@@ -28,8 +28,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check:codex-protocol
+      - run: npm run check:architecture
       - run: npm run typecheck
       - run: npm test
+      - run: npm run test:renderer:dom
       - run: npm run build
       - name: Build unpacked native package
         run: npm exec electron-builder -- --dir

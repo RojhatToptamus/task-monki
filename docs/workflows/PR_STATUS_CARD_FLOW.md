@@ -953,10 +953,10 @@ is satisfied.
 Core and renderer coverage lives in:
 
 - `src/renderer/model/prStatus.test.ts`
-- `src/renderer/ui/taskView.test.ts`
+- `src/renderer/model/taskView.test.ts`
 - `src/core/storage/FileTaskStore.test.ts`
 - `src/core/projection/reducer.test.ts`
-- `src/core/app/TaskManagerService.phase3.test.ts`
+- `src/core/app/TaskManagerService.workflowPolicies.test.ts`
 - `src/core/app/TaskManagerService.reviewPrActions.test.ts`
 - `src/core/github/GitHubService.test.ts`
 

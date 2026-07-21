@@ -1451,6 +1451,86 @@ describe('FileTaskStore', () => {
     );
   });
 
+  it('repairs blank review decisions written by earlier current-schema builds', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-review-repair-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Repair blank review decision',
+      prompt: 'Keep a current-schema GitHub snapshot loadable.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/review-repair',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    await store.recordPullRequestSync({
+      pullRequest: {
+        taskId: task.id,
+        iterationId: iteration.id,
+        worktreeId: worktree.id,
+        number: 8,
+        url: 'https://github.com/example/repo/pull/8',
+        status: 'OPEN_DRAFT',
+        headRefName: worktree.branchName,
+        headRefOid: 'head'
+      },
+      ci: {
+        taskId: task.id,
+        iterationId: iteration.id,
+        worktreeId: worktree.id,
+        pullRequestNumber: 8,
+        headSha: 'head',
+        status: 'NO_CHECKS',
+        requiredStatus: 'NO_CHECKS',
+        totalCount: 0,
+        pendingCount: 0,
+        passingCount: 0,
+        failingCount: 0,
+        skippedCount: 0,
+        canceledCount: 0,
+        checkDetails: []
+      },
+      reviews: {
+        taskId: task.id,
+        iterationId: iteration.id,
+        worktreeId: worktree.id,
+        pullRequestNumber: 8,
+        headSha: 'head',
+        status: 'NOT_REQUESTED'
+      },
+      merge: {
+        taskId: task.id,
+        iterationId: iteration.id,
+        worktreeId: worktree.id,
+        pullRequestNumber: 8,
+        headSha: 'head',
+        status: 'NOT_MERGED'
+      }
+    });
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      reviewRollups: Array<Record<string, unknown>>;
+    };
+    persisted.reviewRollups[0]!.reviewDecision = '';
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
+      mode: 0o600
+    });
+
+    const reloaded = new FileTaskStore(dir);
+    const snapshot = await reloaded.snapshot();
+    expect(snapshot.reviewRollups[0]?.reviewDecision).toBeUndefined();
+    await reloaded.close();
+
+    const repaired = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      reviewRollups: Array<Record<string, unknown>>;
+    };
+    expect(repaired.reviewRollups[0]).not.toHaveProperty('reviewDecision');
+  });
+
   it('rejects duplicate persisted task-creation retry tokens', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-create-duplicate-'));
     const store = new FileTaskStore(dir);

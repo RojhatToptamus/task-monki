@@ -1,5 +1,6 @@
 import http from 'node:http';
 import net from 'node:net';
+import { boundedPreviewFailure as boundedMessage } from './PreviewFailure';
 
 export interface PreviewReadinessResult {
   status: 'PASSED' | 'FAILED';
@@ -158,8 +159,4 @@ function abortError(): Error {
   const error = new Error('Preview readiness canceled.');
   error.name = 'AbortError';
   return error;
-}
-
-function boundedMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 512);
 }

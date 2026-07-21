@@ -6,9 +6,9 @@ import { createDomainEvent } from './domainEvent';
 import { FileTaskStore } from './FileTaskStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
-describe('FileTaskStore Phase 6 subagent observations', () => {
+describe('FileTaskStore subagent observations', () => {
   it('persists provider-observed children with inherited runtime settings across restart', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase6-restart-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-restart-'));
     const store = new FileTaskStore(dir);
     const task = await store.createTask({
       title: 'Restart observed subagent',
@@ -25,7 +25,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
-      branchName: 'codex/phase6-restart',
+      branchName: 'codex/subagent-restart',
       worktreePath: dir,
       baseSha: 'base'
     });
@@ -78,7 +78,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
   });
 
   it('materializes explicit child hierarchy without replacing the task run', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase6-store-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-store-'));
     const store = new FileTaskStore(dir);
     const task = await store.createTask({
       title: 'Observed subagent',
@@ -87,7 +87,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
-      branchName: 'codex/phase6-store',
+      branchName: 'codex/subagent-store',
       worktreePath: dir,
       baseSha: 'base'
     });
@@ -179,7 +179,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
   });
 
   it('retains contradictory parent observations instead of rewriting hierarchy', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase6-conflict-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-conflict-'));
     const store = new FileTaskStore(dir);
     const task = await store.createTask({
       title: 'Contradictory subagent',
@@ -188,7 +188,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
-      branchName: 'codex/phase6-conflict',
+      branchName: 'codex/subagent-conflict',
       worktreePath: dir,
       baseSha: 'base'
     });

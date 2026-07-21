@@ -10,7 +10,7 @@ import {
   ArtifactAppendAmbiguousError,
   FileTaskStore
 } from '../../storage/FileTaskStore';
-import type { AcpNativeSessionState } from './AcpEventMapper';
+import type { AcpNativeSessionState } from './AcpNativeSession';
 import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
 import type { AcpSessionConfigOption, AcpSessionUpdate } from './AcpProtocol';
 import type { AcpRpcClient } from './AcpRpcClient';

@@ -22,9 +22,9 @@ import {
 import {
   MAX_PREVIEW_RECIPE_BYTES,
   PREVIEW_RECIPE_PATH,
-  activePreviewAttachmentIds,
   parsePreviewRecipe
 } from '../PreviewRecipeLoader';
+import { activePreviewAttachmentIds } from '../PreviewExecutionAuthority';
 import {
   buildPreviewRecipeGenerationInstruction,
   PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION

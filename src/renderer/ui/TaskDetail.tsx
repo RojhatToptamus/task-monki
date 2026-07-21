@@ -5,13 +5,11 @@ import {
   useMemo,
   useRef,
   useState,
-  type FormEvent,
   type ReactNode,
   type RefObject
 } from 'react';
 import {
   getImplementationRetryReason,
-  PULL_REQUEST_TITLE_MAX_LENGTH,
   normalizePullRequestTitle
 } from '../../shared/contracts';
 import type {
@@ -34,7 +32,6 @@ import type {
   AgentRuntimeState,
   AgentServerInstance,
   UpdateAgentNativeSessionRequest,
-  AgentReviewFinding,
   InteractionRequestRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
@@ -62,8 +59,7 @@ import type { TaskAttachmentRecord } from '../../shared/attachments';
 import {
   canCreateDeliveryCommit,
   canPrepareWorktree,
-  canStartRun,
-  formatShortId
+  canStartRun
 } from '../model/selectors';
 import { describeHealthFinding } from '../model/debugDiagnostics';
 import { AgentControlPanel } from './AgentControlPanel';
@@ -75,17 +71,14 @@ import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import { Chip } from './StatusBadge';
-import { useDialogFocusBoundary } from './dialogFocus';
+import { FindingRow } from './Findings';
 import {
-  FindingRow,
-  findingLevel,
-  formatFindingLocation,
-  shortFindingRef
-} from './Findings';
+  buildReviewFollowUpInstruction,
+  defaultSelectedFindingIds
+} from '../model/reviewFollowUp';
 import {
   findCompletedCurrentImplementationRun,
   isActiveNonReviewRun,
-  isCompletedCurrentImplementationRun,
   isImplementationRetryRequired,
   selectNextAction,
   shouldShowOverviewNextAction,
@@ -98,12 +91,10 @@ import {
   describeTaskHeaderState,
   finishRequirementsForTask,
   getFinishEvidenceState,
-  markDoneModalCopy,
-  taskReviewGate,
-  type FinishEvidenceState,
-  type FinishRequirement,
-  type Tone
-} from './taskView';
+  taskReviewGate
+} from '../model/taskView';
+import type { FinishRequirement } from '../model/taskFinish';
+import type { Tone } from '../model/viewTypes';
 import { humanizeEnum } from './display';
 import {
   buildFailingChecksInvestigationPrompt,
@@ -116,8 +107,7 @@ import {
 } from '../model/prStatus';
 import {
   MASCOT_VIDEO_SOURCES,
-  getMascotStateForTask,
-  type MascotState
+  getMascotStateForTask
 } from '../model/mascotState';
 import {
   buildTaskActivityLedger,
@@ -144,6 +134,19 @@ import { describeGitSnapshot } from './gitSnapshotCopy';
 import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { PreviewTaskRouteOption } from '../model/previewBindings';
+import {
+  isReviewPhase,
+  shouldShowMoveToReviewHeaderAction
+} from '../model/taskReviewActions';
+import {
+  TaskMascotVideo,
+  usePrefersReducedMotion
+} from './TaskMascotVideo';
+import {
+  CreateDraftPrModal,
+  MarkDoneModal,
+  ReviewRequestDrawer
+} from './TaskDetailModals';
 
 interface TaskDetailProps {
   headingRef?: RefObject<HTMLHeadingElement | null>;
@@ -1301,98 +1304,6 @@ export function TaskDetail(props: TaskDetailProps) {
   );
 }
 
-function CreateDraftPrModal({
-  title,
-  worktree,
-  busy,
-  disabled,
-  disabledReason,
-  onTitleChange,
-  onCancel,
-  onSubmit,
-  fallbackReturnFocusRef
-}: {
-  title: string;
-  worktree?: WorktreeRecord;
-  busy: boolean;
-  disabled: boolean;
-  disabledReason?: string;
-  onTitleChange(value: string): void;
-  onCancel(): void;
-  onSubmit(): void;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const cleanTitle = title.replace(/\s+/g, ' ').trim();
-  const confirmDisabled = busy || disabled || !cleanTitle;
-  const panelRef = useRef<HTMLFormElement>(null);
-  const titleInputRef = useRef<HTMLInputElement>(null);
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: titleInputRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose: onCancel
-  });
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!confirmDisabled) {
-      onSubmit();
-    }
-  };
-
-  return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="draft-pr-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <form
-        ref={panelRef}
-        className="tm-modal__panel tm-draftpr-modal"
-        tabIndex={-1}
-        onSubmit={submit}
-      >
-        <h3 id="draft-pr-title">Create draft PR</h3>
-        <p>Review the title before Task Monki opens the draft pull request.</p>
-
-        <label className="field tm-draftpr-modal__field">
-          <span className="field__label">PR title</span>
-          <input
-            ref={titleInputRef}
-            type="text"
-            value={title}
-            maxLength={PULL_REQUEST_TITLE_MAX_LENGTH}
-            disabled={busy}
-            onChange={(event) => onTitleChange(event.target.value)}
-          />
-          <small>{cleanTitle.length} / {PULL_REQUEST_TITLE_MAX_LENGTH}</small>
-        </label>
-
-        {worktree ? (
-          <div className="tm-draftpr-modal__context">
-            <div>
-              <span>Head</span>
-              <strong>{worktree.branchName}</strong>
-            </div>
-            <div>
-              <span>Base</span>
-              <strong>{worktree.baseRef ?? 'main'}</strong>
-            </div>
-          </div>
-        ) : null}
-
-        {disabled && disabledReason ? <p className="form-warning">{disabledReason}</p> : null}
-
-        <div className="tm-modal__actions">
-          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="submit" className="primary-button" disabled={confirmDisabled}>
-            {busy ? 'Creating...' : 'Create draft PR'}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
 export function TaskWorkPanels({ children }: { children: ReactNode }) {
   return (
     <section className="tm-workpanels" aria-labelledby="task-work-panels-title">
@@ -1864,233 +1775,6 @@ function ChevronRightIcon() {
   );
 }
 
-function ReviewRequestDrawer({
-  task,
-  findings,
-  selectedFindingIds,
-  note,
-  instruction,
-  busy,
-  onToggleFinding,
-  onNoteChange,
-  onInstructionChange,
-  onCancel,
-  onSubmit,
-  fallbackReturnFocusRef
-}: {
-  task: Task;
-  findings: AgentReviewFinding[];
-  selectedFindingIds: string[];
-  note: string;
-  instruction: string;
-  busy: boolean;
-  onToggleFinding(findingId: string): void;
-  onNoteChange(value: string): void;
-  onInstructionChange(value: string): void;
-  onCancel(): void;
-  onSubmit(): void;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const selectedCount = selectedFindingIds.length;
-  const panelRef = useRef<HTMLElement>(null);
-  const noteRef = useRef<HTMLTextAreaElement>(null);
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: noteRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose: onCancel
-  });
-  return (
-    <div className="tm-reviewdrawer" role="dialog" aria-modal="true" aria-label="Request changes">
-      <div className="tm-reviewdrawer__scrim" onClick={busy ? undefined : onCancel} />
-      <aside ref={panelRef} className="tm-reviewdrawer__panel" tabIndex={-1}>
-        <header className="tm-reviewdrawer__header">
-          <div>
-            <h3>Request changes</h3>
-            <p>Start a follow-up run with the selected findings for #{formatShortId(task.id)}.</p>
-          </div>
-          <button
-            type="button"
-            className="tm-reviewdrawer__close"
-            disabled={busy}
-            aria-label="Close request changes"
-            onClick={onCancel}
-          >
-            <span aria-hidden="true">×</span>
-          </button>
-        </header>
-
-        <div className="tm-reviewdrawer__body" inert={busy ? true : undefined}>
-          <section className="tm-reviewdrawer__section">
-            <h4>Findings to attach · {selectedCount} selected</h4>
-            {findings.length > 0 ? (
-              <div className="tm-reviewdrawer__findings tm-reviewfindings__list">
-                {findings.map((finding) => {
-                  const level = findingLevel(finding.severity);
-                  return (
-                    <FindingRow
-                      key={finding.id}
-                      tone={level.tone}
-                      severityLabel={level.label}
-                      title={finding.title}
-                      reference={shortFindingRef(finding)}
-                      selection={{
-                        checked: selectedFindingIds.includes(finding.id),
-                        onToggle: () => onToggleFinding(finding.id)
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="tm-reviewdrawer__empty">
-                No structured findings were returned. The instruction includes the review summary.
-              </p>
-            )}
-          </section>
-
-          <label className="tm-reviewdrawer__section">
-            <h4>Optional note</h4>
-            <textarea
-              ref={noteRef}
-              className="tm-reviewdrawer__note"
-              value={note}
-              disabled={busy}
-              placeholder="Add context for the follow-up"
-              onChange={(event) => onNoteChange(event.target.value)}
-              rows={3}
-            />
-          </label>
-
-          <details className="tm-reviewdrawer__instruction">
-            <summary>Full instruction</summary>
-            <label>
-              <span>Instruction to agent</span>
-              <textarea
-                value={instruction}
-                disabled={busy}
-                onChange={(event) => onInstructionChange(event.target.value)}
-                rows={11}
-              />
-              <small>Generated from the selected findings and optional note. Editable.</small>
-            </label>
-          </details>
-        </div>
-
-        <footer className="tm-reviewdrawer__footer">
-          <span>Returns to Review when the follow-up finishes.</span>
-          <div>
-            <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={busy || !instruction.trim()}
-              onClick={onSubmit}
-            >
-              {busy ? 'Sending...' : 'Send to agent'}
-            </button>
-          </div>
-        </footer>
-      </aside>
-    </div>
-  );
-}
-
-function isReviewPhase(phase: WorkflowPhase): boolean {
-  return phase === 'REVIEW' || phase === 'IN_REVIEW';
-}
-
-export function shouldShowMoveToReviewHeaderAction(
-  task: Pick<Task, 'currentRunId' | 'workflowPhase' | 'projection'>,
-  run: Pick<RunRecord, 'id' | 'mode' | 'status'> | undefined
-): boolean {
-  return (
-    isCompletedCurrentImplementationRun(task, run) &&
-    !isImplementationRetryRequired(task, run) &&
-    !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)
-  );
-}
-
-function MarkDoneModal({
-  withIssues,
-  warnings,
-  hasPullRequest,
-  requirements,
-  busy,
-  onCancel,
-  onConfirm,
-  fallbackReturnFocusRef
-}: {
-  withIssues: boolean;
-  warnings: FinishEvidenceState['warnings'];
-  hasPullRequest: boolean;
-  requirements: FinishRequirement[];
-  busy: boolean;
-  onCancel(): void;
-  onConfirm(): void;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const copy = markDoneModalCopy(withIssues, busy, { hasPullRequest });
-  const panelRef = useRef<HTMLDivElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: cancelRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose: onCancel
-  });
-  return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="mark-done-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <div ref={panelRef} className="tm-modal__panel" tabIndex={-1}>
-        <h3 id="mark-done-title">{copy.title}</h3>
-        <p>{copy.body}</p>
-        {withIssues && requirements.length > 0 ? (
-          <div className="tm-modal__requirements">
-            <div className="tm-modal__requirements-title">Unresolved</div>
-            {requirements.map((requirement) => (
-              <div
-                className={`tm-modal__requirement tm-modal__requirement--${requirement.tone}`}
-                key={requirement.label}
-              >
-                <span className="tm-modal__requirement-dot" aria-hidden="true" />
-                <span>
-                  <strong>{requirement.label}</strong> — {requirement.detail}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {withIssues && requirements.length === 0 ? (
-          <div className="tm-modal__warning">
-            <strong>{copy.fallbackWarningTitle}</strong>
-            <span>{warnings[0]?.detail ?? copy.fallbackWarningDetail}</span>
-          </div>
-        ) : null}
-        <div className="tm-modal__actions">
-          <button
-            ref={cancelRef}
-            type="button"
-            className="outline-button"
-            disabled={busy}
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-          <button type="button" className="primary-button" disabled={busy} onClick={onConfirm}>
-            {copy.confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
 function healthFindingRank(severity: Finding['severity']): number {
   switch (severity) {
     case 'ERROR':
@@ -2117,226 +1801,6 @@ function healthFindingTone(severity: Finding['severity']): Tone {
     case 'HEALTHY':
       return 'neutral';
   }
-}
-
-export function buildReviewFollowUpInstruction(
-  task: Task,
-  reviewGate: NonNullable<Task['projection']['agentReview']>,
-  reviewRun: RunRecord | undefined,
-  selectedFindingIds: string[],
-  note = ''
-): string {
-  const selectedFindings = (reviewGate.result?.findings ?? []).filter((finding) =>
-    selectedFindingIds.includes(finding.id)
-  );
-  const lines = [
-    `Address the review result for "${task.title}".`,
-    '',
-    `Review status: ${humanizeEnum(reviewGate.status)}.`
-  ];
-  if (reviewGate.result?.summary) {
-    lines.push('', `Review summary: ${reviewGate.result.summary}`);
-  } else if (reviewGate.summary) {
-    lines.push('', `Review summary: ${reviewGate.summary}`);
-  }
-
-  if (selectedFindings.length > 0) {
-    lines.push('', 'Selected findings to fix:');
-    for (const [index, finding] of selectedFindings.entries()) {
-      lines.push(
-        '',
-        `${index + 1}. [${humanizeEnum(finding.severity)}] ${finding.title}`,
-        `   Location: ${formatFindingLocation(finding)}`,
-        `   Explanation: ${finding.explanation}`
-      );
-      if (finding.recommendation) {
-        lines.push(`   Recommendation: ${finding.recommendation}`);
-      }
-    }
-  } else if (reviewRun?.finalMessage) {
-    lines.push('', 'Review output:', reviewRun.finalMessage.trim());
-  }
-  if (note.trim()) {
-    lines.push('', 'Additional note:', note.trim());
-  }
-  lines.push(
-    '',
-    [
-      'Fix only the selected findings or review output above unless the root cause requires a scoped adjacent change.',
-      'Preserve the existing task intent and stop when the follow-up is ready for review again.'
-    ].join(' ')
-  );
-  return lines.join('\n');
-}
-
-function defaultSelectedFindingIds(findings: AgentReviewFinding[]): string[] {
-  const blocking = findings.filter(
-    (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
-  );
-  return (blocking.length > 0 ? blocking : findings).map((finding) => finding.id);
-}
-type MascotVideoLayerPhase = 'entering' | 'active' | 'exiting';
-
-const MASCOT_EXIT_FALLBACK_MS = 620;
-const MASCOT_PLAYBACK_RATE = 0.85;
-
-interface MascotVideoLayer {
-  id: number;
-  source: string;
-  state: MascotState;
-  phase: MascotVideoLayerPhase;
-}
-
-function TaskMascotVideo({
-  source,
-  state,
-  prefersReducedMotion
-}: {
-  source: string;
-  state: MascotState;
-  prefersReducedMotion: boolean;
-}) {
-  const nextLayerIdRef = useRef(1);
-  const videoRefs = useRef(new Map<number, HTMLVideoElement>());
-  const [layers, setLayers] = useState<MascotVideoLayer[]>([
-    { id: 0, source, state, phase: 'active' }
-  ]);
-
-  useEffect(() => {
-    setLayers((current) => {
-      const active =
-        current.find((layer) => layer.phase === 'active') ?? current[current.length - 1];
-      if (prefersReducedMotion) {
-        if (active?.source === source) {
-          return [{ ...active, state, phase: 'active' }];
-        }
-
-        const nextLayer: MascotVideoLayer = {
-          id: nextLayerIdRef.current,
-          source,
-          state,
-          phase: 'active'
-        };
-        nextLayerIdRef.current += 1;
-        return [nextLayer];
-      }
-
-      if (active?.source === source) {
-        return current.map((layer) =>
-          layer.source === source
-            ? { ...layer, state, phase: 'active' }
-            : { ...layer, phase: 'exiting' }
-        );
-      }
-
-      const nextLayer: MascotVideoLayer = {
-        id: nextLayerIdRef.current,
-        source,
-        state,
-        phase: 'entering'
-      };
-      nextLayerIdRef.current += 1;
-
-      return [
-        ...current.map((layer) => ({ ...layer, phase: 'exiting' as const })).slice(-1),
-        nextLayer
-      ];
-    });
-  }, [source, state, prefersReducedMotion]);
-
-  useEffect(() => {
-    if (prefersReducedMotion || !layers.some((layer) => layer.phase === 'entering')) {
-      return;
-    }
-
-    const animationFrame = window.requestAnimationFrame(() => {
-      setLayers((current) =>
-        current.map((layer) =>
-          layer.phase === 'entering' ? { ...layer, phase: 'active' } : layer
-        )
-      );
-    });
-
-    return () => window.cancelAnimationFrame(animationFrame);
-  }, [layers, prefersReducedMotion]);
-
-  useEffect(() => {
-    if (prefersReducedMotion || !layers.some((layer) => layer.phase === 'exiting')) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      setLayers((current) => current.filter((layer) => layer.phase !== 'exiting'));
-    }, MASCOT_EXIT_FALLBACK_MS);
-
-    return () => window.clearTimeout(timeout);
-  }, [layers, prefersReducedMotion]);
-
-  useEffect(() => {
-    for (const video of videoRefs.current.values()) {
-      video.playbackRate = MASCOT_PLAYBACK_RATE;
-      if (prefersReducedMotion) {
-        video.pause();
-        if (video.currentTime > 0.05) {
-          video.currentTime = 0;
-        }
-      } else {
-        void video.play().catch(() => undefined);
-      }
-    }
-  }, [layers, prefersReducedMotion]);
-
-  return (
-    <div className="tm-detail__mascot" data-mascot-state={state} aria-hidden="true">
-      {layers.map((layer) => (
-        <video
-          key={layer.id}
-          ref={(video) => {
-            if (video) {
-              videoRefs.current.set(layer.id, video);
-            } else {
-              videoRefs.current.delete(layer.id);
-            }
-          }}
-          className={`tm-detail__mascot-video tm-detail__mascot-video--${layer.phase}`}
-          src={layer.source}
-          data-mascot-state={layer.state}
-          autoPlay={!prefersReducedMotion}
-          loop={!prefersReducedMotion}
-          muted
-          playsInline
-          preload="auto"
-          disablePictureInPicture
-          onTransitionEnd={(event) => {
-            if (layer.phase !== 'exiting' || event.propertyName !== 'opacity') {
-              return;
-            }
-            setLayers((current) =>
-              current.filter((candidate) => candidate.id !== layer.id)
-            );
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-function usePrefersReducedMotion(): boolean {
-  const [prefersReducedMotion, setPrefersReducedMotion] = useState(
-    () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
-  );
-
-  useEffect(() => {
-    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-    if (!media) {
-      return;
-    }
-    const onChange = (event: MediaQueryListEvent) => setPrefersReducedMotion(event.matches);
-    media.addEventListener('change', onChange);
-    return () => media.removeEventListener('change', onChange);
-  }, []);
-
-  return prefersReducedMotion;
 }
 
 function getPrimaryAction(input: {

@@ -77,6 +77,15 @@ import {
 } from './attachmentIpcSecurity';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
 import type { PreviewPrivateInputApi } from '../shared/preview';
+import {
+  IPC_UPDATE_CHANNEL,
+  IPC_WINDOW_CHROME_CHANNEL,
+  type IpcInvokeChannel
+} from '../shared/ipcChannels';
+
+function invokeIpc(channel: IpcInvokeChannel, ...args: unknown[]): Promise<any> {
+  return ipcRenderer.invoke(channel, ...args);
+}
 
 function getWindowChromePlatform(): WindowChromePlatform {
   if (process.platform === 'darwin') {
@@ -94,162 +103,162 @@ function getWindowChromePlatform(): WindowChromePlatform {
 const attachmentIpcClientGate = new AttachmentIpcOperationGate();
 
 const api: TaskManagerApi = {
-  chooseRepositoryFolder: () => ipcRenderer.invoke('repository:chooseFolder'),
-  addRepository: (path) => ipcRenderer.invoke('repository:add', path),
+  chooseRepositoryFolder: () => invokeIpc('repository:chooseFolder'),
+  addRepository: (path) => invokeIpc('repository:add', path),
   getRepositoryImpact: (repositoryId) =>
-    ipcRenderer.invoke('repository:impact', repositoryId),
-  disconnectRepository: (input) => ipcRenderer.invoke('repository:disconnect', input),
-  reconnectRepository: (input) => ipcRenderer.invoke('repository:reconnect', input),
+    invokeIpc('repository:impact', repositoryId),
+  disconnectRepository: (input) => invokeIpc('repository:disconnect', input),
+  reconnectRepository: (input) => invokeIpc('repository:reconnect', input),
   refreshRepository: (repositoryId) =>
-    ipcRenderer.invoke('repository:refresh', repositoryId),
-  createBoard: (input) => ipcRenderer.invoke('board:create', input),
-  updateBoard: (input) => ipcRenderer.invoke('board:update', input),
-  deleteBoard: (boardId) => ipcRenderer.invoke('board:delete', boardId),
-  getAppSettings: () => ipcRenderer.invoke('settings:get'),
+    invokeIpc('repository:refresh', repositoryId),
+  createBoard: (input) => invokeIpc('board:create', input),
+  updateBoard: (input) => invokeIpc('board:update', input),
+  deleteBoard: (boardId) => invokeIpc('board:delete', boardId),
+  getAppSettings: () => invokeIpc('settings:get'),
   updateAppSettings: (input: UpdateAppSettingsRequest) =>
-    ipcRenderer.invoke('settings:update', input),
-  getExternalToolStatus: () => ipcRenderer.invoke('settings:tools:status'),
+    invokeIpc('settings:update', input),
+  getExternalToolStatus: () => invokeIpc('settings:tools:status'),
   testExternalTool: (input: TestExternalToolRequest) =>
-    ipcRenderer.invoke('settings:tools:test', input),
+    invokeIpc('settings:tools:test', input),
   inspectOpenTarget: (input: InspectOpenTargetRequest) =>
-    ipcRenderer.invoke('openTarget:inspect', input),
+    invokeIpc('openTarget:inspect', input),
   executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
-    ipcRenderer.invoke('openTarget:execute', input),
-  getAgentRuntimeCatalog: () => ipcRenderer.invoke('agent:runtimeCatalog'),
+    invokeIpc('openTarget:execute', input),
+  getAgentRuntimeCatalog: () => invokeIpc('agent:runtimeCatalog'),
   discoverAgentRuntimeModels: (runtimeId) =>
-    ipcRenderer.invoke('agent:discoverRuntimeModels', runtimeId),
+    invokeIpc('agent:discoverRuntimeModels', runtimeId),
   updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
-    ipcRenderer.invoke('agent:updateNativeSession', input),
-  listTasks: () => ipcRenderer.invoke('task:list'),
+    invokeIpc('agent:updateNativeSession', input),
+  listTasks: () => invokeIpc('task:list'),
   listDiscourseConversations: (input?: ListDiscourseConversationsRequest) =>
-    ipcRenderer.invoke('discourse:conversations:list', input),
+    invokeIpc('discourse:conversations:list', input),
   getDiscourseConversation: (conversationId: string) =>
-    ipcRenderer.invoke('discourse:conversation:get', conversationId),
+    invokeIpc('discourse:conversation:get', conversationId),
   listDiscourseMessages: (input: ListDiscourseMessagesRequest) =>
-    ipcRenderer.invoke('discourse:messages:list', input),
+    invokeIpc('discourse:messages:list', input),
   getDiscourseMessageByClientId: (input: GetDiscourseMessageByClientIdRequest) =>
-    ipcRenderer.invoke('discourse:message:get-by-client-id', input),
-  getDiscourseMentionCatalog: () => ipcRenderer.invoke('discourse:mentions:get'),
+    invokeIpc('discourse:message:get-by-client-id', input),
+  getDiscourseMentionCatalog: () => invokeIpc('discourse:mentions:get'),
   createDiscourseConversation: (input: CreateDiscourseConversationRequest) =>
-    ipcRenderer.invoke('discourse:conversation:create', input),
+    invokeIpc('discourse:conversation:create', input),
   appendHumanDiscourseMessage: (input: AppendHumanDiscourseMessageRequest) =>
-    ipcRenderer.invoke('discourse:message:append', input),
+    invokeIpc('discourse:message:append', input),
   sendDiscourseMessage: (input: SendDiscourseMessageRequest) =>
-    ipcRenderer.invoke('discourse:message:send', input),
+    invokeIpc('discourse:message:send', input),
   resumeDiscourseAcceptedSend: (input: ResumeDiscourseAcceptedSendRequest) =>
-    ipcRenderer.invoke('discourse:message:resume', input),
+    invokeIpc('discourse:message:resume', input),
   cancelDiscourseAcceptedSend: (input: CancelDiscourseAcceptedSendRequest) =>
-    ipcRenderer.invoke('discourse:message:cancel-response', input),
+    invokeIpc('discourse:message:cancel-response', input),
   tombstoneDiscourseMessage: (input: TombstoneDiscourseMessageRequest) =>
-    ipcRenderer.invoke('discourse:message:tombstone', input),
+    invokeIpc('discourse:message:tombstone', input),
   setPinnedDiscourseContext: (input: SetPinnedDiscourseContextRequest) =>
-    ipcRenderer.invoke('discourse:context:pin', input),
+    invokeIpc('discourse:context:pin', input),
   previewDiscourseContext: (input: PreviewDiscourseContextRequest) =>
-    ipcRenderer.invoke('discourse:context:preview', input),
+    invokeIpc('discourse:context:preview', input),
   saveDiscourseDraft: (input: SaveDiscourseDraftRequest) =>
-    ipcRenderer.invoke('discourse:draft:save', input),
+    invokeIpc('discourse:draft:save', input),
   getDiscourseDraft: (draftId: string) =>
-    ipcRenderer.invoke('discourse:draft:get', draftId),
-  listDiscourseDrafts: () => ipcRenderer.invoke('discourse:drafts:list'),
+    invokeIpc('discourse:draft:get', draftId),
+  listDiscourseDrafts: () => invokeIpc('discourse:drafts:list'),
   deleteDiscourseDraft: (input: DeleteDiscourseDraftRequest) =>
-    ipcRenderer.invoke('discourse:draft:delete', input),
+    invokeIpc('discourse:draft:delete', input),
   renameDiscourseConversation: (input: RenameDiscourseConversationRequest) =>
-    ipcRenderer.invoke('discourse:conversation:rename', input),
+    invokeIpc('discourse:conversation:rename', input),
   setDiscourseConversationRead: (input: SetDiscourseConversationReadRequest) =>
-    ipcRenderer.invoke('discourse:conversation:read', input),
+    invokeIpc('discourse:conversation:read', input),
   setDiscourseConversationArchived: (input: SetDiscourseConversationArchivedRequest) =>
-    ipcRenderer.invoke('discourse:conversation:archive', input),
+    invokeIpc('discourse:conversation:archive', input),
   deleteDiscourseConversation: (input: DeleteDiscourseConversationRequest) =>
-    ipcRenderer.invoke('discourse:conversation:delete', input),
+    invokeIpc('discourse:conversation:delete', input),
   stopDiscourseWave: (input: StopDiscourseWaveRequest) =>
-    ipcRenderer.invoke('discourse:wave:stop', input),
+    invokeIpc('discourse:wave:stop', input),
   confirmDiscourseWaveContext: (input: ConfirmDiscourseWaveContextRequest) =>
-    ipcRenderer.invoke('discourse:wave:confirm-context', input),
+    invokeIpc('discourse:wave:confirm-context', input),
   stageTaskAttachmentBatch: async (input: StageTaskAttachmentBatchRequest) => {
     const byteCount = assertAttachmentIpcBatch(input);
     return attachmentIpcClientGate.run(byteCount, () =>
-      ipcRenderer.invoke('attachment:stage-batch', input)
+      invokeIpc('attachment:stage-batch', input)
     );
   },
   discardTaskAttachmentDraft: (input: DiscardTaskAttachmentDraftRequest) =>
-    ipcRenderer.invoke('attachment:draft:discard', input),
+    invokeIpc('attachment:draft:discard', input),
   readTaskAttachment: (input: ReadTaskAttachmentRequest) =>
     attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
-      ipcRenderer.invoke('attachment:read', input)
+      invokeIpc('attachment:read', input)
     ),
   readClipboardImage: () =>
     attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
-      ipcRenderer.invoke('attachment:clipboard:readImage')
+      invokeIpc('attachment:clipboard:readImage')
     ),
-  createTask: (input: CreateTaskRequest) => ipcRenderer.invoke('task:create', input),
-  refinePrompt: (input: RefinePromptRequest) => ipcRenderer.invoke('prompt:refine', input),
-  prepareWorktree: (input: PrepareWorktreeRequest) => ipcRenderer.invoke('worktree:prepare', input),
-  startRun: (input: StartRunRequest) => ipcRenderer.invoke('agent:startRun', input),
-  steerRun: (input: SteerRunRequest) => ipcRenderer.invoke('agent:steerRun', input),
+  createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
+  refinePrompt: (input: RefinePromptRequest) => invokeIpc('prompt:refine', input),
+  prepareWorktree: (input: PrepareWorktreeRequest) => invokeIpc('worktree:prepare', input),
+  startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),
+  steerRun: (input: SteerRunRequest) => invokeIpc('agent:steerRun', input),
   continueRun: (input: ContinueRunRequest) =>
-    ipcRenderer.invoke('agent:continueRun', input),
-  retryRun: (input: RetryRunRequest) => ipcRenderer.invoke('agent:retryRun', input),
+    invokeIpc('agent:continueRun', input),
+  retryRun: (input: RetryRunRequest) => invokeIpc('agent:retryRun', input),
   startReview: (input: StartReviewRequest) =>
-    ipcRenderer.invoke('agent:startReview', input),
+    invokeIpc('agent:startReview', input),
   syncAgentGoal: (input: SyncAgentGoalRequest) =>
-    ipcRenderer.invoke('agent:syncGoal', input),
-  cancelRun: (input: CancelRunRequest) => ipcRenderer.invoke('agent:cancelRun', input),
+    invokeIpc('agent:syncGoal', input),
+  cancelRun: (input: CancelRunRequest) => invokeIpc('agent:cancelRun', input),
   respondToInteraction: (input: RespondToInteractionRequest) =>
-    ipcRenderer.invoke('agent:respondToInteraction', input),
-  refreshEvidence: (input: RefreshEvidenceRequest) => ipcRenderer.invoke('evidence:refresh', input),
+    invokeIpc('agent:respondToInteraction', input),
+  refreshEvidence: (input: RefreshEvidenceRequest) => invokeIpc('evidence:refresh', input),
   createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
-    ipcRenderer.invoke('git:deliveryCommit', input),
-  preflightGitHub: (input: GitHubPreflightRequest) => ipcRenderer.invoke('github:preflight', input),
-  publishBranch: (input: PublishBranchRequest) => ipcRenderer.invoke('github:publish', input),
+    invokeIpc('git:deliveryCommit', input),
+  preflightGitHub: (input: GitHubPreflightRequest) => invokeIpc('github:preflight', input),
+  publishBranch: (input: PublishBranchRequest) => invokeIpc('github:publish', input),
   createPullRequest: (input: CreatePullRequestRequest) =>
-    ipcRenderer.invoke('github:createPullRequest', input),
-  refreshGitHub: (input: RefreshGitHubRequest) => ipcRenderer.invoke('github:refresh', input),
-  resolvePreview: (input: ResolvePreviewRequest) => ipcRenderer.invoke('preview:resolve', input),
+    invokeIpc('github:createPullRequest', input),
+  refreshGitHub: (input: RefreshGitHubRequest) => invokeIpc('github:refresh', input),
+  resolvePreview: (input: ResolvePreviewRequest) => invokeIpc('preview:resolve', input),
   getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
-    ipcRenderer.invoke('preview:recipe-generation:get', input),
+    invokeIpc('preview:recipe-generation:get', input),
   generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
-    ipcRenderer.invoke('preview:recipe-generation:generate', input),
+    invokeIpc('preview:recipe-generation:generate', input),
   validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
-    ipcRenderer.invoke('preview:recipe-generation:validate', input),
+    invokeIpc('preview:recipe-generation:validate', input),
   acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>
-    ipcRenderer.invoke('preview:recipe-generation:accept', input),
+    invokeIpc('preview:recipe-generation:accept', input),
   discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
-    ipcRenderer.invoke('preview:recipe-generation:discard', input),
+    invokeIpc('preview:recipe-generation:discard', input),
   approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
-    ipcRenderer.invoke('preview:approve', input),
-  startPreview: (input: StartPreviewRequest) => ipcRenderer.invoke('preview:start', input),
-  stopPreview: (input: StopPreviewRequest) => ipcRenderer.invoke('preview:stop', input),
-  openPreview: (input: OpenPreviewRequest) => ipcRenderer.invoke('preview:open', input),
-  readPreviewLog: (input: ReadPreviewLogRequest) => ipcRenderer.invoke('preview:log:read', input),
-  resetPreviewData: (input: ResetPreviewDataRequest) => ipcRenderer.invoke('preview:resetData', input),
-  retryPreviewSetup: (input: RetryPreviewSetupRequest) => ipcRenderer.invoke('preview:retrySetup', input),
+    invokeIpc('preview:approve', input),
+  startPreview: (input: StartPreviewRequest) => invokeIpc('preview:start', input),
+  stopPreview: (input: StopPreviewRequest) => invokeIpc('preview:stop', input),
+  openPreview: (input: OpenPreviewRequest) => invokeIpc('preview:open', input),
+  readPreviewLog: (input: ReadPreviewLogRequest) => invokeIpc('preview:log:read', input),
+  resetPreviewData: (input: ResetPreviewDataRequest) => invokeIpc('preview:resetData', input),
+  retryPreviewSetup: (input: RetryPreviewSetupRequest) => invokeIpc('preview:retrySetup', input),
   setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
-    ipcRenderer.invoke('preview:binding:set', input),
+    invokeIpc('preview:binding:set', input),
   deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
-    ipcRenderer.invoke('preview:binding:delete', input),
-  transitionTask: (input: TransitionTaskRequest) => ipcRenderer.invoke('task:transition', input),
-  deleteTask: (input: DeleteTaskRequest) => ipcRenderer.invoke('task:delete', input),
-  readArtifact: (input: ReadArtifactRequest) => ipcRenderer.invoke('artifact:read', input),
+    invokeIpc('preview:binding:delete', input),
+  transitionTask: (input: TransitionTaskRequest) => invokeIpc('task:transition', input),
+  deleteTask: (input: DeleteTaskRequest) => invokeIpc('task:delete', input),
+  readArtifact: (input: ReadArtifactRequest) => invokeIpc('artifact:read', input),
   readProtocolMessage: (input: ReadProtocolMessageRequest) =>
-    ipcRenderer.invoke('agent:readProtocolMessage', input),
+    invokeIpc('agent:readProtocolMessage', input),
   onUpdate: (listener: (event: AppUpdateEvent) => void) => {
     const wrapped = (_: Electron.IpcRendererEvent, event: AppUpdateEvent) => listener(event);
-    ipcRenderer.on('app:update', wrapped);
-    return () => ipcRenderer.off('app:update', wrapped);
+    ipcRenderer.on(IPC_UPDATE_CHANNEL, wrapped);
+    return () => ipcRenderer.off(IPC_UPDATE_CHANNEL, wrapped);
   }
 };
 
 contextBridge.exposeInMainWorld('taskManager', api);
 const privateInputs: PreviewPrivateInputApi = {
-  set: (input) => ipcRenderer.invoke('preview:private:set', input),
-  import: (input) => ipcRenderer.invoke('preview:private:import', input),
-  delete: (input) => ipcRenderer.invoke('preview:private:delete', input),
-  retryCleanup: () => ipcRenderer.invoke('preview:private:retryCleanup')
+  set: (input) => invokeIpc('preview:private:set', input),
+  import: (input) => invokeIpc('preview:private:import', input),
+  delete: (input) => invokeIpc('preview:private:delete', input),
+  retryCleanup: () => invokeIpc('preview:private:retryCleanup')
 };
 contextBridge.exposeInMainWorld('previewPrivateInputs', privateInputs);
 const shellApi: TaskManagerShellApi = {
   windowChromePlatform: getWindowChromePlatform(),
-  syncWindowChrome: () => ipcRenderer.send('windowChrome:sync')
+  syncWindowChrome: () => ipcRenderer.send(IPC_WINDOW_CHROME_CHANNEL)
 };
 
 contextBridge.exposeInMainWorld('taskManagerShell', shellApi);

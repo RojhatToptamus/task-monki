@@ -8,6 +8,7 @@ import type {
 } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { buildPreviewEnvironment } from '../PreviewEnvironment';
+import { boundedPreviewFailure as boundedError } from '../PreviewFailure';
 import {
   NativeLauncherHost,
   digestCommand,
@@ -254,8 +255,4 @@ function literalEnvironment(
     result[key] = value;
   }
   return result;
-}
-
-function boundedError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 512);
 }

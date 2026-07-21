@@ -54,6 +54,12 @@ import {
 import type { DiscourseComposerMentionState } from '../model/discourseMentions';
 import { createDiscourseComposerMentionState } from '../model/discourseMentions';
 import { DiscourseDraftAutosaveCoordinator } from '../model/discourseDraftAutosave';
+import {
+  dedupeDiscourseContextSelections,
+  dedupeDiscourseMessages,
+  deriveDiscourseConversationTitle,
+  discoursePendingConversationFingerprint
+} from '../model/discourseSend';
 import { DiscourseActionMenu } from './DiscourseActionMenu';
 import { DiscourseAgentConfigurationBar } from './DiscourseAgentConfigurationBar';
 import { DiscourseConversationRail } from './DiscourseConversationRail';
@@ -1164,21 +1170,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     const sentReplyTargetId = replyTargetId;
     const sentCorrectionTargetId = correctionTargetId;
     const sentSourceMessageIds = [...selectedSourceMessageIds];
-    const agentProfileIds = sentSelections.map((selection) => selection.agentProfileId);
-    if (sentPolicy === 'TEAM' && !teamReady) {
-      onNotify('Team responses require all three agents to be available.', 'info');
-      return;
-    }
-    if (sentPolicy === 'DIRECT' && agentProfileIds.length !== 1) {
-      onNotify('Choose one agent for a Direct response.', 'info');
-      return;
-    }
-    if (sentPolicy === 'PANEL' && (agentProfileIds.length < 2 || agentProfileIds.length > 3)) {
-      onNotify('Choose two or three agents for a Panel response.', 'info');
-      return;
-    }
-    if (!configuredAgentsReady) {
-      onNotify('Choose an available provider and model for each responding agent.', 'info');
+    if (!responseReadiness.ready) {
+      onNotify(responseReadiness.requirement, 'info');
       return;
     }
     const messageContext = state.tokens.flatMap((token) =>
@@ -1210,8 +1203,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     try {
       await pendingConversationCleanupRef.current;
       await cleanupSupersededConversations([]);
-      const title = deriveConversationTitle(body);
-      const createFingerprint = pendingConversationFingerprint(
+      const title = deriveDiscourseConversationTitle(body);
+      const createFingerprint = discoursePendingConversationFingerprint(
         title,
         sentPolicy,
         sentSelections
@@ -1487,7 +1480,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         limit: 100
       });
       setMessages((current) => {
-        const next = dedupeMessages([...page.messages, ...current]);
+        const next = dedupeDiscourseMessages([...page.messages, ...current]);
         messagesRef.current = next;
         return next;
       });
@@ -1567,7 +1560,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
 
   const pinContext = async (entityKind: 'TASK' | 'REPOSITORY', entityId: string) => {
     if (!aggregate) return;
-    const selections = dedupeContextSelections([
+    const selections = dedupeDiscourseContextSelections([
       ...pinned.map((reference) => ({
         entityKind: reference.entityKind,
         entityId: reference.entityId
@@ -2320,45 +2313,6 @@ function navigateToMessage(messageId: string): void {
 
 function scrollTranscriptToBottom(container: HTMLDivElement | null): void {
   if (container) container.scrollTop = container.scrollHeight;
-}
-
-function dedupeMessages(messages: DiscourseMessageRecord[]): DiscourseMessageRecord[] {
-  return [...new Map(messages.map((message) => [message.id, message])).values()]
-    .sort((left, right) => left.ordinal - right.ordinal);
-}
-
-function dedupeContextSelections<T extends { entityKind: string; entityId: string }>(values: T[]): T[] {
-  const seen = new Set<string>();
-  return values.filter((value) => {
-    const key = `${value.entityKind}:${value.entityId}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function deriveConversationTitle(body: string): string {
-  const first = body.split(/\r?\n/u).find((line) => line.trim())?.trim() ?? 'New conversation';
-  return first.length <= 72 ? first : `${first.slice(0, 69).trimEnd()}…`;
-}
-
-function pendingConversationFingerprint(
-  title: string,
-  policy: DiscourseDefaultPolicy,
-  selections: DiscourseAgentSelectionInput[]
-): string {
-  return JSON.stringify({
-    title,
-    policy,
-    agents: [...selections]
-      .sort((left, right) => left.agentProfileId.localeCompare(right.agentProfileId))
-      .map((selection) => ({
-        agentProfileId: selection.agentProfileId,
-        runtimeId: selection.runtimeId ?? '',
-        modelId: selection.modelId ?? '',
-        reasoningEffort: selection.reasoningEffort ?? ''
-      }))
-  });
 }
 
 function compactText(value: string, limit: number): string {

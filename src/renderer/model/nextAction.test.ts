@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection } from '../../shared/contracts';
 import type { AgentReviewFinding, RunRecord, Task } from '../../shared/contracts';
-import type { FinishEvidenceState, FinishRequirement } from '../ui/taskView';
+import type { FinishEvidenceState, FinishRequirement } from './taskFinish';
 import {
   findCompletedCurrentImplementationRun,
   isActiveNonReviewRun,

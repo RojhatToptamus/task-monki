@@ -6,7 +6,7 @@ import {
   type Task
 } from '../../shared/contracts';
 import { InboxDecisionCard, TaskCard } from './MainColumn';
-import type { TaskCardVM } from './taskView';
+import type { TaskCardVM } from '../model/taskView';
 
 describe('TaskCard', () => {
   it('keeps distinguishing status and evidence text without default hashes or decorative dots', () => {

@@ -11,6 +11,7 @@ import type {
   PreviewOciResourcePlan
 } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import { boundedPreviewFailure } from '../PreviewFailure';
 import { PreviewReadinessService } from '../PreviewReadinessService';
 import {
   OciEngineAdapter,
@@ -20,7 +21,6 @@ import {
 import {
   asRecord,
   bindingDigest,
-  boundedError,
   createObjectIdentity,
   delay,
   digestLabels,
@@ -342,7 +342,7 @@ export class OciResourceRuntime {
       await this.store.savePreviewManagedResource({
         ...resource,
         state: input.ambiguous ? 'RECOVERY_REQUIRED' : 'SETUP_FAILED',
-        failureReason: this.credentials.redact(input.reason).slice(0, 512),
+        failureReason: this.safeFailure(input.reason),
         updatedAt: new Date().toISOString()
       });
     }
@@ -436,7 +436,7 @@ export class OciResourceRuntime {
       await this.store.savePreviewManagedResource({
         ...resource,
         state: 'CLEANUP_INCOMPLETE',
-        cleanupError: this.credentials.redact(boundedError(error)),
+        cleanupError: this.safeFailure(error),
         updatedAt: new Date().toISOString()
       });
       return 'REFUSED';
@@ -493,7 +493,7 @@ export class OciResourceRuntime {
       await this.store.savePreviewManagedEnvironment({
         ...environment,
         state: 'CLEANUP_INCOMPLETE',
-        cleanupError: this.credentials.redact(boundedError(error)),
+        cleanupError: this.safeFailure(error),
         updatedAt: new Date().toISOString()
       });
       return 'REFUSED';
@@ -589,7 +589,7 @@ export class OciResourceRuntime {
       await this.store.savePreviewManagedEnvironment({
         ...environment,
         state: 'CLEANUP_INCOMPLETE',
-        cleanupError: this.credentials.redact(boundedError(error)),
+        cleanupError: this.safeFailure(error),
         updatedAt: new Date().toISOString()
       });
       throw error;
@@ -718,7 +718,7 @@ export class OciResourceRuntime {
         await created.credentialDelivery.close();
       }
     } catch (error) {
-      const message = this.credentials.redact(boundedError(error));
+      const message = this.safeFailure(error);
       await this.store.savePreviewManagedResource({
         ...record,
         state: 'FAILED',
@@ -1081,7 +1081,7 @@ export class OciResourceRuntime {
         { timeoutMs: MUTATION_TIMEOUT_MS }
       );
     } catch (error) {
-      throw new OciRuntimeError('CLEANUP_FAILED', `OCI ${kind} cleanup failed: ${boundedError(error)}`, { cause: error });
+      throw new OciRuntimeError('CLEANUP_FAILED', `OCI ${kind} cleanup failed: ${this.safeFailure(error)}`, { cause: error });
     }
   }
 
@@ -1164,6 +1164,12 @@ export class OciResourceRuntime {
     const resource = await this.store.getPreviewManagedResource(id);
     if (!resource) throw new Error(`Managed preview resource not found: ${id}`);
     return resource;
+  }
+
+  private safeFailure(error: unknown): string {
+    return boundedPreviewFailure(error, {
+      redact: (message) => this.credentials.redact(message)
+    });
   }
 
   private assertEngineIdentity(

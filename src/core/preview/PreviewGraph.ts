@@ -10,6 +10,7 @@ import type {
   PreviewWorkerPlan
 } from '../../shared/contracts';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { boundedPreviewFailure as boundedError } from './PreviewFailure';
 import { PreviewReadinessService, type PreviewReadinessResult } from './PreviewReadinessService';
 import { NativeJobRunner } from './runtime/NativeJobRunner';
 import { NativeServiceRuntime, type RunningNativeService } from './runtime/NativeServiceRuntime';
@@ -881,10 +882,6 @@ function waitForAbort(signal?: AbortSignal): Promise<void> {
   if (!signal) return new Promise<void>(() => undefined);
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
-}
-
-function boundedError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 512);
 }
 
 export class PreviewReadinessFailure extends Error {

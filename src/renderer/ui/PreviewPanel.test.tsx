@@ -10,10 +10,10 @@ import {
 } from '../../shared/contracts';
 import {
   PreviewOverviewCard,
-  PreviewRecipeGenerationModal,
   PreviewWorkspace,
   type PreviewPanelProps
 } from './PreviewPanel';
+import { PreviewRecipeGenerationModal } from './preview/PreviewRecipeGenerationModal';
 
 describe('Preview surfaces', () => {
   it('renders exact public-target recipients instead of surfacing configuration as a global error', () => {

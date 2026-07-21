@@ -8,7 +8,7 @@ import {
   getImplementationRetryReason,
   isImplementationRunMode
 } from '../../shared/contracts';
-import type { FinishEvidenceState, FinishRequirement } from '../ui/taskView';
+import type { FinishEvidenceState, FinishRequirement } from './taskFinish';
 
 /**
  * The single "what should I do next?" answer for a task. The audit (§04) found

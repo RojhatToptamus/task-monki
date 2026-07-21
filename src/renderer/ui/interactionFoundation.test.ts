@@ -1,9 +1,9 @@
-import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { readRendererStyles } from '../../testSupport/rendererStyles';
 
 describe('renderer interaction foundation styles', () => {
   it('uses theme-aware focus and control boundaries with at least 3:1 contrast', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const light = themeToken(css, ':root', '--control-border');
     const lightSurface = themeToken(css, ':root', '--surface');
     const lightSurface2 = themeToken(css, ':root', '--surface2');
@@ -27,7 +27,7 @@ describe('renderer interaction foundation styles', () => {
   });
 
   it('keeps one custom search clear target and suppresses the native WebKit control', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const clearRule = ruleBody(css, '.tm-filefilter__clear');
     const nativeRule = ruleBody(
       css,
@@ -41,7 +41,7 @@ describe('renderer interaction foundation styles', () => {
   });
 
   it('keeps selected Inbox counts readable in the collapsed sidebar', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const selectedUrgentCount = ruleBody(
       css,
       '.tm-nav--collapsed .tm-nav__item--active .tm-nav__count--urgent'
@@ -53,7 +53,7 @@ describe('renderer interaction foundation styles', () => {
   });
 
   it('provides immediate press feedback without changing control geometry', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const active = ruleBody(
       css,
       ":where(button, [role='button']):not(:disabled):active"
@@ -64,7 +64,7 @@ describe('renderer interaction foundation styles', () => {
   });
 
   it('keeps faint annotation text readable and supports contrast and transparency preferences', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const lightFaint = themeToken(css, ':root', '--faint');
     const lightSurface = themeToken(css, ':root', '--surface');
     const darkFaint = themeToken(css, ".app-shell[data-theme='dark']", '--faint');
@@ -79,12 +79,12 @@ describe('renderer interaction foundation styles', () => {
   });
 
   it('does not retain the unused parallel tm-btn family', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     expect(css).not.toMatch(/\.tm-btn(?:--[a-z-]+)?\s*\{/);
   });
 
   it('uses the compact interface metadata scale for PR supporting text', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const identity = ruleBody(css, '.tm-prstatus__identity');
     const metadata = ruleBody(css, '.tm-prstatus__meta');
 
@@ -93,7 +93,7 @@ describe('renderer interaction foundation styles', () => {
   });
 
   it('stops every continuous status animation when reduced motion is requested', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const reducedMotionStart = css.lastIndexOf('@media (prefers-reduced-motion: reduce)');
     const lastComponentAnimation = css.lastIndexOf('animation: tm-');
     const reducedMotion = css.slice(reducedMotionStart);
@@ -115,10 +115,6 @@ describe('renderer interaction foundation styles', () => {
     expect(reducedMotion).toMatch(/\.tm-detail__mascot-video\s*\{[^}]*transition: none/);
   });
 });
-
-function readStyles(): Promise<string> {
-  return readFile(new URL('../styles.css', import.meta.url), 'utf8');
-}
 
 function ruleBody(css: string, selector: string): string {
   const start = css.indexOf(`${selector} {`);

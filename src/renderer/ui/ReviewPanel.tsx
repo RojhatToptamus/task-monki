@@ -5,19 +5,15 @@ import type {
   RunRecord
 } from '../../shared/contracts';
 import type { ReviewActivityViewModel } from '../model/reviewActivity';
-import {
-  FINDING_LEVELS,
-  FindingRow,
-  findingLevel,
-  shortFindingRef
-} from './Findings';
+import { FINDING_LEVELS, findingLevel, shortFindingRef } from '../model/findings';
+import { FindingRow } from './Findings';
 import { RunHeader } from './RunHeader';
 import { dotStyle } from './StatusBadge';
 import {
   describeGitSnapshot,
   describeReviewedDiff
 } from './gitSnapshotCopy';
-import type { Tone } from './taskView';
+import type { Tone } from '../model/viewTypes';
 
 export type ReviewActionPauseReason =
   | 'review-starting'

@@ -51,7 +51,9 @@ state, and local acceptance.
 
 ```sh
 npm run typecheck
+npm run check:architecture
 npm test
+npm run test:renderer:dom
 npm run build
 npm run check:codex-protocol
 git diff --check
@@ -155,7 +157,9 @@ projection, or provider state inconsistent.
   chips, cards, panels, and CSS tokens from the shared styles before adding new
   classes.
 - Add new CSS only when the existing system cannot express the needed state, and
-  keep it consistent with the surrounding selectors in `src/renderer/styles.css`.
+  keep it consistent with the surrounding selectors in the appropriate
+  `src/renderer/styles/*` feature stylesheet. Keep `src/renderer/styles.css`
+  limited to the intentional cascade import order.
 - Do not add explanatory product copy just to justify an implementation detail.
   If behavior changes, reflect it through the correct state, available actions,
   disabled reasons, and concise labels.

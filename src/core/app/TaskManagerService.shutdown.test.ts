@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../shared/contracts';
 import { TaskManagerService } from './TaskManagerService';
+import { RuntimeOperationGate } from './RuntimeOperationGate';
 
 describe('TaskManagerService shutdown coordination', () => {
   it('shuts runtime owners down once and waits for preview cleanup', async () => {
@@ -308,9 +309,7 @@ describe('TaskManagerService shutdown coordination', () => {
 
 function initializeRuntimeLifecycle(service: TaskManagerService): void {
   Object.assign(service as unknown as Record<string, unknown>, {
-    runtimeLifecycleTail: Promise.resolve(),
-    activeRuntimeOperations: new Set<Promise<void>>(),
-    runtimeLifecycleClosing: false,
+    runtimeOperations: new RuntimeOperationGate(),
     postRunEvidenceTasks: new Map<string, Promise<void>>(),
     disposeAgentEventListener: () => undefined
   });

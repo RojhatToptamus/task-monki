@@ -97,6 +97,26 @@ describe('GitHub PR rollups', () => {
     expect(parsed.merge.status).toBe('NOT_MERGED');
   });
 
+  it('omits GitHub blank review decisions from the durable review rollup', () => {
+    const parsed = parsePrView(
+      {
+        number: 8,
+        url: 'https://github.com/openai/task-manager/pull/8',
+        state: 'OPEN',
+        isDraft: true,
+        headRefName: 'codex/task',
+        headRefOid: 'def',
+        baseRefName: 'main',
+        reviewDecision: '',
+        statusCheckRollup: []
+      },
+      worktreeFixture('/tmp/repo')
+    );
+
+    expect(parsed.reviews.status).toBe('NOT_REQUESTED');
+    expect(parsed.reviews).not.toHaveProperty('reviewDecision');
+  });
+
   it('rolls failing checks up as failing for the current head', () => {
     const rollup = parseCiRollup(
       [{ name: 'test', conclusion: 'FAILURE' }],

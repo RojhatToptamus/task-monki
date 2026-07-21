@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from './FileTaskStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
-describe('FileTaskStore Phase 5 provider observations', () => {
+describe('FileTaskStore provider observations', () => {
   it('structurally redacts provider credentials before journal persistence', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-redacted-journal-'));
     const store = new FileTaskStore(dir);
@@ -92,7 +92,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
   });
 
   it('persists immutable provider observations and validates raw journal reads', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase5-store-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-provider-observations-'));
     const store = new FileTaskStore(dir);
     const task = await store.createTask({
       title: 'Provider observations',
@@ -101,7 +101,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
-      branchName: 'codex/phase5-store',
+      branchName: 'codex/provider-observations',
       worktreePath: dir,
       baseSha: 'base'
     });

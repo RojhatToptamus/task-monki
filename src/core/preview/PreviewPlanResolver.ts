@@ -10,11 +10,13 @@ import type {
 } from '../../shared/contracts';
 import type { Task, TaskIteration } from '../../shared/contracts';
 import {
-  activePreviewAttachmentIds,
-  activePreviewLocalAttachmentRequirements,
-  previewExecutionDigest,
   type ParsedPreviewRecipe
 } from './PreviewRecipeLoader';
+import {
+  activePreviewAttachmentIds,
+  activePreviewLocalAttachmentRequirements,
+  previewExecutionDigest
+} from './PreviewExecutionAuthority';
 import { canonicalProspectivePath, isPathWithin } from './PreviewPaths';
 import { OciEngineAdapter } from './runtime/OciEngineAdapter';
 import { FileTaskStore } from '../storage/FileTaskStore';

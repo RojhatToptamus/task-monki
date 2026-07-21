@@ -10,7 +10,7 @@ import type {
   AcpSessionConfigOption,
   AcpSessionModelState
 } from './AcpProtocol';
-import type { AcpNativeSessionState } from './AcpEventMapper';
+import type { AcpNativeSessionState } from './AcpNativeSession';
 
 const MAX_NATIVE_DEPTH = 8;
 const MAX_NATIVE_COLLECTION = 500;

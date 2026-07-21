@@ -1,15 +1,15 @@
 import { getImplementationRetryReason, type Task } from '../../shared/contracts';
-import { isImplementationOutcomeBlocked } from '../model/nextAction';
+import { isImplementationOutcomeBlocked } from './nextAction';
 
-type AttentionTone = 'warning' | 'error' | 'info';
+export type TaskAttentionTone = 'warning' | 'error' | 'info';
 
-interface AttentionDescriptor {
+export interface TaskAttentionDescriptor {
   label: string;
   detail: string;
-  tone: AttentionTone;
+  tone: TaskAttentionTone;
 }
 
-const IN_FLIGHT_RUNS = new Set([
+const IN_FLIGHT_RUNS = new Set<Task['projection']['agentRun']>([
   'QUEUED',
   'STARTING',
   'RUNNING',
@@ -22,7 +22,9 @@ const IN_FLIGHT_RUNS = new Set([
  * The most urgent child state for a task, used to drive the "Needs you" inbox,
  * decision banners, and card chips. Returns undefined when nothing is blocked.
  */
-export function describeTaskAttention(task: Task): AttentionDescriptor | undefined {
+export function describeTaskAttention(
+  task: Task
+): TaskAttentionDescriptor | undefined {
   if (isImplementationOutcomeBlocked(task)) {
     return {
       label: 'Needs retry',
@@ -89,7 +91,7 @@ export function describeTaskAttention(task: Task): AttentionDescriptor | undefin
   return undefined;
 }
 
-function describeDeliveryAttention(task: Task): AttentionDescriptor | undefined {
+function describeDeliveryAttention(task: Task): TaskAttentionDescriptor | undefined {
   const projection = task.projection;
   if (
     task.completionPolicy === 'MANUAL' &&

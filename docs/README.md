@@ -57,6 +57,9 @@ behavior and architecture, not private roadmap sequencing.
      files/PDFs), composer normalization, durable storage and retry rules,
      Codex delivery, HTTP/Electron trust boundaries, resource limits,
      portability, cleanup, and deletion semantics.
+8. `docs/architecture/MODULE_BOUNDARIES.md`
+   - Current module ownership, dependency direction, test placement, and
+     domain-specific verification commands for maintainers and agents.
 
 ### User And Maintainer Docs
 
@@ -76,8 +79,9 @@ behavior and architecture, not private roadmap sequencing.
      semantics, accessibility expectations, and UI review checklist.
 
 Window behavior is implemented in `src/electron/main.ts`,
-`src/electron/windowChrome.ts`, and `src/renderer/styles.css`. There is no
-separate window-chrome design document.
+`src/electron/windowChrome.ts`, and `src/renderer/styles/app-shell.css` (ordered
+through `src/renderer/styles.css`). There is no separate window-chrome design
+document.
 
 For agent-specific working instructions, start at root `AGENTS.md`.
 
@@ -117,11 +121,17 @@ of:
 
 ```sh
 npm run typecheck
+npm run check:architecture
 npm test
+npm run test:renderer:dom
 npm run build
 npm run check:codex-protocol
 git diff --check
 ```
+
+`npm run test:renderer:dom` mounts focused renderer interactions in JSDOM so
+focus, events, effects, and cleanup are verified in addition to static markup.
+`npm run verify` runs the repository-wide automated verification sequence.
 
 For deterministic UI and workflow testing, start from `npm run dev:seed` and the
 generated `.local/task-monki-dev-seed/manifest.json`.

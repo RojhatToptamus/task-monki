@@ -1,0 +1,311 @@
+:root {
+  color-scheme: light dark;
+  --font-ui: "Inter Tight", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace;
+
+  /* --- Task Monki Redesign palette (light) --- */
+  /* Artifact-native tokens */
+  --bg: #eceded;
+  --surface: #ffffff;
+  --surface2: #f4f5f6;
+  --hair: #ededee;
+  --border: #e2e3e5;
+  --border-strong: #d1d3d6;
+  --text: #1a1c20;
+  --text-soft: #3a3d43;
+  --muted: #6c6f76;
+  --faint: #70737a;
+  --accent: #26292f;
+  --accent-hover: color-mix(in srgb, var(--accent) 86%, #fff);
+  --on-accent: #ffffff;
+  --code-bg: #f7f8fa;
+  --code-text: #3a3d43;
+  --action-ink: #8a5a08;
+  --success-bright: #1a8f5e;
+  --neutral: #a4a7ad;
+  --info: #2f6fd6;
+  --action: #c47e14;
+  --success: #1a8f5e;
+  --error: #cf4640;
+  --control-border: #8a8d93;
+
+  /* Derived semantic tokens */
+  --border-hover: color-mix(in srgb, var(--accent) 32%, var(--border));
+  --info-ink: #2a5fb8;
+  --success-ink: color-mix(in srgb, var(--success) 72%, var(--text));
+  --error-ink: color-mix(in srgb, var(--error) 72%, var(--text));
+  --scrim: rgba(16, 19, 24, 0.32);
+  --shadow-menu: 0 10px 30px rgba(16, 19, 24, 0.14);
+
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-shell[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* --- Task Monki Redesign palette (dark) --- */
+  --bg: #101113;
+  --surface: #191a1e;
+  --surface2: #202126;
+  --hair: #26272c;
+  --border: #2a2b30;
+  --border-strong: #3a3c43;
+  --text: #e9eaed;
+  --text-soft: #b8bbc1;
+  --muted: #92969e;
+  --faint: #858991;
+  --accent: #ebedf0;
+  --accent-hover: color-mix(in srgb, var(--accent) 86%, #000);
+  --on-accent: #1a1c20;
+  --code-bg: #0a0b0d;
+  --code-text: #ced1d7;
+  --action-ink: #e8b25a;
+  --success-bright: #37bd80;
+  --neutral: #787c84;
+  --info: #5d8ecf;
+  --action: #e6a23c;
+  --success: #37bd80;
+  --error: #e0655c;
+  --control-border: #686c74;
+
+  /* Derived semantic tokens (dark) */
+  --border-hover: color-mix(in srgb, var(--accent) 22%, var(--border));
+  --info-ink: #86abdc;
+  --success-ink: #5fc79f;
+  --error-ink: #ef8f86;
+  --scrim: rgba(0, 0, 0, 0.5);
+  --shadow-menu: 0 14px 38px rgba(0, 0, 0, 0.38);
+}
+
+.app-shell {
+  --action-soft: color-mix(in srgb, var(--action) 10%, var(--surface));
+  --action-line: color-mix(in srgb, var(--action) 38%, var(--border));
+  --error-soft: color-mix(in srgb, var(--error) 9%, var(--surface));
+  --error-line: color-mix(in srgb, var(--error) 34%, var(--border));
+  --info-soft: color-mix(in srgb, var(--info) 10%, var(--surface));
+  --info-line: color-mix(in srgb, var(--info) 28%, var(--border));
+  --success-soft: color-mix(in srgb, var(--success) 10%, var(--surface));
+  --success-line: color-mix(in srgb, var(--success) 30%, var(--border));
+
+  /* Semantic status contract (audit §07): one status color per *question*, not
+     per state. These name the meaning so future code answers "what does this
+     color say?" instead of picking a raw hue. See DESIGN.md § Status color map. */
+  --state-working: var(--info); /* the agent is working (running/reviewing/refining) */
+  --state-waiting: var(--action); /* waiting on you (needs approval, ready for review) */
+  --state-blocked: var(--error); /* blocked / verdict against (needs changes, failed) */
+  --state-verified: var(--success); /* verified / complete (done, review passed) */
+  --state-idle: var(--neutral); /* idle / not yet (ready, not run, no PR, backlog) */
+  --focus-ring: var(--info);
+
+  /* Categorical saved-view colors. These identify views; they are not status tones. */
+  --view-color-neutral: #858990;
+  --view-color-blue: #7293c7;
+  --view-color-amber: #c39a59;
+  --view-color-green: #72a889;
+  --view-color-rose: #c37b86;
+  --view-color-violet: #957fc2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+}
+
+#root {
+  height: 100%;
+}
+
+.tm-notifier {
+  /* Bottom-center, clear of the task-detail header where the mascot is pinned
+     top-right — a top-right toast would land on the mascot video. */
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  width: min(560px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.tm-notifier__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  padding: 12px 17px;
+  border: 1px solid var(--info-line);
+  border-radius: 10px;
+  background: var(--text);
+  color: var(--surface);
+  box-shadow: var(--shadow-menu);
+  font-size: 13px;
+  pointer-events: auto;
+}
+
+.tm-notifier__item--success {
+  border-color: var(--success-line);
+}
+
+.tm-notifier__item--error {
+  border-color: var(--error-line);
+}
+
+.tm-notifier__dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--faint);
+  border-radius: 9px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  opacity: 0.4;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes tm-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes tm-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* The live-label background-clip shimmer (spec §Motion): a bright band that
+   travels left-to-right across the text. Paired with a 200% background-size and
+   a slow (~2.6s) linear duration so the sweep reads as calm, not flickery. */
+@keyframes tm-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0% 0;
+  }
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 0;
+  background: none;
+  color: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* Press feedback is immediate and geometry-stable across the existing control
+   families. The filter preserves every component's established fill. */
+:where(button, [role='button']):not(:disabled):active {
+  filter: brightness(0.88);
+}
+
+.tm-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[role='menu']:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+button:focus:not(:focus-visible),
+summary:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.app-shell[data-input-modality='pointer'] button:focus-visible,
+.app-shell[data-input-modality='pointer'] a:focus-visible,
+.app-shell[data-input-modality='pointer'] summary:focus-visible,
+.app-shell[data-input-modality='pointer'] [role='menu']:focus-visible {
+  outline: none;
+}
+
+.app-shell[data-input-modality='keyboard'] button:focus,
+.app-shell[data-input-modality='keyboard'] a:focus,
+.app-shell[data-input-modality='keyboard'] summary:focus,
+.app-shell[data-input-modality='keyboard'] [role='menu']:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  summary:focus-visible,
+  [role='menu']:focus-visible {
+    outline-color: Highlight;
+  }
+}
