@@ -1,6 +1,6 @@
 # Task Monki Documentation
 
-Date: 2026-07-14
+Date: 2026-07-26
 
 This folder is the operating context for Task Monki development. It should help
 humans and AI agents understand what is current without reading stale planning
@@ -32,6 +32,12 @@ behavior and architecture, not private roadmap sequencing.
 7. `docs/PROVIDER_SMOKE_TESTING.md`
    - Live provider/model verification through TaskManagerService in a clean,
      remote-free throwaway Git repository.
+8. `docs/testing-strategy/STRATEGY.md`
+   - Post-change agent testing workflow, layer boundaries, safety contract,
+     measured timings, and exact usage.
+9. `docs/testing-strategy/RESEARCH.md`
+   - Repository audit, primary-source comparison, measurements, and evidence
+     behind the selected testing workflow.
 
 ### Architecture
 
@@ -125,6 +131,7 @@ of:
 ```sh
 npm run typecheck
 npm run check:architecture
+npm run test:agent-workflow
 npm test
 npm run test:renderer:dom
 npm run build
@@ -135,6 +142,11 @@ git diff --check
 `npm run test:renderer:dom` mounts focused renderer interactions in JSDOM so
 focus, events, effects, and cleanup are verified in addition to static markup.
 `npm run verify` runs the repository-wide automated verification sequence.
+
+For a safe real-process inner loop after Git, worktree, workflow, or runtime
+changes, run `npm run test:agent-workflow`. Add `-- --ui` only when the
+renderer itself needs semantic browser inspection; see
+`docs/testing-strategy/STRATEGY.md`.
 
 For deterministic UI and workflow testing, start from `npm run dev:seed` and the
 generated `.local/task-monki-dev-seed/manifest.json`.

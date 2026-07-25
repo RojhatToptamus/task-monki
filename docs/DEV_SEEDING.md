@@ -1,8 +1,15 @@
 # Development Seed Data
 
 Task Monki ships a deterministic local seed workflow for UI and workflow
-testing. Use it whenever a change needs a specific task, review, Git, GitHub,
-interaction, or completion-policy state.
+inspection. Use it when a change needs a specific projected task, review, Git,
+GitHub, interaction, or completion-policy state without executing an agent
+runtime.
+
+For changes to task workflow, Git/worktree handling, agent orchestration, or
+provider lifecycle, use `npm run test:agent-workflow` instead. Add `-- --ui`
+when the executed state also needs semantic browser inspection. The seed and
+executed workflows are complementary; seed records are not evidence that a
+provider process, worktree lifecycle, or post-run Git observation worked.
 
 ## Contract
 

@@ -33,6 +33,7 @@
     "verify:packaged-preview-safe-storage": "node scripts/verify-packaged-preview-safe-storage.mjs",
     "dev:api": "npm run build:tools && node dist-tools/dev/server.js",
     "dev:seed": "npm run build:tools && node dist-tools/dev/seed.js --reset",
+    "test:agent-workflow": "npm run build:tools && node dist-tools/dev/agentTestWorkflow.js",
     "smoke:providers": "npm run build:tools && node dist-tools/dev/providerSmoke.js",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.check.json --noEmit",

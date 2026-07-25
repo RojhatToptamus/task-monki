@@ -169,8 +169,17 @@ See the [Development Seed Data guide](docs/DEV_SEEDING.md) for more details.
 ## Checks
 
 ```bash
-npm run typecheck && npm test && npm run build && npm run check:codex-protocol
+npm run typecheck
+npm run test:agent-workflow
+npm test
+npm run build
+npm run check:codex-protocol
 ```
+
+Use `npm run test:agent-workflow -- --ui` when an executed workflow also needs
+semantic browser inspection. See the
+[agent testing strategy](docs/testing-strategy/STRATEGY.md) for the testing
+layers, safety contract, and live-provider boundary.
 
 ## Status
 
