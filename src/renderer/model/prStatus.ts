@@ -224,7 +224,9 @@ export function buildPrStatusViewModel(input: {
       ...baseStatus(pullRequest),
       ...freshnessStatus,
       freshnessLine: freshness.line,
-      canPushUpdate: freshness.kind === 'LOCAL_NOT_PUSHED',
+      canPushUpdate:
+        freshness.kind === 'LOCAL_NOT_PUSHED' ||
+        branchPublication?.status === 'AMBIGUOUS',
       pushUpdateDisabledReason: freshness.pushUpdateDisabledReason
     };
   }
@@ -365,6 +367,16 @@ function createDraftPrAvailability(
       overviewRelevant: true,
       line: 'Branch publication is already in progress.',
       disabledReason: 'Branch publication is already in progress.'
+    };
+  }
+  if (branchPublication?.status === 'AMBIGUOUS') {
+    const reason =
+      branchPublication.error ??
+      'The prior push could not be confirmed. Retry to recheck the remote safely.';
+    return {
+      showAction: true,
+      overviewRelevant: true,
+      line: reason
     };
   }
   if (branchPublication?.status === 'FAILED' && branchPublication.error) {
@@ -552,6 +564,14 @@ function deriveFreshness(input: {
   const staleEvidence = [ciRollup?.headSha, reviewRollup?.headSha, mergeSnapshot?.headSha].some(
     (headSha) => Boolean(headSha && prHead && headSha !== prHead)
   );
+  if (branchPublication?.status === 'AMBIGUOUS') {
+    return {
+      kind: 'BRANCH_DIVERGED',
+      line:
+        branchPublication.error ??
+        'The prior push could not be confirmed. Retry to recheck the remote safely.'
+    };
+  }
   if (branchPublication?.status === 'FAILED' && branchPublication.error) {
     if (isRemoteNewerPublicationError(branchPublication.error)) {
       return {

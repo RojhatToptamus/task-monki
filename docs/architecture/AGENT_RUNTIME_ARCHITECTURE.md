@@ -798,8 +798,28 @@ terminal/recovery UI events or follow-on session state. A provider may prepare
 an idempotent final artifact before that claim, but the artifact is telemetry
 and does not itself make the run terminal.
 
-The user may explicitly retry or continue after Task Monki closes the uncertain
-run. Provider IDs from another runtime are never consulted.
+After Task Monki closes the uncertain run, the user may explicitly continue
+unfinished work or retry the original implementation. Either action first
+inspects current authoritative state and neither blindly resubmits the ambiguous
+mutation. Provider IDs from another runtime are never consulted.
+
+The user may instead abandon a `RECOVERY_REQUIRED` run. Abandoning resolves only
+the ambiguous run record; it does not delete the task, worktree, or independently
+observed Git and external results.
+
+Startup includes runs waiting on an approval or user answer, and it follows
+their server ownership even when a prior server record was already marked
+terminal. A terminal server record does not prove that the owned run or
+interaction was settled. Codex, OpenCode, and ACP use the same active-ownership
+selection rule before applying their provider-specific reconciliation.
+Before selectively initializing eager, selected, or recovery-owning runtimes,
+startup marks every nonterminal server record from the previous application
+process lost. This application-owned sweep also covers idle on-demand runtimes,
+without launching them. Runtime adapters remain responsible for reconciling
+the affected runs, sessions, and interactions against provider-specific truth.
+An active interaction must belong to the run's current server. Once resolved,
+stale, or aborted, it remains historical evidence owned by the server that
+actually carried that request even if recovery later rebinds the run.
 
 Long-running prompt completion is not assigned the bounded control-RPC
 deadline. A submitted prompt stays pending until the provider returns a
@@ -831,6 +851,11 @@ If Task Monki cannot confirm that boundary, the process supervisor publishes a
 distinct termination failure instead of a normal close or spawn error. The
 runtime records the server as lost, moves active work to recovery, and fences
 replacement startup until the application restarts.
+Provider processes are launched behind an IPC-bound owner process. Abrupt loss
+of the app closes that ownership channel, and the owner stops only the exact
+target process group. Provider probes, mutating or remote-inspection Git
+commands, and GitHub CLI children use the same boundary. Persisted PIDs from a
+previous app process are not used as authority to kill processes after restart.
 Windows' `taskkill` interface cannot prove the fate of orphaned descendants
 after their leader has already exited. Task Monki does not claim that guarantee
 on Windows; reliable ownership there requires a native Job Object boundary and

@@ -182,6 +182,7 @@ describe('ProcessSupervisor', () => {
   it.runIf(process.platform !== 'win32')(
     'publishes a distinct terminal failure when descendant termination cannot be confirmed',
     async () => {
+      vi.spyOn(portableChildProcess, 'isPortableProcessTreeRunning').mockReturnValue(true);
       vi.spyOn(portableChildProcess, 'waitForPortableProcessTreeExit').mockResolvedValue(false);
       const leaderScript = [
         "const { spawn } = require('node:child_process');",

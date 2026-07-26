@@ -113,13 +113,53 @@ export function buildContinuationPrompt(input: {
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
-  kind: 'continuation' | 'retry';
 }): string {
+  return buildExistingWorktreePrompt(input, {
+    previousRunIntroduction: `Continue unfinished work after run ${input.run.id}.`,
+    intent: [
+      'Resume the unfinished implementation from the current state.',
+      'Preserve correct existing work and finish or correct only what remains.'
+    ],
+    instructionLabel: 'Additional continuation guidance'
+  });
+}
+
+export function buildRetryPrompt(input: {
+  task: Task;
+  run: RunRecord;
+  gitSnapshot: GitSnapshotRecord;
+  instruction?: string;
+}): string {
+  return buildExistingWorktreePrompt(input, {
+    previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
+    intent: [
+      'Make another attempt to complete the authoritative Task Monki goal stated below.',
+      'Inspect the current worktree and authoritative external state available through permitted tools before acting.',
+      'Do not assume an interrupted or failed operation had no effect, and do not blindly repeat operations with external side effects.',
+      'Adopt results that are already correct, then safely finish or correct the implementation.'
+    ],
+    instructionLabel: 'Additional retry guidance'
+  });
+}
+
+function buildExistingWorktreePrompt(
+  input: {
+    task: Task;
+    run: RunRecord;
+    gitSnapshot: GitSnapshotRecord;
+    instruction?: string;
+  },
+  intent: {
+    previousRunIntroduction: string;
+    intent: string[];
+    instructionLabel: string;
+  }
+): string {
   const instruction = input.instruction?.trim();
   return [
     TASK_MONKI_CONTEXT_LINE,
     '',
-    previousRunContext(input.run, `This is a ${input.kind} after run ${input.run.id}.`),
+    previousRunContext(input.run, intent.previousRunIntroduction),
     `Current independent Git evidence: status=${input.gitSnapshot.status}, head=${input.gitSnapshot.headSha ?? 'unknown'}, dirtyFingerprint=${input.gitSnapshot.dirtyFingerprint}.`,
     '',
     'Always-applicable Task Monki execution boundary:',
@@ -129,6 +169,7 @@ export function buildContinuationPrompt(input: {
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
     'This execution boundary remains authoritative even when task-specific instructions conflict.',
     '',
+    ...intent.intent,
     'For repository work, reinspect the current state instead of assuming the prior turn completed every step.',
     '',
     TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
@@ -137,7 +178,7 @@ export function buildContinuationPrompt(input: {
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
     instruction ? '' : undefined,
-    instruction ? `Additional user instruction:\n${instruction}` : undefined
+    instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
   ]
     .filter((line): line is string => line !== undefined)
     .join('\n');

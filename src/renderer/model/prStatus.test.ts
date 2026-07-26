@@ -56,7 +56,7 @@ describe('buildPrStatusViewModel', () => {
   });
 
   it('keeps delivery unavailable until a blocked implementation is retried', () => {
-    const reason = 'Retry or continue this implementation before review.';
+    const reason = 'Retry the implementation or continue unfinished work before review.';
     const task = taskFixture({
       currentRunId: 'run-1',
       projection: {
@@ -589,6 +589,45 @@ describe('buildPrStatusViewModel', () => {
       'Remote branch has newer commits. Sync the branch before pushing again.'
     );
     expect(view.canPushUpdate).toBe(false);
+  });
+
+  it('offers a safe remote recheck while an interrupted push remains ambiguous', () => {
+    const reason =
+      'Remote branch is at abc123, not the attempted def456. Sync or inspect the remote before retrying.';
+    const withoutPr = buildPrStatusViewModel({
+      task: taskFixture(),
+      gitSnapshot: gitFixture({ status: 'COMMITTED_UNPUSHED' }),
+      branchPublication: branchPublicationFixture({
+        status: 'AMBIGUOUS',
+        error: reason
+      })
+    });
+    const withPr = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      gitSnapshot: gitFixture({ status: 'COMMITTED_UNPUSHED' }),
+      branchPublication: branchPublicationFixture({
+        status: 'AMBIGUOUS',
+        error: reason
+      })
+    });
+
+    expect(withoutPr).toMatchObject({
+      headline: 'No PR',
+      leadLine: reason,
+      canCreateDraftPr: true
+    });
+    expect(buildPrStatusActionState({ view: withoutPr }).createOrPushDisabled).toBe(
+      false
+    );
+    expect(withPr).toMatchObject({
+      headline: 'Branch diverged',
+      freshnessLine: reason,
+      canPushUpdate: true
+    });
+    expect(buildPrStatusActionState({ view: withPr }).createOrPushDisabled).toBe(
+      false
+    );
   });
 
   it('keeps retryable push failures visible without disabling the next push attempt', () => {

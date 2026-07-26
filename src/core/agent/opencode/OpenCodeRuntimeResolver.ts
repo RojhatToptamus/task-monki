@@ -3,7 +3,7 @@ import path from 'node:path';
 import { constants as fsConstants } from 'node:fs';
 import type { AgentRuntimeResolutionDiagnostics } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
-import { execFilePortable } from '../../process/portableChildProcess';
+import { execFileOwnedPortable } from '../../process/ownedProcess';
 
 export const OPENCODE_RUNTIME_ID = 'opencode' as const;
 export const TASK_MONKI_OPENCODE_BIN_ENV = 'TASK_MONKI_OPENCODE_BIN';
@@ -75,7 +75,7 @@ export async function resolveOpenCodeRuntime(
         options.maximumMajor
       );
       const help = compatible
-        ? await execFilePortable(candidate.executable, ['serve', '--help'], {
+        ? await execFileOwnedPortable(candidate.executable, ['serve', '--help'], {
             cwd: options.cwd,
             env: sanitizeEnvironment(environment),
             timeout: 10_000,
@@ -152,7 +152,7 @@ export async function probeOpenCodeVersion(
   cwd: string,
   environment: NodeJS.ProcessEnv = process.env
 ): Promise<string> {
-  const result = await execFilePortable(executable, ['--version'], {
+  const result = await execFileOwnedPortable(executable, ['--version'], {
     cwd,
     env: sanitizeEnvironment(environment),
     timeout: 10_000,

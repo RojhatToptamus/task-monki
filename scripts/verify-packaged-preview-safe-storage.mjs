@@ -11,6 +11,8 @@ if (process.platform !== 'darwin') {
 }
 
 const execFileAsync = promisify(execFile);
+const FIRST_RELAUNCH_OPERATION_TIMEOUT_MS = 60_000;
+const SECOND_RELAUNCH_OPERATION_TIMEOUT_MS = 120_000;
 
 async function main() {
   const repositoryRoot = path.resolve(import.meta.dirname, '..');
@@ -23,6 +25,7 @@ async function main() {
   const safeStorageAppName = `task-monki-safe-storage-verifier-${crypto.randomUUID()}`;
   const capturedOutput = [];
   let running;
+  let failure;
 
   try {
     await createFixtureRepository(repositoryPath, inputId);
@@ -54,11 +57,19 @@ async function main() {
         if (before.status !== 'PLAN' || before.executionReadiness.status !== 'BLOCKED') {
           throw new Error('Expected the unresolved private input to block execution only.');
         }
-        const stored = await window.previewPrivateInputs.set({
-          taskId: task.id,
-          inputId: ${JSON.stringify(inputId)},
-          value: ${JSON.stringify(canary)}
-        });
+        const stored = await Promise.race([
+          window.previewPrivateInputs.set({
+            taskId: task.id,
+            inputId: ${JSON.stringify(inputId)},
+            value: ${JSON.stringify(canary)}
+          }),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('safeStorage did not settle while storing the private input.')),
+              30000
+            )
+          )
+        ]);
         if (stored.status !== 'STORED') throw new Error('safeStorage did not store the private input.');
         const after = await window.taskManager.resolvePreview({ taskId: task.id });
         if (after.status !== 'PLAN' || after.executionReadiness.status !== 'READY') {
@@ -71,8 +82,8 @@ async function main() {
         });
         return { taskId: task.id, planId: after.plan.id };
       })()`),
-      120_000,
-      'Timed out storing and approving the packaged private input.'
+      FIRST_RELAUNCH_OPERATION_TIMEOUT_MS,
+      'The first packaged safeStorage operation did not settle.'
     );
     await stopPackagedApp(running);
     running = undefined;
@@ -99,13 +110,21 @@ async function main() {
         if (resolved.status !== 'PLAN' || resolved.executionReadiness.status !== 'READY') {
           throw new Error('The private input was not ready after relaunch.');
         }
-        const generation = await window.taskManager.startPreview({ taskId: ${JSON.stringify(first.taskId)} });
+        const generation = await Promise.race([
+          window.taskManager.startPreview({ taskId: ${JSON.stringify(first.taskId)} }),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('Preview did not settle after safeStorage relaunch decryption.')),
+              90000
+            )
+          )
+        ]);
         if (generation.state !== 'READY') throw new Error('The recipient did not start after relaunch decryption.');
         await window.taskManager.stopPreview({ taskId: ${JSON.stringify(first.taskId)}, generationId: generation.id });
         return { generationId: generation.id, state: generation.state };
       })()`),
-      120_000,
-      'Timed out decrypting the private input after packaged relaunch.'
+      SECOND_RELAUNCH_OPERATION_TIMEOUT_MS,
+      'The packaged safeStorage relaunch and Preview operation did not settle.'
     );
     await stopPackagedApp(running);
     running = undefined;
@@ -136,17 +155,33 @@ async function main() {
       relaunchDecryption: 'passed'
     }, null, 2));
   } catch (error) {
+    failure = error;
     console.error(JSON.stringify({
       error: error instanceof Error ? error.message : String(error),
       output: capturedOutput.map((capture) => capture()).join('\n').slice(-20_000)
     }));
     throw error;
   } finally {
-    if (running) await stopPackagedApp(running).catch(() => undefined);
-    try {
-      await deleteVerificationKeychainItem(safeStorageAppName);
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
+    const cleanupErrors = [];
+    if (running) {
+      await stopPackagedApp(running).catch((error) => cleanupErrors.push(error));
+    }
+    await removeFixtureWorktrees(repositoryPath).catch((error) =>
+      cleanupErrors.push(error)
+    );
+    await deleteVerificationKeychainItem(safeStorageAppName).catch((error) =>
+      cleanupErrors.push(error)
+    );
+    await fs.rm(root, { recursive: true, force: true }).catch((error) =>
+      cleanupErrors.push(error)
+    );
+    if (cleanupErrors.length > 0) {
+      const cleanupFailure = new AggregateError(
+        cleanupErrors,
+        'The packaged safeStorage verifier could not clean all owned resources.'
+      );
+      if (!failure) throw cleanupFailure;
+      console.error(JSON.stringify({ cleanupError: cleanupFailure.message }));
     }
   }
 }
@@ -250,28 +285,29 @@ async function connectToTrustedRenderer(port, child, output) {
 
 async function stopPackagedApp(runningApp) {
   const { child, cdp } = runningApp;
-  const exited = child.exitCode === null ? once(child, 'exit') : Promise.resolve();
-  await cdp.send('Browser.close').catch(() => undefined);
+  await withTimeout(
+    cdp.send('Browser.close'),
+    5_000,
+    'Packaged app did not acknowledge Browser.close.'
+  ).catch(() => undefined);
   cdp.close();
   try {
-    await withTimeout(exited, 20_000, 'Packaged app did not exit after Browser.close.');
+    await waitForChildExit(
+      child,
+      15_000,
+      'Packaged app did not exit after Browser.close.'
+    );
+    return;
   } catch {
     child.kill('SIGTERM');
-    try {
-      await withTimeout(
-        child.exitCode === null ? once(child, 'exit') : Promise.resolve(),
-        10_000,
-        'Packaged app did not exit after SIGTERM.'
-      );
-    } catch {
-      child.kill('SIGKILL');
-      await withTimeout(
-        child.exitCode === null ? once(child, 'exit') : Promise.resolve(),
-        5_000,
-        'Packaged app did not exit after SIGKILL.'
-      );
-    }
   }
+  try {
+    await waitForChildExit(child, 5_000, 'Packaged app did not exit after SIGTERM.');
+    return;
+  } catch {
+    child.kill('SIGKILL');
+  }
+  await waitForChildExit(child, 5_000, 'Packaged app did not exit after SIGKILL.');
 }
 
 async function deleteVerificationKeychainItem(appName) {
@@ -286,6 +322,39 @@ async function deleteVerificationKeychainItem(appName) {
       throw error;
     }
   }
+}
+
+async function waitForChildExit(child, timeoutMs, message) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await withTimeout(once(child, 'exit'), timeoutMs, message);
+}
+
+async function removeFixtureWorktrees(repositoryPath) {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['worktree', 'list', '--porcelain', '-z'],
+    { cwd: repositoryPath }
+  );
+  const repositoryRoot = await fs.realpath(repositoryPath);
+  const worktreePaths = stdout
+    .split('\0')
+    .filter((field) => field.startsWith('worktree '))
+    .map((field) => field.slice('worktree '.length));
+  for (const worktreePath of worktreePaths) {
+    if (await sameRealPath(worktreePath, repositoryRoot)) continue;
+    await execFileAsync(
+      'git',
+      ['worktree', 'remove', '--force', worktreePath],
+      { cwd: repositoryPath }
+    );
+  }
+}
+
+async function sameRealPath(candidatePath, expectedPath) {
+  return await fs.realpath(candidatePath).then(
+    (candidate) => candidate === expectedPath,
+    () => false
+  );
 }
 
 class CdpConnection {

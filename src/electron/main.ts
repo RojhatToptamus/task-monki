@@ -105,6 +105,10 @@ import { getMacDockIconPath } from './dockIcon';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
 import { resolveNativePreviewLauncherPath } from '../core/preview/runtime/launcherPath';
+import {
+  configureOwnedProcessLauncher,
+  resolveOwnedProcessLauncherPath
+} from '../core/process/ownedProcess';
 import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
 import { createElectronPreviewUrlHost } from './previewOpenHost';
 import {
@@ -861,6 +865,15 @@ void app.whenReady().then(async () => {
   const defaultRepositoryPath = resolveDefaultRepositoryPath();
   const userDataDir = app.getPath('userData');
   const taskStoreDir = path.join(userDataDir, 'task-store');
+  configureOwnedProcessLauncher({
+    launcherPath: resolveOwnedProcessLauncherPath({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath()
+    }),
+    launcherExecutable: process.execPath,
+    launcherEnvironment: { ELECTRON_RUN_AS_NODE: '1' }
+  });
   service = new TaskManagerService(
     new FileTaskStore(taskStoreDir),
     defaultRepositoryPath,

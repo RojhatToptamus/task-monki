@@ -162,7 +162,14 @@ git add -A
 git diff --cached --quiet
 git commit -m "Task: <title>"
 git push --set-upstream <remote> HEAD
+git ls-remote --heads <remote> refs/heads/<branch>
 ```
+
+An interrupted push is reconciled against that exact remote ref and attempted
+local HEAD. A differing or unreadable ref remains `AMBIGUOUS`. The next explicit
+delivery action performs the same read-only check before local auto-commit,
+GitHub preflight, or push; it never retries from persisted intent alone.
+Unchanged ambiguous observations reuse the existing publication record.
 
 GitHub CLI commands used:
 
@@ -200,20 +207,25 @@ Backend flow:
 1. Load the task.
 2. Block if a task-owned implementation or review run is active.
 3. Require a worktree.
-4. Refresh Git evidence.
-5. If the worktree is dirty, create a delivery commit.
-6. Check the latest branch publication.
-7. If no pushed publication exists for current `HEAD`, publish the branch.
-8. Assert publish readiness with `assertPublishReady`.
-9. Normalize the requested PR title, falling back to the task title.
-10. Write the PR body artifact.
-11. Record `PR_CREATE_REQUESTED`.
-12. `gh pr list` finds an existing open PR for the branch, or `gh pr create`
+4. If an earlier publication is still `PUSHING` or `AMBIGUOUS`, compare the
+   exact remote ref
+   with its recorded local HEAD. Adopt the matching ref, allow an explicit
+   retry only when the ref is absent, and block an ambiguous mismatch.
+5. Refresh Git evidence.
+6. If the worktree is dirty, create a delivery commit.
+7. Check the latest branch publication.
+8. If no pushed publication exists for current `HEAD`, record `PUSHING` with
+   the exact remote, branch, and HEAD before publishing the branch.
+9. Assert publish readiness with `assertPublishReady`.
+10. Normalize the requested PR title, falling back to the task title.
+11. Write the PR body artifact.
+12. Record `PR_CREATE_REQUESTED`.
+13. `gh pr list` finds an existing open PR for the branch, or `gh pr create`
     opens a new draft PR with the normalized title.
-13. `gh pr view` and `gh pr checks` normalize PR, CI, review, and merge
+14. `gh pr view` and `gh pr checks` normalize PR, CI, review, and merge
     evidence.
-14. `FileTaskStore.recordPullRequestSync(...)` stores all evidence records.
-15. If GitHub reports an open PR, Task Monki transitions the task to
+15. `FileTaskStore.recordPullRequestSync(...)` stores all evidence records.
+16. If GitHub reports an open PR, Task Monki transitions the task to
     `IN_REVIEW`.
 
 The edited title applies only when `gh pr create` creates a new PR. If `gh pr
@@ -248,6 +260,13 @@ create a PR. It records fresh PR, CI, review, and merge evidence. Successful
 refresh does not show a transient success toast; the updated timestamp and
 evidence are the confirmation. On failure it records `GITHUB_SYNC_FAILED` and
 surfaces the error through the app shell.
+
+An interrupted refresh leaves the last complete snapshot intact. Startup does
+not repeat the read-only request automatically; the user can run Refresh again.
+By contrast, startup does reconcile unfinished publication and PR creation:
+the remote branch ref is inspected for a recorded `PUSHING` attempt, and
+`gh pr list` may adopt an open PR after `PR_CREATE_REQUESTED`. Startup never
+pushes a branch or invokes `gh pr create`.
 
 ## Failing Check Investigation Flow
 

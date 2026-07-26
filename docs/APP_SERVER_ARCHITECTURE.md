@@ -225,9 +225,14 @@ than inferred from Codex events.
 - `IMPLEMENTATION`
   - First coding run for a task.
 - `FOLLOW_UP`
-  - Continuation with new instructions, including requested review changes.
+  - A new turn in the current task and worktree. This includes ordinary
+    post-success follow-up, requested review changes, and explicit continuation
+    of unfinished work. User-facing activity derives the correct action from
+    the source run outcome rather than presenting every turn as a follow-up.
 - `RETRY`
-  - Another attempt after a previous run.
+  - Another attempt at the authoritative original implementation goal after an
+    unsuccessful outcome. It reuses current state when safe, inspects Git and
+    external outcomes, and does not imply a clean worktree reset.
 - `REVIEW`
   - Detached read-only quality gate. It inspects the current diff and stores
     `projection.agentReview`.
@@ -268,6 +273,12 @@ cancels pending startup/restart work, drains RPC handling, removes process
 listeners, and terminates its portable child process tree. Preview shutdown
 independently cancels and joins generation work, watches, sockets, and cleanup.
 Preview events never update `Task.workflowPhase` or the agent projection.
+
+The Codex process is also launched behind the application-wide IPC owner
+boundary. If the Electron process is killed before graceful shutdown runs, the
+owner stops the exact Codex process group. On the next start, the adapter still
+reconciles durable session, turn, interaction, and run evidence; it does not
+infer a provider result from process disappearance or resend ambiguous input.
 
 ## Renderer and development-host trust
 
@@ -492,6 +503,16 @@ returns. On application startup, active runs and actionable interactions are
 reconciled even when their owning server record already reached `EXITED`,
 `FAILED`, or `LOST`; a terminal process record never makes active ownership
 safe by itself.
+
+An active Codex goal may start a continuation turn when `thread/resume`
+reattaches an interrupted rollout. During startup reconciliation, Task Monki
+therefore gives the exact recovery run temporary ownership of that session,
+adopts a unique provider-reported live continuation, and records the run as
+recovered and running. It does not close the old turn and offer a retry while
+that continuation exists. The correlation is process-local and remains scoped
+to the unresolved recovery until a continuation arrives or provider goal
+evidence becomes terminal; persisted provider turn identity remains the
+durable owner after adoption.
 
 ## Verification
 

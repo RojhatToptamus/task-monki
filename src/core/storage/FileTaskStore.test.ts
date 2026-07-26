@@ -353,6 +353,12 @@ describe('FileTaskStore', () => {
     ).resolves.toEqual([
       expect.objectContaining({ id: run.id, status: 'QUEUED' })
     ]);
+    for (const status of ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'] as const) {
+      await store.updateRun(run.id, { status });
+      await expect(store.getRunsRequiringRecovery()).resolves.toEqual([
+        expect.objectContaining({ id: run.id, status })
+      ]);
+    }
   });
 
   it('rejects a mutation before publishing a snapshot too large to reload', async () => {

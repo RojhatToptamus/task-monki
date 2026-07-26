@@ -325,7 +325,8 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
     case 'AGENT_RUN_FAILED':
     case 'AGENT_RUN_INTERRUPTED':
       // A stopped implementation is not review-ready. Keep it in the
-      // implementation phase so the next action remains retry or continue.
+      // implementation phase so the next action remains the outcome-appropriate
+      // Continue work or Retry implementation action.
       return task.workflowPhase;
     case 'IMPLEMENTATION_OUTCOME_BLOCKED':
       return run &&

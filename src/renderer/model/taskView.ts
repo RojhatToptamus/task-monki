@@ -69,7 +69,7 @@ export function describeRunFailureBanner(
       title: 'Implementation needs another pass',
       detail:
         getImplementationRetryReason(task) ??
-        'Retry or continue this implementation before review.'
+        'Retry the implementation or continue unfinished work before review.'
     };
   }
   switch (task.projection.agentRun) {
@@ -77,7 +77,7 @@ export function describeRunFailureBanner(
       return {
         status: 'FAILED',
         title: 'The agent run failed',
-        detail: `${task.projection.summary} Retry in this session or continue from the current worktree.`
+        detail: `${task.projection.summary} Retry the implementation or continue unfinished work from the current state.`
       };
     case 'LOST':
     case 'RECOVERY_REQUIRED':

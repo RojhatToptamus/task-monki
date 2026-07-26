@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type {
   Board,
   AcceptPreviewRecipeDraftRequest,
@@ -17,6 +18,7 @@ import type {
   GetPreviewRecipeGenerationRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
+  BranchPublicationRecord,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
   ReadProtocolMessageRequest,
@@ -118,6 +120,7 @@ import {
   buildContinuationPrompt,
   buildForkAlternativeTaskPrompt,
   buildInitialRunPrompt,
+  buildRetryPrompt,
   buildSteerInstruction
 } from '../../shared/promptTemplates';
 import { WorktreeService } from '../worktree/WorktreeService';
@@ -156,6 +159,7 @@ import {
 } from '../agent/BrowserDevAgentBoundary';
 import {
   assertContinuable,
+  assertForkable,
   assertRetryable,
   followUpSettings,
   mergeRunSettings,
@@ -415,6 +419,10 @@ export class TaskManagerService {
         this.assertInitializing();
       }
     }
+    if (!this.agentProviderStartupDisabledReason) {
+      await this.reconcileTaskStateOnStartup();
+      this.assertInitializing();
+    }
     await this.agents.initialize(
       [this.appSettings.defaultRuntimeId],
       new Set(this.appSettings.disabledRuntimeIds)
@@ -462,6 +470,211 @@ export class TaskManagerService {
       )
     );
     this.assertInitializing();
+  }
+
+  private async reconcileTaskStateOnStartup(): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    for (const task of snapshot.tasks) {
+      const worktree = snapshot.worktrees.find(
+        (candidate) => candidate.id === task.currentWorktreeId
+      );
+      if (!worktree || ['REMOVED', 'REMOVING'].includes(worktree.status)) {
+        continue;
+      }
+      const repository = snapshot.repositories.find(
+        (candidate) => candidate.id === worktree.repositoryId
+      );
+      if (!repository || repository.status !== 'AVAILABLE') {
+        if (worktree.status === 'CREATING') {
+          await this.store.updateWorktree(
+            {
+              ...worktree,
+              status: 'ERROR',
+              error:
+                'Task Monki restarted before worktree preparation completed, and the repository is unavailable.',
+              updatedAt: new Date().toISOString()
+            },
+            'WORKTREE_FAILED'
+          );
+        }
+        continue;
+      }
+
+      let storedWorktree: WorktreeRecord;
+      try {
+        const verified = await this.worktrees.verify(worktree, repository.path);
+        storedWorktree = sameWorktreeObservation(worktree, verified)
+          ? worktree
+          : await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          await this.store.recordRepositoryPreflight(
+            repository.id,
+            await validateRepositoryPath(repository.path)
+          );
+        } catch {
+          // The worktree error remains authoritative for this task even if the
+          // repository observation cannot be published atomically.
+        }
+        await this.store.updateWorktree(
+          {
+            ...worktree,
+            status: 'ERROR',
+            error:
+              worktree.status === 'CREATING'
+                ? `Task Monki could not reconcile interrupted worktree preparation: ${detail}`
+                : `Task Monki could not verify this worktree after restart: ${detail}`,
+            updatedAt: new Date().toISOString()
+          },
+          'WORKTREE_FAILED'
+        );
+        continue;
+      }
+      if (storedWorktree.status !== 'PRESENT') continue;
+
+      try {
+        await this.refreshEvidenceInternal(
+          { taskId: task.id },
+          {
+            persistOnlyIfChanged: true,
+            verifiedWorktree: storedWorktree
+          }
+        );
+      } catch {
+        continue;
+      }
+      await this.reconcilePendingBranchPublication(task, storedWorktree).catch(
+        () => undefined
+      );
+      try {
+        await this.reconcilePendingPullRequest(task, storedWorktree);
+      } catch (error) {
+        await this.store.appendEvent(
+          createDomainEvent({
+            type: 'GITHUB_SYNC_FAILED',
+            taskId: task.id,
+            iterationId: storedWorktree.iterationId,
+            worktreeId: storedWorktree.id,
+            source: 'github',
+            payload: {
+              operation: 'pull-request-recovery',
+              error: error instanceof Error ? error.message : String(error)
+            }
+          })
+        );
+      }
+    }
+  }
+
+  private async reconcilePendingBranchPublication(
+    task: Task,
+    worktree: WorktreeRecord
+  ): Promise<BranchPublicationRecord | undefined> {
+    const snapshot = await this.store.snapshot();
+    const latestPublication = latestForIteration(
+      snapshot.branchPublications,
+      worktree.iterationId,
+      'updatedAt'
+    );
+    const latestRequest = latestEventForIteration(
+      snapshot,
+      task.id,
+      worktree.iterationId,
+      'BRANCH_PUBLISH_REQUESTED'
+    );
+    const hasPendingAttempt =
+      latestPublication?.status === 'PUSHING' ||
+      latestPublication?.status === 'AMBIGUOUS' ||
+      Boolean(
+        latestRequest &&
+          (!latestPublication ||
+            latestRequest.receivedAt > latestPublication.updatedAt)
+      );
+    if (!hasPendingAttempt) return undefined;
+
+    const latestRepository = latestForIteration(
+      snapshot.githubRepositories,
+      worktree.iterationId,
+      'checkedAt'
+    );
+    const observed = await this.github.reconcileBranchPublication({
+      task,
+      worktree,
+      remoteName:
+        latestPublication?.remoteName ??
+        latestRepository?.remoteName ??
+        'origin',
+      expectedHeadSha: latestPublication?.headSha,
+      failureDetail:
+        originalBranchPublishFailure(latestPublication) ??
+        (!latestPublication
+          ? 'The earlier publication request did not persist its attempted head.'
+          : undefined)
+    });
+    if (
+      latestPublication &&
+      sameBranchPublicationObservation(latestPublication, observed)
+    ) {
+      return latestPublication;
+    }
+    const stored = await this.store.recordBranchPublication(observed);
+    this.emitGitHubUpdate(task.id, worktree, stored);
+    return stored;
+  }
+
+  private async reconcilePendingBranchPublicationBeforeMutation(
+    task: Task,
+    worktree: WorktreeRecord
+  ): Promise<BranchPublicationRecord | undefined> {
+    const reconciled = await this.reconcilePendingBranchPublication(
+      task,
+      worktree
+    );
+    if (reconciled?.status === 'AMBIGUOUS') {
+      throw new Error(
+        reconciled.error ??
+          'The prior branch publication is ambiguous. Inspect the remote before retrying.'
+      );
+    }
+    return reconciled;
+  }
+
+  private async reconcilePendingPullRequest(
+    task: Task,
+    worktree: WorktreeRecord
+  ): Promise<PullRequestSnapshotRecord | undefined> {
+    const snapshot = await this.store.snapshot();
+    const request = latestEventForIteration(
+      snapshot,
+      task.id,
+      worktree.iterationId,
+      'PR_CREATE_REQUESTED'
+    );
+    const latest = latestForIteration(
+      snapshot.pullRequests,
+      worktree.iterationId,
+      'observedAt'
+    );
+    if (!request || (latest && latest.observedAt >= request.receivedAt)) {
+      return undefined;
+    }
+    const sync = await this.github.findOpenPullRequest(worktree);
+    if (!sync) return undefined;
+    const pullRequest = await this.store.recordPullRequestSync(sync);
+    this.emitGitHubUpdate(task.id, worktree, pullRequest);
+    const currentTask = await this.requireTask(task.id);
+    if (
+      ['OPEN_DRAFT', 'OPEN_READY'].includes(pullRequest.status) &&
+      ['READY', 'IN_PROGRESS', 'REVIEW'].includes(currentTask.workflowPhase)
+    ) {
+      await this.store.transitionTask(
+        task.id,
+        'IN_REVIEW',
+        'GitHub confirmed a matching open pull request after restart.'
+      );
+    }
+    return pullRequest;
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
@@ -1134,14 +1347,49 @@ export class TaskManagerService {
     const task = await this.requireTask(input.taskId);
     const repository = await this.requireAvailableRepository(task.repositoryId);
     const existing = await this.store.getCurrentWorktree(task.id);
-    if (existing && existing.status !== 'ERROR' && existing.status !== 'MISSING') {
+    if (existing && !['REMOVED', 'REMOVING'].includes(existing.status)) {
       const verified = await this.worktrees.verify(existing, repository.path);
-      return this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+      const stored = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+      if (!['ERROR', 'MISSING'].includes(stored.status)) {
+        return stored;
+      }
+      await this.validateAndRecordRepository(task);
+      return this.resumeWorktreePreparation(task, stored, repository);
     }
 
     const preflight = await this.validateAndRecordRepository(task);
     const spec = this.worktrees.buildSpec(task, preflight);
     return this.createAndPrepareWorktree(task, spec);
+  }
+
+  private async resumeWorktreePreparation(
+    task: Task,
+    worktree: WorktreeRecord,
+    repository: Repository
+  ): Promise<WorktreeRecord> {
+    try {
+      const created = await this.worktrees.create(worktree, repository.path);
+      const stored = await this.store.updateWorktree(created, 'WORKTREE_CREATED');
+      await this.refreshEvidenceInternal({ taskId: task.id });
+      this.events.emit({
+        type: 'worktree.updated',
+        taskId: task.id,
+        iterationId: stored.iterationId,
+        worktreeId: stored.id,
+        payload: stored,
+        at: new Date().toISOString()
+      });
+      return stored;
+    } catch (error) {
+      const failed: WorktreeRecord = {
+        ...worktree,
+        status: 'ERROR',
+        error: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString()
+      };
+      await this.store.updateWorktree(failed, 'WORKTREE_FAILED');
+      throw error;
+    }
   }
 
   private async createAndPrepareWorktree(
@@ -1308,8 +1556,7 @@ export class TaskManagerService {
           task,
           run,
           gitSnapshot,
-          instruction: input.instruction,
-          kind: 'continuation'
+          instruction: input.instruction
         });
         await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.agents.startTurn({
@@ -1339,11 +1586,11 @@ export class TaskManagerService {
         );
         this.assertRuntimeEnabled(task.runtimeId);
         const snapshot = await this.store.snapshot();
-        assertRetryable(run);
         this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
           exceptRunId: run.id
         });
         if (input.strategy === 'FORK') {
+          assertForkable(run);
           await this.agents.resolveRecoveryRunForReplacement(run.id);
           return this.startForkedAlternative({
             sourceTaskId: task.id,
@@ -1353,14 +1600,14 @@ export class TaskManagerService {
             settings: input.settings
           });
         }
+        assertRetryable(run, Boolean(getImplementationRetryReason(task)));
         const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
         const settings = followUpSettings(task, run, input.settings, false);
-        const prompt = buildContinuationPrompt({
+        const prompt = buildRetryPrompt({
           task,
           run,
           gitSnapshot,
-          instruction: input.instruction,
-          kind: 'retry'
+          instruction: input.instruction
         });
         await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.agents.startTurn({
@@ -1671,7 +1918,7 @@ export class TaskManagerService {
           task.workflowPhase !== 'REVIEW'
         ) {
           throw new Error(
-            'A review requires a successfully completed implementation run. Retry or continue this run first.'
+            'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
           );
         }
         const iteration = snapshot.iterations.find(
@@ -2130,18 +2377,40 @@ export class TaskManagerService {
   }
 
   private async refreshEvidenceInternal(
-    input: RefreshEvidenceRequest
+    input: RefreshEvidenceRequest,
+    options: {
+      persistOnlyIfChanged?: boolean;
+      verifiedWorktree?: WorktreeRecord;
+    } = {}
   ): Promise<GitSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
-    const repository = await this.requireAvailableRepository(task.repositoryId);
-    const worktree = await this.requireWorktree(task);
-    const verified = await this.worktrees.verify(worktree, repository.path);
-    const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+    let storedWorktree = options.verifiedWorktree;
+    if (!storedWorktree) {
+      const repository = await this.requireAvailableRepository(task.repositoryId);
+      const worktree = await this.requireWorktree(task);
+      const verified = await this.worktrees.verify(worktree, repository.path);
+      storedWorktree =
+        options.persistOnlyIfChanged &&
+        sameWorktreeObservation(worktree, verified)
+          ? worktree
+          : await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+    }
     if (storedWorktree.status !== 'PRESENT') {
       throw new Error(`Worktree is not ready: ${storedWorktree.status}`);
     }
 
     const snapshot = await inspectGitSnapshot(storedWorktree);
+    if (options.persistOnlyIfChanged) {
+      const state = await this.store.snapshot();
+      const latest = latestForIteration(
+        state.gitSnapshots,
+        storedWorktree.iterationId,
+        'capturedAt'
+      );
+      if (latest && sameGitObservation(latest, snapshot)) {
+        return latest;
+      }
+    }
     const diffEvidence = await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
     await this.previews.observeGitSnapshot(storedSnapshot);
@@ -2224,16 +2493,35 @@ export class TaskManagerService {
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'publishing the branch');
     const worktree = await this.requireWorktree(task);
-    const latestGit = await this.ensureCommittedPublishableGit(task);
+    const reconciled = await this.reconcilePendingBranchPublicationBeforeMutation(
+      task,
+      worktree
+    );
 
+    const latestGit = await this.ensureCommittedPublishableGit(task);
     assertPublishReady(latestGit);
+    if (!latestGit.headSha) {
+      throw new Error('Cannot publish a branch without a verified local HEAD.');
+    }
+    if (
+      reconciled?.status === 'PUSHED' &&
+      reconciled.headSha === latestGit.headSha
+    ) {
+      await this.refreshEvidenceInternal({ taskId: task.id });
+      return reconciled;
+    }
 
     const githubReady = await this.preflightGitHub({ taskId: task.id });
     if (githubReady.status !== 'READY') {
       throw new Error(githubReady.error ?? `GitHub preflight is ${githubReady.status}.`);
     }
 
-    await this.store.recordBranchPublishRequested(task, worktree);
+    await this.store.recordBranchPublishRequested(
+      task,
+      worktree,
+      githubReady.remoteName ?? 'origin',
+      latestGit.headSha
+    );
     const publication = await this.github.publishBranch({
       task,
       worktree,
@@ -2262,6 +2550,7 @@ export class TaskManagerService {
     const activeSnapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(activeSnapshot, task.id, 'opening a pull request');
     const worktree = await this.requireWorktree(task);
+    await this.reconcilePendingBranchPublicationBeforeMutation(task, worktree);
     let latestGit: GitSnapshotRecord | undefined =
       await this.ensureCommittedPublishableGit(task);
     let snapshot = await this.store.snapshot();
@@ -2526,7 +2815,7 @@ export class TaskManagerService {
       return;
     }
     const outcome = rejectedExecution.status === 'CANCELED' ? 'canceled' : 'declined';
-    const reason = `A provider execution request was ${outcome} and this run produced no Git change. Retry or continue before review.`;
+    const reason = `A provider execution request was ${outcome} and this run produced no Git change. Retry the implementation or continue unfinished work before review.`;
     await this.store.appendEvent(
       createDomainEvent({
         type: 'IMPLEMENTATION_OUTCOME_BLOCKED',
@@ -2993,4 +3282,84 @@ function latestForIteration<T extends { iterationId: string }>(
   return rows
     .filter((row) => row.iterationId === iterationId)
     .sort((a, b) => String(b[dateKey]).localeCompare(String(a[dateKey])))[0];
+}
+
+function sameWorktreeObservation(
+  stored: WorktreeRecord,
+  observed: WorktreeRecord
+): boolean {
+  return (
+    stored.status === observed.status &&
+    stored.headSha === observed.headSha &&
+    stored.error === observed.error
+  );
+}
+
+function sameGitObservation(
+  stored: GitSnapshotRecord,
+  observed: Omit<
+    GitSnapshotRecord,
+    'id' | 'capturedAt' | 'diffArtifactId'
+  >
+): boolean {
+  const {
+    id: _id,
+    capturedAt: _capturedAt,
+    diffArtifactId: _diffArtifactId,
+    ...storedObservation
+  } = stored;
+  const normalizedObserved = Object.fromEntries(
+    Object.entries(observed).filter(([, value]) => value !== undefined)
+  );
+  return isDeepStrictEqual(storedObservation, normalizedObserved);
+}
+
+function sameBranchPublicationObservation(
+  stored: BranchPublicationRecord,
+  observed: Omit<
+    BranchPublicationRecord,
+    'id' | 'requestedAt' | 'updatedAt'
+  >
+): boolean {
+  const {
+    id: _id,
+    requestedAt: _requestedAt,
+    updatedAt: _updatedAt,
+    ...storedObservation
+  } = stored;
+  const normalizedObserved = Object.fromEntries(
+    Object.entries(observed).filter(([, value]) => value !== undefined)
+  );
+  return isDeepStrictEqual(storedObservation, normalizedObserved);
+}
+
+function originalBranchPublishFailure(
+  publication: BranchPublicationRecord | undefined
+): string | undefined {
+  if (!publication?.error) return undefined;
+  if (publication.status === 'PUSHING') return publication.error;
+  if (publication.status !== 'AMBIGUOUS') return undefined;
+  const marker = ' Original push error: ';
+  const markerIndex = publication.error.indexOf(marker);
+  return markerIndex >= 0
+    ? publication.error.slice(markerIndex + marker.length)
+    : undefined;
+}
+
+function latestEventForIteration(
+  snapshot: TaskSnapshot,
+  taskId: string,
+  iterationId: string,
+  type: TaskSnapshot['events'][number]['type']
+): TaskSnapshot['events'][number] | undefined {
+  return snapshot.events
+    .filter(
+      (event) =>
+        event.taskId === taskId &&
+        event.iterationId === iterationId &&
+        event.type === type
+    )
+    .sort((left, right) =>
+      right.receivedAt.localeCompare(left.receivedAt)
+    )[0];
 }

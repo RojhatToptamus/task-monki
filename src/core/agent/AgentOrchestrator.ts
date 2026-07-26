@@ -36,6 +36,7 @@ import {
   BROWSER_DEV_BOUNDARY_MESSAGE,
   browserDevSettingsViolations
 } from './BrowserDevAgentBoundary';
+import { agentServersOwnedByPreviousApplication } from './AgentRuntimeRecovery';
 
 const MAX_CONCURRENT_TURNS = 2;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
@@ -100,6 +101,7 @@ export interface StartOrchestratedReview {
 
 export class AgentOrchestrator {
   private startQueue: Promise<void> = Promise.resolve();
+  private persistedServerOwnershipReconciled = false;
   private readonly interactions: AgentInteractionService;
   private readonly runtimes: AgentRuntimeRegistry;
 
@@ -129,6 +131,7 @@ export class AgentOrchestrator {
       await this.store.reconcileRunAttachments();
       return;
     }
+    await this.reconcilePersistedServerOwnership();
     const persisted = await this.store.snapshot();
     const recoveryRuntimeIds = new Set(
       persisted.runs
@@ -200,6 +203,21 @@ export class AgentOrchestrator {
         );
       }
     }
+  }
+
+  private async reconcilePersistedServerOwnership(): Promise<void> {
+    if (this.persistedServerOwnershipReconciled) return;
+    const snapshot = await this.store.snapshot();
+    const lostAt = new Date().toISOString();
+    for (const server of agentServersOwnedByPreviousApplication(snapshot)) {
+      await this.store.updateAgentServer(server.id, {
+        status: 'LOST',
+        disconnectedAt: lostAt,
+        exitedAt: lostAt,
+        exitReason: 'Task Monki restarted without the prior provider process.'
+      });
+    }
+    this.persistedServerOwnershipReconciled = true;
   }
 
   async getRuntimeCatalog(

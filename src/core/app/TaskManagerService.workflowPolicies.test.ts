@@ -159,7 +159,7 @@ describe('TaskManagerService workflow policies', () => {
   it.each(['REVIEW', 'IN_REVIEW', 'DONE'] as const)(
     'blocks %s while replacement implementation is required',
     (phase) => {
-      const reason = 'Retry or continue this implementation before review.';
+      const reason = 'Retry the implementation or continue unfinished work before review.';
       expect(
         transitionBlocker(
           {

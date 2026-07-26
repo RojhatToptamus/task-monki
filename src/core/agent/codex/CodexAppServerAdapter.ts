@@ -57,6 +57,7 @@ import {
   type StartedScopedAgentTurn
 } from '../AgentScopedTurnProvider';
 import { assertDiscourseExecutionContext } from '../AgentRuntimeOwnership';
+import { agentServersRequiringLossRecovery } from '../AgentRuntimeRecovery';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError
@@ -196,6 +197,7 @@ const STREAM_OUTPUT_FLUSH_MS = 75;
 const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
+const RECOVERY_CONTINUATION_WAIT_MS = 1_000;
 
 interface CodexRunOutputBuffer {
   groups: Array<{ source: string; chunks: string[] }>;
@@ -286,6 +288,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   private readonly runSettlementQueues = new Map<string, Promise<unknown>>();
   private readonly runSettlementContext = new AsyncLocalStorage<string>();
   private readonly runReconciliationBarriers = new Map<string, Promise<void>>();
+  private readonly recoveryRunBySession = new Map<string, string>();
   private readonly unmaterializedThreadAttestations = new Map<
     string,
     UnmaterializedThreadAttestation
@@ -1297,7 +1300,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       const activeTurnId = activeTurnIdFromInterruptMismatch(mapped);
       if (activeTurnId && activeTurnId !== input.providerTurnId) {
         const run = await this.store.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
-        if (run && canRetargetReviewTurn(run, session)) {
+        const activeTurnOwner = await this.store.getRunByProviderTurnId(
+          this.descriptor.id,
+          activeTurnId
+        );
+        if (
+          run?.sessionId === session.id &&
+          ACTIVE_RUN_STATES.includes(run.status) &&
+          (!activeTurnOwner || activeTurnOwner.id === run.id)
+        ) {
           const updatedRun = await this.store.updateRun(run.id, {
             providerTurnId: activeTurnId,
             lastEventAt: new Date().toISOString()
@@ -1622,6 +1633,53 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     return this.reconcileRuns(false);
   }
 
+  private async adoptRecoveredProviderTurn(
+    session: AgentSessionRecord,
+    runId: string,
+    providerTurnId: string,
+    serverInstanceId: string
+  ): Promise<RunRecord | undefined> {
+    const claimed = await this.ensureRunForSession(session, providerTurnId);
+    if (!claimed || claimed.id !== runId) {
+      return undefined;
+    }
+    if (claimed.status !== 'RECOVERY_REQUIRED') {
+      return claimed.status === 'RUNNING' ? claimed : undefined;
+    }
+    const recovered = await this.store.updateRun(claimed.id, {
+      status: 'RUNNING',
+      recoveryState: 'RECOVERED',
+      serverInstanceId,
+      lastEventAt: new Date().toISOString()
+    });
+    await this.recordReconciliation(
+      claimed,
+      'RUNNING',
+      'RECOVERED',
+      false
+    );
+    return (await this.store.getRun(recovered.id)) ?? recovered;
+  }
+
+  private async waitForRecoveredProviderTurn(
+    runId: string,
+    previousProviderTurnId: string
+  ): Promise<RunRecord | undefined> {
+    const deadline = Date.now() + RECOVERY_CONTINUATION_WAIT_MS;
+    do {
+      const current = await this.store.getRun(runId);
+      if (
+        current?.providerTurnId &&
+        current.providerTurnId !== previousProviderTurnId &&
+        (current.status === 'RUNNING' || isTerminalRunStatus(current.status))
+      ) {
+        return current;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    return undefined;
+  }
+
   private async reconcileRuns(
     includePersistedQueuedRuns: boolean,
     targetRunIds?: ReadonlySet<string>
@@ -1658,6 +1716,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       }
 
       const finishReconciliation = this.beginRunReconciliation(run.id);
+      this.recoveryRunBySession.set(session.id, run.id);
+      let retainRecoveryClaim = false;
       try {
         const attachments = toAgentTurnAttachments(
           await this.store.verifyRunAttachments(run.id, run.taskId)
@@ -1684,6 +1744,34 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           observedSettings,
           run.id
         );
+        const activeProviderTurns = response.thread.turns.filter(
+          (turn) => mapTurnStatus(turn.status) === 'RUNNING'
+        );
+        if (activeProviderTurns.length === 1) {
+          const recovered = await this.adoptRecoveredProviderTurn(
+            session,
+            run.id,
+            activeProviderTurns[0]!.id,
+            client.serverInstanceId
+          );
+          if (recovered) {
+            reconciledSessionIds.add(run.sessionId);
+          } else {
+            recoveryRequiredSessionIds.add(run.sessionId);
+          }
+          continue;
+        }
+        if (activeProviderTurns.length > 1) {
+          await this.recordReconciliation(
+            run,
+            'RECOVERY_REQUIRED',
+            'REQUIRES_USER_ACTION',
+            false
+          );
+          recoveryRequiredSessionIds.add(run.sessionId);
+          continue;
+        }
+
         const providerTurn = response.thread.turns.find(
           (turn) => turn.id === run.providerTurnId
         );
@@ -1698,20 +1786,60 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           continue;
         }
         const status = mapTurnStatus(providerTurn.status);
-        const terminal = status !== 'RUNNING';
         let reconciledRun: RunRecord | undefined;
-        if (terminal) {
-          reconciledRun = await this.finalizeRecoveredTurn(run, providerTurn);
-        } else if (!(await this.bindRunToServer(run, client.serverInstanceId))) {
-          continue;
+        if (status === 'RUNNING') {
+          reconciledRun = await this.adoptRecoveredProviderTurn(
+            session,
+            run.id,
+            providerTurn.id,
+            client.serverInstanceId
+          );
+        } else {
+          const goalResponse = await client.request('thread/goal/get', {
+            threadId: session.providerSessionId
+          });
+          if (goalResponse.goal?.status === 'active') {
+            reconciledRun = await this.waitForRecoveredProviderTurn(
+              run.id,
+              run.providerTurnId
+            );
+            if (!reconciledRun) {
+              const current = await client.request('thread/read', {
+                threadId: session.providerSessionId,
+                includeTurns: true
+              });
+              const continuedTurns = current.thread.turns.filter(
+                (turn) =>
+                  turn.id !== run.providerTurnId &&
+                  mapTurnStatus(turn.status) === 'RUNNING'
+              );
+              if (continuedTurns.length === 1) {
+                reconciledRun = await this.adoptRecoveredProviderTurn(
+                  session,
+                  run.id,
+                  continuedTurns[0]!.id,
+                  client.serverInstanceId
+                );
+              }
+            }
+            if (!reconciledRun) {
+              retainRecoveryClaim = true;
+              reconciledRun = await this.recordReconciliation(
+                run,
+                'RECOVERY_REQUIRED',
+                'REQUIRES_USER_ACTION',
+                false
+              );
+            }
+          } else {
+            reconciledRun = await this.finalizeRecoveredTurn(run, providerTurn);
+          }
         }
-        reconciledRun ??= await this.recordReconciliation(
-          run,
-          'RECOVERY_REQUIRED',
-          'REQUIRES_USER_ACTION',
-          false
-        );
-        if (reconciledRun && isTerminalRunStatus(reconciledRun.status)) {
+        if (
+          reconciledRun &&
+          (reconciledRun.status === 'RUNNING' ||
+            isTerminalRunStatus(reconciledRun.status))
+        ) {
           reconciledSessionIds.add(run.sessionId);
         } else {
           recoveryRequiredSessionIds.add(run.sessionId);
@@ -1728,6 +1856,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         );
         recoveryRequiredSessionIds.add(run.sessionId);
       } finally {
+        if (
+          !retainRecoveryClaim &&
+          this.recoveryRunBySession.get(session.id) === run.id
+        ) {
+          this.recoveryRunBySession.delete(session.id);
+        }
         finishReconciliation();
       }
     }
@@ -2712,6 +2846,21 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (existing) {
       return existing;
     }
+    const recoveringRunId = this.recoveryRunBySession.get(session.id);
+    if (recoveringRunId) {
+      const recoveringRun = await this.store.getRun(recoveringRunId);
+      if (
+        recoveringRun?.runtimeId === this.descriptor.id &&
+        recoveringRun.sessionId === session.id &&
+        recoveringRun.status === 'RECOVERY_REQUIRED'
+      ) {
+        return this.store.updateRun(recoveringRun.id, {
+          providerTurnId,
+          serverInstanceId: this.supervisor.currentServer?.id,
+          lastEventAt: new Date().toISOString()
+        });
+      }
+    }
     if (session.role === 'REVIEW') {
       const activeReviewRun = await this.store.getActiveRunForSession(session.id);
       if (activeReviewRun?.mode === 'REVIEW') {
@@ -3137,18 +3286,23 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     }
     if (run.status === 'RECOVERY_REQUIRED') {
       const recoveryRun = run;
+      const adoptedDuringRecovery =
+        this.recoveryRunBySession.get(session.id) === run.id;
       run = await this.store.updateRun(run.id, {
         status: 'RUNNING',
-        recoveryState: 'NONE',
+        recoveryState: adoptedDuringRecovery ? 'RECOVERED' : 'NONE',
         serverInstanceId: this.supervisor.currentServer?.id,
         lastEventAt: new Date().toISOString()
       });
       await this.recordReconciliation(
         recoveryRun,
         'RUNNING',
-        'NONE',
+        adoptedDuringRecovery ? 'RECOVERED' : 'NONE',
         false
       );
+      if (adoptedDuringRecovery) {
+        this.recoveryRunBySession.delete(session.id);
+      }
     }
     await this.store.updateAgentSession(session.id, {
       status: 'ACTIVE',
@@ -3169,6 +3323,18 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       return;
     }
     const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
+    const recoveryRunId = session
+      ? this.recoveryRunBySession.get(session.id)
+      : undefined;
+    if (recoveryRunId) {
+      const recoveryRun = await this.store.getRun(recoveryRunId);
+      if (
+        recoveryRun?.status === 'RECOVERY_REQUIRED' &&
+        recoveryRun.providerTurnId === turn.id
+      ) {
+        return;
+      }
+    }
     const run = session
       ? await this.ensureRunForSession(session, turn.id)
       : undefined;
@@ -3181,6 +3347,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       'TURN_COMPLETED_NOTIFICATION',
       raw
     );
+    if (this.recoveryRunBySession.get(session.id) === run.id) {
+      this.recoveryRunBySession.delete(session.id);
+    }
     await this.store.updateAgentSession(session.id, {
       status: turn.status === 'failed' ? 'SYSTEM_ERROR' : 'IDLE',
       materialized: true,
@@ -3575,6 +3744,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       source: 'PROVIDER_NOTIFICATION',
       rawMessage: raw
     });
+    if (goal.status !== 'active') {
+      this.recoveryRunBySession.delete(session.id);
+    }
     this.emitGoalUpdate(stored);
   }
 
@@ -3586,6 +3758,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (!session) {
       return;
     }
+    this.recoveryRunBySession.delete(session.id);
     const [task, latest] = await Promise.all([
       this.store.getTask(session.taskId),
       this.store.getLatestAgentGoalSnapshot(session.id)
@@ -4436,19 +4609,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
     const snapshot = await this.store.snapshot();
-    const serversWithActiveOwnership = new Set([
-      ...snapshot.runs
-        .filter((run) => ACTIVE_RUN_STATES.includes(run.status))
-        .map((run) => run.serverInstanceId),
-      ...snapshot.interactionRequests
-        .filter((request) => ['PENDING', 'RESPONDING'].includes(request.status))
-        .map((request) => request.serverInstanceId)
-    ]);
-    const orphaned = snapshot.agentServers.filter(
-      (server) =>
-        server.runtimeId === this.descriptor.id &&
-        (['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(server.status) ||
-          serversWithActiveOwnership.has(server.id))
+    const orphaned = agentServersRequiringLossRecovery(
+      snapshot,
+      this.descriptor.id
     );
     for (const server of orphaned) {
       if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {

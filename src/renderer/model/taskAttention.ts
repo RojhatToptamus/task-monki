@@ -30,7 +30,7 @@ export function describeTaskAttention(
       label: 'Needs retry',
       detail:
         getImplementationRetryReason(task) ??
-        'Retry or continue the implementation before review.',
+        'Retry the implementation or continue unfinished work before review.',
       tone: 'warning'
     };
   }
@@ -62,7 +62,7 @@ export function describeTaskAttention(
     case 'FAILED':
       return {
         label: 'Run failed',
-        detail: 'Retry or continue the implementation before review.',
+        detail: 'Retry the implementation or continue unfinished work before review.',
         tone: 'error'
       };
   }

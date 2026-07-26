@@ -2994,6 +2994,111 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect((await store.getInteractionRequest(interaction.id))?.status).toBe('RESOLVED');
 
     await orchestrator.shutdown();
+    await store.close();
+    const reloaded = new FileTaskStore(path.join(dir, 'store'));
+    await expect(reloaded.getRun(run.id)).resolves.toMatchObject({
+      status: 'COMPLETED',
+      serverInstanceId: interaction.serverInstanceId
+    });
+    await expect(
+      reloaded.getInteractionRequest(priorInteraction.id)
+    ).resolves.toMatchObject({
+      status: 'ABORTED_SERVER_LOST',
+      serverInstanceId: priorServer.id
+    });
+    await reloaded.close();
+  });
+
+  it('adopts and interrupts a goal continuation started by recovery resume', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-recovered-goal-continuation-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'recovery-goal-continuation'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const priorServer = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable,
+      argv: ['app-server', '--stdio']
+    });
+    await store.updateAgentServer(priorServer.id, {
+      status: 'EXITED',
+      disconnectedAt: new Date().toISOString(),
+      exitedAt: new Date().toISOString(),
+      exitReason: 'Injected prior App Server crash.'
+    });
+    let session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex',
+      requestedSettings: task.agentSettings
+    });
+    session = await store.updateAgentSession(session.id, {
+      providerSessionId: 'thread-1',
+      providerSessionTreeId: 'session-tree-1',
+      status: 'NOT_LOADED',
+      materialized: true
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      serverInstanceId: priorServer.id,
+      requestedSettings: task.agentSettings
+    });
+    await store.updateRun(run.id, {
+      providerTurnId: 'turn-1',
+      status: 'RUNNING'
+    });
+
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+
+    const recovered = await waitForSnapshot(
+      store,
+      (snapshot) =>
+        snapshot.runs.some(
+          (candidate) =>
+            candidate.id === run.id &&
+            candidate.status === 'RUNNING' &&
+            candidate.recoveryState === 'RECOVERED' &&
+            candidate.providerTurnId === 'continued-turn'
+        ),
+      'provider goal continuation adoption'
+    );
+    const replacementServer = recovered.agentServers.find(
+      (server) => server.runtimeId === 'codex' && server.status === 'READY'
+    )!;
+    expect(replacementServer.id).not.toBe(priorServer.id);
+
+    await orchestrator.interruptRun(run.id);
+    await waitForRunStatus(store, run.id, 'INTERRUPTED');
+
+    const outbound = readOutboundMessages(
+      await fs.readFile(replacementServer.protocolJournalPath, 'utf8')
+    );
+    expect(
+      outbound
+        .filter((message) => message.method === 'turn/interrupt')
+        .map((message) => (message.params as { turnId: string }).turnId)
+    ).toEqual(['continued-turn']);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(0);
+
+    await orchestrator.shutdown();
   });
 
   it('replaces a lost typed question during restart and answers only the recovered request', async () => {
@@ -3166,7 +3271,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         (snapshot) => {
           const current = snapshot.runs.find((candidate) => candidate.id === run.id);
           return (
-            current?.status === 'RECOVERY_REQUIRED' &&
+            current?.status === 'RUNNING' &&
+            current.recoveryState === 'RECOVERED' &&
             typeof current.serverInstanceId === 'string' &&
             current.serverInstanceId !== oldServerId
           );
@@ -3250,7 +3356,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       ).inboundQueue;
 
       expect(await store.getRun(run.id)).toMatchObject({
-        status: 'RECOVERY_REQUIRED',
+        status: 'RUNNING',
+        recoveryState: 'RECOVERED',
         serverInstanceId: replacementClient.serverInstanceId
       });
       expect((await store.getAgentSession(run.sessionId))?.status).not.toBe('NOT_LOADED');
@@ -4943,6 +5050,7 @@ function fakeCodexScript(
     | 'user-input-exit'
     | 'recovery-approval'
     | 'recovery-user-input'
+    | 'recovery-goal-continuation'
     | 'stale-generation'
     | 'permission'
     | 'exit'
@@ -4984,6 +5092,7 @@ const reviewInterruptNoActiveMode = mode === 'review-interrupt-no-active';
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
 const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent' || mode === 'stale-generation';
 const userInputMode = mode === 'user-input' || mode === 'user-input-answer-exit' || mode === 'user-input-clear' || mode === 'user-input-exit';
+let goalContinuationStarted = false;
 const reviewResponseTurnId = 'review-response-turn';
 const reviewActiveTurnId = 'review-active-turn';
 const turn = (status, error = null) => ({
@@ -5312,12 +5421,23 @@ rl.on('line', (line) => {
           mode === 'recovery-approval' && message.params.threadId === 'thread-1';
         const recoveringUserInput =
           mode === 'recovery-user-input' && message.params.threadId === 'thread-1';
+        const recoveringGoalContinuation =
+          mode === 'recovery-goal-continuation' &&
+          message.params.threadId === 'thread-1';
         const recoveringTurn =
           (recoveringApproval || recoveringUserInput || mode === 'stale-generation') &&
           message.params.threadId === 'thread-1';
         const response = {
           ...threadResponse(message.params),
-          thread: thread([turn(recoveringTurn ? 'inProgress' : 'completed')])
+          thread: thread([
+            turn(
+              recoveringTurn
+                ? 'inProgress'
+                : recoveringGoalContinuation
+                  ? 'interrupted'
+                  : 'completed'
+            )
+          ])
         };
         if (mode === 'unsafe-recovery-resume') {
           response.sandbox = { type: 'dangerFullAccess' };
@@ -5384,10 +5504,46 @@ rl.on('line', (line) => {
             } });
           }, 20);
         }
+        if (recoveringGoalContinuation) {
+          setTimeout(() => {
+            goalContinuationStarted = true;
+            const goal = {
+              threadId: 'thread-1',
+              objective: 'Finish the fake task.',
+              status: 'active',
+              tokenBudget: null,
+              tokensUsed: 10,
+              timeUsedSeconds: 2,
+              createdAt: 1,
+              updatedAt: 2
+            };
+            send({ method: 'thread/goal/updated', params: {
+              threadId: 'thread-1',
+              turnId: null,
+              goal
+            } });
+            send({ method: 'thread/status/changed', params: {
+              threadId: 'thread-1',
+              status: { type: 'active', activeFlags: [] }
+            } });
+            send({ method: 'turn/started', params: {
+              threadId: 'thread-1',
+              turn: { ...turn('inProgress'), id: 'continued-turn' }
+            } });
+          }, 1200);
+        }
       }
       break;
     case 'thread/read':
-      send({ id: message.id, result: { thread: thread([turn('completed')]) } });
+      send({ id: message.id, result: {
+        thread: thread([
+          mode === 'recovery-goal-continuation'
+            ? goalContinuationStarted
+              ? { ...turn('inProgress'), id: 'continued-turn' }
+              : turn('interrupted')
+            : turn('completed')
+        ])
+      } });
       break;
     case 'thread/fork':
       {
@@ -5418,7 +5574,20 @@ rl.on('line', (line) => {
       break;
     }
     case 'thread/goal/get':
-      send({ id: message.id, result: { goal: null } });
+      send({ id: message.id, result: {
+        goal: mode === 'recovery-goal-continuation'
+          ? {
+              threadId: 'thread-1',
+              objective: 'Finish the fake task.',
+              status: 'active',
+              tokenBudget: null,
+              tokensUsed: 10,
+              timeUsedSeconds: 2,
+              createdAt: 1,
+              updatedAt: 2
+            }
+          : null
+      } });
       break;
     case 'turn/steer':
       send({ id: message.id, result: { turnId: 'turn-1' } });
@@ -5909,6 +6078,21 @@ rl.on('line', (line) => {
         send({ method: 'turn/completed', params: {
           threadId: 'thread-1',
           turn: turn('interrupted')
+        } });
+        break;
+      }
+      if (mode === 'recovery-goal-continuation') {
+        if (message.params.turnId !== 'continued-turn') {
+          send({ id: message.id, error: {
+            code: -32602,
+            message: 'expected active turn id ' + message.params.turnId + ' but found continued-turn'
+          } });
+          break;
+        }
+        send({ id: message.id, result: {} });
+        send({ method: 'turn/completed', params: {
+          threadId: 'thread-1',
+          turn: { ...turn('interrupted'), id: 'continued-turn' }
         } });
         break;
       }

@@ -32,6 +32,7 @@ import {
 } from './AgentRuntimeAdapter';
 import { createRuntimeReadiness } from './AgentRuntimeReadiness';
 import { AgentOrchestrator } from './AgentOrchestrator';
+import { AgentRuntimeRegistry } from './AgentRuntimeRegistry';
 import { assertModelSupportsAttachments } from './AgentAttachmentDelivery';
 import {
   CODEX_RUNTIME_DESCRIPTOR,
@@ -44,6 +45,75 @@ import {
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('AgentOrchestrator lifecycle and recovery', () => {
+  it('leaves synthetic server evidence unchanged when provider startup is disabled', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-disabled-runtime-loss-')
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    await store.updateAgentServer(server.id, { status: 'READY' });
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(
+      store,
+      new AppEventBus(),
+      adapter,
+      { providerStartupDisabledReason: 'Synthetic scenario host.' }
+    );
+
+    await orchestrator.initialize();
+
+    expect(adapter.initializeCount).toBe(0);
+    await expect(store.snapshot()).resolves.toMatchObject({
+      agentServers: [
+        expect.objectContaining({ id: server.id, status: 'READY' })
+      ]
+    });
+  });
+
+  it('marks an idle on-demand runtime server lost without launching that runtime', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-idle-runtime-loss-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const staleServer = await store.createAgentServer({
+      runtimeId: 'grok-acp',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: 'grok',
+      argv: ['--acp']
+    });
+    await store.updateAgentServer(staleServer.id, { status: 'READY' });
+    const codex = new Phase4Adapter(store);
+    const grok = new Phase4Adapter(store, {
+      ...CODEX_RUNTIME_DESCRIPTOR,
+      id: 'grok-acp',
+      displayName: 'Grok ACP',
+      startupPolicy: 'ON_DEMAND'
+    });
+    const registry = new AgentRuntimeRegistry([codex, grok], 'codex');
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), registry);
+
+    await orchestrator.initialize();
+
+    expect(codex.initializeCount).toBe(1);
+    expect(grok.initializeCount).toBe(0);
+    await expect(store.snapshot()).resolves.toMatchObject({
+      agentServers: [
+        expect.objectContaining({
+          id: staleServer.id,
+          status: 'LOST',
+          disconnectedAt: expect.any(String),
+          exitedAt: expect.any(String),
+          exitReason: 'Task Monki restarted without the prior provider process.'
+        })
+      ]
+    });
+  });
+
   it('rejects image delivery before creating a run when the selected model is text-only', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-text-model-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -1204,7 +1274,6 @@ const { task, iteration, worktree } = await createTaskContext(
 });
 
 class Phase4Adapter implements AgentRuntimeAdapter {
-  readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   ambiguousStart = false;
   recoveryThenRejectStart = false;
   startFailure?: string;
@@ -1224,7 +1293,10 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   private turnCounter = 0;
   private threadCounter = 0;
 
-  constructor(private readonly store: FileTaskStore) {}
+  constructor(
+    private readonly store: FileTaskStore,
+    readonly descriptor = CODEX_RUNTIME_DESCRIPTOR
+  ) {}
 
   async initialize(): Promise<void> {
     this.initializeCount += 1;

@@ -19,7 +19,10 @@ state, and local acceptance.
   - Codex-specific App Server process, protocol, and recovery rules.
 - `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
   - Runtime registry, identity, provider capability, routing, and recovery
-    rules shared across integrations.
+  rules shared across integrations.
+- `docs/architecture/CRASH_RECOVERY.md`
+  - Required reading before changing startup, shutdown, external reconciliation,
+    delivery recovery, or owned-process behavior.
 - `DESIGN.md`
   - Frontend and design guidance for coherent Task Monki UI changes.
 - `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`

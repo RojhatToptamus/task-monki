@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { execFilePortable } from '../../process/portableChildProcess';
+import { execFileOwnedPortable } from '../../process/ownedProcess';
 
 const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
@@ -141,7 +141,7 @@ async function executeComposeCommand(
     signal?: AbortSignal;
   }
 ): Promise<{ stdout: string; stderr: string }> {
-  return execFilePortable(executable, argv, {
+  return execFileOwnedPortable(executable, argv, {
     cwd: options.cwd,
     env: options.env,
     timeout: options.timeoutMs,

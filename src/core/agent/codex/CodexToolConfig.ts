@@ -3,7 +3,7 @@ import {
   type CodexExternalToolSettings
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
-import { execFilePortable } from '../../process/portableChildProcess';
+import { execFileOwnedPortable } from '../../process/ownedProcess';
 import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 const CODEX_MCP_LIST_TIMEOUT_MS = 5_000;
 
@@ -116,7 +116,7 @@ export async function listDisabledCodexMcpServerConfigOverrides(
   environment?: NodeJS.ProcessEnv,
   options: { requireCompleteDiscovery?: boolean } = {}
 ): Promise<string[]> {
-  const { stdout } = await execFilePortable(executable, ['mcp', 'list', '--json'], {
+  const { stdout } = await execFileOwnedPortable(executable, ['mcp', 'list', '--json'], {
     cwd,
     env: sanitizeEnvironment(
       environment ?? process.env,

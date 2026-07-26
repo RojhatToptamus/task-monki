@@ -190,6 +190,11 @@ function buildTaskActivityItems(
 ): BuiltTaskActivityItem[] {
   const runById = new Map((input.runs ?? []).map((run) => [run.id, run]));
   const terminalRunIds = terminalRunIdsFor(input.events, input.runs ?? []);
+  const blockedImplementationRunIds = new Set(
+    input.events
+      .filter((event) => event.type === 'IMPLEMENTATION_OUTCOME_BLOCKED' && event.runId)
+      .map((event) => event.runId as string)
+  );
   const state: TaskActivityBuildState = {};
   const items: BuiltTaskActivityItem[] = [];
   let order = 0;
@@ -199,7 +204,13 @@ function buildTaskActivityItems(
     .sort((a, b) => compareTimeAscending(a.event.receivedAt, b.event.receivedAt) || a.index - b.index);
 
   for (const { event } of events) {
-    const candidate = itemForEvent(event, runById, terminalRunIds, state);
+    const candidate = itemForEvent(
+      event,
+      runById,
+      terminalRunIds,
+      blockedImplementationRunIds,
+      state
+    );
     if (candidate) {
       order = appendOrReplaceHistoryItem(items, candidate, order);
     }
@@ -217,11 +228,17 @@ function itemForEvent(
   event: DomainEvent,
   runById: Map<string, RunRecord>,
   terminalRunIds: Set<string>,
+  blockedImplementationRunIds: Set<string>,
   state: TaskActivityBuildState
 ): TaskActivityCandidate | undefined {
   const payload = objectPayload(event.payload);
   const run = event.runId ? runById.get(event.runId) : undefined;
   const mode = (stringField(payload, 'mode') as AgentRunMode | undefined) ?? run?.mode;
+  const recoveryContinuation = isRecoveryContinuation(
+    run,
+    runById,
+    blockedImplementationRunIds
+  );
 
   switch (event.type) {
     case 'TASK_CREATED':
@@ -253,13 +270,13 @@ function itemForEvent(
       if (event.runId && terminalRunIds.has(event.runId)) {
         return undefined;
       }
-      return runStartedItem(event, mode, payload);
+      return runStartedItem(event, mode, payload, recoveryContinuation);
     case 'AGENT_RUN_COMPLETED':
-      return runCompletedItem(event, run?.mode ?? mode, payload);
+      return runCompletedItem(event, run?.mode ?? mode, payload, recoveryContinuation);
     case 'AGENT_RUN_FAILED':
-      return runFailedItem(event, run?.mode ?? mode, payload);
+      return runFailedItem(event, run?.mode ?? mode, payload, recoveryContinuation);
     case 'AGENT_RUN_INTERRUPTED':
-      return runInterruptedItem(event, run?.mode ?? mode, payload);
+      return runInterruptedItem(event, run?.mode ?? mode, payload, recoveryContinuation);
     case 'IMPLEMENTATION_OUTCOME_BLOCKED':
       return item(
         event,
@@ -267,7 +284,7 @@ function itemForEvent(
         'Task Monki',
         'Implementation needs another pass',
         evidence(
-          'Retry or continue before this task can advance.',
+          'Retry the implementation or continue unfinished work before this task can advance.',
           evidenceRows(stringField(payload, 'reason'))
         ),
         'action'
@@ -357,7 +374,8 @@ function itemForEvent(
 function runStartedItem(
   event: DomainEvent,
   mode: AgentRunMode | undefined,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  recoveryContinuation: boolean
 ): TaskActivityCandidate {
   switch (mode) {
     case 'REVIEW':
@@ -374,7 +392,7 @@ function runStartedItem(
         event,
         'run',
         'Agent',
-        'Follow-up implementation started',
+        recoveryContinuation ? 'Continuing unfinished work' : 'Follow-up implementation started',
         undefined,
         'action'
       );
@@ -395,7 +413,8 @@ function runStartedItem(
 function runCompletedItem(
   event: DomainEvent,
   mode: AgentRunMode | undefined,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  recoveryContinuation: boolean
 ): TaskActivityCandidate {
   if (mode === 'REVIEW') {
     const reviewStatus = stringField(payload, 'agentReviewStatus');
@@ -445,7 +464,7 @@ function runCompletedItem(
       event,
       'run',
       'Agent',
-      'Follow-up implementation completed',
+      recoveryContinuation ? 'Continued work completed' : 'Follow-up implementation completed',
       undefined,
       'success'
     );
@@ -466,15 +485,20 @@ function runCompletedItem(
 function runFailedItem(
   event: DomainEvent,
   mode: AgentRunMode | undefined,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  recoveryContinuation: boolean
 ): TaskActivityCandidate {
   const error = stringField(payload, 'error') ?? stringField(payload, 'terminalReason');
   const title =
     mode === 'REVIEW'
       ? 'Review failed'
       : mode === 'FOLLOW_UP'
-        ? 'Follow-up implementation failed'
-        : 'Implementation failed';
+        ? recoveryContinuation
+          ? 'Continuation failed'
+          : 'Follow-up implementation failed'
+        : mode === 'RETRY'
+          ? 'Retry failed'
+          : 'Implementation failed';
   return item(
     event,
     mode === 'REVIEW' ? 'review' : 'run',
@@ -483,7 +507,7 @@ function runFailedItem(
     evidence(
       mode === 'REVIEW'
         ? 'Run review again after the failure is resolved.'
-        : 'Continue or retry before this task can advance.',
+        : 'Retry the implementation or continue unfinished work before this task can advance.',
       evidenceRows(error)
     ),
     'error'
@@ -493,14 +517,19 @@ function runFailedItem(
 function runInterruptedItem(
   event: DomainEvent,
   mode: AgentRunMode | undefined,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  recoveryContinuation: boolean
 ): TaskActivityCandidate {
   const title =
     mode === 'REVIEW'
       ? 'Review stopped'
       : mode === 'FOLLOW_UP'
-        ? 'Follow-up implementation stopped'
-        : 'Implementation stopped';
+        ? recoveryContinuation
+          ? 'Continuation stopped'
+          : 'Follow-up implementation stopped'
+        : mode === 'RETRY'
+          ? 'Retry stopped'
+          : 'Implementation stopped';
   return item(
     event,
     mode === 'REVIEW' ? 'review' : 'run',
@@ -508,6 +537,21 @@ function runInterruptedItem(
     title,
     evidence('Run stopped before it completed.', evidenceRows(stringField(payload, 'terminalReason'))),
     'action'
+  );
+}
+
+function isRecoveryContinuation(
+  run: RunRecord | undefined,
+  runById: Map<string, RunRecord>,
+  blockedImplementationRunIds: Set<string>
+): boolean {
+  if (run?.mode !== 'FOLLOW_UP' || !run.continuedFromRunId) {
+    return false;
+  }
+  const sourceRun = runById.get(run.continuedFromRunId);
+  return Boolean(
+    sourceRun &&
+      (sourceRun.status !== 'COMPLETED' || blockedImplementationRunIds.has(sourceRun.id))
   );
 }
 

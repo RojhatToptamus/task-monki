@@ -12,7 +12,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { git } from '../git/gitCli';
-import { execFilePortable } from '../process/portableChildProcess';
+import { execFileOwnedPortable } from '../process/ownedProcess';
 
 export interface GitHubRemote {
   remoteName: string;
@@ -107,9 +107,9 @@ export class GitHubService {
   }): Promise<Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>> {
     const remoteName = input.remoteName ?? 'origin';
     const branchName = input.worktree.branchName;
+    const headSha = (await git(input.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
     try {
       await git(input.worktree.worktreePath, ['push', '--set-upstream', remoteName, 'HEAD'], 120_000);
-      const headSha = (await git(input.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
       return {
         taskId: input.task.id,
         iterationId: input.worktree.iterationId,
@@ -121,17 +121,87 @@ export class GitHubService {
         status: 'PUSHED'
       };
     } catch (error) {
-      return {
-        taskId: input.task.id,
-        iterationId: input.worktree.iterationId,
-        worktreeId: input.worktree.id,
+      const pushError = publishBranchErrorMessage(error);
+      if (isRejectedPushError(error)) {
+        return {
+          taskId: input.task.id,
+          iterationId: input.worktree.iterationId,
+          worktreeId: input.worktree.id,
+          remoteName,
+          branchName,
+          remoteRef: `${remoteName}/${branchName}`,
+          headSha,
+          status: 'FAILED',
+          error: pushError
+        };
+      }
+      return this.reconcileBranchPublication({
+        task: input.task,
+        worktree: input.worktree,
         remoteName,
-        branchName,
-        remoteRef: `${remoteName}/${branchName}`,
-        status: 'FAILED',
-        error: publishBranchErrorMessage(error)
+        expectedHeadSha: headSha,
+        failureDetail: pushError
+      });
+    }
+  }
+
+  async reconcileBranchPublication(input: {
+    task: Task;
+    worktree: WorktreeRecord;
+    remoteName: string;
+    expectedHeadSha?: string;
+    failureDetail?: string;
+  }): Promise<Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>> {
+    const branchName = input.worktree.branchName;
+    const base = {
+      taskId: input.task.id,
+      iterationId: input.worktree.iterationId,
+      worktreeId: input.worktree.id,
+      remoteName: input.remoteName,
+      branchName,
+      remoteRef: `${input.remoteName}/${branchName}`,
+      headSha: input.expectedHeadSha
+    };
+    let remoteHeadSha: string | undefined;
+    try {
+      const output = await git(input.worktree.worktreePath, [
+        'ls-remote',
+        '--heads',
+        input.remoteName,
+        `refs/heads/${branchName}`
+      ]);
+      remoteHeadSha = output.trim().split(/\s+/)[0] || undefined;
+    } catch (error) {
+      return {
+        ...base,
+        status: 'AMBIGUOUS',
+        error:
+          `Could not confirm the remote branch after an interrupted push: ${errorMessage(error)}` +
+          (input.failureDetail ? ` Original push error: ${input.failureDetail}` : '')
       };
     }
+    if (!remoteHeadSha) {
+      return {
+        ...base,
+        status: 'FAILED',
+        error:
+          input.failureDetail ??
+          'Branch publication was interrupted before the remote ref was created. Retry is safe.'
+      };
+    }
+    if (input.expectedHeadSha && remoteHeadSha === input.expectedHeadSha) {
+      return {
+        ...base,
+        status: 'PUSHED'
+      };
+    }
+    return {
+      ...base,
+      status: 'AMBIGUOUS',
+      error: input.expectedHeadSha
+        ? `Remote branch is at ${remoteHeadSha.slice(0, 12)}, not the attempted ${input.expectedHeadSha.slice(0, 12)}. Sync or inspect the remote before retrying.`
+        : `Remote branch exists at ${remoteHeadSha.slice(0, 12)}, but the interrupted attempt did not record its local head. Inspect the remote before retrying.`
+    };
   }
 
   async createOrFindDraftPullRequest(input: {
@@ -242,7 +312,7 @@ export class GitHubService {
     stdin?: string | Buffer
   ): Promise<ExecResult> {
     try {
-      const { stdout, stderr } = await execFilePortable(
+      const { stdout, stderr } = await execFileOwnedPortable(
         this.ghExecutable,
         argv,
         {
@@ -640,16 +710,28 @@ function errorMessage(error: unknown): string {
 
 function publishBranchErrorMessage(error: unknown): string {
   const message = errorMessage(error);
-  const normalized = message.toLowerCase();
-  if (
+  if (isRejectedPushError(error)) {
+    return 'Remote branch has newer commits. Sync the branch before pushing again.';
+  }
+  return message;
+}
+
+function isRejectedPushError(error: unknown): boolean {
+  const execError: { stdout?: string | Buffer; stderr?: string | Buffer } =
+    typeof error === 'object' && error !== null ? (error as ExecError) : {};
+  const normalized = [
+    errorMessage(error),
+    bufferToString(execError.stdout),
+    bufferToString(execError.stderr)
+  ]
+    .join('\n')
+    .toLowerCase();
+  return (
     normalized.includes('fetch first') ||
     normalized.includes('non-fast-forward') ||
     normalized.includes('remote contains work') ||
     normalized.includes('updates were rejected')
-  ) {
-    return 'Remote branch has newer commits. Sync the branch before pushing again.';
-  }
-  return message;
+  );
 }
 
 function bufferToString(value: string | Buffer | undefined): string {

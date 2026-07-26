@@ -1931,6 +1931,8 @@ export class FileTaskStore {
       'RECOVERY_REQUIRED',
       'RUNNING',
       'STARTING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
       'INTERRUPTING'
     ];
     if (options.includeQueued) statuses.push('QUEUED');
@@ -4037,17 +4039,22 @@ export class FileTaskStore {
     return clone(stored);
   }
 
-  async recordBranchPublishRequested(task: Task, worktree: WorktreeRecord): Promise<void> {
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'BRANCH_PUBLISH_REQUESTED',
-        taskId: task.id,
-        iterationId: worktree.iterationId,
-        worktreeId: worktree.id,
-        source: 'github',
-        payload: { branchName: worktree.branchName }
-      })
-    );
+  async recordBranchPublishRequested(
+    task: Task,
+    worktree: WorktreeRecord,
+    remoteName: string,
+    headSha: string
+  ): Promise<BranchPublicationRecord> {
+    return this.recordBranchPublication({
+      taskId: task.id,
+      iterationId: worktree.iterationId,
+      worktreeId: worktree.id,
+      remoteName,
+      branchName: worktree.branchName,
+      remoteRef: `${remoteName}/${worktree.branchName}`,
+      headSha,
+      status: 'PUSHING'
+    });
   }
 
   async recordBranchPublication(

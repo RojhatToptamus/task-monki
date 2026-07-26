@@ -8,7 +8,7 @@ const TERMINAL_OR_RECOVERY = new Set<RunRecord['status']>([
   'LOST'
 ]);
 
-const RECOVERY_STATUSES = new Set<RunRecord['status']>([
+const UNSUCCESSFUL_STATUSES = new Set<RunRecord['status']>([
   'FAILED',
   'INTERRUPTED',
   'RECOVERY_REQUIRED',
@@ -19,7 +19,9 @@ export interface PostRunActionState {
   canFollowUp: boolean;
   canContinue: boolean;
   canRetry: boolean;
-  continuationLabel: 'Follow up' | 'Continue';
+  canForkAlternative: boolean;
+  primaryRecoveryAction: 'continue' | 'retry' | 'none';
+  continuationLabel: 'Follow up' | 'Continue work';
   continuationKind: 'follow-up' | 'recovery' | 'none';
 }
 
@@ -38,12 +40,20 @@ export function getPostRunActionState(
   requiresRecovery = false
 ): PostRunActionState {
   const canFollowUp = run.status === 'COMPLETED' && !requiresRecovery;
-  const canContinue = requiresRecovery || RECOVERY_STATUSES.has(run.status);
+  const canContinue = requiresRecovery || UNSUCCESSFUL_STATUSES.has(run.status);
+  const canRetry = requiresRecovery || UNSUCCESSFUL_STATUSES.has(run.status);
+  const primaryRecoveryAction = !canContinue
+    ? 'none'
+    : run.status === 'FAILED' || requiresRecovery
+      ? 'retry'
+      : 'continue';
   return {
     canFollowUp,
     canContinue,
-    canRetry: TERMINAL_OR_RECOVERY.has(run.status),
-    continuationLabel: canFollowUp ? 'Follow up' : 'Continue',
+    canRetry,
+    canForkAlternative: TERMINAL_OR_RECOVERY.has(run.status),
+    primaryRecoveryAction,
+    continuationLabel: canFollowUp ? 'Follow up' : 'Continue work',
     continuationKind: canFollowUp ? 'follow-up' : canContinue ? 'recovery' : 'none'
   };
 }
@@ -70,19 +80,20 @@ export function getAgentComposerCopy(
         };
       }
       return {
-        title: 'Continue unfinished work',
-        fieldLabel: 'Continuation instruction',
-        helperText: 'Continues from the current worktree state.',
-        placeholder: 'Add context or constraints for the next turn.',
-        submitLabel: 'Continue run'
+        title: 'Continue work',
+        fieldLabel: 'Optional continuation guidance',
+        helperText: 'Resumes unfinished work from the current worktree and provider context.',
+        placeholder: 'Add context or guidance for continuing the unfinished work.',
+        submitLabel: 'Continue work'
       };
     case 'RETRY_SAME':
       return {
-        title: 'Retry in session',
-        fieldLabel: 'Retry instruction',
-        helperText: 'Uses current files and the same AI session; does not reset the worktree.',
-        placeholder: 'Add context or constraints for the retry.',
-        submitLabel: 'Retry in session'
+        title: 'Retry implementation',
+        fieldLabel: 'Optional retry guidance',
+        helperText:
+          'Reattempts the original goal from the current verified state; it does not reset the worktree.',
+        placeholder: 'Add guidance for this attempt at the original implementation goal.',
+        submitLabel: 'Retry implementation'
       };
     case 'RETRY_FORK':
       return {

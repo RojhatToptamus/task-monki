@@ -188,7 +188,8 @@ describe('task activity model', () => {
       'Implementation needs another pass'
     ]);
     expect(view.items[1].evidence).toMatchObject({
-      summary: 'Retry or continue before this task can advance.',
+      summary:
+        'Retry the implementation or continue unfinished work before this task can advance.',
       rows: [
         {
           label: 'Reason',
@@ -467,6 +468,66 @@ describe('task activity model', () => {
     });
   });
 
+  it('distinguishes recovery continuations and retries from ordinary follow-up activity', () => {
+    const view = buildOverviewTaskActivityViewModel({
+      task: taskFixture(),
+      runs: [
+        run({ id: 'failed-source', mode: 'IMPLEMENTATION', status: 'FAILED' }),
+        run({
+          id: 'continuation-run',
+          mode: 'FOLLOW_UP',
+          status: 'RUNNING',
+          continuedFromRunId: 'failed-source'
+        }),
+        run({
+          id: 'retry-run',
+          mode: 'RETRY',
+          status: 'FAILED',
+          retryOfRunId: 'failed-source'
+        })
+      ],
+      events: [
+        event('AGENT_RUN_STARTED', { mode: 'FOLLOW_UP' }, { runId: 'continuation-run' }),
+        event('AGENT_RUN_FAILED', { error: 'Retry failed.' }, { runId: 'retry-run' })
+      ],
+      limit: 10
+    });
+
+    expect(view.items.map((item) => item.title)).toEqual([
+      'Continuing unfinished work',
+      'Retry failed'
+    ]);
+  });
+
+  it('recognizes continuation after a locally blocked completed implementation', () => {
+    const view = buildOverviewTaskActivityViewModel({
+      task: taskFixture(),
+      runs: [
+        run({ id: 'blocked-source', mode: 'IMPLEMENTATION', status: 'COMPLETED' }),
+        run({
+          id: 'continuation-run',
+          mode: 'FOLLOW_UP',
+          status: 'RUNNING',
+          continuedFromRunId: 'blocked-source'
+        })
+      ],
+      events: [
+        event(
+          'IMPLEMENTATION_OUTCOME_BLOCKED',
+          { reason: 'No Git change.' },
+          { runId: 'blocked-source' }
+        ),
+        event('AGENT_RUN_STARTED', { mode: 'FOLLOW_UP' }, { runId: 'continuation-run' })
+      ],
+      limit: 10
+    });
+
+    expect(view.items.map((item) => item.title)).toEqual([
+      'Implementation needs another pass',
+      'Continuing unfinished work'
+    ]);
+  });
+
   it('does not show a run start as active when the run record is already terminal', () => {
     const view = buildOverviewTaskActivityViewModel({
       task: taskFixture(),
@@ -584,28 +645,28 @@ function taskFixture(input: Partial<Task> = {}): Task {
   };
 }
 
-function run(input: {
-  id: string;
-  mode: AgentRunMode;
-  status?: RunRecord['status'];
-}): RunRecord {
+function run(
+  input: Pick<RunRecord, 'id' | 'mode'> & Partial<RunRecord>
+): RunRecord {
+  const { id, mode, status = 'COMPLETED', ...overrides } = input;
   return {
-    id: input.id,
+    id,
     runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
     sessionId: 'session-1',
-    mode: input.mode,
+    mode,
     origin: 'TASK_MONKI',
-    status: input.status ?? 'COMPLETED',
+    status,
     recoveryState: 'NONE',
     requestedSettings: {},
     promptArtifactId: 'prompt',
     outputArtifactId: 'output',
     diagnosticArtifactId: 'diagnostic',
     startedAt: baseAt,
-    eventCount: 0
+    eventCount: 0,
+    ...overrides
   };
 }
 

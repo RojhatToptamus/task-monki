@@ -14,6 +14,7 @@ import {
   buildForkAlternativeTaskPrompt,
   buildInitialRunPrompt,
   buildPromptRefinementInstruction,
+  buildRetryPrompt,
   buildSteerInstruction
 } from './promptTemplates';
 
@@ -81,15 +82,16 @@ describe('prompt templates', () => {
     expect(analysis).not.toContain('Only modify files inside this worktree.');
   });
 
-  it('keeps follow-up and retry turns anchored to the same progress contract', () => {
+  it('anchors continuation turns to unfinished work and the same progress contract', () => {
     const prompt = buildContinuationPrompt({
       task: taskFixture(),
       run: runFixture(),
       gitSnapshot: gitSnapshotFixture(),
-      kind: 'continuation',
       instruction: 'Add regression coverage.'
     });
 
+    expect(prompt).toContain('Continue unfinished work after run run-1.');
+    expect(prompt).toContain('Resume the unfinished implementation from the current state.');
     expect(prompt).toContain('Authoritative Task Monki goal');
     expect(prompt).toContain(TASK_MONKI_CONTEXT_LINE);
     expect(prompt).toContain('Previous run status: FAILED.');
@@ -101,8 +103,29 @@ describe('prompt templates', () => {
     expect(prompt.indexOf(TASK_MONKI_PROGRESS_CONTRACT)).toBeLessThan(
       prompt.indexOf('Authoritative Task Monki goal')
     );
-    expect(prompt.endsWith('Additional user instruction:\nAdd regression coverage.')).toBe(true);
+    expect(prompt.endsWith('Additional continuation guidance:\nAdd regression coverage.')).toBe(
+      true
+    );
     expect(prompt).not.toContain('When finished, summarize');
+  });
+
+  it('gives retries a distinct original-goal and external-side-effect safety prompt', () => {
+    const prompt = buildRetryPrompt({
+      task: taskFixture(),
+      run: runFixture(),
+      gitSnapshot: gitSnapshotFixture(),
+      instruction: 'Use the smaller correction.'
+    });
+
+    expect(prompt).toContain('Retry the implementation after unsuccessful run run-1.');
+    expect(prompt).toContain(
+      'Make another attempt to complete the authoritative Task Monki goal stated below.'
+    );
+    expect(prompt).toContain('Inspect the current worktree and authoritative external state');
+    expect(prompt).toContain('do not blindly repeat operations with external side effects');
+    expect(prompt).toContain('Authoritative Task Monki goal:\nAdd a progress panel.');
+    expect(prompt.endsWith('Additional retry guidance:\nUse the smaller correction.')).toBe(true);
+    expect(prompt).not.toContain('Resume the unfinished implementation');
   });
 
   it('keeps fork context task-specific so the initial run wrapper adds shared defaults once', () => {

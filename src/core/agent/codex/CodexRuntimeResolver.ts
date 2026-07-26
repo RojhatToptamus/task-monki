@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
-  execFilePortable,
   isPortableProcessTreeRunning,
-  spawnPortable,
   terminatePortableProcessTree,
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
+import {
+  execFileOwnedPortable,
+  spawnOwnedPortable
+} from '../../process/ownedProcess';
 import {
   compareCodexVersions,
   parseCodexVersionOutput
@@ -272,7 +274,7 @@ export async function probeCodexVersion(
   cwd: string,
   environment?: NodeJS.ProcessEnv
 ): Promise<string> {
-  const { stdout } = await execFilePortable(executable, ['--version'], {
+  const { stdout } = await execFileOwnedPortable(executable, ['--version'], {
     cwd,
     env: sanitizeEnvironment(
       environment ?? process.env,
@@ -344,7 +346,7 @@ async function probeJsonRpcCapabilities(
     }
 > {
   const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-probe-'));
-  const child = spawnPortable(executable, launch.argv, {
+  const child = spawnOwnedPortable(executable, launch.argv, {
     cwd: options.cwd,
     env: {
       ...sanitizeEnvironment(
@@ -616,7 +618,7 @@ async function execFileText(
   options: { cwd: string; environment?: NodeJS.ProcessEnv }
 ): Promise<string> {
   try {
-    const { stdout, stderr } = await execFilePortable(executable, argv, {
+    const { stdout, stderr } = await execFileOwnedPortable(executable, argv, {
       cwd: options.cwd,
       env: sanitizeEnvironment(
         options.environment ?? process.env,

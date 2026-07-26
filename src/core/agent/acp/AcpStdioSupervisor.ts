@@ -7,10 +7,10 @@ import {
 } from '../../process/ProcessSupervisor';
 import {
   isPortableProcessTreeRunning,
-  spawnPortable,
   terminatePortableProcessTree,
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
+import { spawnOwnedPortable } from '../../process/ownedProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { sensitiveEnvironmentValues } from '../ProviderEnvironmentPolicy';
 import {
@@ -52,7 +52,7 @@ export interface AcpStdioSupervisorOptions {
   appVersion?: string;
   environment?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
-  spawnProcess?: typeof spawnPortable;
+  spawnProcess?: typeof spawnOwnedPortable;
   shutdownGraceTimeoutMs?: number;
   shutdownKillTimeoutMs?: number;
   closeHandlingTimeoutMs?: number;
@@ -276,7 +276,7 @@ export class AcpStdioSupervisor {
       this.server = server;
       this.assertStartupActive();
 
-      child = (this.options.spawnProcess ?? spawnPortable)(
+      child = (this.options.spawnProcess ?? spawnOwnedPortable)(
         this.options.runtime.executable,
         argv,
         {

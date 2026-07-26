@@ -98,6 +98,16 @@ describe('TaskManagerService evidence flow', () => {
       await expect(
         scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' })
       ).rejects.toThrow(retryReason);
+      const replacement = await scenario.service.retryRun({
+        taskId: task.id,
+        runId: run.id,
+        strategy: 'SAME_SESSION'
+      });
+      expect(replacement).toMatchObject({
+        mode: 'RETRY',
+        retryOfRunId: run.id,
+        status: 'RUNNING'
+      });
     }
   );
 

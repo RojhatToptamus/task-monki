@@ -9,6 +9,7 @@ import {
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
+  getImplementationRetryReason,
   type CreateTaskRequest,
   type CreateBoardRequest,
   type Board,
@@ -1325,8 +1326,14 @@ export function App() {
       if (!run) {
         throw new Error('Run not found.');
       }
+      const task = snapshot.tasks.find((candidate) => candidate.id === run.taskId);
+      const recoveryContinuation =
+        run.status !== 'COMPLETED' || Boolean(task && getImplementationRetryReason(task));
       await taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction });
-      notify('Follow-up run started.', 'success');
+      notify(
+        recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
+        'success'
+      );
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to continue run.');
@@ -1355,7 +1362,10 @@ export function App() {
         setSelectedTaskId(retry.taskId);
         setIsDetailOpen(true);
       }
-      notify(strategy === 'FORK' ? 'Alternative task started.' : 'Retry started.', 'success');
+      notify(
+        strategy === 'FORK' ? 'Alternative task started.' : 'Implementation retry started.',
+        'success'
+      );
       await refresh();
     } catch (caught) {
       if (strategy === 'FORK') {

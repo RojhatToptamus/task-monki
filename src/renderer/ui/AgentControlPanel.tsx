@@ -43,8 +43,15 @@ export function AgentControlPanel({
   }
 
   const isRunning = run.status === 'RUNNING';
-  const { canFollowUp, canContinue, canRetry, continuationLabel, continuationKind } =
-    getPostRunActionState(run, requiresRecovery);
+  const {
+    canFollowUp,
+    canContinue,
+    canRetry,
+    canForkAlternative,
+    primaryRecoveryAction,
+    continuationLabel,
+    continuationKind
+  } = getPostRunActionState(run, requiresRecovery);
   const composerCopy = mode ? getAgentComposerCopy(mode, continuationKind) : undefined;
   const staleInteractions = interactions.filter((interaction) =>
     ['STALE', 'ABORTED_SERVER_LOST'].includes(interaction.status)
@@ -54,8 +61,24 @@ export function AgentControlPanel({
     run.status === 'LOST' ||
     run.recoveryState === 'REQUIRES_USER_ACTION' ||
     run.recoveryState === 'UNRECOVERABLE';
+  const recoveryTitle =
+    run.status === 'FAILED'
+      ? 'Run failed'
+      : requiresRecovery
+        ? 'Implementation needs another pass'
+        : 'Unfinished work';
+  const recoveryDescription =
+    primaryRecoveryAction === 'retry'
+      ? 'Retry the original implementation or continue unfinished work from the current state.'
+      : 'Continue unfinished work, retry the original implementation, or fork an alternative.';
   const hasAvailableControls =
-    isRunning || canFollowUp || canContinue || canRetry || recoveryVisible || staleInteractions.length > 0;
+    isRunning ||
+    canFollowUp ||
+    canContinue ||
+    canRetry ||
+    canForkAlternative ||
+    recoveryVisible ||
+    staleInteractions.length > 0;
 
   if (!hasAvailableControls) {
     return null;
@@ -153,7 +176,7 @@ export function AgentControlPanel({
           </div>
         ) : null}
 
-        {canFollowUp || (canRetry && !canContinue) ? (
+        {canFollowUp || (canForkAlternative && !canContinue) ? (
           <div className="agent-controls__button-row">
             {canFollowUp ? (
               <button
@@ -165,25 +188,15 @@ export function AgentControlPanel({
                 {continuationLabel}
               </button>
             ) : null}
-            {canRetry ? (
-              <>
-                <button
-                  type="button"
-                  className={actionButtonClass('outline-button', mode === 'RETRY_SAME')}
-                  aria-pressed={mode === 'RETRY_SAME'}
-                  onClick={() => setMode('RETRY_SAME')}
-                >
-                  Retry in session
-                </button>
-                <button
-                  type="button"
-                  className={actionButtonClass('outline-button', mode === 'RETRY_FORK')}
-                  aria-pressed={mode === 'RETRY_FORK'}
-                  onClick={() => setMode('RETRY_FORK')}
-                >
-                  Fork alternative
-                </button>
-              </>
+            {canForkAlternative ? (
+              <button
+                type="button"
+                className={actionButtonClass('outline-button', mode === 'RETRY_FORK')}
+                aria-pressed={mode === 'RETRY_FORK'}
+                onClick={() => setMode('RETRY_FORK')}
+              >
+                Fork alternative
+              </button>
             ) : null}
           </div>
         ) : null}
@@ -191,29 +204,44 @@ export function AgentControlPanel({
         {canContinue ? (
           <div className="agent-controls__group agent-controls__group--recovery">
             <div className="agent-controls__group-copy">
-              <strong>{run.status === 'FAILED' ? 'Run failed' : 'Unfinished work'}</strong>
-              <span>Retry in this session or continue from the current worktree state.</span>
+              <strong>{recoveryTitle}</strong>
+              <span>{recoveryDescription}</span>
             </div>
             <div className="agent-controls__button-row">
+              {primaryRecoveryAction === 'continue' ? (
+                <button
+                  type="button"
+                  className={actionButtonClass('primary-button', mode === 'CONTINUE')}
+                  aria-pressed={mode === 'CONTINUE'}
+                  onClick={() => setMode('CONTINUE')}
+                >
+                  {continuationLabel}
+                </button>
+              ) : null}
               {canRetry ? (
                 <button
                   type="button"
-                  className={actionButtonClass('primary-button', mode === 'RETRY_SAME')}
+                  className={actionButtonClass(
+                    primaryRecoveryAction === 'retry' ? 'primary-button' : 'outline-button',
+                    mode === 'RETRY_SAME'
+                  )}
                   aria-pressed={mode === 'RETRY_SAME'}
                   onClick={() => setMode('RETRY_SAME')}
                 >
-                  Retry in session
+                  Retry implementation
                 </button>
               ) : null}
-              <button
-                type="button"
-                className={actionButtonClass('outline-button', mode === 'CONTINUE')}
-                aria-pressed={mode === 'CONTINUE'}
-                onClick={() => setMode('CONTINUE')}
-              >
-                {continuationLabel}
-              </button>
-              {canRetry ? (
+              {primaryRecoveryAction === 'retry' ? (
+                <button
+                  type="button"
+                  className={actionButtonClass('outline-button', mode === 'CONTINUE')}
+                  aria-pressed={mode === 'CONTINUE'}
+                  onClick={() => setMode('CONTINUE')}
+                >
+                  {continuationLabel}
+                </button>
+              ) : null}
+              {canForkAlternative ? (
                 <button
                   type="button"
                   className={actionButtonClass('outline-button', mode === 'RETRY_FORK')}

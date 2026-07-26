@@ -16,6 +16,8 @@ files:
 extraResources:
   - from: src/core/preview/runtime/native-preview-launcher.mjs
     to: native-preview-launcher.mjs
+  - from: src/core/process/owned-process-launcher.mjs
+    to: owned-process-launcher.mjs
   - from: build/icon.png
     to: icon.png
   - from: LICENSE

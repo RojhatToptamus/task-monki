@@ -69,12 +69,24 @@ export function assertContinuable(run: RunRecord): void {
   }
 }
 
-export function assertRetryable(run: RunRecord): void {
+export function assertRetryable(
+  run: RunRecord,
+  implementationRetryRequired = false
+): void {
+  if (
+    !['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(run.status) &&
+    !(run.status === 'COMPLETED' && implementationRetryRequired)
+  ) {
+    throw new Error(`Run ${run.id} cannot be retried while it is ${run.status}.`);
+  }
+}
+
+export function assertForkable(run: RunRecord): void {
   if (
     !['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
       run.status
     )
   ) {
-    throw new Error(`Run ${run.id} cannot be retried while it is ${run.status}.`);
+    throw new Error(`Run ${run.id} cannot be forked while it is ${run.status}.`);
   }
 }

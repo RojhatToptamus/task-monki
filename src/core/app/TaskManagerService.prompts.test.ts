@@ -65,7 +65,9 @@ describe('TaskManagerService prompt composition', () => {
       'Previous provider final summary excerpt (context only, not verified evidence)'
     );
     expect(
-      prompt.endsWith('Additional user instruction:\nContinue from the current local state.')
+      prompt.endsWith(
+        'Additional continuation guidance:\nContinue from the current local state.'
+      )
     ).toBe(true);
     await expect(scenario.store.getRun(run.id)).resolves.toMatchObject({
       status: 'INTERRUPTED',
@@ -73,5 +75,65 @@ describe('TaskManagerService prompt composition', () => {
       terminalReason:
         'Recovery-required run was superseded by an explicit continue or retry action.'
     });
+  }, 15_000);
+
+  it('uses a distinct original-goal prompt for Retry implementation', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-manager-implementation-retry'
+    });
+    const task = await scenario.createTask({
+      title: 'Retry prompt',
+      prompt: 'Complete the original implementation safely.'
+    });
+    const run = await scenario.service.startRun({ taskId: task.id });
+    await scenario.store.updateRun(run.id, {
+      status: 'FAILED',
+      terminalReason: 'Provider process exited.'
+    });
+
+    const retry = await scenario.service.retryRun({
+      taskId: task.id,
+      runId: run.id,
+      strategy: 'SAME_SESSION',
+      instruction: 'Keep the correction focused.'
+    });
+
+    const prompt = await scenario.store.readArtifact(retry.promptArtifactId);
+    expect(retry.mode).toBe('RETRY');
+    expect(retry.retryOfRunId).toBe(run.id);
+    expect(prompt).toContain('Retry the implementation after unsuccessful run');
+    expect(prompt).toContain(
+      'Make another attempt to complete the authoritative Task Monki goal stated below.'
+    );
+    expect(prompt).toContain('do not blindly repeat operations with external side effects');
+    expect(prompt).toContain(
+      'Authoritative Task Monki goal:\nComplete the original implementation safely.'
+    );
+    expect(prompt.endsWith('Additional retry guidance:\nKeep the correction focused.')).toBe(
+      true
+    );
+  }, 15_000);
+
+  it('rejects Retry implementation after an ordinary successful completion', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-manager-successful-retry'
+    });
+    const task = await scenario.createTask({
+      title: 'Successful implementation',
+      prompt: 'Complete this implementation once.'
+    });
+    const run = await scenario.service.startRun({ taskId: task.id });
+    await scenario.store.updateRun(run.id, {
+      status: 'COMPLETED',
+      endedAt: new Date().toISOString()
+    });
+
+    await expect(
+      scenario.service.retryRun({
+        taskId: task.id,
+        runId: run.id,
+        strategy: 'SAME_SESSION'
+      })
+    ).rejects.toThrow(`Run ${run.id} cannot be retried while it is COMPLETED.`);
   }, 15_000);
 });

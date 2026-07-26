@@ -17,11 +17,19 @@ const WINDOWS_BATCH_INSPECTION_BYTES = 64 * 1024;
 const WINDOWS_PROCESS_TREE_TIMEOUT_MS = 10_000;
 const PROCESS_TREE_POLL_INTERVAL_MS = 20;
 const ownedPosixProcessGroups = new WeakSet<ChildProcess>();
+const additionalOwnedPosixProcessGroups = new WeakMap<
+  ChildProcess,
+  Set<number>
+>();
 
 export interface PreparedProcessCommand {
   executable: string;
   argv: string[];
   windowsVerbatimArguments?: true;
+}
+
+export interface PreparedProcessLaunch extends PreparedProcessCommand {
+  env: NodeJS.ProcessEnv;
 }
 
 export function prepareProcessCommand(
@@ -47,6 +55,28 @@ export function prepareProcessCommand(
     executable: resolveWindowsCommandProcessor(env, hostEnv),
     argv: ['/d', '/s', '/v:off', '/c', `"${commandLine}"`],
     windowsVerbatimArguments: true
+  };
+}
+
+export function prepareProcessLaunch(
+  executable: string,
+  argv: string[],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  hostEnv: NodeJS.ProcessEnv = process.env
+): PreparedProcessLaunch {
+  const command = prepareProcessCommand(
+    executable,
+    argv,
+    platform,
+    env,
+    hostEnv
+  );
+  return {
+    ...command,
+    env: command.windowsVerbatimArguments
+      ? windowsLauncherEnvironment(env, hostEnv, command.executable)
+      : env
   };
 }
 
@@ -105,30 +135,43 @@ export function execFilePortable(
   });
 }
 
+export function registerPortableProcessGroup(
+  owner: ChildProcess,
+  groupId: number
+): void {
+  if (process.platform === 'win32' || !ownedPosixProcessGroups.has(owner)) {
+    return;
+  }
+  const groups =
+    additionalOwnedPosixProcessGroups.get(owner) ?? new Set<number>();
+  groups.add(groupId);
+  additionalOwnedPosixProcessGroups.set(owner, groups);
+}
+
 /** Terminates an owned POSIX process group or a Windows task tree. */
 export async function terminatePortableProcessTree(
   child: ChildProcess,
   signal: NodeJS.Signals = 'SIGTERM'
 ): Promise<void> {
-  if (
-    process.platform !== 'win32' &&
-    ownedPosixProcessGroups.has(child) &&
-    child.pid
-  ) {
-    try {
-      process.kill(-child.pid, signal);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ESRCH') return;
-      if (
-        code === 'EPERM' &&
-        child.exitCode === null &&
-        child.signalCode === null
-      ) {
-        child.kill(signal);
-        return;
+  const ownedGroups = ownedProcessGroups(child);
+  if (process.platform !== 'win32' && ownedGroups.length > 0) {
+    for (const groupId of ownedGroups) {
+      try {
+        process.kill(-groupId, signal);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') continue;
+        if (
+          code === 'EPERM' &&
+          groupId === child.pid &&
+          child.exitCode === null &&
+          child.signalCode === null
+        ) {
+          child.kill(signal);
+          continue;
+        }
+        throw error;
       }
-      throw error;
     }
     return;
   }
@@ -162,26 +205,26 @@ export async function terminatePortableProcessTree(
  * leader-process semantics.
  */
 export function isPortableProcessTreeRunning(child: ChildProcess): boolean {
-  if (
-    process.platform !== 'win32' &&
-    ownedPosixProcessGroups.has(child) &&
-    child.pid
-  ) {
-    try {
-      process.kill(-child.pid, 0);
-      return true;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'EPERM') return true;
-      if (code !== 'ESRCH') throw error;
-      if (child.exitCode !== null || child.signalCode !== null) {
-        ownedPosixProcessGroups.delete(child);
-        return false;
+  const ownedGroups = ownedProcessGroups(child);
+  if (process.platform !== 'win32' && ownedGroups.length > 0) {
+    for (const groupId of ownedGroups) {
+      try {
+        process.kill(-groupId, 0);
+        return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EPERM') return true;
+        if (code !== 'ESRCH') throw error;
       }
-      // The detached child may not have completed setsid() yet. Preserve group
+    }
+    if (child.exitCode === null && child.signalCode === null) {
+      // The detached owner may not have completed setsid() yet. Preserve group
       // ownership so later termination still targets its descendants.
       return true;
     }
+    ownedPosixProcessGroups.delete(child);
+    additionalOwnedPosixProcessGroups.delete(child);
+    return false;
   }
   return child.exitCode === null && child.signalCode === null;
 }
@@ -220,6 +263,20 @@ function withPreparedProcessOptions<T extends SpawnOptions | ExecFileOptions>(
     ),
     windowsVerbatimArguments: true
   };
+}
+
+function ownedProcessGroups(child: ChildProcess): number[] {
+  if (
+    process.platform === 'win32' ||
+    !ownedPosixProcessGroups.has(child) ||
+    !child.pid
+  ) {
+    return [];
+  }
+  return [
+    child.pid,
+    ...(additionalOwnedPosixProcessGroups.get(child) ?? [])
+  ];
 }
 
 function isWindowsBatchFile(executable: string): boolean {

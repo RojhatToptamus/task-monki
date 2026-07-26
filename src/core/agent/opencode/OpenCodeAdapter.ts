@@ -52,6 +52,7 @@ import {
   errorDiagnostic,
   warningDiagnostic
 } from '../AgentRuntimeReadiness';
+import { agentServersRequiringLossRecovery } from '../AgentRuntimeRecovery';
 import {
   buildInteractionPolicy,
   interactionTerminalStatus
@@ -4082,18 +4083,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         )
       ].filter((serverId): serverId is string => serverId !== undefined)
     );
-    for (const server of snapshot.agentServers.filter(
-      (candidate) =>
-        candidate.runtimeId === this.descriptor.id &&
-        !inMemoryServerIds.has(candidate.id) &&
-        ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(candidate.status)
-    )) {
-      await this.store.updateAgentServer(server.id, {
-        status: 'LOST',
-        disconnectedAt: new Date().toISOString(),
-        exitedAt: new Date().toISOString(),
-        exitReason: 'Task Monki restarted without the prior OpenCode process.'
-      });
+    for (const server of agentServersRequiringLossRecovery(
+      snapshot,
+      this.descriptor.id
+    ).filter((candidate) => !inMemoryServerIds.has(candidate.id))) {
+      if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
+        await this.store.updateAgentServer(server.id, {
+          status: 'LOST',
+          disconnectedAt: new Date().toISOString(),
+          exitedAt: new Date().toISOString(),
+          exitReason: 'Task Monki restarted without the prior OpenCode process.'
+        });
+      }
       await this.handleRuntimeLoss(server.id);
     }
   }

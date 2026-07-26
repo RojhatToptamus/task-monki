@@ -49,6 +49,7 @@ import {
   infoDiagnostic,
   warningDiagnostic
 } from '../AgentRuntimeReadiness';
+import { agentServersRequiringLossRecovery } from '../AgentRuntimeRecovery';
 import {
   type AgentTurnAttachment
 } from '../AgentAttachmentDelivery';
@@ -4149,17 +4150,18 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
     const snapshot = await this.store.snapshot();
-    for (const server of snapshot.agentServers.filter(
-      (candidate) =>
-        candidate.runtimeId === this.descriptor.id &&
-        ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(candidate.status)
+    for (const server of agentServersRequiringLossRecovery(
+      snapshot,
+      this.descriptor.id
     )) {
-      await this.store.updateAgentServer(server.id, {
-        status: 'LOST',
-        disconnectedAt: new Date().toISOString(),
-        exitedAt: new Date().toISOString(),
-        exitReason: 'Task Monki restarted without the prior ACP process.'
-      });
+      if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
+        await this.store.updateAgentServer(server.id, {
+          status: 'LOST',
+          disconnectedAt: new Date().toISOString(),
+          exitedAt: new Date().toISOString(),
+          exitReason: 'Task Monki restarted without the prior ACP process.'
+        });
+      }
       await this.handleRuntimeLoss(server.id);
     }
   }

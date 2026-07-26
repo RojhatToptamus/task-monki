@@ -2,10 +2,10 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   isPortableProcessTreeRunning,
-  spawnPortable,
   terminatePortableProcessTree,
   waitForPortableProcessTreeExit
 } from './portableChildProcess';
+import { spawnOwnedPortable } from './ownedProcess';
 
 export interface ProcessSpec {
   executable: string;
@@ -55,7 +55,7 @@ export class ProcessSupervisor {
       terminationUnconfirmed: [ProcessTerminationUnconfirmed];
     }>();
 
-    const child = spawnPortable(spec.executable, spec.argv, {
+    const child = spawnOwnedPortable(spec.executable, spec.argv, {
       cwd: spec.cwd,
       env: sanitizeEnvironment(spec.env ?? process.env, spec.allowedEnvironmentKeys),
       stdio: ['pipe', 'pipe', 'pipe'],

@@ -6,7 +6,9 @@ describe('getPostRunActionState', () => {
     expect(getPostRunActionState({ status: 'COMPLETED' })).toEqual({
       canFollowUp: true,
       canContinue: false,
-      canRetry: true,
+      canRetry: false,
+      canForkAlternative: true,
+      primaryRecoveryAction: 'none',
       continuationLabel: 'Follow up',
       continuationKind: 'follow-up'
     });
@@ -17,9 +19,23 @@ describe('getPostRunActionState', () => {
       canFollowUp: false,
       canContinue: true,
       canRetry: true,
-      continuationLabel: 'Continue',
+      canForkAlternative: true,
+      primaryRecoveryAction: 'retry',
+      continuationLabel: 'Continue work',
       continuationKind: 'recovery'
     });
+  });
+
+  it('makes Continue work primary for interrupted and uncertain outcomes', () => {
+    for (const status of ['INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'] as const) {
+      expect(getPostRunActionState({ status })).toMatchObject({
+        canContinue: true,
+        canRetry: true,
+        canForkAlternative: true,
+        primaryRecoveryAction: 'continue',
+        continuationLabel: 'Continue work'
+      });
+    }
   });
 
   it('treats a provider-completed but locally blocked implementation as recovery', () => {
@@ -27,7 +43,9 @@ describe('getPostRunActionState', () => {
       canFollowUp: false,
       canContinue: true,
       canRetry: true,
-      continuationLabel: 'Continue',
+      canForkAlternative: true,
+      primaryRecoveryAction: 'retry',
+      continuationLabel: 'Continue work',
       continuationKind: 'recovery'
     });
   });
@@ -37,7 +55,9 @@ describe('getPostRunActionState', () => {
       canFollowUp: false,
       canContinue: false,
       canRetry: false,
-      continuationLabel: 'Continue',
+      canForkAlternative: false,
+      primaryRecoveryAction: 'none',
+      continuationLabel: 'Continue work',
       continuationKind: 'none'
     });
   });
@@ -54,18 +74,20 @@ describe('getAgentComposerCopy', () => {
 
   it('matches recovery continue copy to unfinished work', () => {
     expect(getAgentComposerCopy('CONTINUE', 'recovery')).toMatchObject({
-      title: 'Continue unfinished work',
-      fieldLabel: 'Continuation instruction',
-      helperText: 'Continues from the current worktree state.',
-      submitLabel: 'Continue run'
+      title: 'Continue work',
+      fieldLabel: 'Optional continuation guidance',
+      helperText: 'Resumes unfinished work from the current worktree and provider context.',
+      submitLabel: 'Continue work'
     });
   });
 
-  it('explains retry-in-session without implying a reset', () => {
+  it('explains Retry implementation as another attempt without implying a reset', () => {
     expect(getAgentComposerCopy('RETRY_SAME', 'follow-up')).toMatchObject({
-      title: 'Retry in session',
-      helperText: 'Uses current files and the same AI session; does not reset the worktree.',
-      submitLabel: 'Retry in session'
+      title: 'Retry implementation',
+      fieldLabel: 'Optional retry guidance',
+      helperText:
+        'Reattempts the original goal from the current verified state; it does not reset the worktree.',
+      submitLabel: 'Retry implementation'
     });
   });
 

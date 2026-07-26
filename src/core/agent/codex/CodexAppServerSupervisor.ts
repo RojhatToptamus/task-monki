@@ -8,10 +8,10 @@ import type {
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
   isPortableProcessTreeRunning,
-  spawnPortable,
   terminatePortableProcessTree,
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
+import { spawnOwnedPortable } from '../../process/ownedProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
@@ -67,7 +67,7 @@ export interface CodexAppServerSupervisorOptions {
   failClosedMcpDiscovery?: boolean;
   runtimeResolver?: typeof resolveCodexRuntime;
   argvResolver?: typeof resolveCodexAppServerArgv;
-  spawnProcess?: typeof spawnPortable;
+  spawnProcess?: typeof spawnOwnedPortable;
   shutdownGraceTimeoutMs?: number;
   shutdownKillTimeoutMs?: number;
   closeHandlingTimeoutMs?: number;
@@ -426,7 +426,7 @@ export class CodexAppServerSupervisor {
       this.server = server;
       this.assertStartupActive();
 
-      child = (this.options.spawnProcess ?? spawnPortable)(executable, argv, {
+      child = (this.options.spawnProcess ?? spawnOwnedPortable)(executable, argv, {
         cwd: this.options.cwd,
         env: sanitizeEnvironment(
           this.options.environment ?? process.env,

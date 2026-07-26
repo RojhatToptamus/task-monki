@@ -331,6 +331,23 @@ describe('Task Monki development seed data', () => {
     );
     expect(runningProgress?.activityOutputSummary).toBe('show full output · 12 lines');
 
+    const failedTask = taskForScenario(manifest, snapshot, 'agent-failed');
+    expect(failedTask).toMatchObject({
+      workflowPhase: 'IN_PROGRESS',
+      projection: { agentRun: 'FAILED' }
+    });
+    const retryRequiredTask = taskForScenario(manifest, snapshot, 'agent-retry-required');
+    expect(retryRequiredTask).toMatchObject({
+      workflowPhase: 'IN_PROGRESS',
+      projection: {
+        agentRun: 'COMPLETED',
+        implementationRetry: {
+          runId: retryRequiredTask.currentRunId,
+          reason: expect.stringContaining('needs another pass')
+        }
+      }
+    });
+
     const completedTask = taskForScenario(manifest, snapshot, 'review-not-run');
     const completedRun = snapshot.runs.find((run) => run.id === completedTask.currentRunId);
     const completedCi = selectLatestCiRollup(snapshot, completedTask);

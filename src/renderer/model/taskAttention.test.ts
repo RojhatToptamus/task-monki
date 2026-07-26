@@ -33,7 +33,7 @@ describe('describeTaskAttention', () => {
 
     expect(attention).toMatchObject({
       label: 'Run failed',
-      detail: 'Retry or continue the implementation before review.'
+      detail: 'Retry the implementation or continue unfinished work before review.'
     });
   });
 

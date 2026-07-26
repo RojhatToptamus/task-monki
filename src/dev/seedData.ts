@@ -51,7 +51,7 @@ import {
   type DevSeedScenarioGroup
 } from './seedScenarios';
 
-export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v3';
+export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v4';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
 
 export type DevSeedScenarioSet = 'all' | DevSeedScenarioGroup;
@@ -1338,6 +1338,10 @@ async function seedScenario(
       return { task: (await createAgentScenario(ctx, definition, 'user-input')).task };
     case 'agent-interrupted':
       return { task: (await createAgentScenario(ctx, definition, 'interrupted')).task };
+    case 'agent-failed':
+      return { task: (await createAgentScenario(ctx, definition, 'failed')).task };
+    case 'agent-retry-required':
+      return { task: (await createAgentScenario(ctx, definition, 'retry-required')).task };
     case 'agent-runtime-lost':
       return { task: (await createAgentScenario(ctx, definition, 'runtime-lost')).task };
     case 'agent-ambiguous-mutation':
@@ -1931,6 +1935,8 @@ async function createAgentScenario(
     | 'approval'
     | 'user-input'
     | 'interrupted'
+    | 'failed'
+    | 'retry-required'
     | 'runtime-lost'
     | 'ambiguous'
     | 'interaction-stale'
@@ -1965,6 +1971,21 @@ async function createAgentScenario(
   if (variant === 'interrupted') {
     await appendRunEvent(ctx, run, 'CANCEL_REQUESTED', { reason: 'Seeded interruption request.' }, 'ui');
     await appendRunEvent(ctx, run, 'AGENT_RUN_INTERRUPTED', { terminalReason: 'Seeded interruption.' });
+  } else if (variant === 'failed') {
+    await appendRunEvent(ctx, run, 'AGENT_RUN_FAILED', {
+      error: 'Seeded provider process exited with a definitive failure.'
+    });
+  } else if (variant === 'retry-required') {
+    await completeRun(
+      ctx,
+      run,
+      'The provider turn completed without producing the required implementation.',
+      state.gitSnapshot?.id
+    );
+    await appendRunEvent(ctx, run, 'IMPLEMENTATION_OUTCOME_BLOCKED', {
+      reason:
+        'The provider turn completed, but Task Monki verified that the implementation needs another pass.'
+    });
   } else if (variant === 'runtime-lost') {
     await appendRunEvent(ctx, run, 'AGENT_RUNTIME_LOST', { reason: 'Seeded runtime loss.' });
   } else {
@@ -2548,6 +2569,7 @@ async function appendRunEvent(
     | 'AGENT_RUN_COMPLETED'
     | 'AGENT_RUN_FAILED'
     | 'AGENT_RUN_INTERRUPTED'
+    | 'IMPLEMENTATION_OUTCOME_BLOCKED'
     | 'AGENT_MUTATION_AMBIGUOUS'
     | 'AGENT_RUNTIME_LOST'
     | 'CANCEL_REQUESTED'

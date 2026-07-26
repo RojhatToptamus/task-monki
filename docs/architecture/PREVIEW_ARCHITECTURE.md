@@ -564,6 +564,12 @@ objects, and Compose projects are verified against exact identity and cleaned.
 Nothing is adopted or restarted. Uncertainty becomes `CLEANUP_INCOMPLETE` or
 `RECOVERY_REQUIRED`, preserving the evidence and data needed for a retry.
 
+Docker and Compose CLI children use the application IPC owner boundary. Abrupt
+main-process loss therefore stops the exact CLI process tree; any mutation
+already accepted by the engine is still reconciled from complete Task Monki
+labels and pinned engine identity. Killing a CLI is never treated as proof that
+the daemon-side operation did or did not complete.
+
 ## Failure semantics
 
 - Recipe, plan, approval, private-input, source, or engine preflight failure

@@ -35,29 +35,32 @@ behavior and architecture, not private roadmap sequencing.
 
 ### Architecture
 
-1. `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
+1. `docs/architecture/CRASH_RECOVERY.md`
+   - Application-level startup ordering, authoritative recovery sources,
+     no-replay rules, process ownership, and Git/GitHub adoption.
+2. `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
    - Current multi-runtime registry, durable identity, routing, capability,
      security, recovery, and extension boundaries.
-2. `docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md`
+3. `docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md`
    - Current support tiers, native and ACP runtime matrix, readiness
      conditions, provider-specific limits, and execution security boundaries.
-3. `docs/architecture/PREVIEW_ARCHITECTURE.md`
+4. `docs/architecture/PREVIEW_ARCHITECTURE.md`
    - Canonical Preview authority, lifecycle, native/Compose runtime, security,
      ownership, storage, shutdown, and recovery architecture.
-4. `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
+5. `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
    - Agent-assisted Preview recipe authoring, sanitized repository evidence,
      structured drafts, review UX, validation, and exact acceptance boundary.
-5. `docs/APP_SERVER_ARCHITECTURE.md`
+6. `docs/APP_SERVER_ARCHITECTURE.md`
    - Current Codex App Server integration architecture and responsibility
      boundaries.
-6. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+7. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
-7. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
+8. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
    - Current restricted attachment formats (and explicitly unsupported generic
      files/PDFs), composer normalization, durable storage and retry rules,
      Codex delivery, HTTP/Electron trust boundaries, resource limits,
      portability, cleanup, and deletion semantics.
-8. `docs/architecture/MODULE_BOUNDARIES.md`
+9. `docs/architecture/MODULE_BOUNDARIES.md`
    - Current module ownership, dependency direction, test placement, and
      domain-specific verification commands for maintainers and agents.
 

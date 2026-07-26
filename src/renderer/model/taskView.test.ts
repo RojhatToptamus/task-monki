@@ -77,7 +77,7 @@ describe('task card view model', () => {
     expect(describeRunFailureBanner(task)).toEqual({
       status: 'FAILED',
       title: 'The agent run failed',
-      detail: expect.stringMatching(/retry in this session or continue/i)
+      detail: expect.stringMatching(/retry the implementation or continue unfinished work/i)
     });
   });
 
