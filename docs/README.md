@@ -147,6 +147,9 @@ For a safe real-process inner loop after Git, worktree, workflow, or runtime
 changes, run `npm run test:agent-workflow`. Add `-- --ui` only when the
 renderer itself needs semantic browser inspection; see
 `docs/testing-strategy/STRATEGY.md`.
+For bounded accumulated-history, concurrent-output, Preview, provider-loss,
+and soak evidence, add `-- --stress`; combine `--stress --ui` for semantic
+inspection of live concurrent output.
 
 For deterministic UI and workflow testing, start from `npm run dev:seed` and the
 generated `.local/task-monki-dev-seed/manifest.json`.

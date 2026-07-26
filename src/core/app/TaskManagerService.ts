@@ -172,6 +172,7 @@ import {
   transitionBlocker
 } from './TaskTransitionPolicy';
 import { RuntimeOperationGate } from './RuntimeOperationGate';
+import { projectTaskSnapshotForClient } from './TaskSnapshotClientProjection';
 import { DiscourseRuntimeHost } from './DiscourseRuntimeHost';
 import {
   builtInRuntimeExecutableOverrides,
@@ -1039,8 +1040,8 @@ export class TaskManagerService {
     );
   }
 
-  listTasks(): Promise<TaskSnapshot> {
-    return this.store.snapshot();
+  async listTasks(): Promise<TaskSnapshot> {
+    return projectTaskSnapshotForClient(await this.store.snapshot());
   }
 
   listDiscourseConversations(input: ListDiscourseConversationsRequest = {}) {

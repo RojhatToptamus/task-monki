@@ -1,6 +1,26 @@
+import type { AppUpdateEvent } from '../../shared/contracts';
+
 export interface UpdateRefreshScheduler {
   request(): void;
+  cancelPending(): void;
   dispose(): void;
+}
+
+export type TaskSnapshotRefreshKind = 'NONE' | 'IMMEDIATE' | 'SELECTED_ACTIVITY';
+
+export function taskSnapshotRefreshKind(
+  event: AppUpdateEvent,
+  detail: { open: boolean; taskId?: string }
+): TaskSnapshotRefreshKind {
+  if (event.type === 'run.output') {
+    return 'NONE';
+  }
+  if (event.type === 'run.activity') {
+    return detail.open && event.taskId === detail.taskId
+      ? 'SELECTED_ACTIVITY'
+      : 'NONE';
+  }
+  return 'IMMEDIATE';
 }
 
 export interface UpdateRefreshSchedulerOptions {
@@ -48,6 +68,14 @@ export function createUpdateRefreshScheduler({
       });
   };
 
+  const cancelPending = () => {
+    pending = false;
+    if (timer) {
+      clearTimer(timer);
+      timer = undefined;
+    }
+  };
+
   return {
     request() {
       if (disposed) {
@@ -56,13 +84,10 @@ export function createUpdateRefreshScheduler({
       pending = true;
       schedule();
     },
+    cancelPending,
     dispose() {
       disposed = true;
-      pending = false;
-      if (timer) {
-        clearTimer(timer);
-        timer = undefined;
-      }
+      cancelPending();
     }
   };
 }

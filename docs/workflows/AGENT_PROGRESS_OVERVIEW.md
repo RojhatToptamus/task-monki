@@ -406,6 +406,11 @@ The progress UI must stay compact and bounded:
 - context and command groups collapse repeated detail;
 - text labels are truncated/compacted;
 - raw output is summarized as a line count and shown in Debug, not in Overview.
+- task-list client snapshots bound each provider-text field to 128 KiB while
+  complete output remains in run artifacts and the raw protocol journal;
+- raw `run.output` and hidden-task activity do not refresh the full client
+  snapshot; selected-task activity is coalesced to one refresh per second, and
+  terminal or actionable state changes refresh promptly.
 
 Projection work is pure and synchronous over the current task snapshot. If item
 volume grows enough to make this expensive, optimize the selector/model layer

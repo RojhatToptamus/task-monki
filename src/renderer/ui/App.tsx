@@ -49,7 +49,10 @@ import {
   selectTaskRuns
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
-import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
+import {
+  createUpdateRefreshScheduler,
+  taskSnapshotRefreshKind
+} from '../model/updateRefreshScheduler';
 import { selectBoardTasks } from '../model/boards';
 import {
   dragNewTaskCanvas,
@@ -93,6 +96,9 @@ import {
   SavedViewsFolderIcon,
   SettingsIcon
 } from './AppNavigation';
+
+const SNAPSHOT_REFRESH_DELAY_MS = 50;
+const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
 
 const emptySnapshot: TaskSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -578,7 +584,13 @@ export function App() {
 
   useEffect(() => {
     const snapshotRefresh = createUpdateRefreshScheduler({
-      delayMs: 50,
+      delayMs: SNAPSHOT_REFRESH_DELAY_MS,
+      refresh,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const selectedActivityRefresh = createUpdateRefreshScheduler({
+      delayMs: SELECTED_ACTIVITY_REFRESH_DELAY_MS,
       refresh,
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle as number)
@@ -615,15 +627,28 @@ export function App() {
           [event.taskId]: recipeGeneration
         }));
       }
+      const refreshKind = taskSnapshotRefreshKind(event, {
+        open: isDetailOpen,
+        taskId: selectedTaskId
+      });
+      if (refreshKind === 'NONE') {
+        return;
+      }
+      if (refreshKind === 'SELECTED_ACTIVITY') {
+        selectedActivityRefresh.request();
+        return;
+      }
+      selectedActivityRefresh.cancelPending();
       snapshotRefresh.request();
     });
     return () => {
       unsubscribe();
       snapshotRefresh.dispose();
+      selectedActivityRefresh.dispose();
       runtimeCatalogRefresh.dispose();
       discourseAttentionRefresh.dispose();
     };
-  }, [refresh, refreshDiscourseAttention]);
+  }, [isDetailOpen, refresh, refreshDiscourseAttention, selectedTaskId]);
 
   const theme = appSettings.theme;
   const isSidebarCollapsed = appSettings.sidebarCollapsed;

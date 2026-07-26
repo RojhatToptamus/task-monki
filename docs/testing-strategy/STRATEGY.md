@@ -120,6 +120,68 @@ failure, canceled, disabled, theme, focus, and responsive states should be
 checked only when the change affects them. Seeds remain faster for visual
 states that do not need an executed provider lifecycle.
 
+### Long-running resource behavior
+
+Run the bounded deterministic stress composition with:
+
+```sh
+npm run test:agent-workflow -- --stress
+```
+
+The defaults exercise 24 accumulated completed tasks, two concurrent
+1,500-chunk output streams (the supported concurrency limit), a repository
+with 120 commits, an 8 MiB working-tree diff, four native Preview start/stop
+cycles on macOS, exact provider disappearance and replacement, and a
+30-second mixed complete/cancel soak. Sizing is explicit:
+
+```sh
+npm run test:agent-workflow -- --stress \
+  --duration-ms=30000 \
+  --history-count=24 \
+  --output-chunks=1500 \
+  --preview-cycles=4
+```
+
+The report records scenario timings, durable/client snapshot bytes and record
+counts, warm and cold snapshot timings, harness/service-process and provider
+RSS/CPU/file-descriptor samples, active Node resource types, update-listener
+count, output/protocol bounds, and cleanup proof. Duration is a lower bound: an
+already-started soak cycle is allowed to finish so the report never measures
+or abandons a partial operation.
+
+Use the same accumulated state for semantic renderer inspection with:
+
+```sh
+npm run test:agent-workflow -- --stress --ui \
+  --history-count=24 \
+  --output-chunks=20000
+```
+
+UI stress keeps two bounded streams active at a controlled rate while the
+existing loopback API and Vite renderer are inspected. `history-count` and
+`output-chunks` size this UI state; the duration and Preview-cycle options
+belong to non-UI stress. Send `Ctrl-C` after inspection and require successful
+service/UI shutdown, process joins, and root removal.
+
+High-volume provider output remains in bounded artifacts and is not itself a
+reason to rebuild the renderer's full durable snapshot. `run.output`
+invalidations and activity from hidden tasks therefore do not request a
+snapshot. Activity for the selected open task is coalesced to at most one
+refresh per second so live plan/tool progress remains visible. Terminal,
+interaction, task, Git, and other product-state invalidations remain prompt.
+Client snapshots also bound each provider-text field to 128 KiB while
+preserving the beginning, end, and an explicit omission marker. The durable
+store, run artifacts, and raw protocol journal remain unchanged. This prevents
+active streams and terminal events from repeatedly transporting and rendering
+multi-megabyte telemetry while preserving authoritative durable state.
+
+The stress command is deterministic resource evidence, not a universal
+performance budget. It measures the Node service process, not Electron's main
+or renderer processes. Native Preview cycles run only on macOS and are
+reported as skipped elsewhere. It does not start Docker-managed Preview
+resources, contact a provider service, use credentials, or prove paid-provider
+behavior.
+
 ### Real runtime integration
 
 Only when a change affects a provider adapter or live protocol, use the
@@ -255,8 +317,9 @@ budgets.
 - Automatic creation/cleanup changes to paid-provider smoke.
 - GitHub remote simulation; the selected scenarios need upstream Git state but
   not GitHub semantics.
-- Preview lifecycle scenarios. Preview has dedicated tests and seeded states;
-  add a runner scenario only for a concrete cross-boundary regression.
+- Docker-managed Preview resources. The stress workflow covers native
+  Preview process/port ownership on macOS; managed PostgreSQL/Redis/Compose
+  resources remain covered by their focused tests and explicit environments.
 - Review/follow-up scenarios. Existing service tests cover the detailed review
   lifecycle. Add one here when a regression specifically needs provider stdio,
   Git evidence, and review projection in the same proof.

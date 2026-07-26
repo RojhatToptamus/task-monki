@@ -587,6 +587,7 @@ export class FileTaskStore {
   private readonly attachmentFiles: AttachmentFileStore;
   private state: StoreState = createEmptyState();
   private publishedState: StoreState = this.state;
+  private publishedSnapshotJson = JSON.stringify(this.state);
   private loaded = false;
   private lifecycle: StoreLifecycle = 'NEW';
   private initialization?: Promise<void>;
@@ -708,7 +709,10 @@ export class FileTaskStore {
       await this.protocolJournal.reconcileServers(
         this.state.agentServers.map((server) => server.id)
       );
-      this.publishedState = this.state;
+      if (this.publishedState !== this.state) {
+        this.publishedState = this.state;
+        this.publishedSnapshotJson = JSON.stringify(this.state);
+      }
       this.loaded = true;
     } catch (error) {
       await this.releaseLease().catch(() => undefined);
@@ -852,7 +856,7 @@ export class FileTaskStore {
 
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
-    return clone(this.state);
+    return JSON.parse(this.publishedSnapshotJson) as TaskSnapshot;
   }
 
   async getRepository(repositoryId: string): Promise<Repository | undefined> {
@@ -4713,7 +4717,8 @@ export class FileTaskStore {
     // entry it references. High-volume unmaterialized input remains batch-synced.
     await this.protocolJournal.flush();
     await fs.mkdir(this.baseDir, { recursive: true });
-    const serialized = `${JSON.stringify(this.state, null, 2)}\n`;
+    const publishedSnapshotJson = JSON.stringify(this.state);
+    const serialized = `${publishedSnapshotJson}\n`;
     if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_FILE_BYTES) {
       throw new Error('Task store snapshot exceeds its durable size limit.');
     }
@@ -4739,6 +4744,7 @@ export class FileTaskStore {
       await fs.rename(tmpPath, this.storePath);
       published = true;
       this.publishedState = this.state;
+      this.publishedSnapshotJson = publishedSnapshotJson;
       await syncDirectoryIfSupported(this.baseDir);
       return true;
     } catch (error) {

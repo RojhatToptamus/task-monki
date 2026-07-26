@@ -197,6 +197,38 @@ describe('FileTaskStore', () => {
     }
   });
 
+  it('reuses the published serialization for isolated snapshots and compact persistence', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-snapshot-cache-'));
+    const store = new FileTaskStore(dir);
+    const repository = await addTestRepository(store, dir);
+    const task = await store.createTask({
+      title: 'Published snapshot cache',
+      prompt: 'Avoid serializing the unchanged full store for every reader.',
+      repositoryId: repository.id
+    });
+
+    const persisted = await fs.readFile(path.join(dir, 'store.json'), 'utf8');
+    expect(persisted.endsWith('\n')).toBe(true);
+    expect(persisted).not.toContain('\n  "');
+    expect(JSON.parse(persisted)).toMatchObject({
+      tasks: [expect.objectContaining({ id: task.id })]
+    });
+
+    const stringify = vi.spyOn(JSON, 'stringify');
+    try {
+      const first = await store.snapshot();
+      first.tasks[0]!.title = 'Mutated caller copy';
+      const second = await store.snapshot();
+
+      expect(second.tasks[0]?.title).toBe('Published snapshot cache');
+      expect(first).not.toBe(second);
+      expect(stringify).not.toHaveBeenCalled();
+    } finally {
+      stringify.mockRestore();
+      await store.close();
+    }
+  });
+
   it.runIf(process.platform !== 'win32')(
     'makes canonical lease release durable before removing its owner anchor',
     async () => {
@@ -372,7 +404,7 @@ describe('FileTaskStore', () => {
     const originalByteLength = Buffer.byteLength.bind(Buffer);
     const byteLength = vi.spyOn(Buffer, 'byteLength').mockImplementation(
       (value, encoding) =>
-        typeof value === 'string' && value.includes('"workflowPhase": "BACKLOG"')
+        typeof value === 'string' && value.includes('"workflowPhase":"BACKLOG"')
           ? Number.MAX_SAFE_INTEGER
           : originalByteLength(value, encoding)
     );
