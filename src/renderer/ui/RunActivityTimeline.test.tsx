@@ -40,7 +40,7 @@ describe('RunActivityTimeline', () => {
             ]
           })
         ]}
-        outputSummary="show full output · 128 lines"
+        outputSummary="show output · 128 lines"
       />
     );
 
@@ -53,7 +53,7 @@ describe('RunActivityTimeline', () => {
     expect(html).toContain('npm run typecheck');
     expect(html).toContain('for 2s');
     expect(html).toContain('tm-run-activity__detail--command');
-    expect(html).toContain('show full output · 128 lines');
+    expect(html).toContain('show output · 128 lines');
     expect(html).not.toContain('Bash');
   });
 });

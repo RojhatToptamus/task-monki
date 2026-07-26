@@ -1,5 +1,12 @@
 export type PreviewNodeKind = 'JOB' | 'SERVICE' | 'WORKER' | 'RESOURCE' | 'ATTACHMENT' | 'PROBE';
 
+export interface PreviewTaskRouteOption {
+  taskId: string;
+  taskTitle: string;
+  routeId: string;
+  available: boolean;
+}
+
 export const PREVIEW_POSIX_INHERITED_ENV_KEYS = [
   'HOME',
   'LANG',

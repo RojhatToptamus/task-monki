@@ -5,14 +5,14 @@ import { createBrowserTaskManagerApi, TaskManagerApiError } from './taskManagerC
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
 
-  readonly listeners = new Map<string, Array<(message: MessageEvent) => void>>();
+  readonly listeners = new Map<string, Array<(message: Event) => void>>();
   closed = false;
 
   constructor(readonly url: string) {
     FakeEventSource.instances.push(this);
   }
 
-  addEventListener(type: string, listener: (message: MessageEvent) => void) {
+  addEventListener(type: string, listener: (message: Event) => void) {
     const listeners = this.listeners.get(type) ?? [];
     listeners.push(listener);
     this.listeners.set(type, listeners);
@@ -22,7 +22,7 @@ class FakeEventSource {
     this.closed = true;
   }
 
-  emit(type: string, message: MessageEvent) {
+  emit(type: string, message: Event) {
     for (const listener of this.listeners.get(type) ?? []) {
       listener(message);
     }
@@ -78,6 +78,44 @@ describe('createBrowserTaskManagerApi updates', () => {
 
     unsubscribe();
     expect(FakeEventSource.instances[0]?.closed).toBe(true);
+  });
+
+  it('polls during an SSE outage and returns to the reconnecting stream', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const api = createBrowserTaskManagerApi('');
+    const events: AppUpdateEvent[] = [];
+
+    const unsubscribe = api.onUpdate((event) => events.push(event));
+    const source = FakeEventSource.instances[0]!;
+    source.emit('error', new Event('error'));
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(source.closed).toBe(false);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('projection.updated');
+
+    source.emit('open', new Event('open'));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(events).toHaveLength(1);
+
+    const update: AppUpdateEvent = {
+      type: 'run.terminal',
+      scope: { kind: 'TASK', taskId: 'task-1' },
+      taskId: 'task-1',
+      payload: null,
+      at: '2026-07-26T00:00:00.000Z'
+    };
+    source.emit('update', {
+      data: JSON.stringify(update)
+    } as MessageEvent);
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'projection.updated' }),
+      update
+    ]);
+
+    unsubscribe();
+    expect(source.closed).toBe(true);
   });
 });
 

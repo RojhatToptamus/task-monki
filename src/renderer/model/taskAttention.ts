@@ -1,5 +1,11 @@
-import { getImplementationRetryReason, type Task } from '../../shared/contracts';
+import {
+  getImplementationRetryReason,
+  type BoardTaskSummary,
+  type Task
+} from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
+
+export type TaskAttentionSource = Task | BoardTaskSummary;
 
 export type TaskAttentionTone = 'warning' | 'error' | 'info';
 
@@ -23,7 +29,7 @@ const IN_FLIGHT_RUNS = new Set<Task['projection']['agentRun']>([
  * decision banners, and card chips. Returns undefined when nothing is blocked.
  */
 export function describeTaskAttention(
-  task: Task
+  task: TaskAttentionSource
 ): TaskAttentionDescriptor | undefined {
   if (isImplementationOutcomeBlocked(task)) {
     return {
@@ -91,7 +97,9 @@ export function describeTaskAttention(
   return undefined;
 }
 
-function describeDeliveryAttention(task: Task): TaskAttentionDescriptor | undefined {
+function describeDeliveryAttention(
+  task: TaskAttentionSource
+): TaskAttentionDescriptor | undefined {
   const projection = task.projection;
   if (
     task.completionPolicy === 'MANUAL' &&
@@ -150,10 +158,10 @@ function describeDeliveryAttention(task: Task): TaskAttentionDescriptor | undefi
   return undefined;
 }
 
-export function isAttentionTask(task: Task): boolean {
+export function isAttentionTask(task: TaskAttentionSource): boolean {
   return Boolean(describeTaskAttention(task));
 }
 
-export function isInFlightTask(task: Task): boolean {
+export function isInFlightTask(task: TaskAttentionSource): boolean {
   return IN_FLIGHT_RUNS.has(task.projection.agentRun);
 }

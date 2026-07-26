@@ -2,6 +2,7 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   Board,
+  BoardSnapshot,
   ApprovePreviewPlanRequest,
   CancelRunRequest,
   ContinueRunRequest,
@@ -43,8 +44,8 @@ import type {
   StartPreviewRequest,
   SetPreviewLocalAttachmentBindingRequest,
   Task,
+  TaskDetailSnapshot,
   TaskManagerApi,
-  TaskSnapshot,
   TransitionTaskRequest,
   StopPreviewRequest,
   WorktreeRecord,
@@ -161,9 +162,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
         listener(event);
       }
     });
+    eventSource.addEventListener('open', stopFallbackPolling);
     eventSource.addEventListener('error', () => {
-      eventSource?.close();
-      eventSource = undefined;
       ensureFallbackPolling();
     });
   };
@@ -215,7 +215,12 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post(baseUrl, '/api/agent/runtimes/discover', { runtimeId }),
     updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
       post(baseUrl, '/api/agent/session/native', input),
-    listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
+    getBoardSnapshot: () => get<BoardSnapshot>(baseUrl, '/api/board'),
+    getTaskDetail: (taskId) =>
+      get<TaskDetailSnapshot>(
+        baseUrl,
+        `/api/tasks/${encodeURIComponent(taskId)}`
+      ),
     listDiscourseConversations: (input = {}) => {
       const query = new URLSearchParams();
       if (input.status) query.set('status', input.status);

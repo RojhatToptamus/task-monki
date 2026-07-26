@@ -27,7 +27,7 @@ describe('RunProgressCard', () => {
               sourceInteractionIds: []
             }
           ],
-          activityOutputSummary: 'show full output · 12 lines'
+          activityOutputSummary: 'show output · 12 lines'
         }}
         runStartedAt="2026-07-07T10:00:00.000Z"
         scope="abc12345 · 2 files · dirty"
@@ -43,7 +43,7 @@ describe('RunProgressCard', () => {
     expect(html).toContain('Activity');
     expect(html).toContain('Running');
     expect(html).toContain('npm test');
-    expect(html).toContain('show full output · 12 lines');
+    expect(html).toContain('show output · 12 lines');
     expect(html).toContain('Stop');
   });
 

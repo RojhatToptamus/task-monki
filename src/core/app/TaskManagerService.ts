@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import type {
   Board,
+  BoardSnapshot,
   AcceptPreviewRecipeDraftRequest,
   AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
@@ -31,6 +32,7 @@ import type {
   RunRecord,
   StartRunRequest,
   Task,
+  TaskDetailSnapshot,
   TaskSnapshot,
   TransitionTaskRequest,
   WorktreeRecord,
@@ -172,7 +174,7 @@ import {
   transitionBlocker
 } from './TaskTransitionPolicy';
 import { RuntimeOperationGate } from './RuntimeOperationGate';
-import { projectTaskSnapshotForClient } from './TaskSnapshotClientProjection';
+import { projectTaskDetailForClient } from './TaskDetailClientProjection';
 import { DiscourseRuntimeHost } from './DiscourseRuntimeHost';
 import {
   builtInRuntimeExecutableOverrides,
@@ -1041,7 +1043,15 @@ export class TaskManagerService {
   }
 
   async listTasks(): Promise<TaskSnapshot> {
-    return projectTaskSnapshotForClient(await this.store.snapshot());
+    return this.store.snapshot();
+  }
+
+  async getBoardSnapshot(): Promise<BoardSnapshot> {
+    return this.store.getBoardSnapshot();
+  }
+
+  async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
+    return projectTaskDetailForClient(await this.store.getTaskDetail(taskId));
   }
 
   listDiscourseConversations(input: ListDiscourseConversationsRequest = {}) {

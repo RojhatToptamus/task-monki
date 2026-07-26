@@ -3248,7 +3248,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
               }
             })
           );
-          this.emitRunActivity(run, {
+          this.emitRunStateUpdate(run, {
             eventType: 'mutation/ambiguous',
             operation: 'question/reply'
           });
@@ -4038,7 +4038,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       );
       if (!published) continue;
       this.clearInterruptDeadline(run.id);
-      this.emitRunActivity(run, {
+      this.emitRunStateUpdate(run, {
         eventType: 'runtime/lost',
         reason
       });
@@ -4677,7 +4677,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         payload: { status, recoveryState, terminal }
       })
     );
-    this.emitRunActivity(run, {
+    this.emitRunStateUpdate(run, {
       eventType: 'runtime/reconciled',
       status,
       recoveryState,
@@ -4716,7 +4716,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         payload: { parseError: this.redactProviderText(errorMessage(cause)) }
       })
     );
-    this.emitRunActivity(run, {
+    this.emitRunStateUpdate(run, {
       eventType: 'runtime/protocol-incident',
       error: this.redactProviderText(errorMessage(cause))
     });
@@ -4725,6 +4725,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private emitRunActivity(run: RunRecord, payload: Record<string, unknown>): void {
     this.appEvents.emit({
       type: 'run.activity',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      payload: this.redactProviderValue(payload),
+      at: new Date().toISOString()
+    });
+  }
+
+  private emitRunStateUpdate(run: RunRecord, payload: Record<string, unknown>): void {
+    this.appEvents.emit({
+      type: 'run.state.updated',
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,

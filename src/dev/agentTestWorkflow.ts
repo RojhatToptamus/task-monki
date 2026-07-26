@@ -37,7 +37,7 @@ import {
 import { createDevHttpServer, type DevHttpServer } from './devHttpServer';
 
 const REPORT_SCHEMA_VERSION = 'task-monki/agent-test-workflow@v1' as const;
-const STRESS_REPORT_SCHEMA_VERSION = 'task-monki/agent-resource-stress@v1' as const;
+const STRESS_REPORT_SCHEMA_VERSION = 'task-monki/agent-resource-stress@v2' as const;
 const RUNTIME_ID = 'deterministic-acp';
 const TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 20;
@@ -208,7 +208,10 @@ export interface AgentResourceStressReport {
   scenarios: StressScenarioResult;
   store: {
     finalBytes: number;
-    clientSnapshotBytes: number;
+    fullSnapshotBytes: number;
+    boardSnapshotBytes: number;
+    selectedTaskDetailBytes: number;
+    largestTaskDetailBytes: number;
     recordCounts: Record<string, number>;
     warmSnapshot: TimingDistribution;
     coldInitializationMs: number;
@@ -556,9 +559,30 @@ export async function runAgentResourceStressWorkflow(
       warmSnapshotSamples.push(elapsed(startedAt));
     }
     const beforeShutdownSnapshot = await environment.store.snapshot();
-    const clientSnapshotBytes = Buffer.byteLength(
-      JSON.stringify(await environment.service.listTasks()),
+    const fullSnapshotBytes = Buffer.byteLength(
+      JSON.stringify(beforeShutdownSnapshot),
       'utf8'
+    );
+    const boardSnapshot = await environment.service.getBoardSnapshot();
+    const boardSnapshotBytes = Buffer.byteLength(
+      JSON.stringify(boardSnapshot),
+      'utf8'
+    );
+    const taskDetailSizes = await Promise.all(
+      boardSnapshot.tasks.map(async (task) => ({
+        taskId: task.id,
+        bytes: Buffer.byteLength(
+          JSON.stringify(await environment.service.getTaskDetail(task.id)),
+          'utf8'
+        )
+      }))
+    );
+    const selectedTaskDetailBytes =
+      taskDetailSizes.find((entry) => entry.taskId === boardSnapshot.tasks[0]?.id)
+        ?.bytes ?? 0;
+    const largestTaskDetailBytes = Math.max(
+      0,
+      ...taskDetailSizes.map((entry) => entry.bytes)
     );
     const beforeShutdown = await measureResources(environment, measurementStartedAt);
     beforeShutdown.providers.forEach((entry) => observedProcessIds.add(entry.pid));
@@ -649,7 +673,10 @@ export async function runAgentResourceStressWorkflow(
       },
       store: {
         finalBytes,
-        clientSnapshotBytes,
+        fullSnapshotBytes,
+        boardSnapshotBytes,
+        selectedTaskDetailBytes,
+        largestTaskDetailBytes,
         recordCounts,
         warmSnapshot: timingDistribution(warmSnapshotSamples),
         coldInitializationMs,

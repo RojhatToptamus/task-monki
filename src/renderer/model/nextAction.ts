@@ -138,7 +138,7 @@ export function isImplementationRetryRequired(
 }
 
 export function isImplementationOutcomeBlocked(
-  task: Pick<Task, 'currentRunId' | 'projection'>
+  task: Parameters<typeof getImplementationRetryReason>[0]
 ): boolean {
   return Boolean(getImplementationRetryReason(task));
 }

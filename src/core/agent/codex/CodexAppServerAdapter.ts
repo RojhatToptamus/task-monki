@@ -5299,7 +5299,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
             })
           );
           this.appEvents.emit({
-            type: 'run.activity',
+            type: 'run.state.updated',
             taskId: run.taskId,
             iterationId: run.iterationId,
             runId: run.id,

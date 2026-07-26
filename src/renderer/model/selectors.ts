@@ -14,13 +14,13 @@ import type {
 } from '../../shared/contracts';
 import { getImplementationRetryReason } from '../../shared/contracts';
 
-export function selectTaskRuns(snapshot: TaskSnapshot, taskId: string): RunRecord[] {
+export function selectTaskRuns(snapshot: Pick<TaskSnapshot, 'runs'>, taskId: string): RunRecord[] {
   return snapshot.runs
     .filter((run) => run.taskId === taskId)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
-export function selectTaskEvents(snapshot: TaskSnapshot, taskId: string): DomainEvent[] {
+export function selectTaskEvents(snapshot: Pick<TaskSnapshot, 'events'>, taskId: string): DomainEvent[] {
   return snapshot.events
     .filter((event) => event.taskId === taskId)
     .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
@@ -30,12 +30,15 @@ export function selectActiveRun(task: Task, runs: RunRecord[]): RunRecord | unde
   return runs.find((run) => run.id === task.currentRunId) ?? runs[0];
 }
 
-export function selectCurrentWorktree(snapshot: TaskSnapshot, task: Task): WorktreeRecord | undefined {
+export function selectCurrentWorktree(
+  snapshot: Pick<TaskSnapshot, 'worktrees'>,
+  task: Task
+): WorktreeRecord | undefined {
   return snapshot.worktrees.find((worktree) => worktree.id === task.currentWorktreeId);
 }
 
 export function selectLatestGitSnapshot(
-  snapshot: TaskSnapshot,
+  snapshot: Pick<TaskSnapshot, 'gitSnapshots'>,
   task: Task
 ): GitSnapshotRecord | undefined {
   return snapshot.gitSnapshots
@@ -44,7 +47,7 @@ export function selectLatestGitSnapshot(
 }
 
 export function selectLatestGitHubRepository(
-  snapshot: TaskSnapshot,
+  snapshot: Pick<TaskSnapshot, 'githubRepositories'>,
   task: Task
 ): GitHubRepositoryRecord | undefined {
   return snapshot.githubRepositories
@@ -53,7 +56,7 @@ export function selectLatestGitHubRepository(
 }
 
 export function selectLatestBranchPublication(
-  snapshot: TaskSnapshot,
+  snapshot: Pick<TaskSnapshot, 'branchPublications'>,
   task: Task
 ): BranchPublicationRecord | undefined {
   return snapshot.branchPublications
@@ -62,7 +65,7 @@ export function selectLatestBranchPublication(
 }
 
 export function selectLatestPullRequest(
-  snapshot: TaskSnapshot,
+  snapshot: Pick<TaskSnapshot, 'pullRequests'>,
   task: Task
 ): PullRequestSnapshotRecord | undefined {
   return snapshot.pullRequests
@@ -70,14 +73,17 @@ export function selectLatestPullRequest(
     .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
 }
 
-export function selectLatestCiRollup(snapshot: TaskSnapshot, task: Task): CiRollupRecord | undefined {
+export function selectLatestCiRollup(
+  snapshot: Pick<TaskSnapshot, 'ciRollups'>,
+  task: Task
+): CiRollupRecord | undefined {
   return snapshot.ciRollups
     .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
     .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
 }
 
 export function selectLatestReviewRollup(
-  snapshot: TaskSnapshot,
+  snapshot: Pick<TaskSnapshot, 'reviewRollups'>,
   task: Task
 ): ReviewRollupRecord | undefined {
   return snapshot.reviewRollups
@@ -86,7 +92,7 @@ export function selectLatestReviewRollup(
 }
 
 export function selectLatestMergeSnapshot(
-  snapshot: TaskSnapshot,
+  snapshot: Pick<TaskSnapshot, 'mergeSnapshots'>,
   task: Task
 ): MergeSnapshotRecord | undefined {
   return snapshot.mergeSnapshots

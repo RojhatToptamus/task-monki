@@ -1,5 +1,6 @@
 import type {
   BranchPublicationRecord,
+  BoardTaskSummary,
   CiRollupRecord,
   GitHubCheckDetailRecord,
   GitSnapshotRecord,
@@ -496,7 +497,9 @@ export interface BoardDeliveryParts {
  * a sans status phrase, so status words never render in mono (audit §06/§07:
  * mono is reserved for values — ids, branches, counts).
  */
-export function buildBoardDeliveryParts(task: Task): BoardDeliveryParts {
+type BoardDeliveryTask = Task | BoardTaskSummary;
+
+export function buildBoardDeliveryParts(task: BoardDeliveryTask): BoardDeliveryParts {
   const number = task.projection.githubPullRequestNumber;
   const ref =
     task.projection.githubPullRequest === 'UNLINKED' ||
@@ -511,7 +514,7 @@ export function buildBoardDeliveryParts(task: Task): BoardDeliveryParts {
   return { ref, status: boardDeliveryStatus(task) };
 }
 
-export function buildBoardDeliveryLine(task: Task): string {
+export function buildBoardDeliveryLine(task: BoardDeliveryTask): string {
   const { ref, status } = buildBoardDeliveryParts(task);
   return status ? `${ref} | ${status}` : ref;
 }
@@ -807,7 +810,7 @@ function countPart(count: number | undefined, label: string): string | undefined
   return count && count > 0 ? `${count} ${label}` : undefined;
 }
 
-function boardDeliveryStatus(task: Task): string | undefined {
+function boardDeliveryStatus(task: BoardDeliveryTask): string | undefined {
   if (task.projection.merge === 'MERGED' || task.projection.githubPullRequest === 'MERGED') {
     return 'merged';
   }

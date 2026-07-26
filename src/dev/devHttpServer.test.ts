@@ -60,6 +60,31 @@ describe('development HTTP server', () => {
     });
   });
 
+  it('serves separate board and task-detail read models', async () => {
+    const getBoardSnapshot = vi.fn(async () => ({ tasks: [{ id: 'task-1' }] }));
+    const getTaskDetail = vi.fn(async (taskId: string) => ({
+      task: { id: taskId },
+      runs: [{ id: 'run-1' }]
+    }));
+    const running = await startServer({ getBoardSnapshot, getTaskDetail });
+
+    const board = await fetch(`${running.baseUrl}/api/board`, {
+      headers: running.headers
+    });
+    expect(board.status).toBe(200);
+    await expect(board.json()).resolves.toEqual({ tasks: [{ id: 'task-1' }] });
+
+    const detail = await fetch(`${running.baseUrl}/api/tasks/task-1`, {
+      headers: running.headers
+    });
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toEqual({
+      task: { id: 'task-1' },
+      runs: [{ id: 'run-1' }]
+    });
+    expect(getTaskDetail).toHaveBeenCalledWith('task-1');
+  });
+
   it('rejects hostile origins and cross-site browser requests even with the proxy token', async () => {
     const running = await startServer();
 
@@ -515,6 +540,19 @@ describe('development HTTP server', () => {
 
     expect(Buffer.byteLength(frame)).toBeLessThan(512);
     expect(frame).toContain('"previewGenerationId":"generation-1"');
+  });
+
+  it('keeps the recipe-generation payload needed for direct renderer updates', () => {
+    const frame = createDevEventStreamFrame({
+      type: 'preview.recipe-generation.updated',
+      scope: { kind: 'TASK', taskId: 'task-1' },
+      taskId: 'task-1',
+      payload: { taskId: 'task-1', status: 'READY', draftId: 'draft-1' },
+      at: '2026-07-10T00:00:00.000Z'
+    });
+
+    expect(frame).toContain('"status":"READY"');
+    expect(frame).toContain('"draftId":"draft-1"');
   });
 });
 

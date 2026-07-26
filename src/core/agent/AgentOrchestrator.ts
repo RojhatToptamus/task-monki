@@ -1227,7 +1227,7 @@ export class AgentOrchestrator {
     );
     if (!recorded) return;
     this.events.emit({
-      type: 'run.activity',
+      type: 'run.state.updated',
       taskId: current.taskId,
       iterationId: current.iterationId,
       runId: current.id,

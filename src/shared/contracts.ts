@@ -40,6 +40,7 @@ import type {
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
   PreviewResourceRecord,
+  PreviewTaskRouteOption,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResetPreviewDataRequest,
@@ -832,6 +833,104 @@ export interface TaskSnapshot {
   attachments: TaskAttachmentRecord[];
 }
 
+export interface BoardAgentReviewSummary {
+  status: AgentReviewGateStatus;
+  runId?: string;
+  hasResult: boolean;
+  findingCounts: Partial<Record<AgentReviewFindingSeverity, number>>;
+}
+
+export type BoardStatusProjection = Pick<
+  StatusProjection,
+  | 'agentRun'
+  | 'worktree'
+  | 'git'
+  | 'githubPullRequest'
+  | 'githubPullRequestNumber'
+  | 'ciChecks'
+  | 'reviews'
+  | 'merge'
+  | 'health'
+  | 'summary'
+  | 'implementationRetry'
+  | 'updatedAt'
+> & {
+  agentReview: BoardAgentReviewSummary;
+};
+
+export interface BoardTaskSummary {
+  id: string;
+  title: string;
+  repositoryId: string;
+  workflowPhase: WorkflowPhase;
+  completionPolicy: CompletionPolicy;
+  currentRunId?: string;
+  forkedFromTaskId?: string;
+  updatedAt: string;
+  projection: BoardStatusProjection;
+}
+
+export interface BoardSnapshot {
+  schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
+  repositories: Repository[];
+  boards: Board[];
+  tasks: BoardTaskSummary[];
+  interactionRequests: InteractionRequestRecord[];
+}
+
+export type ClientTextExcerptAvailability =
+  | { kind: 'BOUNDED_ARTIFACT'; artifactId: string }
+  | { kind: 'NOT_AVAILABLE' };
+
+export interface ClientTextExcerpt {
+  collection: 'runs' | 'agentItems' | 'events';
+  recordId: string;
+  fieldPath: string;
+  originalByteCount: number;
+  displayedByteCount: number;
+  availableContent: ClientTextExcerptAvailability;
+}
+
+export interface TaskDetailSnapshot {
+  schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
+  task: Task;
+  repository?: Repository;
+  iterations: TaskIteration[];
+  worktrees: WorktreeRecord[];
+  gitSnapshots: GitSnapshotRecord[];
+  githubRepositories: GitHubRepositoryRecord[];
+  branchPublications: BranchPublicationRecord[];
+  pullRequests: PullRequestSnapshotRecord[];
+  ciRollups: CiRollupRecord[];
+  reviewRollups: ReviewRollupRecord[];
+  mergeSnapshots: MergeSnapshotRecord[];
+  runs: RunRecord[];
+  agentServers: AgentServerInstance[];
+  agentSessions: AgentSessionRecord[];
+  agentItems: AgentItemRecord[];
+  agentGoalSnapshots: AgentGoalSnapshotRecord[];
+  agentPlanRevisions: AgentPlanRevisionRecord[];
+  agentUsageSnapshots: AgentUsageSnapshotRecord[];
+  agentSettingsObservations: AgentSettingsObservationRecord[];
+  agentSubagentObservations: AgentSubagentObservationRecord[];
+  interactionRequests: InteractionRequestRecord[];
+  previewPlans: PreviewPlanRecord[];
+  previewApprovals: PreviewApprovalRecord[];
+  previewComposeProjects: PreviewComposeProjectRecord[];
+  previewGenerations: PreviewGenerationRecord[];
+  previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
+  previewManagedResources: PreviewManagedResourceRecord[];
+  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
+  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
+  previewNodeAttempts: PreviewNodeAttemptRecord[];
+  previewResources: PreviewResourceRecord[];
+  events: DomainEvent[];
+  artifacts: ArtifactRecord[];
+  attachments: TaskAttachmentRecord[];
+  previewTaskRoutes: PreviewTaskRouteOption[];
+  textExcerpts: ClientTextExcerpt[];
+}
+
 export interface CreateTaskRequest {
   title: string;
   prompt: string;
@@ -1120,6 +1219,7 @@ export interface AppUpdateEvent {
     | 'run.started'
     | 'run.output'
     | 'run.activity'
+    | 'run.state.updated'
     | 'agent.goal.updated'
     | 'run.diagnostic'
     | 'run.terminal'
@@ -1185,7 +1285,8 @@ export interface TaskManagerApi {
   updateAgentNativeSession(
     input: UpdateAgentNativeSessionRequest
   ): Promise<UpdateAgentNativeSessionResult>;
-  listTasks(): Promise<TaskSnapshot>;
+  getBoardSnapshot(): Promise<BoardSnapshot>;
+  getTaskDetail(taskId: string): Promise<TaskDetailSnapshot>;
   listDiscourseConversations(
     input?: import('./discourse').ListDiscourseConversationsRequest
   ): Promise<import('./discourse').DiscourseConversationPage>;
@@ -1334,7 +1435,10 @@ export function createInitialProjection(now: string): StatusProjection {
 }
 
 export function getImplementationRetryReason(
-  task: Pick<Task, 'currentRunId' | 'projection'>
+  task: {
+    currentRunId?: string;
+    projection: Pick<StatusProjection, 'implementationRetry'>;
+  }
 ): string | undefined {
   const retry = task.projection.implementationRetry;
   if (!retry || retry.runId !== task.currentRunId) {

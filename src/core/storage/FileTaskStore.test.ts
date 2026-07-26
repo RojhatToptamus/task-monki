@@ -229,6 +229,217 @@ describe('FileTaskStore', () => {
     }
   });
 
+  it('derives compact board and task-owned detail reads from published state', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-client-reads-'));
+    const store = new FileTaskStore(dir);
+    const repository = await addTestRepository(store, dir);
+    const consumer = await store.createTask({
+      title: 'Consumer',
+      prompt: 'consumer prompt that must not reach the board',
+      repositoryId: repository.id
+    });
+    const producer = await store.createTask({
+      title: 'Producer',
+      prompt: 'producer prompt that must not reach the board',
+      repositoryId: repository.id
+    });
+    const consumerOwnership = await store.createIterationAndWorktree({
+      task: consumer,
+      branchName: 'codex/consumer',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const producerOwnership = await store.createIterationAndWorktree({
+      task: producer,
+      branchName: 'codex/producer',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const consumerSession = await store.createAgentSession({
+      task: consumer,
+      ...consumerOwnership,
+      runtimeId: 'codex'
+    });
+    const producerSession = await store.createAgentSession({
+      task: producer,
+      ...producerOwnership,
+      runtimeId: 'codex'
+    });
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const eventOnlyServer = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    await store.appendEvent(
+      createDomainEvent({
+        type: 'PROJECTION_UPDATED',
+        taskId: consumer.id,
+        serverInstanceId: eventOnlyServer.id,
+        source: 'provider',
+        payload: { reason: 'event-only server reference' }
+      })
+    );
+    const rawMessage = await store.appendProtocolMessage(
+      server.id,
+      'INBOUND',
+      '{"method":"seed/update"}',
+      { method: 'seed/update' }
+    );
+    const consumerRun = await store.createRun({
+      task: consumer,
+      session: consumerSession,
+      serverInstanceId: server.id,
+      mode: 'IMPLEMENTATION',
+      prompt: consumer.prompt
+    });
+    const producerRun = await store.createRun({
+      task: producer,
+      session: producerSession,
+      serverInstanceId: server.id,
+      mode: 'IMPLEMENTATION',
+      prompt: producer.prompt
+    });
+    const consumerItem = await store.upsertAgentItem({
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      providerItemId: 'consumer-item',
+      type: 'AGENT_MESSAGE',
+      status: 'COMPLETED',
+      payload: { text: 'current consumer item' },
+      rawMessage
+    });
+    const producerItem = await store.upsertAgentItem({
+      taskId: producer.id,
+      iterationId: producerOwnership.iteration.id,
+      runId: producerRun.id,
+      sessionId: producerSession.id,
+      providerItemId: 'producer-item',
+      type: 'AGENT_MESSAGE',
+      status: 'COMPLETED',
+      payload: { text: 'unrelated producer item' },
+      rawMessage
+    });
+    const consumerPlan = await store.recordAgentPlanRevision({
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      runtimeId: 'codex',
+      explanation: 'Current consumer plan',
+      steps: [{ step: 'Inspect', status: 'IN_PROGRESS' }],
+      rawMessage
+    });
+    const consumerUsage = await store.recordAgentUsageSnapshot({
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      runtimeId: 'codex',
+      total: testUsage(100),
+      last: testUsage(40),
+      modelContextWindow: 200_000,
+      rawMessage
+    });
+    const consumerInteraction = await store.createInteractionRequest({
+      runtimeId: 'codex',
+      serverInstanceId: server.id,
+      providerRequestId: 'consumer-request',
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      providerItemId: consumerItem.providerItemId,
+      type: 'COMMAND_APPROVAL',
+      request: { command: 'npm test', startedAtMs: 0 },
+      allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
+      policyWarnings: [],
+      requestRawMessage: rawMessage
+    });
+    const now = '2026-07-26T00:00:00.000Z';
+    await store.savePreviewPlan({
+      id: 'producer-plan',
+      taskId: producer.id,
+      iterationId: producerOwnership.iteration.id,
+      worktreeId: producerOwnership.worktree.id,
+      recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1,
+      recipeDigest: 'recipe',
+      executionDigest: 'execution',
+      executionPlan: {
+        version: 1,
+        jobs: [],
+        resources: [],
+        services: [],
+        workers: [],
+        routes: [{ id: 'api', service: 'web', port: 'http', primary: true }],
+        scenarios: [{ id: 'default', jobs: [], resources: [] }],
+        selectedScenarioId: 'default'
+      },
+      warnings: [],
+      createdAt: now
+    });
+
+    const board = await store.getBoardSnapshot();
+    expect(board.tasks.map((task) => task.id).sort()).toEqual(
+      [consumer.id, producer.id].sort()
+    );
+    expect(board).not.toHaveProperty('runs');
+    expect(board).not.toHaveProperty('events');
+    expect(JSON.stringify(board)).not.toContain(consumer.prompt);
+    expect(JSON.stringify(board)).not.toContain(producer.prompt);
+
+    const detail = await store.getTaskDetail(consumer.id);
+    expect(detail.task.id).toBe(consumer.id);
+    expect(detail.runs.map((run) => run.id)).toEqual([consumerRun.id]);
+    expect(detail.runs).not.toContainEqual(expect.objectContaining({ id: producerRun.id }));
+    expect(detail.agentServers.map((record) => record.id).sort()).toEqual(
+      [server.id, eventOnlyServer.id].sort()
+    );
+    expect(detail.agentItems.map((record) => record.id)).toEqual([consumerItem.id]);
+    expect(detail.agentItems).not.toContainEqual(
+      expect.objectContaining({ id: producerItem.id })
+    );
+    expect(detail.agentPlanRevisions.map((record) => record.id)).toEqual([
+      consumerPlan.id
+    ]);
+    expect(detail.agentUsageSnapshots.map((record) => record.id)).toEqual([
+      consumerUsage.id
+    ]);
+    expect(detail.interactionRequests.map((record) => record.id)).toEqual([
+      consumerInteraction.id
+    ]);
+    expect(detail.iterations).toHaveLength(1);
+    expect(detail.worktrees).toHaveLength(1);
+    expect(detail.previewTaskRoutes).toEqual([
+      {
+        taskId: producer.id,
+        taskTitle: 'Producer',
+        routeId: 'api',
+        available: false
+      }
+    ]);
+
+    await store.close();
+    const restarted = new FileTaskStore(dir);
+    await expect(restarted.getBoardSnapshot()).resolves.toEqual(board);
+    await expect(restarted.getTaskDetail(consumer.id)).resolves.toMatchObject({
+      task: { id: consumer.id },
+      runs: [{ id: consumerRun.id }]
+    });
+    await restarted.close();
+  });
+
   it.runIf(process.platform !== 'win32')(
     'makes canonical lease release durable before removing its owner anchor',
     async () => {
@@ -3814,4 +4025,14 @@ async function recordOpenPullRequest(
       status: mergeStatus
     }
   });
+}
+
+function testUsage(totalTokens: number) {
+  return {
+    totalTokens,
+    inputTokens: totalTokens,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0
+  };
 }

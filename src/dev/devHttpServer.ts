@@ -7,6 +7,7 @@ import type {
   CreateBoardRequest,
   UpdateBoardRequest
 } from '../shared/contracts';
+import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
 import {
   ATTACHMENT_MAX_COUNT,
   ATTACHMENT_MAX_IMAGE_BYTES,
@@ -340,8 +341,21 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'GET' && url.pathname === '/api/tasks') {
-        sendJson(response, requestId, 200, await options.service.listTasks());
+      if (request.method === 'GET' && url.pathname === '/api/board') {
+        sendJson(response, requestId, 200, await options.service.getBoardSnapshot());
+        return;
+      }
+
+      const taskDetailMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/u);
+      if (request.method === 'GET' && taskDetailMatch) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getTaskDetail(
+            decodeURIComponent(taskDetailMatch[1])
+          )
+        );
         return;
       }
 
@@ -995,17 +1009,7 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
 }
 
 export function createDevEventStreamFrame(event: AppUpdateEvent): string {
-  const signal: AppUpdateEvent = {
-    type: event.type,
-    scope: event.scope,
-    taskId: event.taskId,
-    iterationId: event.iterationId,
-    runId: event.runId,
-    worktreeId: event.worktreeId,
-    previewGenerationId: event.previewGenerationId,
-    payload: null,
-    at: event.at
-  };
+  const signal = projectAppUpdateEventForClient(event);
   return `event: update\ndata: ${JSON.stringify(signal)}\n\n`;
 }
 

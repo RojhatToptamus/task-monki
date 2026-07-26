@@ -1482,7 +1482,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       if (!published) continue;
       recoveryRequiredSessionIds.add(run.sessionId);
       this.appEvents.emit({
-        type: 'run.activity',
+        type: 'run.state.updated',
         taskId: run.taskId,
         iterationId: run.iterationId,
         runId: run.id,
@@ -3598,7 +3598,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       }
       await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
       this.appEvents.emit({
-        type: 'run.activity',
+        type: 'run.state.updated',
         taskId: run.taskId,
         iterationId: run.iterationId,
         runId: run.id,
@@ -3797,7 +3797,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     );
     this.emitRuntimeUpdate();
     this.appEvents.emit({
-      type: 'run.activity',
+      type: 'run.state.updated',
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -3888,7 +3888,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
 
     this.appEvents.emit({
-      type: 'run.activity',
+      type: 'run.state.updated',
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -4090,7 +4090,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       if (!lossPublished) continue;
       await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
       this.appEvents.emit({
-        type: 'run.activity',
+        type: 'run.state.updated',
         taskId: run.taskId,
         iterationId: run.iterationId,
         runId: run.id,
@@ -4233,7 +4233,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           false
         );
         this.appEvents.emit({
-          type: 'run.activity',
+          type: 'run.state.updated',
           taskId: run.taskId,
           iterationId: run.iterationId,
           runId: run.id,

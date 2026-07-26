@@ -1999,7 +1999,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       await waitFor(async () =>
         observedEvents.some(
           (event) =>
-            event.type === 'run.activity' &&
+            event.type === 'run.state.updated' &&
             typeof event.payload === 'object' &&
             event.payload !== null &&
             'eventType' in event.payload &&

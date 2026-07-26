@@ -142,12 +142,13 @@ npm run test:agent-workflow -- --stress \
   --preview-cycles=4
 ```
 
-The report records scenario timings, durable/client snapshot bytes and record
-counts, warm and cold snapshot timings, harness/service-process and provider
-RSS/CPU/file-descriptor samples, active Node resource types, update-listener
-count, output/protocol bounds, and cleanup proof. Duration is a lower bound: an
-already-started soak cycle is allowed to finish so the report never measures
-or abandons a partial operation.
+The report records scenario timings, durable store bytes, full internal
+snapshot bytes, board-read bytes, selected-task and largest-task detail bytes,
+record counts, warm and cold snapshot timings, harness/service-process and
+provider RSS/CPU/file-descriptor samples, active Node resource types,
+update-listener count, output/protocol bounds, and cleanup proof. Duration is a
+lower bound: an already-started soak cycle is allowed to finish so the report
+never measures or abandons a partial operation.
 
 Use the same accumulated state for semantic renderer inspection with:
 
@@ -164,16 +165,23 @@ belong to non-UI stress. Send `Ctrl-C` after inspection and require successful
 service/UI shutdown, process joins, and root removal.
 
 High-volume provider output remains in bounded artifacts and is not itself a
-reason to rebuild the renderer's full durable snapshot. `run.output`
-invalidations and activity from hidden tasks therefore do not request a
-snapshot. Activity for the selected open task is coalesced to at most one
-refresh per second so live plan/tool progress remains visible. Terminal,
-interaction, task, Git, and other product-state invalidations remain prompt.
-Client snapshots also bound each provider-text field to 128 KiB while
-preserving the beginning, end, and an explicit omission marker. The durable
-store, run artifacts, and raw protocol journal remain unchanged. This prevents
-active streams and terminal events from repeatedly transporting and rendering
-multi-megabyte telemetry while preserving authoritative durable state.
+reason to rebuild client state. The renderer initially reads a compact board
+snapshot and reads the selected task's ownership graph only while its detail is
+open. `run.output` invalidations and activity from hidden tasks therefore do
+not request either read. Activity for the selected open task is coalesced to at
+most one detail refresh per second so live plan/tool progress remains visible.
+Terminal, interaction, task, Git, recovery-required, and ambiguous-mutation
+state invalidations refresh the board promptly and refresh matching open detail.
+App-scoped fallback polling refreshes both reads while detail is open. Preview
+route changes from another task also refresh open detail because its compact
+route catalog is a deliberate cross-task dependency.
+
+Task-detail reads bound run final messages and nested provider item/event
+payload strings to 128 KiB per field while preserving the beginning, end, and
+an explicit omission marker. Typed metadata states the original/displayed byte
+counts and whether a bounded retained artifact can be loaded lazily. It never
+claims that a complete artifact or journal segment exists. The durable store,
+bounded artifacts, and bounded raw protocol journal remain unchanged.
 
 The stress command is deterministic resource evidence, not a universal
 performance budget. It measures the Node service process, not Electron's main

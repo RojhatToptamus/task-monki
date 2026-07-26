@@ -16,6 +16,7 @@ import type {
   ArtifactRecord,
   BranchPublicationRecord,
   CiRollupRecord,
+  ClientTextExcerpt,
   DomainEvent,
   Finding,
   GitSnapshotRecord,
@@ -133,7 +134,7 @@ import { RunProgressCard } from './RunProgressCard';
 import { describeGitSnapshot } from './gitSnapshotCopy';
 import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
-import type { PreviewTaskRouteOption } from '../model/previewBindings';
+import type { PreviewTaskRouteOption } from '../../shared/preview';
 import {
   isReviewPhase,
   shouldShowMoveToReviewHeaderAction
@@ -175,6 +176,7 @@ interface TaskDetailProps {
   runtimeState?: AgentRuntimeState;
   server?: AgentServerInstance;
   artifacts: ArtifactRecord[];
+  textExcerpts?: ClientTextExcerpt[];
   attachments: TaskAttachmentRecord[];
   interactions: InteractionRequestRecord[];
   previewPlans: PreviewPlanRecord[];
@@ -236,6 +238,7 @@ interface TaskDetailProps {
   onResetPreviewData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
   onRetryPreviewSetup(taskId: string, generationId: string, scenarioId: string): Promise<void>;
   onReadPreviewLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<import('../../shared/contracts').ReadPreviewLogResult>;
+  onReadArtifact?(artifactId: string): Promise<string>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
@@ -297,6 +300,10 @@ export function TaskDetail(props: TaskDetailProps) {
   const [draftPrTitle, setDraftPrTitle] = useState('');
   const [requestNote, setRequestNote] = useState('');
   const [requestInstruction, setRequestInstruction] = useState('');
+  const [requestReviewOutput, setRequestReviewOutput] = useState<string>();
+  const [loadedReviewOutput, setLoadedReviewOutput] = useState<string>();
+  const [reviewOutputLoading, setReviewOutputLoading] = useState(false);
+  const [reviewOutputError, setReviewOutputError] = useState<string>();
   const [evidenceGitSnapshotId, setEvidenceGitSnapshotId] = useState<string | undefined>();
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
@@ -315,6 +322,22 @@ export function TaskDetail(props: TaskDetailProps) {
   );
   const prefersReducedMotion = usePrefersReducedMotion();
   const reviewGate = task ? taskReviewGate(task) : undefined;
+  const reviewRun = reviewGate
+    ? props.runs.find((candidate) => candidate.id === reviewGate.runId) ??
+      props.runs.find(
+        (candidate) =>
+          candidate.mode === 'REVIEW' &&
+          candidate.iterationId === task?.currentIterationId
+      )
+    : undefined;
+  const reviewTextExcerpt = reviewRun
+    ? (props.textExcerpts ?? []).find(
+        (excerpt) =>
+          excerpt.collection === 'runs' &&
+          excerpt.recordId === reviewRun.id &&
+          excerpt.fieldPath === 'finalMessage'
+      )
+    : undefined;
   const reviewIsRunning = reviewGate?.status === 'RUNNING';
   const reviewPending = reviewStartPending && !reviewIsRunning;
   const reviewMascotHoldActive = reviewMascotHoldGeneration > 0;
@@ -366,10 +389,18 @@ export function TaskDetail(props: TaskDetailProps) {
     setRequestDrawerOpen(false);
     setSelectedReviewFindingIds([]);
     setRequestNote('');
+    setRequestReviewOutput(undefined);
     setDraftPrModalOpen(false);
     setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
     setEvidenceGitSnapshotId(undefined);
   }, [task?.id, task?.title]);
+
+  useEffect(() => {
+    setLoadedReviewOutput(undefined);
+    setReviewOutputLoading(false);
+    setReviewOutputError(undefined);
+    setRequestReviewOutput(undefined);
+  }, [reviewRun?.id, reviewTextExcerpt?.originalByteCount]);
 
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: 0 });
@@ -419,12 +450,6 @@ export function TaskDetail(props: TaskDetailProps) {
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
   const promptLineCount = task.prompt.split(/\r?\n/).length;
   const reviewFindings = reviewGate.result?.findings ?? [];
-  const reviewRun =
-    props.runs.find((candidate) => candidate.id === reviewGate.runId) ??
-    props.runs.find(
-      (candidate) =>
-        candidate.mode === 'REVIEW' && candidate.iterationId === task.currentIterationId
-    );
   const reviewActivity = buildReviewActivityViewModel({
     reviewRun,
     reviewRunning: reviewPending || reviewGate.status === 'RUNNING',
@@ -556,8 +581,37 @@ export function TaskDetail(props: TaskDetailProps) {
     });
   };
 
-  const openRequestChanges = (findingIds?: string[]) => {
-    const hasReviewOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
+  const loadAvailableReviewOutput = async (): Promise<string | undefined> => {
+    if (loadedReviewOutput !== undefined) return loadedReviewOutput;
+    if (reviewTextExcerpt?.availableContent.kind !== 'BOUNDED_ARTIFACT') {
+      return reviewTextExcerpt ? undefined : reviewRun?.finalMessage;
+    }
+    if (!props.onReadArtifact) return undefined;
+    setReviewOutputLoading(true);
+    setReviewOutputError(undefined);
+    try {
+      const output = await props.onReadArtifact(
+        reviewTextExcerpt.availableContent.artifactId
+      );
+      setLoadedReviewOutput(output);
+      return output;
+    } catch (caught) {
+      setReviewOutputError(
+        caught instanceof Error ? caught.message : 'Could not load review output.'
+      );
+      throw caught;
+    } finally {
+      setReviewOutputLoading(false);
+    }
+  };
+
+  const openRequestChanges = async (findingIds?: string[]) => {
+    const hasReviewOutput =
+      Boolean(reviewGate.result) ||
+      Boolean(
+        reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
+        (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
+      );
     if (
       !actionableReviewSourceRun ||
       reviewActionsPaused ||
@@ -568,10 +622,19 @@ export function TaskDetail(props: TaskDetailProps) {
     const selectedIds = findingIds?.length
       ? findingIds
       : defaultSelectedFindingIds(reviewFindings);
+    let reviewOutput: string | undefined;
+    if (selectedIds.length === 0) {
+      try {
+        reviewOutput = await loadAvailableReviewOutput();
+      } catch {
+        return;
+      }
+    }
     setSelectedReviewFindingIds(selectedIds);
     setRequestNote('');
+    setRequestReviewOutput(reviewOutput);
     setRequestInstruction(
-      buildReviewFollowUpInstruction(task, reviewGate, reviewRun, selectedIds)
+      buildReviewFollowUpInstruction(task, reviewGate, reviewOutput, selectedIds)
     );
     setRequestDrawerOpen(true);
   };
@@ -590,13 +653,22 @@ export function TaskDetail(props: TaskDetailProps) {
     });
   };
 
-  const toggleSelectedReviewFinding = (findingId: string) => {
+  const toggleSelectedReviewFinding = async (findingId: string) => {
     const next = selectedReviewFindingIds.includes(findingId)
       ? selectedReviewFindingIds.filter((id) => id !== findingId)
       : [...selectedReviewFindingIds, findingId];
+    let reviewOutput = requestReviewOutput;
+    if (next.length === 0 && reviewOutput === undefined) {
+      try {
+        reviewOutput = await loadAvailableReviewOutput();
+      } catch {
+        return;
+      }
+      setRequestReviewOutput(reviewOutput);
+    }
     setSelectedReviewFindingIds(next);
     setRequestInstruction(
-      buildReviewFollowUpInstruction(task, reviewGate, reviewRun, next, requestNote)
+      buildReviewFollowUpInstruction(task, reviewGate, reviewOutput, next, requestNote)
     );
   };
 
@@ -606,7 +678,7 @@ export function TaskDetail(props: TaskDetailProps) {
       buildReviewFollowUpInstruction(
         task,
         reviewGate,
-        reviewRun,
+        requestReviewOutput,
         selectedReviewFindingIds,
         note
       )
@@ -673,7 +745,7 @@ export function TaskDetail(props: TaskDetailProps) {
         }
         return;
       case 'request-changes':
-        openRequestChanges();
+        void openRequestChanges();
         return;
       case 'commit':
         void runDeliveryAction(async () => {
@@ -833,7 +905,12 @@ export function TaskDetail(props: TaskDetailProps) {
   // The single "what next" model for the rail. Kept in one place so the header,
   // run surface, and rail all agree instead of each inventing an action.
   const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run);
-  const reviewHasOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
+  const reviewHasOutput =
+    Boolean(reviewGate.result) ||
+    Boolean(
+      reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
+      (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
+    );
   const reviewHasActionableFindings =
     Boolean(actionableReviewSourceRun) &&
     canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
@@ -1094,6 +1171,11 @@ export function TaskDetail(props: TaskDetailProps) {
                     reviewActivity={reviewActivity}
                     actionBusy={reviewActionBusy}
                     reviewPending={reviewPending}
+                    textExcerpt={reviewTextExcerpt}
+                    loadedReviewOutput={loadedReviewOutput}
+                    reviewOutputLoading={reviewOutputLoading}
+                    reviewOutputError={reviewOutputError}
+                    onLoadReviewOutput={() => void loadAvailableReviewOutput()}
                     onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
                   />
                 ) : null}

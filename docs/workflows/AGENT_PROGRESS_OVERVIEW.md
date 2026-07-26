@@ -106,7 +106,7 @@ Its public output is `RunActivityProjection`:
 - `sections`
   - grouped sections for Debug/provider panels;
 - `outputSummary`
-  - compact output summary such as `show full output · N lines`.
+  - compact output summary such as `show output · N lines`.
 
 Each activity row has:
 
@@ -338,7 +338,8 @@ It:
 - renders the `Activity / following tail` header;
 - renders grouped rows with native `<details>`;
 - preserves user toggles in local component state during live rerenders;
-- shows `show full output · N lines` as a Debug button when available.
+- shows `show output · N lines` as a Debug button when available, without
+  claiming that a bounded client excerpt is complete.
 
 It does not fetch raw output. Clicking output should take the user to Debug.
 
@@ -357,8 +358,9 @@ provider-neutral in product copy even though the stored contract is currently
 named `agentReview`.
 
 While review is running, it shows one current-activity row. While resting, it
-shows review status, reviewed diff, findings, stale context, raw review output
-disclosure, and a quiet `Run review again` utility when valid.
+shows review status, reviewed diff, findings, stale context, the review-output
+excerpt and any available retained artifact, and a quiet `Run review again`
+utility when valid.
 
 ## Evidence Boundaries
 
@@ -406,15 +408,23 @@ The progress UI must stay compact and bounded:
 - context and command groups collapse repeated detail;
 - text labels are truncated/compacted;
 - raw output is summarized as a line count and shown in Debug, not in Overview.
-- task-list client snapshots bound each provider-text field to 128 KiB while
-  complete output remains in run artifacts and the raw protocol journal;
-- raw `run.output` and hidden-task activity do not refresh the full client
-  snapshot; selected-task activity is coalesced to one refresh per second, and
-  terminal or actionable state changes refresh promptly.
+- the board read contains card summaries and actionable Inbox data, not
+  provider-item or run history;
+- opening a task performs a fresh, generation-guarded task-detail read;
+- task-detail display excerpts bound run final messages and nested provider
+  item/event payload strings to 128 KiB per field and carry explicit byte
+  counts plus `BOUNDED_ARTIFACT` or `NOT_AVAILABLE` metadata;
+- raw `run.output` and hidden-task activity do not refresh client data;
+  selected-task activity is coalesced to one detail refresh per second, while
+  terminal, ambiguous, recovery-required, interaction, and other authoritative
+  state changes refresh the board promptly.
 
-Projection work is pure and synchronous over the current task snapshot. If item
-volume grows enough to make this expensive, optimize the selector/model layer
-instead of adding imperative state copying in React components.
+Projection work is pure and synchronous over the current task-detail read.
+Displayed review excerpts are never follow-up prompt input. Structured findings
+are used directly; if unstructured review content is needed, the renderer
+loads the explicitly available bounded artifact first. If item volume grows
+enough to make projection expensive, optimize the selector/model layer instead
+of adding imperative state copying in React components.
 
 ## Testing Expectations
 

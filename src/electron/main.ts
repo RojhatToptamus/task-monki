@@ -16,6 +16,7 @@ import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
   AcceptPreviewRecipeDraftRequest,
@@ -426,8 +427,11 @@ function installIpcHandlers(): void {
     return service.deleteBoard(boardId);
   });
 
-  handleTrustedIpc('task:list', async () => {
-    return service.listTasks();
+  handleTrustedIpc('task:getBoardSnapshot', async () => {
+    return service.getBoardSnapshot();
+  });
+  handleTrustedIpc('task:getDetail', async (_, taskId: string) => {
+    return service.getTaskDetail(taskId);
   });
 
   handleTrustedIpc(
@@ -805,7 +809,10 @@ function handleTrustedIpc<TArgs extends unknown[], TResult>(
 }
 
 function broadcast(event: AppUpdateEvent): void {
-  mainWindow?.webContents.send(IPC_UPDATE_CHANNEL, event);
+  mainWindow?.webContents.send(
+    IPC_UPDATE_CHANNEL,
+    projectAppUpdateEventForClient(event)
+  );
 }
 
 async function readBoundedFile(handle: fs.promises.FileHandle, maximumBytes: number): Promise<Buffer> {

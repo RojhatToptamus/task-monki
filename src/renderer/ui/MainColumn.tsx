@@ -3,8 +3,7 @@ import type {
   AgentInteractionDecision,
   Board,
   InteractionRequestRecord,
-  Repository,
-  Task
+  Repository
 } from '../../shared/contracts';
 import {
   type AgentModel,
@@ -36,13 +35,14 @@ import {
   tasksSpanMultipleRepositories,
   shouldShowInboxRepository,
   type NavView,
+  type TaskCardSource,
   type TaskCardVM
 } from '../model/taskView';
 
 interface MainColumnProps {
   view: NavView;
   board?: Board;
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
   theme: ThemePreference;
@@ -76,7 +76,10 @@ interface MainColumnProps {
   onEditBoard(board: Board): void;
 }
 
-const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): string }> = {
+const VIEW_TITLES: Record<
+  NavView,
+  { title: string; subtitle(tasks: TaskCardSource[]): string }
+> = {
   inbox: {
     title: 'Inbox',
     subtitle: () => 'Decisions and runs waiting on you'
@@ -265,7 +268,7 @@ function BoardKanban({
   onArchive,
   onRequestDelete
 }: {
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   showRepository: boolean;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -373,7 +376,7 @@ function CardGrid({
   onArchive,
   onRequestDelete
 }: {
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   view: NavView;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -520,7 +523,7 @@ function Inbox({
   onSelect,
   onRespondToInteraction
 }: {
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -570,7 +573,7 @@ export function InboxDecisionCard({
   onSelect,
   onRespondToInteraction
 }: {
-  task: Task;
+  task: TaskCardSource;
   repositoryName: string;
   showRepository: boolean;
   interaction?: InteractionRequestRecord;

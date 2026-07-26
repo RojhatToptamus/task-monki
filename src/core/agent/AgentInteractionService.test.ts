@@ -147,7 +147,7 @@ describe('AgentInteractionService permission decisions', () => {
       expect.objectContaining({ type: 'AGENT_MUTATION_AMBIGUOUS', runId: run.id }),
       expect.arrayContaining(['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'])
     );
-    expect(updates).toContain('run.activity');
+    expect(updates).toContain('run.state.updated');
   });
 
   it('preserves a terminal run when it wins an ambiguous interaction response race', async () => {

@@ -2199,7 +2199,16 @@ async function createReviewScenario(
   }
 
   const result = reviewResultFor(definition.slug);
-  await completeRun(ctx, review, result.summary, state.gitSnapshot?.id, {
+  const finalMessage =
+    definition.slug === 'review-needs-changes'
+      ? [
+          result.summary,
+          '',
+          'This intentionally long retained review exercises display excerpt authority.',
+          'Seeded retained review detail. '.repeat(6_000)
+        ].join('\n')
+      : result.summary;
+  await completeRun(ctx, review, finalMessage, state.gitSnapshot?.id, {
     agentReviewResult: result
   });
 

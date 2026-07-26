@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createUpdateRefreshScheduler,
-  taskSnapshotRefreshKind
+  taskDataRefreshPlan
 } from './updateRefreshScheduler';
 
 describe('createUpdateRefreshScheduler', () => {
-  it('does not rebuild a full snapshot for high-volume run telemetry', () => {
+  it('keeps high-volume telemetry off board reads and scopes activity to open detail', () => {
     const common = {
       scope: { kind: 'TASK' as const, taskId: 'task-1' },
       taskId: 'task-1',
@@ -15,29 +15,93 @@ describe('createUpdateRefreshScheduler', () => {
     };
 
     expect(
-      taskSnapshotRefreshKind(
+      taskDataRefreshPlan(
         { ...common, type: 'run.output' },
         { open: true, taskId: 'task-1' }
       )
-    ).toBe('NONE');
+    ).toEqual({ board: false, detail: 'NONE' });
     expect(
-      taskSnapshotRefreshKind(
+      taskDataRefreshPlan(
         { ...common, type: 'run.activity' },
         { open: false, taskId: 'task-1' }
       )
-    ).toBe('NONE');
+    ).toEqual({ board: false, detail: 'NONE' });
     expect(
-      taskSnapshotRefreshKind(
+      taskDataRefreshPlan(
         { ...common, type: 'run.activity' },
         { open: true, taskId: 'task-1' }
       )
-    ).toBe('SELECTED_ACTIVITY');
+    ).toEqual({ board: false, detail: 'SELECTED_ACTIVITY' });
     expect(
-      taskSnapshotRefreshKind(
+      taskDataRefreshPlan(
         { ...common, type: 'run.terminal' },
         { open: true, taskId: 'task-1' }
       )
-    ).toBe('IMMEDIATE');
+    ).toEqual({ board: true, detail: 'IMMEDIATE' });
+    expect(
+      taskDataRefreshPlan(
+        { ...common, type: 'run.state.updated' },
+        { open: false, taskId: 'task-1' }
+      )
+    ).toEqual({ board: true, detail: 'NONE' });
+    expect(
+      taskDataRefreshPlan(
+        { ...common, type: 'interaction.updated' },
+        { open: true, taskId: 'task-1' }
+      )
+    ).toEqual({ board: true, detail: 'IMMEDIATE' });
+  });
+
+  it('refreshes open detail for global and cross-task dependencies', () => {
+    const selected = { open: true, taskId: 'task-1' };
+    const otherTask = {
+      scope: { kind: 'TASK' as const, taskId: 'task-2' },
+      taskId: 'task-2',
+      payload: null,
+      at: '2026-07-26T00:00:00.000Z'
+    };
+
+    expect(
+      taskDataRefreshPlan(
+        {
+          type: 'projection.updated',
+          scope: { kind: 'APP' },
+          taskId: '__browser_poll__',
+          payload: null,
+          at: '2026-07-26T00:00:00.000Z'
+        },
+        selected
+      )
+    ).toEqual({ board: true, detail: 'IMMEDIATE' });
+    expect(
+      taskDataRefreshPlan(
+        { ...otherTask, type: 'preview.updated' },
+        selected
+      )
+    ).toEqual({ board: false, detail: 'IMMEDIATE' });
+    expect(
+      taskDataRefreshPlan(
+        { ...otherTask, type: 'task.deleted' },
+        selected
+      )
+    ).toEqual({ board: true, detail: 'IMMEDIATE' });
+    expect(
+      taskDataRefreshPlan(
+        {
+          ...otherTask,
+          type: 'task.deleted',
+          scope: { kind: 'TASK', taskId: 'task-1' },
+          taskId: 'task-1'
+        },
+        selected
+      )
+    ).toEqual({ board: true, detail: 'NONE' });
+    expect(
+      taskDataRefreshPlan(
+        { ...otherTask, type: 'repository.updated' },
+        selected
+      )
+    ).toEqual({ board: true, detail: 'IMMEDIATE' });
   });
 
   it('coalesces bursty update events into one refresh', async () => {

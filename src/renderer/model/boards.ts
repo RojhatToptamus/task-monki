@@ -1,6 +1,12 @@
-import type { Board, Task } from '../../shared/contracts';
+import type { Board, WorkflowPhase } from '../../shared/contracts';
 
-export function selectBoardTasks(tasks: readonly Task[], board: Board | undefined): Task[] {
+export function selectBoardTasks<T extends {
+  repositoryId: string;
+  workflowPhase: WorkflowPhase;
+}>(
+  tasks: readonly T[],
+  board: Board | undefined
+): T[] {
   if (!board) return [...tasks];
   const repositoryIds = new Set(board.repositoryIds);
   const workflowPhases = new Set(board.workflowPhases);

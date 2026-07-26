@@ -298,6 +298,42 @@ off, and unsafe persisted settings are refused. Deterministic seed hosts keep
 the provider inert so synthetic provider records cannot start a live Codex
 process.
 
+### Renderer reads and invalidations
+
+The Electron IPC and browser HTTP transports expose the same client read
+boundaries:
+
+- a compact board snapshot containing task-card and actionable Inbox data;
+- a selected-task detail snapshot containing that task's ownership graph plus
+  the compact cross-task Preview route catalog needed by the detail view.
+
+Both reads are derived directly from the store's immutable published state. The
+full durable snapshot remains an internal service, test, and diagnostic
+boundary; it is not a renderer API. Board and detail requests have independent
+generations so an older completion cannot replace newer UI state. Opening or
+deleting a task always reconciles fresh task detail before the UI acts on
+worktree or Git evidence.
+
+Task detail bounds run final messages and nested provider item/event payload
+strings to 128 KiB per field for display. Excerpt metadata identifies the
+original and displayed byte counts and whether a bounded retained artifact is
+available. Arbitrary provider fields do not claim a complete artifact. Durable
+records remain unchanged, and behavior-producing actions use structured
+findings or an explicitly loaded retained artifact rather than excerpt text.
+
+App-update events are compact invalidations shared by Electron and browser
+transports. Output and routine activity are volume signals; authoritative state
+transitions, including ambiguous or recovery-required mutations, use
+`run.state.updated` and promptly invalidate the board plus matching open
+detail. App-scoped fallback invalidations refresh both the board and any open
+detail. An open detail also refreshes when another task changes Preview route
+availability because the detail owns the compact cross-task route catalog.
+The browser uses polling only while its EventSource connection is unavailable;
+native EventSource reconnect remains active, and a reopened stream stops the
+poller.
+Only direct-render events such as Preview recipe progress and Discourse deltas
+retain their bounded payloads in the client event projection.
+
 ## Settings
 
 Task and review execution settings stored on task/run records include:

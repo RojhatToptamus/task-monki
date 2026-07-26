@@ -22,6 +22,8 @@ import type {
   ArtifactRecord,
   Board,
   BoardColor,
+  BoardSnapshot,
+  BoardTaskSummary,
   BranchPublicationRecord,
   CiRollupRecord,
   CreateBoardRequest,
@@ -50,6 +52,7 @@ import type {
   RunRecord,
   Task,
   TaskAttachmentRecord,
+  TaskDetailSnapshot,
   AttachmentContent,
   AttachmentDraftSnapshot,
   StageAttachmentBytesInput,
@@ -857,6 +860,123 @@ export class FileTaskStore {
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
     return JSON.parse(this.publishedSnapshotJson) as TaskSnapshot;
+  }
+
+  async getBoardSnapshot(): Promise<BoardSnapshot> {
+    await this.init();
+    const state = this.publishedState;
+    return clone({
+      schemaVersion: state.schemaVersion,
+      repositories: state.repositories,
+      boards: state.boards,
+      tasks: state.tasks.map(projectBoardTask),
+      interactionRequests: state.interactionRequests.filter((interaction) =>
+        interaction.status === 'PENDING' || interaction.status === 'RESPONDING'
+      )
+    });
+  }
+
+  async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
+    await this.init();
+    const state = this.publishedState;
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) {
+      throw new Error('Task not found.');
+    }
+
+    const runs = state.runs.filter((record) => record.taskId === taskId);
+    const agentItems = state.agentItems.filter((record) => record.taskId === taskId);
+    const agentGoalSnapshots = state.agentGoalSnapshots.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentPlanRevisions = state.agentPlanRevisions.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentUsageSnapshots = state.agentUsageSnapshots.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentSettingsObservations = state.agentSettingsObservations.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentSubagentObservations = state.agentSubagentObservations.filter(
+      (record) => record.taskId === taskId
+    );
+    const interactionRequests = state.interactionRequests.filter(
+      (record) => record.taskId === taskId
+    );
+    const events = state.events.filter((record) => record.taskId === taskId);
+    const serverIds = new Set<string>();
+    const addServerReference = (
+      reference: AgentProtocolMessageReference | undefined
+    ) => {
+      if (reference) serverIds.add(reference.serverInstanceId);
+    };
+    for (const run of runs) {
+      if (run.serverInstanceId) serverIds.add(run.serverInstanceId);
+      addServerReference(run.providerTerminalRawMessage);
+    }
+    for (const item of agentItems) addServerReference(item.rawMessage);
+    for (const goal of agentGoalSnapshots) addServerReference(goal.rawMessage);
+    for (const plan of agentPlanRevisions) addServerReference(plan.rawMessage);
+    for (const usage of agentUsageSnapshots) addServerReference(usage.rawMessage);
+    for (const settings of agentSettingsObservations) {
+      addServerReference(settings.rawMessage);
+    }
+    for (const observation of agentSubagentObservations) {
+      addServerReference(observation.rawMessage);
+    }
+    for (const interaction of interactionRequests) {
+      serverIds.add(interaction.serverInstanceId);
+      addServerReference(interaction.requestRawMessage);
+      addServerReference(interaction.responseRawMessage);
+    }
+    for (const event of events) {
+      if (event.serverInstanceId) serverIds.add(event.serverInstanceId);
+    }
+
+    const taskRecords = <T extends { taskId: string }>(records: readonly T[]): T[] =>
+      records.filter((record) => record.taskId === taskId);
+    return clone({
+      schemaVersion: state.schemaVersion,
+      task,
+      repository: state.repositories.find(
+        (repository) => repository.id === task.repositoryId
+      ),
+      iterations: taskRecords(state.iterations),
+      worktrees: taskRecords(state.worktrees),
+      gitSnapshots: taskRecords(state.gitSnapshots),
+      githubRepositories: taskRecords(state.githubRepositories),
+      branchPublications: taskRecords(state.branchPublications),
+      pullRequests: taskRecords(state.pullRequests),
+      ciRollups: taskRecords(state.ciRollups),
+      reviewRollups: taskRecords(state.reviewRollups),
+      mergeSnapshots: taskRecords(state.mergeSnapshots),
+      runs,
+      agentServers: state.agentServers.filter((server) => serverIds.has(server.id)),
+      agentSessions: taskRecords(state.agentSessions),
+      agentItems,
+      agentGoalSnapshots,
+      agentPlanRevisions,
+      agentUsageSnapshots,
+      agentSettingsObservations,
+      agentSubagentObservations,
+      interactionRequests,
+      previewPlans: taskRecords(state.previewPlans),
+      previewApprovals: taskRecords(state.previewApprovals),
+      previewComposeProjects: taskRecords(state.previewComposeProjects),
+      previewGenerations: taskRecords(state.previewGenerations),
+      previewManagedEnvironments: taskRecords(state.previewManagedEnvironments),
+      previewManagedResources: taskRecords(state.previewManagedResources),
+      previewGenerationAttachments: taskRecords(state.previewGenerationAttachments),
+      previewLocalBindings: taskRecords(state.previewLocalBindings),
+      previewNodeAttempts: taskRecords(state.previewNodeAttempts),
+      previewResources: taskRecords(state.previewResources),
+      events,
+      artifacts: taskRecords(state.artifacts),
+      attachments: taskRecords(state.attachments),
+      previewTaskRoutes: selectPreviewTaskRouteOptions(state, taskId),
+      textExcerpts: []
+    });
   }
 
   async getRepository(repositoryId: string): Promise<Repository | undefined> {
@@ -6218,6 +6338,86 @@ function clone<T>(value: T): T {
     return value;
   }
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function projectBoardTask(task: Task): BoardTaskSummary {
+  const review = task.projection.agentReview;
+  const findingCounts: BoardTaskSummary['projection']['agentReview']['findingCounts'] = {};
+  for (const finding of review?.result?.findings ?? []) {
+    findingCounts[finding.severity] = (findingCounts[finding.severity] ?? 0) + 1;
+  }
+  return {
+    id: task.id,
+    title: task.title,
+    repositoryId: task.repositoryId,
+    workflowPhase: task.workflowPhase,
+    completionPolicy: task.completionPolicy,
+    currentRunId: task.currentRunId,
+    forkedFromTaskId: task.forkedFromTaskId,
+    updatedAt: task.updatedAt,
+    projection: {
+      agentRun: task.projection.agentRun,
+      worktree: task.projection.worktree,
+      git: task.projection.git,
+      githubPullRequest: task.projection.githubPullRequest,
+      githubPullRequestNumber: task.projection.githubPullRequestNumber,
+      ciChecks: task.projection.ciChecks,
+      reviews: task.projection.reviews,
+      merge: task.projection.merge,
+      health: task.projection.health,
+      summary: task.projection.summary,
+      implementationRetry: task.projection.implementationRetry,
+      updatedAt: task.projection.updatedAt,
+      agentReview: {
+        status: review?.status ?? 'NOT_RUN',
+        runId: review?.runId,
+        hasResult: Boolean(review?.result),
+        findingCounts
+      }
+    }
+  };
+}
+
+function selectPreviewTaskRouteOptions(
+  state: StoreState,
+  consumerTaskId: string
+): TaskDetailSnapshot['previewTaskRoutes'] {
+  const options: TaskDetailSnapshot['previewTaskRoutes'] = [];
+  for (const task of state.tasks) {
+    if (task.id === consumerTaskId) continue;
+    const plan = state.previewPlans
+      .filter(
+        (candidate) =>
+          candidate.taskId === task.id &&
+          candidate.iterationId === task.currentIterationId
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    if (!plan) continue;
+    const activeGeneration = state.previewGenerations.find(
+      (candidate) =>
+        candidate.taskId === task.id &&
+        candidate.iterationId === task.currentIterationId &&
+        candidate.routingState === 'ACTIVE' &&
+        candidate.state === 'READY'
+    );
+    for (const route of plan.executionPlan.routes) {
+      options.push({
+        taskId: task.id,
+        taskTitle: task.title,
+        routeId: route.id,
+        available: Boolean(
+          activeGeneration?.routes.some(
+            (candidate) => candidate.id === route.id && candidate.state === 'ATTACHED'
+          )
+        )
+      });
+    }
+  }
+  return options.sort(
+    (left, right) =>
+      left.taskTitle.localeCompare(right.taskTitle) ||
+      left.routeId.localeCompare(right.routeId)
+  );
 }
 
 function exactArrayBuffer(value: Uint8Array): ArrayBuffer {

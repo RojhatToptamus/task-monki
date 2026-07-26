@@ -133,7 +133,7 @@ describe('TaskManagerService progress harness', () => {
             metric: '+1'
           })
         ],
-        activityOutputSummary: 'show full output · 1 line'
+        activityOutputSummary: 'show output · 1 line'
       });
 
       const server = await scenario.store.createAgentServer({
@@ -200,7 +200,7 @@ describe('TaskManagerService progress harness', () => {
             metric: '+1'
           })
         ],
-        activityOutputSummary: 'show full output · 1 line'
+        activityOutputSummary: 'show output · 1 line'
       });
     } finally {
       await scenario.service.shutdown();

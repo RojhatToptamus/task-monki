@@ -128,7 +128,7 @@ export class AgentInteractionService {
           );
           if (recorded) {
             this.events.emit({
-              type: 'run.activity',
+              type: 'run.state.updated',
               taskId: run.taskId,
               iterationId: run.iterationId,
               runId: run.id,

@@ -329,7 +329,7 @@ describe('Task Monki development seed data', () => {
         })
       ])
     );
-    expect(runningProgress?.activityOutputSummary).toBe('show full output · 12 lines');
+    expect(runningProgress?.activityOutputSummary).toBe('show output · 12 lines');
 
     const failedTask = taskForScenario(manifest, snapshot, 'agent-failed');
     expect(failedTask).toMatchObject({
@@ -514,6 +514,30 @@ describe('Task Monki development seed data', () => {
         models: []
       });
       expect(seedLifecycleSnapshot(after)).toEqual(seedLifecycleSnapshot(before));
+      const excerptTask = taskForScenario(
+        manifest,
+        after,
+        'review-needs-changes'
+      );
+      const excerptDetail = await service.getTaskDetail(excerptTask.id);
+      const excerptRun = excerptDetail.runs.find(
+        (run) => run.mode === 'REVIEW'
+      );
+      const excerptMetadata = excerptDetail.textExcerpts.find(
+        (excerpt) =>
+          excerpt.collection === 'runs' &&
+          excerpt.recordId === excerptRun?.id &&
+          excerpt.fieldPath === 'finalMessage'
+      );
+      expect(excerptRun?.finalMessage).toContain('Task Monki omitted');
+      expect(excerptMetadata).toMatchObject({
+        originalByteCount: expect.any(Number),
+        displayedByteCount: expect.any(Number),
+        availableContent: {
+          kind: 'BOUNDED_ARTIFACT',
+          artifactId: excerptRun?.finalArtifactId
+        }
+      });
       expect({
         tasks: after.tasks.length,
         runs: after.runs.length,

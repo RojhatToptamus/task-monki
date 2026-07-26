@@ -23,7 +23,7 @@ import type {
   PreviewActionModel,
   PreviewViewModel
 } from '../../model/preview';
-import type { PreviewTaskRouteOption } from '../../model/previewBindings';
+import type { PreviewTaskRouteOption } from '../../../shared/preview';
 
 export interface PreviewPanelProps {
   task: Task;

@@ -595,6 +595,24 @@ and unsupported extensions stay in bounded, structurally redacted journals or
 native metadata. UI workflow selectors consume projections and verified
 evidence, not protocol messages.
 
+Renderer reads preserve the same authority boundary. The board endpoint derives
+only card summaries and actionable Inbox projections from the store's published
+state. A task-detail endpoint derives the selected task's runs, sessions, items,
+interactions, prompts, evidence, and referenced runtime/server records plus a
+compact cross-task Preview route catalog. It does not serialize unrelated task
+histories, and the renderer has no full-snapshot endpoint.
+
+All transports use the same compact client event projection. High-volume output
+and routine activity are volume invalidations; terminal, ambiguous,
+recovery-required, interaction, and other authoritative mutations publish state
+invalidations that refresh board truth and matching open detail. App-scoped
+fallback invalidations refresh any open detail too. Because task detail owns
+the compact cross-task Preview route catalog, route availability changes from a
+different task also invalidate the open detail. Browser and Electron therefore
+cannot assign different freshness semantics to the same provider event. Browser
+polling is outage-only: the native EventSource keeps reconnecting and stops the
+poller after the stream reopens.
+
 ### Raw protocol journal
 
 Every runtime writes traffic to the same provider-neutral journal contract.
@@ -682,6 +700,16 @@ fails. Startup repairs recoverable private-mode drift through a verified file
 handle before exposing the artifact again. Task deletion publishes the durable
 record removal before best-effort file cleanup; startup removes a managed orphan
 left by an interrupted cleanup.
+
+Task-detail run final messages and nested provider item/event payload strings
+are display excerpts, not authoritative inputs. Each excerpted field carries
+original and displayed byte counts plus an explicit availability state:
+`BOUNDED_ARTIFACT` when the retained bounded artifact may be loaded, or
+`NOT_AVAILABLE`. The projection never infers that a complete artifact or
+journal segment exists. Review follow-up prompts use structured findings
+directly; when only unstructured truncated review text is available, the
+renderer must load the explicitly retained artifact before building a prompt
+and must not use omission-marker text.
 
 ## Permissions and interactions
 

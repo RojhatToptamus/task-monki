@@ -38,9 +38,10 @@ lifecycle, test support, provider smoke tests, and Git history.
 - ACP adapter tests already contain the important lower-level mechanism that
   the missing workflow needs: a Node child implementing ACP over stdio, driven
   through the production `AcpRuntimeAdapter` and `AcpStdioSupervisor`.
-- The development HTTP server exposes the renderer's existing typed
-  `TaskManagerService` operations. `GET /api/tasks` returns the authoritative
-  `TaskSnapshot`; mutations such as task creation, worktree preparation, run
+- The development HTTP server exposes the renderer's typed
+  `TaskManagerService` operations. `GET /api/board` returns compact board and
+  Inbox truth, while `GET /api/tasks/:taskId` returns fresh selected-task
+  detail; mutations such as task creation, worktree preparation, run
   start/cancel/retry/continue, review, and evidence refresh use the same
   service methods as the app.
 - The HTTP surface is loopback-only, token-protected, host/origin/fetch-site
@@ -51,7 +52,7 @@ lifecycle, test support, provider smoke tests, and Git history.
 
 ### Seeds
 
-- `npm run dev:seed` builds 72 stable scenarios for renderer and workflow
+- `npm run dev:seed` builds 87 stable scenarios for renderer and workflow
   inspection. Scenario slugs make visual states easy to find.
 - The generated data exercises real store APIs while being created, but the
   resulting application is projected state. It deliberately disables provider

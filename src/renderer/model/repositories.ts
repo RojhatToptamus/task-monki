@@ -1,4 +1,4 @@
-import type { Repository, Task } from '../../shared/contracts';
+import type { Repository } from '../../shared/contracts';
 
 export interface RepositoryOption {
   id: string;
@@ -37,7 +37,7 @@ export function filterRepositoryOptions(
 
 export function buildRepositoryOptions(input: {
   repositories: Repository[];
-  tasks: Task[];
+  tasks: Array<{ repositoryId: string }>;
 }): RepositoryOption[] {
   const taskCounts = new Map<string, number>();
   for (const task of input.tasks) {

@@ -96,6 +96,69 @@ describe('ReviewPanel', () => {
     expect(html).not.toContain('Last result');
     expect(html).not.toContain('>none<');
   });
+
+  it('labels bounded review excerpts and their lazy artifact states truthfully', () => {
+    const excerpt = {
+      collection: 'runs' as const,
+      recordId: 'review-run',
+      fieldPath: 'finalMessage',
+      originalByteCount: 186_130,
+      displayedByteCount: 131_072,
+      availableContent: {
+        kind: 'BOUNDED_ARTIFACT' as const,
+        artifactId: 'artifact-1'
+      }
+    };
+    const baseProps = {
+      reviewGate: reviewGateFixture(),
+      reviewRun: runFixture({
+        id: 'review-run',
+        mode: 'REVIEW',
+        finalMessage: 'Excerpt with an omission marker.'
+      }),
+      gitSnapshot: gitSnapshotFixture(),
+      actionBusy: false,
+      reviewPending: false,
+      onStopReview: () => {}
+    };
+    const excerptHtml = renderToStaticMarkup(
+      <ReviewPanel
+        {...baseProps}
+        textExcerpt={excerpt}
+        reviewOutputLoading
+        reviewOutputError="Artifact read failed."
+      />
+    );
+
+    expect(excerptHtml).toContain('Raw review output excerpt');
+    expect(excerptHtml).toContain('Displayed 131,072 of 186,130 bytes.');
+    expect(excerptHtml).toContain('Loading review artifact…');
+    expect(excerptHtml).toContain('Artifact read failed.');
+
+    const loadedHtml = renderToStaticMarkup(
+      <ReviewPanel
+        {...baseProps}
+        textExcerpt={excerpt}
+        loadedReviewOutput="Retained bounded artifact body."
+      />
+    );
+    expect(loadedHtml).toContain('Retained review artifact');
+    expect(loadedHtml).toContain('Retained bounded artifact body.');
+    expect(loadedHtml).not.toContain('Load available review artifact');
+
+    const unavailableHtml = renderToStaticMarkup(
+      <ReviewPanel
+        {...baseProps}
+        textExcerpt={{
+          ...excerpt,
+          availableContent: { kind: 'NOT_AVAILABLE' }
+        }}
+      />
+    );
+    expect(unavailableHtml).toContain(
+      'Additional content is not available from retained evidence.'
+    );
+  });
 });
 
 function reviewGateFixture(): AgentReviewGateProjection {

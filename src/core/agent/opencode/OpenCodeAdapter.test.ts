@@ -2647,7 +2647,7 @@ describe('OpenCodeAdapter', () => {
     expect(
       updates.filter(
         (event) =>
-          event.type === 'run.activity' &&
+          event.type === 'run.state.updated' &&
           event.runId === run.id &&
           (event.payload as { eventType?: string }).eventType === 'runtime/lost'
       )
@@ -3337,13 +3337,13 @@ describe('OpenCodeAdapter', () => {
     await waitForCondition(() =>
       updates.some(
         (event) =>
-          event.type === 'run.activity' &&
+          event.type === 'run.state.updated' &&
           (event.payload as { eventType?: string }).eventType === 'runtime/lost'
       )
     );
 
     const activityTypes = updates
-      .filter((event) => event.type === 'run.activity' && event.runId === run.id)
+      .filter((event) => event.type === 'run.state.updated' && event.runId === run.id)
       .map((event) => (event.payload as { eventType?: string }).eventType);
     expect(activityTypes).toContain('runtime/reconciled');
     expect(activityTypes).toContain('runtime/protocol-incident');

@@ -1,6 +1,7 @@
 import type {
   AgentReviewFinding,
   AgentReviewGateProjection,
+  ClientTextExcerpt,
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
@@ -28,6 +29,11 @@ export function ReviewPanel({
   reviewActivity,
   actionBusy,
   reviewPending,
+  textExcerpt,
+  loadedReviewOutput,
+  reviewOutputLoading = false,
+  reviewOutputError,
+  onLoadReviewOutput = () => undefined,
   onStopReview
 }: {
   reviewGate: AgentReviewGateProjection;
@@ -36,6 +42,11 @@ export function ReviewPanel({
   reviewActivity?: ReviewActivityViewModel;
   actionBusy: boolean;
   reviewPending: boolean;
+  textExcerpt?: ClientTextExcerpt;
+  loadedReviewOutput?: string;
+  reviewOutputLoading?: boolean;
+  reviewOutputError?: string;
+  onLoadReviewOutput?(): void;
   onStopReview(reviewRunId: string): void;
 }) {
   const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
@@ -117,10 +128,42 @@ export function ReviewPanel({
               </div>
             )}
             <ReviewFindingsList findings={reviewGate.result?.findings ?? []} />
-            {reviewRun?.finalMessage ? (
+            {reviewRun?.finalMessage || loadedReviewOutput ? (
               <details className="tm-raw tm-reviewcard__raw">
-                <summary>Raw review output</summary>
-                <pre>{reviewRun.finalMessage}</pre>
+                <summary>
+                  {textExcerpt
+                    ? loadedReviewOutput === undefined
+                      ? 'Raw review output excerpt'
+                      : 'Retained review artifact'
+                    : 'Raw review output'}
+                </summary>
+                <pre>{loadedReviewOutput ?? reviewRun?.finalMessage}</pre>
+                {textExcerpt ? (
+                  <div>
+                    <p>
+                      Displayed {textExcerpt.displayedByteCount.toLocaleString()} of{' '}
+                      {textExcerpt.originalByteCount.toLocaleString()} bytes.
+                    </p>
+                    {textExcerpt.availableContent.kind === 'BOUNDED_ARTIFACT' &&
+                    loadedReviewOutput === undefined ? (
+                      <button
+                        type="button"
+                        className="tm-btn tm-btn--soft"
+                        disabled={reviewOutputLoading}
+                        onClick={onLoadReviewOutput}
+                      >
+                        {reviewOutputLoading
+                          ? 'Loading review artifact…'
+                          : 'Load available review artifact'}
+                      </button>
+                    ) : textExcerpt.availableContent.kind === 'NOT_AVAILABLE' ? (
+                      <p>Additional content is not available from retained evidence.</p>
+                    ) : null}
+                    {reviewOutputError ? (
+                      <div className="tm-error">{reviewOutputError}</div>
+                    ) : null}
+                  </div>
+                ) : null}
               </details>
             ) : null}
           </div>

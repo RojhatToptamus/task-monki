@@ -13,6 +13,7 @@ import {
   type CreateTaskRequest,
   type CreateBoardRequest,
   type Board,
+  type BoardSnapshot,
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
@@ -26,8 +27,8 @@ import {
   type PreviewResolvedAttachmentTarget,
   type ResolvePreviewResult,
   type Task,
+  type TaskDetailSnapshot,
   type TaskManagerAppSettings,
-  type TaskSnapshot,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
   type WorkflowPhase
@@ -51,8 +52,12 @@ import {
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import {
   createUpdateRefreshScheduler,
-  taskSnapshotRefreshKind
+  taskDataRefreshPlan
 } from '../model/updateRefreshScheduler';
+import {
+  createTaskDataReadCoordinator,
+  type TaskDataReadCoordinator
+} from '../model/taskDataReadCoordinator';
 import { selectBoardTasks } from '../model/boards';
 import {
   dragNewTaskCanvas,
@@ -65,7 +70,6 @@ import {
   resolveRepositorySetupState,
   resolveSelectedRepositoryId
 } from '../model/repositories';
-import { selectPreviewTaskRouteOptions } from '../model/previewBindings';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from '../model/taskView';
@@ -97,46 +101,15 @@ import {
   SettingsIcon
 } from './AppNavigation';
 
-const SNAPSHOT_REFRESH_DELAY_MS = 50;
+const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
 
-const emptySnapshot: TaskSnapshot = {
+const emptyBoardSnapshot: BoardSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
   repositories: [],
   boards: [],
   tasks: [],
-  iterations: [],
-  worktrees: [],
-  gitSnapshots: [],
-  githubRepositories: [],
-  branchPublications: [],
-  pullRequests: [],
-  ciRollups: [],
-  reviewRollups: [],
-  mergeSnapshots: [],
-  runs: [],
-  agentServers: [],
-  agentSessions: [],
-  agentItems: [],
-  agentGoalSnapshots: [],
-  agentPlanRevisions: [],
-  agentUsageSnapshots: [],
-  agentSettingsObservations: [],
-  agentSubagentObservations: [],
-  interactionRequests: [],
-  previewPlans: [],
-  previewLocalBindings: [],
-  previewApprovals: [],
-  previewComposeProjects: [],
-  previewGenerations: [],
-  previewManagedEnvironments: [],
-  previewManagedResources: [],
-  previewGenerationAttachments: [],
-  previewNodeAttempts: [],
-  previewResources: [],
-  events: [],
-  artifacts: [],
-  attachments: []
+  interactionRequests: []
 };
 
 function prefersDarkScheme(): boolean {
@@ -145,7 +118,7 @@ function prefersDarkScheme(): boolean {
 
 function retainTaskEntries<T>(
   current: Record<string, T>,
-  tasks: Array<Pick<Task, 'id'>>
+  tasks: Array<{ id: string }>
 ): Record<string, T> {
   const liveTaskIds = new Set(tasks.map((task) => task.id));
   const retainedEntries = Object.entries(current).filter(([taskId]) => liveTaskIds.has(taskId));
@@ -187,7 +160,8 @@ function isHorizontalCanvasControl(target: EventTarget | null): boolean {
 
 export function App() {
   const [inputModality, setInputModality] = useState<'keyboard' | 'pointer'>('pointer');
-  const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
+  const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptyBoardSnapshot);
+  const [taskDetail, setTaskDetail] = useState<TaskDetailSnapshot>();
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
   const [isAddingRepository, setIsAddingRepository] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -207,6 +181,8 @@ export function App() {
     prompt: ''
   });
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | undefined>();
+  const [deleteCandidateDetail, setDeleteCandidateDetail] =
+    useState<TaskDetailSnapshot>();
   const [repositoryDisconnect, setRepositoryDisconnect] = useState<{
     repository: Repository;
     impact: RepositoryImpact;
@@ -230,6 +206,7 @@ export function App() {
   const canvasDragRef = useRef<
     { pointerId: number; startX: number; startScrollLeft: number } | undefined
   >(undefined);
+  const deleteCandidateGenerationRef = useRef(0);
   const [previewExecutionReadiness, setPreviewExecutionReadiness] = useState<
     Record<string, PreviewExecutionReadiness>
   >({});
@@ -415,6 +392,36 @@ export function App() {
     },
     [notify]
   );
+  const taskDataCoordinatorRef = useRef<TaskDataReadCoordinator | undefined>(
+    undefined
+  );
+  if (!taskDataCoordinatorRef.current) {
+    taskDataCoordinatorRef.current = createTaskDataReadCoordinator({
+      readBoard: () => taskManagerApi.getBoardSnapshot(),
+      readTaskDetail: (taskId) => taskManagerApi.getTaskDetail(taskId),
+      applyBoard: (next) => {
+        setSnapshot(next);
+        setPreviewExecutionReadiness((current) =>
+          retainTaskEntries(current, next.tasks)
+        );
+        setPreviewResolutions((current) => retainTaskEntries(current, next.tasks));
+        setPreviewRecipeGenerations((current) =>
+          retainTaskEntries(current, next.tasks)
+        );
+      },
+      applyTaskDetail: (detail) => {
+        setTaskDetail(detail);
+        setError(undefined);
+      },
+      reportBoardError: (caught) => {
+        reportActionError(caught, 'Failed to refresh the task board.');
+      },
+      reportTaskDetailError: (_taskId, caught) => {
+        reportActionError(caught, 'Failed to refresh task detail.');
+      }
+    });
+  }
+  const taskDataCoordinator = taskDataCoordinatorRef.current;
   const updateAppSettings = useCallback(
     async (patch: UpdateAppSettingsRequest, successMessage = 'Settings updated.') => {
       try {
@@ -445,18 +452,11 @@ export function App() {
   }, [appSettings.sidebarCollapsed, updateAppSettings]);
 
   const refresh = useCallback(async () => {
-    const next = await taskManagerApi.listTasks();
-    setSnapshot(next);
-    setPreviewExecutionReadiness((current) => {
-      const liveTaskIds = new Set(next.tasks.map((task) => task.id));
-      const retainedEntries = Object.entries(current).filter(([taskId]) => liveTaskIds.has(taskId));
-      return retainedEntries.length === Object.keys(current).length
-        ? current
-        : Object.fromEntries(retainedEntries);
-    });
-    setPreviewResolutions((current) => retainTaskEntries(current, next.tasks));
-    setPreviewRecipeGenerations((current) => retainTaskEntries(current, next.tasks));
-  }, []);
+    await Promise.all([
+      taskDataCoordinator.refreshBoard(),
+      taskDataCoordinator.refreshSelectedTask()
+    ]);
+  }, [taskDataCoordinator]);
   const refreshExternalToolStatus = useCallback(async () => {
     setError(undefined);
     try {
@@ -583,15 +583,21 @@ export function App() {
   }, [refresh, refreshDiscourseAttention]);
 
   useEffect(() => {
-    const snapshotRefresh = createUpdateRefreshScheduler({
-      delayMs: SNAPSHOT_REFRESH_DELAY_MS,
-      refresh,
+    const boardRefresh = createUpdateRefreshScheduler({
+      delayMs: AUTHORITATIVE_REFRESH_DELAY_MS,
+      refresh: taskDataCoordinator.refreshBoard,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const detailRefresh = createUpdateRefreshScheduler({
+      delayMs: AUTHORITATIVE_REFRESH_DELAY_MS,
+      refresh: taskDataCoordinator.refreshSelectedTask,
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle as number)
     });
     const selectedActivityRefresh = createUpdateRefreshScheduler({
       delayMs: SELECTED_ACTIVITY_REFRESH_DELAY_MS,
-      refresh,
+      refresh: taskDataCoordinator.refreshSelectedTask,
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle as number)
     });
@@ -627,28 +633,31 @@ export function App() {
           [event.taskId]: recipeGeneration
         }));
       }
-      const refreshKind = taskSnapshotRefreshKind(event, {
-        open: isDetailOpen,
-        taskId: selectedTaskId
+      const refreshPlan = taskDataRefreshPlan(event, {
+        open: Boolean(taskDataCoordinator.selectedTaskId()),
+        taskId: taskDataCoordinator.selectedTaskId()
       });
-      if (refreshKind === 'NONE') {
-        return;
+      if (refreshPlan.board) {
+        boardRefresh.request();
       }
-      if (refreshKind === 'SELECTED_ACTIVITY') {
+      if (refreshPlan.detail === 'SELECTED_ACTIVITY') {
         selectedActivityRefresh.request();
         return;
       }
-      selectedActivityRefresh.cancelPending();
-      snapshotRefresh.request();
+      if (refreshPlan.detail === 'IMMEDIATE') {
+        selectedActivityRefresh.cancelPending();
+        detailRefresh.request();
+      }
     });
     return () => {
       unsubscribe();
-      snapshotRefresh.dispose();
+      boardRefresh.dispose();
+      detailRefresh.dispose();
       selectedActivityRefresh.dispose();
       runtimeCatalogRefresh.dispose();
       discourseAttentionRefresh.dispose();
     };
-  }, [isDetailOpen, refresh, refreshDiscourseAttention, selectedTaskId]);
+  }, [refreshDiscourseAttention, taskDataCoordinator]);
 
   const theme = appSettings.theme;
   const isSidebarCollapsed = appSettings.sidebarCollapsed;
@@ -701,8 +710,15 @@ export function App() {
   }, [activeRepositoryId, selectedRepositoryId, updateAppSettings]);
 
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
-  const selectedTask = selectedTaskCandidate;
-  const deleteCandidate = snapshot.tasks.find((task) => task.id === deleteCandidateId);
+  const selectedTask =
+    taskDetail && taskDetail.task.id === selectedTaskId
+      ? taskDetail.task
+      : undefined;
+  const deleteCandidate =
+    deleteCandidateDetail &&
+    deleteCandidateDetail.task.id === deleteCandidateId
+      ? deleteCandidateDetail.task
+      : undefined;
 
   useEffect(() => {
     if (!selectedTaskId || isLoading) {
@@ -714,153 +730,99 @@ export function App() {
     setSelectedTaskId(undefined);
     setLastTaskId((current) => (current === selectedTaskId ? undefined : current));
     setIsDetailOpen(false);
-  }, [isLoading, selectedTaskId, snapshot.tasks]);
+    setTaskDetail(undefined);
+    taskDataCoordinator.closeTask();
+  }, [isLoading, selectedTaskId, snapshot.tasks, taskDataCoordinator]);
   const selectedRuns = useMemo(
-    () => (selectedTask ? selectTaskRuns(snapshot, selectedTask.id) : []),
-    [selectedTask, snapshot]
+    () =>
+      selectedTask && taskDetail
+        ? selectTaskRuns(taskDetail, selectedTask.id)
+        : [],
+    [selectedTask, taskDetail]
   );
   const selectedRun = selectedTask ? selectActiveRun(selectedTask, selectedRuns) : undefined;
   const selectedEvents = useMemo(
-    () => (selectedTask ? selectTaskEvents(snapshot, selectedTask.id) : []),
-    [selectedTask, snapshot]
-  );
-  const selectedInteractions = useMemo(
     () =>
-      selectedTask
-        ? snapshot.interactionRequests.filter(
-            (interaction) => interaction.taskId === selectedTask.id
-          )
+      selectedTask && taskDetail
+        ? selectTaskEvents(taskDetail, selectedTask.id)
         : [],
-    [selectedTask, snapshot.interactionRequests]
+    [selectedTask, taskDetail]
   );
-  const selectedSessions = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.agentSessions.filter((session) => session.taskId === selectedTask.id)
-        : [],
-    [selectedTask, snapshot.agentSessions]
-  );
-  const selectedItems = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.agentItems.filter((item) => item.taskId === selectedTask.id)
-        : [],
-    [selectedTask, snapshot.agentItems]
-  );
-  const selectedGoals = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.agentGoalSnapshots.filter((goal) => goal.taskId === selectedTask.id)
-        : [],
-    [selectedTask, snapshot.agentGoalSnapshots]
-  );
-  const selectedPlans = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.agentPlanRevisions.filter((plan) => plan.taskId === selectedTask.id)
-        : [],
-    [selectedTask, snapshot.agentPlanRevisions]
-  );
-  const selectedUsage = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.agentUsageSnapshots.filter((usage) => usage.taskId === selectedTask.id)
-        : [],
-    [selectedTask, snapshot.agentUsageSnapshots]
-  );
-  const selectedSettings = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.agentSettingsObservations.filter(
-            (observation) => observation.taskId === selectedTask.id
-          )
-        : [],
-    [selectedTask, snapshot.agentSettingsObservations]
-  );
-  const selectedSubagentObservations = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.agentSubagentObservations.filter(
-            (observation) => observation.taskId === selectedTask.id
-          )
-        : [],
-    [selectedTask, snapshot.agentSubagentObservations]
-  );
-  const selectedPreviewPlans = selectedTask
-    ? snapshot.previewPlans.filter((record) => record.taskId === selectedTask.id)
+  const selectedInteractions = selectedTask ? taskDetail?.interactionRequests ?? [] : [];
+  const selectedSessions = selectedTask ? taskDetail?.agentSessions ?? [] : [];
+  const selectedItems = selectedTask ? taskDetail?.agentItems ?? [] : [];
+  const selectedGoals = selectedTask ? taskDetail?.agentGoalSnapshots ?? [] : [];
+  const selectedPlans = selectedTask ? taskDetail?.agentPlanRevisions ?? [] : [];
+  const selectedUsage = selectedTask ? taskDetail?.agentUsageSnapshots ?? [] : [];
+  const selectedSettings = selectedTask
+    ? taskDetail?.agentSettingsObservations ?? []
     : [];
-  const selectedPreviewApprovals = selectedTask
-    ? snapshot.previewApprovals.filter((record) => record.taskId === selectedTask.id)
+  const selectedSubagentObservations = selectedTask
+    ? taskDetail?.agentSubagentObservations ?? []
     : [];
+  const selectedPreviewPlans = selectedTask ? taskDetail?.previewPlans ?? [] : [];
+  const selectedPreviewApprovals = selectedTask ? taskDetail?.previewApprovals ?? [] : [];
   const selectedPreviewGenerations = selectedTask
-    ? snapshot.previewGenerations.filter((record) => record.taskId === selectedTask.id)
+    ? taskDetail?.previewGenerations ?? []
     : [];
   const selectedPreviewGenerationAttachments = selectedTask
-    ? snapshot.previewGenerationAttachments.filter((record) => record.taskId === selectedTask.id)
+    ? taskDetail?.previewGenerationAttachments ?? []
     : [];
   const selectedPreviewManagedResources = selectedTask
-    ? snapshot.previewManagedResources.filter((record) => record.taskId === selectedTask.id)
+    ? taskDetail?.previewManagedResources ?? []
     : [];
   const selectedPreviewComposeProjects = selectedTask
-    ? snapshot.previewComposeProjects.filter((record) => record.taskId === selectedTask.id)
+    ? taskDetail?.previewComposeProjects ?? []
     : [];
   const selectedPreviewLocalBindings = selectedTask
-    ? snapshot.previewLocalBindings.filter((record) => record.taskId === selectedTask.id)
+    ? taskDetail?.previewLocalBindings ?? []
     : [];
   const selectedPreviewRuntimeResources = selectedTask
-    ? snapshot.previewResources.filter((record) => record.taskId === selectedTask.id)
+    ? taskDetail?.previewResources ?? []
     : [];
   const selectedPreviewNodeAttempts = selectedTask
-    ? snapshot.previewNodeAttempts.filter((record) => record.taskId === selectedTask.id)
+    ? taskDetail?.previewNodeAttempts ?? []
     : [];
-  const selectedPreviewTaskRoutes = useMemo(
-    () => selectedTask
-      ? selectPreviewTaskRouteOptions(
-          snapshot.tasks,
-          snapshot.previewPlans,
-          snapshot.previewGenerations,
-          selectedTask.id
-        )
-      : [],
-    [selectedTask, snapshot.previewGenerations, snapshot.previewPlans, snapshot.tasks]
-  );
-  const selectedGitSnapshots = useMemo(
-    () =>
-      selectedTask
-        ? snapshot.gitSnapshots.filter(
-            (gitSnapshot) => gitSnapshot.taskId === selectedTask.id
-          )
-        : [],
-    [selectedTask, snapshot.gitSnapshots]
-  );
+  const selectedPreviewTaskRoutes = selectedTask
+    ? taskDetail?.previewTaskRoutes ?? []
+    : [];
+  const selectedGitSnapshots = selectedTask ? taskDetail?.gitSnapshots ?? [] : [];
   const selectedTaskAttachments = useMemo(
     () =>
-      selectedTask
-        ? snapshot.attachments
-            .filter((attachment) => attachment.taskId === selectedTask.id)
-            .sort((left, right) => left.ordinal - right.ordinal)
+      selectedTask && taskDetail
+        ? [...taskDetail.attachments].sort((left, right) => left.ordinal - right.ordinal)
         : [],
-    [selectedTask, snapshot.attachments]
+    [selectedTask, taskDetail]
   );
-  const selectedWorktree = selectedTask ? selectCurrentWorktree(snapshot, selectedTask) : undefined;
-  const selectedGitSnapshot = selectedTask
-    ? selectLatestGitSnapshot(snapshot, selectedTask)
+  const selectedWorktree = selectedTask && taskDetail
+    ? selectCurrentWorktree(taskDetail, selectedTask)
     : undefined;
-  const selectedGitHubRepository = selectedTask
-    ? selectLatestGitHubRepository(snapshot, selectedTask)
+  const selectedGitSnapshot = selectedTask && taskDetail
+    ? selectLatestGitSnapshot(taskDetail, selectedTask)
     : undefined;
-  const selectedBranchPublication = selectedTask
-    ? selectLatestBranchPublication(snapshot, selectedTask)
+  const selectedGitHubRepository = selectedTask && taskDetail
+    ? selectLatestGitHubRepository(taskDetail, selectedTask)
     : undefined;
-  const selectedPullRequest = selectedTask ? selectLatestPullRequest(snapshot, selectedTask) : undefined;
-  const selectedCiRollup = selectedTask ? selectLatestCiRollup(snapshot, selectedTask) : undefined;
-  const selectedReviewRollup = selectedTask ? selectLatestReviewRollup(snapshot, selectedTask) : undefined;
-  const selectedMergeSnapshot = selectedTask ? selectLatestMergeSnapshot(snapshot, selectedTask) : undefined;
-  const deleteCandidateWorktree = deleteCandidate
-    ? selectCurrentWorktree(snapshot, deleteCandidate)
+  const selectedBranchPublication = selectedTask && taskDetail
+    ? selectLatestBranchPublication(taskDetail, selectedTask)
     : undefined;
-  const deleteCandidateGitSnapshot = deleteCandidate
-    ? selectLatestGitSnapshot(snapshot, deleteCandidate)
+  const selectedPullRequest = selectedTask && taskDetail
+    ? selectLatestPullRequest(taskDetail, selectedTask)
+    : undefined;
+  const selectedCiRollup = selectedTask && taskDetail
+    ? selectLatestCiRollup(taskDetail, selectedTask)
+    : undefined;
+  const selectedReviewRollup = selectedTask && taskDetail
+    ? selectLatestReviewRollup(taskDetail, selectedTask)
+    : undefined;
+  const selectedMergeSnapshot = selectedTask && taskDetail
+    ? selectLatestMergeSnapshot(taskDetail, selectedTask)
+    : undefined;
+  const deleteCandidateWorktree = deleteCandidate && deleteCandidateDetail
+    ? selectCurrentWorktree(deleteCandidateDetail, deleteCandidate)
+    : undefined;
+  const deleteCandidateGitSnapshot = deleteCandidate && deleteCandidateDetail
+    ? selectLatestGitSnapshot(deleteCandidateDetail, deleteCandidate)
     : undefined;
   const disabledRuntimeIds = useMemo(
     () => new Set(appSettings.disabledRuntimeIds),
@@ -960,16 +922,36 @@ export function App() {
     ]
   );
 
+  const openTaskDetail = useCallback(
+    (taskId: string, trigger?: HTMLElement) => {
+      if (trigger) {
+        taskNavigationReturnFocusRef.current = trigger;
+      }
+      taskNavigationReturnIdRef.current = taskId;
+      setSelectedTaskId(taskId);
+      setLastTaskId(taskId);
+      setTaskDetail(undefined);
+      setError(undefined);
+      setIsDetailOpen(true);
+      return taskDataCoordinator.openTask(taskId);
+    },
+    [taskDataCoordinator]
+  );
+
+  const closeTaskDetail = useCallback(() => {
+    taskDataCoordinator.closeTask();
+    setIsDetailOpen(false);
+    setTaskDetail(undefined);
+  }, [taskDataCoordinator]);
+
   const createTask = async (input: CreateTaskRequest) => {
     try {
       const created = await taskManagerApi.createTask(input);
       taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
-      taskNavigationReturnIdRef.current = created.id;
-      setSelectedTaskId(created.id);
-      setIsDetailOpen(true);
       setNewTaskTextDraft({ title: '', prompt: '' });
       notify('Task created.', 'success');
-      await refresh();
+      await taskDataCoordinator.refreshBoard();
+      await openTaskDetail(created.id);
     } catch (caught) {
       reportActionError(caught, 'Could not create task.');
       throw caught;
@@ -1273,6 +1255,15 @@ export function App() {
     }
   };
 
+  const readArtifact = async (artifactId: string) => {
+    try {
+      return await taskManagerApi.readArtifact({ artifactId });
+    } catch (caught) {
+      reportActionError(caught, 'Could not read the retained artifact.');
+      throw caught;
+    }
+  };
+
   const transitionTask = async (taskId: string, toPhase: WorkflowPhase) => {
     setError(undefined);
     try {
@@ -1288,8 +1279,20 @@ export function App() {
     void transitionTask(taskId, 'ARCHIVED');
   };
 
-  const requestDeleteTask = (taskId: string) => {
+  const requestDeleteTask = async (taskId: string) => {
+    const generation = ++deleteCandidateGenerationRef.current;
     setDeleteCandidateId(taskId);
+    setDeleteCandidateDetail(undefined);
+    try {
+      const detail = await taskManagerApi.getTaskDetail(taskId);
+      if (generation === deleteCandidateGenerationRef.current) {
+        setDeleteCandidateDetail(detail);
+      }
+    } catch (caught) {
+      if (generation !== deleteCandidateGenerationRef.current) return;
+      setDeleteCandidateId(undefined);
+      reportActionError(caught, 'Could not load deletion evidence.');
+    }
   };
 
   const deleteTask = async (
@@ -1300,9 +1303,10 @@ export function App() {
     try {
       const deleted = await taskManagerApi.deleteTask({ taskId, removeWorktree });
       setDeleteCandidateId(undefined);
+      setDeleteCandidateDetail(undefined);
       if (selectedTaskId === taskId) {
         setSelectedTaskId(undefined);
-        setIsDetailOpen(false);
+        closeTaskDetail();
       }
       setLastTaskId((current) => (current === taskId ? undefined : current));
       notify(
@@ -1331,7 +1335,7 @@ export function App() {
   const steerRun = async (runId: string, instruction: string) => {
     setError(undefined);
     try {
-      const run = snapshot.runs.find((candidate) => candidate.id === runId);
+      const run = selectedRuns.find((candidate) => candidate.id === runId);
       if (!run) {
         throw new Error('Run not found.');
       }
@@ -1347,13 +1351,13 @@ export function App() {
   const continueRun = async (runId: string, instruction?: string) => {
     setError(undefined);
     try {
-      const run = snapshot.runs.find((candidate) => candidate.id === runId);
+      const run = selectedRuns.find((candidate) => candidate.id === runId);
       if (!run) {
         throw new Error('Run not found.');
       }
-      const task = snapshot.tasks.find((candidate) => candidate.id === run.taskId);
       const recoveryContinuation =
-        run.status !== 'COMPLETED' || Boolean(task && getImplementationRetryReason(task));
+        run.status !== 'COMPLETED' ||
+        Boolean(selectedTask && getImplementationRetryReason(selectedTask));
       await taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction });
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
@@ -1373,7 +1377,7 @@ export function App() {
   ) => {
     setError(undefined);
     try {
-      const run = snapshot.runs.find((candidate) => candidate.id === runId);
+      const run = selectedRuns.find((candidate) => candidate.id === runId);
       if (!run) {
         throw new Error('Run not found.');
       }
@@ -1384,14 +1388,15 @@ export function App() {
         instruction
       });
       if (strategy === 'FORK') {
-        setSelectedTaskId(retry.taskId);
-        setIsDetailOpen(true);
+        await taskDataCoordinator.refreshBoard();
+        await openTaskDetail(retry.taskId);
+      } else {
+        await refresh();
       }
       notify(
         strategy === 'FORK' ? 'Alternative task started.' : 'Implementation retry started.',
         'success'
       );
-      await refresh();
     } catch (caught) {
       if (strategy === 'FORK') {
         try {
@@ -1408,7 +1413,7 @@ export function App() {
   const startReview = async (runId: string) => {
     setError(undefined);
     try {
-      const run = snapshot.runs.find((candidate) => candidate.id === runId);
+      const run = selectedRuns.find((candidate) => candidate.id === runId);
       if (!run) {
         throw new Error('Run not found.');
       }
@@ -1490,12 +1495,18 @@ export function App() {
       }
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
-      setIsDetailOpen(false);
+      closeTaskDetail();
       setError(undefined);
       const repository = snapshot.repositories.find((candidate) => candidate.id === repositoryId);
       notify(`New tasks will use ${repository?.name ?? 'this repository'}.`, 'success');
     },
-    [activeRepositoryId, notify, snapshot.repositories, updateAppSettings]
+    [
+      activeRepositoryId,
+      closeTaskDetail,
+      notify,
+      snapshot.repositories,
+      updateAppSettings
+    ]
   );
 
   const addRepository = useCallback(async () => {
@@ -1516,7 +1527,7 @@ export function App() {
       }
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
-      setIsDetailOpen(false);
+      closeTaskDetail();
       setIsNewTaskOpen(false);
       await refresh();
       notify(`Added ${repository.name}.`, 'success');
@@ -1527,7 +1538,7 @@ export function App() {
     } finally {
       setIsAddingRepository(false);
     }
-  }, [notify, refresh, reportActionError, updateAppSettings]);
+  }, [closeTaskDetail, notify, refresh, reportActionError, updateAppSettings]);
 
   const refreshRepository = useCallback(
     async (repositoryId: string) => {
@@ -1606,14 +1617,14 @@ export function App() {
         setBoardEditor(undefined);
         setSelectedBoardId(board.id);
         setView('board');
-        setIsDetailOpen(false);
+        closeTaskDetail();
         notify(`${board.name} saved.`, 'success');
       } catch (caught) {
         reportActionError(caught, 'Could not save board.');
         throw caught;
       }
     },
-    [boardEditor, notify, refresh, reportActionError]
+    [boardEditor, closeTaskDetail, notify, refresh, reportActionError]
   );
 
   const deleteBoard = useCallback(
@@ -1663,7 +1674,7 @@ export function App() {
       setView('board');
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
-      setIsDetailOpen(false);
+      closeTaskDetail();
       setIsNewTaskOpen(false);
       setError(undefined);
       notify('Setup complete.', 'success');
@@ -1671,20 +1682,23 @@ export function App() {
       reportActionError(caught, 'Could not finish setup.');
       throw caught;
     }
-  }, [activeRepositoryId, appSettings.defaultRuntimeId, notify, reportActionError]);
+  }, [
+    activeRepositoryId,
+    appSettings.defaultRuntimeId,
+    closeTaskDetail,
+    notify,
+    reportActionError
+  ]);
 
   const selectTask = (taskId: string, trigger?: HTMLElement) => {
     taskNavigationReturnFocusRef.current =
       trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    taskNavigationReturnIdRef.current = taskId;
-    setSelectedTaskId(taskId);
-    setLastTaskId(taskId);
-    setIsDetailOpen(true);
+    void openTaskDetail(taskId, trigger);
   };
 
   // Back: from an open task to the view it was opened from.
   const goBack = () => {
-    setIsDetailOpen(false);
+    closeTaskDetail();
     window.requestAnimationFrame(() => {
       taskNavigationReturnTarget(
         taskNavigationReturnFocusRef.current,
@@ -1698,21 +1712,20 @@ export function App() {
   // Forward: re-open the last task that was viewed.
   const goForward = () => {
     if (lastTaskId) {
-      setSelectedTaskId(lastTaskId);
-      setIsDetailOpen(true);
+      void openTaskDetail(lastTaskId);
     }
   };
 
   const showView = (next: AppView) => {
     setView(next);
     setSelectedBoardId(undefined);
-    setIsDetailOpen(false);
+    closeTaskDetail();
   };
 
   const showBoard = (boardId: string) => {
     setSelectedBoardId(boardId);
     setView('board');
-    setIsDetailOpen(false);
+    closeTaskDetail();
   };
 
   const canGoBack = isDetailOpen;
@@ -1720,7 +1733,7 @@ export function App() {
 
   const navCounts = computeNavCounts(snapshot.tasks);
 
-  const showDetail = isDetailOpen && Boolean(selectedTask);
+  const showDetail = isDetailOpen && Boolean(selectedTaskCandidate);
 
   useEffect(() => {
     if (!showDetail) {
@@ -1972,14 +1985,12 @@ export function App() {
           />
         </aside>
 
-        {showDetail ? (
+        {showDetail && selectedTask && taskDetail ? (
           <TaskDetail
             headingRef={taskDetailHeadingRef}
             error={error}
             task={selectedTask}
-            repository={snapshot.repositories.find(
-              (repository) => repository.id === selectedTask?.repositoryId
-            )}
+            repository={taskDetail.repository}
             run={selectedRun}
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
@@ -2000,10 +2011,11 @@ export function App() {
             settingsObservations={selectedSettings}
             subagentObservations={selectedSubagentObservations}
             runtimeState={selectedTaskRuntimeState}
-            server={snapshot.agentServers.find(
+            server={taskDetail.agentServers.find(
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}
-            artifacts={snapshot.artifacts}
+            artifacts={taskDetail.artifacts}
+            textExcerpts={taskDetail.textExcerpts}
             attachments={selectedTaskAttachments}
             interactions={selectedInteractions}
             previewPlans={selectedPreviewPlans}
@@ -2052,11 +2064,28 @@ export function App() {
             onResetPreviewData={resetPreviewData}
             onRetryPreviewSetup={retryPreviewSetup}
             onReadPreviewLog={readPreviewLog}
+            onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
             onModalOpenChange={setIsTaskDetailModalOpen}
           />
+        ) : showDetail ? (
+          <main className="tm-main" aria-live="polite">
+            <div className="tm-main__head">
+              <div>
+                <h1 className="tm-main__title">
+                  {selectedTaskCandidate?.title ?? 'Task'}
+                </h1>
+                <span className="tm-main__subtitle">
+                  {error
+                    ? 'Task detail could not be loaded.'
+                    : 'Loading current task detail…'}
+                </span>
+              </div>
+            </div>
+            {error ? <div className="tm-error">{error}</div> : null}
+          </main>
         ) : view === 'discourse' ? (
           <DiscourseWorkspace onNotify={notify} onError={reportActionError} />
         ) : (
@@ -2125,7 +2154,11 @@ export function App() {
           task={deleteCandidate}
           worktree={deleteCandidateWorktree}
           gitSnapshot={deleteCandidateGitSnapshot}
-          onCancel={() => setDeleteCandidateId(undefined)}
+          onCancel={() => {
+            deleteCandidateGenerationRef.current += 1;
+            setDeleteCandidateId(undefined);
+            setDeleteCandidateDetail(undefined);
+          }}
           onConfirm={(removeWorktree) => deleteTask(deleteCandidate.id, removeWorktree)}
           fallbackReturnFocusRef={appRootRef}
         />

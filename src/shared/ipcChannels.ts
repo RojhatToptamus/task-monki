@@ -88,7 +88,8 @@ export const IPC_INVOKE_CHANNELS = [
   'settings:update',
   'task:create',
   'task:delete',
-  'task:list',
+  'task:getBoardSnapshot',
+  'task:getDetail',
   'task:transition',
   'worktree:prepare'
 ] as const;

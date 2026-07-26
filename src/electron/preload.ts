@@ -129,7 +129,8 @@ const api: TaskManagerApi = {
     invokeIpc('agent:discoverRuntimeModels', runtimeId),
   updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
     invokeIpc('agent:updateNativeSession', input),
-  listTasks: () => invokeIpc('task:list'),
+  getBoardSnapshot: () => invokeIpc('task:getBoardSnapshot'),
+  getTaskDetail: (taskId) => invokeIpc('task:getDetail', taskId),
   listDiscourseConversations: (input?: ListDiscourseConversationsRequest) =>
     invokeIpc('discourse:conversations:list', input),
   getDiscourseConversation: (conversationId: string) =>

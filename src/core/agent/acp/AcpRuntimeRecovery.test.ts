@@ -138,7 +138,7 @@ describe('ACP cold recovery', () => {
       expect(
         snapshot.events.slice(beforeEventCount).map((event) => event.type)
       ).toEqual(['AGENT_RUNTIME_LOST', 'AGENT_RUNTIME_RECONCILED']);
-      expect(observedAppEvents).toContain('run.activity');
+      expect(observedAppEvents).toContain('run.state.updated');
       expect(observedAppEvents).not.toContain('run.started');
       expect(observedAppEvents).not.toContain('run.output');
       await expect(fs.access(journalPath)).rejects.toMatchObject({ code: 'ENOENT' });
