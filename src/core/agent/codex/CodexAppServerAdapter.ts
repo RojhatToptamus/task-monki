@@ -108,19 +108,21 @@ import type {
   AgentProtocolMessageReference,
   CodexExternalToolSettings
 } from '../../../shared/agent';
+import { isImplementationRunMode } from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
 import {
   assertCodexAttachmentExternalToolsDisabled,
   normalizeCodexExternalToolSettings
 } from './CodexToolConfig';
 import {
-  resolveReviewGitExecutablePath,
-  resolveReviewGitMetadata
-} from '../../git/ReviewGitMetadata';
+  resolveAgentGitExecutablePath,
+  resolveAgentGitMetadata
+} from '../../git/AgentGitMetadata';
 import type { ServerNotification } from './protocol/generated/ServerNotification';
 import type { ServerRequest } from './protocol/generated/ServerRequest';
 import type { Model } from './protocol/generated/v2/Model';
 import type { ApprovalsReviewer } from './protocol/generated/v2/ApprovalsReviewer';
+import type { CollaborationMode } from './protocol/generated/CollaborationMode';
 import type { ThreadItem } from './protocol/generated/v2/ThreadItem';
 import type { Thread } from './protocol/generated/v2/Thread';
 import type { ThreadGoal } from './protocol/generated/v2/ThreadGoal';
@@ -133,6 +135,7 @@ import type { CollabAgentStatus } from './protocol/generated/v2/CollabAgentStatu
 import type { SubAgentActivityKind } from './protocol/generated/v2/SubAgentActivityKind';
 import type { TurnStatus } from './protocol/generated/v2/TurnStatus';
 import type { ReviewTarget } from './protocol/generated/v2/ReviewTarget';
+import type { TurnStartParams } from './protocol/generated/v2/TurnStartParams';
 import type { JsonValue } from './protocol/generated/serde_json/JsonValue';
 import {
   describeAccount,
@@ -179,6 +182,9 @@ const SUBMITTED_RUN_STATES: RunRecord['status'][] = [
   'AWAITING_USER_INPUT',
   'INTERRUPTING'
 ];
+
+const CODEX_INTERACTIVE_IMPLEMENTATION_INSTRUCTIONS =
+  'You are in implementation mode, not planning-only mode. You may inspect and modify files, run commands, and complete the coding task. Use request_user_input only when clarification is genuinely required, wait for its response, and then continue the same turn to finish the implementation.';
 
 function isTerminalRunStatus(status: RunRecord['status']): boolean {
   return ['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(status);
@@ -1086,7 +1092,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     }
     let response;
     try {
-      response = await client.requestMutation('turn/start', {
+      const turnStartParams: TurnStartParams & {
+        collaborationMode?: CollaborationMode;
+      } = {
         threadId: providerThreadId,
         clientUserMessageId: input.localRunId,
         input: [
@@ -1104,8 +1112,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         effort: settings.reasoningEffort ?? null,
         summary: 'auto',
         personality: null,
-        outputSchema: null
-      });
+        outputSchema: null,
+        ...codexInteractiveCollaborationMode(input, settings)
+      };
+      response = await client.requestMutation('turn/start', turnStartParams);
     } catch (error) {
       const mapped = mapMutationError('turn/start', error);
       if (requiresFirstTurnFence && error instanceof CodexRpcError) {
@@ -3043,6 +3053,42 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       }
     );
     this.emitInteractionUpdate(resolved);
+    await this.resumeAfterInteractionResolution(resolved);
+  }
+
+  private async resumeAfterInteractionResolution(
+    interaction: InteractionRequestRecord
+  ): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    if (
+      snapshot.interactionRequests.some(
+        (candidate) =>
+          candidate.runId === interaction.runId &&
+          candidate.sessionId === interaction.sessionId &&
+          candidate.serverInstanceId === interaction.serverInstanceId &&
+          (candidate.status === 'PENDING' || candidate.status === 'RESPONDING')
+      )
+    ) {
+      return;
+    }
+    const run = snapshot.runs.find((candidate) => candidate.id === interaction.runId);
+    if (
+      run?.status === 'AWAITING_APPROVAL' ||
+      run?.status === 'AWAITING_USER_INPUT'
+    ) {
+      await this.recordRunActivity(run, 'serverRequest/resolved', {
+        resumeConfirmed: true
+      });
+    }
+    const session = snapshot.agentSessions.find(
+      (candidate) => candidate.id === interaction.sessionId
+    );
+    if (
+      session?.status === 'AWAITING_APPROVAL' ||
+      session?.status === 'AWAITING_USER_INPUT'
+    ) {
+      await this.store.updateAgentSession(session.id, { status: 'ACTIVE' });
+    }
   }
 
   private async handleTurnStarted(threadId: string, turn: Turn): Promise<void> {
@@ -4969,46 +5015,50 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     settings: AgentExecutionSettings,
     attachmentPaths: readonly string[] = []
   ) {
-    let additionalReadOnlyPaths: readonly string[] = [];
-    let reviewSubprocessConfig: Record<string, JsonValue> = {};
-    if (session.role === 'REVIEW') {
-      const worktree = await this.store.getWorktree(session.worktreeId);
-      if (
-        !worktree ||
-        worktree.taskId !== session.taskId ||
-        worktree.iterationId !== session.iterationId ||
-        worktree.worktreePath !== session.worktreePath
-      ) {
-        throw new Error(
-          'Cannot resolve trusted Git metadata for agent review: the review session worktree ownership is inconsistent.'
-        );
-      }
-      const repository = await this.store.getRepository(worktree.repositoryId);
-      if (!repository || repository.status !== 'AVAILABLE') {
-        throw new Error(
-          'Cannot resolve trusted Git metadata for agent review: the selected repository is unavailable.'
-        );
-      }
-      const metadata = await resolveReviewGitMetadata({
-        repositoryPath: repository.path,
-        worktreePath: worktree.worktreePath
-      });
-      const gitExecutablePath = await resolveReviewGitExecutablePath();
-      additionalReadOnlyPaths = [metadata.gitCommonDir];
-      reviewSubprocessConfig = codexReviewSubprocessConfig({
-        worktreePath: session.worktreePath,
-        gitExecutablePath
-      });
+    const permissionProfile = codexPermissionProfileConfig({
+      sessionId: session.id,
+      settings,
+      worktreePath: session.worktreePath,
+      attachmentPaths
+    });
+    if (settings.sandbox === 'DANGER_FULL_ACCESS') {
+      return permissionProfile;
     }
+    const worktree = await this.store.getWorktree(session.worktreeId);
+    if (
+      !worktree ||
+      worktree.taskId !== session.taskId ||
+      worktree.iterationId !== session.iterationId ||
+      worktree.worktreePath !== session.worktreePath
+    ) {
+      throw new Error(
+        'Cannot resolve trusted Git metadata for agent session: the session worktree ownership is inconsistent.'
+      );
+    }
+    const repository = await this.store.getRepository(worktree.repositoryId);
+    if (!repository || repository.status !== 'AVAILABLE') {
+      throw new Error(
+        'Cannot resolve trusted Git metadata for agent session: the selected repository is unavailable.'
+      );
+    }
+    const metadata = await resolveAgentGitMetadata({
+      repositoryPath: repository.path,
+      worktreePath: worktree.worktreePath
+    });
+    const gitExecutablePath = await resolveAgentGitExecutablePath();
     return {
       ...codexPermissionProfileConfig({
         sessionId: session.id,
         settings,
         worktreePath: session.worktreePath,
         attachmentPaths,
-        additionalReadOnlyPaths
+        additionalReadOnlyPaths: [metadata.gitCommonDir]
       }),
-      ...reviewSubprocessConfig
+      ...codexGitSubprocessConfig({
+        worktreePath: session.worktreePath,
+        gitExecutablePath,
+        isolateHome: session.role === 'REVIEW'
+      })
     };
   }
 
@@ -5166,6 +5216,27 @@ function redactOptionalProviderText(
   sensitiveValues: readonly string[]
 ): string | undefined {
   return value ? redactCredentialText(value, sensitiveValues) : undefined;
+}
+
+function codexInteractiveCollaborationMode(
+  input: Pick<StartAgentTurn, 'mode'>,
+  settings: AgentExecutionSettings
+): { collaborationMode: CollaborationMode } | undefined {
+  if (!isImplementationRunMode(input.mode)) return undefined;
+  const model = settings.model?.trim();
+  if (!model) {
+    throw new Error('Codex interactive implementation requires a resolved model.');
+  }
+  return {
+    collaborationMode: {
+      mode: 'plan',
+      settings: {
+        model,
+        reasoning_effort: settings.reasoningEffort ?? null,
+        developer_instructions: CODEX_INTERACTIVE_IMPLEMENTATION_INSTRUCTIONS
+      }
+    }
+  };
 }
 
 function toApprovalPolicy(
@@ -5393,9 +5464,10 @@ function hashString(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function codexReviewSubprocessConfig(input: {
+function codexGitSubprocessConfig(input: {
   worktreePath: string;
   gitExecutablePath: string;
+  isolateHome: boolean;
 }): Record<string, JsonValue> {
   const gitDirectory = path.dirname(input.gitExecutablePath);
   const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
@@ -5411,11 +5483,16 @@ function codexReviewSubprocessConfig(input: {
       ignore_default_excludes: false,
       set: {
         PATH: [gitDirectory, ...inheritedPath].join(path.delimiter),
-        HOME: input.worktreePath,
-        XDG_CONFIG_HOME: path.join(input.worktreePath, '.config'),
+        ...(input.isolateHome
+          ? {
+              HOME: input.worktreePath,
+              XDG_CONFIG_HOME: path.join(input.worktreePath, '.config')
+            }
+          : {}),
         GIT_CONFIG_GLOBAL: nullDevice,
         GIT_CONFIG_SYSTEM: nullDevice,
         GIT_CONFIG_NOSYSTEM: '1',
+        GIT_OPTIONAL_LOCKS: '0',
         GIT_CONFIG_COUNT: '1',
         GIT_CONFIG_KEY_0: 'core.excludesFile',
         GIT_CONFIG_VALUE_0: nullDevice

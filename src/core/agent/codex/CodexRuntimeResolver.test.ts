@@ -171,6 +171,27 @@ describe('Codex runtime resolution', () => {
     ).rejects.toThrow('review/start');
   });
 
+  it('rejects a runtime that cannot expose interactive collaboration modes', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-codex-collaboration-mode-')
+    );
+    const incomplete = await writeFakeCodex(path.join(dir, 'incomplete'), 'codex', {
+      version: '0.142.4',
+      missingMethods: ['collaborationMode/list']
+    });
+
+    await expect(
+      resolveCodexRuntime({
+        cwd: dir,
+        environment: process.env,
+        pathEntries: [path.dirname(incomplete)],
+        appBundleCandidates: [],
+        extensionRoots: [],
+        requestTimeoutMs: 1_000
+      })
+    ).rejects.toThrow('collaborationMode/list');
+  });
+
   it('rejects thread/start when the requested permission profile is not attested', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-profile-probe-'));
     const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {

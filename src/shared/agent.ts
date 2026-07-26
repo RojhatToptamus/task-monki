@@ -688,6 +688,7 @@ export interface AgentUserInputQuestion {
   question: string;
   isOther: boolean;
   isSecret: boolean;
+  allowsMultiple?: boolean;
   options?: AgentUserInputOption[];
 }
 

@@ -497,7 +497,7 @@ export class CodexAppServerSupervisor {
           version: this.options.appVersion
         },
         capabilities: {
-          experimentalApi: false,
+          experimentalApi: true,
           requestAttestation: false,
           optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
         }

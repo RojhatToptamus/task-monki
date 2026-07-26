@@ -218,6 +218,34 @@ describe('Task Monki development seed data', () => {
         (event) => event.taskId === approvalTask.id && event.type === 'AGENT_INTERACTION_REQUESTED'
       )
     ).toBe(true);
+    const userInputTask = taskForScenario(
+      manifest,
+      snapshot,
+      'agent-awaiting-user-input'
+    );
+    expect(userInputTask.projection.agentRun).toBe('AWAITING_USER_INPUT');
+    expect(
+      snapshot.interactionRequests.find(
+        (request) => request.taskId === userInputTask.id && request.status === 'PENDING'
+      )
+    ).toMatchObject({
+      type: 'USER_INPUT',
+      request: {
+        questions: [
+          {
+            id: 'seed_choice',
+            isOther: true,
+            options: [
+              { label: 'Proceed' },
+              { label: 'Pause' }
+            ]
+          },
+          {
+            id: 'seed_detail'
+          }
+        ]
+      }
+    });
     const approvalRun = snapshot.runs.find((run) => run.id === approvalTask.currentRunId);
     const approvalProgress = buildRunProgressViewModel({
       preferredRun: approvalRun,

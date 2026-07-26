@@ -28,6 +28,7 @@ export const TASK_MONKI_REQUIRED_CODEX_APP_SERVER_METHODS = [
   'thread/read',
   'thread/goal/get',
   'thread/goal/set',
+  'collaborationMode/list',
   'turn/start',
   'turn/steer',
   'turn/interrupt',
@@ -432,7 +433,7 @@ async function probeJsonRpcCapabilities(
         version: '0.1.0'
       },
       capabilities: {
-        experimentalApi: false
+        experimentalApi: true
       }
     });
     if (initialized.error) {
@@ -548,6 +549,8 @@ function capabilityProbeParams(
         threadId: '__task_monki_capability_probe_missing_thread__',
         objective: 'Task Monki App Server compatibility probe'
       };
+    case 'collaborationMode/list':
+      return {};
     case 'turn/start':
       return {
         threadId: '__task_monki_capability_probe_missing_thread__',

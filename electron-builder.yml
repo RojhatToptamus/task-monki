@@ -47,6 +47,7 @@ mac:
   icon: build/icon.icns
   # Unsigned alpha builds are ad-hoc signed only. Enable Hardened Runtime with
   # the future Developer ID signed and notarized release path.
+  identity: "-"
   hardenedRuntime: false
   sign: scripts/ad-hoc-mac-sign.cjs
   extendInfo:

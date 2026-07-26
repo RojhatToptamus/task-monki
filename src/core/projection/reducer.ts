@@ -193,6 +193,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
                     ].includes(run.status)
                   ? 'RUNNING'
                   : ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status) &&
+                      getBoolean(event.payload, 'interactionPending') !== true &&
                       (getBoolean(event.payload, 'resumeConfirmed') === true ||
                         isAuthoritativeAgentProgress(eventType))
                     ? 'RUNNING'

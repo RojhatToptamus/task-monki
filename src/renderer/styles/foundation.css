@@ -44,6 +44,10 @@
   -webkit-font-smoothing: antialiased;
 }
 
+.app-shell[data-theme='light'] {
+  color-scheme: light;
+}
+
 .app-shell[data-theme='dark'] {
   color-scheme: dark;
 

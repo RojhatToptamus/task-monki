@@ -26,7 +26,7 @@ policy.
 - Treat `CODEX_PROTOCOL_RUNTIME_VERSION` as the generated binding baseline, not
   a runtime minimum by itself.
 - Do not depend on experimental fields unless a feature has an explicit runtime
-  allow-list and fallback.
+  capability gate and fail-closed behavior.
 - Unknown server requests should be routed to an explicit unsupported path,
   not silently accepted as generated request types.
 
@@ -46,6 +46,13 @@ form from `codex app-server --help`, starts the candidate with a temporary
 `CODEX_HOME` is admitted by the explicit
 `task-monki/codex-environment@v1` contract rather than the portable child
 environment, so other runtimes cannot inherit Codex state.
+The required-method probe includes `collaborationMode/list`. Task Monki uses
+that capability to gate the experimental `turn/start.collaborationMode`
+extension needed for native mid-turn user input. The stable `0.141.0` generated
+`TurnStartParams` does not declare that field, so the adapter narrows the local
+extension at the request boundary instead of editing generated bindings. A
+runtime without the collaboration-mode method is incompatible rather than
+silently falling back to prose questions.
 Automatic discovery picks a compatible runtime instead of failing on an older
 incompatible candidate that appears earlier on `PATH`. Explicit configuration is
 treated as intentional and must be compatible.

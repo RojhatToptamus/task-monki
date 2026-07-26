@@ -5810,7 +5810,8 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       interaction.iterationId !== run.iterationId ||
       interaction.iterationId !== session.iterationId ||
       interaction.sessionId !== run.sessionId ||
-      interaction.serverInstanceId !== run.serverInstanceId ||
+      (['PENDING', 'RESPONDING'].includes(interaction.status) &&
+        interaction.serverInstanceId !== run.serverInstanceId) ||
       interaction.requestRawMessage.serverInstanceId !== interaction.serverInstanceId ||
       (interaction.responseRawMessage !== undefined &&
         interaction.responseRawMessage.serverInstanceId !== interaction.serverInstanceId)

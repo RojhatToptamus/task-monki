@@ -131,6 +131,22 @@ let rendererTrustPolicy: RendererTrustPolicy | undefined;
 const attachmentIpcGate = new AttachmentIpcOperationGate();
 
 const appId = 'dev.taskmonki.desktop';
+const safeStorageVerificationName =
+  process.env.TASK_MONKI_SAFE_STORAGE_VERIFICATION_NAME;
+if (safeStorageVerificationName) {
+  const isPackagedVerification =
+    app.isPackaged &&
+    process.argv.some((argument) =>
+      argument.startsWith('--remote-debugging-port=')
+    ) &&
+    /^task-monki-safe-storage-verifier-[0-9a-f-]{36}$/u.test(
+      safeStorageVerificationName
+    );
+  if (!isPackagedVerification) {
+    throw new Error('Invalid packaged safeStorage verification identity.');
+  }
+  app.setName(safeStorageVerificationName);
+}
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!ownsSingleInstanceLock) {
@@ -328,7 +344,7 @@ function configureMacDockIcon(): void {
     resourcesPath: process.resourcesPath
   });
   if (fs.existsSync(iconPath)) {
-    app.dock.setIcon(iconPath);
+    app.dock?.setIcon(iconPath);
   }
 }
 

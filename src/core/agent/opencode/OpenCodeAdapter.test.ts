@@ -10,6 +10,7 @@ import type {
   AgentServerInstance,
   AgentSessionRecord,
   AppUpdateEvent,
+  RespondToInteractionRequest,
   RunRecord,
   Task,
   TaskIteration,
@@ -22,6 +23,7 @@ import {
   FileTaskStore
 } from '../../storage/FileTaskStore';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
+import { AgentInteractionService } from '../AgentInteractionService';
 import {
   createOpenCodeMessageId,
   OpenCodeAdapter,
@@ -157,6 +159,203 @@ describe('OpenCodeAdapter', () => {
     });
     expect(terminalEvents).toHaveLength(1);
     unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('answers a native multi-part question once and resumes the same run', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+    await fixture.harness.emit({
+      type: 'question.asked',
+      properties: {
+        id: 'que_native_input',
+        sessionID: session.providerSessionId,
+        tool: {
+          messageID: turn.providerTurnId,
+          callID: 'call_native_input'
+        },
+        questions: [
+          {
+            header: 'Checks',
+            question: 'Which checks should run?',
+            multiple: true,
+            options: [
+              { label: 'Unit', description: 'Run focused unit tests.' },
+              { label: 'Build', description: 'Build the app.' }
+            ]
+          },
+          {
+            header: 'Detail',
+            question: 'What should the agent preserve?'
+          }
+        ]
+      }
+    });
+    await fixture.harness.emit({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: 'msg_native_question',
+          sessionID: session.providerSessionId,
+          role: 'assistant',
+          parentID: turn.providerTurnId,
+          time: { created: Date.now() }
+        }
+      }
+    });
+    await fixture.harness.emit({
+      type: 'message.part.updated',
+      properties: {
+        part: {
+          id: 'prt_native_question',
+          sessionID: session.providerSessionId,
+          messageID: 'msg_native_question',
+          type: 'tool',
+          tool: 'question',
+          callID: 'call_native_input',
+          state: {
+            status: 'running',
+            input: { questions: [] },
+            time: { start: Date.now() }
+          }
+        }
+      }
+    });
+
+    const interaction = (await fixture.store.snapshot()).interactionRequests.find(
+      (candidate) => candidate.providerRequestId === 'que_native_input'
+    )!;
+    expect(interaction).toMatchObject({
+      type: 'USER_INPUT',
+      status: 'PENDING',
+      runId: run.id,
+      providerTurnId: turn.providerTurnId,
+      request: {
+        questions: [
+          { id: 'que_native_input:0', allowsMultiple: true, isOther: true },
+          { id: 'que_native_input:1', isOther: true }
+        ]
+      }
+    });
+    expect(await fixture.store.getRun(run.id)).toMatchObject({
+      status: 'AWAITING_USER_INPUT',
+      providerTurnId: turn.providerTurnId
+    });
+    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+      status: 'AWAITING_USER_INPUT'
+    });
+
+    const service = new AgentInteractionService(
+      fixture.store,
+      fixture.appEvents,
+      () => fixture.adapter
+    );
+    const input: RespondToInteractionRequest = {
+      taskId: fixture.task.id,
+      runId: run.id,
+      interactionRequestId: interaction.id,
+      decision: {
+        interactionType: 'USER_INPUT',
+        action: 'ANSWER',
+        answers: {
+          'que_native_input:0': ['Unit', 'Smoke'],
+          'que_native_input:1': ['Preserve current behavior.']
+        }
+      }
+    };
+    await service.respond(input);
+
+    expect(fixture.harness.questionReplies).toEqual([
+      {
+        answers: [
+          ['Unit', 'Smoke'],
+          ['Preserve current behavior.']
+        ]
+      }
+    ]);
+    expect(await fixture.store.getInteractionRequest(interaction.id)).toMatchObject({
+      status: 'RESOLVED',
+      resolution: { provider: 'opencode', acknowledged: true }
+    });
+    expect(await fixture.store.getRun(run.id)).toMatchObject({
+      status: 'RUNNING',
+      providerTurnId: turn.providerTurnId
+    });
+    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+      status: 'ACTIVE'
+    });
+    await expect(service.respond(input)).rejects.toThrow('expected PENDING');
+    expect(fixture.harness.questionReplies).toHaveLength(1);
+    await fixture.adapter.shutdown();
+  });
+
+  it('fails a blocked question closed when it is first discovered during recovery', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+    fixture.harness.questions = [
+      {
+        id: 'que_secret_recovery',
+        sessionID: session.providerSessionId,
+        tool: { messageID: turn.providerTurnId },
+        questions: [
+          {
+            header: 'API token',
+            question: 'Enter the secret API token.',
+            options: []
+          }
+        ]
+      }
+    ];
+
+    await fixture.adapter.attachSession({
+      localSessionId: session.id,
+      providerSessionId: session.providerSessionId
+    });
+    await fixture.adapter.attachSession({
+      localSessionId: session.id,
+      providerSessionId: session.providerSessionId
+    });
+
+    expect(fixture.harness.questionReplies).toEqual([{ answers: [[]] }]);
+    expect(
+      (await fixture.store.snapshot()).interactionRequests.find(
+        (candidate) => candidate.providerRequestId === 'que_secret_recovery'
+      )
+    ).toMatchObject({
+      status: 'RESOLVED',
+      allowedActions: [],
+      policyWarnings: [expect.stringContaining('secret-safe response channel')]
+    });
+    expect(await fixture.store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+      status: 'ACTIVE'
+    });
     await fixture.adapter.shutdown();
   });
 
@@ -605,6 +804,38 @@ describe('OpenCodeAdapter', () => {
     expect(fixture.harness.supervisors).toHaveLength(1);
 
     fixture.harness.catalogSupervisor.shutdownFailure = undefined;
+    await fixture.adapter.shutdown();
+  });
+
+  it('fully reinitializes a stopped runtime before resolving and starting new work', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    await fixture.adapter.shutdown();
+
+    await expect(
+      fixture.adapter.resolveExecution({ settings: SETTINGS, attachments: [] })
+    ).resolves.toMatchObject({
+      settings: {
+        runtimeId: 'opencode',
+        model: 'claude-test',
+        modelProvider: 'anthropic'
+      }
+    });
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    await expect(fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    })).resolves.toMatchObject({ localRunId: run.id });
+
+    expect(await fixture.store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
     await fixture.adapter.shutdown();
   });
 
@@ -2496,6 +2727,151 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
+  it('keeps an unfinished native question recovery-required across restart and accepts a later retry', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+    await fixture.harness.emit({
+      type: 'question.asked',
+      properties: {
+        id: 'que_restart',
+        sessionID: session.providerSessionId,
+        tool: { messageID: turn.providerTurnId },
+        questions: [
+          {
+            header: 'Scope',
+            question: 'Which scope should be used?',
+            options: []
+          }
+        ]
+      }
+    });
+    const originalServerId = (await fixture.store.getRun(run.id))!.serverInstanceId;
+    fixture.harness.messages.set(session.providerSessionId!, [
+      {
+        info: {
+          id: turn.providerTurnId!,
+          sessionID: session.providerSessionId!,
+          role: 'user',
+          time: { created: Date.now() }
+        },
+        parts: []
+      },
+      {
+        info: {
+          id: 'msg_unfinished_question',
+          sessionID: session.providerSessionId!,
+          role: 'assistant',
+          parentID: turn.providerTurnId,
+          time: { created: Date.now() }
+        },
+        parts: [
+          {
+            id: 'prt_unfinished_question',
+            sessionID: session.providerSessionId!,
+            messageID: 'msg_unfinished_question',
+            type: 'tool',
+            tool: 'question',
+            state: {
+              status: 'running',
+              input: {
+                questions: [
+                  {
+                    header: 'Scope',
+                    question: 'Which scope should be used?',
+                    options: []
+                  }
+                ]
+              },
+              time: { start: Date.now() }
+            }
+          }
+        ]
+      }
+    ]);
+    fixture.harness.statuses[session.providerSessionId!] = { type: 'idle' };
+
+    await fixture.harness.sessionSupervisor.lose();
+    await waitForCondition(
+      async () => (await fixture.store.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
+    );
+    await fixture.adapter.shutdown();
+
+    const replacement = createAdapterForFixture(fixture);
+    await expect(replacement.initialize()).resolves.toBeUndefined();
+    const recoveredRun = (await fixture.store.getRun(run.id))!;
+    expect(recoveredRun).toMatchObject({ status: 'RECOVERY_REQUIRED' });
+    expect(recoveredRun.finalArtifactId).toBeUndefined();
+    expect(
+      (await fixture.store.snapshot()).interactionRequests.find(
+        (interaction) => interaction.providerRequestId === 'que_restart'
+      )
+    ).toMatchObject({
+      status: 'ABORTED_SERVER_LOST',
+      serverInstanceId: originalServerId
+    });
+
+    const finalArtifact = await fixture.store.writeFinalArtifact(
+      run.taskId,
+      run.id,
+      '# Recovery run closed\n\nExplicitly abandoned before retry.\n'
+    );
+    await fixture.store.appendEvent(createDomainEvent({
+      type: 'AGENT_RUN_INTERRUPTED',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      agentSessionId: run.sessionId,
+      serverInstanceId: run.serverInstanceId,
+      source: 'ui',
+      payload: {
+        terminalReason: 'Recovery-required run was explicitly abandoned.',
+        finalArtifactId: finalArtifact.id
+      }
+    }));
+    const nextRun = await createRun(
+      fixture,
+      (await fixture.store.getAgentSession(session.id))!
+    );
+    await replacement.startTurn({
+      localRunId: nextRun.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'RETRY',
+      prompt: 'Start a new question after recovery.',
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+
+    expect(await fixture.store.getRun(nextRun.id)).toMatchObject({ status: 'RUNNING' });
+    expect(fixture.harness.promptBodies).toHaveLength(2);
+    await replacement.shutdown();
+    await fixture.store.close();
+    const reopenedStore = new FileTaskStore(path.join(fixture.root, 'store'));
+    await expect(reopenedStore.snapshot()).resolves.toMatchObject({
+      runs: expect.arrayContaining([
+        expect.objectContaining({ id: run.id, status: 'INTERRUPTED' }),
+        expect.objectContaining({ id: nextRun.id, status: 'RUNNING' })
+      ])
+    });
+    await reopenedStore.close();
+  });
+
   it('never retries an output append with ambiguous durable state', async () => {
     const fixture = await createFixture();
     const { session, run } = await startStreamingRun(fixture);
@@ -4191,17 +4567,35 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
   harness.catalogs.set(path.resolve(worktreePath), defaultProviderCatalog());
   const runtime = fakeRuntime();
   const appEvents = new AppEventBus();
-  const adapter = new OpenCodeAdapter(store, appEvents, {
-    cwd: appCwd,
+  const fixture = {
+    root,
+    appCwd,
+    store,
+    appEvents,
+    harness,
+    task,
+    iteration,
+    worktree
+  };
+  const adapter = createAdapterForFixture(fixture, options);
+  return { ...fixture, adapter };
+}
+
+function createAdapterForFixture(
+  fixture: Omit<AdapterFixture, 'adapter'>,
+  options: AdapterFixtureOptions = {}
+): OpenCodeAdapter {
+  const runtime = fakeRuntime();
+  return new OpenCodeAdapter(fixture.store, fixture.appEvents, {
+    cwd: fixture.appCwd,
     executable: runtime.executable,
     runtimeResolver: options.runtimeResolver ?? (async () => runtime),
     environment: options.environment,
     supervisorFactory: (runtimeStore, supervisorOptions) =>
-      harness.createSupervisor(runtimeStore, supervisorOptions),
+      fixture.harness.createSupervisor(runtimeStore, supervisorOptions),
     sessionIdleTimeoutMs: options.sessionIdleTimeoutMs,
     interruptCompletionTimeoutMs: options.interruptCompletionTimeoutMs
   });
-  return { root, appCwd, store, adapter, appEvents, harness, task, iteration, worktree };
 }
 
 function fakeRuntime(): ResolvedOpenCodeRuntime {
@@ -4307,6 +4701,7 @@ class FakeOpenCodeHarness {
   questions: unknown[] = [];
   readonly promptBodies: unknown[] = [];
   readonly permissionReplies: unknown[] = [];
+  readonly questionReplies: unknown[] = [];
   readonly permissionPatchBodies: unknown[] = [];
   readonly forkRequests: Array<{ sourceSessionId: string; directory: string }> = [];
   readonly deletedSessionIds: string[] = [];
@@ -4620,6 +5015,9 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
       data = undefined;
     } else if (requestPath.startsWith('/permission/')) {
       this.harness.permissionReplies.push(body);
+      data = true;
+    } else if (requestPath.startsWith('/question/')) {
+      this.harness.questionReplies.push(body);
       data = true;
     } else if (requestPath.endsWith('/abort')) {
       if (this.harness.stallAbort) {

@@ -64,8 +64,9 @@ The catalog in `src/dev/seedData.ts` covers the important UI and workflow
 states:
 
 - board setup: backlog, ready, clean/missing/error worktrees
-- agent lifecycle: running, approval, user input, interrupted, runtime lost,
-  ambiguous mutation, stale interaction
+- agent lifecycle: running, approval, user input with provider choices, a
+  custom choice, and free text, interrupted, runtime lost, ambiguous mutation,
+  stale interaction
 - agent review: not run, running, passed, needs changes, inconclusive, failed,
   canceled, stale after follow-up, active follow-up
 - delivery without PR: Git not inspected, clean, dirty, conflicted,

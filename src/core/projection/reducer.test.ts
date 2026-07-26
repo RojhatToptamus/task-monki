@@ -755,6 +755,13 @@ describe('run reducer', () => {
 
   it('waits for authoritative progress after an interaction resolves', () => {
     const waiting = { ...createRun(), status: 'AWAITING_APPROVAL' as const };
+    const stillPending = reduceRun(
+      waiting,
+      createEvent('AGENT_ACTIVITY_RECEIVED', {
+        eventType: 'item/tool/in_progress',
+        interactionPending: true
+      })
+    );
     const resolved = reduceRun(
       waiting,
       createEvent('AGENT_INTERACTION_RESOLVED', { status: 'RESOLVED' })
@@ -768,6 +775,7 @@ describe('run reducer', () => {
       createEvent('AGENT_ACTIVITY_RECEIVED', { eventType: 'thread/name/updated' })
     );
 
+    expect(stillPending.status).toBe('AWAITING_APPROVAL');
     expect(resolved.status).toBe('AWAITING_APPROVAL');
     expect(resumed.status).toBe('RUNNING');
     expect(unrelated.status).toBe('AWAITING_APPROVAL');

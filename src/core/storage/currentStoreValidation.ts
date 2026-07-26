@@ -609,6 +609,9 @@ function interactionRequestPayload(type: string, value: unknown): void {
         );
         booleanField(record, 'isOther', 'interactionRequests');
         booleanField(record, 'isSecret', 'interactionRequests');
+        if (record.allowsMultiple !== undefined) {
+          booleanField(record, 'allowsMultiple', 'interactionRequests');
+        }
         if (record.options !== undefined) {
           if (!Array.isArray(record.options)) invalid('interactionRequests');
           for (const option of record.options) {

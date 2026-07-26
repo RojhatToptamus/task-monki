@@ -182,6 +182,35 @@ describe('development HTTP server', () => {
     expect(discoverAgentRuntimeModels).toHaveBeenCalledWith('cursor-agent-acp');
   });
 
+  it('routes one typed user-input answer through the authenticated interaction API', async () => {
+    const respondToInteraction = vi.fn(async (input: unknown) => input);
+    const running = await startServer({ respondToInteraction });
+    const request = {
+      taskId: 'task-1',
+      runId: 'run-1',
+      interactionRequestId: 'interaction-1',
+      decision: {
+        interactionType: 'USER_INPUT',
+        action: 'ANSWER',
+        answers: {
+          checks: ['Unit', 'Smoke'],
+          detail: ['Preserve current behavior.']
+        }
+      }
+    };
+
+    const response = await fetch(`${running.baseUrl}/api/interactions/respond`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify(request)
+    });
+
+    expect(response.status).toBe(200);
+    expect(respondToInteraction).toHaveBeenCalledOnce();
+    expect(respondToInteraction).toHaveBeenCalledWith(request);
+    await expect(response.json()).resolves.toEqual(request);
+  });
+
   it('keeps current preview endpoints behind the hardened boundary', async () => {
     const startPreview = vi.fn(async (input: unknown) => ({ id: 'generation-1', input }));
     const running = await startServer({ startPreview });

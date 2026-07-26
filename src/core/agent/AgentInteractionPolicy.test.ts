@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type {
   AgentSessionRecord,
+  AgentUserInputDecision,
   InteractionRequestRecord,
   RunRecord
 } from '../../shared/contracts';
@@ -435,6 +436,200 @@ describe('Agent interaction policy', () => {
         runFixture()
       )
     ).toThrow('not an allowed value');
+  });
+
+  it('validates single, multiple, custom, and free-text user answers', () => {
+    const interaction = interactionFixture({
+      type: 'USER_INPUT',
+      request: {
+        questions: [
+          {
+            id: 'scope',
+            header: 'Scope',
+            question: 'Choose one scope.',
+            isOther: false,
+            isSecret: false,
+            options: [
+              { label: 'Core', description: '' },
+              { label: 'Renderer', description: '' }
+            ]
+          },
+          {
+            id: 'checks',
+            header: 'Checks',
+            question: 'Choose checks or add one.',
+            isOther: true,
+            isSecret: false,
+            allowsMultiple: true,
+            options: [
+              { label: 'Unit', description: '' },
+              { label: 'Build', description: '' }
+            ]
+          },
+          {
+            id: 'detail',
+            header: 'Detail',
+            question: 'Add a note.',
+            isOther: false,
+            isSecret: false
+          }
+        ]
+      },
+      allowedActions: ['ANSWER']
+    });
+    const valid: AgentUserInputDecision = {
+      interactionType: 'USER_INPUT',
+      action: 'ANSWER',
+      answers: {
+        scope: ['Core'],
+        checks: ['Unit', 'Smoke'],
+        detail: ['Keep the change small.']
+      }
+    };
+
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        valid,
+        sessionFixture(),
+        runFixture()
+      )
+    ).not.toThrow();
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        {
+          ...valid,
+          answers: { ...valid.answers, scope: ['Core', 'Renderer'] }
+        },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('Only one answer');
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        {
+          ...valid,
+          answers: { ...valid.answers, scope: ['Database'] }
+        },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('not one of the supplied options');
+  });
+
+  it('keeps secret-marked user input blocked after typed boolean redaction', () => {
+    expect(
+      buildInteractionPolicy({
+        type: 'USER_INPUT',
+        request: {
+          questions: [
+            {
+              id: 'credential',
+              header: 'Credential',
+              question: 'Enter a secret.',
+              isOther: false,
+              isSecret: true
+            }
+          ]
+        },
+        session: sessionFixture(),
+        run: runFixture()
+      })
+    ).toMatchObject({
+      allowedActions: [],
+      warnings: [expect.stringContaining('secret-safe response channel')]
+    });
+  });
+
+  it.each([
+    ['no questions', []],
+    [
+      'duplicate question IDs',
+      [
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'Choose a scope.',
+          isOther: false,
+          isSecret: false
+        },
+        {
+          id: 'scope',
+          header: 'Detail',
+          question: 'Add detail.',
+          isOther: false,
+          isSecret: false
+        }
+      ]
+    ],
+    [
+      'no answer route',
+      [
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'Choose a scope.',
+          isOther: false,
+          isSecret: false,
+          options: []
+        }
+      ]
+    ],
+    [
+      'a blank option label',
+      [
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'Choose a scope.',
+          isOther: false,
+          isSecret: false,
+          options: [{ label: ' ', description: 'Invalid provider option.' }]
+        }
+      ]
+    ],
+    [
+      'blank question metadata',
+      [
+        {
+          id: ' ',
+          header: 'Scope',
+          question: 'Choose a scope.',
+          isOther: false,
+          isSecret: false
+        }
+      ]
+    ],
+    [
+      'duplicate option labels',
+      [
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'Choose a scope.',
+          isOther: false,
+          isSecret: false,
+          options: [
+            { label: 'Core', description: 'First provider option.' },
+            { label: ' Core ', description: 'Ambiguous duplicate option.' }
+          ]
+        }
+      ]
+    ]
+  ])('blocks malformed user input with %s', (_case, questions) => {
+    expect(
+      buildInteractionPolicy({
+        type: 'USER_INPUT',
+        request: { questions },
+        session: sessionFixture(),
+        run: runFixture()
+      })
+    ).toMatchObject({
+      allowedActions: [],
+      warnings: [expect.stringContaining('malformed or unanswerable')]
+    });
   });
 });
 

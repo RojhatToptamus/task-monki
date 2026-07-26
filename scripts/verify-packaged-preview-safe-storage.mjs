@@ -20,93 +20,121 @@ async function main() {
   const userDataPath = path.join(root, 'user-data');
   const canary = `tm-safe-storage-${crypto.randomUUID()}-${crypto.randomUUID()}`;
   const inputId = 'relaunch-token';
+  const safeStorageAppName = `task-monki-safe-storage-verifier-${crypto.randomUUID()}`;
   const capturedOutput = [];
   let running;
 
   try {
     await createFixtureRepository(repositoryPath, inputId);
 
-  running = await launchPackagedApp({ executablePath, repositoryPath, userDataPath });
-  capturedOutput.push(running.output);
-  const first = await running.cdp.evaluate(`(async () => {
-    const deadline = Date.now() + 30000;
-    while (Date.now() < deadline && (!window.taskManager || !window.previewPrivateInputs)) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    if (!window.taskManager || !window.previewPrivateInputs) {
-      throw new Error('Trusted packaged renderer APIs did not become available.');
-    }
-    const task = await window.taskManager.createTask({
-      title: 'Packaged safeStorage relaunch verification',
-      prompt: 'Verify encrypted private input persistence across a packaged relaunch.',
-      repositoryPath: ${JSON.stringify(repositoryPath)}
+    running = await launchPackagedApp({
+      executablePath,
+      repositoryPath,
+      userDataPath,
+      safeStorageAppName
     });
-    await window.taskManager.prepareWorktree({ taskId: task.id });
-    const before = await window.taskManager.resolvePreview({ taskId: task.id });
-    if (before.status !== 'PLAN' || before.executionReadiness.status !== 'BLOCKED') {
-      throw new Error('Expected the unresolved private input to block execution only.');
-    }
-    const stored = await window.previewPrivateInputs.set({
-      taskId: task.id,
-      inputId: ${JSON.stringify(inputId)},
-      value: ${JSON.stringify(canary)}
+    capturedOutput.push(running.output);
+    const first = await withTimeout(
+      running.cdp.evaluate(`(async () => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline && (!window.taskManager || !window.previewPrivateInputs)) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (!window.taskManager || !window.previewPrivateInputs) {
+          throw new Error('Trusted packaged renderer APIs did not become available.');
+        }
+        const repository = await window.taskManager.addRepository(${JSON.stringify(repositoryPath)});
+        const task = await window.taskManager.createTask({
+          title: 'Packaged safeStorage relaunch verification',
+          prompt: 'Verify encrypted private input persistence across a packaged relaunch.',
+          repositoryId: repository.id
+        });
+        await window.taskManager.prepareWorktree({ taskId: task.id });
+        const before = await window.taskManager.resolvePreview({ taskId: task.id });
+        if (before.status !== 'PLAN' || before.executionReadiness.status !== 'BLOCKED') {
+          throw new Error('Expected the unresolved private input to block execution only.');
+        }
+        const stored = await window.previewPrivateInputs.set({
+          taskId: task.id,
+          inputId: ${JSON.stringify(inputId)},
+          value: ${JSON.stringify(canary)}
+        });
+        if (stored.status !== 'STORED') throw new Error('safeStorage did not store the private input.');
+        const after = await window.taskManager.resolvePreview({ taskId: task.id });
+        if (after.status !== 'PLAN' || after.executionReadiness.status !== 'READY') {
+          throw new Error('Stored private input did not become execution-ready.');
+        }
+        await window.taskManager.approvePreviewPlan({
+          taskId: task.id,
+          planId: after.plan.id,
+          executionDigest: after.plan.executionDigest
+        });
+        return { taskId: task.id, planId: after.plan.id };
+      })()`),
+      120_000,
+      'Timed out storing and approving the packaged private input.'
+    );
+    await stopPackagedApp(running);
+    running = undefined;
+
+    await assertCanaryAbsent(userDataPath, canary);
+
+    running = await launchPackagedApp({
+      executablePath,
+      repositoryPath,
+      userDataPath,
+      safeStorageAppName
     });
-    if (stored.status !== 'STORED') throw new Error('safeStorage did not store the private input.');
-    const after = await window.taskManager.resolvePreview({ taskId: task.id });
-    if (after.status !== 'PLAN' || after.executionReadiness.status !== 'READY') {
-      throw new Error('Stored private input did not become execution-ready.');
+    capturedOutput.push(running.output);
+    const second = await withTimeout(
+      running.cdp.evaluate(`(async () => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline && (!window.taskManager || !window.previewPrivateInputs)) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (!window.taskManager || !window.previewPrivateInputs) {
+          throw new Error('Trusted packaged renderer APIs did not become available.');
+        }
+        const resolved = await window.taskManager.resolvePreview({ taskId: ${JSON.stringify(first.taskId)} });
+        if (resolved.status !== 'PLAN' || resolved.executionReadiness.status !== 'READY') {
+          throw new Error('The private input was not ready after relaunch.');
+        }
+        const generation = await window.taskManager.startPreview({ taskId: ${JSON.stringify(first.taskId)} });
+        if (generation.state !== 'READY') throw new Error('The recipient did not start after relaunch decryption.');
+        await window.taskManager.stopPreview({ taskId: ${JSON.stringify(first.taskId)}, generationId: generation.id });
+        return { generationId: generation.id, state: generation.state };
+      })()`),
+      120_000,
+      'Timed out decrypting the private input after packaged relaunch.'
+    );
+    await stopPackagedApp(running);
+    running = undefined;
+
+    await assertCanaryAbsent(userDataPath, canary);
+    assertTextDoesNotContainCanary(
+      capturedOutput.map((capture) => capture()).join('\n'),
+      canary,
+      'packaged process output'
+    );
+
+    const vaultFiles = (await listFiles(userDataPath)).filter((file) =>
+      file.endsWith('.blob')
+    );
+    if (vaultFiles.length !== 1) {
+      throw new Error(
+        `Expected one encrypted private-input revision after relaunch, found ${vaultFiles.length}.`
+      );
     }
-    await window.taskManager.approvePreviewPlan({
-      taskId: task.id,
-      planId: after.plan.id,
-      executionDigest: after.plan.executionDigest
-    });
-    return { taskId: task.id, planId: after.plan.id };
-  })()`);
-  await stopPackagedApp(running);
-  running = undefined;
 
-  await assertCanaryAbsent(userDataPath, canary);
-
-  running = await launchPackagedApp({ executablePath, repositoryPath, userDataPath });
-  capturedOutput.push(running.output);
-  const second = await running.cdp.evaluate(`(async () => {
-    const deadline = Date.now() + 30000;
-    while (Date.now() < deadline && (!window.taskManager || !window.previewPrivateInputs)) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    if (!window.taskManager || !window.previewPrivateInputs) {
-      throw new Error('Trusted packaged renderer APIs did not become available.');
-    }
-    const resolved = await window.taskManager.resolvePreview({ taskId: ${JSON.stringify(first.taskId)} });
-    if (resolved.status !== 'PLAN' || resolved.executionReadiness.status !== 'READY') {
-      throw new Error('The private input was not ready after relaunch.');
-    }
-    const generation = await window.taskManager.startPreview({ taskId: ${JSON.stringify(first.taskId)} });
-    if (generation.state !== 'READY') throw new Error('The recipient did not start after relaunch decryption.');
-    await window.taskManager.stopPreview({ taskId: ${JSON.stringify(first.taskId)}, generationId: generation.id });
-    return { generationId: generation.id, state: generation.state };
-  })()`);
-  await stopPackagedApp(running);
-  running = undefined;
-
-  await assertCanaryAbsent(userDataPath, canary);
-  assertTextDoesNotContainCanary(capturedOutput.map((capture) => capture()).join('\n'), canary, 'packaged process output');
-
-  const vaultFiles = (await listFiles(userDataPath)).filter((file) => file.endsWith('.blob'));
-  if (vaultFiles.length !== 1) {
-    throw new Error(`Expected one encrypted private-input revision after relaunch, found ${vaultFiles.length}.`);
-  }
-
-  console.log(JSON.stringify({
-    status: 'passed',
-    app: path.dirname(path.dirname(path.dirname(executablePath))),
-    firstPlanId: first.planId,
-    generationId: second.generationId,
-    encryptedRevisionCount: vaultFiles.length,
-    plaintextScan: 'passed',
-    relaunchDecryption: 'passed'
-  }, null, 2));
+    console.log(JSON.stringify({
+      status: 'passed',
+      app: path.dirname(path.dirname(path.dirname(executablePath))),
+      firstPlanId: first.planId,
+      generationId: second.generationId,
+      encryptedRevisionCount: vaultFiles.length,
+      plaintextScan: 'passed',
+      relaunchDecryption: 'passed'
+    }, null, 2));
   } catch (error) {
     console.error(JSON.stringify({
       error: error instanceof Error ? error.message : String(error),
@@ -115,7 +143,11 @@ async function main() {
     throw error;
   } finally {
     if (running) await stopPackagedApp(running).catch(() => undefined);
-    await fs.rm(root, { recursive: true, force: true });
+    try {
+      await deleteVerificationKeychainItem(safeStorageAppName);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   }
 }
 
@@ -144,7 +176,12 @@ routes:
   await execFileAsync('git', ['commit', '-m', 'Create packaged safeStorage fixture'], { cwd: repositoryPath });
 }
 
-async function launchPackagedApp({ executablePath, repositoryPath, userDataPath }) {
+async function launchPackagedApp({
+  executablePath,
+  repositoryPath,
+  userDataPath,
+  safeStorageAppName
+}) {
   const port = await reservePort();
   const child = spawn(executablePath, [
     `--user-data-dir=${userDataPath}`,
@@ -152,7 +189,11 @@ async function launchPackagedApp({ executablePath, repositoryPath, userDataPath 
     '--remote-debugging-address=127.0.0.1',
     '--no-first-run'
   ], {
-    env: { ...process.env, TASK_MANAGER_REPO_PATH: repositoryPath },
+    env: {
+      ...process.env,
+      TASK_MANAGER_REPO_PATH: repositoryPath,
+      TASK_MONKI_SAFE_STORAGE_VERIFICATION_NAME: safeStorageAppName
+    },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let stdout = '';
@@ -188,7 +229,7 @@ async function connectToTrustedRenderer(port, child, output) {
         if (!window.taskManager || !window.previewPrivateInputs) {
           throw new Error('Trusted packaged renderer APIs did not become available.');
         }
-        await window.taskManager.getDefaultRepositoryPath();
+        await window.taskManager.getAppSettings();
         return true;
       })()`;
       await cdp.evaluate(verifyTrustedApi);
@@ -216,7 +257,34 @@ async function stopPackagedApp(runningApp) {
     await withTimeout(exited, 20_000, 'Packaged app did not exit after Browser.close.');
   } catch {
     child.kill('SIGTERM');
-    await withTimeout(child.exitCode === null ? once(child, 'exit') : Promise.resolve(), 10_000, 'Packaged app did not exit after SIGTERM.');
+    try {
+      await withTimeout(
+        child.exitCode === null ? once(child, 'exit') : Promise.resolve(),
+        10_000,
+        'Packaged app did not exit after SIGTERM.'
+      );
+    } catch {
+      child.kill('SIGKILL');
+      await withTimeout(
+        child.exitCode === null ? once(child, 'exit') : Promise.resolve(),
+        5_000,
+        'Packaged app did not exit after SIGKILL.'
+      );
+    }
+  }
+}
+
+async function deleteVerificationKeychainItem(appName) {
+  try {
+    await execFileAsync('security', [
+      'delete-generic-password',
+      '-s',
+      `${appName} Safe Storage`
+    ]);
+  } catch (error) {
+    if (!String(error?.stderr).includes('could not be found')) {
+      throw error;
+    }
   }
 }
 

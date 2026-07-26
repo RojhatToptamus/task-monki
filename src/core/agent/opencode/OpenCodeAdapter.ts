@@ -335,13 +335,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   async listModels(): Promise<AgentModel[]> {
-    if (!this.runtime) {
-      this.runtime = await (this.options.runtimeResolver ?? resolveOpenCodeRuntime)({
-        ...this.options,
-        executable: this.configuredExecutable,
-        cwd: this.options.cwd
-      });
-    }
+    if (!this.initialized) await this.initializeRuntime(true);
     if (this.operationalModels.length === 0) await this.refreshCatalog();
     return structuredClone(this.models);
   }
@@ -1218,6 +1212,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const assistant = latestAssistantFor(messages, userMessage.info.id);
     if (
       assistant &&
+      isTerminalAssistantMessage(assistant) &&
       (status === 'IDLE' || isOpenCodeAbortError(assistant.info.error))
     ) {
       const finalized = await this.finalizeFromSnapshot(
@@ -2962,9 +2957,21 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       providerStartedAt: providerTimestamp(part.state?.time?.start),
       providerCompletedAt: providerTimestamp(part.state?.time?.end)
     });
+    const interactionPending =
+      typeof part.callID === 'string' &&
+      (await this.store.snapshot()).interactionRequests.some(
+        (interaction) =>
+          interaction.runId === run.id &&
+          interaction.sessionId === session.id &&
+          interaction.serverInstanceId === run.serverInstanceId &&
+          interaction.providerItemId === part.callID &&
+          (interaction.status === 'PENDING' ||
+            interaction.status === 'RESPONDING')
+      );
     await this.recordRunActivity(run, `item/${part.type}/${status.toLowerCase()}`, {
       providerItemId: part.id,
-      tool: part.tool
+      tool: part.tool,
+      ...(interactionPending ? { interactionPending: true } : {})
     });
   }
 
@@ -3179,11 +3186,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       requestRawMessage: raw
     });
     this.emitInteractionUpdate(interaction);
-    if (
-      !fromRecoverySnapshot &&
-      mapped.type === 'USER_INPUT' &&
-      allowedActions.length === 0
-    ) {
+    if (mapped.type === 'USER_INPUT' && allowedActions.length === 0) {
       await this.resolveBlockedUserInput(interaction);
     }
   }
@@ -3603,7 +3606,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       return 'recovery-required';
     }
     const assistant = latestAssistantFor(messages, userMessage.info.id);
-    if (assistant && status === 'IDLE') {
+    if (assistant && status === 'IDLE' && isTerminalAssistantMessage(assistant)) {
       await this.finalizeFromSnapshot(run, session, assistant, messagesResult.raw, serverId);
     } else if (status === 'ACTIVE') {
       const currentRun = (await this.store.getRun(run.id)) ?? run;
@@ -4071,9 +4074,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
     const snapshot = await this.store.snapshot();
+    const inMemoryServerIds = new Set(
+      [
+        this.catalogSupervisor?.currentServer?.id,
+        ...[...this.supervisors.values()].map(
+          (supervisor) => supervisor.currentServer?.id
+        )
+      ].filter((serverId): serverId is string => serverId !== undefined)
+    );
     for (const server of snapshot.agentServers.filter(
       (candidate) =>
         candidate.runtimeId === this.descriptor.id &&
+        !inMemoryServerIds.has(candidate.id) &&
         ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(candidate.status)
     )) {
       await this.store.updateAgentServer(server.id, {
@@ -5058,6 +5070,12 @@ function latestAssistantFor(
   return messages
     .filter((message) => message.info.role === 'assistant' && message.info.parentID === userMessageId)
     .sort((left, right) => (right.info.time?.created ?? 0) - (left.info.time?.created ?? 0))[0];
+}
+
+function isTerminalAssistantMessage(message: OpenCodeMessage): boolean {
+  return message.info.finish !== undefined ||
+    message.info.error !== undefined ||
+    message.info.time?.completed !== undefined;
 }
 
 function latestUsageForRun(

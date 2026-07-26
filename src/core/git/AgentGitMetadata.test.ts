@@ -4,9 +4,9 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { git } from './gitCli';
 import {
-  resolveReviewGitExecutablePath,
-  resolveReviewGitMetadata
-} from './ReviewGitMetadata';
+  resolveAgentGitExecutablePath,
+  resolveAgentGitMetadata
+} from './AgentGitMetadata';
 
 const fixtureRoots: string[] = [];
 
@@ -18,9 +18,9 @@ afterEach(async () => {
   );
 });
 
-describe('resolveReviewGitMetadata', () => {
+describe('resolveAgentGitMetadata', () => {
   it('resolves a concrete executable and bypasses the macOS xcrun shim', async () => {
-    const executable = await resolveReviewGitExecutablePath();
+    const executable = await resolveAgentGitExecutablePath();
 
     expect(path.isAbsolute(executable)).toBe(true);
     await expect(fs.access(executable)).resolves.toBeUndefined();
@@ -32,7 +32,7 @@ describe('resolveReviewGitMetadata', () => {
   it('resolves a linked worktree common directory outside a path containing spaces', async () => {
     const fixture = await createLinkedFixture('task monki review metadata ');
 
-    const metadata = await resolveReviewGitMetadata({
+    const metadata = await resolveAgentGitMetadata({
       repositoryPath: fixture.repository,
       worktreePath: fixture.worktree
     });
@@ -66,7 +66,7 @@ describe('resolveReviewGitMetadata', () => {
       await gitPointer.close();
     }
 
-    const metadata = await resolveReviewGitMetadata({
+    const metadata = await resolveAgentGitMetadata({
       repositoryPath: fixture.repository,
       worktreePath: fixture.worktree
     });
@@ -86,7 +86,7 @@ describe('resolveReviewGitMetadata', () => {
     await initRepository(repository);
 
     await expect(
-      resolveReviewGitMetadata({
+      resolveAgentGitMetadata({
         repositoryPath: repository,
         worktreePath: repository
       })
@@ -114,7 +114,7 @@ describe('resolveReviewGitMetadata', () => {
     await fs.rm(staleWorktree, { recursive: true, force: true });
 
     await expect(
-      resolveReviewGitMetadata({
+      resolveAgentGitMetadata({
         repositoryPath: fixture.repository,
         worktreePath: fixture.worktree
       })
@@ -133,11 +133,11 @@ describe('resolveReviewGitMetadata', () => {
     await fs.mkdir(repository);
 
     await expect(
-      resolveReviewGitMetadata({
+      resolveAgentGitMetadata({
         repositoryPath: repository,
         worktreePath: repository
       })
-    ).rejects.toThrow('Cannot resolve trusted Git metadata for agent review');
+    ).rejects.toThrow('Cannot resolve trusted Git metadata for agent session');
   });
 
   it('rejects a worktree that belongs to a different repository', async () => {
@@ -145,7 +145,7 @@ describe('resolveReviewGitMetadata', () => {
     const second = await createLinkedFixture('task-monki-review-second-');
 
     await expect(
-      resolveReviewGitMetadata({
+      resolveAgentGitMetadata({
         repositoryPath: first.repository,
         worktreePath: second.worktree
       })
@@ -168,7 +168,7 @@ describe('resolveReviewGitMetadata', () => {
     );
 
     await expect(
-      resolveReviewGitMetadata({
+      resolveAgentGitMetadata({
         repositoryPath: repository,
         worktreePath: repository
       })

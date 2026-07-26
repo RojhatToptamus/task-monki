@@ -2505,12 +2505,19 @@ async function createInteraction(
                 id: 'seed_choice',
                 header: 'Choice',
                 question: 'Choose how the seeded task should proceed.',
-                isOther: false,
+                isOther: true,
                 isSecret: false,
                 options: [
                   { label: 'Proceed', description: 'Continue the seeded flow.' },
                   { label: 'Pause', description: 'Leave the seeded flow paused.' }
                 ]
+              },
+              {
+                id: 'seed_detail',
+                header: 'Details',
+                question: 'What should the agent preserve while it continues?',
+                isOther: false,
+                isSecret: false
               }
             ],
             autoResolutionMs: 120_000

@@ -114,7 +114,7 @@ If Task Monki is installed somewhere else, update the path accordingly.
 
 ## Run from source
 
-Source builds require Node.js 20 or newer, npm, Git, and at least one installed and authenticated agent runtime for live tasks.
+Source builds require Node.js 22.12 or newer, npm, Git, and at least one installed and authenticated agent runtime for live tasks.
 
 Clone the repository, install the dependencies, and start the desktop app:
 

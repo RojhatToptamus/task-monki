@@ -374,6 +374,16 @@ messages, parts, status, pending interactions, todos, and usage. An incomplete
 or unpersistable snapshot quarantines that session process; it is never reduced
 to telemetry while execution continues. Interaction-owned waiting states take
 precedence over provider busy/idle telemetry until the interaction is resolved.
+An idle restart snapshot does not make an unfinished assistant or running tool
+terminal. That run remains recovery-required, and an explicit later retry
+fully reinitializes the stopped adapter before it starts a replacement process.
+Native OpenCode questions retain their ordered prompts, option labels and
+descriptions, `multiple` selection rule, and custom-answer allowance. Task
+Monki follows the native schema's `custom` default: custom answers are allowed
+unless the question explicitly sets `custom: false`. It replies through the
+exact `/question/{id}/reply` resource and treats the HTTP acknowledgement as
+authoritative. The `/question` snapshot repairs missed create, reply, reject,
+disconnect, and restart events without replaying an answer.
 
 OpenCode interruption is a bounded control flow, not an unbounded wait for SSE.
 Task Monki sends abort only through the exact session process that owns the run,
@@ -460,6 +470,12 @@ and advertises the official v1.19 boolean config-option client capability. The
 agent remains responsible for its tools; Task Monki does not become a generic
 command-execution host through ACP. Unsupported client requests fail
 explicitly.
+
+Stable ACP v1 has permission requests but no general ad hoc mid-turn
+user-input method. Task Monki therefore does not turn assistant prose into an
+interaction and does not implement draft elicitation proposals as though they
+were stable. A prose question completes through the normal turn lifecycle and
+the user can answer it with Task Monki's explicit follow-up/continue action.
 
 Cursor Agent is the only current ACP profile allowed to surface positive
 provider choices for an execute request that omits command text. The profile
@@ -679,7 +695,11 @@ separate non-actionable interaction-creation path.
 Rules:
 
 - unsafe paths, Task Monki-controlled Git/delivery commands, disallowed network
-  access, and unsupported secret input fail closed;
+  access, unsupported secret input, and malformed or unanswerable structured
+  questions fail closed;
+- credential redaction preserves typed boolean classification fields such as
+  `isSecret`; those flags are policy input, not credential contents. Actual
+  credential values and credential-shaped display text remain redacted;
 - a decision must match the persisted interaction type and allowed actions;
 - a granting response requires both the run and exact owning session to retain
   the interaction's matching awaiting state; decline and cancel remain
@@ -692,7 +712,27 @@ Rules:
   persistence is never described as Task Monki session scope, and Task Monki
   creates no persistent grant;
 - runtime loss makes unanswered interactions stale or aborted; it does not
-  auto-approve or synthesize a response.
+  auto-approve or synthesize a response;
+- a closed interaction retains the server generation and raw protocol
+  reference that actually owned it even when recovery rebinds its run to a
+  later server generation. Only actionable pending/responding interactions
+  must match the run's current server;
+- Codex input remains responding until `serverRequest/resolved`; OpenCode input
+  resolves on the acknowledged question reply. In both cases the awaiting state
+  is released only after the last actionable sibling interaction for the same
+  run, session, and server generation is gone. A provider tool update that
+  belongs to an actionable pending interaction remains telemetry and cannot be
+  treated as proof that the turn resumed;
+- Codex and OpenCode questions preserve choices, free text, allowed custom
+  answers, and native multiplicity where the provider exposes it. Every
+  question must receive a nonblank answer and single-choice questions reject
+  multiple values;
+- stable ACP profiles expose no structured general-input interaction. Normal
+  prose remains output and can be answered only by a deliberate follow-up
+  turn; no text parsing creates workflow state;
+- response APIs require the exact task, run, interaction, runtime, session, and
+  server ownership. A terminal, superseded, already responding, or already
+  resolved request cannot be delivered again.
 
 A provider-completed turn does not override a durable user rejection. After
 post-run Git capture, an implementation with a declined execution interaction

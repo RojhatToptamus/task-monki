@@ -180,6 +180,15 @@ describe('ACP runtime profiles', () => {
     }
   });
 
+  it('keeps general mid-turn input unsupported on every stable ACP profile', () => {
+    for (const profile of ACP_RUNTIME_PROFILES) {
+      expect(acpCapabilities(profile).userInputRequests).toMatchObject({
+        maturity: 'unsupported',
+        detail: expect.stringContaining('no general user-input request method')
+      });
+    }
+  });
+
   it('exposes only the access policies each provider profile can enforce', () => {
     const policy = acpCapabilities(CURSOR_ACP_PROFILE).executionPolicy;
     expect(policy.defaultPresetId).toBe('ask-for-approval');
