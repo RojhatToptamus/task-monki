@@ -860,6 +860,7 @@ export interface DesignDetailSnapshot {
   references: DesignReference[];
   revisions: DesignRevision[];
   conversation: DesignConversationEntry[];
+  previousConversationCursor?: string;
   interactions: InteractionRequestRecord[];
   sessions: AgentSessionRecord[];
   items: AgentItemRecord[];
@@ -1330,8 +1331,19 @@ export interface TaskManagerApi {
   getTaskDetail(taskId: string): Promise<TaskDetailSnapshot>;
   listDesigns(): Promise<DesignListItem[]>;
   getDesign(designId: string): Promise<DesignDetailSnapshot>;
+  listDesignConversation(
+    input: import('./design').ListDesignConversationRequest
+  ): Promise<import('./design').DesignConversationPage>;
   createBlankDesign(input: CreateBlankDesignRequest): Promise<DesignDetailSnapshot>;
   submitDesignTurn(input: SubmitDesignTurnRequest): Promise<DesignDetailSnapshot>;
+  cancelDesignTurn(
+    input: import('./design').CancelDesignTurnRequest
+  ): Promise<DesignDetailSnapshot>;
+  getDesignDraft(designId: string): Promise<import('./design').DesignDraftRecord | null>;
+  saveDesignDraft(
+    input: import('./design').SaveDesignDraftRequest
+  ): Promise<import('./design').DesignDraftRecord>;
+  deleteDesignDraft(input: import('./design').DeleteDesignDraftRequest): Promise<void>;
   restartDesignPreview(
     input: import('./design').RestartDesignPreviewRequest
   ): Promise<DesignDetailSnapshot>;

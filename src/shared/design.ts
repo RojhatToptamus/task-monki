@@ -1,5 +1,12 @@
 export type DesignTurnMessageSource = 'TASK_PROMPT' | 'INLINE_MESSAGE';
 
+export const DESIGN_LIMITS = {
+  queuedTurns: 20,
+  transcriptPageSize: 50,
+  recentTelemetryItems: 100,
+  draftBytes: 1024 * 1024
+} as const;
+
 export interface DesignSourceCheckpoint {
   repositoryId: string;
   worktreeId: string;
@@ -84,6 +91,40 @@ export interface SubmitDesignTurnRequest {
   message: string;
 }
 
+export interface CancelDesignTurnRequest {
+  designId: string;
+  turnId: string;
+}
+
+export interface ListDesignConversationRequest {
+  designId: string;
+  beforeCursor?: string;
+  limit?: number;
+}
+
+export interface DesignConversationPage {
+  entries: DesignConversationEntry[];
+  previousCursor?: string;
+}
+
+export interface DesignDraftRecord {
+  designId: string;
+  recordRevision: number;
+  body: string;
+  updatedAt: string;
+}
+
+export interface SaveDesignDraftRequest {
+  designId: string;
+  expectedRevision: number;
+  body: string;
+}
+
+export interface DeleteDesignDraftRequest {
+  designId: string;
+  expectedRevision: number;
+}
+
 export interface RestartDesignPreviewRequest {
   designId: string;
 }
@@ -109,6 +150,9 @@ export interface DesignCanvasProjection {
 export interface DesignActionAvailability {
   canRefine: boolean;
   refineDisabledReason?: string;
+  queuedTurnCount: number;
+  canStop: boolean;
+  stopTurnId?: string;
   canRestart: boolean;
   canDelete: boolean;
   deleteDisabledReason?: string;

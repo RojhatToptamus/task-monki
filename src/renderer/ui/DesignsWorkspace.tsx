@@ -6,7 +6,11 @@ import {
 } from 'react';
 import type {
   AgentInteractionDecision,
+  AgentExecutionSettings,
+  AgentModel,
+  AgentRuntimeState,
   CreateBlankDesignRequest,
+  DesignDraftRecord,
   InteractionRequestRecord
 } from '../../shared/contracts';
 import {
@@ -28,16 +32,22 @@ import {
 } from './DesignCanvas';
 import { DesignConversation } from './DesignConversation';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { AgentModelSelector } from './AgentModelSelector';
+import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
 
 export type CreateBlankDesignInput = Pick<
   CreateBlankDesignRequest,
-  'brief' | 'creationToken'
+  'brief' | 'creationToken' | 'model' | 'reasoningEffort'
 >;
 
 export interface DesignsWorkspaceProps {
   designs: readonly DesignProjectSummary[];
   selectedDesignId?: string;
   project?: DesignProjectDetail;
+  draft?: DesignDraftRecord | null;
+  models: AgentModel[];
+  runtimes: AgentRuntimeState[];
+  defaultAgentSettings?: AgentExecutionSettings;
   loading?: boolean;
   error?: string;
   desktopCanvasAvailable: boolean;
@@ -45,6 +55,11 @@ export interface DesignsWorkspaceProps {
   onSelectDesign(designId: string): void;
   onCreateBlankDesign(input: CreateBlankDesignInput): Promise<void>;
   onSubmitRefinement(designId: string, message: string): Promise<void>;
+  onStopTurn(designId: string, turnId: string): Promise<void>;
+  onLoadEarlier(designId: string): Promise<void>;
+  onSaveDraft(designId: string, body: string, expectedRevision: number): Promise<DesignDraftRecord>;
+  onDeleteDraft(designId: string, expectedRevision: number): Promise<void>;
+  onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
   onRespondToInteraction(
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -63,6 +78,10 @@ export function DesignsWorkspace({
   designs,
   selectedDesignId,
   project,
+  draft = null,
+  models,
+  runtimes,
+  defaultAgentSettings,
   loading = false,
   error,
   desktopCanvasAvailable,
@@ -70,6 +89,11 @@ export function DesignsWorkspace({
   onSelectDesign,
   onCreateBlankDesign,
   onSubmitRefinement,
+  onStopTurn,
+  onLoadEarlier,
+  onSaveDraft,
+  onDeleteDraft,
+  onDiscoverAgentRuntimeModels,
   onRespondToInteraction,
   onRefreshCanvas,
   onRestartCanvas,
@@ -162,6 +186,10 @@ export function DesignsWorkspace({
         {showCreate ? (
           <BlankDesignForm
             canCancel={designs.length > 0}
+            models={models}
+            runtimes={runtimes}
+            defaultAgentSettings={defaultAgentSettings}
+            onDiscoverAgentRuntimeModels={onDiscoverAgentRuntimeModels}
             onCancel={() => setCreatingBlank(false)}
             onCreate={async (input) => {
               await onCreateBlankDesign(input);
@@ -219,8 +247,17 @@ export function DesignsWorkspace({
                   <DesignConversation
                     key={project.design.id}
                     project={project}
+                    draft={draft}
                     onSubmit={(message) =>
                       onSubmitRefinement(project.design.id, message)
+                    }
+                    onStop={(turnId) => onStopTurn(project.design.id, turnId)}
+                    onLoadEarlier={() => onLoadEarlier(project.design.id)}
+                    onSaveDraft={(body, expectedRevision) =>
+                      onSaveDraft(project.design.id, body, expectedRevision)
+                    }
+                    onDeleteDraft={(expectedRevision) =>
+                      onDeleteDraft(project.design.id, expectedRevision)
                     }
                     onRespond={onRespondToInteraction}
                   />
@@ -302,15 +339,35 @@ function DesignHeader({
 
 function BlankDesignForm({
   canCancel,
+  models,
+  runtimes,
+  defaultAgentSettings,
+  onDiscoverAgentRuntimeModels,
   onCancel,
   onCreate
 }: {
   canCancel: boolean;
+  models: AgentModel[];
+  runtimes: AgentRuntimeState[];
+  defaultAgentSettings?: AgentExecutionSettings;
+  onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
   onCancel(): void;
   onCreate(input: CreateBlankDesignInput): Promise<void>;
 }) {
   const [brief, setBrief] = useState('');
   const [creationToken] = useState(() => crypto.randomUUID());
+  const initialRuntimeId =
+    defaultAgentSettings?.runtimeId ?? runtimes[0]?.preflight.runtime.id ?? '';
+  const initialModel = selectModel(
+    models,
+    defaultAgentSettings?.model,
+    initialRuntimeId
+  );
+  const [runtimeId, setRuntimeId] = useState(initialRuntimeId);
+  const [modelId, setModelId] = useState(initialModel?.id ?? '');
+  const [reasoningEffort, setReasoningEffort] = useState(
+    resolveReasoningEffort(initialModel, defaultAgentSettings?.reasoningEffort) ?? ''
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const submittingRef = useRef(false);
@@ -318,12 +375,20 @@ function BlankDesignForm({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const nextBrief = brief.trim();
-    if (!nextBrief || submittingRef.current) return;
+    const selectedModel = models.find(
+      (model) => model.id === modelId && model.runtimeId === runtimeId
+    );
+    if (!nextBrief || !runtimeId || !selectedModel || submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(undefined);
     try {
-      await onCreate({ brief: nextBrief, creationToken });
+      await onCreate({
+        brief: nextBrief,
+        creationToken,
+        model: selectedModel.model,
+        reasoningEffort: reasoningEffort || undefined
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not create the Design.');
     } finally {
@@ -355,12 +420,28 @@ function BlankDesignForm({
         />
 
         <div className="tm-design-create__runtime" aria-label="Design agent settings">
-          <span><CodexMark /></span>
-          <div>
-            <strong>Codex</strong>
-            <small>Restricted workspace</small>
-          </div>
-          <em>Fixed for this milestone</em>
+          <AgentModelSelector
+            label="Design"
+            runtimeId={runtimeId}
+            modelId={modelId}
+            reasoningEffort={reasoningEffort}
+            models={models}
+            runtimes={runtimes}
+            compact
+            selectionUnavailable={!runtimeId || !modelId}
+            selectionUnavailableMessage="No ready agent supports Design Mode."
+            onDiscoverModels={onDiscoverAgentRuntimeModels}
+            onSelectionChange={(nextRuntimeId, nextModelId) => {
+              setRuntimeId(nextRuntimeId);
+              setModelId(nextModelId);
+              const nextModel = models.find(
+                (model) =>
+                  model.runtimeId === nextRuntimeId && model.id === nextModelId
+              );
+              setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+            }}
+            onReasoningEffortChange={setReasoningEffort}
+          />
         </div>
 
         {error ? <p className="tm-design-create__error" role="alert">{error}</p> : null}
@@ -373,7 +454,7 @@ function BlankDesignForm({
           <button
             type="submit"
             className="primary-button"
-            disabled={submitting || brief.trim().length === 0}
+            disabled={submitting || brief.trim().length === 0 || !runtimeId || !modelId}
           >
             {submitting ? 'Creating…' : 'Create Design'}
           </button>
@@ -498,15 +579,6 @@ function DesignMark() {
     <svg viewBox="0 0 28 28" fill="none">
       <rect x="4" y="5" width="20" height="18" rx="3" />
       <path d="M4 10h20M9 5v18M13 14h7M13 18h5" />
-    </svg>
-  );
-}
-
-function CodexMark() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <path d="m10 2.5 6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z" />
-      <path d="m6.5 8 3.5-2 3.5 2v4L10 14l-3.5-2z" />
     </svg>
   );
 }

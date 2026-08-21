@@ -5,6 +5,7 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
+  CancelDesignTurnRequest,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateBoardRequest,
@@ -13,7 +14,10 @@ import type {
   DeleteTaskRequest,
   DeleteTaskResult,
   DesignDetailSnapshot,
+  DesignConversationPage,
+  DesignDraftRecord,
   DesignListItem,
+  DeleteDesignDraftRequest,
   DisconnectRepositoryRequest,
   DiscardPreviewRecipeDraftRequest,
   GitSnapshotRecord,
@@ -45,6 +49,8 @@ import type {
   RespondToInteractionRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
+  ListDesignConversationRequest,
+  SaveDesignDraftRequest,
   StartReviewRequest,
   SteerRunRequest,
   SubmitDesignTurnRequest,
@@ -193,6 +199,7 @@ import {
 } from './AgentRuntimeComposition';
 import { DesignSourceService } from '../design/DesignSourceService';
 import { DesignUpdateCoordinator } from '../design/DesignUpdateCoordinator';
+import { FileDesignDraftStore } from '../design/FileDesignDraftStore';
 
 type TaskManagerLifecycleState =
   | 'NEW'
@@ -217,6 +224,7 @@ export class TaskManagerService {
   private readonly designWorktrees?: WorktreeService;
   private readonly designSource?: DesignSourceService;
   private readonly designUpdates?: DesignUpdateCoordinator;
+  private readonly designDrafts?: FileDesignDraftStore;
   private readonly github: GitHubService;
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
@@ -281,6 +289,7 @@ export class TaskManagerService {
       designWorktreeRoot?: string;
       designCanvasFence?: DesignCanvasCutoverFence;
       designSkillRoot?: string;
+      designDraftRoot?: string;
     } = {}
   ) {
     if (Boolean(options.agentRuntimeStore) !== Boolean(options.discourseStore)) {
@@ -395,6 +404,10 @@ export class TaskManagerService {
         repositoryRoot: options.designRepositoryRoot,
         worktreeRoot: options.designWorktreeRoot
       });
+      this.designDrafts = new FileDesignDraftStore(
+        options.designDraftRoot ??
+          path.join(path.dirname(options.designRepositoryRoot), 'design-drafts')
+      );
       this.designUpdates = new DesignUpdateCoordinator({
         store,
         agents: this.agents,
@@ -446,6 +459,7 @@ export class TaskManagerService {
 
   private async initializeInternal(): Promise<void> {
     await this.store.init();
+    await this.designDrafts?.init();
     this.assertInitializing();
     if (this.designSource) {
       const stored = await this.store.snapshot();
@@ -1365,6 +1379,31 @@ export class TaskManagerService {
     return this.store.getDesignDetail(designId);
   }
 
+  listDesignConversation(
+    input: ListDesignConversationRequest
+  ): Promise<DesignConversationPage> {
+    return this.store.listDesignConversation(input);
+  }
+
+  async getDesignDraft(designId: string): Promise<DesignDraftRecord | null> {
+    await this.requireDesignTask(designId, 'Design draft read');
+    return (await this.requireDesignDrafts().get(designId)) ?? null;
+  }
+
+  saveDesignDraft(input: SaveDesignDraftRequest): Promise<DesignDraftRecord> {
+    return this.withTaskAction(input.designId, 'Design draft save', async () => {
+      await this.requireDesignTask(input.designId, 'Design draft save');
+      return this.requireDesignDrafts().save(input);
+    });
+  }
+
+  deleteDesignDraft(input: DeleteDesignDraftRequest): Promise<void> {
+    return this.withTaskAction(input.designId, 'Design draft deletion', async () => {
+      await this.requireDesignTask(input.designId, 'Design draft deletion');
+      return this.requireDesignDrafts().delete(input);
+    });
+  }
+
   createBlankDesign(
     input: CreateBlankDesignRequest
   ): Promise<DesignDetailSnapshot> {
@@ -1425,6 +1464,18 @@ export class TaskManagerService {
         await this.store.createInlineDesignTurn(input);
         await designUpdates.dispatch(input.designId).catch(() => undefined);
         this.emitDesignUpdate(input.designId, { reason: 'message-accepted' });
+        return this.store.getDesignDetail(input.designId);
+      })
+    );
+  }
+
+  cancelDesignTurn(
+    input: CancelDesignTurnRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design turn cancellation', () =>
+      this.withRuntimeOperation(async () => {
+        const designUpdates = await this.requireDesignUpdates();
+        await designUpdates.cancelTurn(input.designId, input.turnId);
         return this.store.getDesignDetail(input.designId);
       })
     );
@@ -2936,8 +2987,11 @@ export class TaskManagerService {
     task: Task,
     snapshot: TaskSnapshot
   ): Promise<DeleteTaskResult> {
-    const detail = await this.store.getDesignDetail(task.id);
-    if (detail.turns.some((turn) => turn.outcome === undefined)) {
+    if (
+      snapshot.designTurns.some(
+        (turn) => turn.designId === task.id && turn.outcome === undefined
+      )
+    ) {
       throw new Error('Wait for the current Design update to settle before deleting it.');
     }
     const worktreeOwner = this.requireDesignWorktrees();
@@ -2957,6 +3011,7 @@ export class TaskManagerService {
     }
 
     const released = await this.store.deleteTaskAndReleaseManagedRepository(task.id);
+    await this.designDrafts?.deleteForDesign(task.id).catch(() => undefined);
     await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
     if (released.removedManagedRepository) {
       await source.removeManagedRepository(released.removedManagedRepository);
@@ -3376,6 +3431,19 @@ export class TaskManagerService {
     return this.designSource;
   }
 
+  private requireDesignDrafts(): FileDesignDraftStore {
+    if (!this.designDrafts) {
+      throw new Error('Design drafts are not configured in this Task Monki host.');
+    }
+    return this.designDrafts;
+  }
+
+  private async requireDesignTask(designId: string, action: string): Promise<Task> {
+    const task = await this.requireTask(designId);
+    if (task.kind !== 'DESIGN') throw new Error(`${action} requires a Design.`);
+    return task;
+  }
+
   private async requireDesignUpdates(): Promise<DesignUpdateCoordinator> {
     this.assertPreviewEnabled();
     this.assertAgentProviderAvailable();
@@ -3390,10 +3458,11 @@ export class TaskManagerService {
       capabilities.extensions['task-monki.design-instructions']?.maturity !==
         'stable' ||
       capabilities.extensions['task-monki.design-skill-access']?.maturity !==
-        'stable'
+        'stable' ||
+      capabilities.turnInterruption.maturity !== 'stable'
     ) {
       throw new Error(
-        'The configured Codex runtime cannot apply Design instructions and skills safely.'
+        'The configured Codex runtime cannot apply Design instructions and skills safely or support Stop.'
       );
     }
     return this.designUpdates;

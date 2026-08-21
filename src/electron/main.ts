@@ -25,11 +25,13 @@ import type {
   AppUpdateEvent,
   ContinueRunRequest,
   CreateBlankDesignRequest,
+  CancelDesignTurnRequest,
   CreateBoardRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DeleteDesignDraftRequest,
   DisconnectRepositoryRequest,
   DeletePreviewLocalAttachmentBindingRequest,
   DiscardPreviewRecipeDraftRequest,
@@ -48,6 +50,7 @@ import type {
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
   RestartDesignPreviewRequest,
+  ListDesignConversationRequest,
   ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
@@ -65,6 +68,7 @@ import type {
   UpdateAgentNativeSessionRequest,
   UpdateAppSettingsRequest,
   StopPreviewRequest,
+  SaveDesignDraftRequest,
   SubmitDesignTurnRequest,
   UpdateBoardRequest,
   ValidatePreviewRecipeDraftRequest
@@ -463,12 +467,32 @@ function installIpcHandlers(): void {
     service.getDesign(designId)
   );
   handleTrustedIpc(
+    'design:conversation:list',
+    async (_, input: ListDesignConversationRequest) =>
+      service.listDesignConversation(input)
+  );
+  handleTrustedIpc('design:draft:get', async (_, designId: string) =>
+    service.getDesignDraft(designId)
+  );
+  handleTrustedIpc(
+    'design:draft:save',
+    async (_, input: SaveDesignDraftRequest) => service.saveDesignDraft(input)
+  );
+  handleTrustedIpc(
+    'design:draft:delete',
+    async (_, input: DeleteDesignDraftRequest) => service.deleteDesignDraft(input)
+  );
+  handleTrustedIpc(
     'design:create',
     async (_, input: CreateBlankDesignRequest) => service.createBlankDesign(input)
   );
   handleTrustedIpc(
     'design:turn:submit',
     async (_, input: SubmitDesignTurnRequest) => service.submitDesignTurn(input)
+  );
+  handleTrustedIpc(
+    'design:turn:cancel',
+    async (_, input: CancelDesignTurnRequest) => service.cancelDesignTurn(input)
   );
   handleTrustedIpc(
     'design:preview:restart',
@@ -1064,6 +1088,7 @@ void app.whenReady().then(async () => {
         ? {
             designRepositoryRoot: path.join(userDataDir, 'design-repositories'),
             designWorktreeRoot: path.join(userDataDir, 'design-worktrees'),
+            designDraftRoot: path.join(userDataDir, 'design-drafts'),
             designCanvasFence: designCanvasHost
           }
         : {})

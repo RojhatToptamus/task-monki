@@ -20,6 +20,7 @@ import {
   type CreateBlankDesignRequest,
   type DeleteTaskResult,
   type DesignDetailSnapshot,
+  type DesignDraftRecord,
   type DesignListItem,
   type ExternalToolStatusReport,
   type InteractionRequestRecord,
@@ -69,6 +70,9 @@ import {
 import { selectBoardTasks } from '../model/boards';
 import {
   designCanvasClientEvent,
+  eligibleDesignRuntimeCatalog,
+  mergeDesignConversationPage,
+  mergeDesignDetailHistory,
   type DesignCanvasExternalLinkRequest
 } from '../model/designs';
 import {
@@ -188,6 +192,7 @@ export function App() {
   const [designs, setDesigns] = useState<DesignListItem[]>([]);
   const [selectedDesignId, setSelectedDesignId] = useState<string | undefined>();
   const [designDetail, setDesignDetail] = useState<DesignDetailSnapshot>();
+  const [designDraft, setDesignDraft] = useState<DesignDraftRecord | null>(null);
   const [designsLoading, setDesignsLoading] = useState(false);
   const [designsError, setDesignsError] = useState<string | undefined>();
   const [designExternalLinkRequest, setDesignExternalLinkRequest] =
@@ -540,6 +545,7 @@ export function App() {
         selectedDesignIdRef.current = undefined;
         setSelectedDesignId(undefined);
         setDesignDetail(undefined);
+        setDesignDraft(null);
         setDesignExternalLinkRequest((current) =>
           current?.designId === currentDesignId ? undefined : current
         );
@@ -565,12 +571,14 @@ export function App() {
     ) => {
       const select = options.select ?? false;
       const showLoading = options.showLoading ?? false;
+      const loadDraft = select || showLoading;
       if (select) {
         selectedDesignIdRef.current = designId;
         setSelectedDesignId(designId);
         setDesignDetail((current) =>
           current?.design.id === designId ? current : undefined
         );
+        setDesignDraft(null);
       } else if (selectedDesignIdRef.current !== designId) {
         return;
       }
@@ -581,14 +589,20 @@ export function App() {
         setDesignsError(undefined);
       }
       try {
-        const detail = await taskManagerApi.getDesign(designId);
+        const [detail, draft] = await Promise.all([
+          taskManagerApi.getDesign(designId),
+          loadDraft
+            ? taskManagerApi.getDesignDraft(designId)
+            : Promise.resolve(undefined)
+        ]);
         if (
           generation !== designReadGenerationRef.current ||
           selectedDesignIdRef.current !== designId
         ) {
           return;
         }
-        setDesignDetail(detail);
+        setDesignDetail((current) => mergeDesignDetailHistory(current, detail));
+        if (draft !== undefined) setDesignDraft(draft);
         upsertDesignSummary(detail.design);
         setDesignsError(undefined);
       } catch (caught) {
@@ -619,7 +633,8 @@ export function App() {
         designReadGenerationRef.current += 1;
         selectedDesignIdRef.current = detail.design.id;
         setSelectedDesignId(detail.design.id);
-        setDesignDetail(detail);
+        setDesignDetail((current) => mergeDesignDetailHistory(current, detail));
+        if (select) setDesignDraft(null);
         setDesignsLoading(false);
         setDesignsError(undefined);
       }
@@ -643,6 +658,7 @@ export function App() {
       selectedDesignIdRef.current = undefined;
       setSelectedDesignId(undefined);
       setDesignDetail(undefined);
+      setDesignDraft(null);
       setDesignsLoading(false);
       return;
     }
@@ -653,13 +669,18 @@ export function App() {
   }, [designs, loadDesign, refreshDesignList]);
   const createBlankDesign = useCallback(
     async (
-      input: Pick<CreateBlankDesignRequest, 'brief' | 'creationToken'>
+      input: Pick<
+        CreateBlankDesignRequest,
+        'brief' | 'creationToken' | 'model' | 'reasoningEffort'
+      >
     ) => {
       const brief = input.brief.trim();
       try {
         const detail = await taskManagerApi.createBlankDesign({
           brief,
-          creationToken: input.creationToken
+          creationToken: input.creationToken,
+          model: input.model,
+          reasoningEffort: input.reasoningEffort
         });
         applyDesignActionDetail(detail, true);
         notify('Design created.', 'success');
@@ -691,7 +712,10 @@ export function App() {
           pendingDesignTurnRef.current = undefined;
         }
         applyDesignActionDetail(detail, false);
-        notify('Design update started.', 'success');
+        const accepted = detail.conversation.find(
+          (entry) => entry.turn.clientMessageId === pending.clientMessageId
+        );
+        notify(accepted?.turn.runId ? 'Design update started.' : 'Message queued.', 'success');
         void refreshDesignList();
       } catch (caught) {
         const errorMessage =
@@ -701,6 +725,65 @@ export function App() {
       }
     },
     [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const stopDesignTurn = useCallback(
+    async (designId: string, turnId: string) => {
+      try {
+        const detail = await taskManagerApi.cancelDesignTurn({ designId, turnId });
+        applyDesignActionDetail(detail, false);
+        notify('Stopping Design work.', 'info');
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not stop work.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify]
+  );
+  const loadEarlierDesignConversation = useCallback(
+    async (designId: string) => {
+      const cursor =
+        designDetail?.design.id === designId
+          ? designDetail.previousConversationCursor
+          : undefined;
+      if (!cursor) return;
+      try {
+        const page = await taskManagerApi.listDesignConversation({
+          designId,
+          beforeCursor: cursor
+        });
+        setDesignDetail((current) =>
+          current?.design.id === designId
+            ? mergeDesignConversationPage(current, page)
+            : current
+        );
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not load earlier messages.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [designDetail, notify]
+  );
+  const saveDesignDraft = useCallback(
+    async (designId: string, body: string, expectedRevision: number) => {
+      const saved = await taskManagerApi.saveDesignDraft({
+        designId,
+        body,
+        expectedRevision
+      });
+      if (selectedDesignIdRef.current === designId) setDesignDraft(saved);
+      return saved;
+    },
+    []
+  );
+  const deleteDesignDraft = useCallback(
+    async (designId: string, expectedRevision: number) => {
+      await taskManagerApi.deleteDesignDraft({ designId, expectedRevision });
+      if (selectedDesignIdRef.current === designId) setDesignDraft(null);
+    },
+    []
   );
   const respondToDesignInteraction = useCallback(
     async (
@@ -759,6 +842,7 @@ export function App() {
           selectedDesignIdRef.current = undefined;
           setSelectedDesignId(undefined);
           setDesignDetail(undefined);
+          setDesignDraft(null);
           setDesignExternalLinkRequest((current) =>
             current?.designId === designId ? undefined : current
           );
@@ -1310,6 +1394,35 @@ export function App() {
   const enabledRuntimeModels = useMemo(
     () => runtimeModels.filter((model) => enabledRuntimeIds.has(model.runtimeId)),
     [enabledRuntimeIds, runtimeModels]
+  );
+  const designRuntimeCatalog = useMemo(
+    () =>
+      runtimeCatalog
+        ? eligibleDesignRuntimeCatalog({
+            ...runtimeCatalog,
+            runtimes: enabledRuntimes,
+            models: enabledRuntimeModels
+          })
+        : undefined,
+    [enabledRuntimeModels, enabledRuntimes, runtimeCatalog]
+  );
+  const defaultDesignSettings = useMemo(
+    () =>
+      designRuntimeCatalog
+        ? resolveModelExecutionSettings(
+            designRuntimeCatalog.models,
+            appSettings.defaultModel,
+            appSettings.defaultReasoningEffort,
+            designRuntimeCatalog.defaultRuntimeId,
+            appSettings.defaultModelProvider
+          )
+        : undefined,
+    [
+      appSettings.defaultModel,
+      appSettings.defaultModelProvider,
+      appSettings.defaultReasoningEffort,
+      designRuntimeCatalog
+    ]
   );
   const readyPromptRefinementRuntimes = enabledRuntimes.filter(
     (runtime) =>
@@ -2580,6 +2693,10 @@ export function App() {
                 ? designDetail
                 : undefined
             }
+            draft={designDraft}
+            models={designRuntimeCatalog?.models ?? []}
+            runtimes={designRuntimeCatalog?.runtimes ?? []}
+            defaultAgentSettings={defaultDesignSettings}
             loading={designsLoading}
             error={designsError}
             desktopCanvasAvailable={Boolean(window.designCanvas)}
@@ -2589,6 +2706,11 @@ export function App() {
             }}
             onCreateBlankDesign={createBlankDesign}
             onSubmitRefinement={submitDesignRefinement}
+            onStopTurn={stopDesignTurn}
+            onLoadEarlier={loadEarlierDesignConversation}
+            onSaveDraft={saveDesignDraft}
+            onDeleteDraft={deleteDesignDraft}
+            onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
             onRespondToInteraction={respondToDesignInteraction}
             onRefreshCanvas={refreshDesignCanvas}
             onRestartCanvas={restartDesignCanvas}

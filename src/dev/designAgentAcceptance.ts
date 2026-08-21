@@ -238,6 +238,7 @@ function createService(root: string): TaskManagerService {
       ),
       designRepositoryRoot: path.join(root, 'design-repositories'),
       designWorktreeRoot: path.join(root, 'design-worktrees'),
+      designDraftRoot: path.join(root, 'design-drafts'),
       designSkillRoot: path.resolve('resources/design-skills'),
       designCanvasFence: {
         async begin() {

@@ -5,21 +5,26 @@ interface RunActivityTimelineProps {
   rows: OverviewActivityRow[];
   outputSummary?: string;
   onShowDebug?: () => void;
+  live?: boolean;
 }
 
 export function RunActivityTimeline({
   rows,
   outputSummary,
-  onShowDebug
+  onShowDebug,
+  live = true
 }: RunActivityTimelineProps) {
   if (rows.length === 0) {
     return null;
   }
   return (
-    <section className="tm-run-activity tm-run-activity--live" aria-label="Agent activity">
+    <section
+      className={`tm-run-activity ${live ? 'tm-run-activity--live' : ''}`}
+      aria-label="Agent activity"
+    >
       <div className="tm-run-activity__head">
-        <span>Activity</span>
-        <span>following tail</span>
+        <span>{live ? 'Activity' : 'Recent activity'}</span>
+        {live ? <span>following tail</span> : null}
       </div>
       <div className="tm-run-activity__list">
         {rows.map((row) => (

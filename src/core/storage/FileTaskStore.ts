@@ -29,13 +29,16 @@ import type {
   CreateBoardRequest,
   CreateBlankDesignRequest,
   CreateTaskRequest,
+  DesignConversationEntry,
   DesignDetailSnapshot,
+  DesignConversationPage,
   DesignListItem,
   DesignReference,
   DesignRevision,
   DesignTurn,
   DesignTurnCheckpoint,
   DesignTurnOutcome,
+  ListDesignConversationRequest,
   DomainEvent,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
@@ -71,6 +74,7 @@ import type {
   WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
+import { DESIGN_LIMITS } from '../../shared/design';
 import {
   BOARD_COLORS,
   TASK_STORE_SCHEMA_VERSION,
@@ -1038,31 +1042,24 @@ export class FileTaskStore {
     const revisions = state.designRevisions
       .filter((revision) => revision.designId === designId)
       .sort((left, right) => left.ordinal - right.ordinal);
-    const turns = state.designTurns
-      .filter((turn) => turn.designId === designId)
-      .sort((left, right) => left.order - right.order)
-      .slice(-100);
-    const conversation = await Promise.all(
-      turns.map(async (turn) => {
-        const run = turn.runId
-          ? state.runs.find((candidate) => candidate.id === turn.runId)
-          : undefined;
-        const artifact = turn.messageArtifactId
-          ? state.artifacts.find((candidate) => candidate.id === turn.messageArtifactId)
-          : undefined;
-        return {
-          turn,
-          userMessage:
-            turn.messageSource === 'TASK_PROMPT'
-              ? task.prompt
-              : artifact
-                ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
-                : '',
-          assistantMessage: run?.finalMessage,
-          runStatus: run?.status
-        };
-      })
+    const conversationPage = await projectDesignConversationPage(state, task, {});
+    const visibleTurnIds = new Set(
+      conversationPage.entries.map((entry) => entry.turn.id)
     );
+    const unsettledEntries = await Promise.all(
+      state.designTurns
+        .filter(
+          (turn) =>
+            turn.designId === designId &&
+            turn.outcome === undefined &&
+            !visibleTurnIds.has(turn.id)
+        )
+        .map((turn) => projectDesignConversationEntry(state, task, turn))
+    );
+    const conversation = [...unsettledEntries, ...conversationPage.entries].sort(
+      (left, right) => left.turn.order - right.turn.order
+    );
+    const turns = conversation.map((entry) => entry.turn);
     const interactions = state.interactionRequests
       .filter(
         (interaction) =>
@@ -1082,7 +1079,7 @@ export class FileTaskStore {
     const items = state.agentItems
       .filter((item) => item.taskId === designId && runIds.has(item.runId))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .slice(-100);
+      .slice(-DESIGN_LIMITS.recentTelemetryItems);
     const currentPreview = selectCurrentDesignPreview(state, designId, revisions.at(-1));
     return clone({
       schemaVersion: state.schemaVersion,
@@ -1095,6 +1092,7 @@ export class FileTaskStore {
       ),
       revisions,
       conversation,
+      previousConversationCursor: conversationPage.previousCursor,
       interactions,
       sessions,
       items,
@@ -1112,6 +1110,18 @@ export class FileTaskStore {
       canvas: projectDesignCanvas(state, task, revisions.at(-1), currentPreview),
       actions: projectDesignActions(state, task, revisions.at(-1), currentPreview)
     });
+  }
+
+  async listDesignConversation(
+    input: ListDesignConversationRequest
+  ): Promise<DesignConversationPage> {
+    await this.init();
+    const state = this.publishedState;
+    const task = state.tasks.find(
+      (candidate) => candidate.id === input.designId && candidate.kind === 'DESIGN'
+    );
+    if (!task) throw new Error('Design not found.');
+    return clone(await projectDesignConversationPage(state, task, input));
   }
 
   async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
@@ -2652,12 +2662,14 @@ export class FileTaskStore {
         }
         return clone(existing);
       }
-      if (
-        this.state.designTurns.some(
-          (turn) => turn.designId === design.id && turn.outcome === undefined
-        )
-      ) {
-        throw new Error('This Design already has an unsettled turn.');
+      const queuedTurnCount = this.state.designTurns.filter(
+        (turn) =>
+          turn.designId === design.id &&
+          turn.outcome === undefined &&
+          !turn.runId
+      ).length;
+      if (queuedTurnCount >= DESIGN_LIMITS.queuedTurns) {
+        throw new Error('This Design message queue is full.');
       }
 
       const now = new Date().toISOString();
@@ -7695,8 +7707,8 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
   const status: DesignListItem['status'] = needsInput
     ? 'NEEDS_INPUT'
     : latestTurn?.outcome === 'FAILED' ||
-        latestTurn?.outcome === 'CANCELED' ||
         latestTurn?.outcome === 'NEEDS_ATTENTION' ||
+        (latestTurn?.outcome === 'CANCELED' && !latestRevision) ||
         previewNeedsRestart
       ? 'NEEDS_ATTENTION'
       : latestTurn?.outcome === undefined || activeRun
@@ -7725,6 +7737,78 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
     latestRevision,
     updatedAt
   };
+}
+
+async function projectDesignConversationPage(
+  state: StoreState,
+  task: Task,
+  input: Pick<ListDesignConversationRequest, 'beforeCursor' | 'limit'>
+): Promise<DesignConversationPage> {
+  const limit = input.limit ?? DESIGN_LIMITS.transcriptPageSize;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > DESIGN_LIMITS.transcriptPageSize
+  ) {
+    throw new Error('Design conversation page limit is invalid.');
+  }
+  const beforeOrder = decodeDesignConversationCursor(input.beforeCursor);
+  const allTurns = state.designTurns
+    .filter(
+      (turn) =>
+        turn.designId === task.id &&
+        (beforeOrder === undefined || turn.order < beforeOrder)
+    )
+    .sort((left, right) => left.order - right.order);
+  const turns = allTurns.slice(-limit);
+  const entries = await Promise.all(
+    turns.map((turn) => projectDesignConversationEntry(state, task, turn))
+  );
+  return {
+    entries,
+    ...(allTurns.length > turns.length && turns[0]
+      ? { previousCursor: encodeDesignConversationCursor(turns[0].order) }
+      : {})
+  };
+}
+
+async function projectDesignConversationEntry(
+  state: StoreState,
+  task: Task,
+  turn: DesignTurn
+): Promise<DesignConversationEntry> {
+  const run = turn.runId
+    ? state.runs.find((candidate) => candidate.id === turn.runId)
+    : undefined;
+  const artifact = turn.messageArtifactId
+    ? state.artifacts.find((candidate) => candidate.id === turn.messageArtifactId)
+    : undefined;
+  return {
+    turn,
+    userMessage:
+      turn.messageSource === 'TASK_PROMPT'
+        ? task.prompt
+        : artifact
+          ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
+          : '',
+    assistantMessage: run?.finalMessage,
+    runStatus: run?.status
+  };
+}
+
+function encodeDesignConversationCursor(order: number): string {
+  return Buffer.from(`order:${order}`, 'utf8').toString('base64url');
+}
+
+function decodeDesignConversationCursor(cursor: string | undefined): number | undefined {
+  if (!cursor) return undefined;
+  const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+  const match = /^order:(\d+)$/u.exec(decoded);
+  const order = match ? Number(match[1]) : Number.NaN;
+  if (!Number.isSafeInteger(order) || order < 1) {
+    throw new Error('Design conversation cursor is invalid.');
+  }
+  return order;
 }
 
 function selectCurrentDesignPreview(
@@ -7790,33 +7874,45 @@ function projectDesignActions(
   latestRevision: DesignRevision | undefined,
   currentPreview: PreviewGenerationRecord | undefined
 ): DesignDetailSnapshot['actions'] {
-  const unsettled = state.designTurns.some(
-    (turn) => turn.designId === task.id && turn.outcome === undefined
-  );
-  const canRefine = task.workflowPhase === 'READY' && !unsettled;
+  const unsettledTurns = state.designTurns
+    .filter((turn) => turn.designId === task.id && turn.outcome === undefined)
+    .sort((left, right) => left.order - right.order);
+  const queuedTurnCount = unsettledTurns.filter((turn) => !turn.runId).length;
+  const canRefine =
+    task.workflowPhase === 'READY' && queuedTurnCount < DESIGN_LIMITS.queuedTurns;
   const previewIsReady =
     currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY';
-  const activeRun = state.runs.some(
-    (run) =>
-      run.taskId === task.id &&
-      [
-        'QUEUED',
-        'STARTING',
-        'RUNNING',
-        'AWAITING_APPROVAL',
-        'AWAITING_USER_INPUT',
-        'INTERRUPTING',
-        'RECOVERY_REQUIRED'
-      ].includes(run.status)
-  );
-  const canDelete = !unsettled && !activeRun;
+  const currentRun = task.currentRunId
+    ? state.runs.find((run) => run.id === task.currentRunId)
+    : undefined;
+  const activeRun =
+    currentRun &&
+    [
+      'QUEUED',
+      'STARTING',
+      'RUNNING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
+      'INTERRUPTING',
+      'RECOVERY_REQUIRED'
+    ].includes(currentRun.status)
+      ? currentRun
+      : undefined;
+  const stopTurn = activeRun
+    ? unsettledTurns.find((turn) => turn.runId === activeRun.id)
+    : undefined;
+  const canStop = Boolean(stopTurn && activeRun?.status !== 'INTERRUPTING');
+  const canDelete = unsettledTurns.length === 0 && !activeRun;
   return {
     canRefine,
     refineDisabledReason: canRefine
       ? undefined
       : task.workflowPhase !== 'READY'
         ? 'This Design is archived.'
-        : 'Wait for the current Design turn to settle.',
+        : 'The Design message queue is full.',
+    queuedTurnCount,
+    canStop,
+    stopTurnId: canStop ? stopTurn?.id : undefined,
     canRestart: Boolean(latestRevision && !previewIsReady),
     canDelete,
     deleteDisabledReason: canDelete

@@ -5,6 +5,7 @@ import type {
   BoardSnapshot,
   ApprovePreviewPlanRequest,
   CancelRunRequest,
+  CancelDesignTurnRequest,
   ContinueRunRequest,
   CreateBlankDesignRequest,
   BranchPublicationRecord,
@@ -12,8 +13,11 @@ import type {
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DeleteDesignDraftRequest,
   DeleteTaskResult,
   DesignDetailSnapshot,
+  DesignConversationPage,
+  DesignDraftRecord,
   DesignListItem,
   DiscardPreviewRecipeDraftRequest,
   DeletePreviewLocalAttachmentBindingRequest,
@@ -59,6 +63,8 @@ import type {
   RespondToInteractionRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
+  ListDesignConversationRequest,
+  SaveDesignDraftRequest,
   SubmitDesignTurnRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
@@ -328,12 +334,45 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     listDesigns: () => get<DesignListItem[]>(baseUrl, '/api/designs'),
     getDesign: (designId: string) =>
       get<DesignDetailSnapshot>(baseUrl, `/api/designs/${encodeURIComponent(designId)}`),
+    listDesignConversation: (input: ListDesignConversationRequest) => {
+      const query = new URLSearchParams();
+      if (input.beforeCursor) query.set('beforeCursor', input.beforeCursor);
+      if (input.limit !== undefined) query.set('limit', String(input.limit));
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return get<DesignConversationPage>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/conversation${suffix}`
+      );
+    },
+    getDesignDraft: (designId: string) =>
+      get<DesignDraftRecord | null>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(designId)}/draft`
+      ),
+    saveDesignDraft: (input: SaveDesignDraftRequest) =>
+      post<DesignDraftRecord>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/draft`,
+        input
+      ),
+    deleteDesignDraft: (input: DeleteDesignDraftRequest) =>
+      post<void>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/draft/delete`,
+        input
+      ),
     createBlankDesign: (input: CreateBlankDesignRequest) =>
       post<DesignDetailSnapshot>(baseUrl, '/api/designs', input),
     submitDesignTurn: (input: SubmitDesignTurnRequest) =>
       post<DesignDetailSnapshot>(
         baseUrl,
         `/api/designs/${encodeURIComponent(input.designId)}/turns`,
+        input
+      ),
+    cancelDesignTurn: (input: CancelDesignTurnRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/turns/${encodeURIComponent(input.turnId)}/cancel`,
         input
       ),
     restartDesignPreview: (input: RestartDesignPreviewRequest) =>

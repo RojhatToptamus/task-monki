@@ -1,6 +1,8 @@
 import type {
   AppUpdateEvent,
+  AgentRuntimeCatalog,
   DesignCanvasTarget,
+  DesignConversationPage,
   DesignConversationEntry,
   DesignDetailSnapshot,
   DesignListItem,
@@ -17,6 +19,7 @@ export type DesignTurnStatus =
   | 'RUNNING'
   | 'READY'
   | 'NO_CHANGE'
+  | 'CANCELED'
   | 'FAILED';
 
 export type DesignProjectSummary = DesignListItem;
@@ -221,10 +224,13 @@ export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
   if (outcome === 'NO_CHANGE') {
     return { status: 'NO_CHANGE', statusLabel: 'No visual change' };
   }
-  if (outcome === 'FAILED' || outcome === 'NEEDS_ATTENTION' || outcome === 'CANCELED') {
+  if (outcome === 'CANCELED') {
+    return { status: 'CANCELED', statusLabel: 'Stopped' };
+  }
+  if (outcome === 'FAILED' || outcome === 'NEEDS_ATTENTION') {
     return {
       status: 'FAILED',
-      statusLabel: 'Needs attention',
+      statusLabel: 'Update failed',
       detail: entry.turn.failureReason
     };
   }
@@ -258,13 +264,87 @@ export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
   return { status: 'QUEUED', statusLabel: 'Queued' };
 }
 
+export function eligibleDesignRuntimeCatalog(
+  catalog: AgentRuntimeCatalog
+): AgentRuntimeCatalog {
+  const runtimes = catalog.runtimes.filter((runtime) => {
+    const capabilities = runtime.preflight.capabilities;
+    return (
+      runtime.preflight.readiness.canStart &&
+      capabilities.extensions['task-monki.design-instructions']?.maturity === 'stable' &&
+      capabilities.extensions['task-monki.design-skill-access']?.maturity === 'stable' &&
+      capabilities.turnInterruption.maturity === 'stable'
+    );
+  });
+  const runtimeIds = new Set(
+    runtimes.map((runtime) => runtime.preflight.runtime.id)
+  );
+  return {
+    ...catalog,
+    runtimes,
+    models: catalog.models.filter((model) => runtimeIds.has(model.runtimeId)),
+    defaultRuntimeId: runtimeIds.has(catalog.defaultRuntimeId)
+      ? catalog.defaultRuntimeId
+      : runtimes[0]?.preflight.runtime.id ?? catalog.defaultRuntimeId
+  };
+}
+
+export function mergeDesignConversationPage(
+  project: DesignProjectDetail,
+  page: DesignConversationPage
+): DesignProjectDetail {
+  const entries = new Map(
+    [...page.entries, ...project.conversation].map((entry) => [entry.turn.id, entry])
+  );
+  const conversation = [...entries.values()].sort(
+    (left, right) => left.turn.order - right.turn.order
+  );
+  return {
+    ...project,
+    conversation,
+    turns: conversation.map((entry) => entry.turn),
+    previousConversationCursor: page.previousCursor
+  };
+}
+
+export function mergeDesignDetailHistory(
+  current: DesignProjectDetail | undefined,
+  next: DesignProjectDetail
+): DesignProjectDetail {
+  if (
+    !current ||
+    current.design.id !== next.design.id ||
+    current.conversation.length <= next.conversation.length
+  ) {
+    return next;
+  }
+  const entries = new Map(
+    [...current.conversation, ...next.conversation].map((entry) => [entry.turn.id, entry])
+  );
+  const conversation = [...entries.values()].sort(
+    (left, right) => left.turn.order - right.turn.order
+  );
+  return {
+    ...next,
+    conversation,
+    turns: conversation.map((entry) => entry.turn),
+    previousConversationCursor: current.previousConversationCursor
+  };
+}
+
 export function designActivityRows(project: DesignProjectDetail): OverviewActivityRow[] {
+  return designDetailedActivityRows(project).slice(-5);
+}
+
+export function designDetailedActivityRows(
+  project: DesignProjectDetail
+): OverviewActivityRow[] {
   if (!project.currentRun) return [];
   const projection = buildRunActivityProjection({
     run: project.currentRun,
     items: project.items.filter((item) => item.runId === project.currentRun?.id)
   });
-  return buildOverviewRunActivityRows(projection.rows).slice(-5);
+  return buildOverviewRunActivityRows(projection.rows);
 }
 
 export function finiteDesignCanvasBounds(

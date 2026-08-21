@@ -315,6 +315,18 @@
   scrollbar-gutter: stable;
 }
 
+.tm-design-conversation__earlier {
+  display: block;
+  margin: 0 auto 18px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.tm-design-conversation__earlier:hover:not(:disabled) {
+  color: var(--text-soft);
+}
+
 .tm-design-conversation__empty {
   min-height: 240px;
   display: grid;
@@ -426,6 +438,10 @@
   border-left-color: var(--state-blocked);
 }
 
+.tm-design-message--agent.tm-design-message--canceled {
+  border-left-color: var(--state-idle);
+}
+
 .tm-design-message__turn-status {
   display: inline-flex;
   align-items: center;
@@ -455,6 +471,10 @@
   background: var(--state-blocked);
 }
 
+.tm-design-message--canceled .tm-design-message__turn-status i {
+  background: var(--state-idle);
+}
+
 .tm-design-message--agent .tm-discourse-markdown {
   color: var(--text-soft);
   font-size: 12px;
@@ -482,6 +502,23 @@
 
 .tm-design-conversation__transcript > .interaction-card {
   box-shadow: none;
+}
+
+.tm-design-technical-details {
+  margin-top: 12px;
+  border-top: 1px solid var(--hair);
+  color: var(--muted);
+}
+
+.tm-design-technical-details > summary {
+  padding: 10px 0 2px;
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.tm-design-technical-details > .tm-run-activity {
+  margin-top: 8px;
 }
 
 .tm-design-composer {
@@ -523,11 +560,13 @@
 }
 
 .tm-design-composer__footer > span {
+  margin-right: auto;
   color: var(--muted);
   font-size: 9.5px;
 }
 
-.tm-design-composer__footer .primary-button {
+.tm-design-composer__footer .primary-button,
+.tm-design-composer__footer .outline-button {
   min-height: 30px;
   padding: 0 12px;
   font-size: 11px;
@@ -710,56 +749,14 @@
 }
 
 .tm-design-create__runtime {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   margin-top: 12px;
-  padding: 11px 12px;
+  padding: 10px 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
 
-.tm-design-create__runtime > span {
-  width: 29px;
-  height: 29px;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  background: var(--surface2);
-  color: var(--text-soft);
-}
-
-.tm-design-create__runtime svg {
-  width: 17px;
-  height: 17px;
-  stroke: currentColor;
-  stroke-width: 1.25;
-  stroke-linejoin: round;
-}
-
-.tm-design-create__runtime div {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.tm-design-create__runtime strong {
-  color: var(--text);
-  font-size: 11.5px;
-}
-
-.tm-design-create__runtime small {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.tm-design-create__runtime em {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 9.5px;
-  font-style: normal;
+.tm-design-create__runtime > .tm-agent-console {
+  width: 100%;
 }
 
 .tm-design-create__actions {

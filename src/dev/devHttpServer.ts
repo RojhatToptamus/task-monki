@@ -351,6 +351,39 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      const designConversationMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/conversation$/u
+      );
+      if (request.method === 'GET' && designConversationMatch) {
+        const limit = url.searchParams.get('limit');
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.listDesignConversation({
+            designId: decodeURIComponent(designConversationMatch[1]),
+            ...(url.searchParams.get('beforeCursor')
+              ? { beforeCursor: url.searchParams.get('beforeCursor')! }
+              : {}),
+            ...(limit !== null ? { limit: Number(limit) } : {})
+          })
+        );
+        return;
+      }
+
+      const designDraftMatch = url.pathname.match(/^\/api\/designs\/([^/]+)\/draft$/u);
+      if (request.method === 'GET' && designDraftMatch) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDesignDraft(
+            decodeURIComponent(designDraftMatch[1])
+          )
+        );
+        return;
+      }
+
       const designDetailMatch = url.pathname.match(/^\/api\/designs\/([^/]+)$/u);
       if (request.method === 'GET' && designDetailMatch) {
         sendJson(
@@ -620,6 +653,42 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
             designId: decodeURIComponent(designTurnMatch[1])
           } as never)
         );
+        return;
+      }
+
+      const designTurnCancelMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/turns\/([^/]+)\/cancel$/u
+      );
+      if (request.method === 'POST' && designTurnCancelMatch) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.cancelDesignTurn({
+            designId: decodeURIComponent(designTurnCancelMatch[1]),
+            turnId: decodeURIComponent(designTurnCancelMatch[2])
+          })
+        );
+        return;
+      }
+
+      const designDraftMutationMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/draft(?:\/(delete))?$/u
+      );
+      if (request.method === 'POST' && designDraftMutationMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        const designId = decodeURIComponent(designDraftMutationMatch[1]);
+        if (designDraftMutationMatch[2] === 'delete') {
+          await options.service.deleteDesignDraft({ ...input, designId } as never);
+          sendJson(response, requestId, 200, {});
+        } else {
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.saveDesignDraft({ ...input, designId } as never)
+          );
+        }
         return;
       }
 

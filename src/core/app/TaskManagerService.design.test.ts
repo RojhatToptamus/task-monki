@@ -137,6 +137,76 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(fs.stat(repositoryPath)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 45_000);
 
+  it('queues follow-up messages, stops active work, and persists an unsent draft', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-long-conversation',
+      previewEnabled: true,
+      designMode: true
+    });
+    scenarios.push(scenario);
+
+    let detail = await scenario.service.createBlankDesign({
+      brief: 'Create a compact reporting page.',
+      creationToken: 'design-long-create',
+      model: 'scenario-model',
+      reasoningEffort: 'medium'
+    });
+    const firstRun = detail.currentRun!;
+    const draft = await scenario.service.saveDesignDraft({
+      designId: detail.design.id,
+      expectedRevision: 0,
+      body: 'Try a less dense layout.'
+    });
+    await expect(scenario.service.getDesignDraft(detail.design.id)).resolves.toEqual(draft);
+
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-long-queued',
+      message: 'Use larger section headings.'
+    });
+    expect(scenario.agent.startedTurns).toHaveLength(1);
+    expect(detail.turns.at(-1)).toMatchObject({ order: 2 });
+    expect(detail.turns.at(-1)).not.toHaveProperty('runId');
+    expect(detail.actions).toMatchObject({
+      canRefine: true,
+      queuedTurnCount: 1,
+      canStop: true,
+      stopTurnId: detail.turns[0]?.id
+    });
+
+    detail = await scenario.service.cancelDesignTurn({
+      designId: detail.design.id,
+      turnId: detail.turns[0]!.id
+    });
+    expect(detail.currentRun?.status).toBe('INTERRUPTED');
+    scenario.events.emit({
+      type: 'run.terminal',
+      taskId: detail.design.id,
+      iterationId: firstRun.iterationId,
+      runId: firstRun.id,
+      worktreeId: firstRun.worktreeId,
+      payload: { status: 'INTERRUPTED' },
+      at: new Date().toISOString()
+    });
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => scenario.agent.startedTurns.length === 2 && candidate.turns[1]?.runId !== undefined
+    );
+    expect(detail.turns[0]?.outcome).toBe('CANCELED');
+    expect(detail.currentRun?.id).toBe(detail.turns[1]?.runId);
+    expect(scenario.agent.startedTurns[1]).toMatchObject({
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN'
+    });
+
+    await scenario.service.deleteDesignDraft({
+      designId: detail.design.id,
+      expectedRevision: draft.recordRevision
+    });
+    await expect(scenario.service.getDesignDraft(detail.design.id)).resolves.toBeNull();
+  }, 30_000);
+
   it('does not delete a Design while its Preview restart is running', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-restart-delete',

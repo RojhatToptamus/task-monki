@@ -3,12 +3,14 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   CancelRunRequest,
+  CancelDesignTurnRequest,
   ContinueRunRequest,
   CreateBlankDesignRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DeleteDesignDraftRequest,
   DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
@@ -36,6 +38,8 @@ import type {
   SteerRunRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
+  ListDesignConversationRequest,
+  SaveDesignDraftRequest,
   SubmitDesignTurnRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
@@ -198,10 +202,19 @@ const api: TaskManagerApi = {
   createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
   listDesigns: () => invokeIpc('design:list'),
   getDesign: (designId: string) => invokeIpc('design:get', designId),
+  listDesignConversation: (input: ListDesignConversationRequest) =>
+    invokeIpc('design:conversation:list', input),
+  getDesignDraft: (designId: string) => invokeIpc('design:draft:get', designId),
+  saveDesignDraft: (input: SaveDesignDraftRequest) =>
+    invokeIpc('design:draft:save', input),
+  deleteDesignDraft: (input: DeleteDesignDraftRequest) =>
+    invokeIpc('design:draft:delete', input),
   createBlankDesign: (input: CreateBlankDesignRequest) =>
     invokeIpc('design:create', input),
   submitDesignTurn: (input: SubmitDesignTurnRequest) =>
     invokeIpc('design:turn:submit', input),
+  cancelDesignTurn: (input: CancelDesignTurnRequest) =>
+    invokeIpc('design:turn:cancel', input),
   restartDesignPreview: (input: RestartDesignPreviewRequest) =>
     invokeIpc('design:preview:restart', input),
   refinePrompt: (input: RefinePromptRequest) => invokeIpc('prompt:refine', input),

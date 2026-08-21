@@ -371,6 +371,49 @@ describe('createBrowserTaskManagerApi preview contract', () => {
   });
 });
 
+describe('createBrowserTaskManagerApi Design conversation', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses scoped paging, draft, and Stop endpoints', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => ({}) } as Response;
+      })
+    );
+    const api = createBrowserTaskManagerApi('');
+
+    await api.listDesignConversation({
+      designId: 'design/1',
+      beforeCursor: 'before cursor',
+      limit: 25
+    });
+    await api.getDesignDraft('design/1');
+    await api.saveDesignDraft({
+      designId: 'design/1',
+      expectedRevision: 2,
+      body: 'Unsent change'
+    });
+    await api.deleteDesignDraft({ designId: 'design/1', expectedRevision: 3 });
+    await api.cancelDesignTurn({ designId: 'design/1', turnId: 'turn/1' });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/api/designs/design%2F1/conversation?beforeCursor=before+cursor&limit=25',
+      '/api/designs/design%2F1/draft',
+      '/api/designs/design%2F1/draft',
+      '/api/designs/design%2F1/draft/delete',
+      '/api/designs/design%2F1/turns/turn%2F1/cancel'
+    ]);
+    expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+      designId: 'design/1',
+      expectedRevision: 2,
+      body: 'Unsent change'
+    });
+  });
+});
+
 describe('createBrowserTaskManagerApi discourse', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

@@ -71,7 +71,9 @@ describe('FileTaskStore Design ownership', () => {
       ],
       canvas: { state: 'UPDATING' },
       actions: {
-        canRefine: false,
+        canRefine: true,
+        queuedTurnCount: 1,
+        canStop: false,
         canRestart: false,
         canDelete: false,
         deleteDisabledReason: expect.stringContaining('settle')
@@ -86,7 +88,7 @@ describe('FileTaskStore Design ownership', () => {
     await store.close();
   });
 
-  it('stores one inline turn and message artifact, with exact retry and one-at-a-time admission', async () => {
+  it('stores inline turns as an idempotent FIFO message queue', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-message-'));
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
@@ -109,23 +111,88 @@ describe('FileTaskStore Design ownership', () => {
     await expect(
       store.createInlineDesignTurn({ ...input, message: 'Different bytes' })
     ).rejects.toThrow('already used for different content');
-    await expect(
-      store.createInlineDesignTurn({
-        ...input,
-        clientMessageId: 'design-message-0002'
-      })
-    ).rejects.toThrow('already has an unsettled turn');
+    const queued = await store.createInlineDesignTurn({
+      ...input,
+      clientMessageId: 'design-message-0002',
+      message: 'Use a warmer accent color.'
+    });
 
     const detail = await store.getDesignDetail(created.task.id);
-    expect(detail.conversation.at(-1)).toMatchObject({
+    expect(detail.conversation.at(-2)).toMatchObject({
       turn: { id: turn.id, messageSource: 'INLINE_MESSAGE', order: 2 },
       userMessage: input.message
+    });
+    expect(detail.conversation.at(-1)).toMatchObject({
+      turn: { id: queued.id, messageSource: 'INLINE_MESSAGE', order: 3 },
+      userMessage: 'Use a warmer accent color.'
+    });
+    expect(detail.actions).toMatchObject({
+      canRefine: true,
+      queuedTurnCount: 2,
+      canStop: false
     });
     expect(
       (await store.snapshot()).artifacts.filter(
         (artifact) => artifact.kind === 'design-message'
       )
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+    for (let index = 3; index <= 20; index += 1) {
+      await store.createInlineDesignTurn({
+        designId: created.task.id,
+        clientMessageId: `design-message-${index.toString().padStart(4, '0')}`,
+        message: `Queued change ${index}`
+      });
+    }
+    await expect(
+      store.createInlineDesignTurn({
+        designId: created.task.id,
+        clientMessageId: 'design-message-0021',
+        message: 'This message exceeds the queue limit.'
+      })
+    ).rejects.toThrow('queue is full');
+    await expect(store.getDesignDetail(created.task.id)).resolves.toMatchObject({
+      actions: { canRefine: false, queuedTurnCount: 20 }
+    });
+    await store.close();
+  });
+
+  it('pages older conversation entries while retaining an old unsettled turn', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-paging-'));
+    const store = new FileTaskStore(dir);
+    const created = await store.createDesignBundle({
+      request: { brief: 'Create the initial page.', creationToken: 'design-paging-create' },
+      repository: managedRepository(dir)
+    });
+    for (let index = 1; index <= 55; index += 1) {
+      const turn = await store.createInlineDesignTurn({
+        designId: created.task.id,
+        clientMessageId: `design-paging-${index.toString().padStart(4, '0')}`,
+        message: `Refinement ${index}`
+      });
+      await store.settleDesignTurn({
+        designId: created.task.id,
+        turnId: turn.id,
+        outcome: 'CANCELED'
+      });
+    }
+
+    const detail = await store.getDesignDetail(created.task.id);
+    expect(detail.conversation).toHaveLength(51);
+    expect(detail.conversation[0]?.turn).toMatchObject({ order: 1 });
+    expect(detail.conversation[0]?.turn).not.toHaveProperty('outcome');
+    expect(detail.conversation[1]?.turn.order).toBe(7);
+    expect(detail.conversation.at(-1)?.turn.order).toBe(56);
+    expect(detail.previousConversationCursor).toBeTypeOf('string');
+
+    const earlier = await store.listDesignConversation({
+      designId: created.task.id,
+      beforeCursor: detail.previousConversationCursor
+    });
+    expect(earlier.entries.map((entry) => entry.turn.order)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(earlier.previousCursor).toBeUndefined();
+    await expect(
+      store.listDesignConversation({ designId: created.task.id, beforeCursor: 'invalid' })
+    ).rejects.toThrow('cursor is invalid');
     await store.close();
   });
 
@@ -552,6 +619,38 @@ describe('FileTaskStore Design ownership', () => {
         canRestart: false,
         canDelete: true
       }
+    });
+
+    for (let index = 0; index < 105; index += 1) {
+      await store.upsertAgentItem({
+        taskId: created.task.id,
+        iterationId: iteration.id,
+        runId: run.id,
+        sessionId: session.id,
+        providerItemId: `design-activity-${index.toString().padStart(3, '0')}`,
+        type: 'AGENT_MESSAGE',
+        status: 'COMPLETED',
+        payload: { text: `Activity ${index}` }
+      });
+    }
+    const boundedActivity = await store.getDesignDetail(created.task.id);
+    expect(boundedActivity.items).toHaveLength(100);
+    expect(boundedActivity.items[0]?.providerItemId).toBe('design-activity-005');
+    expect(boundedActivity.items.at(-1)?.providerItemId).toBe('design-activity-104');
+
+    const stoppedTurn = await store.createInlineDesignTurn({
+      designId: created.task.id,
+      clientMessageId: 'design-stop-after-ready',
+      message: 'Try a different direction.'
+    });
+    await store.settleDesignTurn({
+      designId: created.task.id,
+      turnId: stoppedTurn.id,
+      outcome: 'CANCELED'
+    });
+    await expect(store.getDesignDetail(created.task.id)).resolves.toMatchObject({
+      design: { status: 'READY' },
+      canvas: { state: 'READY' }
     });
 
     await store.close();

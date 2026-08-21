@@ -1,10 +1,13 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type {
+  AgentModel,
+  AgentRuntimeState,
   InteractionRequestRecord,
   DesignListItem
 } from '../../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
+import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import type { DesignProjectDetail } from '../model/designs';
 import { DesignsWorkspace, type DesignsWorkspaceProps } from './DesignsWorkspace';
 
@@ -25,7 +28,7 @@ describe('mounted Design workspace', () => {
     expect(screen.getByRole('heading', { name: 'New blank Design' })).toBeTruthy();
   });
 
-  it('creates one blank Design from a brief with fixed Codex settings', () => {
+  it('creates one blank Design with the selected compatible model', () => {
     const onCreateBlankDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(
       <DesignsWorkspace
@@ -39,9 +42,7 @@ describe('mounted Design workspace', () => {
     );
 
     expect(screen.getByRole('heading', { name: 'New blank Design' })).toBeTruthy();
-    expect(screen.getByText('Codex')).toBeTruthy();
-    expect(screen.getByText('Restricted workspace')).toBeTruthy();
-    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.getByRole('button', { name: /Design: Codex · Luna/ })).toBeTruthy();
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: '  Build a calm project portfolio.  ' }
@@ -53,7 +54,9 @@ describe('mounted Design workspace', () => {
     expect(onCreateBlankDesign).toHaveBeenCalledOnce();
     expect(onCreateBlankDesign).toHaveBeenCalledWith({
       brief: 'Build a calm project portfolio.',
-      creationToken: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/u)
+      creationToken: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/u),
+      model: 'gpt-5.6-luna',
+      reasoningEffort: 'medium'
     });
   });
 
@@ -87,7 +90,7 @@ describe('mounted Design workspace', () => {
     );
   });
 
-  it('renders the ready conversation and sends one trimmed refinement', () => {
+  it('renders the ready conversation and sends one trimmed refinement', async () => {
     const onSubmitRefinement = vi.fn(() => new Promise<void>(() => undefined));
     render(
       <DesignsWorkspace
@@ -103,11 +106,128 @@ describe('mounted Design workspace', () => {
     fireEvent.click(send);
     fireEvent.click(send);
 
-    expect(onSubmitRefinement).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onSubmitRefinement).toHaveBeenCalledOnce());
     expect(onSubmitRefinement).toHaveBeenCalledWith(
       'design-1',
       'Increase the title contrast.'
     );
+  });
+
+  it('queues another message during active work and exposes Stop', async () => {
+    const onSubmitRefinement = vi.fn(async () => undefined);
+    const onStopTurn = vi.fn(async () => undefined);
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          project: designProject({
+            design: designListItem({ status: 'UPDATING' }),
+            currentRun: { id: 'run-1', status: 'RUNNING' } as DesignProjectDetail['currentRun'],
+            actions: {
+              canRefine: true,
+              queuedTurnCount: 1,
+              canStop: true,
+              stopTurnId: 'turn-1',
+              canRestart: false,
+              canDelete: false
+            }
+          }),
+          onSubmitRefinement,
+          onStopTurn
+        })}
+      />
+    );
+
+    expect(screen.getByText('1 queued')).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refine this Design' }), {
+      target: { value: 'Reduce the chart density.' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    await waitFor(() => expect(onSubmitRefinement).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(onStopTurn).toHaveBeenCalledWith('design-1', 'turn-1');
+  });
+
+  it('restores and persists an unsent draft outside the task transcript', async () => {
+    const onSaveDraft = vi.fn(async (designId, body, expectedRevision) => ({
+      designId,
+      body,
+      recordRevision: expectedRevision + 1,
+      updatedAt: '2026-08-20T10:00:00.000Z'
+    }));
+    const view = render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          draft: {
+            designId: 'design-1',
+            body: 'Saved unfinished thought',
+            recordRevision: 3,
+            updatedAt: '2026-08-20T10:00:00.000Z'
+          },
+          onSaveDraft
+        })}
+      />
+    );
+    const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
+    expect((composer as HTMLTextAreaElement).value).toBe('Saved unfinished thought');
+    fireEvent.change(composer, { target: { value: 'Updated unfinished thought' } });
+
+    view.unmount();
+
+    await waitFor(() =>
+      expect(onSaveDraft).toHaveBeenCalledWith(
+        'design-1',
+        'Updated unfinished thought',
+        3
+      )
+    );
+  });
+
+  it('clears the sent draft before it accepts another message', async () => {
+    let finishDelete: (() => void) | undefined;
+    const onDeleteDraft = vi.fn(
+      () => new Promise<void>((resolve) => {
+        finishDelete = resolve;
+      })
+    );
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          draft: {
+            designId: 'design-1',
+            body: 'Send this saved thought',
+            recordRevision: 2,
+            updatedAt: '2026-08-20T10:00:00.000Z'
+          },
+          onDeleteDraft
+        })}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(onDeleteDraft).toHaveBeenCalledWith('design-1', 2));
+    expect(
+      (screen.getByRole('button', { name: 'Sending…' }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    finishDelete?.();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Sending…' })).toBeNull());
+  });
+
+  it('loads an earlier transcript page on demand', async () => {
+    const onLoadEarlier = vi.fn(async () => undefined);
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          project: designProject({ previousConversationCursor: 'before-page' }),
+          onLoadEarlier
+        })}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
+
+    expect(onLoadEarlier).toHaveBeenCalledWith('design-1');
   });
 
   it('embeds one blocking provider response in the conversation', () => {
@@ -121,6 +241,9 @@ describe('mounted Design workspace', () => {
             actions: {
               canRefine: false,
               refineDisabledReason: 'Answer the current question first.',
+              queuedTurnCount: 0,
+              canStop: true,
+              stopTurnId: 'turn-1',
               canRestart: false,
               canDelete: false
             }
@@ -231,10 +354,27 @@ function workspaceProps(
     designs: [project.design],
     selectedDesignId: project.design.id,
     project,
+    draft: null,
+    models: [designModel],
+    runtimes: [designRuntime],
+    defaultAgentSettings: {
+      runtimeId: 'codex',
+      model: 'gpt-5.6-luna',
+      reasoningEffort: 'medium'
+    },
     desktopCanvasAvailable: true,
     onSelectDesign: vi.fn(),
     onCreateBlankDesign: vi.fn(async () => undefined),
     onSubmitRefinement: vi.fn(async () => undefined),
+    onStopTurn: vi.fn(async () => undefined),
+    onLoadEarlier: vi.fn(async () => undefined),
+    onSaveDraft: vi.fn(async (designId, body, expectedRevision) => ({
+      designId,
+      body,
+      recordRevision: expectedRevision + 1,
+      updatedAt: '2026-08-20T10:00:00.000Z'
+    })),
+    onDeleteDraft: vi.fn(async () => undefined),
     onRespondToInteraction: vi.fn(async () => undefined),
     onRefreshCanvas: vi.fn(async () => undefined),
     onRestartCanvas: vi.fn(async () => undefined),
@@ -292,10 +432,58 @@ function designProject(
       state: 'READY',
       target: { generationId: 'generation-1', routeId: 'route-1' }
     },
-    actions: { canRefine: true, canRestart: false, canDelete: true },
+    actions: {
+      canRefine: true,
+      queuedTurnCount: 0,
+      canStop: false,
+      canRestart: false,
+      canDelete: true
+    },
     ...overrides
   };
 }
+
+const designModel: AgentModel = {
+  id: 'codex:gpt-5.6-luna',
+  runtimeId: 'codex',
+  model: 'gpt-5.6-luna',
+  displayName: 'Luna',
+  hidden: false,
+  supportedReasoningEfforts: ['medium'],
+  defaultReasoningEffort: 'medium',
+  serviceTiers: [],
+  inputModalities: ['text'],
+  isDefault: true
+};
+
+const designRuntime = {
+  preflight: {
+    runtime: {
+      id: 'codex',
+      displayName: 'Codex',
+      kind: 'APP_SERVER',
+      transport: 'STDIO',
+      lifecycleScope: 'APPLICATION'
+    },
+    readiness: {
+      status: 'READY',
+      canStart: true,
+      summary: 'Ready',
+      detail: 'Ready',
+      checks: {
+        discovery: 'FOUND',
+        compatibility: 'COMPATIBLE',
+        initialization: 'INITIALIZED',
+        authentication: 'PROVIDER_MANAGED',
+        modelCatalog: 'AVAILABLE'
+      },
+      diagnostics: []
+    },
+    capabilities: codexCapabilities()
+  },
+  models: [designModel],
+  refreshedAt: '2026-08-20T10:00:00.000Z'
+} as AgentRuntimeState;
 
 function userInputInteraction(): InteractionRequestRecord {
   return {

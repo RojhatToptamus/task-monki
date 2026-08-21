@@ -1,11 +1,13 @@
-import { useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type {
   AgentInteractionDecision,
   DesignConversationEntry,
+  DesignDraftRecord,
   InteractionRequestRecord
 } from '../../shared/contracts';
 import {
   designActivityRows,
+  designDetailedActivityRows,
   designTurnView,
   formatDesignUpdatedAt,
   type DesignProjectDetail
@@ -16,7 +18,12 @@ import { RunActivityTimeline } from './RunActivityTimeline';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
+  draft: DesignDraftRecord | null;
   onSubmit(message: string): Promise<void>;
+  onStop(turnId: string): Promise<void>;
+  onLoadEarlier(): Promise<void>;
+  onSaveDraft(body: string, expectedRevision: number): Promise<DesignDraftRecord>;
+  onDeleteDraft(expectedRevision: number): Promise<void>;
   onRespond(
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -25,18 +32,88 @@ export interface DesignConversationProps {
 
 export function DesignConversation({
   project,
+  draft,
   onSubmit,
+  onStop,
+  onLoadEarlier,
+  onSaveDraft,
+  onDeleteDraft,
   onRespond
 }: DesignConversationProps) {
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(draft?.body ?? '');
   const [submitting, setSubmitting] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | undefined>();
   const submittingRef = useRef(false);
+  const draftRevisionRef = useRef(draft?.recordRevision ?? 0);
+  const savedDraftBodyRef = useRef(draft?.body ?? '');
+  const messageRef = useRef(message);
+  const draftTimerRef = useRef<number | undefined>(undefined);
+  const draftTailRef = useRef<Promise<unknown>>(Promise.resolve());
+  const mountedRef = useRef(true);
+  const saveDraftRef = useRef(onSaveDraft);
+  saveDraftRef.current = onSaveDraft;
   const activityRows = designActivityRows(project);
+  const detailedActivityRows = designDetailedActivityRows(project);
   const canSubmit = project.actions.canRefine && message.trim().length > 0 && !submitting;
   const disabledReason = project.actions.canRefine
     ? undefined
-    : (project.actions.refineDisabledReason ?? 'Wait for the current update to finish.');
+    : project.actions.refineDisabledReason;
+  const activeWork = Boolean(
+    project.currentRun &&
+      ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING', 'RECOVERY_REQUIRED'].includes(
+        project.currentRun.status
+      )
+  );
+
+  const persistDraft = useCallback(
+    (body: string) => {
+      if (body === savedDraftBodyRef.current) return Promise.resolve();
+      const operation = draftTailRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (body === savedDraftBodyRef.current) return;
+          if (mountedRef.current) setDraftStatus('saving');
+          const saved = await saveDraftRef.current(body, draftRevisionRef.current);
+          draftRevisionRef.current = saved.recordRevision;
+          savedDraftBodyRef.current = saved.body;
+          if (mountedRef.current && messageRef.current === saved.body) {
+            setDraftStatus('saved');
+          }
+        });
+      draftTailRef.current = operation.catch(() => undefined);
+      return operation.catch((caught) => {
+        if (mountedRef.current) setDraftStatus('error');
+        throw caught;
+      });
+    },
+    []
+  );
+
+  const scheduleDraftSave = (body: string) => {
+    if (draftTimerRef.current !== undefined) {
+      window.clearTimeout(draftTimerRef.current);
+    }
+    setDraftStatus('idle');
+    draftTimerRef.current = window.setTimeout(() => {
+      draftTimerRef.current = undefined;
+      void persistDraft(body).catch(() => undefined);
+    }, 600);
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (draftTimerRef.current !== undefined) {
+        window.clearTimeout(draftTimerRef.current);
+        draftTimerRef.current = undefined;
+      }
+      void persistDraft(messageRef.current).catch(() => undefined);
+    };
+  }, [persistDraft]);
 
   const submit = async () => {
     const nextMessage = message.trim();
@@ -45,8 +122,28 @@ export function DesignConversation({
     setSubmitting(true);
     setError(undefined);
     try {
+      if (draftTimerRef.current !== undefined) {
+        window.clearTimeout(draftTimerRef.current);
+        draftTimerRef.current = undefined;
+      }
+      await persistDraft(nextMessage).catch(() => undefined);
       await onSubmit(nextMessage);
       setMessage('');
+      messageRef.current = '';
+      savedDraftBodyRef.current = '';
+      const revision = draftRevisionRef.current;
+      if (revision > 0) {
+        try {
+          await onDeleteDraft(revision);
+          draftRevisionRef.current = 0;
+          if (mountedRef.current) setDraftStatus('idle');
+        } catch {
+          if (mountedRef.current) {
+            setDraftStatus('error');
+            setError('The message was sent, but its saved draft could not be cleared.');
+          }
+        }
+      }
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not send the refinement.'
@@ -68,11 +165,41 @@ export function DesignConversation({
       <header className="tm-design-conversation__head">
         <div>
           <h2 id="design-conversation-title">Conversation</h2>
-          <span>Codex · Restricted workspace</span>
+          <span>
+            Codex
+            {project.task.agentSettings?.model
+              ? ` · ${project.task.agentSettings.model}`
+              : ''}
+            {project.task.agentSettings?.reasoningEffort
+              ? ` · ${project.task.agentSettings.reasoningEffort}`
+              : ''}
+          </span>
         </div>
       </header>
 
       <div className="tm-design-conversation__transcript" aria-live="polite">
+        {project.previousConversationCursor ? (
+          <button
+            type="button"
+            className="tm-design-conversation__earlier"
+            disabled={loadingEarlier}
+            onClick={() => {
+              setLoadingEarlier(true);
+              setError(undefined);
+              void onLoadEarlier()
+                .catch((caught) => {
+                  setError(
+                    caught instanceof Error
+                      ? caught.message
+                      : 'Could not load earlier messages.'
+                  );
+                })
+                .finally(() => setLoadingEarlier(false));
+            }}
+          >
+            {loadingEarlier ? 'Loading…' : 'Load earlier messages'}
+          </button>
+        ) : null}
         {project.conversation.length === 0 ? (
           <div className="tm-design-conversation__empty">
             <ConversationGlyph />
@@ -87,6 +214,13 @@ export function DesignConversation({
 
         {activityRows.length > 0 ? (
           <RunActivityTimeline rows={activityRows} />
+        ) : null}
+
+        {detailedActivityRows.length > 0 ? (
+          <details className="tm-design-technical-details">
+            <summary>Technical details</summary>
+            <RunActivityTimeline rows={detailedActivityRows} live={false} />
+          </details>
         ) : null}
 
         <InteractionPanel
@@ -113,15 +247,47 @@ export function DesignConversation({
           placeholder="Describe the next change…"
           disabled={!project.actions.canRefine || submitting}
           aria-describedby={disabledReason ? 'design-refinement-help' : undefined}
-          onChange={(event) => setMessage(event.target.value)}
+          onChange={(event) => {
+            const body = event.target.value;
+            setMessage(body);
+            messageRef.current = body;
+            scheduleDraftSave(body);
+          }}
           onKeyDown={onComposerKeyDown}
         />
         <div className="tm-design-composer__footer">
           <span id="design-refinement-help">
-            {disabledReason ?? 'Press ⌘ Enter to send'}
+            {disabledReason ??
+              (draftStatus === 'saving'
+                ? 'Saving draft…'
+                : draftStatus === 'saved'
+                  ? 'Draft saved'
+                  : draftStatus === 'error'
+                    ? 'Draft not saved'
+                    : project.actions.queuedTurnCount > 0
+                      ? `${project.actions.queuedTurnCount} queued`
+                      : 'Press ⌘ Enter to send')}
           </span>
+          {project.actions.canStop && project.actions.stopTurnId ? (
+            <button
+              type="button"
+              className="outline-button"
+              disabled={stopping}
+              onClick={() => {
+                setStopping(true);
+                setError(undefined);
+                void onStop(project.actions.stopTurnId!)
+                  .catch((caught) => {
+                    setError(caught instanceof Error ? caught.message : 'Could not stop work.');
+                  })
+                  .finally(() => setStopping(false));
+              }}
+            >
+              {stopping ? 'Stopping…' : 'Stop'}
+            </button>
+          ) : null}
           <button type="submit" className="primary-button" disabled={!canSubmit}>
-            {submitting ? 'Sending…' : 'Send'}
+            {submitting ? 'Sending…' : activeWork ? 'Queue' : 'Send'}
           </button>
         </div>
         {error ? <p className="tm-design-composer__error" role="alert">{error}</p> : null}

@@ -66,6 +66,62 @@ describe('DesignUpdateCoordinator', () => {
     });
   });
 
+  it('starts the next queued message after a provider failure settles the active turn', async () => {
+    const harness = await createHarness();
+    harness.coordinator.open();
+    await harness.coordinator.dispatch(harness.designId);
+    const firstRun = requireCurrentRun(await harness.store.getDesignDetail(harness.designId));
+    const secondTurn = await harness.store.createInlineDesignTurn({
+      designId: harness.designId,
+      clientMessageId: 'design-queue-follow-up',
+      message: 'Make the status easier to scan.'
+    });
+    await harness.store.updateRun(firstRun.id, {
+      status: 'FAILED',
+      terminalReason: 'Provider stopped unexpectedly.',
+      endedAt: new Date().toISOString()
+    });
+
+    await harness.coordinator.handleRunTerminal(firstRun.id);
+
+    const detail = await harness.store.getDesignDetail(harness.designId);
+    expect(harness.startTurn).toHaveBeenCalledTimes(2);
+    expect(detail.turns[0]).toMatchObject({
+      outcome: 'FAILED',
+      failureReason: 'Provider stopped unexpectedly.'
+    });
+    expect(detail.turns[1]).toMatchObject({
+      id: secondTurn.id,
+      runId: detail.currentRun?.id,
+      checkpoint: { boundary: 'RUN_LINKED' }
+    });
+  });
+
+  it('uses runtime interruption for the active message and cancels queued messages locally', async () => {
+    const interruptRun = vi.fn(async () => undefined);
+    const harness = await createHarness({ interruptRun });
+    harness.coordinator.open();
+    await harness.coordinator.dispatch(harness.designId);
+    const active = await harness.store.getDesignDetail(harness.designId);
+    const firstRun = requireCurrentRun(active);
+    const firstTurn = active.turns[0]!;
+    const queued = await harness.store.createInlineDesignTurn({
+      designId: harness.designId,
+      clientMessageId: 'design-queue-cancel',
+      message: 'Add a secondary chart.'
+    });
+
+    await harness.coordinator.cancelTurn(harness.designId, queued.id);
+    expect(interruptRun).not.toHaveBeenCalled();
+    expect((await harness.store.getDesignDetail(harness.designId)).turns[1]).toMatchObject({
+      id: queued.id,
+      outcome: 'CANCELED'
+    });
+
+    await harness.coordinator.cancelTurn(harness.designId, firstTurn.id);
+    expect(interruptRun).toHaveBeenCalledWith(firstRun.id);
+  });
+
   it('settles a pre-provider dispatch failure instead of leaving the turn queued', async () => {
     const harness = await createHarness({
       refreshGitEvidence: vi.fn(async () => {

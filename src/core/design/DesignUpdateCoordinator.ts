@@ -130,6 +130,42 @@ export class DesignUpdateCoordinator {
     });
   }
 
+  cancelTurn(designId: string, turnId: string): Promise<void> {
+    this.assertAccepting();
+    return this.withDesignLock(designId, async () => {
+      const detail = await this.options.store.getDesignDetail(designId);
+      const turn = detail.turns.find((candidate) => candidate.id === turnId);
+      if (!turn) throw new Error('Design turn not found.');
+      if (turn.outcome !== undefined) return;
+
+      if (!turn.runId) {
+        await this.options.store.settleDesignTurn({
+          designId,
+          turnId,
+          outcome: 'CANCELED'
+        });
+        this.emitUpdated(designId, { reason: 'turn-canceled', turnId });
+        await this.dispatchNextUnlocked(designId);
+        return;
+      }
+
+      const run = await this.options.store.getRun(turn.runId);
+      if (!run) {
+        throw new Error('The active Design turn lost its agent run.');
+      }
+      if (ACTIVE_RUN_STATUSES.has(run.status)) {
+        await this.options.agents.interruptRun(run.id);
+        this.emitUpdated(designId, {
+          reason: 'turn-cancel-requested',
+          turnId,
+          runId: run.id
+        });
+        return;
+      }
+      await this.settleRunUnlocked(run.id);
+    });
+  }
+
   withExclusiveAccess<T>(designId: string, operation: () => Promise<T>): Promise<T> {
     this.assertAccepting();
     return this.withDesignLock(designId, operation);
@@ -251,6 +287,7 @@ export class DesignUpdateCoordinator {
     if (run.status !== 'COMPLETED') {
       await this.settleTerminalFailure(run.taskId, turn.id, run);
       this.emitUpdated(run.taskId, { reason: 'run-failed', runId });
+      await this.dispatchNextUnlocked(run.taskId);
       return;
     }
 
@@ -275,6 +312,7 @@ export class DesignUpdateCoordinator {
       }
       await this.finishSourceAndPreview(run, currentTurn);
       this.emitUpdated(run.taskId, { reason: 'turn-settled', runId });
+      await this.dispatchNextUnlocked(run.taskId);
     } catch (error) {
       if (error instanceof RecoverableCheckpointWriteError) {
         this.emitUpdated(run.taskId, {
@@ -506,6 +544,11 @@ export class DesignUpdateCoordinator {
       payload,
       at: new Date().toISOString()
     });
+  }
+
+  private async dispatchNextUnlocked(designId: string): Promise<void> {
+    if (!this.accepting || this.shuttingDown) return;
+    await this.dispatchUnlocked(designId);
   }
 
   private assertAccepting(): void {

@@ -85,6 +85,69 @@ describe('development HTTP server', () => {
     expect(getTaskDetail).toHaveBeenCalledWith('task-1');
   });
 
+  it('routes Design conversation paging, drafts, and Stop with path-owned ids', async () => {
+    const listDesignConversation = vi.fn(async (input: unknown) => ({ input }));
+    const getDesignDraft = vi.fn(async () => null);
+    const saveDesignDraft = vi.fn(async (input: unknown) => input);
+    const deleteDesignDraft = vi.fn(async () => undefined);
+    const cancelDesignTurn = vi.fn(async (input: unknown) => input);
+    const running = await startServer({
+      listDesignConversation,
+      getDesignDraft,
+      saveDesignDraft,
+      deleteDesignDraft,
+      cancelDesignTurn
+    });
+
+    const page = await fetch(
+      `${running.baseUrl}/api/designs/design-1/conversation?beforeCursor=before-1&limit=25`,
+      { headers: running.headers }
+    );
+    expect(page.status).toBe(200);
+    expect(listDesignConversation).toHaveBeenCalledWith({
+      designId: 'design-1',
+      beforeCursor: 'before-1',
+      limit: 25
+    });
+
+    const draft = await fetch(`${running.baseUrl}/api/designs/design-1/draft`, {
+      headers: running.headers
+    });
+    expect(draft.status).toBe(200);
+    await expect(draft.json()).resolves.toBeNull();
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/draft`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', expectedRevision: 0, body: 'Draft' })
+    });
+    expect(saveDesignDraft).toHaveBeenCalledWith({
+      designId: 'design-1',
+      expectedRevision: 0,
+      body: 'Draft'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/draft/delete`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', expectedRevision: 1 })
+    });
+    expect(deleteDesignDraft).toHaveBeenCalledWith({
+      designId: 'design-1',
+      expectedRevision: 1
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/turns/turn-1/cancel`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', turnId: 'wrong' })
+    });
+    expect(cancelDesignTurn).toHaveBeenCalledWith({
+      designId: 'design-1',
+      turnId: 'turn-1'
+    });
+  });
+
   it('rejects hostile origins and cross-site browser requests even with the proxy token', async () => {
     const running = await startServer();
 

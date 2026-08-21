@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   TASK_STORE_SCHEMA_VERSION,
+  type AgentRuntimeCatalog,
   type AppUpdateEvent,
   type DesignListItem
 } from '../../shared/contracts';
+import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import {
   designCanvasClientEvent,
   designCanvasPresentation,
@@ -11,7 +13,10 @@ import {
   designStatusView,
   designTurnView,
   designWorkspaceIsCompact,
+  eligibleDesignRuntimeCatalog,
   finiteDesignCanvasBounds,
+  mergeDesignConversationPage,
+  mergeDesignDetailHistory,
   sortedDesignProjects,
   type DesignProjectDetail
 } from './designs';
@@ -150,7 +155,13 @@ describe('Design workspace view model', () => {
         project: designProject({
           design: designListItem({ status: 'NEEDS_ATTENTION' }),
           canvas: { state: 'RESTART_REQUIRED', detail: 'The preview process stopped.' },
-          actions: { canRefine: true, canRestart: true, canDelete: true }
+          actions: {
+            canRefine: true,
+            queuedTurnCount: 0,
+            canStop: false,
+            canRestart: true,
+            canDelete: true
+          }
         }),
         desktopAvailable: true,
         occluded: false
@@ -204,6 +215,56 @@ describe('Design workspace view model', () => {
         turn: { ...entry.turn, outcome: 'NO_CHANGE' }
       })
     ).toMatchObject({ status: 'NO_CHANGE', statusLabel: 'No visual change' });
+    expect(
+      designTurnView({
+        ...entry,
+        runStatus: 'INTERRUPTED',
+        turn: { ...entry.turn, outcome: 'CANCELED' }
+      })
+    ).toMatchObject({ status: 'CANCELED', statusLabel: 'Stopped' });
+  });
+
+  it('keeps only startable runtimes with Design instructions, skills, and Stop', () => {
+    const supported = runtimeState('codex', codexCapabilities());
+    const unsupported = runtimeState('other', {
+      ...codexCapabilities(),
+      runtimeId: 'other',
+      turnInterruption: { maturity: 'unsupported' }
+    });
+    const catalog = {
+      runtimes: [unsupported, supported],
+      models: [
+        { id: 'other:model', runtimeId: 'other', model: 'model' },
+        { id: 'codex:model', runtimeId: 'codex', model: 'model' }
+      ],
+      defaultRuntimeId: 'other'
+    } as AgentRuntimeCatalog;
+
+    expect(eligibleDesignRuntimeCatalog(catalog)).toMatchObject({
+      defaultRuntimeId: 'codex',
+      runtimes: [supported],
+      models: [{ runtimeId: 'codex' }]
+    });
+  });
+
+  it('prepends transcript pages and keeps them across live detail refreshes', () => {
+    const newest = designProject({
+      conversation: [conversationEntry(3), conversationEntry(4)],
+      previousConversationCursor: 'before-3'
+    });
+    const paged = mergeDesignConversationPage(newest, {
+      entries: [conversationEntry(1), conversationEntry(2)],
+      previousCursor: undefined
+    });
+    expect(paged.conversation.map((entry) => entry.turn.order)).toEqual([1, 2, 3, 4]);
+    expect(paged.previousConversationCursor).toBeUndefined();
+
+    const refreshed = mergeDesignDetailHistory(
+      paged,
+      designProject({ conversation: [conversationEntry(4), conversationEntry(5)] })
+    );
+    expect(refreshed.conversation.map((entry) => entry.turn.order)).toEqual([1, 2, 3, 4, 5]);
+    expect(refreshed.previousConversationCursor).toBeUndefined();
   });
 
   it('accepts only finite positive native-view bounds', () => {
@@ -270,7 +331,62 @@ function designProject(
       kind: 'DESIGN_MANAGED'
     } as DesignProjectDetail['repository'],
     canvas: { state: 'EMPTY' },
-    actions: { canRefine: true, canRestart: false, canDelete: true },
+    actions: {
+      canRefine: true,
+      queuedTurnCount: 0,
+      canStop: false,
+      canRestart: false,
+      canDelete: true
+    },
     ...overrides
+  };
+}
+
+function conversationEntry(order: number): DesignProjectDetail['conversation'][number] {
+  return {
+    turn: {
+      id: `turn-${order}`,
+      designId: 'design-1',
+      clientMessageId: `message-${order}`,
+      order,
+      messageSource: order === 1 ? 'TASK_PROMPT' : 'INLINE_MESSAGE',
+      referenceIds: [],
+      createdAt: '2026-08-20T10:00:00.000Z'
+    },
+    userMessage: `Message ${order}`
+  };
+}
+
+function runtimeState(
+  runtimeId: string,
+  capabilities: ReturnType<typeof codexCapabilities>
+): AgentRuntimeCatalog['runtimes'][number] {
+  return {
+    preflight: {
+      runtime: {
+        id: runtimeId,
+        displayName: runtimeId,
+        kind: 'APP_SERVER',
+        transport: 'STDIO',
+        lifecycleScope: 'APPLICATION'
+      },
+      readiness: {
+        status: 'READY',
+        canStart: true,
+        summary: 'Ready',
+        detail: 'Ready',
+        checks: {
+          discovery: 'FOUND',
+          compatibility: 'COMPATIBLE',
+          initialization: 'INITIALIZED',
+          authentication: 'PROVIDER_MANAGED',
+          modelCatalog: 'AVAILABLE'
+        },
+        diagnostics: []
+      },
+      capabilities
+    },
+    models: [],
+    refreshedAt: '2026-08-20T10:00:00.000Z'
   };
 }
