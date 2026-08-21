@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AgentExecutionSettings,
+  AgentInstructionProfile,
   AgentRuntimeCatalog,
   AgentRuntimeId,
   AgentRuntimeState,
@@ -57,6 +58,7 @@ export interface StartOrchestratedTurn {
   worktree: WorktreeRecord;
   mode: AgentRunMode;
   prompt: string;
+  instructionProfile?: AgentInstructionProfile;
   settings: AgentExecutionSettings;
   generationKey?: string;
   beforeGitSnapshotId?: string;
@@ -798,6 +800,7 @@ export class AgentOrchestrator {
       mode: input.mode,
       prompt: input.prompt,
       authoritativeGoal: input.task.prompt,
+      instructionProfile: input.instructionProfile,
       attachments,
       settings
     });

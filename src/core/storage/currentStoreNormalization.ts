@@ -21,6 +21,97 @@ type UnvalidatedCurrentStore = {
   reviewRollups?: unknown;
 };
 
+type LegacyTaskStore = UnvalidatedCurrentStore & {
+  tasks?: unknown;
+  repositories?: unknown;
+  designTurns?: unknown;
+  designReferences?: unknown;
+  designRevisions?: unknown;
+  previewPlans?: unknown;
+  previewGenerations?: unknown;
+};
+
+/** One explicit, fail-closed upgrade from the last durable store schema. */
+export function migratePersistedStateToCurrent<T extends LegacyTaskStore>(
+  state: T
+): { state: T; changed: boolean } {
+  if (state.schemaVersion !== 19) {
+    return { state, changed: false };
+  }
+  assertLegacyCollection(state.tasks, 'tasks');
+  assertLegacyCollection(state.repositories, 'repositories');
+  assertNoLegacyDesignRecords(state.designTurns, 'designTurns');
+  assertNoLegacyDesignRecords(state.designReferences, 'designReferences');
+  assertNoLegacyDesignRecords(state.designRevisions, 'designRevisions');
+  assertLegacyCollection(state.previewPlans, 'previewPlans');
+  assertLegacyCollection(state.previewGenerations, 'previewGenerations');
+
+  const tasks = state.tasks.map((value) =>
+    isRecord(value) ? { ...value, kind: 'NORMAL' } : value
+  );
+  const repositories = state.repositories.map((value) =>
+    isRecord(value) ? { ...value, kind: 'USER_REGISTERED' } : value
+  );
+  const previewPlans = state.previewPlans.map((value) => {
+    if (!isRecord(value)) return value;
+    const {
+      recipePath,
+      recipeVersion,
+      recipeDigest,
+      ...plan
+    } = value;
+    return {
+      ...plan,
+      planSource: {
+        type: 'REPOSITORY_RECIPE',
+        recipePath,
+        recipeVersion,
+        recipeDigest
+      }
+    };
+  });
+  const previewGenerations = state.previewGenerations.map((value) => {
+    if (!isRecord(value)) return value;
+    const {
+      approvalId,
+      executionDigest,
+      sourceGitSnapshotId,
+      sourceHeadSha,
+      sourceDirtyFingerprint,
+      ...generation
+    } = value;
+    return {
+      ...generation,
+      executionAuthority: {
+        type: 'USER_APPROVAL',
+        approvalId,
+        executionDigest
+      },
+      source: {
+        type: 'WORKTREE_SNAPSHOT',
+        gitSnapshotId: sourceGitSnapshotId,
+        headSha: sourceHeadSha,
+        dirtyFingerprint: sourceDirtyFingerprint
+      }
+    };
+  });
+
+  return {
+    state: {
+      ...state,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION,
+      tasks,
+      repositories,
+      designTurns: [],
+      designReferences: [],
+      designRevisions: [],
+      previewPlans,
+      previewGenerations
+    } as T,
+    changed: true
+  };
+}
+
 /**
  * Repairs narrowly identified writer defects before current-schema validation.
  * Unknown shapes and all other malformed records remain fail-closed.
@@ -59,6 +150,27 @@ export function normalizePersistedStateBeforeValidation<
         changed: true
       }
     : { state, changed: false };
+}
+
+function assertLegacyCollection(
+  value: unknown,
+  name: string
+): asserts value is unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Task Monki store schema 19 is invalid: ${name} is missing.`);
+  }
+}
+
+function assertNoLegacyDesignRecords(value: unknown, name: string): void {
+  if (value !== undefined && (!Array.isArray(value) || value.length > 0)) {
+    throw new Error(
+      `Task Monki store schema 19 is invalid: ${name} contains unsupported Design records.`
+    );
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 /** Applies explicit, idempotent repairs to a validated current-schema state. */

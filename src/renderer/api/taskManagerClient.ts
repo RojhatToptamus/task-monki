@@ -6,12 +6,15 @@ import type {
   ApprovePreviewPlanRequest,
   CancelRunRequest,
   ContinueRunRequest,
+  CreateBlankDesignRequest,
   BranchPublicationRecord,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DesignDetailSnapshot,
+  DesignListItem,
   DiscardPreviewRecipeDraftRequest,
   DeletePreviewLocalAttachmentBindingRequest,
   ExecuteOpenTargetActionRequest,
@@ -55,6 +58,8 @@ import type {
   RefinePromptResponse,
   RespondToInteractionRequest,
   RetryRunRequest,
+  RestartDesignPreviewRequest,
+  SubmitDesignTurnRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   StartReviewRequest,
@@ -320,6 +325,23 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       readAttachment(baseUrl, input),
     readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
+    listDesigns: () => get<DesignListItem[]>(baseUrl, '/api/designs'),
+    getDesign: (designId: string) =>
+      get<DesignDetailSnapshot>(baseUrl, `/api/designs/${encodeURIComponent(designId)}`),
+    createBlankDesign: (input: CreateBlankDesignRequest) =>
+      post<DesignDetailSnapshot>(baseUrl, '/api/designs', input),
+    submitDesignTurn: (input: SubmitDesignTurnRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/turns`,
+        input
+      ),
+    restartDesignPreview: (input: RestartDesignPreviewRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/preview/restart`,
+        input
+      ),
     refinePrompt: (input: RefinePromptRequest) =>
       post<RefinePromptResponse>(baseUrl, '/api/prompt/refine', input),
     prepareWorktree: (input: PrepareWorktreeRequest) =>

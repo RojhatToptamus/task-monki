@@ -42,6 +42,7 @@ describe('PreviewApprovalPolicy', () => {
       testPlan('plan-2', first.executionDigest, task.id, iteration.id, worktree.id)
     );
     const now = new Date().toISOString();
+    const snapshot = await recordSnapshot(store, task.id, iteration.id, worktree.id);
 
     await expect(policy.requireMatching(next)).resolves.toEqual(approval);
     await expect(store.savePreviewGeneration({
@@ -51,11 +52,13 @@ describe('PreviewApprovalPolicy', () => {
       iterationId: iteration.id,
       worktreeId: worktree.id,
       planId: next.id,
-      approvalId: approval.id,
-      executionDigest: next.executionDigest,
-      sourceGitSnapshotId: 'git-snapshot-2',
-      sourceHeadSha: 'head',
-      sourceDirtyFingerprint: 'dirty',
+      executionAuthority: {
+        type: 'USER_APPROVAL', approvalId: approval.id, executionDigest: next.executionDigest
+      },
+      source: {
+        type: 'WORKTREE_SNAPSHOT', gitSnapshotId: snapshot.id,
+        headSha: snapshot.headSha!, dirtyFingerprint: snapshot.dirtyFingerprint
+      },
       workspacePath: path.join(process.cwd(), 'preview-reuse'),
       state: 'CREATED',
       routingState: 'CANDIDATE',
@@ -63,19 +66,43 @@ describe('PreviewApprovalPolicy', () => {
       routes: [],
       createdAt: now,
       updatedAt: now
-    })).resolves.toMatchObject({ planId: next.id, approvalId: approval.id });
+    })).resolves.toMatchObject({
+      planId: next.id,
+      executionAuthority: { type: 'USER_APPROVAL', approvalId: approval.id }
+    });
   });
 });
 
 function testPlan(id: string, executionDigest: string, taskId: string, iterationId: string, worktreeId: string) {
   return {
     id, taskId, iterationId, worktreeId,
-    recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const,
-    recipeDigest: `recipe-${id}`, executionDigest,
+    planSource: {
+      type: 'REPOSITORY_RECIPE' as const,
+      recipePath: '.taskmonki/preview.yaml' as const,
+      recipeVersion: 1 as const,
+      recipeDigest: `recipe-${id}`
+    },
+    executionDigest,
     executionPlan: {
       version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [],
       scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
     },
     warnings: [], createdAt: new Date().toISOString()
   };
+}
+
+function recordSnapshot(
+  store: FileTaskStore,
+  taskId: string,
+  iterationId: string,
+  worktreeId: string
+) {
+  return store.recordGitSnapshot({
+    taskId, iterationId, worktreeId,
+    worktreePath: process.cwd(), repoRoot: process.cwd(), gitCommonDir: '.git',
+    headSha: 'head', branch: 'codex/approval', aheadCount: 0, behindCount: 0,
+    stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictedCount: 0,
+    commitsAheadOfBase: 0, committedDiffFileCount: 0, workingDiffFileCount: 0,
+    diffStat: '', dirtyFingerprint: 'dirty', status: 'DIRTY'
+  }, '');
 }

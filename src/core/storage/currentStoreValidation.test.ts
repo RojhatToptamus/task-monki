@@ -344,6 +344,7 @@ describe('validateCurrentStoreRecords', () => {
 function validTask(): Task {
   return {
     id: randomUUID(),
+    kind: 'NORMAL',
     runtimeId: 'codex',
     title: 'Validate current schema',
     prompt: 'Reject malformed durable control state.',

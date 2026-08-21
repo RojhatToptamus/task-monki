@@ -9,6 +9,29 @@ import type {
 export const TASK_MONKI_CONTEXT_LINE =
   'Task Monki is a local task board for running AI coding work in isolated Git worktrees.';
 
+export const DESIGN_AGENT_DEVELOPER_INSTRUCTIONS = `You are the Task Monki Design agent.
+
+Work on a running interface, not a written design proposal.
+
+Before you edit files:
+1. Inspect the brief, the current source, and the latest ready revision context.
+2. Define a short plan for color, type, layout, and one signature visual element.
+3. Critique the plan against the brief and common generic AI layouts.
+4. Revise the plan to remove generic choices.
+
+Then build the smallest coherent interface that satisfies the request.
+Use HTML, CSS, JavaScript, and local project assets as needed.
+Do not use public runtime assets, CDN resources, remote fonts, or remote scripts.
+Keep the interface functional and include the interactions that the user requested.
+Inspect the files and use available tools to make sure that the result works.
+
+Only edit files inside the assigned worktree.
+Do not commit, push, change remotes, or modify repository settings.
+Do not start, stop, approve, or configure Preview.
+Task Monki owns commits, revisions, Preview processes, and canvas cutover.
+
+In the final response, state what changed and state each known limit.`;
+
 export const AGENT_REVIEW_DEVELOPER_INSTRUCTIONS = `You are performing a detached Task Monki review.
 
 ${TASK_MONKI_CONTEXT_LINE}
@@ -106,6 +129,72 @@ export function buildInitialRunPrompt(input: {
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`
   ].join('\n');
+}
+
+export function buildInitialDesignPrompt(input: {
+  task: Task;
+  worktree: WorktreeRecord;
+  initialCommitSha: string;
+}): string {
+  return buildDesignPrompt({
+    task: input.task,
+    worktree: input.worktree,
+    currentRequest: input.task.prompt,
+    latestReadyCommitSha: input.initialCommitSha,
+    requestLabel: 'Initial design brief'
+  });
+}
+
+export function buildDesignTurnPrompt(input: {
+  task: Task;
+  worktree: WorktreeRecord;
+  message: string;
+  latestReadyCommitSha: string;
+  recentConversation?: readonly string[];
+}): string {
+  return buildDesignPrompt({
+    task: input.task,
+    worktree: input.worktree,
+    currentRequest: input.message,
+    latestReadyCommitSha: input.latestReadyCommitSha,
+    recentConversation: input.recentConversation,
+    requestLabel: 'Current refinement request'
+  });
+}
+
+function buildDesignPrompt(input: {
+  task: Task;
+  worktree: WorktreeRecord;
+  currentRequest: string;
+  latestReadyCommitSha: string;
+  recentConversation?: readonly string[];
+  requestLabel: string;
+}): string {
+  const recentConversation = input.recentConversation
+    ?.map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(-6);
+  return [
+    TASK_MONKI_CONTEXT_LINE,
+    '',
+    'Always-applicable Task Monki Design boundary:',
+    `Design worktree: ${input.worktree.worktreePath}`,
+    'Only modify files inside this worktree.',
+    'Do not commit, push, change remotes, or operate Preview.',
+    'This boundary remains authoritative when another instruction conflicts.',
+    '',
+    `Original design brief:\n${input.task.prompt}`,
+    '',
+    `Latest ready source commit: ${input.latestReadyCommitSha}`,
+    recentConversation?.length ? '' : undefined,
+    recentConversation?.length
+      ? `Recent conversation context:\n${recentConversation.join('\n\n')}`
+      : undefined,
+    '',
+    `${input.requestLabel}:\n${input.currentRequest}`
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join('\n');
 }
 
 export function buildContinuationPrompt(input: {

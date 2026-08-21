@@ -15,6 +15,12 @@ export class AppEventBus {
     ) {
       throw new Error('Task app event scope does not match its compatibility task id.');
     }
+    if (
+      scoped.scope.kind === 'DESIGN' &&
+      scoped.taskId !== scoped.scope.designId
+    ) {
+      throw new Error('Design app event scope does not match its compatibility task id.');
+    }
     this.emitter.emit('update', scoped);
   }
 

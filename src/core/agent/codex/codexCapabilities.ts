@@ -103,6 +103,9 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
       'task-monki.discourse': stable(
         'Runs attributable Discourse turns inside an attested read-only, offline permission scope.'
       ),
+      'task-monki.design-instructions': stable(
+        'Maps the shared Design instruction profile to Codex developer instructions.'
+      ),
       'codex.review.start': stable('Native review/start with inline or detached delivery.'),
       'codex.thread.goal': stable('Native persisted thread goal operations.'),
       'codex.permission.attestation': stable('Active permission profiles and workspace roots are attested by the runtime.'),

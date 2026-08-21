@@ -27,7 +27,15 @@ import type {
   BranchPublicationRecord,
   CiRollupRecord,
   CreateBoardRequest,
+  CreateBlankDesignRequest,
   CreateTaskRequest,
+  DesignDetailSnapshot,
+  DesignListItem,
+  DesignReference,
+  DesignRevision,
+  DesignTurn,
+  DesignTurnCheckpoint,
+  DesignTurnOutcome,
   DomainEvent,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
@@ -99,6 +107,7 @@ import {
 } from './AttachmentFileStore';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
 import {
+  migratePersistedStateToCurrent,
   normalizeLoadedState,
   normalizePersistedStateBeforeValidation
 } from './currentStoreNormalization';
@@ -140,6 +149,58 @@ export interface CreateRunInput {
   continuedFromRunId?: string;
   requestedSettings?: AgentExecutionSettings;
   beforeGitSnapshotId?: string;
+}
+
+export interface ManagedDesignRepositoryInput {
+  id: string;
+  name: string;
+  path: string;
+  headSha: string;
+  branch: string;
+  checkedAt: string;
+}
+
+export interface CreateDesignBundleInput {
+  request: CreateBlankDesignRequest;
+  repository: ManagedDesignRepositoryInput;
+}
+
+export interface CreateDesignBundleResult {
+  task: Task;
+  repository: Repository;
+  turn: DesignTurn;
+  references: DesignReference[];
+}
+
+export interface CreateInlineDesignTurnInput {
+  designId: string;
+  clientMessageId: string;
+  message: string;
+}
+
+export interface UpdateDesignTurnCheckpointInput {
+  designId: string;
+  turnId: string;
+  checkpoint: DesignTurnCheckpoint;
+}
+
+export interface SettleDesignTurnInput {
+  designId: string;
+  turnId: string;
+  outcome: Exclude<DesignTurnOutcome, 'READY'>;
+  failureReason?: string;
+}
+
+export interface DesignPreviewSettlementInput {
+  designId: string;
+  turnId: string;
+  runId: string;
+  commitSha: string;
+  routeId: string;
+}
+
+export interface DeleteTaskStorageResult {
+  removedManagedRepository?: Repository;
 }
 
 export type CreateInteractionRequestInput = Omit<
@@ -348,6 +409,7 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'agent-output': 32 * 1024 * 1024,
   'agent-diagnostics': 16 * 1024 * 1024,
   'agent-final': 8 * 1024 * 1024,
+  'design-message': 1024 * 1024,
   diff: 32 * 1024 * 1024,
   'git-snapshot': 8 * 1024 * 1024,
   'pr-body': 256 * 1024,
@@ -392,7 +454,11 @@ function validateBoardInput(
   }
   const name = input.name.trim();
   if (!name) throw new Error('Board name is required.');
-  const knownRepositoryIds = new Set(repositories.map((repository) => repository.id));
+  const knownRepositoryIds = new Set(
+    repositories
+      .filter((repository) => repository.kind === 'USER_REGISTERED')
+      .map((repository) => repository.id)
+  );
   const repositoryIds = uniqueIds(input.repositoryIds);
   if (repositoryIds.some((repositoryId) => !knownRepositoryIds.has(repositoryId))) {
     throw new Error('Board references an unknown repository.');
@@ -419,6 +485,63 @@ function normalizeCreateTaskCompletionPolicy(
 interface TaskCreationMetadata {
   token: string;
   fingerprint: string;
+}
+
+function designCreationMetadata(
+  input: CreateBlankDesignRequest
+): TaskCreationMetadata {
+  if (!isTaskCreationToken(input.creationToken)) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Design creation retry token is invalid.',
+      400
+    );
+  }
+  const brief = input.brief.trim();
+  const model = normalizedOptionalString(input.model);
+  const reasoningEffort = normalizedOptionalString(input.reasoningEffort);
+  if (
+    !brief ||
+    Buffer.byteLength(brief, 'utf8') > 1024 * 1024 ||
+    (input.model !== undefined && !model) ||
+    (input.reasoningEffort !== undefined && !reasoningEffort)
+  ) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Design creation request is invalid.',
+      400
+    );
+  }
+  const canonicalRequest = stableJsonStringify({
+    kind: 'DESIGN_BLANK',
+    brief,
+    runtimeId: CODEX_RUNTIME_ID,
+    model: model ?? null,
+    reasoningEffort: reasoningEffort ?? null,
+    attachmentDraftId: input.attachmentDraftId ?? null
+  });
+  if (!canonicalRequest) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Design creation request cannot be used for a safe retry.',
+      400
+    );
+  }
+  return {
+    token: input.creationToken,
+    fingerprint: createHash('sha256').update(canonicalRequest).digest('hex')
+  };
+}
+
+function deriveDesignTitle(brief: string): string {
+  const compact = brief.replace(/\s+/gu, ' ').trim();
+  if (compact.length <= 60) return compact;
+  return `${compact.slice(0, 57).trimEnd()}…`;
+}
+
+function normalizedOptionalString(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized || undefined;
 }
 
 function taskCreationMetadata(
@@ -695,13 +818,15 @@ export class FileTaskStore {
         await this.persist();
       } else {
         const persisted = JSON.parse(raw) as PersistedState;
-        const repaired = normalizePersistedStateBeforeValidation(persisted);
+        const migrated = migratePersistedStateToCurrent(persisted);
+        const repaired = normalizePersistedStateBeforeValidation(migrated.state);
         const normalized = normalizeLoadedState(requireCurrentState(repaired.state));
         this.state = normalized.state;
         await this.attachmentFiles.reconcile(this.state.attachments);
         await this.reconcileArtifacts();
         const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
         if (
+          migrated.changed ||
           repaired.changed ||
           normalized.changed ||
           prunedServerIds.length > 0
@@ -867,12 +992,125 @@ export class FileTaskStore {
     const state = this.publishedState;
     return clone({
       schemaVersion: state.schemaVersion,
-      repositories: state.repositories,
+      repositories: state.repositories.filter(
+        (repository) => repository.kind === 'USER_REGISTERED'
+      ),
       boards: state.boards,
-      tasks: state.tasks.map(projectBoardTask),
-      interactionRequests: state.interactionRequests.filter((interaction) =>
-        interaction.status === 'PENDING' || interaction.status === 'RESPONDING'
+      tasks: state.tasks
+        .filter((task) => task.kind === 'NORMAL')
+        .map(projectBoardTask),
+      interactionRequests: state.interactionRequests.filter(
+        (interaction) =>
+          (interaction.status === 'PENDING' || interaction.status === 'RESPONDING') &&
+          state.tasks.some(
+            (task) => task.id === interaction.taskId && task.kind === 'NORMAL'
+          )
       )
+    });
+  }
+
+  async listDesigns(): Promise<DesignListItem[]> {
+    await this.init();
+    const state = this.publishedState;
+    return clone(
+      state.tasks
+        .filter((task) => task.kind === 'DESIGN')
+        .map((task) => projectDesignListItem(state, task))
+        .sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            left.title.localeCompare(right.title)
+        )
+    );
+  }
+
+  async getDesignDetail(designId: string): Promise<DesignDetailSnapshot> {
+    await this.init();
+    const state = this.publishedState;
+    const task = state.tasks.find(
+      (candidate) => candidate.id === designId && candidate.kind === 'DESIGN'
+    );
+    if (!task) throw new Error('Design not found.');
+    const repository = state.repositories.find(
+      (candidate) => candidate.id === task.repositoryId
+    );
+    if (!repository) throw new Error('Design repository not found.');
+    const revisions = state.designRevisions
+      .filter((revision) => revision.designId === designId)
+      .sort((left, right) => left.ordinal - right.ordinal);
+    const turns = state.designTurns
+      .filter((turn) => turn.designId === designId)
+      .sort((left, right) => left.order - right.order)
+      .slice(-100);
+    const conversation = await Promise.all(
+      turns.map(async (turn) => {
+        const run = turn.runId
+          ? state.runs.find((candidate) => candidate.id === turn.runId)
+          : undefined;
+        const artifact = turn.messageArtifactId
+          ? state.artifacts.find((candidate) => candidate.id === turn.messageArtifactId)
+          : undefined;
+        return {
+          turn,
+          userMessage:
+            turn.messageSource === 'TASK_PROMPT'
+              ? task.prompt
+              : artifact
+                ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
+                : '',
+          assistantMessage: run?.finalMessage,
+          runStatus: run?.status
+        };
+      })
+    );
+    const interactions = state.interactionRequests
+      .filter(
+        (interaction) =>
+          interaction.taskId === designId &&
+          (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
+      )
+      .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+      .slice(-20);
+    const sessionIds = new Set([
+      ...interactions.map((interaction) => interaction.sessionId),
+      ...(task.currentAgentSessionId ? [task.currentAgentSessionId] : [])
+    ]);
+    const sessions = state.agentSessions
+      .filter((session) => sessionIds.has(session.id))
+      .slice(-20);
+    const runIds = new Set(turns.flatMap((turn) => (turn.runId ? [turn.runId] : [])));
+    const items = state.agentItems
+      .filter((item) => item.taskId === designId && runIds.has(item.runId))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .slice(-100);
+    const currentPreview = selectCurrentDesignPreview(state, designId, revisions.at(-1));
+    return clone({
+      schemaVersion: state.schemaVersion,
+      design: projectDesignListItem(state, task),
+      task,
+      repository,
+      turns,
+      references: state.designReferences.filter(
+        (reference) => reference.designId === designId
+      ),
+      revisions,
+      conversation,
+      interactions,
+      sessions,
+      items,
+      currentIteration: state.iterations.find(
+        (iteration) => iteration.id === task.currentIterationId
+      ),
+      currentWorktree: state.worktrees.find(
+        (worktree) => worktree.id === task.currentWorktreeId
+      ),
+      currentRun: state.runs.find((run) => run.id === task.currentRunId),
+      currentSession: state.agentSessions.find(
+        (session) => session.id === task.currentAgentSessionId
+      ),
+      currentPreview,
+      canvas: projectDesignCanvas(state, task, revisions.at(-1), currentPreview),
+      actions: projectDesignActions(state, task, revisions.at(-1), currentPreview)
     });
   }
 
@@ -1008,6 +1246,7 @@ export class FileTaskStore {
       const now = new Date().toISOString();
       const repository: Repository = {
         id: randomUUID(),
+        kind: 'USER_REGISTERED',
         name: path.basename(repositoryPath) || repositoryPath,
         path: repositoryPath,
         status: 'AVAILABLE',
@@ -1689,7 +1928,12 @@ export class FileTaskStore {
   async cutoverPreviewGenerations(input: {
     candidate: PreviewGenerationRecord;
     replaced?: PreviewGenerationRecord;
-  }): Promise<{ candidate: PreviewGenerationRecord; replaced?: PreviewGenerationRecord }> {
+    designSettlement?: DesignPreviewSettlementInput;
+  }): Promise<{
+    candidate: PreviewGenerationRecord;
+    replaced?: PreviewGenerationRecord;
+    revision?: DesignRevision;
+  }> {
     return this.serializeMutation(async () => {
       await this.init();
       this.assertPreviewGenerationReferences(input.candidate);
@@ -1715,13 +1959,105 @@ export class FileTaskStore {
       ) {
         throw new Error('Preview cutover requires one active candidate and an optional retired generation for the same task.');
       }
+      let candidate = input.candidate;
+      let revision: DesignRevision | undefined;
+      let settledTurn: DesignTurn | undefined;
+      if (input.designSettlement) {
+        const settlement = input.designSettlement;
+        const design = this.requireDesign(settlement.designId);
+        const turn = this.requireDesignTurn(settlement.designId, settlement.turnId);
+        const run = this.state.runs.find(
+          (candidateRun) =>
+            candidateRun.id === settlement.runId &&
+            candidateRun.taskId === design.id &&
+            candidateRun.mode === 'DESIGN' &&
+            candidateRun.generationKey === turn.id
+        );
+        const selectedRoute = candidate.routes.find(
+          (route) => route.id === settlement.routeId && route.state === 'ATTACHED'
+        );
+        if (
+          candidate.taskId !== design.id ||
+          candidate.source.type !== 'EXACT_COMMIT' ||
+          candidate.source.repositoryId !== design.repositoryId ||
+          candidate.source.commitSha !== settlement.commitSha ||
+          candidate.source.designRevisionId !== undefined ||
+          !isGitObjectId(settlement.commitSha) ||
+          !run ||
+          run.status !== 'COMPLETED' ||
+          turn.runId !== run.id ||
+          turn.outcome !== undefined ||
+          turn.checkpoint?.boundary !== 'PREVIEW_CANDIDATE_READY' ||
+          turn.checkpoint.previewGenerationId !== candidate.id ||
+          turn.checkpoint.commitSha !== settlement.commitSha ||
+          !selectedRoute ||
+          this.state.designRevisions.some(
+            (existing) =>
+              existing.designId === design.id &&
+              (existing.turnId === turn.id || existing.runId === run.id)
+          )
+        ) {
+          throw new Error('Design Preview settlement ownership is inconsistent.');
+        }
+        const now = new Date().toISOString();
+        revision = {
+          id: randomUUID(),
+          designId: design.id,
+          ordinal:
+            Math.max(
+              0,
+              ...this.state.designRevisions
+                .filter((existing) => existing.designId === design.id)
+                .map((existing) => existing.ordinal)
+            ) + 1,
+          commitSha: settlement.commitSha,
+          changeSource: 'AGENT_TURN',
+          turnId: turn.id,
+          runId: run.id,
+          routeId: selectedRoute.id,
+          createdAt: now
+        };
+        candidate = {
+          ...candidate,
+          source: { ...candidate.source, designRevisionId: revision.id },
+          freshness: 'REVISION'
+        };
+        settledTurn = {
+          ...turn,
+          checkpoint: undefined,
+          outcome: 'READY',
+          settledAt: now
+        };
+      } else if (
+        input.candidate.source.type === 'EXACT_COMMIT' &&
+        input.candidate.source.designRevisionId === undefined
+      ) {
+        throw new Error('An exact-commit Design cutover requires durable revision settlement.');
+      }
       const updates = new Map(
-        [input.candidate, input.replaced].filter(Boolean).map((generation) => [generation!.id, generation!])
+        [candidate, input.replaced]
+          .filter(Boolean)
+          .map((generation) => [generation!.id, generation!])
       );
       this.state = {
         ...this.state,
+        tasks: settledTurn
+          ? this.state.tasks.map((task) =>
+              task.id === settledTurn!.designId
+                ? { ...task, updatedAt: settledTurn!.settledAt! }
+                : task
+            )
+          : this.state.tasks,
+        designTurns: settledTurn
+          ? this.state.designTurns.map((turn) =>
+              turn.id === settledTurn!.id ? settledTurn! : turn
+            )
+          : this.state.designTurns,
+        designRevisions: revision
+          ? [revision, ...this.state.designRevisions]
+          : this.state.designRevisions,
         previewGenerations: [
-          input.candidate,
+          candidate,
           ...(input.replaced ? [input.replaced] : []),
           ...this.state.previewGenerations.filter((generation) => !updates.has(generation.id))
         ]
@@ -1746,7 +2082,7 @@ export class FileTaskStore {
         );
       }
       await this.persistSnapshot();
-      return clone(input);
+      return clone({ candidate, replaced: input.replaced, revision });
     });
   }
 
@@ -2127,6 +2463,405 @@ export class FileTaskStore {
     );
   }
 
+  async createDesignBundle(
+    input: CreateDesignBundleInput
+  ): Promise<CreateDesignBundleResult> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const retry = this.resolveDesignCreationRetryFromState(input.request);
+      if (retry) return clone(retry);
+
+      const metadata = designCreationMetadata(input.request);
+      const brief = input.request.brief.trim();
+      if (!brief) throw new Error('Design brief is required.');
+      const repositoryPath = path.resolve(input.repository.path);
+      if (
+        !UUID_FILE_SEGMENT_PATTERN.test(input.repository.id) ||
+        !input.repository.name.trim() ||
+        !input.repository.branch.trim() ||
+        !isGitObjectId(input.repository.headSha) ||
+        !isCanonicalIsoTimestamp(input.repository.checkedAt)
+      ) {
+        throw new Error('Managed Design repository identity is invalid.');
+      }
+      if (
+        this.state.repositories.some(
+          (repository) =>
+            repository.id === input.repository.id ||
+            sameAbsolutePath(path.resolve(repository.path), repositoryPath)
+        )
+      ) {
+        throw new Error('Managed Design repository identity is already registered.');
+      }
+
+      const now = new Date().toISOString();
+      const repository: Repository = {
+        id: input.repository.id,
+        kind: 'DESIGN_MANAGED',
+        name: input.repository.name.trim(),
+        path: repositoryPath,
+        status: 'AVAILABLE',
+        headSha: input.repository.headSha,
+        branch: input.repository.branch.trim(),
+        remotes: [],
+        createdAt: now,
+        updatedAt: now,
+        checkedAt: input.repository.checkedAt
+      };
+      const task: Task = {
+        id: randomUUID(),
+        kind: 'DESIGN',
+        runtimeId: CODEX_RUNTIME_ID,
+        title: deriveDesignTitle(brief),
+        prompt: brief,
+        repositoryId: repository.id,
+        creationToken: metadata.token,
+        creationRequestFingerprint: metadata.fingerprint,
+        workflowPhase: 'READY',
+        resolution: 'NONE',
+        completionPolicy: 'MANUAL',
+        phaseVersion: 1,
+        forkedAlternativeTaskIds: [],
+        agentSettings: {
+          runtimeId: CODEX_RUNTIME_ID,
+          model: normalizedOptionalString(input.request.model),
+          reasoningEffort: normalizedOptionalString(input.request.reasoningEffort),
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user'
+        },
+        createdAt: now,
+        updatedAt: now,
+        projection: createInitialProjection(now)
+      };
+
+      const previousState = this.state;
+      let preparedDraft: PreparedAttachmentDraft | undefined;
+      let attachmentRecords: TaskAttachmentRecord[] = [];
+      let publishedWithoutDirectorySync = false;
+      try {
+        if (input.request.attachmentDraftId) {
+          preparedDraft = await this.attachmentFiles.prepareDraftForTask(
+            input.request.attachmentDraftId,
+            task.id
+          );
+          attachmentRecords = preparedDraft.records;
+        }
+        const references: DesignReference[] = attachmentRecords.map((attachment) => ({
+          id: randomUUID(),
+          designId: task.id,
+          attachmentId: attachment.id,
+          createdAt: now
+        }));
+        const turn: DesignTurn = {
+          id: randomUUID(),
+          designId: task.id,
+          clientMessageId: input.request.creationToken,
+          order: 1,
+          messageSource: 'TASK_PROMPT',
+          referenceIds: references.map((reference) => reference.id),
+          checkpoint: { boundary: 'QUEUED' },
+          createdAt: now
+        };
+        this.state = {
+          ...this.state,
+          repositories: [repository, ...this.state.repositories],
+          tasks: [task, ...this.state.tasks],
+          designTurns: [turn, ...this.state.designTurns],
+          designReferences: [...references, ...this.state.designReferences],
+          attachments: [...attachmentRecords, ...this.state.attachments]
+        };
+        this.state = applyEventToState(
+          this.state,
+          createDomainEvent({
+            type: 'TASK_CREATED',
+            taskId: task.id,
+            source: 'ui',
+            payload: {
+              kind: task.kind,
+              title: task.title,
+              repositoryId: task.repositoryId,
+              attachmentIds: attachmentRecords.map((attachment) => attachment.id),
+              designTurnId: turn.id
+            }
+          })
+        );
+        publishedWithoutDirectorySync = !(await this.persistSnapshot());
+        if (!publishedWithoutDirectorySync && preparedDraft) {
+          await this.attachmentFiles.finalizeDraftForTask(preparedDraft).catch(
+            () => undefined
+          );
+        }
+        return clone({ task, repository, turn, references });
+      } catch (error) {
+        this.state = previousState;
+        if (preparedDraft) {
+          try {
+            await this.attachmentFiles.rollbackDraftForTask(preparedDraft);
+          } catch (rollbackError) {
+            throw new AttachmentAdoptionAmbiguousError(
+              preparedDraft,
+              error,
+              rollbackError
+            );
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  async resolveDesignCreationRetry(
+    request: CreateBlankDesignRequest
+  ): Promise<CreateDesignBundleResult | undefined> {
+    await this.init();
+    return clone(this.resolveDesignCreationRetryFromState(request));
+  }
+
+  async createInlineDesignTurn(
+    input: CreateInlineDesignTurnInput
+  ): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      if (!isTaskCreationToken(input.clientMessageId)) {
+        throw new Error('Design message id is invalid.');
+      }
+      if (!input.message.trim()) throw new Error('Design message is required.');
+      if (Buffer.byteLength(input.message, 'utf8') > ARTIFACT_BYTE_LIMITS['design-message']) {
+        throw new Error('Design message exceeds its durable byte limit.');
+      }
+      const existing = this.state.designTurns.find(
+        (turn) =>
+          turn.designId === design.id &&
+          turn.clientMessageId === input.clientMessageId
+      );
+      if (existing) {
+        const artifact = existing.messageArtifactId
+          ? this.state.artifacts.find((candidate) => candidate.id === existing.messageArtifactId)
+          : undefined;
+        const storedMessage = artifact
+          ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
+          : undefined;
+        if (
+          existing.messageSource !== 'INLINE_MESSAGE' ||
+          storedMessage !== input.message
+        ) {
+          throw new Error('This Design message id was already used for different content.');
+        }
+        return clone(existing);
+      }
+      if (
+        this.state.designTurns.some(
+          (turn) => turn.designId === design.id && turn.outcome === undefined
+        )
+      ) {
+        throw new Error('This Design already has an unsettled turn.');
+      }
+
+      const now = new Date().toISOString();
+      const referenceIds = this.state.designReferences
+        .filter((reference) => reference.designId === design.id)
+        .map((reference) => reference.id);
+      const previousState = this.state;
+      const artifact = await this.createArtifactRecord(design.id, 'design-message');
+      await writeNewArtifactFiles(this.artifactsDir, [
+        { artifact, content: input.message }
+      ]);
+      const order =
+        Math.max(
+          0,
+          ...this.state.designTurns
+            .filter((turn) => turn.designId === design.id)
+            .map((turn) => turn.order)
+        ) + 1;
+      const turn: DesignTurn = {
+        id: randomUUID(),
+        designId: design.id,
+        clientMessageId: input.clientMessageId,
+        order,
+        messageSource: 'INLINE_MESSAGE',
+        messageArtifactId: artifact.id,
+        referenceIds,
+        checkpoint: { boundary: 'QUEUED' },
+        createdAt: now
+      };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === design.id ? { ...task, updatedAt: now } : task
+        ),
+        designTurns: [turn, ...this.state.designTurns],
+        artifacts: [artifact, ...this.state.artifacts]
+      };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        this.state = previousState;
+        await this.cleanupUnpublishedArtifacts([artifact]);
+        throw error;
+      }
+      return clone(turn);
+    });
+  }
+
+  async getRunByGenerationKey(
+    taskId: string,
+    generationKey: string
+  ): Promise<RunRecord | undefined> {
+    await this.init();
+    return clone(
+      this.publishedState.runs.find(
+        (run) =>
+          run.taskId === taskId &&
+          run.mode === 'DESIGN' &&
+          run.generationKey === generationKey
+      )
+    );
+  }
+
+  async linkDesignTurnRun(input: {
+    designId: string;
+    turnId: string;
+    runId: string;
+  }): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      const run = this.state.runs.find(
+        (candidate) =>
+          candidate.id === input.runId &&
+          candidate.taskId === input.designId &&
+          candidate.mode === 'DESIGN' &&
+          candidate.generationKey === input.turnId
+      );
+      if (!run) throw new Error('Design turn Run ownership is inconsistent.');
+      if (turn.runId && turn.runId !== run.id) {
+        throw new Error('Design turn is already linked to another Run.');
+      }
+      if (turn.runId === run.id) return clone(turn);
+      if (turn.outcome !== undefined || turn.checkpoint?.boundary !== 'QUEUED') {
+        throw new Error('Only a queued unsettled Design turn can link its Run.');
+      }
+      const updated: DesignTurn = {
+        ...turn,
+        runId: run.id,
+        checkpoint: { boundary: 'RUN_LINKED' }
+      };
+      this.state = {
+        ...this.state,
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async updateDesignTurnCheckpoint(
+    input: UpdateDesignTurnCheckpointInput
+  ): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      if (turn.outcome !== undefined) {
+        throw new Error('A settled Design turn cannot change its checkpoint.');
+      }
+      if (sameJsonValue(turn.checkpoint, input.checkpoint)) return clone(turn);
+      const currentCheckpoint = turn.checkpoint;
+      const priorPreviewCandidate =
+        currentCheckpoint?.boundary === 'PREVIEW_CANDIDATE_READY'
+          ? this.state.previewGenerations.find(
+              (generation) => generation.id === currentCheckpoint.previewGenerationId
+            )
+          : undefined;
+      const replacesUnavailablePreviewCandidate =
+        currentCheckpoint?.boundary === 'PREVIEW_CANDIDATE_READY' &&
+        input.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY' &&
+        currentCheckpoint.commitSha === input.checkpoint.commitSha &&
+        (!priorPreviewCandidate ||
+          priorPreviewCandidate.state === 'STOPPED' ||
+          priorPreviewCandidate.state === 'FAILED');
+      if (!replacesUnavailablePreviewCandidate) {
+        assertDesignCheckpointTransition(turn.checkpoint, input.checkpoint);
+      }
+      this.assertDesignCheckpointOwnership(design, turn, input.checkpoint);
+      const updated: DesignTurn = { ...turn, checkpoint: clone(input.checkpoint) };
+      this.state = {
+        ...this.state,
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async settleDesignTurn(input: SettleDesignTurnInput): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      const failureReason = normalizedOptionalString(input.failureReason);
+      if (
+        (input.outcome === 'FAILED' || input.outcome === 'NEEDS_ATTENTION') &&
+        !failureReason
+      ) {
+        throw new Error('Failed Design turn settlement requires a reason.');
+      }
+      if (turn.outcome !== undefined) {
+        if (
+          turn.outcome === input.outcome &&
+          turn.failureReason === failureReason
+        ) {
+          return clone(turn);
+        }
+        throw new Error('Design turn is already settled with a different outcome.');
+      }
+      if (input.outcome === 'NO_CHANGE') {
+        const run = turn.runId
+          ? this.state.runs.find((candidate) => candidate.id === turn.runId)
+          : undefined;
+        if (
+          !run ||
+          run.status !== 'COMPLETED' ||
+          turn.checkpoint?.boundary !== 'POST_RUN_EVIDENCE_RECORDED' ||
+          !this.state.designRevisions.some(
+            (revision) => revision.designId === design.id
+          )
+        ) {
+          throw new Error(
+            'No-change settlement requires a completed evidenced Run and an existing ready revision.'
+          );
+        }
+      }
+      const now = new Date().toISOString();
+      const updated: DesignTurn = {
+        ...turn,
+        checkpoint: undefined,
+        outcome: input.outcome,
+        failureReason,
+        settledAt: now
+      };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === design.id ? { ...task, updatedAt: now } : task
+        ),
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
   async createTask(input: CreateTaskStoreInput): Promise<Task> {
     return this.serializeMutation(() => this.createTaskRecord(input, 'ui'));
   }
@@ -2151,15 +2886,31 @@ export class FileTaskStore {
   }
 
   async deleteTask(taskId: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.deleteTaskInternal(taskId);
+    });
+  }
+
+  async deleteTaskAndReleaseManagedRepository(
+    taskId: string
+  ): Promise<DeleteTaskStorageResult> {
     return this.serializeMutation(() => this.deleteTaskInternal(taskId));
   }
 
-  private async deleteTaskInternal(taskId: string): Promise<void> {
+  private async deleteTaskInternal(taskId: string): Promise<DeleteTaskStorageResult> {
     await this.init();
 
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
+    }
+    if (
+      task.kind === 'DESIGN' &&
+      this.state.designTurns.some(
+        (turn) => turn.designId === taskId && turn.outcome === undefined
+      )
+    ) {
+      throw new Error('Design has an unsettled turn. Settle or cancel it before deletion.');
     }
     const activePreviewResource = this.state.previewResources.find(
       (resource) =>
@@ -2216,6 +2967,15 @@ export class FileTaskStore {
     );
     const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
     const now = new Date().toISOString();
+    const removedManagedRepository = this.state.repositories.find(
+      (repository) =>
+        repository.id === task.repositoryId &&
+        repository.kind === 'DESIGN_MANAGED' &&
+        !this.state.tasks.some(
+          (candidate) =>
+            candidate.id !== task.id && candidate.repositoryId === repository.id
+        )
+    );
     const previousState = this.state;
     let publishedWithoutDirectorySync = false;
     let prunedServerIds: string[] = [];
@@ -2223,9 +2983,30 @@ export class FileTaskStore {
     try {
       this.state = {
         ...this.state,
+      repositories: removedManagedRepository
+        ? this.state.repositories.filter(
+            (repository) => repository.id !== removedManagedRepository.id
+          )
+        : this.state.repositories,
+      boards: removedManagedRepository
+        ? this.state.boards.map((board) => ({
+            ...board,
+            repositoryIds: board.repositoryIds.filter(
+              (repositoryId) => repositoryId !== removedManagedRepository.id
+            ),
+            updatedAt: now
+          }))
+        : this.state.boards,
       tasks: this.state.tasks
         .filter((candidate) => candidate.id !== taskId)
         .map((candidate) => removeTaskLink(candidate, taskId, now)),
+      designTurns: this.state.designTurns.filter((turn) => turn.designId !== taskId),
+      designReferences: this.state.designReferences.filter(
+        (reference) => reference.designId !== taskId
+      ),
+      designRevisions: this.state.designRevisions.filter(
+        (revision) => revision.designId !== taskId
+      ),
       iterations: this.state.iterations.filter((iteration) => iteration.taskId !== taskId),
       worktrees: this.state.worktrees.filter((worktree) => worktree.taskId !== taskId),
       gitSnapshots: this.state.gitSnapshots.filter((snapshot) => snapshot.taskId !== taskId),
@@ -2335,6 +3116,7 @@ export class FileTaskStore {
         artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path))
       );
     }
+    return clone({ removedManagedRepository });
   }
 
   private async createTaskRecord(
@@ -2372,6 +3154,7 @@ export class FileTaskStore {
     }
     const task: Task = {
       id: randomUUID(),
+      kind: 'NORMAL',
       runtimeId,
       title: input.title.trim(),
       prompt: input.prompt.trim(),
@@ -2402,6 +3185,9 @@ export class FileTaskStore {
     );
     if (!repository) {
       throw new Error('Repository not found.');
+    }
+    if (repository.kind !== 'USER_REGISTERED') {
+      throw new Error('Normal task creation requires a registered repository.');
     }
     if (repository.status !== 'AVAILABLE') {
       throw new Error('Repository is not available.');
@@ -2508,6 +3294,136 @@ export class FileTaskStore {
     return clone(task);
   }
 
+  private requireDesign(designId: string): Task {
+    const design = this.state.tasks.find(
+      (task) => task.id === designId && task.kind === 'DESIGN'
+    );
+    if (!design) throw new Error('Design not found.');
+    return design;
+  }
+
+  private requireDesignTurn(designId: string, turnId: string): DesignTurn {
+    const turn = this.state.designTurns.find(
+      (candidate) => candidate.id === turnId && candidate.designId === designId
+    );
+    if (!turn) throw new Error('Design turn not found.');
+    return turn;
+  }
+
+  private resolveDesignCreationRetryFromState(
+    request: CreateBlankDesignRequest
+  ): CreateDesignBundleResult | undefined {
+    const metadata = designCreationMetadata(request);
+    const existing = this.state.tasks.find(
+      (task) => task.creationToken === metadata.token
+    );
+    if (!existing) return undefined;
+    if (
+      existing.kind !== 'DESIGN' ||
+      existing.creationRequestFingerprint !== metadata.fingerprint
+    ) {
+      throw new TaskCreationRequestError(
+        'TASK_CREATION_CONFLICT',
+        'This creation retry token was already used for a different request.',
+        409
+      );
+    }
+    const repository = this.state.repositories.find(
+      (candidate) => candidate.id === existing.repositoryId
+    );
+    const turn = this.state.designTurns.find(
+      (candidate) =>
+        candidate.designId === existing.id &&
+        candidate.messageSource === 'TASK_PROMPT' &&
+        candidate.order === 1
+    );
+    if (!repository || !turn) {
+      throw new Error('Stored Design creation bundle is incomplete.');
+    }
+    return {
+      task: existing,
+      repository,
+      turn,
+      references: this.state.designReferences.filter(
+        (reference) => reference.designId === existing.id
+      )
+    };
+  }
+
+  private assertDesignCheckpointOwnership(
+    design: Task,
+    turn: DesignTurn,
+    checkpoint: DesignTurnCheckpoint
+  ): void {
+    if (checkpoint.boundary === 'QUEUED') return;
+    if (checkpoint.boundary === 'RUN_LINKED') {
+      const run = turn.runId
+        ? this.state.runs.find(
+            (candidate) =>
+              candidate.id === turn.runId &&
+              candidate.taskId === design.id &&
+              candidate.mode === 'DESIGN' &&
+              candidate.generationKey === turn.id
+          )
+        : undefined;
+      if (!run) throw new Error('Design checkpoint Run ownership is inconsistent.');
+      return;
+    }
+    if (checkpoint.boundary === 'POST_RUN_EVIDENCE_RECORDED') {
+      const run = turn.runId
+        ? this.state.runs.find((candidate) => candidate.id === turn.runId)
+        : undefined;
+      const snapshot = this.state.gitSnapshots.find(
+        (candidate) =>
+          candidate.id === checkpoint.gitSnapshotId &&
+          candidate.taskId === design.id &&
+          candidate.worktreeId === design.currentWorktreeId &&
+          candidate.id === run?.afterGitSnapshotId
+      );
+      if (!snapshot) {
+        throw new Error('Design checkpoint Git evidence ownership is inconsistent.');
+      }
+      return;
+    }
+    if (checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
+      const generation = this.state.previewGenerations.find(
+        (candidate) =>
+          candidate.id === checkpoint.previewGenerationId &&
+          candidate.taskId === design.id &&
+          candidate.state === 'READY' &&
+          candidate.routingState === 'CANDIDATE' &&
+          candidate.source.type === 'EXACT_COMMIT' &&
+          candidate.source.repositoryId === design.repositoryId &&
+          candidate.source.commitSha === checkpoint.commitSha &&
+          candidate.source.designRevisionId === undefined
+      );
+      if (!generation) {
+        throw new Error('Design checkpoint Preview ownership is inconsistent.');
+      }
+      return;
+    }
+    const source = checkpoint.source;
+    const worktree = this.state.worktrees.find(
+      (candidate) =>
+        candidate.id === source.worktreeId &&
+        candidate.id === design.currentWorktreeId &&
+        candidate.taskId === design.id &&
+        candidate.repositoryId === design.repositoryId &&
+        candidate.branchName === source.branchName
+    );
+    if (
+      source.repositoryId !== design.repositoryId ||
+      !worktree ||
+      !isGitObjectId(source.expectedParentCommit) ||
+      !isGitObjectId(source.treeSha) ||
+      ('candidateCommitSha' in source &&
+        source.candidateCommitSha !== undefined &&
+        !isGitObjectId(source.candidateCommitSha))
+    ) {
+      throw new Error('Design checkpoint source ownership is inconsistent.');
+    }
+  }
+
   private assertPreviewPlanReferences(plan: PreviewPlanRecord): void {
     const task = this.state.tasks.find((candidate) => candidate.id === plan.taskId);
     const iteration = this.state.iterations.find(
@@ -2540,35 +3456,83 @@ export class FileTaskStore {
     const existing = this.state.previewGenerations.find(
       (candidate) => candidate.id === generation.id
     );
+    const authority = generation.executionAuthority;
+    const executionDigest = authority.executionDigest;
     const plan = this.state.previewPlans.find(
       (candidate) =>
         candidate.id === generation.planId &&
         candidate.taskId === generation.taskId &&
         candidate.iterationId === generation.iterationId &&
         candidate.worktreeId === generation.worktreeId &&
-        candidate.executionDigest === generation.executionDigest
+        candidate.executionDigest === executionDigest
     );
-    const approval = this.state.previewApprovals.find(
-      (candidate) =>
-        candidate.id === generation.approvalId &&
-        candidate.taskId === generation.taskId &&
-        candidate.executionDigest === generation.executionDigest &&
-        candidate.scope === 'TASK' &&
-        (!candidate.invalidatedAt || Boolean(existing))
-    );
+    const task = this.state.tasks.find((candidate) => candidate.id === generation.taskId);
+    const approval =
+      authority.type === 'USER_APPROVAL'
+        ? this.state.previewApprovals.find(
+            (candidate) =>
+              candidate.id === authority.approvalId &&
+              candidate.taskId === generation.taskId &&
+              candidate.executionDigest === executionDigest &&
+              candidate.scope === 'TASK' &&
+              (!candidate.invalidatedAt || Boolean(existing))
+          )
+        : undefined;
+    const authorityValid =
+      authority.type === 'USER_APPROVAL'
+        ? Boolean(approval) && plan?.planSource.type === 'REPOSITORY_RECIPE'
+        : authority.adapterVersion === 1 &&
+          plan?.planSource.type === 'MANAGED_DESIGN_STATIC' &&
+          task?.kind === 'DESIGN';
+    const sourceValid = (() => {
+      const source = generation.source;
+      if (source.type === 'WORKTREE_SNAPSHOT') {
+        const snapshot = this.state.gitSnapshots.find(
+          (candidate) =>
+            candidate.id === source.gitSnapshotId &&
+            candidate.taskId === generation.taskId &&
+            candidate.iterationId === generation.iterationId &&
+            candidate.worktreeId === generation.worktreeId
+        );
+        return Boolean(
+          snapshot &&
+            snapshot.headSha === source.headSha &&
+            snapshot.dirtyFingerprint === source.dirtyFingerprint &&
+            plan?.planSource.type === 'REPOSITORY_RECIPE'
+        );
+      }
+      const repository = this.state.repositories.find(
+        (candidate) => candidate.id === source.repositoryId
+      );
+      const revision = source.designRevisionId
+        ? this.state.designRevisions.find(
+            (candidate) => candidate.id === source.designRevisionId
+          )
+        : undefined;
+      return Boolean(
+        task?.kind === 'DESIGN' &&
+          repository?.id === task.repositoryId &&
+          repository.kind === 'DESIGN_MANAGED' &&
+          plan?.planSource.type === 'MANAGED_DESIGN_STATIC' &&
+          (!source.designRevisionId ||
+            (revision?.designId === task.id &&
+              revision.commitSha === source.commitSha))
+      );
+    })();
     const authorityChanged =
       existing &&
       (existing.taskId !== generation.taskId ||
         existing.iterationId !== generation.iterationId ||
         existing.worktreeId !== generation.worktreeId ||
         existing.planId !== generation.planId ||
-        existing.approvalId !== generation.approvalId ||
-        existing.executionDigest !== generation.executionDigest);
+        !sameJsonValue(existing.executionAuthority, generation.executionAuthority) ||
+        !sameJsonValue(existing.source, generation.source));
     if (
       !plan ||
-      !approval ||
+      !authorityValid ||
+      !sourceValid ||
       authorityChanged ||
-      !this.state.tasks.some((task) => task.id === generation.taskId)
+      !task
     ) {
       throw new Error('Preview generation references missing or mismatched task authority.');
     }
@@ -2600,7 +3564,10 @@ export class FileTaskStore {
     if (!existing) {
       return undefined;
     }
-    if (existing.creationRequestFingerprint !== metadata.fingerprint) {
+    if (
+      existing.kind !== 'NORMAL' ||
+      existing.creationRequestFingerprint !== metadata.fingerprint
+    ) {
       throw new TaskCreationRequestError(
         'TASK_CREATION_CONFLICT',
         'This task creation retry token was already used for a different request.',
@@ -3267,6 +4234,38 @@ export class FileTaskStore {
   private async createRunInternal(input: CreateRunInput): Promise<RunRecord> {
     await this.init();
 
+    const persistedTask = this.state.tasks.find(
+      (task) => task.id === input.task.id
+    );
+    if (!persistedTask) throw new Error('Run task does not exist.');
+    if (
+      (persistedTask.kind === 'DESIGN') !== (input.mode === 'DESIGN')
+    ) {
+      throw new Error('DESIGN runs and Design tasks must use each other exclusively.');
+    }
+    if (input.mode === 'DESIGN') {
+      const turn = input.generationKey
+        ? this.state.designTurns.find(
+            (candidate) =>
+              candidate.id === input.generationKey &&
+              candidate.designId === persistedTask.id &&
+              candidate.outcome === undefined
+          )
+        : undefined;
+      if (!turn) {
+        throw new Error('DESIGN run requires an unsettled DesignTurn generation key.');
+      }
+      if (
+        this.state.runs.some(
+          (run) =>
+            run.taskId === persistedTask.id &&
+            run.mode === 'DESIGN' &&
+            run.generationKey === input.generationKey
+        )
+      ) {
+        throw new Error('A DESIGN Run already exists for this DesignTurn generation key.');
+      }
+    }
     const persistedSession = this.state.agentSessions.find(
       (session) => session.id === input.session.id
     );
@@ -3337,7 +4336,8 @@ export class FileTaskStore {
       startedAt: now,
       eventCount: 0
     };
-    const startsWorkflow = input.mode !== 'REVIEW';
+    const bindsCurrentTask = input.mode !== 'REVIEW';
+    const advancesWorkflow = bindsCurrentTask && input.mode !== 'DESIGN';
     const reviewedSnapshot = input.beforeGitSnapshotId
       ? this.state.gitSnapshots.find((snapshot) => snapshot.id === input.beforeGitSnapshotId)
       : undefined;
@@ -3348,18 +4348,18 @@ export class FileTaskStore {
         existing.id === input.task.id
           ? {
               ...existing,
-              workflowPhase: startsWorkflow ? 'IN_PROGRESS' : existing.workflowPhase,
-              currentRunId: startsWorkflow ? run.id : existing.currentRunId,
-              currentAgentSessionId: startsWorkflow
+              workflowPhase: advancesWorkflow ? 'IN_PROGRESS' : existing.workflowPhase,
+              currentRunId: bindsCurrentTask ? run.id : existing.currentRunId,
+              currentAgentSessionId: bindsCurrentTask
                 ? input.session.id
                 : existing.currentAgentSessionId,
-              currentIterationId: startsWorkflow
+              currentIterationId: bindsCurrentTask
                 ? input.session.iterationId
                 : existing.currentIterationId,
-              currentWorktreeId: startsWorkflow
+              currentWorktreeId: bindsCurrentTask
                 ? input.session.worktreeId
                 : existing.currentWorktreeId,
-              phaseVersion: startsWorkflow ? existing.phaseVersion + 1 : existing.phaseVersion,
+              phaseVersion: advancesWorkflow ? existing.phaseVersion + 1 : existing.phaseVersion,
               updatedAt: now
             }
           : existing
@@ -3373,7 +4373,7 @@ export class FileTaskStore {
       ]
     };
 
-    if (startsWorkflow) {
+    if (advancesWorkflow) {
       await this.appendEvent(
         createDomainEvent({
           type: 'TRANSITION_REQUESTED',
@@ -3384,7 +4384,7 @@ export class FileTaskStore {
           agentSessionId: input.session.id,
           serverInstanceId: input.serverInstanceId,
           source: 'ui',
-          payload: { fromPhase: input.task.workflowPhase, toPhase: 'IN_PROGRESS' }
+          payload: { fromPhase: persistedTask.workflowPhase, toPhase: 'IN_PROGRESS' }
         }),
         false
       );
@@ -5428,6 +6428,9 @@ function requireCurrentState(state: PersistedState): StoreState {
     'repositories',
     'boards',
     'tasks',
+    'designTurns',
+    'designReferences',
+    'designRevisions',
     'iterations',
     'worktrees',
     'gitSnapshots',
@@ -5469,6 +6472,7 @@ function requireCurrentState(state: PersistedState): StoreState {
   const current = state as StoreState;
   validateCurrentStoreRecords(current);
   validatePersistedRelationships(current);
+  validatePersistedDesignRelationships(current);
   validatePersistedRuntimeIdentity(current);
   validatePersistedRepositoryReferences(current);
   validatePersistedBoards(current);
@@ -6160,6 +7164,7 @@ function validatePersistedRepositoryReferences(state: StoreState): void {
       repositoryIds.has(repository.id) ||
       typeof repository.path !== 'string' ||
       !repository.path ||
+      !['USER_REGISTERED', 'DESIGN_MANAGED'].includes(repository.kind) ||
       !['AVAILABLE', 'MISSING', 'INVALID', 'DISCONNECTED'].includes(repository.status)
     ) {
       throw new Error(
@@ -6180,6 +7185,317 @@ function validatePersistedRepositoryReferences(state: StoreState): void {
     throw new Error(
       `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: a task or worktree references an unknown repository.`
     );
+  }
+}
+
+function validatePersistedDesignRelationships(state: StoreState): void {
+  const tasks = new Map(state.tasks.map((task) => [task.id, task]));
+  const repositories = new Map(
+    state.repositories.map((repository) => [repository.id, repository])
+  );
+  const artifacts = indexUniqueRecords(state.artifacts, 'artifacts');
+  const attachments = indexUniqueRecords(state.attachments, 'attachments');
+  const runs = indexUniqueRecords(state.runs, 'runs');
+  const references = indexUniqueRecords(state.designReferences, 'designReferences');
+  const turns = indexUniqueRecords(state.designTurns, 'designTurns');
+  const revisions = indexUniqueRecords(state.designRevisions, 'designRevisions');
+  const designRunKeys = new Set<string>();
+
+  for (const task of state.tasks) {
+    const repository = repositories.get(task.repositoryId);
+    if (
+      task.kind === 'DESIGN' &&
+      (repository?.kind !== 'DESIGN_MANAGED' ||
+        !['READY', 'ARCHIVED'].includes(task.workflowPhase) ||
+        task.completionPolicy !== 'MANUAL' ||
+        task.runtimeId !== CODEX_RUNTIME_ID ||
+        !hasRestrictedDesignRequestedSettings(task.agentSettings) ||
+        !state.designTurns.some((turn) => turn.designId === task.id))
+    ) {
+      invalidPersistedRelationship('Design task ownership');
+    }
+    if (task.kind === 'NORMAL' && repository?.kind !== 'USER_REGISTERED') {
+      invalidPersistedRelationship('normal task repository ownership');
+    }
+  }
+  for (const repository of state.repositories) {
+    if (repository.kind !== 'DESIGN_MANAGED') continue;
+    const owners = state.tasks.filter((task) => task.repositoryId === repository.id);
+    if (owners.length !== 1 || owners[0]?.kind !== 'DESIGN') {
+      invalidPersistedRelationship('managed Design repository ownership');
+    }
+  }
+
+  for (const session of state.agentSessions) {
+    const task = tasks.get(session.taskId);
+    if (
+      task?.kind === 'DESIGN' &&
+      (!hasRestrictedDesignRequestedSettings(session.requestedSettings) ||
+        hasContradictoryDesignObservedSettings(session.observedSettings))
+    ) {
+      invalidPersistedRelationship('Design session execution policy');
+    }
+  }
+
+  for (const run of state.runs) {
+    const task = tasks.get(run.taskId);
+    if (!task) continue;
+    if (
+      task.kind === 'DESIGN' &&
+      (!hasRestrictedDesignRequestedSettings(run.requestedSettings) ||
+        hasContradictoryDesignObservedSettings(run.observedSettings))
+    ) {
+      invalidPersistedRelationship('Design Run execution policy');
+    }
+    if (run.mode === 'DESIGN') {
+      const turn = run.generationKey ? turns.get(run.generationKey) : undefined;
+      const key = `${run.taskId}:${run.generationKey ?? ''}`;
+      if (
+        task.kind !== 'DESIGN' ||
+        !turn ||
+        turn.designId !== task.id ||
+        designRunKeys.has(key)
+      ) {
+        invalidPersistedRelationship('Design Run generation ownership');
+      }
+      designRunKeys.add(key);
+    } else if (task.kind === 'DESIGN' && run.origin !== 'PROVIDER_SUBAGENT') {
+      invalidPersistedRelationship('Design Run mode');
+    }
+  }
+
+  const turnsByDesign = new Map<string, DesignTurn[]>();
+  for (const turn of state.designTurns) {
+    const design = tasks.get(turn.designId);
+    if (design?.kind !== 'DESIGN') {
+      invalidPersistedRelationship('Design turn owner');
+    }
+    const hasValidMessageLineage =
+      turn.messageSource === 'TASK_PROMPT'
+        ? turn.order === 1 &&
+          turn.messageArtifactId === undefined &&
+          turn.clientMessageId === design.creationToken
+        : turn.order > 1 && turn.messageArtifactId !== undefined;
+    if (
+      !hasValidMessageLineage ||
+      new Set(turn.referenceIds).size !== turn.referenceIds.length
+    ) {
+      invalidPersistedRelationship('Design turn lineage');
+    }
+    const ownerTurns = turnsByDesign.get(turn.designId) ?? [];
+    if (
+      ownerTurns.some(
+        (existing) =>
+          existing.clientMessageId === turn.clientMessageId ||
+          existing.order === turn.order
+      )
+    ) {
+      invalidPersistedRelationship('Design turn ordering');
+    }
+    ownerTurns.push(turn);
+    turnsByDesign.set(turn.designId, ownerTurns);
+
+    if (turn.messageArtifactId) {
+      assertTaskArtifact(
+        artifacts,
+        turn.designId,
+        turn.messageArtifactId,
+        'design-message',
+        'Design message artifact ownership'
+      );
+    }
+    if (
+      turn.referenceIds.some((referenceId) => {
+        const reference = references.get(referenceId);
+        return !reference || reference.designId !== turn.designId;
+      })
+    ) {
+      invalidPersistedRelationship('Design turn reference ownership');
+    }
+    if (turn.runId) {
+      const run = runs.get(turn.runId);
+      if (
+        !run ||
+        run.taskId !== turn.designId ||
+        run.mode !== 'DESIGN' ||
+        run.generationKey !== turn.id
+      ) {
+        invalidPersistedRelationship('Design turn Run ownership');
+      }
+    }
+    validatePersistedDesignCheckpoint(state, design, turn, runs.get(turn.runId ?? ''));
+  }
+  for (const ownerTurns of turnsByDesign.values()) {
+    const orders = ownerTurns.map((turn) => turn.order).sort((a, b) => a - b);
+    if (
+      orders.some((order, index) => order !== index + 1) ||
+      ownerTurns.filter((turn) => turn.outcome === undefined).length > 1
+    ) {
+      invalidPersistedRelationship('Design turn sequence');
+    }
+  }
+
+  for (const reference of state.designReferences) {
+    const design = tasks.get(reference.designId);
+    const attachment = attachments.get(reference.attachmentId);
+    if (
+      design?.kind !== 'DESIGN' ||
+      !attachment ||
+      attachment.taskId !== design.id
+    ) {
+      invalidPersistedRelationship('Design reference ownership');
+    }
+  }
+
+  const revisionsByDesign = new Map<string, DesignRevision[]>();
+  for (const revision of state.designRevisions) {
+    const design = tasks.get(revision.designId);
+    const turn = turns.get(revision.turnId);
+    const run = runs.get(revision.runId);
+    if (
+      design?.kind !== 'DESIGN' ||
+      revision.changeSource !== 'AGENT_TURN' ||
+      !turn ||
+      turn.designId !== design.id ||
+      turn.outcome !== 'READY' ||
+      !run ||
+      run.taskId !== design.id ||
+      run.id !== turn.runId ||
+      run.mode !== 'DESIGN'
+    ) {
+      invalidPersistedRelationship('Design revision ownership');
+    }
+    const ownerRevisions = revisionsByDesign.get(revision.designId) ?? [];
+    if (
+      ownerRevisions.some(
+        (existing) =>
+          existing.ordinal === revision.ordinal ||
+          existing.turnId === revision.turnId ||
+          existing.runId === revision.runId
+      )
+    ) {
+      invalidPersistedRelationship('Design revision identity');
+    }
+    ownerRevisions.push(revision);
+    revisionsByDesign.set(revision.designId, ownerRevisions);
+  }
+  for (const ownerRevisions of revisionsByDesign.values()) {
+    const ordinals = ownerRevisions
+      .map((revision) => revision.ordinal)
+      .sort((a, b) => a - b);
+    if (ordinals.some((ordinal, index) => ordinal !== index + 1)) {
+      invalidPersistedRelationship('Design revision sequence');
+    }
+  }
+
+  for (const generation of state.previewGenerations) {
+    if (generation.source.type !== 'EXACT_COMMIT') continue;
+    const task = tasks.get(generation.taskId);
+    const repository = repositories.get(generation.source.repositoryId);
+    const revision = generation.source.designRevisionId
+      ? revisions.get(generation.source.designRevisionId)
+      : undefined;
+    if (
+      task?.kind !== 'DESIGN' ||
+      repository?.id !== task.repositoryId ||
+      (generation.routingState === 'ACTIVE' &&
+        generation.state === 'READY' &&
+        !revision) ||
+      (revision &&
+        (revision.designId !== task.id ||
+          revision.commitSha !== generation.source.commitSha))
+    ) {
+      invalidPersistedRelationship('Design Preview source ownership');
+    }
+  }
+}
+
+function hasRestrictedDesignRequestedSettings(
+  settings: AgentExecutionSettings
+): boolean {
+  return (
+    settings.runtimeId === CODEX_RUNTIME_ID &&
+    settings.sandbox === 'WORKSPACE_WRITE' &&
+    settings.networkAccess === false &&
+    settings.approvalPolicy === 'never' &&
+    settings.approvalsReviewer === 'user'
+  );
+}
+
+function hasContradictoryDesignObservedSettings(
+  settings: AgentExecutionSettings | undefined
+): boolean {
+  if (!settings) return false;
+  return (
+    (settings.runtimeId !== undefined && settings.runtimeId !== CODEX_RUNTIME_ID) ||
+    (settings.sandbox !== undefined && settings.sandbox !== 'WORKSPACE_WRITE') ||
+    (settings.networkAccess !== undefined && settings.networkAccess !== false) ||
+    (settings.approvalPolicy !== undefined && settings.approvalPolicy !== 'never') ||
+    (settings.approvalsReviewer !== undefined && settings.approvalsReviewer !== 'user')
+  );
+}
+
+function validatePersistedDesignCheckpoint(
+  state: StoreState,
+  design: Task,
+  turn: DesignTurn,
+  run: RunRecord | undefined
+): void {
+  const checkpoint = turn.checkpoint;
+  if (turn.outcome !== undefined) {
+    if (checkpoint) invalidPersistedRelationship('settled Design turn checkpoint');
+    return;
+  }
+  if (!checkpoint) invalidPersistedRelationship('unsettled Design turn checkpoint');
+  if (checkpoint.boundary === 'QUEUED') {
+    if (turn.runId) invalidPersistedRelationship('queued Design turn Run link');
+    return;
+  }
+  if (!run) invalidPersistedRelationship('Design checkpoint Run ownership');
+  if (checkpoint.boundary === 'RUN_LINKED') return;
+  if (checkpoint.boundary === 'POST_RUN_EVIDENCE_RECORDED') {
+    const snapshot = state.gitSnapshots.find(
+      (candidate) =>
+        candidate.id === checkpoint.gitSnapshotId &&
+        candidate.taskId === design.id &&
+        candidate.worktreeId === design.currentWorktreeId &&
+        candidate.id === run.afterGitSnapshotId
+    );
+    if (!snapshot) invalidPersistedRelationship('Design checkpoint Git evidence ownership');
+    return;
+  }
+  if (checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
+    const generation = state.previewGenerations.find(
+      (candidate) => candidate.id === checkpoint.previewGenerationId
+    );
+    if (!generation) return;
+    const sourceMatches =
+      generation.taskId === design.id &&
+      generation.source.type === 'EXACT_COMMIT' &&
+      generation.source.repositoryId === design.repositoryId &&
+      generation.source.commitSha === checkpoint.commitSha &&
+      generation.source.designRevisionId === undefined;
+    const readyCandidate =
+      generation.state === 'READY' && generation.routingState === 'CANDIDATE';
+    const unavailableCandidate =
+      generation.state === 'STOPPED' || generation.state === 'FAILED';
+    if (!sourceMatches || (!readyCandidate && !unavailableCandidate)) {
+      invalidPersistedRelationship('Design checkpoint Preview ownership');
+    }
+    return;
+  }
+
+  const source = checkpoint.source;
+  const worktree = state.worktrees.find(
+    (candidate) =>
+      candidate.id === source.worktreeId &&
+      candidate.id === design.currentWorktreeId &&
+      candidate.taskId === design.id &&
+      candidate.repositoryId === design.repositoryId &&
+      candidate.branchName === source.branchName
+  );
+  if (source.repositoryId !== design.repositoryId || !worktree) {
+    invalidPersistedRelationship('Design checkpoint source ownership');
   }
 }
 
@@ -6338,6 +7654,208 @@ function clone<T>(value: T): T {
     return value;
   }
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
+  const turns = state.designTurns
+    .filter((turn) => turn.designId === task.id)
+    .sort((left, right) => left.order - right.order);
+  const latestTurn = turns.at(-1);
+  const latestRevision = state.designRevisions
+    .filter((revision) => revision.designId === task.id)
+    .sort((left, right) => left.ordinal - right.ordinal)
+    .at(-1);
+  const run = latestTurn?.runId
+    ? state.runs.find((candidate) => candidate.id === latestTurn.runId)
+    : undefined;
+  const needsInput = state.interactionRequests.some(
+    (interaction) =>
+      interaction.taskId === task.id &&
+      (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
+  );
+  const activeRun =
+    run &&
+    [
+      'QUEUED',
+      'STARTING',
+      'RUNNING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
+      'INTERRUPTING',
+      'RECOVERY_REQUIRED'
+    ].includes(run.status);
+  const currentPreview = selectCurrentDesignPreview(state, task.id, latestRevision);
+  const previewNeedsRestart = Boolean(
+    latestRevision &&
+      !(
+        currentPreview?.state === 'READY' &&
+        currentPreview.routingState === 'ACTIVE'
+      )
+  );
+  const status: DesignListItem['status'] = needsInput
+    ? 'NEEDS_INPUT'
+    : latestTurn?.outcome === 'FAILED' ||
+        latestTurn?.outcome === 'CANCELED' ||
+        latestTurn?.outcome === 'NEEDS_ATTENTION' ||
+        previewNeedsRestart
+      ? 'NEEDS_ATTENTION'
+      : latestTurn?.outcome === undefined || activeRun
+        ? latestRevision
+          ? 'UPDATING'
+          : 'STARTING'
+        : latestRevision
+          ? 'READY'
+          : 'STARTING';
+  const updatedAt = [
+    task.updatedAt,
+    latestTurn?.settledAt,
+    latestTurn?.createdAt,
+    latestRevision?.createdAt,
+    run?.lastEventAt,
+    run?.endedAt
+  ]
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1)!;
+  return {
+    id: task.id,
+    title: task.title,
+    runtimeId: task.runtimeId,
+    status,
+    latestRevision,
+    updatedAt
+  };
+}
+
+function selectCurrentDesignPreview(
+  state: StoreState,
+  designId: string,
+  latestRevision: DesignRevision | undefined
+): PreviewGenerationRecord | undefined {
+  if (!latestRevision) return undefined;
+  const matching = state.previewGenerations
+    .filter(
+      (generation) =>
+        generation.taskId === designId &&
+        generation.source.type === 'EXACT_COMMIT' &&
+        generation.source.designRevisionId === latestRevision.id
+    )
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return (
+    matching.find(
+      (generation) =>
+        generation.routingState === 'ACTIVE' && generation.state === 'READY'
+    ) ?? matching[0]
+  );
+}
+
+function projectDesignCanvas(
+  state: StoreState,
+  task: Task,
+  latestRevision: DesignRevision | undefined,
+  currentPreview: PreviewGenerationRecord | undefined
+): DesignDetailSnapshot['canvas'] {
+  const route =
+    currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY'
+      ? currentPreview.routes.find(
+          (candidate) =>
+            candidate.id === latestRevision?.routeId && candidate.state === 'ATTACHED'
+        )
+      : undefined;
+  if (currentPreview && route) {
+    return {
+      state: 'READY',
+      target: { generationId: currentPreview.id, routeId: route.id }
+    };
+  }
+  if (latestRevision) {
+    return {
+      state: 'RESTART_REQUIRED',
+      detail: 'The last ready revision needs a new Preview process.'
+    };
+  }
+  if (
+    state.designTurns.some(
+      (turn) => turn.designId === task.id && turn.outcome === undefined
+    )
+  ) {
+    return { state: 'UPDATING' };
+  }
+  return { state: 'EMPTY' };
+}
+
+function projectDesignActions(
+  state: StoreState,
+  task: Task,
+  latestRevision: DesignRevision | undefined,
+  currentPreview: PreviewGenerationRecord | undefined
+): DesignDetailSnapshot['actions'] {
+  const unsettled = state.designTurns.some(
+    (turn) => turn.designId === task.id && turn.outcome === undefined
+  );
+  const canRefine = task.workflowPhase === 'READY' && !unsettled;
+  const previewIsReady =
+    currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY';
+  const activeRun = state.runs.some(
+    (run) =>
+      run.taskId === task.id &&
+      [
+        'QUEUED',
+        'STARTING',
+        'RUNNING',
+        'AWAITING_APPROVAL',
+        'AWAITING_USER_INPUT',
+        'INTERRUPTING',
+        'RECOVERY_REQUIRED'
+      ].includes(run.status)
+  );
+  const canDelete = !unsettled && !activeRun;
+  return {
+    canRefine,
+    refineDisabledReason: canRefine
+      ? undefined
+      : task.workflowPhase !== 'READY'
+        ? 'This Design is archived.'
+        : 'Wait for the current Design turn to settle.',
+    canRestart: Boolean(latestRevision && !previewIsReady),
+    canDelete,
+    deleteDisabledReason: canDelete
+      ? undefined
+      : 'Stop and settle the current Design turn before deletion.'
+  };
+}
+
+function assertDesignCheckpointTransition(
+  current: DesignTurnCheckpoint | undefined,
+  next: DesignTurnCheckpoint
+): void {
+  const allowed: Record<DesignTurnCheckpoint['boundary'], DesignTurnCheckpoint['boundary'][]> = {
+    QUEUED: ['RUN_LINKED'],
+    RUN_LINKED: ['POST_RUN_EVIDENCE_RECORDED'],
+    POST_RUN_EVIDENCE_RECORDED: ['SOURCE_CAPTURED', 'PREVIEW_CANDIDATE_READY'],
+    SOURCE_CAPTURED: ['REF_UPDATED_INDEX_PENDING'],
+    REF_UPDATED_INDEX_PENDING: ['INDEX_REPAIRED'],
+    INDEX_REPAIRED: ['PREVIEW_CANDIDATE_READY'],
+    PREVIEW_CANDIDATE_READY: []
+  };
+  if (!current || !allowed[current.boundary].includes(next.boundary)) {
+    throw new Error(
+      `Invalid Design turn checkpoint transition: ${current?.boundary ?? 'NONE'} -> ${next.boundary}`
+    );
+  }
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  return stableJsonStringify(left) === stableJsonStringify(right);
+}
+
+function isGitObjectId(value: string): boolean {
+  return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+}
+
+function isCanonicalIsoTimestamp(value: string): boolean {
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
 }
 
 function projectBoardTask(task: Task): BoardTaskSummary {

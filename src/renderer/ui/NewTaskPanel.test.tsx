@@ -174,6 +174,7 @@ describe('NewTaskPanel', () => {
         repositories={[
           {
             id: 'repository-1',
+            kind: 'USER_REGISTERED',
             name: 'project',
             path: '/tmp/project',
             status: 'AVAILABLE',
@@ -267,6 +268,7 @@ describe('NewTaskPanel', () => {
     const defaultRepositories: Repository[] = [
       {
         id: 'repository-1',
+        kind: 'USER_REGISTERED',
         name: 'project',
         path: '/tmp/project',
         status: 'AVAILABLE',
@@ -431,6 +433,7 @@ describe('NewTaskPanel', () => {
       repositories: [
         {
           id: 'repository-disconnected',
+          kind: 'USER_REGISTERED',
           name: 'old-project',
           path: '/tmp/old-project',
           status: 'DISCONNECTED',
@@ -440,6 +443,7 @@ describe('NewTaskPanel', () => {
         },
         {
           id: 'repository-available',
+          kind: 'USER_REGISTERED',
           name: 'available-project',
           path: '/tmp/available-project',
           status: 'AVAILABLE',

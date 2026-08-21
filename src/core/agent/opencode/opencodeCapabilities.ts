@@ -1,9 +1,15 @@
 import type {
+  AgentCapability,
   AgentRuntimeCapabilities,
   AgentRuntimeDescriptor
 } from '../../../shared/agent';
 import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
 import { BROWSER_DEV_ISOLATION_CAPABILITY } from '../BrowserDevAgentBoundary';
+
+const unsupported = (detail?: string): AgentCapability => ({
+  maturity: 'unsupported',
+  detail
+});
 
 export const OPENCODE_RUNTIME_DESCRIPTOR: AgentRuntimeDescriptor = {
   id: OPENCODE_RUNTIME_ID,
@@ -112,6 +118,9 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       detail: 'Sessions, messages, pending interactions, and status are reconciled after reconnect.'
     },
     extensions: {
+      'task-monki.design-instructions': unsupported(
+        'OpenCode currently receives Design guidance only as user prompt text.'
+      ),
       [BROWSER_DEV_ISOLATION_CAPABILITY]: {
         maturity: 'unsupported',
         detail: 'OpenCode permission rules do not attest an OS-level filesystem and network sandbox.'

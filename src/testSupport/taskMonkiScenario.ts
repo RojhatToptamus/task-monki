@@ -48,6 +48,7 @@ export interface ScenarioOptions {
   previewOciContextName?: string;
   previewOciEnv?: NodeJS.ProcessEnv;
   previewRecipeGenerator?: PreviewRecipeGenerationService;
+  designMode?: boolean;
 }
 
 interface CreateScenarioTaskInput {
@@ -88,6 +89,8 @@ export async function createTaskMonkiScenario(
   const repositoryPath = path.join(rootDir, 'repo');
   const worktreeRoot = path.join(rootDir, 'worktrees');
   const previewRoot = path.join(rootDir, 'preview-runtime');
+  const designRepositoryRoot = path.join(rootDir, 'design-repositories');
+  const designWorktreeRoot = path.join(rootDir, 'design-worktrees');
   await fs.mkdir(repositoryPath, { recursive: true });
   await initRepository(repositoryPath);
 
@@ -105,9 +108,27 @@ export async function createTaskMonkiScenario(
       process.cwd(),
       'src/core/preview/runtime/native-preview-launcher.mjs'
     ),
+    managedDesignStaticServerPath: path.join(
+      process.cwd(),
+      'src/core/preview/runtime/managed-design-static-server.mjs'
+    ),
     previewOciExecutablePath: options.previewOciExecutablePath,
     previewOciContextName: options.previewOciContextName,
-    previewOciEnv: options.previewOciEnv
+    previewOciEnv: options.previewOciEnv,
+    ...(options.designMode
+      ? {
+          designRepositoryRoot,
+          designWorktreeRoot,
+          designCanvasFence: {
+            async begin() {
+              return {
+                async commit() {},
+                async rollback() {}
+              };
+            }
+          }
+        }
+      : {})
   });
   await service.init();
   const repository = await service.addRepository(repositoryPath);

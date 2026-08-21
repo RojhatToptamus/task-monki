@@ -14,6 +14,7 @@ import type {
   AgentSessionSnapshot,
   AgentExecutionSettings,
   AgentInteractionDecision,
+  AgentInstructionProfile,
   InteractionRequestRecord
 } from '../../shared/agent';
 import type { RefinePromptResponse } from '../../shared/contracts';
@@ -45,6 +46,7 @@ export interface StartAgentTurn {
   mode: AgentRunMode;
   prompt: string;
   authoritativeGoal: string;
+  instructionProfile?: AgentInstructionProfile;
   attachments?: AgentTurnAttachment[];
   settings?: AgentExecutionSettings;
 }

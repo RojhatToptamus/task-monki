@@ -160,7 +160,10 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
-import { AGENT_REVIEW_DEVELOPER_INSTRUCTIONS } from '../../../shared/promptTemplates';
+import {
+  AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
+  DESIGN_AGENT_DEVELOPER_INSTRUCTIONS
+} from '../../../shared/promptTemplates';
 import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
@@ -5382,13 +5385,27 @@ function redactOptionalProviderText(
 }
 
 function codexInteractiveCollaborationMode(
-  input: Pick<StartAgentTurn, 'mode'>,
+  input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>,
   settings: AgentExecutionSettings
 ): { collaborationMode: CollaborationMode } | undefined {
-  if (!isImplementationRunMode(input.mode)) return undefined;
+  const developerInstructions =
+    input.instructionProfile === 'DESIGN'
+      ? DESIGN_AGENT_DEVELOPER_INSTRUCTIONS
+      : isImplementationRunMode(input.mode)
+        ? CODEX_INTERACTIVE_IMPLEMENTATION_INSTRUCTIONS
+        : undefined;
+  if (!developerInstructions) {
+    if (input.mode === 'DESIGN') {
+      throw new Error('Codex Design runs require the DESIGN instruction profile.');
+    }
+    return undefined;
+  }
+  if (input.instructionProfile === 'DESIGN' && input.mode !== 'DESIGN') {
+    throw new Error('The DESIGN instruction profile is valid only for Design runs.');
+  }
   const model = settings.model?.trim();
   if (!model) {
-    throw new Error('Codex interactive implementation requires a resolved model.');
+    throw new Error('Codex interactive work requires a resolved model.');
   }
   return {
     collaborationMode: {
@@ -5396,7 +5413,7 @@ function codexInteractiveCollaborationMode(
       settings: {
         model,
         reasoning_effort: settings.reasoningEffort ?? null,
-        developer_instructions: CODEX_INTERACTIVE_IMPLEMENTATION_INSTRUCTIONS
+        developer_instructions: developerInstructions
       }
     }
   };

@@ -20,6 +20,7 @@ import {
 
 const task: Task = {
   id: 'task-1',
+  kind: 'NORMAL',
   title: 'Task',
   prompt: 'Prompt',
   repositoryId: 'repository-1',
@@ -149,8 +150,7 @@ describe('preview view model', () => {
 
     const plan = {
       id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1',
-      recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const,
-      recipeDigest: 'recipe', executionDigest: 'execution',
+      planSource: repositoryRecipeSource('recipe'), executionDigest: 'execution',
       executionPlan: {
         version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [],
         scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
@@ -170,7 +170,7 @@ describe('preview view model', () => {
       worktree: uncheckedWorktree(),
       plans: [plan],
       approvals: [{ id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest, scope: 'TASK', approvedAt: task.createdAt }],
-      generations: [{ id: 'generation', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, approvalId: 'approval', executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: '/preview', state: 'READY', routingState: 'ACTIVE', freshness: 'STALE', routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt }],
+      generations: [{ id: 'generation', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, executionAuthority: userAuthority('approval', plan.executionDigest), source: worktreeSource('git', 'head', 'dirty'), workspacePath: '/preview', state: 'READY', routingState: 'ACTIVE', freshness: 'STALE', routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt }],
       attempts: []
     });
     expect(view.status).toContain('stale');
@@ -185,7 +185,7 @@ describe('preview view model', () => {
   it('keeps the active preview actionable while a candidate is replacing it or has failed', () => {
     const plan = testPlan();
     const approval = { id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest, scope: 'TASK' as const, approvedAt: task.createdAt };
-    const active = { id: 'active', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, approvalId: approval.id, executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: '/active', state: 'READY' as const, routingState: 'ACTIVE' as const, freshness: 'CURRENT' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const active = { id: 'active', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, executionAuthority: userAuthority(approval.id, plan.executionDigest), source: worktreeSource('git', 'head', 'dirty'), workspacePath: '/active', state: 'READY' as const, routingState: 'ACTIVE' as const, freshness: 'CURRENT' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt };
     const candidate = { ...active, id: 'candidate', workspacePath: '/candidate', state: 'WAITING_READY' as const, routingState: 'CANDIDATE' as const, replacesGenerationId: active.id, updatedAt: new Date(Date.parse(task.updatedAt) + 1).toISOString() };
     const replacing = buildPreviewViewModel({
       task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
@@ -264,8 +264,8 @@ describe('preview view model', () => {
     const previousActive = {
       id: 'previous-active', previewKey: 'task-task1', taskId: task.id,
       iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id,
-      approvalId: approval.id, executionDigest: plan.executionDigest,
-      sourceGitSnapshotId: 'git-old', sourceHeadSha: 'old', sourceDirtyFingerprint: 'dirty-old',
+      executionAuthority: userAuthority(approval.id, plan.executionDigest),
+      source: worktreeSource('git-old', 'old', 'dirty-old'),
       workspacePath: '/previous', state: 'STOPPED' as const, routingState: 'RETIRED' as const,
       freshness: 'STALE' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt
     };
@@ -282,9 +282,7 @@ describe('preview view model', () => {
     const currentActive = {
       ...previousActive,
       id: 'current-active',
-      sourceGitSnapshotId: 'git-current',
-      sourceHeadSha: 'current',
-      sourceDirtyFingerprint: 'clean',
+      source: worktreeSource('git-current', 'current', 'clean'),
       workspacePath: '/current',
       state: 'READY' as const,
       routingState: 'ACTIVE' as const,
@@ -334,8 +332,8 @@ describe('preview view model', () => {
     const baseGeneration = {
       id: 'generation', previewKey: 'task-task1', taskId: task.id,
       iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id,
-      approvalId: approval.id, executionDigest: plan.executionDigest,
-      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'clean',
+      executionAuthority: userAuthority(approval.id, plan.executionDigest),
+      source: worktreeSource('git', 'head', 'clean'),
       workspacePath: '/preview', routingState: 'RETIRED' as const,
       freshness: 'CURRENT' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt
     };
@@ -378,9 +376,9 @@ describe('preview view model', () => {
     const oldPlan = testPlan();
     const active = {
       id: 'active', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1',
-      worktreeId: 'worktree-1', planId: oldPlan.id, approvalId: 'old-approval',
-      executionDigest: oldPlan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
-      sourceDirtyFingerprint: 'dirty', workspacePath: '/active', state: 'READY' as const,
+      worktreeId: 'worktree-1', planId: oldPlan.id,
+      executionAuthority: userAuthority('old-approval', oldPlan.executionDigest),
+      source: worktreeSource('git', 'head', 'dirty'), workspacePath: '/active', state: 'READY' as const,
       routingState: 'ACTIVE' as const, freshness: 'CURRENT' as const, routes: [],
       createdAt: task.createdAt, updatedAt: task.updatedAt
     };
@@ -425,9 +423,9 @@ describe('preview view model', () => {
     };
     const failed = {
       id: 'failed', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1',
-      worktreeId: 'worktree-1', planId: plan.id, approvalId: approval.id,
-      executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
-      sourceDirtyFingerprint: 'dirty', workspacePath: '/failed', state: 'FAILED' as const,
+      worktreeId: 'worktree-1', planId: plan.id,
+      executionAuthority: userAuthority(approval.id, plan.executionDigest),
+      source: worktreeSource('git', 'head', 'dirty'), workspacePath: '/failed', state: 'FAILED' as const,
       routingState: 'RETIRED' as const, freshness: 'CURRENT' as const, routes: [],
       failureReason: 'migration failed', createdAt: task.createdAt, updatedAt: task.updatedAt
     };
@@ -452,7 +450,8 @@ describe('preview view model', () => {
     expect(selectPreviewResetResources(input, view).map((resource) => resource.id)).toEqual(['database']);
     const active = {
       ...failed, id: 'active', state: 'READY' as const, routingState: 'ACTIVE' as const,
-      planId: 'previous-plan', approvalId: 'previous-approval', executionDigest: 'previous-execution',
+      planId: 'previous-plan',
+      executionAuthority: userAuthority('previous-approval', 'previous-execution'),
       freshness: 'STALE' as const, failureReason: undefined
     };
     const failedCandidate = {
@@ -591,9 +590,9 @@ describe('preview view model', () => {
     };
     const active = {
       id: 'active', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1',
-      worktreeId: 'worktree-1', planId: plan.id, approvalId: approval.id,
-      executionDigest: plan.executionDigest, adapter: 'COMPOSE' as const,
-      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      worktreeId: 'worktree-1', planId: plan.id,
+      executionAuthority: userAuthority(approval.id, plan.executionDigest), adapter: 'COMPOSE' as const,
+      source: worktreeSource('git', 'head', 'dirty'),
       workspacePath: '/active', state: 'READY' as const, routingState: 'ACTIVE' as const,
       freshness: 'CURRENT' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt
     };
@@ -645,11 +644,8 @@ function previewViewForGeneration(state: PreviewGenerationRecord['state']) {
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
     planId: plan.id,
-    approvalId: approval.id,
-    executionDigest: plan.executionDigest,
-    sourceGitSnapshotId: 'git',
-    sourceHeadSha: 'head',
-    sourceDirtyFingerprint: 'clean',
+    executionAuthority: userAuthority(approval.id, plan.executionDigest),
+    source: worktreeSource('git', 'head', 'clean'),
     workspacePath: `/preview/${state.toLowerCase()}`,
     state,
     routingState: state === 'READY' ? 'ACTIVE' : 'RETIRED',
@@ -669,7 +665,29 @@ function previewViewForGeneration(state: PreviewGenerationRecord['state']) {
 }
 
 function testPlan(): PreviewPlanRecord {
-  return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const, recipeDigest: 'recipe', executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' }, warnings: [], createdAt: task.createdAt };
+  return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planSource: repositoryRecipeSource('recipe'), executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' }, warnings: [], createdAt: task.createdAt };
+}
+
+function repositoryRecipeSource(recipeDigest: string) {
+  return {
+    type: 'REPOSITORY_RECIPE' as const,
+    recipePath: '.taskmonki/preview.yaml' as const,
+    recipeVersion: 1 as const,
+    recipeDigest
+  };
+}
+
+function userAuthority(approvalId: string, executionDigest: string) {
+  return { type: 'USER_APPROVAL' as const, approvalId, executionDigest };
+}
+
+function worktreeSource(gitSnapshotId: string, headSha: string, dirtyFingerprint: string) {
+  return {
+    type: 'WORKTREE_SNAPSHOT' as const,
+    gitSnapshotId,
+    headSha,
+    dirtyFingerprint
+  };
 }
 
 function setupFailedResource(): PreviewManagedResourceRecord {

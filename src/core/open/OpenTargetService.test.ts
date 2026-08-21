@@ -587,6 +587,7 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     repositories: [
       {
         id: 'repository-1',
+        kind: 'USER_REGISTERED',
         name: 'repo',
         path: repositoryPath,
         status: 'AVAILABLE',
@@ -596,9 +597,13 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
       }
     ],
     boards: [],
+    designTurns: [],
+    designReferences: [],
+    designRevisions: [],
     tasks: [
       {
         id: 'task-1',
+        kind: 'NORMAL',
         runtimeId: 'codex',
         title: 'Task',
         prompt: 'Do it',

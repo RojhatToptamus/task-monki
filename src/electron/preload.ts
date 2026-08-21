@@ -4,6 +4,7 @@ import type {
   AppUpdateEvent,
   CancelRunRequest,
   ContinueRunRequest,
+  CreateBlankDesignRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
@@ -34,6 +35,8 @@ import type {
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
+  RestartDesignPreviewRequest,
+  SubmitDesignTurnRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   TestExternalToolRequest,
@@ -77,6 +80,7 @@ import {
 } from './attachmentIpcSecurity';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
 import type { PreviewPrivateInputApi } from '../shared/preview';
+import type { DesignCanvasApi } from '../shared/designCanvas';
 import {
   IPC_UPDATE_CHANNEL,
   IPC_WINDOW_CHROME_CHANNEL,
@@ -192,6 +196,14 @@ const api: TaskManagerApi = {
       invokeIpc('attachment:clipboard:readImage')
     ),
   createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
+  listDesigns: () => invokeIpc('design:list'),
+  getDesign: (designId: string) => invokeIpc('design:get', designId),
+  createBlankDesign: (input: CreateBlankDesignRequest) =>
+    invokeIpc('design:create', input),
+  submitDesignTurn: (input: SubmitDesignTurnRequest) =>
+    invokeIpc('design:turn:submit', input),
+  restartDesignPreview: (input: RestartDesignPreviewRequest) =>
+    invokeIpc('design:preview:restart', input),
   refinePrompt: (input: RefinePromptRequest) => invokeIpc('prompt:refine', input),
   prepareWorktree: (input: PrepareWorktreeRequest) => invokeIpc('worktree:prepare', input),
   startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),
@@ -257,6 +269,16 @@ const privateInputs: PreviewPrivateInputApi = {
   retryCleanup: () => invokeIpc('preview:private:retryCleanup')
 };
 contextBridge.exposeInMainWorld('previewPrivateInputs', privateInputs);
+const designCanvas: DesignCanvasApi = {
+  show: (input) => invokeIpc('design:canvas:show', input),
+  hide: (input) => invokeIpc('design:canvas:hide', input),
+  refresh: (input) => invokeIpc('design:canvas:refresh', input),
+  approveExternal: (input) =>
+    invokeIpc('design:canvas:approve-external', input)
+};
+if (process.platform === 'darwin') {
+  contextBridge.exposeInMainWorld('designCanvas', designCanvas);
+}
 const shellApi: TaskManagerShellApi = {
   windowChromePlatform: getWindowChromePlatform(),
   syncWindowChrome: () => ipcRenderer.send(IPC_WINDOW_CHROME_CHANNEL)

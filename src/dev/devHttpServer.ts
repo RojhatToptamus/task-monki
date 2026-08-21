@@ -346,6 +346,22 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/designs') {
+        sendJson(response, requestId, 200, await options.service.listDesigns());
+        return;
+      }
+
+      const designDetailMatch = url.pathname.match(/^\/api\/designs\/([^/]+)$/u);
+      if (request.method === 'GET' && designDetailMatch) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDesign(decodeURIComponent(designDetailMatch[1]))
+        );
+        return;
+      }
+
       const taskDetailMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/u);
       if (request.method === 'GET' && taskDetailMatch) {
         sendJson(
@@ -578,6 +594,48 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
           requestId,
           200,
           await options.service.createTask((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/designs') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.createBlankDesign((await readJson()) as never)
+        );
+        return;
+      }
+
+      const designTurnMatch = url.pathname.match(/^\/api\/designs\/([^/]+)\/turns$/u);
+      if (request.method === 'POST' && designTurnMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.submitDesignTurn({
+            ...input,
+            designId: decodeURIComponent(designTurnMatch[1])
+          } as never)
+        );
+        return;
+      }
+
+      const designRestartMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/preview\/restart$/u
+      );
+      if (request.method === 'POST' && designRestartMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.restartDesignPreview({
+            ...input,
+            designId: decodeURIComponent(designRestartMatch[1])
+          } as never)
         );
         return;
       }

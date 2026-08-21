@@ -103,8 +103,12 @@ export type AgentRunMode =
   | 'FOLLOW_UP'
   | 'RETRY'
   | 'REVIEW'
+  | 'DESIGN'
   | 'COMPACTION'
   | 'SUBAGENT';
+
+/** Stable Task Monki instruction sets that adapters map to a high-priority provider role. */
+export type AgentInstructionProfile = 'DESIGN';
 
 /** Modes whose successful completion produces implementation work for review. */
 export function isImplementationRunMode(mode: AgentRunMode): boolean {

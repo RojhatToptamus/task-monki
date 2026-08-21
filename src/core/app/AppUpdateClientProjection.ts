@@ -1,6 +1,7 @@
 import type { AppUpdateEvent } from '../../shared/contracts';
 
 const DIRECT_CLIENT_PAYLOAD_EVENTS = new Set<AppUpdateEvent['type']>([
+  'design.updated',
   'preview.recipe-generation.updated',
   'discourse.delta'
 ]);

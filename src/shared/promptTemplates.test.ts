@@ -7,18 +7,61 @@ import type {
 } from './contracts';
 import {
   AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
+  DESIGN_AGENT_DEVELOPER_INSTRUCTIONS,
   TASK_MONKI_CONTEXT_LINE,
   TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
   TASK_MONKI_PROGRESS_CONTRACT,
   buildContinuationPrompt,
   buildForkAlternativeTaskPrompt,
   buildInitialRunPrompt,
+  buildInitialDesignPrompt,
+  buildDesignTurnPrompt,
   buildPromptRefinementInstruction,
   buildRetryPrompt,
   buildSteerInstruction
 } from './promptTemplates';
 
 describe('prompt templates', () => {
+  it('keeps Design ownership and offline runtime rules in one developer instruction profile', () => {
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'Define a short plan for color, type, layout, and one signature visual element.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'Critique the plan against the brief and common generic AI layouts.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'Do not use public runtime assets, CDN resources, remote fonts, or remote scripts.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'Task Monki owns commits, revisions, Preview processes, and canvas cutover.'
+    );
+  });
+
+  it('builds initial and refinement Design prompts without copying provider instructions', () => {
+    const task = taskFixture();
+    const worktree = worktreeFixture();
+    const initial = buildInitialDesignPrompt({
+      task,
+      worktree,
+      initialCommitSha: 'initial-sha'
+    });
+    const refinement = buildDesignTurnPrompt({
+      task,
+      worktree,
+      message: 'Make the primary action quieter.',
+      latestReadyCommitSha: 'ready-sha',
+      recentConversation: ['User: Create the page.', 'Agent: Added the first layout.']
+    });
+
+    expect(initial).toContain('Initial design brief:\nAdd a progress panel.');
+    expect(initial).toContain('Latest ready source commit: initial-sha');
+    expect(refinement).toContain('Original design brief:\nAdd a progress panel.');
+    expect(refinement).toContain('Latest ready source commit: ready-sha');
+    expect(refinement).toContain('Recent conversation context:');
+    expect(refinement).toContain('Current refinement request:\nMake the primary action quieter.');
+    expect(refinement).not.toContain(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS);
+  });
+
   it('keeps the execution boundary authoritative and puts the task goal after shared defaults', () => {
     const prompt = buildInitialRunPrompt({
       task: taskFixture(),
