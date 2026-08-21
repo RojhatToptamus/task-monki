@@ -1,0 +1,320 @@
+{
+  "schemaVersion": "discourse-h1b-participants@1",
+  "corpusVersion": "h1b-text-corpus-v1",
+  "partition": "DEVELOPMENT",
+  "records": [
+    {
+      "caseId": "H1B-D1",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1B-D1",
+        "question": "Among 10,000 items, 4% are defective. Stage 1 sends 90% of defective items and 20% of nondefective items to Stage 2. Conditional on actual status, Stage 2 flags 80% of defective items it receives and 10% of nondefective items it receives. An item is flagged by Stage 2. What is the probability that it is defective? Select the best option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "There are 10,000 items with a 4% defect rate. Stage 1 forwards 90% of defective and 20% of nondefective items. Stage 2 then flags 80% of forwarded defective and 10% of forwarded nondefective items."
+          }
+        ],
+        "propositions": [
+          {"id": "d1-p1", "topicId": "d1-topic", "text": "The probability that a Stage-2-flagged item is defective is 80%."},
+          {"id": "d1-p2", "topicId": "d1-topic", "text": "The probability that a Stage-2-flagged item is defective is 60%."},
+          {"id": "d1-p3", "topicId": "d1-topic", "text": "The denominator must include both the defective and nondefective paths through both stages."},
+          {"id": "d1-p4", "topicId": "d1-topic", "text": "Stage 2 flags 80% of the defective items that it receives."}
+        ],
+        "options": [
+          {"id": "d1-o4", "text": "4%"},
+          {"id": "d1-o25", "text": "25%"},
+          {"id": "d1-o60", "text": "60%"},
+          {"id": "d1-o80", "text": "80%"}
+        ],
+        "topics": [{"id": "d1-topic", "label": "posterior assessment"}]
+      },
+      "fixedInitial": {
+        "artifactId": "d1-initial",
+        "answer": "80%; Stage 2's 80% flag rate for defective items is the relevant probability.",
+        "values": ["80%"],
+        "selectedOptionIds": ["d1-o80"],
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "d1-p1", "stance": "ACCEPT"},
+          {"claimId": "d1-p2", "stance": "REJECT"},
+          {"claimId": "d1-p3", "stance": "REJECT"},
+          {"claimId": "d1-p4", "stance": "ACCEPT"}
+        ]
+      },
+      "signal": {
+        "signalKind": "PEER_MESSAGE",
+        "artifacts": [
+          {
+            "artifactId": "d1-s1",
+            "issueId": "d1-i1",
+            "targetPropositionId": "d1-p1",
+            "kind": "LOGIC",
+            "severity": "MATERIAL",
+            "provenance": {"source": "controlled-derivable-critique", "newFacts": false},
+            "text": "The draft equates Stage 2's sensitivity with the requested posterior. Using only the supplied percentages, compare a common population's defective-to-Stage-1-to-flag and nondefective-to-Stage-1-to-flag paths, then condition on their sum."
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "H1B-D2",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1B-D2",
+        "question": "A committee has 18 units of eligible voting weight, of which 3 are recused. Of the remaining weight, 9.5 votes yes, 2 votes no, 1 abstains, and 2.5 is absent. Approval requires quorum of at least 80% of eligible non-recused weight present and, ordinarily, yes weight greater than no weight. An emergency motion without completed safety review additionally requires yes weight of at least two thirds of all eligible non-recused weight, including absent and abstaining weight. A filed chair waiver waives only the quorum requirement; it does not waive the emergency threshold. This motion is emergency, lacks safety review, and has a chair waiver. Is it finally approved? Select the best option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "Eligible weight is 18 and recused weight is 3, leaving 15 eligible non-recused. Present non-recused weight is 12.5: yes 9.5, no 2, abstain 1; 2.5 is absent. Quorum is 80% present, the ordinary rule is yes greater than no, and the unsignoff emergency rule requires yes of at least two thirds of all 15 eligible non-recused units. The chair waiver affects quorum only."
+          }
+        ],
+        "propositions": [
+          {"id": "d2-p1", "topicId": "d2-topic", "text": "The 12.5 present units satisfy the 80% quorum against 15 eligible non-recused units."},
+          {"id": "d2-p2", "topicId": "d2-topic", "text": "The motion satisfies the ordinary yes-greater-than-no rule."},
+          {"id": "d2-p3", "topicId": "d2-topic", "text": "The emergency threshold requires at least 10 units of yes weight."},
+          {"id": "d2-p4", "topicId": "d2-topic", "text": "The chair waiver does not waive the emergency threshold."},
+          {"id": "d2-p5", "topicId": "d2-topic", "text": "The motion is finally approved."}
+        ],
+        "options": [
+          {"id": "d2-pass", "text": "Approved"},
+          {"id": "d2-fail", "text": "Not approved"}
+        ],
+        "topics": [{"id": "d2-topic", "label": "quorum decision"}]
+      },
+      "fixedInitial": {
+        "artifactId": "d2-initial",
+        "answer": "Approved: 9.5 yes is a strong majority of votes cast, and the chair waiver covers the extra procedural requirement.",
+        "values": ["approved"],
+        "selectedOptionIds": ["d2-pass"],
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "d2-p1", "stance": "ACCEPT"},
+          {"claimId": "d2-p2", "stance": "ACCEPT"},
+          {"claimId": "d2-p3", "stance": "REJECT"},
+          {"claimId": "d2-p4", "stance": "REJECT"},
+          {"claimId": "d2-p5", "stance": "ACCEPT"}
+        ]
+      },
+      "signal": {
+        "signalKind": "PEER_MESSAGE",
+        "artifacts": [
+          {
+            "artifactId": "d2-s1",
+            "issueId": "d2-i1",
+            "targetPropositionId": "d2-p5",
+            "kind": "LOGIC",
+            "severity": "MATERIAL",
+            "provenance": {"source": "controlled-derivable-critique", "newFacts": false},
+            "text": "The draft treats a votes-cast majority and a quorum waiver as if either settled the emergency rule. Audit that rule's distinct denominator and the expressly limited scope of the waiver before deciding final approval."
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "H1B-D3",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1B-D3",
+        "question": "A service may launch only when each direct dependency is release-ready. A component is release-ready only when its own direct dependencies are release-ready and its release test has passed. A root-service waiver naming a component substitutes for that named component's failed release test only; it does not waive readiness of that component's dependencies. Service S directly depends on A and B. A has no dependencies and passed. B depends on C and D and failed, but S has a waiver naming B. C has no dependencies and passed. D has no dependencies and failed, with no waiver. May S launch? Select the best option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "Readiness is recursive over direct dependencies plus the component's own test. S depends on A and B; B depends on C and D. A and C passed. B and D failed. S's waiver names B and replaces B's failed test only; it does not waive B's dependency-readiness requirement. D has no waiver."
+          }
+        ],
+        "propositions": [
+          {"id": "d3-p1", "topicId": "d3-topic", "text": "A and C are release-ready."},
+          {"id": "d3-p2", "topicId": "d3-topic", "text": "The waiver substitutes for B's failed test but does not make D release-ready."},
+          {"id": "d3-p3", "topicId": "d3-topic", "text": "B is not release-ready because D is not release-ready."},
+          {"id": "d3-p4", "topicId": "d3-topic", "text": "Service S may launch."}
+        ],
+        "options": [
+          {"id": "d3-eligible", "text": "May launch"},
+          {"id": "d3-ineligible", "text": "May not launch"}
+        ],
+        "topics": [{"id": "d3-topic", "label": "eligibility decision"}]
+      },
+      "fixedInitial": {
+        "artifactId": "d3-initial",
+        "answer": "S may launch because the waiver cures B's failed release test, while A and C already passed.",
+        "values": ["may launch"],
+        "selectedOptionIds": ["d3-eligible"],
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "d3-p1", "stance": "ACCEPT"},
+          {"claimId": "d3-p2", "stance": "REJECT"},
+          {"claimId": "d3-p3", "stance": "REJECT"},
+          {"claimId": "d3-p4", "stance": "ACCEPT"}
+        ]
+      },
+      "signal": {
+        "signalKind": "PEER_MESSAGE",
+        "artifacts": [
+          {
+            "artifactId": "d3-s1",
+            "issueId": "d3-i1",
+            "targetPropositionId": "d3-p4",
+            "kind": "LOGIC",
+            "severity": "MATERIAL",
+            "provenance": {"source": "controlled-derivable-critique", "newFacts": false},
+            "text": "The draft stops at B's own test. Apply the readiness rule recursively and keep the waiver's stated scope separate from the readiness of B's dependencies before deciding whether S may launch."
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "H1B-G1",
+      "stratum": "NEW_EVIDENCE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1B-G1",
+        "question": "A registry rule says an adopted policy becomes effective on the date it is published in the registry bulletin, unless the adoption record specifies a later date. Policy K was adopted on April 10. No bulletin entry or later-date field is supplied here. Was Policy K effective on April 15? Do not guess; select the best supported option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "Effectivity is the bulletin publication date unless the adoption record specifies a later date. Adoption occurred April 10; publication and later-date facts are not supplied."
+          }
+        ],
+        "propositions": [
+          {"id": "g1-p1", "topicId": "g1-topic", "text": "Policy K was effective on April 15."},
+          {"id": "g1-p2", "topicId": "g1-topic", "text": "Adoption on April 10 alone proves effectivity on April 10."},
+          {"id": "g1-p3", "topicId": "g1-topic", "text": "The publication date and any specified later date are needed to resolve effectivity."}
+        ],
+        "options": [
+          {"id": "g1-yes", "text": "Yes"},
+          {"id": "g1-no", "text": "No"},
+          {"id": "g1-undetermined", "text": "Cannot determine from the supplied record"}
+        ],
+        "topics": [{"id": "g1-topic", "label": "policy effectivity"}]
+      },
+      "fixedInitial": {
+        "artifactId": "g1-initial",
+        "answer": "Cannot determine without the bulletin publication entry and any specified later date.",
+        "values": ["cannot determine"],
+        "selectedOptionIds": ["g1-undetermined"],
+        "status": "NEEDS_USER_INPUT",
+        "assessments": [
+          {"claimId": "g1-p1", "stance": "OPEN"},
+          {"claimId": "g1-p2", "stance": "REJECT"},
+          {"claimId": "g1-p3", "stance": "ACCEPT"}
+        ]
+      },
+      "signal": {
+        "signalKind": "EVIDENCE_PACKET",
+        "artifacts": [
+          {
+            "artifactId": "g1-e1",
+            "evidenceId": "g1-e1",
+            "sourceLabel": "registry extract",
+            "provenance": {"source": "sealed-registry-record", "newFacts": true},
+            "text": "The registry bulletin published Policy K on April 12. The adoption record's later-date field is blank."
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "H1B-G2",
+      "stratum": "NEW_EVIDENCE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1B-G2",
+        "question": "A shipment is on time only if the carrier accepts it no later than 17:00 in the warehouse's local time on August 14. The packing record says the parcel was packed at 16:30 on August 14, but no carrier-acceptance scan is supplied. Did the shipment meet the deadline? Do not guess; select the best supported option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "The deadline is carrier acceptance by 17:00 local time on August 14. Packing occurred at 16:30, but carrier acceptance is not supplied."
+          }
+        ],
+        "propositions": [
+          {"id": "g2-p1", "topicId": "g2-topic", "text": "The shipment met the deadline."},
+          {"id": "g2-p2", "topicId": "g2-topic", "text": "The 16:30 packing timestamp alone proves the shipment was on time."},
+          {"id": "g2-p3", "topicId": "g2-topic", "text": "The carrier-acceptance timestamp is required to resolve the deadline."}
+        ],
+        "options": [
+          {"id": "g2-on-time", "text": "On time"},
+          {"id": "g2-late", "text": "Late"},
+          {"id": "g2-undetermined", "text": "Cannot determine from the supplied record"}
+        ],
+        "topics": [{"id": "g2-topic", "label": "shipment deadline"}]
+      },
+      "fixedInitial": {
+        "artifactId": "g2-initial",
+        "answer": "Cannot determine without the carrier-acceptance scan.",
+        "values": ["cannot determine"],
+        "selectedOptionIds": ["g2-undetermined"],
+        "status": "NEEDS_USER_INPUT",
+        "assessments": [
+          {"claimId": "g2-p1", "stance": "OPEN"},
+          {"claimId": "g2-p2", "stance": "REJECT"},
+          {"claimId": "g2-p3", "stance": "ACCEPT"}
+        ]
+      },
+      "signal": {
+        "signalKind": "EVIDENCE_PACKET",
+        "artifacts": [
+          {
+            "artifactId": "g2-e1",
+            "evidenceId": "g2-e1",
+            "sourceLabel": "carrier acceptance scan",
+            "provenance": {"source": "sealed-carrier-record", "newFacts": true},
+            "text": "The carrier accepted the parcel at 17:08 warehouse local time on August 14."
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "H1B-G3",
+      "stratum": "NEW_EVIDENCE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1B-G3",
+        "question": "A diagnostic rule classifies a missing event as LOGGER_GAP only when an inbound-receipt record proves the event reached the logger and no durable-write acknowledgement exists. If no inbound receipt exists, upstream delivery remains unresolved. An application reports sending event Z at 14:02, and the dashboard lacks it, but no logger receipt or acknowledgement record is supplied. Should event Z be classified as LOGGER_GAP? Do not guess; select the best supported option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "LOGGER_GAP requires proof of logger receipt plus absence of durable-write acknowledgement. The application send and dashboard absence are known; logger receipt and acknowledgement are not supplied."
+          }
+        ],
+        "propositions": [
+          {"id": "g3-p1", "topicId": "g3-topic", "text": "Event Z should be classified as LOGGER_GAP."},
+          {"id": "g3-p2", "topicId": "g3-topic", "text": "The application send and dashboard absence alone prove a logger gap."},
+          {"id": "g3-p3", "topicId": "g3-topic", "text": "Logger receipt and durable-write acknowledgement evidence are needed for the classification."}
+        ],
+        "options": [
+          {"id": "g3-gap", "text": "LOGGER_GAP"},
+          {"id": "g3-upstream", "text": "Upstream delivery failure"},
+          {"id": "g3-undetermined", "text": "Cannot determine from the supplied record"}
+        ],
+        "topics": [{"id": "g3-topic", "label": "logger gap classification"}]
+      },
+      "fixedInitial": {
+        "artifactId": "g3-initial",
+        "answer": "Cannot classify the event without the logger receipt and durable-write acknowledgement records.",
+        "values": ["cannot determine"],
+        "selectedOptionIds": ["g3-undetermined"],
+        "status": "NEEDS_USER_INPUT",
+        "assessments": [
+          {"claimId": "g3-p1", "stance": "OPEN"},
+          {"claimId": "g3-p2", "stance": "REJECT"},
+          {"claimId": "g3-p3", "stance": "ACCEPT"}
+        ]
+      },
+      "signal": {
+        "signalKind": "EVIDENCE_PACKET",
+        "artifacts": [
+          {
+            "artifactId": "g3-e1",
+            "evidenceId": "g3-e1",
+            "sourceLabel": "sealed logger diagnostic",
+            "provenance": {"source": "sealed-logger-diagnostic", "newFacts": true},
+            "text": "The logger recorded inbound receipt of event Z at 14:02:04. The durable-write audit contains no acknowledgement for Z, and the transport trace confirms delivery to the logger."
+          }
+        ]
+      }
+    }
+  ]
+}

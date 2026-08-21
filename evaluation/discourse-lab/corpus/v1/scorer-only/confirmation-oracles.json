@@ -1,0 +1,247 @@
+{
+  "schemaVersion": "discourse-text-corpus-oracles@1",
+  "corpusVersion": "text-lab-v1",
+  "partition": "CONFIRMATION",
+  "participantAccess": "FORBIDDEN",
+  "oracles": [
+    {
+      "caseId": "CNF-OBJ-01",
+      "mechanismTags": ["KNOWN_ANSWER", "MULTISTEP_ARITHMETIC"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [["36"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": true, "sharedErrorClaimIds": [], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-OBJ-02",
+      "mechanismTags": ["KNOWN_ANSWER", "DENOMINATOR_TRAP"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [["25%", "60"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c3", "kind": "DENOMINATOR_ERROR", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": ["c3"], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-OBJ-03",
+      "mechanismTags": ["KNOWN_ANSWER", "HIDDEN_BASE_ASSUMPTION", "SHARED_MISCONCEPTION"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [["99", "1%"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c2", "kind": "CHANGED_BASE", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": ["c2"], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-OBJ-04",
+      "mechanismTags": ["KNOWN_ANSWER", "CATEGORICAL_DEDUCTION"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [],
+      "acceptedAnswerOptionSets": [["C"]],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c2", "kind": "INVALID_CONVERSE", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": [], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-EVD-01",
+      "mechanismTags": ["SUPPLIED_EVIDENCE", "GENERALIZATION", "NONRESPONSE"],
+      "acceptedFinalStatuses": ["ANSWER", "UNCERTAIN"],
+      "acceptedAnswerValueSets": [],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e1"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "UNSUPPORTED", "supportIds": ["e1"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e1"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c2", "kind": "POPULATION_GENERALIZATION", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": ["c2"], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-EVD-02",
+      "mechanismTags": ["SUPPLIED_EVIDENCE", "DATE_SCOPE", "KNOWN_ANSWER"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [["10 days"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["e2"]},
+        {"claimId": "c2", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e2"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e2"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c1", "kind": "WRONG_EFFECTIVE_RULE", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": ["c1"], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-EVD-03",
+      "mechanismTags": ["SUPPLIED_EVIDENCE", "CAUSAL_OVERREACH", "SELECTION_BIAS"],
+      "acceptedFinalStatuses": ["ANSWER", "UNCERTAIN"],
+      "acceptedAnswerValueSets": [],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e1"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "UNSUPPORTED", "supportIds": ["e1"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e1"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c2", "kind": "CAUSAL_OVERREACH", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": ["c2"], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-EVD-04",
+      "mechanismTags": ["SUPPLIED_EVIDENCE", "KNOWN_ANSWER", "CLEAN_NO_ISSUE"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [["2.5%", "equal"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e1"]},
+        {"claimId": "c2", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e1"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["e1"]}
+      ],
+      "expectedMaterialIssues": [],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": true, "sharedErrorClaimIds": [], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-GAP-01",
+      "mechanismTags": ["AMBIGUOUS", "MISSING_REFERENT", "ABSTENTION"],
+      "acceptedFinalStatuses": ["UNCERTAIN", "NEEDS_USER_INPUT", "ABSTAIN"],
+      "acceptedAnswerValueSets": [["ambiguous"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "OPEN", "truthClass": "INDETERMINATE", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "OPEN", "truthClass": "INDETERMINATE", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c1", "kind": "UNRESOLVED_REFERENT", "materiality": "MATERIAL"}, {"targetClaimId": "c2", "kind": "UNRESOLVED_REFERENT", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [{"cruxId": "u1", "questionIntent": "Ask who 'they' refers to."}],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": [], "disagreementClaimIds": ["c1", "c2"], "abstentionExpected": true, "userQuestionExpected": true}
+    },
+    {
+      "caseId": "CNF-GAP-02",
+      "mechanismTags": ["AMBIGUOUS_REQUEST", "MISSING_OBJECT", "ABSTENTION"],
+      "acceptedFinalStatuses": ["NEEDS_USER_INPUT", "UNCERTAIN", "ABSTAIN"],
+      "acceptedAnswerValueSets": [],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c1", "kind": "SILENT_CONSTRAINT_RELAXATION", "materiality": "MATERIAL"}, {"targetClaimId": "c2", "kind": "SILENT_CONSTRAINT_RELAXATION", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [{"cruxId": "u1", "questionIntent": "Ask whether size or color should be relaxed, or whether another container exists."}],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": [], "disagreementClaimIds": ["c1", "c2"], "abstentionExpected": true, "userQuestionExpected": true}
+    },
+    {
+      "caseId": "CNF-GAP-03",
+      "mechanismTags": ["MISSING_INFORMATION", "BREAK_EVEN", "USER_OWNED"],
+      "acceptedFinalStatuses": ["NEEDS_USER_INPUT", "MULTIPLE_DEFENSIBLE", "UNCERTAIN"],
+      "acceptedAnswerValueSets": [["300"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c2", "kind": "MISSING_USAGE", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [{"cruxId": "u1", "questionIntent": "Ask expected monthly message count."}],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": [], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": true}
+    },
+    {
+      "caseId": "CNF-GAP-04",
+      "mechanismTags": ["KNOWN_ANSWER", "HIDDEN_ASSUMPTION", "SHARED_MISCONCEPTION", "CONVERSE_ERROR"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [["no"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "REJECT", "truthClass": "INCORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c1", "kind": "INVALID_CONVERSE", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": ["c1"], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    },
+    {
+      "caseId": "CNF-DEC-01",
+      "mechanismTags": ["MULTIPLE_DEFENSIBLE", "QUANTIFIED_TRADEOFF", "USER_OWNED_TRADEOFF"],
+      "acceptedFinalStatuses": ["MULTIPLE_DEFENSIBLE", "NEEDS_USER_INPUT"],
+      "acceptedAnswerValueSets": [],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "REJECT", "truthClass": "OVERCLAIMED_NORMATIVE", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "OVERCLAIMED_NORMATIVE", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c1", "kind": "USER_VALUE_SUBSTITUTION", "materiality": "MATERIAL"}, {"targetClaimId": "c2", "kind": "USER_VALUE_SUBSTITUTION", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [{"cruxId": "u1", "questionIntent": "Ask the user's value of 25 minutes relative to 20 credits."}],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": [], "disagreementClaimIds": ["c1", "c2"], "abstentionExpected": false, "userQuestionExpected": true}
+    },
+    {
+      "caseId": "CNF-DEC-02",
+      "mechanismTags": ["MULTIPLE_DEFENSIBLE", "PRIVACY_TRADEOFF", "USER_OWNED_TRADEOFF"],
+      "acceptedFinalStatuses": ["MULTIPLE_DEFENSIBLE", "NEEDS_USER_INPUT"],
+      "acceptedAnswerValueSets": [],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "REJECT", "truthClass": "OVERCLAIMED_NORMATIVE", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "OVERCLAIMED_NORMATIVE", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "DEFENSIBLE", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c1", "kind": "UNAUTHORIZED_POLICY_CHOICE", "materiality": "MATERIAL"}, {"targetClaimId": "c2", "kind": "UNAUTHORIZED_POLICY_CHOICE", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [{"cruxId": "u1", "questionIntent": "Ask authorized stakeholders to set the clinical-context versus privacy-risk priority using evidence."}],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": [], "disagreementClaimIds": ["c1", "c2"], "abstentionExpected": false, "userQuestionExpected": true}
+    },
+    {
+      "caseId": "CNF-DEC-03",
+      "mechanismTags": ["MULTIPLE_DEFENSIBLE", "MISSING_PRIORITY", "USER_OWNED_TRADEOFF"],
+      "acceptedFinalStatuses": ["MULTIPLE_DEFENSIBLE", "NEEDS_USER_INPUT"],
+      "acceptedAnswerValueSets": [],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "REJECT", "truthClass": "OVERCLAIMED_NORMATIVE", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "REJECT", "truthClass": "OVERCLAIMED_NORMATIVE", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "DEFENSIBLE", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [{"targetClaimId": "c1", "kind": "MISSING_PRIORITY", "materiality": "MATERIAL"}, {"targetClaimId": "c2", "kind": "MISSING_PRIORITY", "materiality": "MATERIAL"}],
+      "userOwnedCruxes": [{"cruxId": "u1", "questionIntent": "Ask management to set the priority between customer wait time and staff preference."}],
+      "metricOpportunities": {"cleanCase": false, "sharedErrorClaimIds": [], "disagreementClaimIds": ["c1", "c2"], "abstentionExpected": false, "userQuestionExpected": true}
+    },
+    {
+      "caseId": "CNF-DEC-04",
+      "mechanismTags": ["KNOWN_ANSWER", "CLEAN_NO_ISSUE", "CONSTRAINT_DECISION"],
+      "acceptedFinalStatuses": ["ANSWER"],
+      "acceptedAnswerValueSets": [["Venue A"], ["A"]],
+      "acceptedAnswerOptionSets": [],
+      "propositions": [
+        {"claimId": "c1", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c2", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]},
+        {"claimId": "c3", "expectedStance": "ACCEPT", "truthClass": "CORRECT", "supportIds": ["PROMPT"]}
+      ],
+      "expectedMaterialIssues": [],
+      "userOwnedCruxes": [],
+      "metricOpportunities": {"cleanCase": true, "sharedErrorClaimIds": [], "disagreementClaimIds": [], "abstentionExpected": false, "userQuestionExpected": false}
+    }
+  ]
+}

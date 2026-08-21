@@ -1,0 +1,280 @@
+{
+  "schemaVersion": "discourse-h1b-oracles@1",
+  "corpusVersion": "h1b-text-corpus-v1",
+  "partition": "DEVELOPMENT",
+  "participantAccess": "FORBIDDEN",
+  "cases": [
+    {
+      "caseId": "H1B-D1",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "fixedInitialExpectation": "WRONG",
+      "targetPropositionIds": ["d1-p1", "d1-p2", "d1-p3"],
+      "guardPropositionIds": ["d1-p4"],
+      "baseProfile": {
+        "profile": "BASE",
+        "conditionIds": ["CONTROL_CASE_ONLY_B1", "CONTROL_NO_FEEDBACK_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["60%"], ["0.6"]],
+        "acceptedAnswerOptionSets": [["d1-o60"]],
+        "propositions": [
+          {"propositionId": "d1-p1", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d1-p2", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d1-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d1-p4", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "treatmentProfile": {
+        "profile": "TREATMENT",
+        "conditionIds": ["CONTROL_VALID_CRITIQUE_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["60%"], ["0.6"]],
+        "acceptedAnswerOptionSets": [["d1-o60"]],
+        "propositions": [
+          {"propositionId": "d1-p1", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d1-p2", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d1-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d1-p4", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "acceptedIssueKindEquivalences": [
+        {"targetPropositionId": "d1-p1", "acceptedKinds": ["LOGIC", "ASSUMPTION"], "acceptedSeverities": ["MATERIAL"]},
+        {"targetPropositionId": "d1-p2", "acceptedKinds": ["LOGIC", "FACTUAL"], "acceptedSeverities": ["MATERIAL"]},
+        {"targetPropositionId": "d1-p3", "acceptedKinds": ["LOGIC", "ASSUMPTION"], "acceptedSeverities": ["MATERIAL"]}
+      ],
+      "derivationNotes": [
+        "In a population of 10,000, 400 items are defective: 400*0.90*0.80=288 are Stage-2-flagged. Of 9,600 nondefective items, 9,600*0.20*0.10=192 are flagged. The posterior is 288/(288+192)=0.60."
+      ],
+      "auditNotes": [
+        "The critique identifies sensitivity-posterior confusion and a bounded population-path check but supplies no fact absent from PROMPT and no final posterior value.",
+        "The fixed initial is wrong on d1-p1, d1-p2, and d1-p3 while d1-p4 is the preserved guard."
+      ]
+    },
+    {
+      "caseId": "H1B-D2",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "fixedInitialExpectation": "WRONG",
+      "targetPropositionIds": ["d2-p3", "d2-p4", "d2-p5"],
+      "guardPropositionIds": ["d2-p1", "d2-p2"],
+      "baseProfile": {
+        "profile": "BASE",
+        "conditionIds": ["CONTROL_CASE_ONLY_B1", "CONTROL_NO_FEEDBACK_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["not approved"], ["fail"]],
+        "acceptedAnswerOptionSets": [["d2-fail"]],
+        "propositions": [
+          {"propositionId": "d2-p1", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p2", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p4", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p5", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "treatmentProfile": {
+        "profile": "TREATMENT",
+        "conditionIds": ["CONTROL_VALID_CRITIQUE_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["not approved"], ["fail"]],
+        "acceptedAnswerOptionSets": [["d2-fail"]],
+        "propositions": [
+          {"propositionId": "d2-p1", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p2", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p4", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d2-p5", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "acceptedIssueKindEquivalences": [
+        {"targetPropositionId": "d2-p5", "acceptedKinds": ["LOGIC", "ASSUMPTION"], "acceptedSeverities": ["MATERIAL"]},
+        {"targetPropositionId": "d2-p3", "acceptedKinds": ["LOGIC", "FACTUAL"], "acceptedSeverities": ["MATERIAL"]},
+        {"targetPropositionId": "d2-p4", "acceptedKinds": ["LOGIC", "ASSUMPTION"], "acceptedSeverities": ["MATERIAL"]}
+      ],
+      "derivationNotes": [
+        "Eligible non-recused weight is 18-3=15. Present weight 12.5 is 83.33%, so quorum passes; 9.5>2, so the ordinary rule passes. The emergency threshold is (2/3)*15=10, which 9.5 does not meet. The waiver affects quorum only, so final approval fails."
+      ],
+      "auditNotes": [
+        "The critique identifies two already supplied rule-scope checks but gives neither the numerical threshold nor the outcome.",
+        "d2-p1 and d2-p2 are guards because quorum and ordinary approval remain correct even though the additional emergency condition fails."
+      ]
+    },
+    {
+      "caseId": "H1B-D3",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "fixedInitialExpectation": "WRONG",
+      "targetPropositionIds": ["d3-p2", "d3-p3", "d3-p4"],
+      "guardPropositionIds": ["d3-p1"],
+      "baseProfile": {
+        "profile": "BASE",
+        "conditionIds": ["CONTROL_CASE_ONLY_B1", "CONTROL_NO_FEEDBACK_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["may not launch"], ["cannot launch"]],
+        "acceptedAnswerOptionSets": [["d3-ineligible"]],
+        "propositions": [
+          {"propositionId": "d3-p1", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d3-p2", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d3-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d3-p4", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "treatmentProfile": {
+        "profile": "TREATMENT",
+        "conditionIds": ["CONTROL_VALID_CRITIQUE_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["may not launch"], ["cannot launch"]],
+        "acceptedAnswerOptionSets": [["d3-ineligible"]],
+        "propositions": [
+          {"propositionId": "d3-p1", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d3-p2", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d3-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "d3-p4", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "acceptedIssueKindEquivalences": [
+        {"targetPropositionId": "d3-p4", "acceptedKinds": ["LOGIC", "ASSUMPTION"], "acceptedSeverities": ["MATERIAL"]},
+        {"targetPropositionId": "d3-p2", "acceptedKinds": ["LOGIC", "FACTUAL"], "acceptedSeverities": ["MATERIAL"]},
+        {"targetPropositionId": "d3-p3", "acceptedKinds": ["LOGIC", "FACTUAL"], "acceptedSeverities": ["MATERIAL"]}
+      ],
+      "derivationNotes": [
+        "A and C have no dependencies and passed, so they are ready. The waiver substitutes only for B's failed test. D failed without a waiver, so D is not ready; therefore B's dependency requirement fails, B is not ready, and S may not launch."
+      ],
+      "auditNotes": [
+        "The critique asks for recursive application and a waiver-scope audit using only the public dependency graph and rules; it adds no new fact and does not announce the result.",
+        "d3-p1 is the preserved guard while waiver scope, B readiness, and S launch eligibility are targets."
+      ]
+    },
+    {
+      "caseId": "H1B-G1",
+      "stratum": "NEW_EVIDENCE",
+      "fixedInitialExpectation": "APPROPRIATELY_OPEN",
+      "targetPropositionIds": ["g1-p1"],
+      "guardPropositionIds": ["g1-p2", "g1-p3"],
+      "baseProfile": {
+        "profile": "BASE",
+        "conditionIds": ["CONTROL_CASE_ONLY_B1", "CONTROL_NO_FEEDBACK_B1"],
+        "acceptableStatuses": ["NEEDS_USER_INPUT", "UNCERTAIN", "ABSTAIN"],
+        "acceptedAnswerValueSets": [["cannot determine"], ["unknown"]],
+        "acceptedAnswerOptionSets": [["g1-undetermined"]],
+        "propositions": [
+          {"propositionId": "g1-p1", "acceptableStances": ["OPEN"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g1-p2", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g1-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": ["u1"]
+      },
+      "treatmentProfile": {
+        "profile": "TREATMENT",
+        "conditionIds": ["CONTROL_EVIDENCE_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["yes"], ["effective"]],
+        "acceptedAnswerOptionSets": [["g1-yes"]],
+        "propositions": [
+          {"propositionId": "g1-p1", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT", "g1-e1"]]},
+          {"propositionId": "g1-p2", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g1-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT", "g1-e1"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "acceptedIssueKindEquivalences": [
+        {"targetPropositionId": "g1-p1", "acceptedKinds": ["MISSING_INFORMATION", "EVIDENCE"], "acceptedSeverities": ["MATERIAL"]}
+      ],
+      "derivationNotes": [
+        "BASE is unresolved because both publication and any later-date override are absent. Treatment evidence gives publication April 12 and no later date, so the rule makes the policy effective before April 15."
+      ],
+      "auditNotes": [
+        "g1-e1 is a new registry fact absent from PROMPT and is required explicitly for treatment support.",
+        "The fixed initial is appropriately open and should not be scored as an error in BASE."
+      ]
+    },
+    {
+      "caseId": "H1B-G2",
+      "stratum": "NEW_EVIDENCE",
+      "fixedInitialExpectation": "APPROPRIATELY_OPEN",
+      "targetPropositionIds": ["g2-p1"],
+      "guardPropositionIds": ["g2-p2", "g2-p3"],
+      "baseProfile": {
+        "profile": "BASE",
+        "conditionIds": ["CONTROL_CASE_ONLY_B1", "CONTROL_NO_FEEDBACK_B1"],
+        "acceptableStatuses": ["NEEDS_USER_INPUT", "UNCERTAIN", "ABSTAIN"],
+        "acceptedAnswerValueSets": [["cannot determine"], ["unknown"]],
+        "acceptedAnswerOptionSets": [["g2-undetermined"]],
+        "propositions": [
+          {"propositionId": "g2-p1", "acceptableStances": ["OPEN"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g2-p2", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g2-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": ["u1"]
+      },
+      "treatmentProfile": {
+        "profile": "TREATMENT",
+        "conditionIds": ["CONTROL_EVIDENCE_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["late"], ["no"]],
+        "acceptedAnswerOptionSets": [["g2-late"]],
+        "propositions": [
+          {"propositionId": "g2-p1", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT", "g2-e1"]]},
+          {"propositionId": "g2-p2", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g2-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT", "g2-e1"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "acceptedIssueKindEquivalences": [
+        {"targetPropositionId": "g2-p1", "acceptedKinds": ["MISSING_INFORMATION", "EVIDENCE"], "acceptedSeverities": ["MATERIAL"]}
+      ],
+      "derivationNotes": [
+        "BASE is unresolved because packing is not carrier acceptance. Treatment evidence supplies acceptance at 17:08 local time on August 14, eight minutes after the 17:00 deadline."
+      ],
+      "auditNotes": [
+        "g2-e1 is the exact new carrier record required to resolve the target; the public packing timestamp cannot substitute for it.",
+        "The BASE fixed initial preserves the information gap and asks for the missing scan."
+      ]
+    },
+    {
+      "caseId": "H1B-G3",
+      "stratum": "NEW_EVIDENCE",
+      "fixedInitialExpectation": "APPROPRIATELY_OPEN",
+      "targetPropositionIds": ["g3-p1"],
+      "guardPropositionIds": ["g3-p2", "g3-p3"],
+      "baseProfile": {
+        "profile": "BASE",
+        "conditionIds": ["CONTROL_CASE_ONLY_B1", "CONTROL_NO_FEEDBACK_B1"],
+        "acceptableStatuses": ["NEEDS_USER_INPUT", "UNCERTAIN", "ABSTAIN"],
+        "acceptedAnswerValueSets": [["cannot determine"], ["unknown"]],
+        "acceptedAnswerOptionSets": [["g3-undetermined"]],
+        "propositions": [
+          {"propositionId": "g3-p1", "acceptableStances": ["OPEN"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g3-p2", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g3-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT"]]}
+        ],
+        "requiredUserQuestionCruxIds": ["u1"]
+      },
+      "treatmentProfile": {
+        "profile": "TREATMENT",
+        "conditionIds": ["CONTROL_EVIDENCE_B1"],
+        "acceptableStatuses": ["ANSWER"],
+        "acceptedAnswerValueSets": [["LOGGER_GAP"], ["logger gap"]],
+        "acceptedAnswerOptionSets": [["g3-gap"]],
+        "propositions": [
+          {"propositionId": "g3-p1", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT", "g3-e1"]]},
+          {"propositionId": "g3-p2", "acceptableStances": ["REJECT"], "requiredEvidenceSets": [["PROMPT"]]},
+          {"propositionId": "g3-p3", "acceptableStances": ["ACCEPT"], "requiredEvidenceSets": [["PROMPT", "g3-e1"]]}
+        ],
+        "requiredUserQuestionCruxIds": []
+      },
+      "acceptedIssueKindEquivalences": [
+        {"targetPropositionId": "g3-p1", "acceptedKinds": ["MISSING_INFORMATION", "EVIDENCE"], "acceptedSeverities": ["MATERIAL"]}
+      ],
+      "derivationNotes": [
+        "BASE lacks both diagnostic predicates. Treatment evidence proves logger receipt and absence of durable-write acknowledgement, satisfying the stated LOGGER_GAP classification rule."
+      ],
+      "auditNotes": [
+        "g3-e1 is new sealed diagnostic evidence; dashboard absence and an application-side send alone remain insufficient.",
+        "The classification is rule-based and does not require an unsupported broader causal claim."
+      ]
+    }
+  ]
+}

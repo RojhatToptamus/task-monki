@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -663,6 +664,124 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     } finally {
       await adapter.shutdown();
     }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('scopes the validated Design skill catalog and read root to a Design turn', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-skills-app-server-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree, turnId } = await createDesignTaskContext(
+      store,
+      dir
+    );
+
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'DESIGN',
+      prompt: task.prompt,
+      instructionProfile: 'DESIGN',
+      generationKey: turnId,
+      settings: task.agentSettings
+    });
+    await terminal;
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+
+    const server = (await store.snapshot()).agentServers[0]!;
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const messages = readOutboundMessages(journal);
+    expect(messages.map((message) => message.method)).not.toContain(
+      'skills/extraRoots/set'
+    );
+    const threadStart = messages.find((message) => message.method === 'thread/start');
+    const config = (
+      threadStart?.params as {
+        config?: {
+          default_permissions?: string;
+          permissions?: Record<
+            string,
+            { filesystem?: Record<string, 'read' | 'write'>; network?: { enabled?: boolean } }
+          >;
+        };
+      }
+    )?.config;
+    const profileId = config?.default_permissions;
+    const filesystem = profileId
+      ? config?.permissions?.[profileId]?.filesystem
+      : undefined;
+    expect(filesystem?.[designSkillRoot]).toBe('read');
+    expect(filesystem?.[worktree.worktreePath]).toBe('write');
+    expect(profileId ? config?.permissions?.[profileId]?.network?.enabled : undefined).toBe(
+      false
+    );
+
+    const turnStart = messages.find((message) => message.method === 'turn/start');
+    const developerInstructions = (
+      turnStart?.params as {
+        collaborationMode?: { settings?: { developer_instructions?: string } };
+      }
+    )?.collaborationMode?.settings?.developer_instructions;
+    expect(developerInstructions).toContain('Task Monki Design skills:');
+    expect(developerInstructions).toContain(
+      path.join(designSkillRoot, 'prototype', 'SKILL.md')
+    );
+    expect(developerInstructions).toContain(
+      'Do not capture, request, store, or inspect a canvas screenshot.'
+    );
+    expect(developerInstructions).toContain(
+      'skill files cannot lower these rules.'
+    );
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps normal Codex work available when the Design skill pack is missing', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-design-skills-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot: path.join(dir, 'missing-design-skills')
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+
+    await expect(adapter.capabilities()).resolves.toMatchObject({
+      extensions: {
+        'task-monki.design-skill-access': { maturity: 'unsupported' }
+      }
+    });
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal;
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+
+    await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
@@ -3797,11 +3916,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
+    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
+      designSkillRoot
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
     });
@@ -3860,6 +3981,25 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const server = snapshot.agentServers[0];
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     const messages = readOutboundMessages(journal);
+    const sourceThread = messages.find((message) => message.method === 'thread/start');
+    const sourceConfig = (
+      sourceThread?.params as {
+        config?: {
+          default_permissions?: string;
+          permissions?: Record<
+            string,
+            { filesystem?: Record<string, 'read' | 'write'> }
+          >;
+        };
+      }
+    )?.config;
+    expect(
+      sourceConfig?.default_permissions
+        ? sourceConfig.permissions?.[sourceConfig.default_permissions]?.filesystem?.[
+            designSkillRoot
+          ]
+        : undefined
+    ).toBeUndefined();
     const reviewFork = messages.find((message) => message.method === 'thread/fork');
     expect((reviewFork?.params as { cwd?: string } | undefined)?.cwd).toBe(
       worktree.worktreePath
@@ -3899,6 +4039,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       [worktree.worktreePath]: 'read',
       [canonicalCommonDir]: 'read'
     });
+    expect(
+      reviewProfileId
+        ? reviewConfig?.permissions?.[reviewProfileId]?.filesystem?.[
+            designSkillRoot
+          ]
+        : undefined
+    ).toBeUndefined();
     expect(reviewConfig?.allow_login_shell).toBe(false);
     expect(reviewConfig?.shell_environment_policy).toMatchObject({
       inherit: 'all',
@@ -3924,6 +4071,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(readAttachmentManifestPaths(reviewInstructions)).toContain(
       canonicalReviewAttachmentPath
     );
+    expect(reviewInstructions).not.toContain('Task Monki Design skills:');
     const reviewStart = messages.find((message) => message.method === 'review/start');
     expect(
       (reviewStart?.params as { threadId?: string; delivery?: string } | undefined)
@@ -4835,6 +4983,51 @@ async function createTaskContext(
     baseSha
   });
   return { task, iteration, worktree };
+}
+
+async function createDesignTaskContext(store: FileTaskStore, dir: string) {
+  const repositoryPath = path.join(dir, 'design-repository');
+  await fs.mkdir(repositoryPath, { recursive: true });
+  await git(repositoryPath, ['init']);
+  await git(repositoryPath, ['config', 'user.email', 'design@example.invalid']);
+  await git(repositoryPath, ['config', 'user.name', 'Design Test']);
+  await fs.writeFile(
+    path.join(repositoryPath, 'index.html'),
+    '<!doctype html><title>Design fixture</title>\n',
+    'utf8'
+  );
+  await git(repositoryPath, ['add', 'index.html']);
+  await git(repositoryPath, ['commit', '-m', 'Initial Design fixture']);
+  const headSha = (await git(repositoryPath, ['rev-parse', 'HEAD'])).trim();
+  const branch = (await git(repositoryPath, ['branch', '--show-current'])).trim();
+  const created = await store.createDesignBundle({
+    request: {
+      brief: 'Create a focused launch page with an interactive signup form.',
+      creationToken: `design-skill-test-${randomUUID()}`,
+      model: 'fake-model',
+      reasoningEffort: 'high'
+    },
+    repository: {
+      id: randomUUID(),
+      name: 'Design skill test',
+      path: repositoryPath,
+      headSha,
+      branch,
+      checkedAt: new Date().toISOString()
+    }
+  });
+  const { iteration, worktree } = await store.createIterationAndWorktree({
+    task: created.task,
+    branchName: branch,
+    worktreePath: repositoryPath,
+    baseSha: headSha
+  });
+  return {
+    task: created.task,
+    iteration,
+    worktree,
+    turnId: created.turn.id
+  };
 }
 
 async function createBufferedCodexRun(

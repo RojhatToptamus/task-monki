@@ -1,0 +1,236 @@
+{
+  "schemaVersion": "discourse-text-corpus-participants@1",
+  "corpusVersion": "text-lab-v1",
+  "partition": "DEVELOPMENT",
+  "cases": [
+    {
+      "caseId": "DEV-OBJ-01",
+      "partition": "DEVELOPMENT",
+      "domain": "OBJECTIVE",
+      "prompt": "A print shop has 84 blank labels. It prints 3 batches of 17 labels and sets aside 12 still-blank labels for tomorrow. How many blank labels remain available for another batch today?",
+      "answerInstructions": "Give the number and a concise calculation. State any assumption that matters.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The number available today is 21."},
+        {"claimId": "c2", "text": "The 12 labels set aside count as available for another batch today."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-OBJ-02",
+      "partition": "DEVELOPMENT",
+      "domain": "OBJECTIVE",
+      "prompt": "A class has 8 students who each scored 12 points and 24 students who each scored 20 points. What is the class mean score?",
+      "answerInstructions": "Give the mean and a concise calculation.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The mean score is 18."},
+        {"claimId": "c2", "text": "Averaging 12 and 20 without weighting gives the class mean."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-OBJ-03",
+      "partition": "DEVELOPMENT",
+      "domain": "OBJECTIVE",
+      "prompt": "A subscription costs 250 credits. Its price is reduced by 20%, then the reduced price is increased by 20%. What is the final price, and how does it compare with the original?",
+      "answerInstructions": "Give the final price and percentage difference from the original.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The final price is 240 credits."},
+        {"claimId": "c2", "text": "Equal percentage decreases and increases cancel exactly."},
+        {"claimId": "c3", "text": "The final price is 4% below the original."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-OBJ-04",
+      "partition": "DEVELOPMENT",
+      "domain": "OBJECTIVE",
+      "prompt": "Four workshops—J, K, L, and M—occupy slots 1 through 4, one per slot. J is before K. L is immediately after J. M is not in slot 4. Which schedule is possible?",
+      "answerInstructions": "Select one option and briefly check every constraint.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Option B satisfies every stated constraint."},
+        {"claimId": "c2", "text": "Option D satisfies every stated constraint."}
+      ],
+      "evidence": [],
+      "answerOptions": [
+        {"optionId": "A", "text": "K, J, L, M"},
+        {"optionId": "B", "text": "M, J, L, K"},
+        {"optionId": "C", "text": "J, L, K, M"},
+        {"optionId": "D", "text": "J, K, L, M"}
+      ]
+    },
+    {
+      "caseId": "DEV-EVD-01",
+      "partition": "DEVELOPMENT",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "A wellness course enrolled 60 volunteers. Seven withdrew before the final survey. Of the 53 who completed it, 41 reported better sleep. There was no control group and sleep was self-reported. What can the study support?",
+      "answerInstructions": "State the supported descriptive result and whether the course caused better sleep.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "41 of 53 completers reported better sleep."},
+        {"claimId": "c2", "text": "The course caused better sleep for the enrolled volunteers."},
+        {"claimId": "c3", "text": "The seven withdrawals create a possible attrition concern."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "Enrollment: 60; withdrawals: 7; completers reporting better sleep: 41; no control group; self-reported outcome."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-EVD-02",
+      "partition": "DEVELOPMENT",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "A January policy note says reimbursements require receipts from April onward. A March amendment says: 'The receipt requirement begins May 1 and replaces the January start date.' When does the requirement begin?",
+      "answerInstructions": "Give the operative date and cite the supplied sentence that controls.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The receipt requirement begins April 1."},
+        {"claimId": "c2", "text": "The receipt requirement begins May 1."},
+        {"claimId": "c3", "text": "The March amendment supersedes the January start date."}
+      ],
+      "evidence": [
+        {"evidenceId": "e1", "text": "January note: receipts required from April onward."},
+        {"evidenceId": "e2", "text": "March amendment: The receipt requirement begins May 1 and replaces the January start date."}
+      ],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-EVD-03",
+      "partition": "DEVELOPMENT",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "A cafe installed a sidewalk sign on Friday. Weekend sales were 30% higher than the previous weekend. A street festival also took place that weekend, and no comparable cafe without a sign was observed. What causal conclusion is justified?",
+      "answerInstructions": "Separate the observed association from any causal claim and name the material alternative explanation.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Weekend sales were 30% higher after the sign was installed."},
+        {"claimId": "c2", "text": "The sign caused the entire sales increase."},
+        {"claimId": "c3", "text": "The festival is a material alternative explanation."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "Sign installed Friday; sales rose 30% versus the prior weekend; a street festival occurred; no comparison cafe was observed."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-EVD-04",
+      "partition": "DEVELOPMENT",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "A quarterly note states: 'Revenue was 120 in Q1 and 150 in Q2. Expenses were 80 in Q1 and 95 in Q2.' By how much did operating surplus (revenue minus expenses) change?",
+      "answerInstructions": "Give both surpluses and the change. Report no issue if the supplied figures suffice.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Operating surplus was 40 in Q1."},
+        {"claimId": "c2", "text": "Operating surplus was 55 in Q2."},
+        {"claimId": "c3", "text": "Operating surplus increased by 15."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "Q1 revenue 120 and expenses 80; Q2 revenue 150 and expenses 95."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-GAP-01",
+      "partition": "DEVELOPMENT",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "Rina told Maya that she had been selected for the fellowship. Who was selected?",
+      "answerInstructions": "Answer only as specifically as the sentence permits. Ask one clarification if needed.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Rina was selected."},
+        {"claimId": "c2", "text": "Maya was selected."},
+        {"claimId": "c3", "text": "The pronoun makes the selected person ambiguous."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-GAP-02",
+      "partition": "DEVELOPMENT",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "Please move the weekly planning meeting to Thursday afternoon. Will this work?",
+      "answerInstructions": "Identify what is missing before claiming the move works, and ask the smallest useful question.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Thursday afternoon definitely works for everyone."},
+        {"claimId": "c2", "text": "The desired time, time zone, attendees, and their availability are not specified."},
+        {"claimId": "c3", "text": "The user should supply or confirm the scheduling constraints."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-GAP-03",
+      "partition": "DEVELOPMENT",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "A courier charges 9 credits for parcels up to 2 kg and 14 credits for parcels over 2 kg. What will it cost to send my parcel?",
+      "answerInstructions": "Answer without guessing. State the missing fact and the consequence of each possible value.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The charge is definitely 9 credits."},
+        {"claimId": "c2", "text": "The parcel's weight is required to choose the price."},
+        {"claimId": "c3", "text": "At exactly 2 kg the charge is 9 credits; above 2 kg it is 14."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "Up to and including 2 kg: 9 credits. Over 2 kg: 14 credits."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-GAP-04",
+      "partition": "DEVELOPMENT",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "Every cedar in the garden is a tree. This plant is a tree. Must this plant be a cedar?",
+      "answerInstructions": "Answer yes or no and identify the logical assumption behind the tempting contrary answer.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The plant must be a cedar."},
+        {"claimId": "c2", "text": "Being a tree is sufficient to establish that a plant is a cedar."},
+        {"claimId": "c3", "text": "The conclusion does not follow from the premise."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-DEC-01",
+      "partition": "DEVELOPMENT",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "Vendor North costs 10,000 credits per year and reports 99.5% historical uptime. Vendor South costs 7,000 and reports 98.5% historical uptime. No outage-cost estimate, switching cost, contract detail, or measurement audit is supplied. Which vendor should we choose?",
+      "answerInstructions": "Preserve defensible alternatives and identify the decision cruxes instead of inventing a single winner.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Vendor North is unconditionally the correct choice."},
+        {"claimId": "c2", "text": "Vendor South is unconditionally the correct choice."},
+        {"claimId": "c3", "text": "Either choice can be defensible depending on outage cost, risk tolerance, and contract quality."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "North: 10,000/year, reported 99.5% uptime. South: 7,000/year, reported 98.5% uptime. Other decision inputs are absent."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-DEC-02",
+      "partition": "DEVELOPMENT",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "A community group can hold one meeting. Option A is a weekday evening with live captions. Option B is a weekend afternoon with on-site childcare. The group has not asked members which barrier affects them. Which option is fairer?",
+      "answerInstructions": "Name the distinct access benefits, preserve the unresolved tradeoff, and ask the people affected for the missing information.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Option A is inherently fairer for every member."},
+        {"claimId": "c2", "text": "Option B is inherently fairer for every member."},
+        {"claimId": "c3", "text": "The fairness judgment depends on affected members' access needs and preferences."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-DEC-03",
+      "partition": "DEVELOPMENT",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "A team has one spare week. Plan A spends it improving reliability for current users. Plan B spends it prototyping a requested new feature. Both fit the week; expected impact and strategic priority are unknown. Which plan is better?",
+      "answerInstructions": "Give conditional recommendations and the smallest user-owned question that would decide between them.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Plan A is always better than Plan B."},
+        {"claimId": "c2", "text": "Plan B is always better than Plan A."},
+        {"claimId": "c3", "text": "The choice depends on the team's current objective and evidence about expected impact."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "DEV-DEC-04",
+      "partition": "DEVELOPMENT",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "Apartment A costs 900 credits monthly and adds 50 minutes of commuting per day. Apartment B costs 1,150 and adds 10 minutes. Both meet the stated housing requirements. Which should I rent?",
+      "answerInstructions": "Do not choose the user's value tradeoff. Quantify the known difference and ask for the missing preference or constraint.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Apartment A is necessarily better because it is cheaper."},
+        {"claimId": "c2", "text": "Apartment B is necessarily better because it saves commute time."},
+        {"claimId": "c3", "text": "The decision trades 250 credits per month against 40 minutes of commuting per day."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    }
+  ]
+}

@@ -70,6 +70,7 @@ const service = new TaskManagerService(
       discourseDir
     ),
     discourseWorkspaceRoot,
+    designSkillRoot: path.join(process.cwd(), 'resources', 'design-skills'),
     previewRoot,
     previewLauncherPath: path.join(
       process.cwd(),

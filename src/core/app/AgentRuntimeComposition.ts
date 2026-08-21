@@ -22,6 +22,7 @@ export interface BuiltInAgentRuntimeOptions {
   browserDevBoundary: boolean;
   codexToolSettings: TaskManagerAppSettings['codexExternalTools'];
   scopedRuntimeStore?: AgentRuntimeStore;
+  designSkillRoot?: string;
 }
 
 export function createBuiltInAgentRuntimes(
@@ -35,7 +36,8 @@ export function createBuiltInAgentRuntimes(
     toolSettings: options.codexToolSettings,
     failClosedMcpDiscovery: options.browserDevBoundary,
     enforceBrowserDevBoundary: options.browserDevBoundary,
-    scopedRuntimeStore: options.scopedRuntimeStore
+    scopedRuntimeStore: options.scopedRuntimeStore,
+    designSkillRoot: options.designSkillRoot
   });
   const openCode = new OpenCodeAdapter(store, events, {
     cwd: options.cwd,

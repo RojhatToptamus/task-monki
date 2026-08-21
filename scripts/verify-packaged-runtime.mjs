@@ -15,6 +15,21 @@ const REQUIRED_APPLICATION_ENTRIES = [
   ['dist-renderer/index.html', 'renderer entry point'],
   ['package.json', 'package manifest']
 ];
+const REQUIRED_DESIGN_RESOURCE_FILES = [
+  'design-skills/accessibility-review/SKILL.md',
+  'design-skills/aesthetic-direction/SKILL.md',
+  'design-skills/design-system-inspection/SKILL.md',
+  'design-skills/discovery-questions/SKILL.md',
+  'design-skills/final-polish/SKILL.md',
+  'design-skills/generic-design-review/SKILL.md',
+  'design-skills/hierarchy-rhythm-review/SKILL.md',
+  'design-skills/interaction-states-review/SKILL.md',
+  'design-skills/prototype/SKILL.md',
+  'design-skills/variations/SKILL.md',
+  'design-skills/wireframe/SKILL.md',
+  'legal/THIRD_PARTY_NOTICES.md',
+  'legal/third-party/Claude-Design-System-MIT.txt'
+];
 const PROBE_SOURCE = [
   'process.stdout.write(JSON.stringify({',
   'electron: process.versions.electron,',
@@ -61,6 +76,7 @@ export async function verifyPackagedRuntime({
   }
   const archive = resolvePackagedArchive({ platform, arch, releaseDir });
   assertPackagedApplicationEntries(listPackage(archive));
+  await assertPackagedDesignResources(path.dirname(archive));
 
   const { stdout } = await execFileAsync(executable, ['-e', PROBE_SOURCE], {
     env: {
@@ -155,6 +171,16 @@ export function assertPackagedApplicationEntries(entries) {
   );
   if (forbidden) {
     throw new Error(`Packaged application contains development-only content: ${forbidden}`);
+  }
+}
+
+export async function assertPackagedDesignResources(resourceDirectory) {
+  for (const relativePath of REQUIRED_DESIGN_RESOURCE_FILES) {
+    const filePath = path.join(resourceDirectory, relativePath);
+    const stat = await fs.lstat(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) {
+      throw new Error(`Packaged Design resource is invalid: ${relativePath}`);
+    }
   }
 }
 

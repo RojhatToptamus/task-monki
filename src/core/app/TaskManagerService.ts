@@ -280,6 +280,7 @@ export class TaskManagerService {
       designRepositoryRoot?: string;
       designWorktreeRoot?: string;
       designCanvasFence?: DesignCanvasCutoverFence;
+      designSkillRoot?: string;
     } = {}
   ) {
     if (Boolean(options.agentRuntimeStore) !== Boolean(options.discourseStore)) {
@@ -337,7 +338,8 @@ export class TaskManagerService {
         acpExecutablePaths: options.acpExecutablePaths,
         browserDevBoundary: this.browserDevAgentBoundary,
         codexToolSettings: this.appSettings.codexExternalTools,
-        scopedRuntimeStore: options.agentRuntimeStore
+        scopedRuntimeStore: options.agentRuntimeStore,
+        designSkillRoot: options.designSkillRoot
       });
     this.codexAdapter = findCodexRuntimeAdapter(runtimeAdapters);
     this.runtimeRegistry = new AgentRuntimeRegistry(
@@ -3386,9 +3388,13 @@ export class TaskManagerService {
       .capabilities();
     if (
       capabilities.extensions['task-monki.design-instructions']?.maturity !==
-      'stable'
+        'stable' ||
+      capabilities.extensions['task-monki.design-skill-access']?.maturity !==
+        'stable'
     ) {
-      throw new Error('The configured Codex runtime cannot apply Design instructions safely.');
+      throw new Error(
+        'The configured Codex runtime cannot apply Design instructions and skills safely.'
+      );
     }
     return this.designUpdates;
   }

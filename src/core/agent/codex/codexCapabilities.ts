@@ -16,7 +16,10 @@ const unsupported = (detail?: string): AgentCapability => ({
   detail
 });
 
-export function codexCapabilities(): AgentRuntimeCapabilities {
+export function codexCapabilities(input: {
+  designSkillAccess?: { available: boolean; detail?: string };
+} = {}): AgentRuntimeCapabilities {
+  const designSkillAccess = input.designSkillAccess ?? { available: true };
   return {
     runtimeId: CODEX_RUNTIME_ID,
     executionPolicy: {
@@ -106,6 +109,11 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
       'task-monki.design-instructions': stable(
         'Maps the shared Design instruction profile to Codex developer instructions.'
       ),
+      'task-monki.design-skill-access': designSkillAccess.available
+        ? stable('Adds a validated app-owned skill root to verified Design session read access.')
+        : unsupported(
+            designSkillAccess.detail ?? 'The app-owned Design skill pack is unavailable.'
+          ),
       'codex.review.start': stable('Native review/start with inline or detached delivery.'),
       'codex.thread.goal': stable('Native persisted thread goal operations.'),
       'codex.permission.attestation': stable('Active permission profiles and workspace roots are attested by the runtime.'),

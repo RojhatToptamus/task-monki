@@ -12,7 +12,7 @@ import {
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import { spawnOwnedPortable } from '../../process/ownedProcess';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AgentProtocolRuntimeStore } from '../AgentRuntimeStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
   resolveCodexRuntime,
@@ -64,6 +64,7 @@ export interface CodexAppServerSupervisorOptions {
   requestTimeoutMs?: number;
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
+  additionalConfigOverrides?: readonly string[];
   failClosedMcpDiscovery?: boolean;
   runtimeResolver?: typeof resolveCodexRuntime;
   argvResolver?: typeof resolveCodexAppServerArgv;
@@ -71,6 +72,8 @@ export interface CodexAppServerSupervisorOptions {
   shutdownGraceTimeoutMs?: number;
   shutdownKillTimeoutMs?: number;
   closeHandlingTimeoutMs?: number;
+  /** Evaluation and diagnostics may retain selected non-sensitive notifications. */
+  notificationOptOutMethods?: readonly string[];
 }
 
 export interface CodexAppServerLaunchConfig {
@@ -110,6 +113,7 @@ export async function resolveCodexAppServerArgv(input: {
   cwd: string;
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
+  additionalConfigOverrides?: readonly string[];
   launch?: CodexAppServerLaunch;
   failClosedMcpDiscovery?: boolean;
 }): Promise<string[]> {
@@ -118,6 +122,7 @@ export async function resolveCodexAppServerArgv(input: {
     cwd: input.cwd,
     environment: input.environment,
     settings: input.toolSettings,
+    additionalConfigOverrides: input.additionalConfigOverrides,
     failClosedMcpDiscovery: input.failClosedMcpDiscovery
   });
   return codexAppServerArgvWithLaunch(
@@ -147,7 +152,7 @@ export class CodexAppServerSupervisor {
   private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProtocolRuntimeStore,
     private readonly options: CodexAppServerSupervisorOptions
   ) {}
 
@@ -227,7 +232,9 @@ export class CodexAppServerSupervisor {
     const failures: unknown[] = [];
     const starting = this.startPromise;
     const childAtShutdown = this.child;
-    this.client?.close('Codex App Server shut down.');
+    // A normal close can make the stdio server exit immediately. Publish the
+    // shutdown intent first so durable lifecycle state does not lag that exit.
+    // Safety-boundary termination deliberately uses the opposite order below.
     if (this.server && ['READY', 'RUNNING', 'DEGRADED'].includes(this.server.status)) {
       try {
         const stored = await this.store.getAgentServer(this.server.id);
@@ -239,6 +246,7 @@ export class CodexAppServerSupervisor {
         failures.push(cause);
       }
     }
+    this.client?.close('Codex App Server shut down.');
     if (childAtShutdown) {
       try {
         await this.ensureProcessTreeExit(
@@ -405,6 +413,7 @@ export class CodexAppServerSupervisor {
         cwd: this.options.cwd,
         environment: this.options.environment,
         toolSettings: this.options.toolSettings,
+        additionalConfigOverrides: this.options.additionalConfigOverrides,
         failClosedMcpDiscovery: this.options.failClosedMcpDiscovery,
         launch: runtime.compatibility.launch
       });
@@ -499,7 +508,10 @@ export class CodexAppServerSupervisor {
         capabilities: {
           experimentalApi: true,
           requestAttestation: false,
-          optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
+          optOutNotificationMethods: [
+            ...(this.options.notificationOptOutMethods ??
+              CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS)
+          ]
         }
       });
       this.assertStartupActive();
@@ -849,12 +861,27 @@ async function terminateAndConfirm(
   killTimeoutMs: number
 ): Promise<void> {
   if (!isPortableProcessTreeRunning(child)) return;
-  await terminatePortableProcessTree(child, 'SIGTERM');
-  if (await waitForPortableProcessTreeExit(child, gracefulTimeoutMs)) return;
-  await terminatePortableProcessTree(child, 'SIGKILL');
-  if (!(await waitForPortableProcessTreeExit(child, killTimeoutMs))) {
-    throw new Error(`Codex App Server process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`);
+  const signalFailures: unknown[] = [];
+  try {
+    await terminatePortableProcessTree(child, 'SIGTERM');
+  } catch (cause) {
+    signalFailures.push(cause);
   }
+  if (await waitForPortableProcessTreeExit(child, gracefulTimeoutMs)) return;
+  try {
+    await terminatePortableProcessTree(child, 'SIGKILL');
+  } catch (cause) {
+    signalFailures.push(cause);
+  }
+  if (await waitForPortableProcessTreeExit(child, killTimeoutMs)) return;
+  const exitFailure = new Error(
+    `Codex App Server process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`
+  );
+  if (signalFailures.length === 0) throw exitFailure;
+  throw new AggregateError(
+    [...signalFailures, exitFailure],
+    exitFailure.message
+  );
 }
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {

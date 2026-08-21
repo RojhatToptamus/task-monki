@@ -1,0 +1,260 @@
+{
+  "schemaVersion": "discourse-lab/hard-peer-80-oracle-corpus@v1",
+  "corpusVersion": "hard-peer-80-corpus@v1",
+  "partition": "CALIBRATION",
+  "records": [
+    {
+      "caseId": "HP80-CAL-MATH-01",
+      "domain": "ERDOS_STYLE_MATHEMATICS",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "RESOLVED",
+      "acceptedOptionIds": ["hp80-cal-math-13"],
+      "acceptedAnswerValues": ["13"],
+      "acceptedCertificateKinds": ["PROOF_SKETCH", "DIRECT"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-cal-math-p1", "expected": "ACCEPT", "required": true, "text": "The stated optimum is the true maximum cardinality." },
+        { "id": "hp80-cal-math-p2", "expected": "ACCEPT", "required": true, "text": "The proposed construction lies in [26], has no repeated elements, and has the stated size." },
+        { "id": "hp80-cal-math-p3", "expected": "ACCEPT", "required": true, "text": "The construction contains exactly three elements of S and no forbidden difference." },
+        { "id": "hp80-cal-math-p4", "expected": "ACCEPT", "required": true, "text": "The upper-bound argument rules out every larger feasible set." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-cal-math-g1", "text": "A construction with a duplicate, out-of-range value, forbidden difference, or wrong special count is invalid." },
+        { "id": "hp80-cal-math-g2", "text": "A construction alone does not prove optimality." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-cal-math-c1", "targetClaimIds": ["hp80-cal-math-p1", "hp80-cal-math-p4"], "kinds": ["LOGIC", "EVIDENCE"], "severity": "MATERIAL", "validWhen": "The draft gives a different optimum or no valid universal upper bound." },
+        { "id": "hp80-cal-math-c2", "targetClaimIds": ["hp80-cal-math-p2", "hp80-cal-math-p3"], "kinds": ["FACTUAL", "LOGIC"], "severity": "MATERIAL", "validWhen": "The draft construction has the wrong size, special count, range, uniqueness, or a difference of 4 or 7." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "FORBIDDEN_DIFFERENCE_MATCHING",
+        "universeSize": 26,
+        "forbiddenDifferences": [4, 7],
+        "specialElements": [2, 6, 10, 14, 18, 22, 26],
+        "exactSpecialCount": 3,
+        "optimum": 13,
+        "construction": [1, 3, 4, 6, 9, 12, 14, 15, 17, 20, 23, 25, 26],
+        "upperBoundMatching": [[1,5],[2,6],[3,7],[4,8],[9,13],[10,14],[11,15],[12,16],[17,21],[18,25],[19,23],[20,24],[22,26]]
+      },
+      "verification": {
+        "method": "Check the construction directly. Check that the matching edges are disjoint, cover all 26 vertices, and each has forbidden difference 4 or 7; any feasible set uses at most one endpoint per edge.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-CAL-LOGIC-01",
+      "domain": "RIGOROUS_LOGIC",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "RESOLVED",
+      "acceptedOptionIds": ["hp80-cal-logic-entailed"],
+      "acceptedAnswerValues": ["ENTAILED"],
+      "acceptedCertificateKinds": ["PROOF_SKETCH", "DIRECT"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-cal-logic-p1", "expected": "ACCEPT", "required": true, "text": "The premises are satisfiable." },
+        { "id": "hp80-cal-logic-p2", "expected": "ACCEPT", "required": true, "text": "Every satisfying assignment makes D true and F false." },
+        { "id": "hp80-cal-logic-p3", "expected": "ACCEPT", "required": true, "text": "The requested classification follows under the stated Boolean and XOR semantics." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-cal-logic-g1", "text": "XOR is Boolean inequality and iff is equality." },
+        { "id": "hp80-cal-logic-g2", "text": "An unsatisfiable premise set must not be mistaken for the observed entailment." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-cal-logic-c1", "targetClaimIds": ["hp80-cal-logic-p2", "hp80-cal-logic-p3"], "kinds": ["LOGIC"], "severity": "MATERIAL", "validWhen": "The draft classifies the query as OPEN or CONTRADICTED, or offers an assignment that violates a premise." },
+        { "id": "hp80-cal-logic-c2", "targetClaimIds": ["hp80-cal-logic-p1"], "kinds": ["FACTUAL", "EVIDENCE"], "severity": "MATERIAL", "validWhen": "The draft claims vacuous entailment or premise inconsistency." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "BOOLEAN_TRUTH_TABLE",
+        "variableOrder": ["A","B","C","D","E","F","G","H","I","J"],
+        "satisfyingAssignments": ["0101000011", "1001101100"],
+        "queryTrueAssignments": ["0101000011", "1001101100"],
+        "queryFalseAssignments": [],
+        "classification": "ENTAILED"
+      },
+      "verification": {
+        "method": "Enumerate all 2^10 assignments using the ten stated premises and evaluate D and not F. Exactly the two listed assignments satisfy the premises, and both satisfy the query.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-CAL-HIDDEN-01",
+      "domain": "HIDDEN_ASSUMPTION_REASONING",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "UNDERDETERMINED",
+      "acceptedOptionIds": ["hp80-cal-hidden-open"],
+      "acceptedAnswerValues": ["OPEN"],
+      "acceptedCertificateKinds": ["COUNTEREXAMPLE", "MISSING_INFORMATION", "PROOF_SKETCH"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-cal-hidden-p1", "expected": "REJECT", "required": true, "text": "The no-overlap claim has one determinate truth value from the supplied record." },
+        { "id": "hp80-cal-hidden-p2", "expected": "REJECT", "required": true, "text": "The packet timing determines one exact relative clock offset." },
+        { "id": "hp80-cal-hidden-p3", "expected": "ACCEPT", "required": true, "text": "At least one feasible clock world has no overlap and at least one has overlap." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-cal-hidden-g1", "text": "Each clock's absolute bound does not by itself fix the relative offset." },
+        { "id": "hp80-cal-hidden-g2", "text": "The packet timing narrows the relative offset but does not identify one value." },
+        { "id": "hp80-cal-hidden-g3", "text": "A correct OPEN conclusion is a substantive answer, not model abstention." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-cal-hidden-c1", "targetClaimIds": ["hp80-cal-hidden-p1", "hp80-cal-hidden-p3"], "kinds": ["ASSUMPTION", "LOGIC"], "severity": "MATERIAL", "validWhen": "The draft asserts overlap or non-overlap without ruling out the opposite feasible relative offset." },
+        { "id": "hp80-cal-hidden-c2", "targetClaimIds": ["hp80-cal-hidden-p2"], "kinds": ["FACTUAL", "LOGIC"], "severity": "MATERIAL", "validWhen": "The draft derives a relative-offset interval other than [2,6] under local=UTC+offset." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "CLOCK_OFFSET_WITNESSES",
+        "offsetRange": [-4,4],
+        "latencyRange": [1,5],
+        "relativeOffsetRange": [2,6],
+        "worlds": [
+          { "name": "NO_OVERLAP", "offsetA": 0, "offsetB": 2, "latency": 5, "leaseAUtc": [12,26], "leaseBUtc": [30,44], "claimTrue": true },
+          { "name": "ENDPOINT_OVERLAP", "offsetA": -2, "offsetB": 4, "latency": 1, "leaseAUtc": [14,28], "leaseBUtc": [28,42], "claimTrue": false }
+        ]
+      },
+      "verification": {
+        "method": "Use local=UTC+offset. Packet latency is 7+offsetA-offsetB, hence offsetB-offsetA is in [2,6]. Recompute both listed worlds and test the two closed intervals for intersection.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-CAL-DEBUG-01",
+      "domain": "SELF_CONTAINED_DEBUGGING",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "RESOLVED",
+      "acceptedOptionIds": ["hp80-cal-debug-both"],
+      "acceptedAnswerValues": ["CURRENT:[y]", "REQUIRED:[x,y]"],
+      "acceptedCertificateKinds": ["TRACE", "DIRECT"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-cal-debug-p1", "expected": "ACCEPT", "required": true, "text": "The current function returns only y." },
+        { "id": "hp80-cal-debug-p2", "expected": "ACCEPT", "required": true, "text": "The required S1 result contains x and y." },
+        { "id": "hp80-cal-debug-p3", "expected": "REJECT", "required": true, "text": "Changing only the deduplication key or session-scoping order completely repairs the function." },
+        { "id": "hp80-cal-debug-p4", "expected": "REJECT", "required": true, "text": "Changing only the revision comparison completely repairs the function." },
+        { "id": "hp80-cal-debug-p5", "expected": "ACCEPT", "required": true, "text": "A complete robust repair must address more than one independent defect." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-cal-debug-g1", "text": "Changing only session scoping still leaves revision 10 behind revision 9." },
+        { "id": "hp80-cal-debug-g2", "text": "Changing only revision comparison still allows S2/x to shadow S1/x." },
+        { "id": "hp80-cal-debug-g3", "text": "Number conversion is invalid because revisions may exceed the safe-integer range." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-cal-debug-c1", "targetClaimIds": ["hp80-cal-debug-p1", "hp80-cal-debug-p2"], "kinds": ["FACTUAL"], "severity": "MATERIAL", "validWhen": "The draft gives a different current or required trace result." },
+        { "id": "hp80-cal-debug-c2", "targetClaimIds": ["hp80-cal-debug-p3", "hp80-cal-debug-p5"], "kinds": ["LOGIC", "ASSUMPTION"], "severity": "MATERIAL", "validWhen": "The draft misses session scoping or proposes only a global item-key repair incompatible with doneFor's requested-session boundary." },
+        { "id": "hp80-cal-debug-c3", "targetClaimIds": ["hp80-cal-debug-p4", "hp80-cal-debug-p5"], "kinds": ["LOGIC", "FACTUAL"], "severity": "MATERIAL", "validWhen": "The draft misses exact numeric ordering or uses Number." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "SCOPED_REVISION_TRACE",
+        "requestedSession": "S1",
+        "updates": [
+          { "session": "S1", "item": "x", "revision": "9", "state": "open" },
+          { "session": "S2", "item": "x", "revision": "99", "state": "done" },
+          { "session": "S1", "item": "x", "revision": "10", "state": "done" },
+          { "session": "S1", "item": "y", "revision": "1", "state": "done" }
+        ],
+        "currentOutput": ["y"],
+        "requiredOutput": ["x","y"],
+        "repair": {
+          "scopeUpdatesToRequestedSessionBeforeLatestSelection": true,
+          "compareRevisionsAsExactNonnegativeIntegers": true
+        }
+      },
+      "verification": {
+        "method": "Execute the supplied function for currentOutput. Execute a reference reducer that first filters session and orders revisions with BigInt for requiredOutput; add a revision above 2^53 regression to reject Number-based repairs.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-CAL-TECH-01",
+      "domain": "TASK_MONKI_TECHNICAL_DECISION",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "RESOLVED",
+      "acceptedOptionIds": ["hp80-cal-tech-b"],
+      "acceptedAnswerValues": ["B"],
+      "acceptedCertificateKinds": ["TRADEOFF", "TRACE", "PROOF_SKETCH"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-cal-tech-p1", "expected": "ACCEPT", "required": true, "text": "The chosen protocol prevents duplicate remote turns across a lost reply and crash." },
+        { "id": "hp80-cal-tech-p2", "expected": "ACCEPT", "required": true, "text": "The chosen protocol can recover the remote ID without inventing a new key." },
+        { "id": "hp80-cal-tech-p3", "expected": "ACCEPT", "required": true, "text": "Workflow advancement remains controlled by separate local verification." },
+        { "id": "hp80-cal-tech-p4", "expected": "ACCEPT", "required": true, "text": "The stable key is durable before the first provider side effect." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-cal-tech-g1", "text": "A key first persisted after create leaves an unresolvable crash window." },
+        { "id": "hp80-cal-tech-g2", "text": "A prompt hash is not a unique durable work-item identity and provider completion is not local evidence." },
+        { "id": "hp80-cal-tech-g3", "text": "A local database transaction cannot atomically include the provider side effect." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-cal-tech-c1", "targetClaimIds": ["hp80-cal-tech-p1", "hp80-cal-tech-p2", "hp80-cal-tech-p4"], "kinds": ["LOGIC", "ASSUMPTION"], "severity": "MATERIAL", "validWhen": "The draft chooses A, C, or an unstable/new key after an ambiguous create." },
+        { "id": "hp80-cal-tech-c2", "targetClaimIds": ["hp80-cal-tech-p3"], "kinds": ["EVIDENCE", "ASSUMPTION"], "severity": "MATERIAL", "validWhen": "The draft lets provider completion advance Task Monki workflow." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "IDEMPOTENT_CREATE_CRASH_TABLE",
+        "durableKeyBeforeCall": true,
+        "sameKeyOnRecovery": true,
+        "providerIdempotentByKey": true,
+        "providerLookupByKey": true,
+        "workflowRequiresLocalVerification": true,
+        "crashScenarios": [
+          {
+            "providerCreateAppliedBeforeCrash": false,
+            "createReplyReceivedBeforeCrash": false,
+            "remoteIdPersistedBeforeCrash": false,
+            "recoveryContactsProvider": true,
+            "recoveryUsesPersistedKey": true,
+            "atMostOneRemoteTurn": true,
+            "remoteIdEventuallyRecoverable": true
+          },
+          {
+            "providerCreateAppliedBeforeCrash": true,
+            "createReplyReceivedBeforeCrash": false,
+            "remoteIdPersistedBeforeCrash": false,
+            "recoveryContactsProvider": true,
+            "recoveryUsesPersistedKey": true,
+            "atMostOneRemoteTurn": true,
+            "remoteIdEventuallyRecoverable": true
+          },
+          {
+            "providerCreateAppliedBeforeCrash": true,
+            "createReplyReceivedBeforeCrash": true,
+            "remoteIdPersistedBeforeCrash": false,
+            "recoveryContactsProvider": true,
+            "recoveryUsesPersistedKey": true,
+            "atMostOneRemoteTurn": true,
+            "remoteIdEventuallyRecoverable": true
+          },
+          {
+            "providerCreateAppliedBeforeCrash": true,
+            "createReplyReceivedBeforeCrash": true,
+            "remoteIdPersistedBeforeCrash": true,
+            "recoveryContactsProvider": false,
+            "recoveryUsesPersistedKey": true,
+            "atMostOneRemoteTurn": true,
+            "remoteIdEventuallyRecoverable": true
+          }
+        ]
+      },
+      "verification": {
+        "method": "Enumerate each crash cut. Protocol B either creates once or reuses the same existing turn and can bind its ID; A and C duplicate after an ambiguous reply, while D violates unique identity and evidence authority.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    }
+  ]
+}

@@ -162,8 +162,12 @@ import {
 } from '../AgentInteractionPolicy';
 import {
   AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
-  DESIGN_AGENT_DEVELOPER_INSTRUCTIONS
+  buildDesignAgentDeveloperInstructions
 } from '../../../shared/promptTemplates';
+import {
+  loadDesignSkillPack,
+  type DesignSkillPack
+} from '../../design/DesignSkillPack';
 import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
@@ -241,6 +245,7 @@ export interface CodexAppServerAdapterOptions
   interruptCompletionTimeoutMs?: number;
   enforceBrowserDevBoundary?: boolean;
   scopedRuntimeStore?: AgentRuntimeStore;
+  designSkillRoot?: string;
 }
 
 interface UnmaterializedThreadAttestation {
@@ -271,7 +276,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         checks: { initialization: 'NOT_STARTED' }
       }
     ),
-    capabilities: codexCapabilities(),
+    capabilities: codexCapabilities({
+      designSkillAccess: {
+        available: false,
+        detail: 'The app-owned Design skill pack has not been validated yet.'
+      }
+    }),
   };
   private restartAttempt = 0;
   private restartTimer?: NodeJS.Timeout;
@@ -303,6 +313,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   private inboundMaterializationRecoveryFailure?: string;
   private outputPersistenceFence?: Promise<void>;
   private readonly scopedRuntimeStore?: AgentRuntimeStore;
+  private readonly designSkillRoot?: string;
+  private designSkillPack?: DesignSkillPack;
+  private designSkillFailure?: string;
+  private designSkillLoadAttempted = false;
   private readonly scopedTurnListeners = new Set<(event: AgentScopedTurnEvent) => void>();
   private readonly scopedRunByProviderTurn = new Map<string, string>();
   private readonly scopedRunByProviderThread = new Map<string, string>();
@@ -318,6 +332,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       interruptCompletionTimeoutMs,
       enforceBrowserDevBoundary,
       scopedRuntimeStore,
+      designSkillRoot,
       appVersion,
       ...supervisorOptions
     } = options;
@@ -326,6 +341,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     this.interruptCompletionTimeoutMs = interruptCompletionTimeoutMs ?? 15_000;
     this.enforceBrowserDevBoundary = enforceBrowserDevBoundary === true;
     this.scopedRuntimeStore = scopedRuntimeStore;
+    this.designSkillRoot = designSkillRoot;
     this.sensitiveValues = codexSensitiveEnvironmentValues(
       options.environment ?? process.env
     );
@@ -435,6 +451,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       return;
     }
     this.shuttingDown = false;
+    await this.prepareDesignSkillPack();
     this.initialized = true;
     await this.recoverPersistedRuntimeLosses();
     await this.ensureClient();
@@ -453,14 +470,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       this.preflightState = {
         runtime: CODEX_RUNTIME_DESCRIPTOR,
         readiness: codexFailureReadiness(error),
-        capabilities: codexCapabilities(),
+        capabilities: this.runtimeCapabilities(),
       };
     }
     return structuredClone(this.preflightState);
   }
 
   capabilities(): Promise<AgentRuntimeCapabilities> {
-    return Promise.resolve(codexCapabilities());
+    return Promise.resolve(this.runtimeCapabilities());
   }
 
   async listModels(): Promise<AgentModel[]> {
@@ -1119,7 +1136,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         summary: 'auto',
         personality: null,
         outputSchema: null,
-        ...codexInteractiveCollaborationMode(input, settings)
+        ...(await this.codexInteractiveCollaborationModeForSession(
+          session,
+          input,
+          settings
+        ))
       };
       response = await client.requestMutation('turn/start', turnStartParams);
     } catch (error) {
@@ -1960,7 +1981,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           'Codex App Server is stopped and ready to initialize.',
           { checks: { initialization: 'NOT_STARTED' } }
         ),
-        capabilities: codexCapabilities(),
+        capabilities: this.runtimeCapabilities(),
       };
     }
   }
@@ -2010,7 +2031,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           }
         }
       ),
-      capabilities: codexCapabilities(),
+      capabilities: this.runtimeCapabilities(),
     };
     this.emitProviderUpdate();
     await this.initialize();
@@ -2488,7 +2509,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     this.preflightState = {
       runtime: CODEX_RUNTIME_DESCRIPTOR,
       readiness,
-      capabilities: codexCapabilities(),
+      capabilities: this.runtimeCapabilities(),
       runtimeVersion: this.supervisor.currentServer?.runtimeVersion,
       accountLabel
     };
@@ -5176,11 +5197,84 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     return session;
   }
 
+  private async prepareDesignSkillPack(): Promise<void> {
+    if (this.designSkillLoadAttempted) return;
+    this.designSkillLoadAttempted = true;
+    if (!this.designSkillRoot) {
+      this.designSkillFailure = 'The Task Monki host did not configure a Design skill root.';
+      return;
+    }
+    try {
+      this.designSkillPack = await loadDesignSkillPack(this.designSkillRoot);
+      this.designSkillFailure = undefined;
+    } catch (error) {
+      this.designSkillPack = undefined;
+      this.designSkillFailure = errorMessage(error);
+    }
+  }
+
+  private runtimeCapabilities(): AgentRuntimeCapabilities {
+    return codexCapabilities({
+      designSkillAccess: this.designSkillPack
+        ? { available: true }
+        : {
+            available: false,
+            detail:
+              this.designSkillFailure ??
+              'The app-owned Design skill pack has not been validated yet.'
+          }
+    });
+  }
+
+  private requireDesignSkillPack(): DesignSkillPack {
+    if (!this.designSkillPack) {
+      throw new Error(
+        `Task Monki cannot start Design work because its skill pack is unavailable. ${
+          this.designSkillFailure ?? 'The skill pack has not been validated.'
+        }`
+      );
+    }
+    return this.designSkillPack;
+  }
+
+  private async codexInteractiveCollaborationModeForSession(
+    session: AgentSessionRecord,
+    input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>,
+    settings: AgentExecutionSettings
+  ): Promise<{ collaborationMode: CollaborationMode } | undefined> {
+    if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') {
+      return codexInteractiveCollaborationMode(input, settings);
+    }
+    const task = await this.store.getTask(session.taskId);
+    if (task?.kind !== 'DESIGN' || session.role !== 'PRIMARY') {
+      throw new Error(
+        'The DESIGN instruction profile is valid only for a primary Design session.'
+      );
+    }
+    const pack = this.requireDesignSkillPack();
+    return codexInteractiveCollaborationMode(
+      input,
+      settings,
+      buildDesignAgentDeveloperInstructions(pack.catalog)
+    );
+  }
+
   private async permissionProfileConfigForSession(
     session: AgentSessionRecord,
     settings: AgentExecutionSettings,
     attachmentPaths: readonly string[] = []
   ) {
+    const task = await this.store.getTask(session.taskId);
+    const designPack =
+      task?.kind === 'DESIGN' && session.role === 'PRIMARY'
+        ? this.requireDesignSkillPack()
+        : undefined;
+    if (designPack && settings.sandbox === 'DANGER_FULL_ACCESS') {
+      throw new Error('Design sessions require a restricted writable worktree.');
+    }
+    if (designPack && settings.networkAccess === true) {
+      throw new Error('Design sessions cannot enable provider network access.');
+    }
     const permissionProfile = codexPermissionProfileConfig({
       sessionId: session.id,
       settings,
@@ -5218,7 +5312,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         settings,
         worktreePath: session.worktreePath,
         attachmentPaths,
-        additionalReadOnlyPaths: [metadata.gitCommonDir]
+        additionalReadOnlyPaths: [
+          metadata.gitCommonDir,
+          ...(designPack ? [designPack.rootPath] : [])
+        ]
       }),
       ...codexGitSubprocessConfig({
         worktreePath: session.worktreePath,
@@ -5386,11 +5483,12 @@ function redactOptionalProviderText(
 
 function codexInteractiveCollaborationMode(
   input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>,
-  settings: AgentExecutionSettings
+  settings: AgentExecutionSettings,
+  designDeveloperInstructions?: string
 ): { collaborationMode: CollaborationMode } | undefined {
   const developerInstructions =
     input.instructionProfile === 'DESIGN'
-      ? DESIGN_AGENT_DEVELOPER_INSTRUCTIONS
+      ? designDeveloperInstructions
       : isImplementationRunMode(input.mode)
         ? CODEX_INTERACTIVE_IMPLEMENTATION_INSTRUCTIONS
         : undefined;

@@ -119,6 +119,7 @@ import {
   resolveOwnedProcessLauncherPath
 } from '../core/process/ownedProcess';
 import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
+import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
 import { createElectronPreviewUrlHost } from './previewOpenHost';
 import {
   createRendererTrustPolicy,
@@ -1039,6 +1040,11 @@ void app.whenReady().then(async () => {
       previewLauncherExecPath: process.execPath,
       previewLauncherEnv: { ELECTRON_RUN_AS_NODE: '1' },
       managedDesignStaticServerPath: resolveManagedDesignStaticServerPath({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      }),
+      designSkillRoot: resolveDesignSkillPackRoot({
         isPackaged: app.isPackaged,
         resourcesPath: process.resourcesPath,
         appPath: app.getAppPath()

@@ -3,6 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DesignDetailSnapshot, PreviewGenerationRecord } from '../../shared/contracts';
+import { codexCapabilities } from '../agent/codex/codexCapabilities';
 import {
   createTaskMonkiScenario,
   type TaskMonkiScenario
@@ -22,6 +23,28 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService Design vertical slice', () => {
+  it('fails before Design creation when scoped skill access is unavailable', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-skills-unavailable',
+      previewEnabled: true,
+      designMode: true
+    });
+    scenarios.push(scenario);
+    vi.spyOn(scenario.agent, 'capabilities').mockResolvedValue(
+      codexCapabilities({
+        designSkillAccess: { available: false, detail: 'Skill pack is invalid.' }
+      })
+    );
+
+    await expect(
+      scenario.service.createBlankDesign({
+        brief: 'Create a compact status page.',
+        creationToken: 'design-skills-unavailable'
+      })
+    ).rejects.toThrow('cannot apply Design instructions and skills safely');
+    await expect(scenario.service.listDesigns()).resolves.toEqual([]);
+  });
+
   it('creates, refines, keeps no-change history compact, and preserves the last ready preview on failure', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-vertical',

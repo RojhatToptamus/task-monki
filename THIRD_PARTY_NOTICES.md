@@ -17,6 +17,18 @@ OpenAI Codex
 
 Copyright 2025 OpenAI
 
+## Claude Design System prompt and skills
+
+Task Monki's Design instructions and Design skill pack adapt substantial
+parts of the open-source Claude Design System prompt and skills. The source
+material is available under the MIT License. The full license is provided at
+`THIRD_PARTY_LICENSES/Claude-Design-System-MIT.txt` in the source repository
+and at `legal/third-party/Claude-Design-System-MIT.txt` in desktop packages.
+
+Claude Design System prompt and skills
+
+Copyright 2026 Trystan Sarrade
+
 ## Electron and Chromium
 
 Task Monki desktop builds include Electron and Chromium components. Packaged

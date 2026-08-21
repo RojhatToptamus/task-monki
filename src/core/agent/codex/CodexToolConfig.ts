@@ -66,7 +66,7 @@ export async function resolveCodexExternalToolConfigOverrides(input: {
   cwd: string;
   environment?: NodeJS.ProcessEnv;
   settings?: CodexExternalToolSettings;
-  mcpServerConfigOverrides?: readonly string[];
+  additionalConfigOverrides?: readonly string[];
   failClosedMcpDiscovery?: boolean;
 }): Promise<string[]> {
   const normalized = normalizeCodexExternalToolSettings(input.settings);
@@ -85,8 +85,8 @@ export async function resolveCodexExternalToolConfigOverrides(input: {
     return overrides;
   }
 
-  if (input.mcpServerConfigOverrides) {
-    return [...overrides, ...input.mcpServerConfigOverrides];
+  if (input.additionalConfigOverrides) {
+    return [...overrides, ...input.additionalConfigOverrides];
   }
 
   try {

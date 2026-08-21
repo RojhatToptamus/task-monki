@@ -1,0 +1,289 @@
+{
+  "schemaVersion": "discourse-lab/h1c-participant-corpus@v1",
+  "corpusVersion": "h1c-assay-corpus@v1",
+  "partition": "DEVELOPMENT",
+  "confirmationStatus": "ABSENT_CLOSED",
+  "records": [
+    {
+      "caseId": "H1C-D1",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1C-D1",
+        "question": "A trial randomly assigned 600 invitees, before any contact, to onboarding message M or a neutral message. Day-30 satisfaction was a prespecified score defined for every invitee, including people who did not complete onboarding. Completion was higher in the M arm. Investigators nevertheless recorded satisfaction only for completers. Among those recorded completers, the mean satisfaction score was higher in the M arm. No outcomes for noncompleters and no missing-outcome or principal-stratum assumptions are supplied. Does the supplied trial record establish that assignment to M raises mean day-30 satisfaction in the full randomized invitee population? All information needed to judge evidential support is supplied. Do not ask the user for more facts or preferences; make the evidence judgment from this record. Select the best option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "Assignment occurred before contact and was random. Completion differed by assignment. Day-30 satisfaction was defined for all invitees but observed only for completers. The observed completer mean was higher under M. No noncompleter outcomes or identifying assumptions are supplied."
+          }
+        ],
+        "propositions": [
+          {
+            "id": "h1c-d1-p1",
+            "topicId": "h1c-d1-topic",
+            "text": "The supplied record establishes that assignment to message M raises mean day-30 satisfaction in the full randomized invitee population."
+          },
+          {
+            "id": "h1c-d1-p2",
+            "topicId": "h1c-d1-topic",
+            "text": "Invitees were randomly assigned before contact."
+          },
+          {
+            "id": "h1c-d1-p3",
+            "topicId": "h1c-d1-topic",
+            "text": "The satisfaction comparison conditions on completion, which occurred after assignment and differed by assignment."
+          },
+          {
+            "id": "h1c-d1-p4",
+            "topicId": "h1c-d1-topic",
+            "text": "The record supports the descriptive statement that the observed completers assigned M had a higher mean score than the observed completers assigned neutral."
+          }
+        ],
+        "options": [
+          {
+            "id": "h1c-d1-established",
+            "text": "Yes—the causal conclusion is established"
+          },
+          {
+            "id": "h1c-d1-not-established",
+            "text": "No—the causal conclusion is not established"
+          }
+        ],
+        "topics": [
+          {
+            "id": "h1c-d1-topic",
+            "label": "causal evidence and selection"
+          }
+        ]
+      },
+      "validCritique": {
+        "artifactId": "h1c-d1-review-a",
+        "artifactType": "CRITIQUE",
+        "issueId": "h1c-d1-issue-a",
+        "targetPropositionId": "h1c-d1-p1",
+        "issueKind": "LOGIC",
+        "severity": "MATERIAL",
+        "containsNewFacts": false,
+        "statement": "Audit whether the draft carries randomization through a comparison formed only after assignment. Check whether conditioning on completion—a post-assignment event whose observed rate differs by randomized arm—preserves the randomized populations, while keeping the completer-only descriptive difference separate from the full-population mean claim. If the draft already handles this, report no issue."
+      },
+      "placeboCritique": {
+        "artifactId": "h1c-d1-review-b",
+        "artifactType": "CRITIQUE",
+        "issueId": "h1c-d1-issue-b",
+        "targetPropositionId": "h1c-d1-p1",
+        "issueKind": "LOGIC",
+        "severity": "MATERIAL",
+        "containsNewFacts": false,
+        "statement": "Audit whether the full-population conclusion fails because individual satisfaction-score ranges may overlap. Check whether overlapping individual outcomes, by itself, prevents a comparison of population means or determines whether the randomized-population mean claim is established. If the draft already handles this, report no issue."
+      }
+    },
+    {
+      "caseId": "H1C-D2",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1C-D2",
+        "question": "A safety-gate controller has no latch or history-dependent holding state. At each instant the gate is closed if and only if either the hazard sensor is in ALARM or a manual LOCKOUT is active; otherwise it is open. There are no other state variables, latch behavior, or path dependence. The sensor entered ALARM at 10:00. LOCKOUT was activated at 10:01. At 10:02 the gate was closed and both conditions were active. The sensor cleared at 10:03, LOCKOUT remained active, and the gate was still closed at 10:04. Was LOCKOUT necessary for the gate to be closed at 10:02? Here ‘necessary’ means that, holding every other recorded condition at 10:02 fixed, removing only LOCKOUT would make the gate not closed. All information needed is supplied. Do not ask the user for more facts or preferences. Select the best option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "The controller is exhaustive and memoryless: at each instant the gate is closed if and only if ALARM or LOCKOUT is active, and otherwise open. Both were active at 10:02. ALARM was clear and LOCKOUT active at 10:04. Necessity is the stated single-change counterfactual at the specified time."
+          }
+        ],
+        "propositions": [
+          {
+            "id": "h1c-d2-p1",
+            "topicId": "h1c-d2-topic",
+            "text": "Manual lockout was necessary for the gate to be closed at 10:02."
+          },
+          {
+            "id": "h1c-d2-p2",
+            "topicId": "h1c-d2-topic",
+            "text": "The hazard-sensor ALARM condition was active at 10:02."
+          },
+          {
+            "id": "h1c-d2-p3",
+            "topicId": "h1c-d2-topic",
+            "text": "Manual lockout was active at 10:02."
+          },
+          {
+            "id": "h1c-d2-p4",
+            "topicId": "h1c-d2-topic",
+            "text": "Manual lockout was necessary for the gate to be closed at 10:04, after the ALARM condition had cleared."
+          }
+        ],
+        "options": [
+          {
+            "id": "h1c-d2-yes",
+            "text": "Yes, necessary at 10:02"
+          },
+          {
+            "id": "h1c-d2-no",
+            "text": "No, not necessary at 10:02"
+          }
+        ],
+        "topics": [
+          {
+            "id": "h1c-d2-topic",
+            "label": "time-indexed counterfactual necessity"
+          }
+        ]
+      },
+      "validCritique": {
+        "artifactId": "h1c-d2-review-a",
+        "artifactType": "CRITIQUE",
+        "issueId": "h1c-d2-issue-a",
+        "targetPropositionId": "h1c-d2-p1",
+        "issueKind": "LOGIC",
+        "severity": "MATERIAL",
+        "containsNewFacts": false,
+        "statement": "Audit whether the draft uses the condition that explains the gate after ALARM cleared to answer necessity at an earlier instant. Apply the supplied counterfactual definition at 10:02 while holding ALARM at its actual 10:02 value, before relying on the separate 10:04 observation. If the draft already does this, report no issue."
+      },
+      "placeboCritique": {
+        "artifactId": "h1c-d2-review-b",
+        "artifactType": "CRITIQUE",
+        "issueId": "h1c-d2-issue-b",
+        "targetPropositionId": "h1c-d2-p1",
+        "issueKind": "LOGIC",
+        "severity": "MATERIAL",
+        "containsNewFacts": false,
+        "statement": "Audit whether LOCKOUT's necessity at 10:02 is determined by whether LOCKOUT was activated before or after ALARM. Check whether temporal activation order, by itself, controls necessity under the supplied instantaneous memoryless rule. If the draft already handles this, report no issue."
+      }
+    },
+    {
+      "caseId": "H1C-E1",
+      "stratum": "NEW_EVIDENCE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1C-E1",
+        "question": "An evaluation policy attaches the governing rubric to each EVALUATION_START audit event. An evaluation that continues after a rubric amendment keeps its earlier rubric when the continuation event is coded RESUME. A continuation coded NEW_EVALUATION creates a new EVALUATION_START and uses the rubric then in effect. The dashboard word ‘reopened’ is only a display label and does not reveal which audit action occurred. Evaluation Q began under Rubric A, was paused, and the dashboard later showed ‘reopened’ after Rubric B became effective. The audit action code for that reopening is not supplied. Which rubric governs the final evaluation? If the action code is absent, choose Cannot determine, assess the target as UNRESOLVED, and make exactly one blocking USER information request asking whether the post-amendment audit action was RESUME or NEW_EVALUATION. If a provenance-labeled supplemental packet supplies the code, answer without an information request. Do not infer the code from ‘reopened.’ Select the best option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "Rubric selection is controlled by the audit action: RESUME retains the earlier rubric; NEW_EVALUATION starts under the rubric then effective. Q began under A; B became effective before the dashboard showed reopened. The dashboard label is non-authoritative, and the audit action is absent."
+          }
+        ],
+        "propositions": [
+          {
+            "id": "h1c-e1-p1",
+            "topicId": "h1c-e1-topic",
+            "text": "Rubric B governs the post-amendment open evaluation."
+          },
+          {
+            "id": "h1c-e1-p2",
+            "topicId": "h1c-e1-topic",
+            "text": "The original evaluation began under Rubric A."
+          },
+          {
+            "id": "h1c-e1-p3",
+            "topicId": "h1c-e1-topic",
+            "text": "If the post-amendment action was RESUME, Rubric A governs."
+          },
+          {
+            "id": "h1c-e1-p4",
+            "topicId": "h1c-e1-topic",
+            "text": "If the post-amendment action was NEW_EVALUATION, Rubric B governs."
+          }
+        ],
+        "options": [
+          {
+            "id": "h1c-e1-a",
+            "text": "Rubric A"
+          },
+          {
+            "id": "h1c-e1-b",
+            "text": "Rubric B"
+          },
+          {
+            "id": "h1c-e1-undetermined",
+            "text": "Cannot determine from the supplied record"
+          }
+        ],
+        "topics": [
+          {
+            "id": "h1c-e1-topic",
+            "label": "authoritative evaluation action"
+          }
+        ]
+      },
+      "decisiveEvidence": {
+        "artifactId": "h1c-e1-evidence-artifact",
+        "artifactType": "FACTUAL_EVIDENCE",
+        "evidenceId": "h1c-e1-evidence-1",
+        "sourceLabel": "sealed evaluation audit entry Q-reopen",
+        "containsNewFacts": true,
+        "statement": "The audit entry for Q’s post-amendment reopening records actionType: NEW_EVALUATION."
+      }
+    },
+    {
+      "caseId": "H1C-E2",
+      "stratum": "NEW_EVIDENCE",
+      "participantCase": {
+        "schemaVersion": "discourse-protocol-lab/participant-case-v1",
+        "caseId": "H1C-E2",
+        "question": "A trial randomly assigned participants to coaching or neutral check-ins. Its prespecified primary comparison was the between-group difference in change on a symptom score. The public abstract says the coaching arm improved from its own baseline and says the primary outcome was collected in both arms, but it omits both the neutral arm’s change and the prespecified between-group result. Based on that prespecified result, did coaching show a larger symptom reduction than neutral check-ins? If the between-group result is absent, choose Cannot determine, assess the target as UNRESOLVED, and identify exactly one blocking DOCUMENT information request for the registered between-group contrast. Do not request it from the user, who is not stated to possess the registered result. If a provenance-labeled supplemental packet supplies the contrast, answer without an information request. Do not treat within-arm improvement as that contrast. Select the best option and assess every proposition.",
+        "evidence": [
+          {
+            "id": "PROMPT",
+            "text": "Assignment was random. The prespecified primary comparison was between groups. The abstract reports coaching’s within-arm improvement but omits the neutral change and between-group contrast, although outcomes were collected in both arms."
+          }
+        ],
+        "propositions": [
+          {
+            "id": "h1c-e2-p1",
+            "topicId": "h1c-e2-topic",
+            "text": "The registered prespecified coaching-versus-neutral change contrast favored coaching."
+          },
+          {
+            "id": "h1c-e2-p2",
+            "topicId": "h1c-e2-topic",
+            "text": "Participants were randomly assigned."
+          },
+          {
+            "id": "h1c-e2-p3",
+            "topicId": "h1c-e2-topic",
+            "text": "The coaching arm improved relative to its own baseline."
+          },
+          {
+            "id": "h1c-e2-p4",
+            "topicId": "h1c-e2-topic",
+            "text": "A within-arm improvement alone does not determine the prespecified between-group result."
+          },
+          {
+            "id": "h1c-e2-p5",
+            "topicId": "h1c-e2-topic",
+            "text": "Both arm means can improve from baseline even when the between-group result does not favor coaching."
+          }
+        ],
+        "options": [
+          {
+            "id": "h1c-e2-larger",
+            "text": "The prespecified comparison showed a larger reduction under coaching"
+          },
+          {
+            "id": "h1c-e2-not-larger",
+            "text": "The prespecified comparison did not show a larger reduction under coaching"
+          },
+          {
+            "id": "h1c-e2-undetermined",
+            "text": "Cannot determine from the supplied record"
+          }
+        ],
+        "topics": [
+          {
+            "id": "h1c-e2-topic",
+            "label": "prespecified between-group comparison"
+          }
+        ]
+      },
+      "decisiveEvidence": {
+        "artifactId": "h1c-e2-evidence-artifact",
+        "artifactType": "FACTUAL_EVIDENCE",
+        "evidenceId": "h1c-e2-evidence-1",
+        "sourceLabel": "sealed registered primary-outcome table",
+        "containsNewFacts": true,
+        "statement": "prespecified_between_group_direction=DOES_NOT_FAVOR_COACHING"
+      }
+    }
+  ]
+}

@@ -1,0 +1,329 @@
+{
+  "schemaVersion": "discourse-lab/h1c-oracle-corpus@v1",
+  "corpusVersion": "h1c-assay-corpus@v1",
+  "partition": "DEVELOPMENT",
+  "records": [
+    {
+      "caseId": "H1C-D1",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "targetPropositionIds": ["h1c-d1-p1"],
+      "guardPropositionIds": ["h1c-d1-p2", "h1c-d1-p3", "h1c-d1-p4"],
+      "baseProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d1-not-established"],
+        "claims": [
+          {
+            "propositionId": "h1c-d1-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "CONTRADICTS"}]]
+          },
+          {
+            "propositionId": "h1c-d1-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d1-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d1-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d1-not-established"],
+        "claims": [
+          {
+            "propositionId": "h1c-d1-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "CONTRADICTS"}]]
+          },
+          {
+            "propositionId": "h1c-d1-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d1-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d1-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "issueOracles": [
+        {
+          "issueId": "h1c-d1-issue-a",
+          "artifactId": "h1c-d1-review-a",
+          "targetPropositionId": "h1c-d1-p1",
+          "truth": "VALID_IF_TARGET_DRAFT_WRONG"
+        },
+        {
+          "issueId": "h1c-d1-issue-b",
+          "artifactId": "h1c-d1-review-b",
+          "targetPropositionId": "h1c-d1-p1",
+          "truth": "FALSE_OR_IRRELEVANT"
+        }
+      ],
+      "oracleRationale": "Random assignment protects the initially assigned groups, not the selected post-assignment subset of completers when completion differs by assignment. The record establishes the completer-only description but not the all-invitee causal estimand.",
+      "ambiguityAudit": "The question asks whether the supplied record establishes the conclusion, not whether message M truly has an effect. The negative option therefore does not assert no effect."
+    },
+    {
+      "caseId": "H1C-D2",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "targetPropositionIds": ["h1c-d2-p1"],
+      "guardPropositionIds": ["h1c-d2-p2", "h1c-d2-p3", "h1c-d2-p4"],
+      "baseProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d2-no"],
+        "claims": [
+          {
+            "propositionId": "h1c-d2-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "CONTRADICTS"}]]
+          },
+          {
+            "propositionId": "h1c-d2-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d2-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d2-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d2-no"],
+        "claims": [
+          {
+            "propositionId": "h1c-d2-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "CONTRADICTS"}]]
+          },
+          {
+            "propositionId": "h1c-d2-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d2-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-d2-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "issueOracles": [
+        {
+          "issueId": "h1c-d2-issue-a",
+          "artifactId": "h1c-d2-review-a",
+          "targetPropositionId": "h1c-d2-p1",
+          "truth": "VALID_IF_TARGET_DRAFT_WRONG"
+        },
+        {
+          "issueId": "h1c-d2-issue-b",
+          "artifactId": "h1c-d2-review-b",
+          "targetPropositionId": "h1c-d2-p1",
+          "truth": "FALSE_OR_IRRELEVANT"
+        }
+      ],
+      "oracleRationale": "At 10:02 ALARM alone closes the memoryless gate, so removing lockout while holding ALARM fixed does not open it. At 10:04 lockout is the only active sufficient condition and is necessary then.",
+      "ambiguityAudit": "The prompt explicitly defines necessity as a time-indexed single-change counterfactual and rules out a latch, avoiding ordinary-language causal or historical-trigger ambiguity."
+    },
+    {
+      "caseId": "H1C-E1",
+      "stratum": "NEW_EVIDENCE",
+      "targetPropositionIds": ["h1c-e1-p1"],
+      "guardPropositionIds": ["h1c-e1-p2", "h1c-e1-p3", "h1c-e1-p4"],
+      "baseProfile": {
+        "completionDisposition": "NEEDS_USER_ACTION",
+        "epistemicState": "UNDERDETERMINED",
+        "selectedOptionIds": ["h1c-e1-undetermined"],
+        "claims": [
+          {
+            "propositionId": "h1c-e1-p1",
+            "assessment": "UNRESOLVED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "LIMITS"}]]
+          },
+          {
+            "propositionId": "h1c-e1-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e1-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e1-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": {
+          "kind": "MISSING_FACT",
+          "source": "USER",
+          "blocking": true,
+          "propositionIds": ["h1c-e1-p1"],
+          "requiresUserAction": true
+        },
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-e1-b"],
+        "claims": [
+          {
+            "propositionId": "h1c-e1-p1",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[
+              {"evidenceId": "PROMPT", "relation": "LIMITS"},
+              {"evidenceId": "h1c-e1-evidence-1", "relation": "SUPPORTS"}
+            ]]
+          },
+          {
+            "propositionId": "h1c-e1-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e1-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e1-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": "h1c-e1-evidence-1"
+      },
+      "issueOracles": [],
+      "oracleRationale": "The public dashboard label does not determine the authoritative action code. The evidence packet supplies the only missing selector, NEW_EVALUATION, which starts under Rubric B.",
+      "ambiguityAudit": "The public task explicitly requires one USER request before the packet and none after it; this makes user escalation observable rather than a hidden scorer expectation."
+    },
+    {
+      "caseId": "H1C-E2",
+      "stratum": "NEW_EVIDENCE",
+      "targetPropositionIds": ["h1c-e2-p1"],
+      "guardPropositionIds": ["h1c-e2-p2", "h1c-e2-p3", "h1c-e2-p4", "h1c-e2-p5"],
+      "baseProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "UNDERDETERMINED",
+        "selectedOptionIds": ["h1c-e2-undetermined"],
+        "claims": [
+          {
+            "propositionId": "h1c-e2-p1",
+            "assessment": "UNRESOLVED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "LIMITS"}]]
+          },
+          {
+            "propositionId": "h1c-e2-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e2-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e2-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e2-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": {
+          "kind": "MISSING_FACT",
+          "source": "DOCUMENT",
+          "blocking": true,
+          "propositionIds": ["h1c-e2-p1"],
+          "requiresUserAction": false
+        },
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-e2-not-larger"],
+        "claims": [
+          {
+            "propositionId": "h1c-e2-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[
+              {"evidenceId": "PROMPT", "relation": "LIMITS"},
+              {"evidenceId": "h1c-e2-evidence-1", "relation": "CONTRADICTS"}
+            ]]
+          },
+          {
+            "propositionId": "h1c-e2-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e2-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e2-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          },
+          {
+            "propositionId": "h1c-e2-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{"evidenceId": "PROMPT", "relation": "SUPPORTS"}]]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": "h1c-e2-evidence-1"
+      },
+      "issueOracles": [],
+      "oracleRationale": "A within-arm improvement does not identify the registered between-group contrast. The packet supplies that missing contrast and supports only ‘did not show a larger reduction,’ not equality of effects.",
+      "ambiguityAudit": "The public task explicitly requires a DOCUMENT request and says not to ask the user. This separates identifying a missing fact from assigning the user an action."
+    }
+  ]
+}

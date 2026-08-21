@@ -17,6 +17,7 @@ const REQUIRED_PACKAGED_LEGAL_FILES = [
   'legal/LICENSE',
   'legal/THIRD_PARTY_NOTICES.md',
   'legal/third-party/OpenAI-Codex-Apache-2.0.txt',
+  'legal/third-party/Claude-Design-System-MIT.txt',
   'legal/electron/LICENSE',
   'legal/electron/LICENSES.chromium.html'
 ];

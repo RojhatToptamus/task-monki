@@ -1,0 +1,239 @@
+{
+  "schemaVersion": "discourse-text-corpus-participants@1",
+  "corpusVersion": "text-lab-v1",
+  "partition": "CONFIRMATION",
+  "sealedBeforeFirstRun": true,
+  "cases": [
+    {
+      "caseId": "CNF-OBJ-01",
+      "partition": "CONFIRMATION",
+      "domain": "OBJECTIVE",
+      "prompt": "A bus has 72 seats. At the first stop 18 seats are occupied. At the second stop 23 more passengers board, and 5 of the original passengers leave. How many seats are empty after the second stop?",
+      "answerInstructions": "Give the number and a concise calculation.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "There are 36 occupied seats after the second stop."},
+        {"claimId": "c2", "text": "There are 36 empty seats after the second stop."},
+        {"claimId": "c3", "text": "The five departures must be subtracted from occupied seats."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-OBJ-02",
+      "partition": "CONFIRMATION",
+      "domain": "OBJECTIVE",
+      "prompt": "A device contains 45 type-X components and 15 type-Y components. What percentage of all components are type Y?",
+      "answerInstructions": "Give the percentage and denominator.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Type Y makes up 25% of all components."},
+        {"claimId": "c2", "text": "The correct denominator is 60 components."},
+        {"claimId": "c3", "text": "Type Y makes up one third of all components."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-OBJ-03",
+      "partition": "CONFIRMATION",
+      "domain": "OBJECTIVE",
+      "prompt": "An index starts at 100, rises by 10%, then falls by 10% of its new value. What is the final index and how does it compare with the start?",
+      "answerInstructions": "Give the final index and percentage difference from the start.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The final index is 99."},
+        {"claimId": "c2", "text": "The final index returns to 100."},
+        {"claimId": "c3", "text": "The final index is 1% below the start."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-OBJ-04",
+      "partition": "CONFIRMATION",
+      "domain": "OBJECTIVE",
+      "prompt": "All silver tokens are metallic. No metallic object in the box is edible. Token Q is silver. Which conclusion must follow?",
+      "answerInstructions": "Select one option and state the two-step implication.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Token Q is not edible."},
+        {"claimId": "c2", "text": "No non-silver token can be metallic."}
+      ],
+      "evidence": [],
+      "answerOptions": [
+        {"optionId": "A", "text": "Token Q is edible."},
+        {"optionId": "B", "text": "Token Q is not metallic."},
+        {"optionId": "C", "text": "Token Q is not edible."},
+        {"optionId": "D", "text": "Every metallic object is silver."}
+      ]
+    },
+    {
+      "caseId": "CNF-EVD-01",
+      "partition": "CONFIRMATION",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "A library emailed a satisfaction survey to 800 members. Ninety-six members responded; 82 respondents rated the library positively. The report says, 'More than 85% of all members are satisfied.' What does the evidence establish?",
+      "answerInstructions": "Calculate the respondent percentage and assess the all-members claim.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "About 85.4% of respondents rated the library positively."},
+        {"claimId": "c2", "text": "The survey establishes that more than 85% of all 800 members are satisfied."},
+        {"claimId": "c3", "text": "Nonresponse makes the all-members generalization uncertain."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "800 members contacted; 96 responses; 82 positive responses; no information about nonrespondents."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-EVD-02",
+      "partition": "CONFIRMATION",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "A February handbook says expense forms are due within 20 days. A June bulletin says: 'For expenses incurred on or after July 1, forms are due within 10 days; earlier expenses remain under the handbook rule.' An expense was incurred July 4. What deadline rule applies?",
+      "answerInstructions": "Give the applicable window and identify why.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The 20-day window applies."},
+        {"claimId": "c2", "text": "The 10-day window applies."},
+        {"claimId": "c3", "text": "The June bulletin changes the rule for expenses incurred on or after July 1."}
+      ],
+      "evidence": [
+        {"evidenceId": "e1", "text": "February handbook: forms due within 20 days."},
+        {"evidenceId": "e2", "text": "June bulletin: expenses incurred on or after July 1 are due within 10 days; earlier expenses retain the old rule."}
+      ],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-EVD-03",
+      "partition": "CONFIRMATION",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "Students volunteered for optional tutoring. Their average test score later rose 8 points; scores for students who did not volunteer rose 2 points. Assignment was not random, and volunteers differed in prior motivation. Does this establish that tutoring caused a 6-point benefit?",
+      "answerInstructions": "State the observed difference-in-change and assess the causal conclusion.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The observed difference in score changes is 6 points."},
+        {"claimId": "c2", "text": "The data establish a causal 6-point tutoring benefit."},
+        {"claimId": "c3", "text": "Self-selection and prior motivation are plausible confounders."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "Tutoring volunteers: +8 points. Non-volunteers: +2 points. Assignment not random; prior motivation differed."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-EVD-04",
+      "partition": "CONFIRMATION",
+      "domain": "SUPPLIED_TEXT",
+      "prompt": "A production summary states: 'Line A made 320 units with 8 defects. Line B made 480 units with 12 defects.' Which line had the lower defect rate?",
+      "answerInstructions": "Calculate both rates and report no difference if they are equal.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Line A's defect rate was 2.5%."},
+        {"claimId": "c2", "text": "Line B's defect rate was 2.5%."},
+        {"claimId": "c3", "text": "Neither line had a lower defect rate."}
+      ],
+      "evidence": [{"evidenceId": "e1", "text": "Line A: 320 units, 8 defects. Line B: 480 units, 12 defects."}],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-GAP-01",
+      "partition": "CONFIRMATION",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "The supervisor told the designer that they would present the proposal. Who will present?",
+      "answerInstructions": "Answer only as specifically as the sentence permits and ask one clarification if needed.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The supervisor will present."},
+        {"claimId": "c2", "text": "The designer will present."},
+        {"claimId": "c3", "text": "The pronoun leaves the presenter ambiguous."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-GAP-02",
+      "partition": "CONFIRMATION",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "Choose the small blue container on the shelf. The shelf holds one small green container, one large blue container, and one medium blue container. Which container should be chosen?",
+      "answerInstructions": "Do not silently relax an adjective. Explain whether the described object exists and ask a minimal clarification.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The large blue container is the requested object."},
+        {"claimId": "c2", "text": "The medium blue container is the requested object."},
+        {"claimId": "c3", "text": "No listed container is both small and blue."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-GAP-03",
+      "partition": "CONFIRMATION",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "A messaging service costs 6 credits per month plus 0.04 credits per message. Another costs 18 credits per month with messages included. Which service is cheaper for me?",
+      "answerInstructions": "Find the break-even message count and state the missing usage fact needed for a personal recommendation.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The plans cost the same at 300 messages per month."},
+        {"claimId": "c2", "text": "The 6-credit plan is always cheaper."},
+        {"claimId": "c3", "text": "Expected monthly message volume is needed for a personal choice."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-GAP-04",
+      "partition": "CONFIRMATION",
+      "domain": "EPISTEMIC_GAP",
+      "prompt": "Some poets are teachers. Lina is a teacher. Must Lina be a poet?",
+      "answerInstructions": "Answer yes or no and identify the invalid inference, if any.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Lina must be a poet."},
+        {"claimId": "c2", "text": "The premises allow teachers who are not poets."},
+        {"claimId": "c3", "text": "The conclusion does not follow."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-DEC-01",
+      "partition": "CONFIRMATION",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "Route East costs 30 credits and takes 70 minutes. Route West costs 50 credits and takes 45 minutes. Reliability and comfort are stated to be equal. Which route should I take?",
+      "answerInstructions": "Preserve the cost-time tradeoff and ask for the user's value of time rather than selecting it for them.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Route East is necessarily better."},
+        {"claimId": "c2", "text": "Route West is necessarily better."},
+        {"claimId": "c3", "text": "The choice trades 20 credits against 25 minutes."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-DEC-02",
+      "partition": "CONFIRMATION",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "A clinic can store appointment notes for 30 days, reducing storage and privacy exposure, or for 180 days, making prior context easier to retrieve. Legal minimums are already satisfied and no patient preference data are available. Which retention period is better?",
+      "answerInstructions": "State the competing benefits and identify who should decide the unresolved policy tradeoff.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Thirty days is unconditionally best."},
+        {"claimId": "c2", "text": "One hundred eighty days is unconditionally best."},
+        {"claimId": "c3", "text": "The decision depends on authorized stakeholder priorities and evidence about clinical value and privacy risk."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-DEC-03",
+      "partition": "CONFIRMATION",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "A service team can add one shift. Plan Morning covers the busiest hour but is less popular with staff. Plan Evening covers a smaller demand spike and matches more staff preferences. Coverage estimates and preferences are reliable; management has not set a priority between customer wait time and staff preference. Which plan should be chosen?",
+      "answerInstructions": "Give conditional recommendations and ask management for the missing priority.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "The morning plan is the only rational choice."},
+        {"claimId": "c2", "text": "The evening plan is the only fair choice."},
+        {"claimId": "c3", "text": "The choice depends on the authorized priority between wait-time reduction and staff preference."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    },
+    {
+      "caseId": "CNF-DEC-04",
+      "partition": "CONFIRMATION",
+      "domain": "PLURALISTIC_DECISION",
+      "prompt": "A nonprofit must choose a venue that costs no more than 500 credits and has wheelchair access. Venue A costs 450 and has wheelchair access. Venue B costs 400 and does not have wheelchair access. Venue C costs 550 and has wheelchair access. Which venue satisfies both stated constraints?",
+      "answerInstructions": "Select the qualifying venue and check every option against both constraints. Report no unresolved issue if the facts suffice.",
+      "candidateClaims": [
+        {"claimId": "c1", "text": "Venue A satisfies both stated constraints."},
+        {"claimId": "c2", "text": "Venue B fails the wheelchair-access constraint."},
+        {"claimId": "c3", "text": "Venue C exceeds the cost constraint."}
+      ],
+      "evidence": [],
+      "answerOptions": []
+    }
+  ]
+}

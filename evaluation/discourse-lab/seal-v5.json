@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "discourse-lab-seal@1",
+  "sealVersion": "text-lab-seal-v5",
+  "corpusVersion": "text-lab-v1",
+  "preregistrationVersion": "text-lab-prereg-v5",
+  "createdAt": "2026-08-01",
+  "digestAlgorithm": "SHA-256",
+  "purpose": "Detect accidental or post-preregistration changes to the executable v1 corpus and v5 H1 development contract before model dispatch. This seal is not a truth source and does not hash itself.",
+  "confirmationAuthorComplete": true,
+  "files": [
+    {
+      "path": "evaluation/discourse-lab/corpus/v1/participants/development.json",
+      "audience": "PARTICIPANT",
+      "sha256": "36acfff5e9406937607bffee7e7e3944c8dcdf8ca23cdf7e3b141279e053e434"
+    },
+    {
+      "path": "evaluation/discourse-lab/corpus/v1/participants/confirmation.json",
+      "audience": "PARTICIPANT",
+      "sha256": "b0e1c01514df6a7cd46ab6f734e00c2e9b766257b622276edbc3c4da855303c5"
+    },
+    {
+      "path": "evaluation/discourse-lab/corpus/v1/interventions/controlled-feedback.json",
+      "audience": "PARTICIPANT",
+      "sha256": "cfcfcd7de262952ba875bc9b6c663ea14dfe02f75723516fb47be5662c7ab34b"
+    },
+    {
+      "path": "evaluation/discourse-lab/corpus/v1/scorer-only/development-oracles.json",
+      "audience": "SCORER_ONLY",
+      "sha256": "dc111ad514da171fae3c296fbfbfc9a75c4ae07045eba437411229dad8aa04db"
+    },
+    {
+      "path": "evaluation/discourse-lab/corpus/v1/scorer-only/confirmation-oracles.json",
+      "audience": "SCORER_ONLY",
+      "sha256": "a0833d07c2eccfc6c60b27207ae1afa748510fb9e031c643391724a45c99785b"
+    },
+    {
+      "path": "evaluation/discourse-lab/corpus/v1/scorer-only/intervention-oracles.json",
+      "audience": "SCORER_ONLY",
+      "sha256": "a6a26eac10bdcfe868db3f24c26159f696bb6729c1e10cc615b155406d5d68e2"
+    },
+    {
+      "path": "evaluation/discourse-lab/preregistration/v5.json",
+      "audience": "HARNESS",
+      "sha256": "06d454705af4f56d5287aa708ea41f3962f3a30c764a950b65e483935b67cb66"
+    }
+  ],
+  "authoredAt": "2026-08-01"
+}

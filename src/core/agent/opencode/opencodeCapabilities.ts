@@ -121,6 +121,9 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       'task-monki.design-instructions': unsupported(
         'OpenCode currently receives Design guidance only as user prompt text.'
       ),
+      'task-monki.design-skill-access': unsupported(
+        'OpenCode cannot attest a restricted app-owned read root for Design skills.'
+      ),
       [BROWSER_DEV_ISOLATION_CAPABILITY]: {
         maturity: 'unsupported',
         detail: 'OpenCode permission rules do not attest an OS-level filesystem and network sandbox.'
