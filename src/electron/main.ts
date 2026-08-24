@@ -53,6 +53,10 @@ import type {
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
   RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
   ListDesignConversationRequest,
   ResolvePreviewRequest,
   RespondToInteractionRequest,
@@ -525,6 +529,23 @@ function installIpcHandlers(): void {
     'design:preview:restart',
     async (_, input: RestartDesignPreviewRequest) =>
       service.restartDesignPreview(input)
+  );
+  handleTrustedIpc(
+    'design:revision:restore',
+    async (_, input: RestoreDesignRevisionRequest) =>
+      service.restoreDesignRevision(input)
+  );
+  handleTrustedIpc(
+    'design:duplicate',
+    async (_, input: DuplicateDesignRequest) => service.duplicateDesign(input)
+  );
+  handleTrustedIpc(
+    'design:rename',
+    async (_, input: RenameDesignRequest) => service.renameDesign(input)
+  );
+  handleTrustedIpc(
+    'design:archive',
+    async (_, input: ArchiveDesignRequest) => service.archiveDesign(input)
   );
   handleTrustedIpc(
     'design:canvas:show',

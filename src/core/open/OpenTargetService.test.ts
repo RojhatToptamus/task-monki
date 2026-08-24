@@ -600,6 +600,7 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     designTurns: [],
     designReferences: [],
     designRevisions: [],
+    designSourceActions: [],
     tasks: [
       {
         id: 'task-1',

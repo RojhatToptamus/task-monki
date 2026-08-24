@@ -1,10 +1,14 @@
 import type {
   DesignDetailSnapshot,
+  DesignSourceAction,
   DesignOpenedCandidateCheckpoint,
   DesignTurn,
+  DuplicateDesignRequest,
   GitSnapshotRecord,
   PreviewGenerationRecord,
-  RunRecord
+  RestoreDesignRevisionRequest,
+  RunRecord,
+  WorktreeRecord
 } from '../../shared/contracts';
 import {
   buildDesignTurnPrompt,
@@ -59,6 +63,7 @@ export interface DesignUpdateCoordinatorOptions {
   events: AppEventBus;
   refreshGitEvidence(designId: string): Promise<GitSnapshotRecord>;
   ensurePostRunEvidence(runId: string): Promise<void>;
+  ensureDesignWorktree(designId: string): Promise<WorktreeRecord>;
 }
 
 /**
@@ -136,6 +141,41 @@ export class DesignUpdateCoordinator {
       await this.restartLatestReadyUnlocked(detail);
       this.emitUpdated(designId, { reason: 'preview-restarted' });
     });
+  }
+
+  restoreRevision(input: RestoreDesignRevisionRequest): Promise<void> {
+    this.assertAccepting();
+    return this.withDesignLock(input.designId, async () => {
+      const started = await this.options.store.beginRestoreDesignAction(input);
+      if (!started.action) return;
+      await this.processSourceAction(started.action);
+    });
+  }
+
+  duplicateDesign(input: DuplicateDesignRequest): Promise<string> {
+    this.assertAccepting();
+    return this.withDesignLock(input.designId, async () => {
+      const started = await this.options.store.beginDuplicateDesignAction(input);
+      if (!started.action) return started.task.id;
+      await this.processSourceAction(started.action);
+      return started.task.id;
+    });
+  }
+
+  async recoverSourceActions(): Promise<void> {
+    if (this.shuttingDown) return;
+    const snapshot = await this.options.store.snapshot();
+    for (const action of snapshot.designSourceActions) {
+      if (action.failureReason) continue;
+      await this.withDesignLock(action.designId, () =>
+        this.processSourceAction(action).catch(async (error) => {
+          await this.options.store.failDesignSourceAction(
+            action.id,
+            boundedReason(error, 'Task Monki could not recover the Design action.')
+          );
+        })
+      );
+    }
   }
 
   cancelTurn(designId: string, turnId: string): Promise<void> {
@@ -235,6 +275,196 @@ export class DesignUpdateCoordinator {
         ...this.terminalAdmissions.values()
       ]);
     }
+  }
+
+  private async processSourceAction(actionInput: DesignSourceAction): Promise<void> {
+    try {
+      if (actionInput.kind === 'RESTORE') {
+        await this.processRestoreAction(actionInput);
+      } else {
+        await this.processDuplicateAction(actionInput);
+      }
+    } catch (error) {
+      await this.options.store.failDesignSourceAction(
+        actionInput.id,
+        boundedReason(error, 'The Design action did not finish.')
+      );
+      this.emitUpdated(actionInput.designId, {
+        reason: 'source-action-failed',
+        actionId: actionInput.id
+      });
+      throw error;
+    }
+  }
+
+  private async processRestoreAction(
+    initial: Extract<DesignSourceAction, { kind: 'RESTORE' }>
+  ): Promise<void> {
+    let action = initial;
+    const detail = await this.options.store.getDesignDetail(action.designId);
+    const context = requireReadyContext(detail);
+    const sourceRevision = detail.revisions.find(
+      (revision) => revision.id === action.sourceRevisionId
+    );
+    if (!sourceRevision) throw new Error('The selected Design ready state is unavailable.');
+    const ownership = {
+      designId: detail.design.id,
+      repository: detail.repository,
+      worktree: context.worktree,
+      actionId: action.id,
+      sourceRevisionId: sourceRevision.id
+    };
+
+    if (action.checkpoint.boundary === 'RECORDED') {
+      const captured = await this.options.source.captureRestoreSource({
+        ...ownership,
+        selectedCommitSha: sourceRevision.commitSha
+      });
+      action = (await this.options.store.updateDesignSourceAction({
+        ...action,
+        checkpoint: { boundary: 'SOURCE_CAPTURED', ...captured },
+        updatedAt: new Date().toISOString()
+      })) as typeof action;
+    }
+    if (action.checkpoint.boundary === 'SOURCE_CAPTURED') {
+      const published = await this.options.source.prepareRestoreCommit({
+        ...ownership,
+        ...action.checkpoint
+      });
+      await this.options.source.publishRestoreCommit({ ...ownership, ...published });
+      action = (await this.options.store.updateDesignSourceAction({
+        ...action,
+        checkpoint: { boundary: 'COMMIT_PUBLISHED', ...published },
+        updatedAt: new Date().toISOString()
+      })) as typeof action;
+    }
+    if (action.checkpoint.boundary === 'COMMIT_PUBLISHED') {
+      await this.options.source.materializeRestoreCommit({
+        ...ownership,
+        targetCommitSha: action.checkpoint.targetCommitSha
+      });
+      await this.options.refreshGitEvidence(action.designId);
+      action = (await this.options.store.updateDesignSourceAction({
+        ...action,
+        checkpoint: {
+          boundary: 'WORKTREE_MATERIALIZED',
+          targetCommitSha: action.checkpoint.targetCommitSha
+        },
+        updatedAt: new Date().toISOString()
+      })) as typeof action;
+    }
+    const commitSha = requireSourceActionCommit(action);
+    const generation = await this.ensureSourceActionCandidate({
+      action,
+      designId: action.designId,
+      context,
+      commitSha
+    });
+    await this.options.previews.cutoverManagedDesignCandidate({
+      generationId: generation.id,
+      designId: action.designId,
+      settlement: { kind: 'RESTORE', actionId: action.id },
+      fence: this.options.fence
+    });
+    this.emitUpdated(action.designId, {
+      reason: 'ready-state-restored',
+      sourceRevisionId: action.sourceRevisionId
+    });
+  }
+
+  private async processDuplicateAction(
+    initial: Extract<DesignSourceAction, { kind: 'DUPLICATE' }>
+  ): Promise<void> {
+    let action = initial;
+    const sourceDetail = await this.options.store.getDesignDetail(action.designId);
+    const sourceRevision = sourceDetail.revisions.find(
+      (revision) => revision.id === action.sourceRevisionId
+    );
+    if (!sourceRevision) throw new Error('The selected Design ready state is unavailable.');
+    if (action.checkpoint.boundary === 'TARGET_CREATED') {
+      await this.options.ensureDesignWorktree(action.targetDesignId);
+      action = (await this.options.store.updateDesignSourceAction({
+        ...action,
+        checkpoint: { boundary: 'WORKTREE_CREATED' },
+        updatedAt: new Date().toISOString()
+      })) as typeof action;
+    }
+    const targetDetail = await this.options.store.getDesignDetail(
+      action.targetDesignId
+    );
+    const context = requireReadyContext(targetDetail);
+    const generation = await this.ensureSourceActionCandidate({
+      action,
+      designId: action.targetDesignId,
+      context,
+      commitSha: sourceRevision.commitSha
+    });
+    await this.options.previews.cutoverManagedDesignCandidate({
+      generationId: generation.id,
+      designId: action.targetDesignId,
+      settlement: { kind: 'DUPLICATE', actionId: action.id },
+      fence: this.options.fence
+    });
+    this.emitUpdated(action.designId, {
+      reason: 'design-duplicated',
+      targetDesignId: action.targetDesignId
+    });
+    this.emitUpdated(action.targetDesignId, { reason: 'duplicate-ready' });
+  }
+
+  private async ensureSourceActionCandidate(input: {
+    action: DesignSourceAction;
+    designId: string;
+    context: PreviewTaskContext;
+    commitSha: string;
+  }): Promise<PreviewGenerationRecord> {
+    if (input.action.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
+      const existing = await this.options.store.getPreviewGeneration(
+        input.action.checkpoint.previewGenerationId
+      );
+      if (
+        existing?.taskId === input.designId &&
+        existing.state === 'READY' &&
+        existing.routingState === 'CANDIDATE' &&
+        existing.source.type === 'EXACT_COMMIT' &&
+        existing.source.commitSha === input.commitSha &&
+        existing.source.designRevisionId === undefined
+      ) {
+        return existing;
+      }
+    }
+    const prepared = await this.options.previews.prepareManagedDesignExactCommit({
+      context: input.context,
+      commitSha: input.commitSha
+    });
+    const generation = await this.options.previews.executeManagedDesignCandidate(
+      prepared,
+      { designId: input.designId, onCandidateReady: async () => undefined }
+    );
+    const checkpoint =
+      input.action.kind === 'RESTORE'
+        ? {
+            boundary: 'PREVIEW_CANDIDATE_READY' as const,
+            targetCommitSha: input.commitSha,
+            previewGenerationId: generation.id
+          }
+        : {
+            boundary: 'PREVIEW_CANDIDATE_READY' as const,
+            previewGenerationId: generation.id
+          };
+    try {
+      await this.options.store.updateDesignSourceAction({
+        ...input.action,
+        checkpoint,
+        updatedAt: new Date().toISOString()
+      } as DesignSourceAction);
+    } catch (error) {
+      await this.options.previews
+        .stopManagedDesignCandidate(generation.id)
+        .catch(() => undefined);
+      throw error;
+    }
+    return generation;
   }
 
   private async dispatchUnlocked(designId: string): Promise<void> {
@@ -498,7 +728,7 @@ export class DesignUpdateCoordinator {
     await this.options.previews.cutoverManagedDesignCandidate({
       generationId: generation.id,
       designId: run.taskId,
-      settlement: { turnId: turn.id, runId: run.id },
+      settlement: { kind: 'AGENT_TURN', turnId: turn.id, runId: run.id },
       fence: this.options.fence
     });
   }
@@ -870,8 +1100,24 @@ function promptForTurn(
         ]
           .filter(Boolean)
           .join('\n')
-      )
+      ),
+    readyStateContext: detail.readyContext
+      .filter((candidate) => candidate.revision.id !== detail.revisions.at(-1)?.id)
+      .map((candidate) => {
+        const source = candidate.sourceRevisionOrdinal
+          ? ` restored from Ready state ${candidate.sourceRevisionOrdinal}`
+          : '';
+        const request = candidate.userRequest
+          ? ` — request: ${boundedReadyRequest(candidate.userRequest)}`
+          : '';
+        return `Ready state ${candidate.revision.ordinal}${source}, ${candidate.revision.createdAt}, commit ${candidate.revision.commitSha}${request}`;
+      })
   });
+}
+
+function boundedReadyRequest(value: string): string {
+  const compact = value.replace(/\s+/gu, ' ').trim();
+  return compact.length <= 800 ? compact : `${compact.slice(0, 797)}...`;
 }
 
 function isActiveReadyGeneration(
@@ -889,6 +1135,18 @@ function requireFinalOpenedCandidate(
     );
   }
   return turn.finalOpenedCandidate;
+}
+
+function requireSourceActionCommit(
+  action: Extract<DesignSourceAction, { kind: 'RESTORE' }>
+): string {
+  if (
+    action.checkpoint.boundary !== 'WORKTREE_MATERIALIZED' &&
+    action.checkpoint.boundary !== 'PREVIEW_CANDIDATE_READY'
+  ) {
+    throw new Error('Design restore source is not ready for Preview.');
+  }
+  return action.checkpoint.targetCommitSha;
 }
 
 function assertOpenedSourceMatchesCapture(

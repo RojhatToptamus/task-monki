@@ -764,8 +764,19 @@ describe('FileTaskStore Design ownership', () => {
   it('keeps DESIGN runs out of task phases and atomically settles Preview plus revision', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-cutover-'));
     let store = new FileTaskStore(dir);
+    const attachmentDraft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: attachmentDraft.id,
+      clientToken: 'design-cutover-reference',
+      displayName: 'direction.txt',
+      bytes: Buffer.from('Keep the design calm.')
+    });
     const created = await store.createDesignBundle({
-      request: { brief: 'Build a compact launch page.', creationToken: 'design-request-0003' },
+      request: {
+        brief: 'Build a compact launch page.',
+        creationToken: 'design-request-0003',
+        attachmentDraftId: attachmentDraft.id
+      },
       repository: managedRepository(dir)
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -900,10 +911,13 @@ describe('FileTaskStore Design ownership', () => {
     };
     const settlement = {
       designId: created.task.id,
-      turnId: created.turn.id,
-      runId: run.id,
       commitSha: COMMIT,
-      routeId: 'main'
+      routeId: 'main',
+      settlement: {
+        kind: 'AGENT_TURN' as const,
+        turnId: created.turn.id,
+        runId: run.id
+      }
     };
     const originalOpen = fs.open.bind(fs);
     const temporaryPathPrefix = `${path.join(dir, 'store.json')}.`;
@@ -976,6 +990,67 @@ describe('FileTaskStore Design ownership', () => {
       }
     });
 
+    const renamed = await store.renameDesign(created.task.id, '  Calm launch page  ');
+    expect(renamed.title).toBe('Calm launch page');
+    expect(renamed.prompt).toBe(created.task.prompt);
+
+    const duplicateActionId = randomUUID();
+    const duplicate = await store.beginDuplicateDesignAction({
+      designId: created.task.id,
+      revisionId: settled.revision!.id,
+      clientActionId: duplicateActionId
+    });
+    const duplicateRetry = await store.beginDuplicateDesignAction({
+      designId: created.task.id,
+      revisionId: settled.revision!.id,
+      clientActionId: duplicateActionId
+    });
+    expect(duplicateRetry).toEqual(duplicate);
+    expect(duplicate.task).toMatchObject({
+      kind: 'DESIGN',
+      creationToken: duplicateActionId,
+      sourceDesignId: created.task.id,
+      sourceDesignRevisionId: settled.revision!.id
+    });
+    const sourceAttachment = (await store.getTaskAttachments(created.task.id))[0]!;
+    const copiedAttachment = (await store.getTaskAttachments(duplicate.task.id))[0]!;
+    expect(copiedAttachment).toMatchObject({
+      taskId: duplicate.task.id,
+      displayName: sourceAttachment.displayName,
+      sha256: sourceAttachment.sha256
+    });
+    expect(copiedAttachment.id).not.toBe(sourceAttachment.id);
+    expect(
+      Buffer.from((await store.readTaskAttachment(copiedAttachment.id)).bytes)
+    ).toEqual(Buffer.from((await store.readTaskAttachment(sourceAttachment.id)).bytes));
+    await expect(store.getDesignDetail(duplicate.task.id)).resolves.toMatchObject({
+      conversation: [],
+      turns: [],
+      revisions: [],
+      origin: {
+        designId: created.task.id,
+        revisionId: settled.revision!.id,
+        designTitle: 'Calm launch page',
+        revisionOrdinal: 1
+      },
+      actions: { canDelete: false }
+    });
+    await store.failDesignSourceAction(duplicate.action!.id, 'Preview did not start.');
+    await expect(store.getDesignDetail(duplicate.task.id)).resolves.toMatchObject({
+      design: { status: 'NEEDS_ATTENTION' },
+      canvas: { state: 'EMPTY', detail: 'Preview did not start.' },
+      actions: { canDelete: true }
+    });
+    await expect(store.getDesignDetail(created.task.id)).resolves.toMatchObject({
+      actions: { canDelete: false }
+    });
+    await expect(
+      store.deleteTaskAndReleaseManagedRepository(duplicate.task.id)
+    ).resolves.toEqual({ removedManagedRepository: undefined });
+    await expect(store.readTaskAttachment(sourceAttachment.id)).resolves.toMatchObject({
+      displayName: sourceAttachment.displayName
+    });
+
     for (let index = 0; index < 105; index += 1) {
       await store.upsertAgentItem({
         taskId: created.task.id,
@@ -1008,6 +1083,26 @@ describe('FileTaskStore Design ownership', () => {
       design: { status: 'READY' },
       canvas: { state: 'READY' }
     });
+    await expect(store.archiveDesign(created.task.id)).resolves.toMatchObject({
+      title: 'Calm launch page',
+      workflowPhase: 'ARCHIVED'
+    });
+    await expect(store.getDesignDetail(created.task.id)).resolves.toMatchObject({
+      design: { status: 'ARCHIVED' },
+      actions: {
+        canRefine: false,
+        canDuplicate: true,
+        canArchive: false,
+        canDelete: true
+      }
+    });
+    const archivedCopy = await store.beginDuplicateDesignAction({
+      designId: created.task.id,
+      revisionId: settled.revision!.id,
+      clientActionId: randomUUID()
+    });
+    await store.failDesignSourceAction(archivedCopy.action!.id, 'Stop the archived copy test.');
+    await store.deleteTaskAndReleaseManagedRepository(archivedCopy.task.id);
 
     await store.close();
     const restarted = new FileTaskStore(dir);
@@ -1016,7 +1111,7 @@ describe('FileTaskStore Design ownership', () => {
     });
     await restarted.savePreviewGeneration({ ...settled.candidate, state: 'STOPPED' });
     const removable = await restarted.getDesignDetail(created.task.id);
-    expect(removable.design.status).toBe('NEEDS_ATTENTION');
+    expect(removable.design.status).toBe('ARCHIVED');
     expect(removable.canvas.state).toBe('RESTART_REQUIRED');
     expect(removable.actions.canDelete).toBe(true);
     await expect(

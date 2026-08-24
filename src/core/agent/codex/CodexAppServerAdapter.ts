@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
   AgentExecutionSettings,
@@ -111,6 +112,8 @@ import type {
 } from '../../../shared/agent';
 import { isImplementationRunMode } from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
+import type { ThreadSourceKind } from './protocol/generated/v2/ThreadSourceKind';
+import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
 import {
   assertCodexAttachmentExternalToolsDisabled,
   normalizeCodexExternalToolSettings
@@ -1537,6 +1540,102 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         providerSessionId: session.providerSessionId
       });
     }
+  }
+
+  async deleteDesignTaskThreads(taskId: string): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    const task = snapshot.tasks.find(
+      (candidate) => candidate.id === taskId && candidate.kind === 'DESIGN'
+    );
+    if (!task) throw new Error('Design not found for Codex thread cleanup.');
+    const sessions = snapshot.agentSessions.filter(
+      (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
+    );
+    if (
+      snapshot.runs.some(
+        (run) => run.taskId === taskId && ACTIVE_RUN_STATES.includes(run.status)
+      )
+    ) {
+      throw new Error('Stop the active Design Run before deleting its Codex threads.');
+    }
+    const treeIds = new Set(
+      sessions.flatMap((session) =>
+        session.providerSessionTreeId ? [session.providerSessionTreeId] : []
+      )
+    );
+    const explicitIds = new Set(
+      sessions.flatMap((session) =>
+        session.providerSessionId ? [session.providerSessionId] : []
+      )
+    );
+    if (treeIds.size === 0 && explicitIds.size === 0) {
+      await this.releaseTask(taskId);
+      return;
+    }
+    const ownedWorktreePaths = new Set(
+      await Promise.all(
+        snapshot.worktrees
+          .filter((worktree) => worktree.taskId === taskId)
+          .map((worktree) => canonicalPath(worktree.worktreePath))
+      )
+    );
+    const client = await this.ensureClient();
+    const listOwned = async (): Promise<Thread[]> => {
+      const all = await listAllCodexThreads(client);
+      const selected = all.filter(
+        (thread) => treeIds.has(thread.sessionId) || explicitIds.has(thread.id)
+      );
+      const canonicalThreadPaths = new Map(
+        await Promise.all(
+          selected.map(async (thread) => [thread.id, await canonicalPath(thread.cwd)] as const)
+        )
+      );
+      for (const treeId of treeIds) {
+        const tree = selected.filter((thread) => thread.sessionId === treeId);
+        if (
+          tree.length > 0 &&
+          !tree.some(
+            (thread) =>
+              explicitIds.has(thread.id) &&
+              ownedWorktreePaths.has(canonicalThreadPaths.get(thread.id)!)
+          )
+        ) {
+          throw new Error('Codex thread tree does not match the Design worktree.');
+        }
+      }
+      if (
+        selected.some(
+          (thread) =>
+            !treeIds.has(thread.sessionId) &&
+            !ownedWorktreePaths.has(canonicalThreadPaths.get(thread.id)!)
+        )
+      ) {
+        throw new Error('Codex thread does not match the Design worktree.');
+      }
+      return selected;
+    };
+    let owned = await listOwned();
+    const byId = new Map(owned.map((thread) => [thread.id, thread]));
+    owned = owned.sort(
+      (left, right) => threadDepth(right, byId) - threadDepth(left, byId)
+    );
+    for (const thread of owned) {
+      try {
+        await client.requestMutation('thread/delete', { threadId: thread.id });
+      } catch (error) {
+        const remaining = await listOwned();
+        if (remaining.some((candidate) => candidate.id === thread.id)) throw error;
+      }
+    }
+    for (const session of sessions) {
+      this.activePermissionProfiles.delete(session.id);
+      this.recoveryRunBySession.delete(session.id);
+      this.unmaterializedThreadAttestations.delete(session.id);
+    }
+  }
+
+  deleteTaskProviderHistory(taskId: string): Promise<void> {
+    return this.deleteDesignTaskThreads(taskId);
   }
 
   async startReview(input: StartAgentReview): Promise<AgentTurn> {
@@ -6379,6 +6478,75 @@ function mapThreadToSubagentStatus(
     case 'notLoaded':
       return undefined;
   }
+}
+
+const ALL_CODEX_THREAD_SOURCES: readonly ThreadSourceKind[] = [
+  'cli',
+  'vscode',
+  'exec',
+  'appServer',
+  'subAgent',
+  'subAgentReview',
+  'subAgentCompact',
+  'subAgentThreadSpawn',
+  'subAgentOther',
+  'unknown'
+];
+
+async function listAllCodexThreads(client: CodexRpcClient): Promise<Thread[]> {
+  const threads = [
+    ...(await listCodexThreads(client, false)),
+    ...(await listCodexThreads(client, true))
+  ];
+  return [...new Map(threads.map((thread) => [thread.id, thread])).values()];
+}
+
+async function listCodexThreads(
+  client: CodexRpcClient,
+  archived: boolean
+): Promise<Thread[]> {
+  const threads: Thread[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  for (let page = 0; page < 100; page += 1) {
+    const response: ThreadListResponse = await client.request('thread/list', {
+      cursor,
+      limit: 100,
+      sortKey: 'updated_at',
+      sortDirection: 'desc',
+      sourceKinds: [...ALL_CODEX_THREAD_SOURCES],
+      archived,
+      useStateDbOnly: false
+    });
+    threads.push(...response.data);
+    if (!response.nextCursor) break;
+    if (seenCursors.has(response.nextCursor)) {
+      throw new Error('Codex thread pagination repeated a cursor.');
+    }
+    seenCursors.add(response.nextCursor);
+    cursor = response.nextCursor;
+    if (page === 99) {
+      throw new Error('Codex thread cleanup exceeded its safe page limit.');
+    }
+  }
+  return threads;
+}
+
+function threadDepth(thread: Thread, threads: ReadonlyMap<string, Thread>): number {
+  let depth = 0;
+  let parentId = thread.forkedFromId ?? thread.parentThreadId;
+  const visited = new Set([thread.id]);
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    depth += 1;
+    const parent = threads.get(parentId);
+    parentId = parent?.forkedFromId ?? parent?.parentThreadId ?? null;
+  }
+  return depth;
+}
+
+async function canonicalPath(input: string): Promise<string> {
+  return fs.realpath(input).catch(() => path.resolve(input));
 }
 
 function hashString(value: string): string {

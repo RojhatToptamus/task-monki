@@ -247,6 +247,7 @@ export function App() {
     attachmentDraftId?: string;
     clientMessageId: string;
   } | undefined>(undefined);
+  const pendingDesignActionIdsRef = useRef(new Map<string, string>());
   const designCanvasErrorRef = useRef<string | undefined>(undefined);
   const viewRef = useRef<AppView>(view);
   viewRef.current = view;
@@ -913,6 +914,84 @@ export function App() {
       } catch (caught) {
         const message =
           caught instanceof Error ? caught.message : 'Could not restart the preview.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const restoreDesignRevision = useCallback(
+    async (designId: string, revisionId: string) => {
+      const key = `restore:${designId}:${revisionId}`;
+      const clientActionId =
+        pendingDesignActionIdsRef.current.get(key) ?? crypto.randomUUID();
+      pendingDesignActionIdsRef.current.set(key, clientActionId);
+      try {
+        const detail = await taskManagerApi.restoreDesignRevision({
+          designId,
+          revisionId,
+          clientActionId
+        });
+        pendingDesignActionIdsRef.current.delete(key);
+        applyDesignActionDetail(detail, false);
+        notify('Earlier version restored.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not restore this version.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const duplicateDesign = useCallback(
+    async (designId: string, revisionId: string) => {
+      const key = `duplicate:${designId}:${revisionId}`;
+      const clientActionId =
+        pendingDesignActionIdsRef.current.get(key) ?? crypto.randomUUID();
+      pendingDesignActionIdsRef.current.set(key, clientActionId);
+      try {
+        const detail = await taskManagerApi.duplicateDesign({
+          designId,
+          revisionId,
+          clientActionId
+        });
+        pendingDesignActionIdsRef.current.delete(key);
+        applyDesignActionDetail(detail, true);
+        notify('Design duplicated.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not duplicate the Design.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const renameDesign = useCallback(
+    async (designId: string, title: string) => {
+      try {
+        const detail = await taskManagerApi.renameDesign({ designId, title });
+        applyDesignActionDetail(detail, false);
+        notify('Design renamed.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not rename the Design.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const archiveDesign = useCallback(
+    async (designId: string) => {
+      try {
+        const detail = await taskManagerApi.archiveDesign({ designId });
+        applyDesignActionDetail(detail, false);
+        notify('Design archived.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not archive the Design.';
         notify(message, 'error');
         throw caught instanceof Error ? caught : new Error(message);
       }
@@ -2817,6 +2896,10 @@ export function App() {
             onRespondToInteraction={respondToDesignInteraction}
             onRefreshCanvas={refreshDesignCanvas}
             onRestartCanvas={restartDesignCanvas}
+            onRestoreRevision={restoreDesignRevision}
+            onDuplicateDesign={duplicateDesign}
+            onRenameDesign={renameDesign}
+            onArchiveDesign={archiveDesign}
             onDeleteDesign={deleteDesign}
             onShowCanvas={window.designCanvas ? showDesignCanvas : undefined}
             onHideCanvas={window.designCanvas ? hideDesignCanvas : undefined}

@@ -381,6 +381,10 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     return Promise.resolve();
   }
 
+  deleteTaskProviderHistory(): Promise<void> {
+    return Promise.resolve();
+  }
+
   reconcile(): Promise<AgentReconciliationResult> {
     return Promise.resolve({
       reconciledSessionIds: [],

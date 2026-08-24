@@ -995,6 +995,59 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     }
   });
 
+  it('deletes the complete stored Design thread tree from children to root', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-delete-design-'));
+    const executable = await writeFakeCodexExecutable(dir, 'design-delete');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { task, iteration, worktree } = await createDesignTaskContext(store, dir);
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: worktree.worktreePath,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    try {
+      await adapter.initialize();
+      const created = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex',
+        requestedSettings: task.agentSettings
+      });
+      await store.updateAgentSession(created.id, {
+        providerSessionId: 'thread-1',
+        providerSessionTreeId: 'session-tree-1',
+        status: 'IDLE',
+        materialized: true
+      });
+
+      await adapter.deleteDesignTaskThreads(task.id);
+
+      const server = (await store.snapshot()).agentServers[0]!;
+      const outbound = readOutboundMessages(
+        await fs.readFile(server.protocolJournalPath, 'utf8')
+      );
+      expect(
+        outbound
+          .filter((message) => message.method === 'thread/delete')
+          .map((message) => (message.params as { threadId: string }).threadId)
+      ).toEqual(['thread-child', 'thread-review', 'thread-1']);
+      expect(
+        outbound.filter((message) => message.method === 'thread/list')
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ params: expect.objectContaining({ archived: false }) }),
+          expect.objectContaining({ params: expect.objectContaining({ archived: true }) })
+        ])
+      );
+    } finally {
+      await adapter.shutdown();
+      await store.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps normal Codex work available when the Design skill pack is missing', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-design-skills-'));
     const executable = await writeFakeCodexExecutable(dir);
@@ -5515,6 +5568,7 @@ function fakeCodexScript(
     | 'unsafe-live-settings'
     | 'design-browser'
     | 'profile-rebind'
+    | 'design-delete'
     | 'profile-mismatch-create'
     | 'profile-drift'
     | 'unsafe-recovery-resume'
@@ -5615,6 +5669,7 @@ let currentProfileId = ':workspace';
 let currentProfileNetworkAccess = false;
 let turnStartAttempts = 0;
 let designBrowserToolRegistered = false;
+const deletedThreadIds = new Set();
 const threadResponse = (request = {}) => {
   currentProfileId = request.config?.default_permissions ?? currentProfileId;
   currentProfileNetworkAccess =
@@ -5732,7 +5787,7 @@ rl.on('line', (line) => {
           type: 'commandExecution',
           id: 'command-1',
           command: 'npm test',
-          cwd: process.cwd(),
+  cwd: process.cwd(),
           processId: null,
           source: 'agent',
           status: 'completed',
@@ -6036,6 +6091,30 @@ rl.on('line', (line) => {
             : turn('completed')
         ])
       } });
+      break;
+    case 'thread/list': {
+      const unrelated = {
+        ...thread(),
+        id: 'thread-unrelated',
+        sessionId: 'session-tree-unrelated',
+        cwd: process.cwd() + '/unrelated'
+      };
+      const available = message.params.archived
+        ? [reviewThread()]
+        : [thread(), childThread(), unrelated];
+      send({ id: message.id, result: {
+        data: available.filter((candidate) => !deletedThreadIds.has(candidate.id)),
+        nextCursor: null
+      } });
+      break;
+    }
+    case 'thread/delete':
+      deletedThreadIds.add(message.params.threadId);
+      if (mode === 'design-delete' && message.params.threadId === 'thread-child') {
+        send({ id: message.id, error: { code: -32603, message: 'response was lost' } });
+      } else {
+        send({ id: message.id, result: {} });
+      }
       break;
     case 'thread/unsubscribe':
       send({ id: message.id, result: { status: 'unsubscribed' } });

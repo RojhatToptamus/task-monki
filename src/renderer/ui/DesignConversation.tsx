@@ -25,6 +25,7 @@ import { StoredAttachmentChip } from './AttachmentChip';
 import { useTaskAttachments } from './useTaskAttachments';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
+import { DesignReadyMenu } from './DesignActionsMenu';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
@@ -54,6 +55,8 @@ export interface DesignConversationProps {
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
   ): Promise<void>;
+  onRestore(revisionId: string): Promise<void>;
+  onDuplicate(revisionId: string): Promise<void>;
 }
 
 export function DesignConversation({
@@ -71,7 +74,9 @@ export function DesignConversation({
   onLoadEarlier,
   onSaveDraft,
   onDeleteDraft,
-  onRespond
+  onRespond,
+  onRestore,
+  onDuplicate
 }: DesignConversationProps) {
   const [message, setMessage] = useState(draft?.body ?? '');
   const [submitting, setSubmitting] = useState(false);
@@ -288,6 +293,14 @@ export function DesignConversation({
       </header>
 
       <div className="tm-design-conversation__transcript" aria-live="polite">
+        {project.origin && project.conversation.length === 0 ? (
+          <p className="tm-design-conversation__origin">
+            Copied from {project.origin.designTitle ?? 'an earlier Design'}
+            {project.origin.revisionOrdinal
+              ? ` · Ready state ${project.origin.revisionOrdinal}`
+              : ''}
+          </p>
+        ) : null}
         {project.previousConversationCursor ? (
           <button
             type="button"
@@ -313,14 +326,39 @@ export function DesignConversation({
         {project.conversation.length === 0 ? (
           <div className="tm-design-conversation__empty">
             <ConversationGlyph />
-            <strong>Your brief will start the conversation</strong>
-            <span>Describe what you want to see. Codex will build the first preview.</span>
+            <strong>
+              {project.origin && project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION'
+                ? 'This copy could not start'
+                : project.origin
+                  ? 'Continue from this ready copy'
+                  : 'Your brief will start the conversation'}
+            </strong>
+            <span>
+              {project.origin && project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION'
+                ? 'Delete this copy and duplicate the earlier Ready state again.'
+                : project.origin
+                  ? 'Describe the next change. This Design has its own conversation and files.'
+                  : 'Describe what you want to see. Codex will build the first preview.'}
+            </span>
           </div>
         ) : (
           project.conversation.map((entry) => (
             <DesignTurnMessages
               key={entry.turn.id}
               entry={entry}
+              latestRevisionId={project.revisions.at(-1)?.id}
+              canRestore={project.actions.canRestore}
+              canDuplicate={project.actions.canDuplicate}
+              onRestore={(revisionId) =>
+                void onRestore(revisionId).catch((caught) =>
+                  setError(caught instanceof Error ? caught.message : 'Could not restore this version.')
+                )
+              }
+              onDuplicate={(revisionId) =>
+                void onDuplicate(revisionId).catch((caught) =>
+                  setError(caught instanceof Error ? caught.message : 'Could not duplicate this version.')
+                )
+              }
               references={entry.turn.referenceIds.map((referenceId) => {
                 const reference = project.references.find(
                   (candidate) => candidate.id === referenceId
@@ -475,10 +513,20 @@ export function DesignConversation({
 
 function DesignTurnMessages({
   entry,
-  references
+  references,
+  latestRevisionId,
+  canRestore,
+  canDuplicate,
+  onRestore,
+  onDuplicate
 }: {
   entry: DesignConversationEntry;
   references: string[];
+  latestRevisionId?: string;
+  canRestore: boolean;
+  canDuplicate: boolean;
+  onRestore(revisionId: string): void;
+  onDuplicate(revisionId: string): void;
 }) {
   const view = designTurnView(entry);
   return (
@@ -501,10 +549,24 @@ function DesignTurnMessages({
       <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
         <header>
           <strong>Codex</strong>
-          <span className="tm-design-message__turn-status">
-            <i aria-hidden="true" />
-            {view.statusLabel}
-          </span>
+          <div className="tm-design-message__ready-actions">
+            <span className="tm-design-message__turn-status">
+              <i aria-hidden="true" />
+              {entry.readyRevision
+                ? `Ready state ${entry.readyRevision.ordinal}`
+                : view.statusLabel}
+            </span>
+            {entry.readyRevision ? (
+              <DesignReadyMenu
+                ordinal={entry.readyRevision.ordinal}
+                isCurrent={entry.readyRevision.id === latestRevisionId}
+                canRestore={canRestore}
+                canDuplicate={canDuplicate}
+                onRestore={() => onRestore(entry.readyRevision!.id)}
+                onDuplicate={() => onDuplicate(entry.readyRevision!.id)}
+              />
+            ) : null}
+          </div>
         </header>
         {entry.assistantMessage ? (
           <DiscourseMarkdown text={entry.assistantMessage} />

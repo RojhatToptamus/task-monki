@@ -762,6 +762,47 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      const designRevisionActionMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/revisions\/([^/]+)\/(restore|duplicate)$/u
+      );
+      if (request.method === 'POST' && designRevisionActionMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        const actionInput = {
+          ...input,
+          designId: decodeURIComponent(designRevisionActionMatch[1]),
+          revisionId: decodeURIComponent(designRevisionActionMatch[2])
+        } as never;
+        sendJson(
+          response,
+          requestId,
+          200,
+          designRevisionActionMatch[3] === 'restore'
+            ? await options.service.restoreDesignRevision(actionInput)
+            : await options.service.duplicateDesign(actionInput)
+        );
+        return;
+      }
+
+      const designMetadataActionMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/(rename|archive)$/u
+      );
+      if (request.method === 'POST' && designMetadataActionMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        const actionInput = {
+          ...input,
+          designId: decodeURIComponent(designMetadataActionMatch[1])
+        } as never;
+        sendJson(
+          response,
+          requestId,
+          200,
+          designMetadataActionMatch[2] === 'rename'
+            ? await options.service.renameDesign(actionInput)
+            : await options.service.archiveDesign(actionInput)
+        );
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/discourse/conversations') {
         sendJson(
           response,

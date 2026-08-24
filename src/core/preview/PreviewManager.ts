@@ -78,10 +78,10 @@ export interface PreparedPreviewGeneration {
   privateLease?: PreviewPrivateLease;
 }
 
-export interface ManagedDesignPreviewSettlement {
-  turnId: string;
-  runId: string;
-}
+export type ManagedDesignPreviewSettlement =
+  | { kind: 'AGENT_TURN'; turnId: string; runId: string }
+  | { kind: 'RESTORE'; actionId: string }
+  | { kind: 'DUPLICATE'; actionId: string };
 
 export interface ExecuteManagedDesignPreviewInput {
   designId: string;
@@ -1687,7 +1687,11 @@ export class PreviewManager {
       if (generation.source.designRevisionId) {
         throw new Error('A new Design settlement cannot replace an existing revision identity.');
       }
-      if (!input.settlement.turnId || !input.settlement.runId) {
+      if (
+        (input.settlement.kind === 'AGENT_TURN' &&
+          (!input.settlement.turnId || !input.settlement.runId)) ||
+        (input.settlement.kind !== 'AGENT_TURN' && !input.settlement.actionId)
+      ) {
         throw new Error('Managed Design Preview settlement ownership is incomplete.');
       }
       return;
@@ -1843,10 +1847,9 @@ function designPreviewSettlement(
   }
   return {
     designId,
-    turnId: settlement.turnId,
-    runId: settlement.runId,
     commitSha: candidate.source.commitSha,
-    routeId: MANAGED_DESIGN_STATIC_ROUTE_ID
+    routeId: MANAGED_DESIGN_STATIC_ROUTE_ID,
+    settlement
   };
 }
 

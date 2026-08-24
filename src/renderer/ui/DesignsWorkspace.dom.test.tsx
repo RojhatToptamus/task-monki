@@ -742,6 +742,9 @@ describe('mounted Design workspace', () => {
               canStop: true,
               stopTurnId: 'turn-1',
               canRestart: false,
+              canRestore: false,
+              canDuplicate: false,
+              canArchive: false,
               canDelete: false
             }
           }),
@@ -940,6 +943,9 @@ describe('mounted Design workspace', () => {
               canStop: true,
               stopTurnId: 'turn-1',
               canRestart: false,
+              canRestore: false,
+              canDuplicate: false,
+              canArchive: false,
               canDelete: false
             }
           }),
@@ -968,7 +974,10 @@ describe('mounted Design workspace', () => {
     const onDeleteDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(<DesignsWorkspace {...workspaceProps({ onDeleteDesign })} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Design options for Quiet portfolio' })
+    );
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete…' }));
     expect(screen.getByRole('dialog', { name: /Delete “Quiet portfolio”/ })).toBeTruthy();
     const confirm = screen.getByRole('button', { name: 'Delete Design' });
     fireEvent.click(confirm);
@@ -976,6 +985,118 @@ describe('mounted Design workspace', () => {
 
     expect(onDeleteDesign).toHaveBeenCalledOnce();
     expect(onDeleteDesign).toHaveBeenCalledWith('design-1');
+  });
+
+  it('offers earlier Ready actions and the small project action menu', async () => {
+    const firstRevision = {
+      id: 'revision-1',
+      designId: 'design-1',
+      ordinal: 1,
+      commitSha: 'a'.repeat(40),
+      routeId: 'main',
+      createdAt: '2026-08-20T10:00:00.000Z',
+      changeSource: 'AGENT_TURN' as const,
+      turnId: 'turn-1',
+      runId: 'run-1'
+    };
+    const secondRevision = {
+      ...firstRevision,
+      id: 'revision-2',
+      ordinal: 2,
+      commitSha: 'b'.repeat(40),
+      createdAt: '2026-08-20T10:10:00.000Z',
+      turnId: 'turn-2',
+      runId: 'run-2'
+    };
+    const onRestoreRevision = vi.fn(async () => undefined);
+    const onDuplicateDesign = vi.fn(async () => undefined);
+    const onRenameDesign = vi.fn(async () => undefined);
+    const onArchiveDesign = vi.fn(async () => undefined);
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          project: designProject({
+            revisions: [firstRevision, secondRevision],
+            conversation: [
+              {
+                ...designProject().conversation[0]!,
+                readyRevision: firstRevision
+              },
+              {
+                turn: {
+                  ...designProject().conversation[0]!.turn,
+                  id: 'turn-2',
+                  clientMessageId: 'message-2',
+                  order: 2,
+                  messageSource: 'INLINE_MESSAGE'
+                },
+                userMessage: 'Move the main action into the header.',
+                assistantMessage: 'Moved the action.',
+                runStatus: 'COMPLETED',
+                readyRevision: secondRevision
+              }
+            ]
+          }),
+          onRestoreRevision,
+          onDuplicateDesign,
+          onRenameDesign,
+          onArchiveDesign
+        })}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ready state 1 options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Restore this version' }));
+    await waitFor(() =>
+      expect(onRestoreRevision).toHaveBeenCalledWith('design-1', 'revision-1')
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Ready state 1 options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Duplicate from here' }));
+    await waitFor(() =>
+      expect(onDuplicateDesign).toHaveBeenCalledWith('design-1', 'revision-1')
+    );
+
+    const projectMenu = screen.getByRole('button', {
+      name: 'Design options for Quiet portfolio'
+    });
+    fireEvent.click(projectMenu);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Duplicate current' }));
+    await waitFor(() =>
+      expect(onDuplicateDesign).toHaveBeenCalledWith('design-1', 'revision-2')
+    );
+    fireEvent.click(projectMenu);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
+    const name = screen.getByRole('textbox', { name: 'Name' });
+    fireEvent.change(name, { target: { value: 'Calm portfolio' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
+    await waitFor(() =>
+      expect(onRenameDesign).toHaveBeenCalledWith('design-1', 'Calm portfolio')
+    );
+    fireEvent.click(projectMenu);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }));
+    await waitFor(() => expect(onArchiveDesign).toHaveBeenCalledWith('design-1'));
+  });
+
+  it('shows concise source context for a zero-turn Ready copy', () => {
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          project: designProject({
+            conversation: [],
+            turns: [],
+            origin: {
+              designId: 'source-design',
+              revisionId: 'source-revision',
+              designTitle: 'Original portfolio',
+              revisionOrdinal: 3
+            }
+          })
+        })}
+      />
+    );
+
+    expect(screen.getByText('Copied from Original portfolio · Ready state 3')).toBeTruthy();
+    expect(screen.getByText('Continue from this ready copy')).toBeTruthy();
   });
 
   it('shows the desktop-only canvas notice in a browser build', () => {
@@ -1095,6 +1216,10 @@ function workspaceProps(
     onRespondToInteraction: vi.fn(async () => undefined),
     onRefreshCanvas: vi.fn(async () => undefined),
     onRestartCanvas: vi.fn(async () => undefined),
+    onRestoreRevision: vi.fn(async () => undefined),
+    onDuplicateDesign: vi.fn(async () => undefined),
+    onRenameDesign: vi.fn(async () => undefined),
+    onArchiveDesign: vi.fn(async () => undefined),
     onDeleteDesign: vi.fn(async () => undefined),
     ...overrides
   };
@@ -1128,6 +1253,7 @@ function designProject(
     projectFiles: [],
     projectFilesTruncated: false,
     revisions: [],
+    readyContext: [],
     conversation: [
       {
         turn: {
@@ -1157,6 +1283,9 @@ function designProject(
       queuedTurnCount: 0,
       canStop: false,
       canRestart: false,
+      canRestore: true,
+      canDuplicate: true,
+      canArchive: true,
       canDelete: true
     },
     ...overrides

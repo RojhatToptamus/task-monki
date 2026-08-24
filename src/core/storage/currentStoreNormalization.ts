@@ -27,6 +27,7 @@ type LegacyTaskStore = UnvalidatedCurrentStore & {
   designTurns?: unknown;
   designReferences?: unknown;
   designRevisions?: unknown;
+  designSourceActions?: unknown;
   previewPlans?: unknown;
   previewGenerations?: unknown;
 };
@@ -43,6 +44,7 @@ export function migratePersistedStateToCurrent<T extends LegacyTaskStore>(
     assertNoLegacyDesignRecords(current.designTurns, 'designTurns');
     assertNoLegacyDesignRecords(current.designReferences, 'designReferences');
     assertNoLegacyDesignRecords(current.designRevisions, 'designRevisions');
+    assertNoLegacyDesignRecords(current.designSourceActions, 'designSourceActions');
     assertLegacyCollection(current.previewPlans, 'previewPlans');
     assertLegacyCollection(current.previewGenerations, 'previewGenerations');
 
@@ -103,6 +105,7 @@ export function migratePersistedStateToCurrent<T extends LegacyTaskStore>(
       designTurns: [],
       designReferences: [],
       designRevisions: [],
+      designSourceActions: [],
       previewPlans,
       previewGenerations
     } as T;
@@ -114,6 +117,7 @@ export function migratePersistedStateToCurrent<T extends LegacyTaskStore>(
     current = {
       ...current,
       schemaVersion: TASK_STORE_SCHEMA_VERSION,
+      designSourceActions: [],
       designReferences: current.designReferences.map((value) =>
         isRecord(value)
           ? { ...value, role: 'REFERENCE', state: 'ACTIVE' }
@@ -126,7 +130,17 @@ export function migratePersistedStateToCurrent<T extends LegacyTaskStore>(
   if (current.schemaVersion === 21) {
     current = {
       ...current,
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
+      schemaVersion: TASK_STORE_SCHEMA_VERSION,
+      designSourceActions: []
+    } as T;
+    changed = true;
+  }
+
+  if (current.schemaVersion === 22) {
+    current = {
+      ...current,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION,
+      designSourceActions: []
     } as T;
     changed = true;
   }

@@ -374,7 +374,7 @@ describe('createBrowserTaskManagerApi preview contract', () => {
 describe('createBrowserTaskManagerApi Design conversation', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('uses scoped paging, draft, and Stop endpoints', async () => {
+  it('uses scoped Design conversation and project action endpoints', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal(
       'fetch',
@@ -399,13 +399,29 @@ describe('createBrowserTaskManagerApi Design conversation', () => {
     });
     await api.deleteDesignDraft({ designId: 'design/1', expectedRevision: 3 });
     await api.cancelDesignTurn({ designId: 'design/1', turnId: 'turn/1' });
+    await api.restoreDesignRevision({
+      designId: 'design/1',
+      revisionId: 'revision/1',
+      clientActionId: 'restore-1'
+    });
+    await api.duplicateDesign({
+      designId: 'design/1',
+      revisionId: 'revision/1',
+      clientActionId: 'duplicate-1'
+    });
+    await api.renameDesign({ designId: 'design/1', title: 'New name' });
+    await api.archiveDesign({ designId: 'design/1' });
 
     expect(calls.map((call) => call.url)).toEqual([
       '/api/designs/design%2F1/conversation?beforeCursor=before+cursor&limit=25',
       '/api/designs/design%2F1/draft',
       '/api/designs/design%2F1/draft',
       '/api/designs/design%2F1/draft/delete',
-      '/api/designs/design%2F1/turns/turn%2F1/cancel'
+      '/api/designs/design%2F1/turns/turn%2F1/cancel',
+      '/api/designs/design%2F1/revisions/revision%2F1/restore',
+      '/api/designs/design%2F1/revisions/revision%2F1/duplicate',
+      '/api/designs/design%2F1/rename',
+      '/api/designs/design%2F1/archive'
     ]);
     expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
       designId: 'design/1',

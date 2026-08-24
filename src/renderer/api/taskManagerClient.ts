@@ -67,6 +67,10 @@ import type {
   RespondToInteractionRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
   ListDesignConversationRequest,
   SaveDesignDraftRequest,
   SubmitDesignTurnRequest,
@@ -409,6 +413,30 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<DesignDetailSnapshot>(
         baseUrl,
         `/api/designs/${encodeURIComponent(input.designId)}/preview/restart`,
+        input
+      ),
+    restoreDesignRevision: (input: RestoreDesignRevisionRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/revisions/${encodeURIComponent(input.revisionId)}/restore`,
+        input
+      ),
+    duplicateDesign: (input: DuplicateDesignRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/revisions/${encodeURIComponent(input.revisionId)}/duplicate`,
+        input
+      ),
+    renameDesign: (input: RenameDesignRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/rename`,
+        input
+      ),
+    archiveDesign: (input: ArchiveDesignRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/archive`,
         input
       ),
     refinePrompt: (input: RefinePromptRequest) =>

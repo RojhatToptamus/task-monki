@@ -456,9 +456,38 @@ export class AttachmentFileStore {
     targetTaskId: string,
     sourceRecords: readonly TaskAttachmentRecord[]
   ): Promise<TaskAttachmentRecord[]> {
+    return this.copyTaskAttachmentSelection(
+      sourceTaskId,
+      targetTaskId,
+      sourceRecords,
+      true
+    );
+  }
+
+  copySelectedTaskAttachments(
+    sourceTaskId: string,
+    targetTaskId: string,
+    sourceRecords: readonly TaskAttachmentRecord[]
+  ): Promise<TaskAttachmentRecord[]> {
+    return this.copyTaskAttachmentSelection(
+      sourceTaskId,
+      targetTaskId,
+      sourceRecords,
+      false
+    );
+  }
+
+  private copyTaskAttachmentSelection(
+    sourceTaskId: string,
+    targetTaskId: string,
+    sourceRecords: readonly TaskAttachmentRecord[],
+    requireCompleteTaskSet: boolean
+  ): Promise<TaskAttachmentRecord[]> {
     return this.enqueue(async () => {
       if (sourceRecords.length === 0) return [];
-      const verified = await this.verifyTaskUnlocked(sourceTaskId, sourceRecords);
+      const verified = requireCompleteTaskSet
+        ? await this.verifyTaskUnlocked(sourceTaskId, sourceRecords)
+        : await this.verifyTaskSelectionUnlocked(sourceTaskId, sourceRecords);
       await this.ensureCapacity(
         verified.reduce((total, source) => total + source.record.byteCount, 0)
       );

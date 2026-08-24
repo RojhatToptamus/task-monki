@@ -84,6 +84,11 @@ const STATUS_VIEWS: Record<DesignProjectStatus, DesignStatusView> = {
     label: 'Needs attention',
     detail: 'The latest update needs attention. Review the issue before you continue.',
     tone: 'blocked'
+  },
+  ARCHIVED: {
+    label: 'Archived',
+    detail: 'This Design is read-only. You can duplicate or delete it.',
+    tone: 'idle'
   }
 };
 

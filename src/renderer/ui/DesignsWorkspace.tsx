@@ -47,6 +47,7 @@ import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSett
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { useTaskAttachments } from './useTaskAttachments';
+import { DesignProjectMenu } from './DesignActionsMenu';
 
 export type CreateBlankDesignInput = Pick<
   CreateBlankDesignRequest,
@@ -100,6 +101,10 @@ export interface DesignsWorkspaceProps {
   ): Promise<void>;
   onRefreshCanvas(request: DesignCanvasRefreshRequest): Promise<void>;
   onRestartCanvas(designId: string): Promise<void>;
+  onRestoreRevision(designId: string, revisionId: string): Promise<void>;
+  onDuplicateDesign(designId: string, revisionId: string): Promise<void>;
+  onRenameDesign(designId: string, title: string): Promise<void>;
+  onArchiveDesign(designId: string): Promise<void>;
   onDeleteDesign(designId: string): Promise<void>;
   onShowCanvas?(request: DesignCanvasShowRequest): void;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
@@ -138,6 +143,10 @@ export function DesignsWorkspace({
   onRespondToInteraction,
   onRefreshCanvas,
   onRestartCanvas,
+  onRestoreRevision,
+  onDuplicateDesign,
+  onRenameDesign,
+  onArchiveDesign,
   onDeleteDesign,
   onShowCanvas,
   onHideCanvas,
@@ -148,6 +157,7 @@ export function DesignsWorkspace({
   const [compact, setCompact] = useState(false);
   const [compactPane, setCompactPane] = useState<CompactPane>('conversation');
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
   const referenceDesignId = useRef<string | undefined>(undefined);
@@ -297,6 +307,16 @@ export function DesignsWorkspace({
               project={project}
               filesOpen={filesOpen}
               onToggleFiles={() => setFilesOpen((open) => !open)}
+              onDuplicate={() => {
+                const revision = project.revisions.at(-1);
+                if (revision) {
+                  void onDuplicateDesign(project.design.id, revision.id).catch(() => undefined);
+                }
+              }}
+              onRename={() => setRenameOpen(true)}
+              onArchive={() =>
+                void onArchiveDesign(project.design.id).catch(() => undefined)
+              }
               onDelete={() => setDeleteOpen(true)}
             />
             {compact ? (
@@ -367,6 +387,12 @@ export function DesignsWorkspace({
                       onDeleteDraft(project.design.id, expectedRevision)
                     }
                     onRespond={onRespondToInteraction}
+                    onRestore={(revisionId) =>
+                      onRestoreRevision(project.design.id, revisionId)
+                    }
+                    onDuplicate={(revisionId) =>
+                      onDuplicateDesign(project.design.id, revisionId)
+                    }
                   />
                 </div>
               ) : null}
@@ -380,7 +406,7 @@ export function DesignsWorkspace({
                   <DesignCanvas
                     project={project}
                     desktopAvailable={desktopCanvasAvailable}
-                    occluded={canvasOccluded || deleteOpen || filesOpen}
+                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen}
                     onShowCanvas={onShowCanvas}
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
@@ -428,6 +454,16 @@ export function DesignsWorkspace({
           }}
         />
       ) : null}
+      {renameOpen && project ? (
+        <RenameDesignDialog
+          designTitle={project.design.title}
+          onCancel={() => setRenameOpen(false)}
+          onRename={async (title) => {
+            await onRenameDesign(project.design.id, title);
+            setRenameOpen(false);
+          }}
+        />
+      ) : null}
     </main>
   );
 }
@@ -436,11 +472,17 @@ function DesignHeader({
   project,
   filesOpen,
   onToggleFiles,
+  onDuplicate,
+  onRename,
+  onArchive,
   onDelete
 }: {
   project: DesignProjectDetail;
   filesOpen: boolean;
   onToggleFiles(): void;
+  onDuplicate(): void;
+  onRename(): void;
+  onArchive(): void;
   onDelete(): void;
 }) {
   const status = designStatusView(designProjectStatus(project));
@@ -466,19 +508,16 @@ function DesignHeader({
           Files
           <span>{project.references.filter((reference) => reference.state === 'ACTIVE').length}</span>
         </button>
-        <button
-          type="button"
-          className="tm-designs-header__delete"
-          disabled={!project.actions.canDelete}
-          title={
-            project.actions.canDelete
-              ? 'Delete Design'
-              : project.actions.deleteDisabledReason
-          }
-          onClick={onDelete}
-        >
-          Delete
-        </button>
+        <DesignProjectMenu
+          title={project.design.title}
+          canDuplicate={project.actions.canDuplicate}
+          canArchive={project.actions.canArchive}
+          canDelete={project.actions.canDelete}
+          onDuplicate={onDuplicate}
+          onRename={onRename}
+          onArchive={onArchive}
+          onDelete={onDelete}
+        />
       </div>
     </header>
   );
@@ -707,6 +746,79 @@ function BlankDesignForm({
               : creationOutcomeUnknown
                 ? 'Retry creation'
                 : 'Create Design'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function RenameDesignDialog({
+  designTitle,
+  onCancel,
+  onRename
+}: {
+  designTitle: string;
+  onCancel(): void;
+  onRename(title: string): Promise<void>;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [title, setTitle] = useState(designTitle);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  useDialogFocusBoundary({
+    dialogRef,
+    initialFocusRef: inputRef,
+    busy: saving,
+    onClose: onCancel
+  });
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!title.trim() || saving) return;
+    setSaving(true);
+    setError(undefined);
+    try {
+      await onRename(title);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not rename the Design.');
+      setSaving(false);
+    }
+  };
+  return (
+    <div
+      ref={dialogRef}
+      className="tm-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="rename-design-title"
+      tabIndex={-1}
+    >
+      <button
+        type="button"
+        className="tm-modal__scrim"
+        aria-label="Cancel Design rename"
+        disabled={saving}
+        onClick={onCancel}
+      />
+      <form className="tm-modal__panel tm-design-delete" onSubmit={(event) => void submit(event)}>
+        <h3 id="rename-design-title">Rename Design</h3>
+        <label htmlFor="rename-design-input">Name</label>
+        <input
+          ref={inputRef}
+          id="rename-design-input"
+          value={title}
+          maxLength={120}
+          disabled={saving}
+          onChange={(event) => setTitle(event.target.value)}
+        />
+        {error ? <p className="tm-design-delete__error" role="alert">{error}</p> : null}
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={saving} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={saving || !title.trim()}>
+            {saving ? 'Saving…' : 'Rename'}
           </button>
         </div>
       </form>

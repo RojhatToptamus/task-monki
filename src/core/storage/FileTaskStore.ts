@@ -29,15 +29,18 @@ import type {
   CreateBoardRequest,
   CreateBlankDesignRequest,
   CreateTaskRequest,
+  DuplicateDesignRequest,
   DesignConversationEntry,
   DesignDetailSnapshot,
   DesignConversationPage,
   DesignListItem,
   DesignReference,
   DesignRevision,
+  DesignSourceAction,
   DesignTurn,
   DesignTurnCheckpoint,
   DesignTurnOutcome,
+  RestoreDesignRevisionRequest,
   ListDesignConversationRequest,
   DomainEvent,
   GitSnapshotRecord,
@@ -207,10 +210,24 @@ export interface SettleDesignTurnInput {
 
 export interface DesignPreviewSettlementInput {
   designId: string;
-  turnId: string;
-  runId: string;
   commitSha: string;
   routeId: string;
+  settlement:
+    | { kind: 'AGENT_TURN'; turnId: string; runId: string }
+    | { kind: 'RESTORE'; actionId: string }
+    | { kind: 'DUPLICATE'; actionId: string };
+}
+
+export interface BeginRestoreDesignActionResult {
+  action?: Extract<DesignSourceAction, { kind: 'RESTORE' }>;
+  revision?: Extract<DesignRevision, { changeSource: 'RESTORE' }>;
+  sourceRevision: DesignRevision;
+}
+
+export interface BeginDuplicateDesignActionResult {
+  action?: Extract<DesignSourceAction, { kind: 'DUPLICATE' }>;
+  task: Task;
+  sourceRevision: DesignRevision;
 }
 
 export interface DeleteTaskStorageResult {
@@ -1130,6 +1147,14 @@ export class FileTaskStore {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .slice(-DESIGN_LIMITS.recentTelemetryItems);
     const currentPreview = selectCurrentDesignPreview(state, designId, revisions.at(-1));
+    const sourceTask = task.sourceDesignId
+      ? state.tasks.find((candidate) => candidate.id === task.sourceDesignId)
+      : undefined;
+    const sourceRevision = task.sourceDesignRevisionId
+      ? state.designRevisions.find(
+          (candidate) => candidate.id === task.sourceDesignRevisionId
+        )
+      : undefined;
     return clone({
       schemaVersion: state.schemaVersion,
       design: projectDesignListItem(state, task),
@@ -1145,6 +1170,7 @@ export class FileTaskStore {
       projectFiles: [],
       projectFilesTruncated: false,
       revisions,
+      readyContext: await projectDesignReadyContext(state, task, revisions),
       conversation,
       previousConversationCursor: conversationPage.previousCursor,
       interactions,
@@ -1160,6 +1186,15 @@ export class FileTaskStore {
       currentSession: state.agentSessions.find(
         (session) => session.id === task.currentAgentSessionId
       ),
+      origin:
+        task.sourceDesignId && task.sourceDesignRevisionId
+          ? {
+              designId: task.sourceDesignId,
+              revisionId: task.sourceDesignRevisionId,
+              designTitle: sourceTask?.title,
+              revisionOrdinal: sourceRevision?.ordinal
+            }
+          : undefined,
       currentPreview,
       canvas: projectDesignCanvas(state, task, revisions.at(-1), currentPreview),
       actions: projectDesignActions(state, task, revisions.at(-1), currentPreview)
@@ -2072,17 +2107,10 @@ export class FileTaskStore {
       let candidate = input.candidate;
       let revision: DesignRevision | undefined;
       let settledTurn: DesignTurn | undefined;
+      let settledActionId: string | undefined;
       if (input.designSettlement) {
         const settlement = input.designSettlement;
         const design = this.requireDesign(settlement.designId);
-        const turn = this.requireDesignTurn(settlement.designId, settlement.turnId);
-        const run = this.state.runs.find(
-          (candidateRun) =>
-            candidateRun.id === settlement.runId &&
-            candidateRun.taskId === design.id &&
-            candidateRun.mode === 'DESIGN' &&
-            candidateRun.generationKey === turn.id
-        );
         const selectedRoute = candidate.routes.find(
           (route) => route.id === settlement.routeId && route.state === 'ATTACHED'
         );
@@ -2093,24 +2121,12 @@ export class FileTaskStore {
           candidate.source.commitSha !== settlement.commitSha ||
           candidate.source.designRevisionId !== undefined ||
           !isGitObjectId(settlement.commitSha) ||
-          !run ||
-          run.status !== 'COMPLETED' ||
-          turn.runId !== run.id ||
-          turn.outcome !== undefined ||
-          turn.checkpoint?.boundary !== 'PREVIEW_CANDIDATE_READY' ||
-          turn.checkpoint.previewGenerationId !== candidate.id ||
-          turn.checkpoint.commitSha !== settlement.commitSha ||
-          !selectedRoute ||
-          this.state.designRevisions.some(
-            (existing) =>
-              existing.designId === design.id &&
-              (existing.turnId === turn.id || existing.runId === run.id)
-          )
+          !selectedRoute
         ) {
           throw new Error('Design Preview settlement ownership is inconsistent.');
         }
         const now = new Date().toISOString();
-        revision = {
+        const baseRevision = {
           id: randomUUID(),
           designId: design.id,
           ordinal:
@@ -2121,23 +2137,89 @@ export class FileTaskStore {
                 .map((existing) => existing.ordinal)
             ) + 1,
           commitSha: settlement.commitSha,
-          changeSource: 'AGENT_TURN',
-          turnId: turn.id,
-          runId: run.id,
           routeId: selectedRoute.id,
           createdAt: now
         };
+        const authority = settlement.settlement;
+        if (authority.kind === 'AGENT_TURN') {
+          const turn = this.requireDesignTurn(
+            design.id,
+            authority.turnId
+          );
+          const run = this.state.runs.find(
+            (candidateRun) =>
+              candidateRun.id === authority.runId &&
+              candidateRun.taskId === design.id &&
+              candidateRun.mode === 'DESIGN' &&
+              candidateRun.generationKey === turn.id
+          );
+          if (
+            !run ||
+            run.status !== 'COMPLETED' ||
+            turn.runId !== run.id ||
+            turn.outcome !== undefined ||
+            turn.checkpoint?.boundary !== 'PREVIEW_CANDIDATE_READY' ||
+            turn.checkpoint.previewGenerationId !== candidate.id ||
+            turn.checkpoint.commitSha !== settlement.commitSha ||
+            this.state.designRevisions.some(
+              (existing) =>
+                existing.designId === design.id &&
+                existing.changeSource === 'AGENT_TURN' &&
+                (existing.turnId === turn.id || existing.runId === run.id)
+            )
+          ) {
+            throw new Error('Design agent Preview settlement ownership is inconsistent.');
+          }
+          revision = {
+            ...baseRevision,
+            changeSource: 'AGENT_TURN',
+            turnId: turn.id,
+            runId: run.id
+          };
+          settledTurn = {
+            ...turn,
+            checkpoint: undefined,
+            finalOpenedCandidate: undefined,
+            outcome: 'READY',
+            settledAt: now
+          };
+        } else {
+          const action = this.state.designSourceActions.find(
+            (candidateAction) =>
+              candidateAction.id === authority.actionId &&
+              candidateAction.kind === authority.kind
+          );
+          if (
+            !action ||
+            action.failureReason ||
+            action.checkpoint.boundary !== 'PREVIEW_CANDIDATE_READY' ||
+            action.checkpoint.previewGenerationId !== candidate.id ||
+            (action.kind === 'RESTORE' &&
+              (action.designId !== design.id ||
+                action.checkpoint.targetCommitSha !== settlement.commitSha)) ||
+            (action.kind === 'DUPLICATE' &&
+              (action.targetDesignId !== design.id ||
+                this.state.designRevisions.find(
+                  (source) => source.id === action.sourceRevisionId
+                )?.commitSha !== settlement.commitSha))
+          ) {
+            throw new Error('Design source Preview settlement ownership is inconsistent.');
+          }
+          revision =
+            action.kind === 'RESTORE'
+              ? {
+                  ...baseRevision,
+                  changeSource: 'RESTORE',
+                  sourceRevisionId: action.sourceRevisionId,
+                  clientActionId: action.clientActionId
+                }
+              : { ...baseRevision, changeSource: 'DUPLICATE' };
+          settledActionId = action.id;
+        }
         candidate = {
           ...candidate,
           source: { ...candidate.source, designRevisionId: revision.id },
           freshness: 'REVISION'
-        };
-        settledTurn = {
-          ...turn,
-          checkpoint: undefined,
-          finalOpenedCandidate: undefined,
-          outcome: 'READY',
-          settledAt: now
         };
       } else if (
         input.candidate.source.type === 'EXACT_COMMIT' &&
@@ -2152,10 +2234,10 @@ export class FileTaskStore {
       );
       this.state = {
         ...this.state,
-        tasks: settledTurn
+        tasks: revision
           ? this.state.tasks.map((task) =>
-              task.id === settledTurn!.designId
-                ? { ...task, updatedAt: settledTurn!.settledAt! }
+              task.id === revision!.designId
+                ? { ...task, updatedAt: revision!.createdAt }
                 : task
             )
           : this.state.tasks,
@@ -2167,6 +2249,11 @@ export class FileTaskStore {
         designRevisions: revision
           ? [revision, ...this.state.designRevisions]
           : this.state.designRevisions,
+        designSourceActions: settledActionId
+          ? this.state.designSourceActions.filter(
+              (action) => action.id !== settledActionId
+            )
+          : this.state.designSourceActions,
         previewGenerations: [
           candidate,
           ...(input.replaced ? [input.replaced] : []),
@@ -2756,6 +2843,343 @@ export class FileTaskStore {
     return clone(this.resolveDesignCreationRetryFromState(request));
   }
 
+  async beginRestoreDesignAction(
+    input: RestoreDesignRevisionRequest
+  ): Promise<BeginRestoreDesignActionResult> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      validateDesignSourceActionRequest(input);
+      const design = this.requireDesign(input.designId);
+      const sourceRevision = this.requireDesignRevision(
+        input.designId,
+        input.revisionId
+      );
+      const completed = this.state.designRevisions.find(
+        (revision): revision is Extract<DesignRevision, { changeSource: 'RESTORE' }> =>
+          revision.designId === design.id &&
+          revision.changeSource === 'RESTORE' &&
+          revision.clientActionId === input.clientActionId
+      );
+      if (completed) {
+        if (completed.sourceRevisionId !== sourceRevision.id) {
+          throw new Error('This Design action id was already used for another restore.');
+        }
+        return clone({ sourceRevision, revision: completed });
+      }
+      const existing = this.state.designSourceActions.find(
+        (action) => action.clientActionId === input.clientActionId
+      );
+      if (existing) {
+        if (
+          existing.kind !== 'RESTORE' ||
+          existing.designId !== design.id ||
+          existing.sourceRevisionId !== sourceRevision.id
+        ) {
+          throw new Error('This Design action id was already used for another action.');
+        }
+        if (!existing.failureReason) return clone({ action: existing, sourceRevision });
+        const retried: Extract<DesignSourceAction, { kind: 'RESTORE' }> = {
+          ...existing,
+          failureReason: undefined,
+          updatedAt: new Date().toISOString()
+        };
+        this.state = {
+          ...this.state,
+          designSourceActions: this.state.designSourceActions.map((action) =>
+            action.id === retried.id ? retried : action
+          )
+        };
+        await this.persistSnapshot();
+        return clone({ action: retried, sourceRevision });
+      }
+      this.assertDesignSourceActionCanStart(design.id);
+      const latestRevision = this.latestDesignRevision(design.id);
+      if (!latestRevision) throw new Error('This Design has no ready state to restore.');
+      if (sourceRevision.id === latestRevision.id) {
+        throw new Error('This is already the current ready state.');
+      }
+      const now = new Date().toISOString();
+      const retainedActions = this.state.designSourceActions.filter(
+        (action) =>
+          !(
+            action.kind === 'RESTORE' &&
+            action.designId === design.id &&
+            action.failureReason
+          )
+      );
+      const action: Extract<DesignSourceAction, { kind: 'RESTORE' }> = {
+        id: randomUUID(),
+        designId: design.id,
+        kind: 'RESTORE',
+        clientActionId: input.clientActionId,
+        sourceRevisionId: sourceRevision.id,
+        checkpoint: { boundary: 'RECORDED' },
+        createdAt: now,
+        updatedAt: now
+      };
+      this.state = {
+        ...this.state,
+        designSourceActions: [action, ...retainedActions]
+      };
+      await this.persistSnapshot();
+      return clone({ action, sourceRevision });
+    });
+  }
+
+  async beginDuplicateDesignAction(
+    input: DuplicateDesignRequest
+  ): Promise<BeginDuplicateDesignActionResult> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      validateDesignSourceActionRequest(input);
+      const design = this.requireDesign(input.designId);
+      const sourceRevision = this.requireDesignRevision(
+        input.designId,
+        input.revisionId
+      );
+      const fingerprint = duplicateDesignFingerprint(input);
+      const existing = this.state.designSourceActions.find(
+        (action) => action.clientActionId === input.clientActionId
+      );
+      if (existing) {
+        if (
+          existing.kind !== 'DUPLICATE' ||
+          existing.designId !== design.id ||
+          existing.sourceRevisionId !== sourceRevision.id
+        ) {
+          throw new Error('This Design action id was already used for another action.');
+        }
+        const target = this.requireDesign(existing.targetDesignId);
+        if (!existing.failureReason) {
+          return clone({ action: existing, task: target, sourceRevision });
+        }
+        const retried: Extract<DesignSourceAction, { kind: 'DUPLICATE' }> = {
+          ...existing,
+          failureReason: undefined,
+          updatedAt: new Date().toISOString()
+        };
+        this.state = {
+          ...this.state,
+          designSourceActions: this.state.designSourceActions.map((action) =>
+            action.id === retried.id ? retried : action
+          )
+        };
+        await this.persistSnapshot();
+        return clone({ action: retried, task: target, sourceRevision });
+      }
+      const completed = this.state.tasks.find(
+        (task) => task.creationToken === input.clientActionId
+      );
+      if (completed) {
+        if (
+          completed.kind !== 'DESIGN' ||
+          completed.sourceDesignId !== design.id ||
+          completed.sourceDesignRevisionId !== sourceRevision.id ||
+          completed.creationRequestFingerprint !== fingerprint ||
+          !this.state.designRevisions.some(
+            (revision) =>
+              revision.designId === completed.id &&
+              revision.changeSource === 'DUPLICATE'
+          )
+        ) {
+          throw new Error('This Design action id was already used for another duplicate.');
+        }
+        return clone({ task: completed, sourceRevision });
+      }
+      this.assertDesignSourceActionCanStart(design.id, true);
+      if (
+        this.state.designSourceActions.some(
+          (action) => action.kind === 'DUPLICATE' && action.designId === design.id
+        )
+      ) {
+        throw new Error('Delete the unfinished Design copy before duplicating again.');
+      }
+
+      const now = new Date().toISOString();
+      const targetId = randomUUID();
+      const sourceReferences = this.state.designReferences.filter(
+        (reference) =>
+          reference.designId === design.id &&
+          (reference.state === 'ACTIVE' || reference.role === 'PROJECT_ASSET_SOURCE')
+      );
+      const sourceAttachments = sourceReferences.map((reference) => {
+        const attachment = this.state.attachments.find(
+          (candidate) =>
+            candidate.id === reference.attachmentId && candidate.taskId === design.id
+        );
+        if (!attachment) throw new Error('Design duplicate reference bytes are unavailable.');
+        return attachment;
+      });
+      const previousState = this.state;
+      let attachments: TaskAttachmentRecord[] = [];
+      try {
+        attachments = await this.attachmentFiles.copySelectedTaskAttachments(
+          design.id,
+          targetId,
+          sourceAttachments
+        );
+        const attachmentBySource = new Map(
+          sourceAttachments.map((attachment, index) => [attachment.id, attachments[index]!])
+        );
+        const references = sourceReferences.map<DesignReference>((reference) => ({
+          ...reference,
+          id: randomUUID(),
+          designId: targetId,
+          attachmentId: attachmentBySource.get(reference.attachmentId)!.id,
+          sourceDraftId: undefined,
+          firstDeliveredAt: undefined,
+          createdAt: now,
+          deactivatedAt: reference.state === 'INACTIVE' ? now : undefined
+        }));
+        const task: Task = {
+          ...design,
+          id: targetId,
+          title: duplicateDesignTitle(design.title),
+          creationToken: input.clientActionId,
+          creationRequestFingerprint: fingerprint,
+          sourceDesignId: design.id,
+          sourceDesignRevisionId: sourceRevision.id,
+          currentRunId: undefined,
+          currentAgentSessionId: undefined,
+          currentIterationId: undefined,
+          currentWorktreeId: undefined,
+          forkedAlternativeTaskIds: [],
+          createdAt: now,
+          updatedAt: now,
+          projection: createInitialProjection(now)
+        };
+        const action: Extract<DesignSourceAction, { kind: 'DUPLICATE' }> = {
+          id: randomUUID(),
+          designId: design.id,
+          kind: 'DUPLICATE',
+          clientActionId: input.clientActionId,
+          sourceRevisionId: sourceRevision.id,
+          targetDesignId: task.id,
+          checkpoint: { boundary: 'TARGET_CREATED' },
+          createdAt: now,
+          updatedAt: now
+        };
+        this.state = {
+          ...this.state,
+          tasks: [task, ...this.state.tasks],
+          designReferences: [...references, ...this.state.designReferences],
+          designSourceActions: [action, ...this.state.designSourceActions],
+          attachments: [...attachments, ...this.state.attachments]
+        };
+        await this.persistSnapshot();
+        return clone({ action, task, sourceRevision });
+      } catch (error) {
+        this.state = previousState;
+        if (attachments.length > 0) {
+          await this.attachmentFiles.discardTaskFiles(targetId).catch(() => undefined);
+        }
+        throw error;
+      }
+    });
+  }
+
+  async updateDesignSourceAction(
+    action: DesignSourceAction
+  ): Promise<DesignSourceAction> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const existing = this.state.designSourceActions.find(
+        (candidate) => candidate.id === action.id
+      );
+      if (!existing || existing.kind !== action.kind) {
+        throw new Error('Design source action not found.');
+      }
+      if (sameJsonValue(existing, action)) return clone(existing);
+      assertDesignSourceActionTransition(existing, action, this.state);
+      this.state = {
+        ...this.state,
+        designSourceActions: this.state.designSourceActions.map((candidate) =>
+          candidate.id === action.id ? clone(action) : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(action);
+    });
+  }
+
+  async failDesignSourceAction(actionId: string, reason: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const action = this.state.designSourceActions.find(
+        (candidate) => candidate.id === actionId
+      );
+      if (!action) return;
+      const failureReason = boundedDesignActionReason(reason);
+      if (action.failureReason === failureReason) return;
+      const updated = {
+        ...action,
+        failureReason,
+        updatedAt: new Date().toISOString()
+      } satisfies DesignSourceAction;
+      this.state = {
+        ...this.state,
+        designSourceActions: this.state.designSourceActions.map((candidate) =>
+          candidate.id === action.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+    });
+  }
+
+  async renameDesign(designId: string, titleInput: string): Promise<Task> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(designId);
+      const title = titleInput.replace(/\s+/gu, ' ').trim();
+      if (!title || title.length > 120) {
+        throw new Error('Design name must contain 1 to 120 characters.');
+      }
+      if (design.title === title) return clone(design);
+      const updated = { ...design, title, updatedAt: new Date().toISOString() };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === design.id ? updated : task
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async archiveDesign(designId: string): Promise<Task> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(designId);
+      if (design.workflowPhase === 'ARCHIVED') return clone(design);
+      this.assertDesignSourceActionCanStart(design.id);
+      if (
+        this.state.designSourceActions.some(
+          (action) =>
+            action.designId === design.id ||
+            (action.kind === 'DUPLICATE' && action.targetDesignId === design.id)
+        )
+      ) {
+        throw new Error('Resolve the current Design action before archiving.');
+      }
+      const now = new Date().toISOString();
+      const updated: Task = {
+        ...design,
+        workflowPhase: 'ARCHIVED',
+        phaseVersion: design.phaseVersion + 1,
+        updatedAt: now
+      };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === design.id ? updated : task
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
   async createInlineDesignTurn(
     input: CreateInlineDesignTurnInput
   ): Promise<DesignTurn> {
@@ -2771,6 +3195,18 @@ export class FileTaskStore {
       if (existing) {
         await this.assertInlineDesignTurnRetry(existing, input);
         return clone(existing);
+      }
+      if (design.workflowPhase !== 'READY') {
+        throw new Error('Archived Designs cannot accept new messages.');
+      }
+      if (
+        this.state.designSourceActions.some(
+          (action) =>
+            action.designId === design.id ||
+            (action.kind === 'DUPLICATE' && action.targetDesignId === design.id)
+        )
+      ) {
+        throw new Error('Resolve the current Design action before sending a message.');
       }
       const queuedTurnCount = this.state.designTurns.filter(
         (turn) =>
@@ -3366,6 +3802,26 @@ export class FileTaskStore {
     ) {
       throw new Error('Design has an unsettled turn. Settle or cancel it before deletion.');
     }
+    if (task.kind === 'DESIGN') {
+      const relatedSourceAction = this.state.designSourceActions.find(
+        (action) =>
+          (action.designId === task.id ||
+            (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)) &&
+          !action.failureReason
+      );
+      if (relatedSourceAction) {
+        throw new Error('Design source recovery must finish before deletion.');
+      }
+      const copiedDesignToDeleteFirst = this.state.designSourceActions.find(
+        (action) =>
+          action.kind === 'DUPLICATE' &&
+          action.designId === task.id &&
+          action.targetDesignId !== task.id
+      );
+      if (copiedDesignToDeleteFirst) {
+        throw new Error('Delete the unfinished Design copy before deleting its source.');
+      }
+    }
     const activePreviewResource = this.state.previewResources.find(
       (resource) =>
         resource.taskId === taskId &&
@@ -3460,6 +3916,11 @@ export class FileTaskStore {
       ),
       designRevisions: this.state.designRevisions.filter(
         (revision) => revision.designId !== taskId
+      ),
+      designSourceActions: this.state.designSourceActions.filter(
+        (action) =>
+          action.designId !== taskId &&
+          (action.kind !== 'DUPLICATE' || action.targetDesignId !== taskId)
       ),
       iterations: this.state.iterations.filter((iteration) => iteration.taskId !== taskId),
       worktrees: this.state.worktrees.filter((worktree) => worktree.taskId !== taskId),
@@ -3754,6 +4215,45 @@ export class FileTaskStore {
     );
     if (!design) throw new Error('Design not found.');
     return design;
+  }
+
+  private requireDesignRevision(
+    designId: string,
+    revisionId: string
+  ): DesignRevision {
+    const revision = this.state.designRevisions.find(
+      (candidate) =>
+        candidate.id === revisionId && candidate.designId === designId
+    );
+    if (!revision) throw new Error('Design ready state not found.');
+    return revision;
+  }
+
+  private latestDesignRevision(designId: string): DesignRevision | undefined {
+    return this.state.designRevisions
+      .filter((revision) => revision.designId === designId)
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .at(-1);
+  }
+
+  private assertDesignSourceActionCanStart(
+    designId: string,
+    allowArchived = false
+  ): void {
+    const design = this.requireDesign(designId);
+    if (!allowArchived && design.workflowPhase !== 'READY') {
+      throw new Error('Archived Designs cannot change source.');
+    }
+    if (
+      this.state.designTurns.some(
+        (turn) => turn.designId === design.id && turn.outcome === undefined
+      ) ||
+      this.state.designSourceActions.some(
+        (action) => action.designId === design.id && !action.failureReason
+      )
+    ) {
+      throw new Error('Wait for the current Design work to finish.');
+    }
   }
 
   private requireDesignTurn(designId: string, turnId: string): DesignTurn {
@@ -6956,6 +7456,7 @@ function requireCurrentState(state: PersistedState): StoreState {
     'designTurns',
     'designReferences',
     'designRevisions',
+    'designSourceActions',
     'iterations',
     'worktrees',
     'gitSnapshots',
@@ -7724,10 +8225,17 @@ function validatePersistedDesignRelationships(state: StoreState): void {
   const references = indexUniqueRecords(state.designReferences, 'designReferences');
   const turns = indexUniqueRecords(state.designTurns, 'designTurns');
   const revisions = indexUniqueRecords(state.designRevisions, 'designRevisions');
+  const sourceActions = indexUniqueRecords(
+    state.designSourceActions,
+    'designSourceActions'
+  );
   const designRunKeys = new Set<string>();
 
   for (const task of state.tasks) {
     const repository = repositories.get(task.repositoryId);
+    const copiedDesign =
+      task.sourceDesignId !== undefined &&
+      task.sourceDesignRevisionId !== undefined;
     if (
       task.kind === 'DESIGN' &&
       (repository?.kind !== 'DESIGN_MANAGED' ||
@@ -7735,9 +8243,28 @@ function validatePersistedDesignRelationships(state: StoreState): void {
         task.completionPolicy !== 'MANUAL' ||
         task.runtimeId !== CODEX_RUNTIME_ID ||
         !hasRestrictedDesignRequestedSettings(task.agentSettings) ||
-        !state.designTurns.some((turn) => turn.designId === task.id))
+        ((task.sourceDesignId === undefined) !==
+          (task.sourceDesignRevisionId === undefined)) ||
+        (!state.designTurns.some((turn) => turn.designId === task.id) &&
+          !copiedDesign))
     ) {
       invalidPersistedRelationship('Design task ownership');
+    }
+    if (
+      task.kind !== 'DESIGN' &&
+      (task.sourceDesignId !== undefined || task.sourceDesignRevisionId !== undefined)
+    ) {
+      invalidPersistedRelationship('copied Design task ownership');
+    }
+    if (copiedDesign) {
+      const sourceTask = tasks.get(task.sourceDesignId!);
+      const sourceRevision = revisions.get(task.sourceDesignRevisionId!);
+      if (
+        (sourceTask && sourceTask.kind !== 'DESIGN') ||
+        (sourceRevision && sourceRevision.designId !== task.sourceDesignId)
+      ) {
+        invalidPersistedRelationship('copied Design source ownership');
+      }
     }
     if (task.kind === 'NORMAL' && repository?.kind !== 'USER_REGISTERED') {
       invalidPersistedRelationship('normal task repository ownership');
@@ -7746,7 +8273,7 @@ function validatePersistedDesignRelationships(state: StoreState): void {
   for (const repository of state.repositories) {
     if (repository.kind !== 'DESIGN_MANAGED') continue;
     const owners = state.tasks.filter((task) => task.repositoryId === repository.id);
-    if (owners.length !== 1 || owners[0]?.kind !== 'DESIGN') {
+    if (owners.length < 1 || owners.some((owner) => owner.kind !== 'DESIGN')) {
       invalidPersistedRelationship('managed Design repository ownership');
     }
   }
@@ -7797,10 +8324,13 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     }
     const hasValidMessageLineage =
       turn.messageSource === 'TASK_PROMPT'
-        ? turn.order === 1 &&
+        ? design.sourceDesignId === undefined &&
+          turn.order === 1 &&
           turn.messageArtifactId === undefined &&
           turn.clientMessageId === design.creationToken
-        : turn.order > 1 && turn.messageArtifactId !== undefined;
+        : turn.order >= 1 &&
+          turn.messageArtifactId !== undefined &&
+          (design.sourceDesignId !== undefined || turn.order > 1);
     if (
       !hasValidMessageLineage ||
       new Set(turn.referenceIds).size !== turn.referenceIds.length ||
@@ -7906,34 +8436,83 @@ function validatePersistedDesignRelationships(state: StoreState): void {
   const revisionsByDesign = new Map<string, DesignRevision[]>();
   for (const revision of state.designRevisions) {
     const design = tasks.get(revision.designId);
-    const turn = turns.get(revision.turnId);
-    const run = runs.get(revision.runId);
-    if (
-      design?.kind !== 'DESIGN' ||
-      revision.changeSource !== 'AGENT_TURN' ||
-      !turn ||
-      turn.designId !== design.id ||
-      turn.outcome !== 'READY' ||
-      !run ||
-      run.taskId !== design.id ||
-      run.id !== turn.runId ||
-      run.mode !== 'DESIGN'
-    ) {
+    if (design?.kind !== 'DESIGN') {
       invalidPersistedRelationship('Design revision ownership');
     }
     const ownerRevisions = revisionsByDesign.get(revision.designId) ?? [];
-    if (
-      ownerRevisions.some(
-        (existing) =>
-          existing.ordinal === revision.ordinal ||
-          existing.turnId === revision.turnId ||
-          existing.runId === revision.runId
-      )
-    ) {
+    if (ownerRevisions.some((existing) => existing.ordinal === revision.ordinal)) {
       invalidPersistedRelationship('Design revision identity');
+    }
+    if (revision.changeSource === 'AGENT_TURN') {
+      const turn = turns.get(revision.turnId);
+      const run = runs.get(revision.runId);
+      if (
+        !turn ||
+        turn.designId !== design.id ||
+        turn.outcome !== 'READY' ||
+        !run ||
+        run.taskId !== design.id ||
+        run.id !== turn.runId ||
+        run.mode !== 'DESIGN' ||
+        ownerRevisions.some(
+          (existing) =>
+            existing.changeSource === 'AGENT_TURN' &&
+            (existing.turnId === revision.turnId || existing.runId === revision.runId)
+        )
+      ) {
+        invalidPersistedRelationship('Design agent revision ownership');
+      }
+    } else if (revision.changeSource === 'RESTORE') {
+      const sourceRevision = revisions.get(revision.sourceRevisionId);
+      if (
+        !sourceRevision ||
+        sourceRevision.designId !== design.id ||
+        sourceRevision.ordinal >= revision.ordinal ||
+        state.designRevisions.some(
+          (candidate) =>
+            candidate.id !== revision.id &&
+            candidate.changeSource === 'RESTORE' &&
+            candidate.designId === revision.designId &&
+            candidate.clientActionId === revision.clientActionId
+        )
+      ) {
+        invalidPersistedRelationship('Design restore revision ownership');
+      }
+    } else if (
+      revision.ordinal !== 1 ||
+      !design.sourceDesignId ||
+      !design.sourceDesignRevisionId
+    ) {
+      invalidPersistedRelationship('Design duplicate revision ownership');
     }
     ownerRevisions.push(revision);
     revisionsByDesign.set(revision.designId, ownerRevisions);
+  }
+
+  const sourceActionClientIds = new Set<string>();
+  for (const action of sourceActions.values()) {
+    const design = tasks.get(action.designId);
+    const sourceRevision = revisions.get(action.sourceRevisionId);
+    if (
+      design?.kind !== 'DESIGN' ||
+      !sourceRevision ||
+      sourceRevision.designId !== design.id ||
+      sourceActionClientIds.has(action.clientActionId)
+    ) {
+      invalidPersistedRelationship('Design source action ownership');
+    }
+    sourceActionClientIds.add(action.clientActionId);
+    if (action.kind === 'DUPLICATE') {
+      const target = tasks.get(action.targetDesignId);
+      if (
+        target?.kind !== 'DESIGN' ||
+        target.sourceDesignId !== design.id ||
+        target.sourceDesignRevisionId !== sourceRevision.id ||
+        target.creationToken !== action.clientActionId
+      ) {
+        invalidPersistedRelationship('Design duplicate action ownership');
+      }
+    }
   }
   for (const ownerRevisions of revisionsByDesign.values()) {
     const ordinals = ownerRevisions
@@ -8274,6 +8853,11 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
       'INTERRUPTING',
       'RECOVERY_REQUIRED'
     ].includes(run.status);
+  const sourceAction = state.designSourceActions.find(
+    (action) =>
+      action.designId === task.id ||
+      (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)
+  );
   const currentPreview = selectCurrentDesignPreview(state, task.id, latestRevision);
   const previewNeedsRestart = Boolean(
     latestRevision &&
@@ -8282,14 +8866,18 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
         currentPreview.routingState === 'ACTIVE'
       )
   );
-  const status: DesignListItem['status'] = needsInput
-    ? 'NEEDS_INPUT'
-    : latestTurn?.outcome === 'FAILED' ||
+  const status: DesignListItem['status'] = task.workflowPhase === 'ARCHIVED'
+    ? 'ARCHIVED'
+    : sourceAction?.failureReason
+      ? 'NEEDS_ATTENTION'
+      : needsInput
+        ? 'NEEDS_INPUT'
+        : latestTurn?.outcome === 'FAILED' ||
         latestTurn?.outcome === 'NEEDS_ATTENTION' ||
         (latestTurn?.outcome === 'CANCELED' && !latestRevision) ||
         previewNeedsRestart
       ? 'NEEDS_ATTENTION'
-      : latestTurn?.outcome === undefined || activeRun
+      : sourceAction || (latestTurn && latestTurn.outcome === undefined) || activeRun
         ? latestRevision
           ? 'UPDATING'
           : 'STARTING'
@@ -8370,8 +8958,86 @@ async function projectDesignConversationEntry(
           ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
           : '',
     assistantMessage: run?.finalMessage,
-    runStatus: run?.status
+    runStatus: run?.status,
+    readyRevision:
+      turn.outcome === 'READY'
+        ? state.designRevisions.find(
+            (revision) =>
+              revision.designId === task.id &&
+              revision.changeSource === 'AGENT_TURN' &&
+              revision.turnId === turn.id
+          )
+        : undefined
   };
+}
+
+async function projectDesignReadyContext(
+  state: StoreState,
+  task: Task,
+  revisions: readonly DesignRevision[]
+): Promise<DesignDetailSnapshot['readyContext']> {
+  return Promise.all(
+    revisions.slice(-DESIGN_LIMITS.readyContextEntries).map(async (revision) => {
+      const sourceRevision = resolveSourceReadyRevision(state, task, revision);
+      return {
+        revision,
+        userRequest: sourceRevision
+          ? await readDesignRevisionRequest(state, sourceRevision)
+          : undefined,
+        sourceRevisionOrdinal:
+          revision.changeSource === 'RESTORE'
+            ? state.designRevisions.find(
+                (candidate) => candidate.id === revision.sourceRevisionId
+              )?.ordinal
+            : undefined
+      };
+    })
+  );
+}
+
+function resolveSourceReadyRevision(
+  state: StoreState,
+  task: Task,
+  revision: DesignRevision
+): DesignRevision | undefined {
+  let current: DesignRevision | undefined = revision;
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    if (current.changeSource === 'AGENT_TURN') return current;
+    if (current.changeSource === 'RESTORE') {
+      const sourceRevisionId: string = current.sourceRevisionId;
+      current = state.designRevisions.find(
+        (candidate) => candidate.id === sourceRevisionId
+      );
+      continue;
+    }
+    current = task.sourceDesignRevisionId
+      ? state.designRevisions.find(
+          (candidate) => candidate.id === task.sourceDesignRevisionId
+        )
+      : undefined;
+  }
+  return undefined;
+}
+
+async function readDesignRevisionRequest(
+  state: StoreState,
+  revision: DesignRevision
+): Promise<string | undefined> {
+  if (revision.changeSource !== 'AGENT_TURN') return undefined;
+  const turn = state.designTurns.find(
+    (candidate) => candidate.id === revision.turnId
+  );
+  const task = state.tasks.find((candidate) => candidate.id === revision.designId);
+  if (!turn || !task) return undefined;
+  if (turn.messageSource === 'TASK_PROMPT') return task.prompt;
+  const artifact = turn.messageArtifactId
+    ? state.artifacts.find((candidate) => candidate.id === turn.messageArtifactId)
+    : undefined;
+  return artifact
+    ? readPrivateArtifactFile(artifact.path, artifact.byteCount)
+    : undefined;
 }
 
 function encodeDesignConversationCursor(order: number): string {
@@ -8417,6 +9083,12 @@ function projectDesignCanvas(
   latestRevision: DesignRevision | undefined,
   currentPreview: PreviewGenerationRecord | undefined
 ): DesignDetailSnapshot['canvas'] {
+  const sourceFailure = state.designSourceActions.find(
+    (action) =>
+      (action.designId === task.id ||
+        (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)) &&
+      action.failureReason
+  )?.failureReason;
   const route =
     currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY'
       ? currentPreview.routes.find(
@@ -8427,7 +9099,8 @@ function projectDesignCanvas(
   if (currentPreview && route) {
     return {
       state: 'READY',
-      target: { generationId: currentPreview.id, routeId: route.id }
+      target: { generationId: currentPreview.id, routeId: route.id },
+      detail: sourceFailure
     };
   }
   if (latestRevision) {
@@ -8443,7 +9116,7 @@ function projectDesignCanvas(
   ) {
     return { state: 'UPDATING' };
   }
-  return { state: 'EMPTY' };
+  return { state: 'EMPTY', detail: sourceFailure };
 }
 
 function projectDesignActions(
@@ -8456,8 +9129,15 @@ function projectDesignActions(
     .filter((turn) => turn.designId === task.id && turn.outcome === undefined)
     .sort((left, right) => left.order - right.order);
   const queuedTurnCount = unsettledTurns.filter((turn) => !turn.runId).length;
+  const relatedSourceActions = state.designSourceActions.filter(
+    (action) =>
+      action.designId === task.id ||
+      (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)
+  );
   const canRefine =
-    task.workflowPhase === 'READY' && queuedTurnCount < DESIGN_LIMITS.queuedTurns;
+    task.workflowPhase === 'READY' &&
+    queuedTurnCount < DESIGN_LIMITS.queuedTurns &&
+    relatedSourceActions.length === 0;
   const previewIsReady =
     currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY';
   const currentRun = task.currentRunId
@@ -8480,23 +9160,137 @@ function projectDesignActions(
     ? unsettledTurns.find((turn) => turn.runId === activeRun.id)
     : undefined;
   const canStop = Boolean(stopTurn && activeRun?.status !== 'INTERRUPTING');
-  const canDelete = unsettledTurns.length === 0 && !activeRun;
+  const hasActiveSourceAction = relatedSourceActions.some(
+    (action) => !action.failureReason
+  );
+  const sourceIdle = unsettledTurns.length === 0 && !activeRun && !hasActiveSourceAction;
+  const sourceActionFree = relatedSourceActions.length === 0;
+  const isFailedDuplicateTarget = relatedSourceActions.some(
+    (action) =>
+      action.kind === 'DUPLICATE' &&
+      action.targetDesignId === task.id &&
+      Boolean(action.failureReason)
+  );
+  const canDelete = sourceIdle && (sourceActionFree || isFailedDuplicateTarget);
   return {
     canRefine,
     refineDisabledReason: canRefine
       ? undefined
       : task.workflowPhase !== 'READY'
         ? 'This Design is archived.'
-        : 'The Design message queue is full.',
+        : relatedSourceActions.length > 0
+          ? 'Resolve the unfinished Design action before sending a message.'
+          : 'The Design message queue is full.',
     queuedTurnCount,
     canStop,
     stopTurnId: canStop ? stopTurn?.id : undefined,
     canRestart: Boolean(latestRevision && !previewIsReady),
+    canRestore: Boolean(
+      latestRevision &&
+        sourceIdle &&
+        task.workflowPhase === 'READY' &&
+        !relatedSourceActions.some((action) => action.kind === 'DUPLICATE')
+    ),
+    canDuplicate: Boolean(latestRevision && sourceIdle && sourceActionFree),
+    canArchive: sourceIdle && sourceActionFree && task.workflowPhase === 'READY',
     canDelete,
     deleteDisabledReason: canDelete
       ? undefined
-      : 'Stop and settle the current Design turn before deletion.'
+      : relatedSourceActions.length > 0
+        ? 'Resolve or remove the unfinished Design action before deletion.'
+        : 'Stop and settle the current Design turn before deletion.'
   };
+}
+
+function validateDesignSourceActionRequest(input: {
+  designId: string;
+  revisionId: string;
+  clientActionId: string;
+}): void {
+  if (
+    !UUID_FILE_SEGMENT_PATTERN.test(input.designId) ||
+    !UUID_FILE_SEGMENT_PATTERN.test(input.revisionId) ||
+    !isTaskCreationToken(input.clientActionId)
+  ) {
+    throw new Error('Design action request is invalid.');
+  }
+}
+
+function duplicateDesignFingerprint(input: DuplicateDesignRequest): string {
+  return createHash('sha256')
+    .update(
+      stableJsonStringify({
+        kind: 'DESIGN_DUPLICATE',
+        designId: input.designId,
+        revisionId: input.revisionId
+      })!
+    )
+    .digest('hex');
+}
+
+function duplicateDesignTitle(title: string): string {
+  const suffix = ' copy';
+  return title.length + suffix.length <= 120
+    ? `${title}${suffix}`
+    : `${title.slice(0, 120 - suffix.length).trimEnd()}${suffix}`;
+}
+
+function boundedDesignActionReason(reason: string): string {
+  const trimmed = reason.trim() || 'The Design source action did not finish.';
+  return trimmed.length <= 1_000 ? trimmed : `${trimmed.slice(0, 997)}...`;
+}
+
+function assertDesignSourceActionTransition(
+  current: DesignSourceAction,
+  next: DesignSourceAction,
+  state: StoreState
+): void {
+  if (
+    current.kind !== next.kind ||
+    current.id !== next.id ||
+    current.designId !== next.designId ||
+    current.clientActionId !== next.clientActionId ||
+    current.sourceRevisionId !== next.sourceRevisionId ||
+    current.createdAt !== next.createdAt ||
+    current.failureReason !== next.failureReason ||
+    (current.kind === 'DUPLICATE' &&
+      (next.kind !== 'DUPLICATE' || current.targetDesignId !== next.targetDesignId)) ||
+    !isCanonicalIsoTimestamp(next.updatedAt)
+  ) {
+    throw new Error('Design source action ownership cannot change.');
+  }
+  const allowed =
+    current.kind === 'RESTORE'
+      ? {
+          RECORDED: ['SOURCE_CAPTURED'],
+          SOURCE_CAPTURED: ['COMMIT_PUBLISHED'],
+          COMMIT_PUBLISHED: ['WORKTREE_MATERIALIZED'],
+          WORKTREE_MATERIALIZED: ['PREVIEW_CANDIDATE_READY'],
+          PREVIEW_CANDIDATE_READY: ['PREVIEW_CANDIDATE_READY']
+        }
+      : {
+          TARGET_CREATED: ['WORKTREE_CREATED'],
+          WORKTREE_CREATED: ['PREVIEW_CANDIDATE_READY'],
+          PREVIEW_CANDIDATE_READY: ['PREVIEW_CANDIDATE_READY']
+        };
+  const nextBoundary = next.checkpoint.boundary;
+  if (!(allowed[current.checkpoint.boundary] as readonly string[]).includes(nextBoundary)) {
+    throw new Error(
+      `Invalid Design source action transition: ${current.checkpoint.boundary} -> ${nextBoundary}`
+    );
+  }
+  if (
+    current.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY' &&
+    next.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY'
+  ) {
+    const priorGenerationId = current.checkpoint.previewGenerationId;
+    const prior = state.previewGenerations.find(
+      (generation) => generation.id === priorGenerationId
+    );
+    if (prior && !['STOPPED', 'FAILED'].includes(prior.state)) {
+      throw new Error('A live Design source candidate cannot be replaced.');
+    }
+  }
 }
 
 function assertDesignCheckpointTransition(

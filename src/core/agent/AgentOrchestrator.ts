@@ -303,6 +303,16 @@ export class AgentOrchestrator {
     }
   }
 
+  async deleteTaskProviderHistory(task: Task): Promise<void> {
+    const adapter = this.runtimes.require(task.runtimeId);
+    if (!adapter.deleteTaskProviderHistory) {
+      throw new Error(
+        `${adapter.descriptor.displayName} cannot delete provider history safely.`
+      );
+    }
+    await adapter.deleteTaskProviderHistory(task.id);
+  }
+
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {
     const operation = this.startQueue.then(() => this.startTurnSerially(input));
     this.startQueue = operation.then(

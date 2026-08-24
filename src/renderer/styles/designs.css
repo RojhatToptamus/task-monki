@@ -236,7 +236,6 @@
   white-space: nowrap;
 }
 
-.tm-designs-header__delete,
 .tm-designs-header__files {
   height: 29px;
   padding: 0 8px;
@@ -280,9 +279,16 @@
   text-align: center;
 }
 
-.tm-designs-header__delete:hover:not(:disabled) {
-  background: var(--error-soft);
-  color: var(--error-ink);
+.tm-design-project-menu .tm-taskmenu__trigger {
+  width: 29px;
+  height: 29px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--muted);
+}
+
+.tm-design-project-menu .tm-taskmenu__menu {
+  min-width: 176px;
 }
 
 .tm-designs-split {
@@ -437,6 +443,35 @@
 .tm-design-message header time {
   color: var(--muted);
   font: 9px var(--font-mono);
+}
+
+.tm-design-message--agent > header {
+  justify-content: space-between;
+}
+
+.tm-design-message__ready-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tm-design-ready-menu .tm-taskmenu__trigger {
+  width: 24px;
+  height: 24px;
+}
+
+.tm-design-ready-menu .tm-taskmenu__menu {
+  min-width: 178px;
+}
+
+.tm-design-conversation__origin {
+  margin: 0 0 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--muted);
+  font-size: 10.5px;
 }
 
 .tm-design-message--user {

@@ -31,6 +31,10 @@ import type { ModelProviderCapabilitiesReadParams } from './protocol/generated/v
 import type { ModelProviderCapabilitiesReadResponse } from './protocol/generated/v2/ModelProviderCapabilitiesReadResponse';
 import type { ThreadReadParams } from './protocol/generated/v2/ThreadReadParams';
 import type { ThreadReadResponse } from './protocol/generated/v2/ThreadReadResponse';
+import type { ThreadListParams } from './protocol/generated/v2/ThreadListParams';
+import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
+import type { ThreadDeleteParams } from './protocol/generated/v2/ThreadDeleteParams';
+import type { ThreadDeleteResponse } from './protocol/generated/v2/ThreadDeleteResponse';
 import type { ThreadForkParams } from './protocol/generated/v2/ThreadForkParams';
 import type { ThreadForkResponse } from './protocol/generated/v2/ThreadForkResponse';
 import type { ThreadGoalGetParams } from './protocol/generated/v2/ThreadGoalGetParams';
@@ -66,6 +70,8 @@ interface CodexMethodMap {
   'thread/goal/set': { params: ThreadGoalSetParams; result: ThreadGoalSetResponse };
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse };
   'thread/read': { params: ThreadReadParams; result: ThreadReadResponse };
+  'thread/list': { params: ThreadListParams; result: ThreadListResponse };
+  'thread/delete': { params: ThreadDeleteParams; result: ThreadDeleteResponse };
   'thread/unsubscribe': {
     params: ThreadUnsubscribeParams;
     result: ThreadUnsubscribeResponse;

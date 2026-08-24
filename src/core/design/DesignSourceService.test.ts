@@ -183,6 +183,78 @@ describe('DesignSourceService', () => {
     ).rejects.toThrow('never removes a registered repository');
   }, 30_000);
 
+  it('restores an exact earlier tree as a child of the current commit', async () => {
+    const project = await createManagedProject('restore', 'design-restore-token');
+    const filePath = path.join(project.worktree.worktreePath, 'index.html');
+    await fs.writeFile(filePath, '<h1>First ready state</h1>\n', 'utf8');
+    await fs.writeFile(
+      path.join(project.worktree.worktreePath, '.gitignore'),
+      'node_modules/\n',
+      'utf8'
+    );
+    await commitAll(project.worktree.worktreePath, 'First ready state');
+    const selectedCommitSha = (await git(project.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+
+    await fs.writeFile(filePath, '<h1>Current ready state</h1>\n', 'utf8');
+    await commitAll(project.worktree.worktreePath, 'Current ready state');
+    const currentCommitSha = (await git(project.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+    await fs.writeFile(
+      path.join(project.worktree.worktreePath, 'untracked.txt'),
+      'remove during exact materialization',
+      'utf8'
+    );
+    await fs.mkdir(path.join(project.worktree.worktreePath, 'node_modules'));
+    await fs.writeFile(
+      path.join(project.worktree.worktreePath, 'node_modules', 'stale.txt'),
+      'ignored stale bytes',
+      'utf8'
+    );
+
+    const ownership = {
+      designId: project.designId,
+      repository: project.repository,
+      worktree: project.worktree,
+      actionId: randomUUID(),
+      sourceRevisionId: randomUUID()
+    };
+    const captured = await project.source.captureRestoreSource({
+      ...ownership,
+      selectedCommitSha
+    });
+    expect(captured.expectedParentCommit).toBe(currentCommitSha);
+    const prepared = await project.source.prepareRestoreCommit({
+      ...ownership,
+      ...captured
+    });
+
+    expect(
+      (await git(project.repository.path, ['rev-parse', `${prepared.targetCommitSha}^`])).trim()
+    ).toBe(currentCommitSha);
+    expect(
+      (await git(project.repository.path, ['rev-parse', `${prepared.targetCommitSha}^{tree}`])).trim()
+    ).toBe(
+      (await git(project.repository.path, ['rev-parse', `${selectedCommitSha}^{tree}`])).trim()
+    );
+
+    await project.source.publishRestoreCommit({ ...ownership, ...prepared });
+    await project.source.materializeRestoreCommit({
+      ...ownership,
+      targetCommitSha: prepared.targetCommitSha
+    });
+
+    expect(await fs.readFile(filePath, 'utf8')).toBe('<h1>First ready state</h1>\n');
+    await expect(
+      fs.access(path.join(project.worktree.worktreePath, 'untracked.txt'))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fs.access(path.join(project.worktree.worktreePath, 'node_modules'))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await git(project.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim()).toBe(
+      prepared.targetCommitSha
+    );
+    expect(await git(project.worktree.worktreePath, ['status', '--porcelain=v1'])).toBe('');
+  }, 30_000);
+
   it('removes only unreferenced, marker-owned repositories during reconciliation', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-orphans-'));
     const repositoryRoot = path.join(root, 'repositories');
@@ -375,4 +447,18 @@ async function git(
     env: env ? { ...process.env, ...env } : process.env
   });
   return stdout;
+}
+
+async function commitAll(cwd: string, message: string): Promise<void> {
+  await git(cwd, ['add', '--all']);
+  await git(
+    cwd,
+    ['commit', '-m', message],
+    {
+      GIT_AUTHOR_NAME: 'Task Monki',
+      GIT_AUTHOR_EMAIL: 'task-monki@localhost',
+      GIT_COMMITTER_NAME: 'Task Monki',
+      GIT_COMMITTER_EMAIL: 'task-monki@localhost'
+    }
+  );
 }

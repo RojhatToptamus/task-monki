@@ -52,6 +52,10 @@ import type {
   RespondToInteractionRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
   ListDesignConversationRequest,
   SaveDesignDraftRequest,
   StartReviewRequest,
@@ -441,7 +445,8 @@ export class TaskManagerService {
         fence: options.designCanvasFence,
         events: this.events,
         refreshGitEvidence: (designId) => this.refreshDesignGitEvidence(designId),
-        ensurePostRunEvidence: (runId) => this.ensurePostRunEvidence(runId)
+        ensurePostRunEvidence: (runId) => this.ensurePostRunEvidence(runId),
+        ensureDesignWorktree: (designId) => this.ensureDesignWorktree(designId)
       });
     }
     this.github = new GitHubService(options.ghPath);
@@ -590,6 +595,8 @@ export class TaskManagerService {
     );
     this.assertInitializing();
     await this.reconcileDesignWorkspaces();
+    this.assertInitializing();
+    await this.designUpdates?.recoverSourceActions();
     this.assertInitializing();
     await this.designUpdates?.recover();
     this.assertInitializing();
@@ -1730,6 +1737,49 @@ export class TaskManagerService {
         return this.getDesign(input.designId);
       })
     );
+  }
+
+  restoreDesignRevision(
+    input: RestoreDesignRevisionRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design restore', () =>
+      this.withRuntimeOperation(async () => {
+        await this.requireDesignUpdates().then((updates) =>
+          updates.restoreRevision(input)
+        );
+        return this.getDesign(input.designId);
+      })
+    );
+  }
+
+  duplicateDesign(input: DuplicateDesignRequest): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design duplicate', () =>
+      this.withRuntimeOperation(async () => {
+        const targetDesignId = await this.requireDesignUpdates().then((updates) =>
+          updates.duplicateDesign(input)
+        );
+        return this.getDesign(targetDesignId);
+      })
+    );
+  }
+
+  renameDesign(input: RenameDesignRequest): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design rename', async () => {
+      await this.store.renameDesign(input.designId, input.title);
+      this.emitDesignUpdate(input.designId, { reason: 'renamed' });
+      return this.getDesign(input.designId);
+    });
+  }
+
+  archiveDesign(input: ArchiveDesignRequest): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design archive', async () => {
+      const updates = await this.requireDesignUpdates();
+      return updates.withExclusiveAccess(input.designId, async () => {
+        await this.store.archiveDesign(input.designId);
+        this.emitDesignUpdate(input.designId, { reason: 'archived' });
+        return this.getDesign(input.designId);
+      });
+    });
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
@@ -3233,12 +3283,30 @@ export class TaskManagerService {
     ) {
       throw new Error('Wait for the current Design update to settle before deleting it.');
     }
+    const activeSourceAction = snapshot.designSourceActions.find(
+      (action) =>
+        (action.designId === task.id ||
+          (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)) &&
+        !action.failureReason
+    );
+    if (activeSourceAction) {
+      throw new Error('Wait for the current Design action to finish before deleting it.');
+    }
+    const unfinishedCopy = snapshot.designSourceActions.find(
+      (action) =>
+        action.kind === 'DUPLICATE' &&
+        action.designId === task.id &&
+        action.targetDesignId !== task.id
+    );
+    if (unfinishedCopy) {
+      throw new Error('Delete the unfinished Design copy before deleting its source.');
+    }
     const worktreeOwner = this.requireDesignWorktrees();
     const source = this.requireDesignSource();
 
     await this.previews.stopTask(task.id);
     await this.previewRecipeGenerator.discard(task.id);
-    await this.agents.releaseTask(task.id);
+    await this.agents.deleteTaskProviderHistory(task);
 
     let removedWorktree = false;
     for (const worktree of snapshot.worktrees.filter(
@@ -3593,9 +3661,22 @@ export class TaskManagerService {
     }
     let worktree = await this.store.getCurrentWorktree(task.id);
     if (!worktree || ['REMOVED', 'REMOVING'].includes(worktree.status)) {
+      const snapshot = await this.store.snapshot();
+      const latestOwnRevision = snapshot.designRevisions
+        .filter((revision) => revision.designId === task.id)
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .at(-1);
+      const duplicateBase = latestOwnRevision ?? (task.sourceDesignRevisionId
+        ? snapshot.designRevisions.find(
+            (revision) => revision.id === task.sourceDesignRevisionId
+          )
+        : undefined);
+      if ((task.sourceDesignRevisionId || latestOwnRevision) && !duplicateBase) {
+        throw new Error('The copied Design source revision is unavailable.');
+      }
       const spec = owner.buildSpecFromBase(task, {
-        baseRef: repository.branch,
-        baseSha: repository.headSha
+        baseRef: duplicateBase ? undefined : repository.branch,
+        baseSha: duplicateBase?.commitSha ?? repository.headSha
       });
       ({ worktree } = await this.store.createIterationAndWorktree({
         task,

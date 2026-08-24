@@ -125,6 +125,20 @@ export interface DesignAssetImportReceipt {
   created: boolean;
 }
 
+export interface DesignRestoreOwnership extends DesignProjectOwnership {
+  actionId: string;
+  sourceRevisionId: string;
+}
+
+export interface DesignRestoreSource {
+  expectedParentCommit: string;
+  treeSha: string;
+}
+
+export interface PublishedDesignRestoreSource extends DesignRestoreSource {
+  targetCommitSha: string;
+}
+
 /**
  * Owns only Task Monki-managed Design Git sources. Git remains the source of
  * ready bytes; the service does not mirror files or revision history.
@@ -435,6 +449,149 @@ export class DesignSourceService {
     }
   }
 
+  async captureRestoreSource(
+    input: DesignRestoreOwnership & { selectedCommitSha: string }
+  ): Promise<DesignRestoreSource> {
+    await this.assertRestoreOwnership(input);
+    assertGitObjectId(input.selectedCommitSha, 'selected Design commit');
+    const expectedParentCommit = await this.readBranchCommit(
+      input.repository.path,
+      input.worktree.branchName
+    );
+    const treeSha = cleanGitOutput(
+      await managedGit(input.repository.path, [
+        'rev-parse',
+        '--verify',
+        `${input.selectedCommitSha}^{tree}`
+      ])
+    );
+    assertGitObjectId(treeSha, 'selected Design tree');
+    return { expectedParentCommit, treeSha };
+  }
+
+  async prepareRestoreCommit(
+    input: DesignRestoreOwnership & DesignRestoreSource
+  ): Promise<PublishedDesignRestoreSource> {
+    await this.assertRestoreOwnership(input);
+    assertGitObjectId(input.expectedParentCommit, 'restore parent');
+    assertGitObjectId(input.treeSha, 'restore tree');
+    const current = await this.readBranchCommit(
+      input.repository.path,
+      input.worktree.branchName
+    );
+    if (current !== input.expectedParentCommit) {
+      if (await this.restoreCommitMatches(input, current)) {
+        return {
+          expectedParentCommit: input.expectedParentCommit,
+          treeSha: input.treeSha,
+          targetCommitSha: current
+        };
+      }
+      throw new Error('Design source changed before restore publication.');
+    }
+    const recoverable = await this.findRecoverableRestoreCommit(input);
+    if (recoverable) {
+      return {
+        expectedParentCommit: input.expectedParentCommit,
+        treeSha: input.treeSha,
+        targetCommitSha: recoverable
+      };
+    }
+    const targetCommitSha = cleanGitOutput(
+      await managedGit(
+        input.repository.path,
+        ['commit-tree', input.treeSha, '-p', input.expectedParentCommit],
+        {
+          stdin: `${restoreCommitMessage(input)}\n`,
+          env: {
+            GIT_AUTHOR_NAME: 'Task Monki',
+            GIT_AUTHOR_EMAIL: 'task-monki@localhost',
+            GIT_COMMITTER_NAME: 'Task Monki',
+            GIT_COMMITTER_EMAIL: 'task-monki@localhost'
+          }
+        }
+      )
+    );
+    assertGitObjectId(targetCommitSha, 'restore commit');
+    if (!(await this.restoreCommitMatches(input, targetCommitSha))) {
+      throw new Error('Prepared Design restore commit does not match its source.');
+    }
+    return {
+      expectedParentCommit: input.expectedParentCommit,
+      treeSha: input.treeSha,
+      targetCommitSha
+    };
+  }
+
+  async publishRestoreCommit(
+    input: DesignRestoreOwnership & PublishedDesignRestoreSource
+  ): Promise<void> {
+    await this.assertRestoreOwnership(input);
+    if (!(await this.restoreCommitMatches(input, input.targetCommitSha))) {
+      throw new Error('Design restore commit does not match its source action.');
+    }
+    const current = await this.readBranchCommit(
+      input.repository.path,
+      input.worktree.branchName
+    );
+    if (current === input.targetCommitSha) return;
+    if (current !== input.expectedParentCommit) {
+      throw new Error('Design source changed before restore publication.');
+    }
+    await managedGit(input.repository.path, [
+      'update-ref',
+      `refs/heads/${input.worktree.branchName}`,
+      input.targetCommitSha,
+      input.expectedParentCommit
+    ]);
+  }
+
+  async materializeRestoreCommit(
+    input: DesignRestoreOwnership & { targetCommitSha: string }
+  ): Promise<void> {
+    await this.assertRestoreOwnership(input);
+    assertGitObjectId(input.targetCommitSha, 'restore commit');
+    const current = await this.readBranchCommit(
+      input.repository.path,
+      input.worktree.branchName
+    );
+    if (current !== input.targetCommitSha) {
+      throw new Error('Design restore branch does not match its target commit.');
+    }
+    await managedGit(input.worktree.worktreePath, [
+      'restore',
+      `--source=${input.targetCommitSha}`,
+      '--staged',
+      '--worktree',
+      '--',
+      ':/'
+    ]);
+    await managedGit(input.worktree.worktreePath, ['clean', '-ffdx']);
+    const [status, indexTree, head] = await Promise.all([
+      managedGit(input.worktree.worktreePath, [
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=all'
+      ]),
+      managedGit(input.worktree.worktreePath, ['write-tree']).then(cleanGitOutput),
+      managedGit(input.worktree.worktreePath, [
+        'rev-parse',
+        '--verify',
+        'HEAD'
+      ]).then(cleanGitOutput)
+    ]);
+    const targetTree = cleanGitOutput(
+      await managedGit(input.repository.path, [
+        'rev-parse',
+        '--verify',
+        `${input.targetCommitSha}^{tree}`
+      ])
+    );
+    if (status.trim() || indexTree !== targetTree || head !== input.targetCommitSha) {
+      throw new Error('Design worktree did not materialize the restored tree exactly.');
+    }
+  }
+
   async removeManagedRepository(repository: Repository): Promise<void> {
     if (repository.kind !== 'DESIGN_MANAGED') {
       throw new Error('Task Monki never removes a registered repository.');
@@ -646,6 +803,65 @@ export class DesignSourceService {
     }
   }
 
+  private async assertRestoreOwnership(input: DesignRestoreOwnership): Promise<void> {
+    await this.assertManagedProjectOwnership(input);
+    if (!UUID.test(input.actionId) || !UUID.test(input.sourceRevisionId)) {
+      throw new Error('Design restore ownership is inconsistent.');
+    }
+  }
+
+  private async findRecoverableRestoreCommit(
+    input: DesignRestoreOwnership & DesignRestoreSource
+  ): Promise<string | undefined> {
+    const output = await managedGit(input.repository.path, [
+      'fsck',
+      '--full',
+      '--unreachable',
+      '--no-reflogs',
+      '--no-progress'
+    ]);
+    for (const match of output.matchAll(
+      /^(?:dangling|unreachable) commit ([a-f0-9]{40,64})$/gmu
+    )) {
+      const candidate = match[1]!;
+      if (await this.restoreCommitMatches(input, candidate)) return candidate;
+    }
+    return undefined;
+  }
+
+  private async restoreCommitMatches(
+    input: DesignRestoreOwnership & DesignRestoreSource,
+    commitSha: string
+  ): Promise<boolean> {
+    assertGitObjectId(commitSha, 'restore commit');
+    const [parents, treeSha, message] = await Promise.all([
+      managedGit(input.repository.path, [
+        'rev-list',
+        '--parents',
+        '-n',
+        '1',
+        commitSha
+      ]).then((output) => cleanGitOutput(output).split(/\s+/u)),
+      managedGit(input.repository.path, [
+        'rev-parse',
+        '--verify',
+        `${commitSha}^{tree}`
+      ]).then(cleanGitOutput),
+      managedGit(input.repository.path, [
+        'log',
+        '-1',
+        '--format=%B',
+        commitSha
+      ]).then((output) => output.trimEnd())
+    ]);
+    return (
+      parents.length === 2 &&
+      parents[1] === input.expectedParentCommit &&
+      treeSha === input.treeSha &&
+      message === restoreCommitMessage(input)
+    );
+  }
+
   private async assertCheckpointOwnership(
     input: PrepareDesignCandidateInput
   ): Promise<void> {
@@ -789,6 +1005,20 @@ function candidateCommitMessage(input: DesignSourceOwnership & {
     `Run: ${input.runId}`,
     `Parent: ${input.checkpoint.expectedParentCommit}`,
     `Tree: ${input.checkpoint.treeSha}`
+  ].join('\n');
+}
+
+function restoreCommitMessage(
+  input: DesignRestoreOwnership & DesignRestoreSource
+): string {
+  return [
+    'Task Monki Design restore',
+    '',
+    `Design: ${input.designId}`,
+    `Action: ${input.actionId}`,
+    `Source revision: ${input.sourceRevisionId}`,
+    `Parent: ${input.expectedParentCommit}`,
+    `Tree: ${input.treeSha}`
   ].join('\n');
 }
 

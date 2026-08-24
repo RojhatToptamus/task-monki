@@ -81,7 +81,7 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 22 as const;
+export const TASK_STORE_SCHEMA_VERSION = 23 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -483,6 +483,9 @@ export interface Task {
   forkedAlternativeTaskIds: string[];
   forkedFromTaskId?: string;
   forkedFromRunId?: string;
+  /** Historical source links for a copied Design. */
+  sourceDesignId?: string;
+  sourceDesignRevisionId?: string;
   agentSettings: AgentExecutionSettings;
   createdAt: string;
   updatedAt: string;
@@ -817,6 +820,7 @@ export interface TaskSnapshot {
   designTurns: DesignTurn[];
   designReferences: DesignReference[];
   designRevisions: DesignRevision[];
+  designSourceActions: import('./design').DesignSourceAction[];
   iterations: TaskIteration[];
   worktrees: WorktreeRecord[];
   gitSnapshots: GitSnapshotRecord[];
@@ -862,6 +866,7 @@ export interface DesignDetailSnapshot {
   projectFiles: import('./design').DesignProjectFile[];
   projectFilesTruncated: boolean;
   revisions: DesignRevision[];
+  readyContext: import('./design').DesignReadyContextEntry[];
   conversation: DesignConversationEntry[];
   previousConversationCursor?: string;
   interactions: InteractionRequestRecord[];
@@ -872,6 +877,7 @@ export interface DesignDetailSnapshot {
   currentRun?: RunRecord;
   currentSession?: AgentSessionRecord;
   currentPreview?: PreviewGenerationRecord;
+  origin?: import('./design').DesignOrigin;
   canvas: DesignCanvasProjection;
   actions: DesignActionAvailability;
 }
@@ -1361,6 +1367,18 @@ export interface TaskManagerApi {
   deleteDesignDraft(input: import('./design').DeleteDesignDraftRequest): Promise<void>;
   restartDesignPreview(
     input: import('./design').RestartDesignPreviewRequest
+  ): Promise<DesignDetailSnapshot>;
+  restoreDesignRevision(
+    input: import('./design').RestoreDesignRevisionRequest
+  ): Promise<DesignDetailSnapshot>;
+  duplicateDesign(
+    input: import('./design').DuplicateDesignRequest
+  ): Promise<DesignDetailSnapshot>;
+  renameDesign(
+    input: import('./design').RenameDesignRequest
+  ): Promise<DesignDetailSnapshot>;
+  archiveDesign(
+    input: import('./design').ArchiveDesignRequest
   ): Promise<DesignDetailSnapshot>;
   listDiscourseConversations(
     input?: import('./discourse').ListDiscourseConversationsRequest

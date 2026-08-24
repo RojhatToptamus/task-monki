@@ -297,6 +297,126 @@ describe('DesignUpdateCoordinator', () => {
     releasePreview.reject(new Error('Stop after the source recovery check.'));
     await recovery;
   });
+
+  it('creates one zero-turn Ready duplicate for one stable action id', async () => {
+    const harness = await createHarness();
+    const sourceRevision = await settleCurrentTurnReady(harness, 'c'.repeat(40));
+    const clientActionId = randomUUID();
+
+    const started = await harness.store.beginDuplicateDesignAction({
+      designId: harness.designId,
+      revisionId: sourceRevision.id,
+      clientActionId
+    });
+    if (!started.action) throw new Error('Expected a recoverable duplicate action.');
+    await harness.coordinator.recoverSourceActions();
+    const targetDesignId = started.task.id;
+    const retryTargetDesignId = await harness.coordinator.duplicateDesign({
+      designId: harness.designId,
+      revisionId: sourceRevision.id,
+      clientActionId
+    });
+
+    expect(retryTargetDesignId).toBe(targetDesignId);
+    expect(harness.ensureDesignWorktree).toHaveBeenCalledTimes(1);
+    expect(harness.previews.executeManagedDesignCandidate).toHaveBeenCalledTimes(1);
+    const target = await harness.store.getDesignDetail(targetDesignId);
+    expect(target).toMatchObject({
+      turns: [],
+      conversation: [],
+      origin: {
+        designId: harness.designId,
+        revisionId: sourceRevision.id,
+        revisionOrdinal: 1
+      },
+      revisions: [
+        expect.objectContaining({
+          ordinal: 1,
+          commitSha: sourceRevision.commitSha,
+          changeSource: 'DUPLICATE'
+        })
+      ],
+      design: { status: 'READY' },
+      canvas: { state: 'READY' }
+    });
+    expect(
+      (await harness.store.snapshot()).agentSessions.filter(
+        (session) => session.taskId === targetDesignId
+      )
+    ).toEqual([]);
+    expect((await harness.store.snapshot()).designSourceActions).toEqual([]);
+  });
+
+  it('keeps the current Ready state on restore failure and resumes the same action', async () => {
+    const harness = await createHarness();
+    const earlier = await settleCurrentTurnReady(harness, 'c'.repeat(40));
+    await harness.store.createInlineDesignTurn({
+      designId: harness.designId,
+      clientMessageId: 'design-restore-later-turn',
+      message: 'Move the main action into the header.',
+      referenceIds: []
+    });
+    const current = await settleCurrentTurnReady(harness, 'e'.repeat(40));
+    const clientActionId = randomUUID();
+    harness.previews.executeManagedDesignCandidate.mockRejectedValueOnce(
+      new Error('Restore Preview failed.')
+    );
+
+    await expect(
+      harness.coordinator.restoreRevision({
+        designId: harness.designId,
+        revisionId: earlier.id,
+        clientActionId
+      })
+    ).rejects.toThrow('Restore Preview failed');
+    const failed = await harness.store.getDesignDetail(harness.designId);
+    expect(failed.revisions).toHaveLength(2);
+    expect(failed.currentPreview?.source).toMatchObject({
+      type: 'EXACT_COMMIT',
+      commitSha: current.commitSha,
+      designRevisionId: current.id
+    });
+    expect(failed.canvas).toMatchObject({
+      state: 'READY',
+      detail: 'Restore Preview failed.'
+    });
+    expect((await harness.store.snapshot()).designSourceActions).toEqual([
+      expect.objectContaining({
+        kind: 'RESTORE',
+        clientActionId,
+        failureReason: 'Restore Preview failed.',
+        checkpoint: {
+          boundary: 'WORKTREE_MATERIALIZED',
+          targetCommitSha: 'f'.repeat(40)
+        }
+      })
+    ]);
+
+    await harness.coordinator.restoreRevision({
+      designId: harness.designId,
+      revisionId: earlier.id,
+      clientActionId
+    });
+    await harness.coordinator.restoreRevision({
+      designId: harness.designId,
+      revisionId: earlier.id,
+      clientActionId
+    });
+
+    const restored = await harness.store.getDesignDetail(harness.designId);
+    expect(restored.revisions.at(-1)).toMatchObject({
+      ordinal: 3,
+      commitSha: 'f'.repeat(40),
+      changeSource: 'RESTORE',
+      sourceRevisionId: earlier.id,
+      clientActionId
+    });
+    expect(harness.source.captureRestoreSource).toHaveBeenCalledTimes(1);
+    expect(harness.source.publishRestoreCommit).toHaveBeenCalledTimes(1);
+    expect(harness.source.materializeRestoreCommit).toHaveBeenCalledTimes(1);
+    expect(harness.previews.executeManagedDesignCandidate).toHaveBeenCalledTimes(2);
+    expect((await harness.store.snapshot()).designSourceActions).toEqual([]);
+  });
 });
 
 interface CoordinatorHarness {
@@ -310,12 +430,18 @@ interface CoordinatorHarness {
     prepareCandidateCommit: ReturnType<typeof vi.fn>;
     publishPreparedCandidateCommit: ReturnType<typeof vi.fn>;
     repairCandidateIndex: ReturnType<typeof vi.fn>;
+    captureRestoreSource: ReturnType<typeof vi.fn>;
+    prepareRestoreCommit: ReturnType<typeof vi.fn>;
+    publishRestoreCommit: ReturnType<typeof vi.fn>;
+    materializeRestoreCommit: ReturnType<typeof vi.fn>;
   };
   previews: {
     prepareManagedDesignExactCommit: ReturnType<typeof vi.fn>;
     executeManagedDesign: ReturnType<typeof vi.fn>;
+    executeManagedDesignCandidate: ReturnType<typeof vi.fn>;
     cutoverManagedDesignCandidate: ReturnType<typeof vi.fn>;
   };
+  ensureDesignWorktree: ReturnType<typeof vi.fn>;
 }
 
 async function createHarness(
@@ -401,18 +527,69 @@ async function createHarness(
       ...sourceCheckpoint,
       candidateCommitSha: 'c'.repeat(40)
     })),
-    repairCandidateIndex: vi.fn(async () => undefined)
+    repairCandidateIndex: vi.fn(async () => undefined),
+    captureRestoreSource: vi.fn(async () => ({
+      expectedParentCommit: 'e'.repeat(40),
+      treeSha: 'b'.repeat(40)
+    })),
+    prepareRestoreCommit: vi.fn(async () => ({
+      expectedParentCommit: 'e'.repeat(40),
+      treeSha: 'b'.repeat(40),
+      targetCommitSha: 'f'.repeat(40)
+    })),
+    publishRestoreCommit: vi.fn(async () => undefined),
+    materializeRestoreCommit: vi.fn(async () => undefined)
   };
+  const ensureDesignWorktree = vi.fn(async (designId: string) => {
+    const detail = await store.getDesignDetail(designId);
+    if (detail.currentWorktree) return detail.currentWorktree;
+    const target = detail.task;
+    const createdTarget = await store.createIterationAndWorktree({
+      task: target,
+      branchName: `task-monki/task-${target.id.slice(0, 8)}-1`,
+      worktreePath: path.join(dir, 'worktrees', target.id),
+      baseRef: target.sourceDesignRevisionId ?? 'main',
+      baseSha: target.sourceDesignRevisionId ? 'c'.repeat(40) : COMMIT
+    });
+    return store.updateWorktree(
+      {
+        ...createdTarget.worktree,
+        status: 'PRESENT',
+        headSha: target.sourceDesignRevisionId ? 'c'.repeat(40) : COMMIT,
+        updatedAt: new Date().toISOString(),
+        lastVerifiedAt: new Date().toISOString()
+      },
+      'WORKTREE_CREATED'
+    );
+  });
   const previews = {
-    prepareManagedDesignExactCommit: vi.fn(async () => {
-      throw new Error('Unexpected Preview preparation.');
-    }),
+    prepareManagedDesignExactCommit: vi.fn(async (input) => input),
     executeManagedDesign: vi.fn(async () => {
       throw new Error('Unexpected Preview execution.');
     }),
-    cutoverManagedDesignCandidate: vi.fn(async () => {
-      throw new Error('Unexpected Preview cutover.');
+    executeManagedDesignCandidate: vi.fn(async (prepared) => {
+      const target = await store.getDesignDetail(prepared.context.task.id);
+      const plan = await store.savePreviewPlan(
+        managedPlan({
+          taskId: prepared.context.task.id,
+          iterationId: prepared.context.iteration.id,
+          worktreeId: prepared.context.worktree.id
+        })
+      );
+      return store.savePreviewGeneration(
+        managedCandidate({
+          taskId: prepared.context.task.id,
+          repositoryId: target.repository.id,
+          iterationId: prepared.context.iteration.id,
+          worktreeId: prepared.context.worktree.id,
+          planId: plan.id,
+          commitSha: prepared.commitSha
+        })
+      );
     }),
+    cutoverManagedDesignCandidate: vi.fn(async (input) =>
+      cutoverCandidate(store, input)
+    ),
     stopManagedDesignCandidate: vi.fn(async () => undefined)
   };
   const coordinator = new DesignUpdateCoordinator({
@@ -440,7 +617,8 @@ async function createHarness(
     },
     events: new AppEventBus(),
     refreshGitEvidence: options.refreshGitEvidence ?? (async () => before),
-    ensurePostRunEvidence: async () => undefined
+    ensurePostRunEvidence: async () => undefined,
+    ensureDesignWorktree
   });
   const harness = {
     dir,
@@ -449,14 +627,17 @@ async function createHarness(
     coordinator,
     startTurn,
     source,
-    previews
+    previews,
+    ensureDesignWorktree
   };
   harnesses.push(harness);
   return harness;
 }
 
 async function startAndCompleteCurrentTurn(
-  harness: CoordinatorHarness
+  harness: CoordinatorHarness,
+  candidateCommitSha = 'c'.repeat(40),
+  treeSha = 'b'.repeat(40)
 ): Promise<RunRecord> {
   harness.coordinator.open();
   await harness.coordinator.dispatch(harness.designId);
@@ -465,6 +646,27 @@ async function startAndCompleteCurrentTurn(
     throw new Error('Expected the Design Run to have start Git evidence.');
   }
   const detail = await harness.store.getDesignDetail(harness.designId);
+  const turn = detail.turns.find((candidate) => candidate.id === run.generationKey);
+  if (!turn) throw new Error('Expected the current Design turn.');
+  const sourceCheckpoint: DesignSourceCheckpoint = {
+    repositoryId: detail.repository.id,
+    worktreeId: detail.currentWorktree!.id,
+    branchName: detail.currentWorktree!.branchName,
+    expectedParentCommit: COMMIT,
+    treeSha
+  };
+  harness.source.captureCandidate.mockResolvedValue({
+    kind: 'CAPTURED',
+    checkpoint: sourceCheckpoint
+  });
+  harness.source.prepareCandidateCommit.mockResolvedValue({
+    ...sourceCheckpoint,
+    candidateCommitSha
+  });
+  harness.source.publishPreparedCandidateCommit.mockResolvedValue({
+    ...sourceCheckpoint,
+    candidateCommitSha
+  });
   const plan = await harness.store.savePreviewPlan(
     managedPlan({
       taskId: harness.designId,
@@ -478,20 +680,21 @@ async function startAndCompleteCurrentTurn(
       repositoryId: detail.repository.id,
       iterationId: detail.currentIteration!.id,
       worktreeId: detail.currentWorktree!.id,
-      planId: plan.id
+      planId: plan.id,
+      commitSha: candidateCommitSha
     })
   );
   await harness.store.updateDesignOpenedCandidate({
     designId: harness.designId,
-    turnId: detail.turns[0]!.id,
+    turnId: turn.id,
     candidate: {
       source: {
         repositoryId: detail.repository.id,
         worktreeId: detail.currentWorktree!.id,
         branchName: detail.currentWorktree!.branchName,
         expectedParentCommit: COMMIT,
-        treeSha: 'b'.repeat(40),
-        candidateCommitSha: 'c'.repeat(40)
+        treeSha,
+        candidateCommitSha
       },
       previewGenerationId: generation.id
     }
@@ -502,6 +705,63 @@ async function startAndCompleteCurrentTurn(
     afterGitSnapshotId: run.beforeGitSnapshotId,
     endedAt: new Date().toISOString()
   });
+}
+
+async function settleCurrentTurnReady(
+  harness: CoordinatorHarness,
+  candidateCommitSha: string
+) {
+  const run = await startAndCompleteCurrentTurn(
+    harness,
+    candidateCommitSha,
+    candidateCommitSha === 'c'.repeat(40) ? 'b'.repeat(40) : 'd'.repeat(40)
+  );
+  await harness.coordinator.handleRunTerminal(run.id);
+  const detail = await harness.store.getDesignDetail(harness.designId);
+  const revision = detail.revisions.at(-1);
+  if (!revision) throw new Error('Expected the Design turn to become Ready.');
+  return revision;
+}
+
+async function cutoverCandidate(
+  store: FileTaskStore,
+  input: Parameters<PreviewManager['cutoverManagedDesignCandidate']>[0]
+): Promise<PreviewGenerationRecord> {
+  const stored = await store.getPreviewGeneration(input.generationId);
+  if (!stored || stored.source.type !== 'EXACT_COMMIT') {
+    throw new Error('Expected an exact-commit candidate.');
+  }
+  const current = (await store.getDesignDetail(input.designId)).currentPreview;
+  const now = new Date().toISOString();
+  const replaced =
+    current && current.id !== stored.id
+      ? {
+          ...current,
+          routingState: 'RETIRED' as const,
+          routes: current.routes.map((route) => ({
+            ...route,
+            state: 'DETACHED' as const
+          })),
+          updatedAt: now
+        }
+      : undefined;
+  const result = await store.cutoverPreviewGenerations({
+    candidate: {
+      ...stored,
+      routingState: 'ACTIVE',
+      replacesGenerationId: replaced?.id,
+      cutoverAt: now,
+      updatedAt: now
+    },
+    replaced,
+    designSettlement: {
+      designId: input.designId,
+      commitSha: stored.source.commitSha,
+      routeId: 'main',
+      settlement: input.settlement
+    }
+  });
+  return result.candidate;
 }
 
 function managedPlan(input: {
@@ -535,6 +795,7 @@ function managedCandidate(input: {
   iterationId: string;
   worktreeId: string;
   planId: string;
+  commitSha?: string;
 }): PreviewGenerationRecord {
   const now = new Date().toISOString();
   return {
@@ -552,7 +813,7 @@ function managedCandidate(input: {
     source: {
       type: 'EXACT_COMMIT',
       repositoryId: input.repositoryId,
-      commitSha: 'c'.repeat(40)
+      commitSha: input.commitSha ?? 'c'.repeat(40)
     },
     workspacePath: path.join('/tmp', randomUUID()),
     state: 'READY',

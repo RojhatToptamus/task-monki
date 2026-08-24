@@ -85,7 +85,7 @@ describe('development HTTP server', () => {
     expect(getTaskDetail).toHaveBeenCalledWith('task-1');
   });
 
-  it('routes Design paging, drafts, references, and Stop with path-owned ids', async () => {
+  it('routes Design conversation and project actions with path-owned ids', async () => {
     const listDesignConversation = vi.fn(async (input: unknown) => ({ input }));
     const getDesignDraft = vi.fn(async () => null);
     const saveDesignDraft = vi.fn(async (input: unknown) => input);
@@ -94,6 +94,10 @@ describe('development HTTP server', () => {
     const removeDesignReference = vi.fn(async (input: unknown) => input);
     const importDesignReferenceAsset = vi.fn(async (input: unknown) => input);
     const cancelDesignTurn = vi.fn(async (input: unknown) => input);
+    const restoreDesignRevision = vi.fn(async (input: unknown) => input);
+    const duplicateDesign = vi.fn(async (input: unknown) => input);
+    const renameDesign = vi.fn(async (input: unknown) => input);
+    const archiveDesign = vi.fn(async (input: unknown) => input);
     const running = await startServer({
       listDesignConversation,
       getDesignDraft,
@@ -102,7 +106,11 @@ describe('development HTTP server', () => {
       addDesignReferences,
       removeDesignReference,
       importDesignReferenceAsset,
-      cancelDesignTurn
+      cancelDesignTurn,
+      restoreDesignRevision,
+      duplicateDesign,
+      renameDesign,
+      archiveDesign
     });
 
     const page = await fetch(
@@ -182,6 +190,53 @@ describe('development HTTP server', () => {
       designId: 'design-1',
       turnId: 'turn-1'
     });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/revisions/revision-1/restore`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        designId: 'wrong',
+        revisionId: 'wrong',
+        clientActionId: 'restore-1'
+      })
+    });
+    expect(restoreDesignRevision).toHaveBeenCalledWith({
+      designId: 'design-1',
+      revisionId: 'revision-1',
+      clientActionId: 'restore-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/revisions/revision-1/duplicate`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        designId: 'wrong',
+        revisionId: 'wrong',
+        clientActionId: 'duplicate-1'
+      })
+    });
+    expect(duplicateDesign).toHaveBeenCalledWith({
+      designId: 'design-1',
+      revisionId: 'revision-1',
+      clientActionId: 'duplicate-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/rename`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', title: 'New name' })
+    });
+    expect(renameDesign).toHaveBeenCalledWith({
+      designId: 'design-1',
+      title: 'New name'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/archive`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong' })
+    });
+    expect(archiveDesign).toHaveBeenCalledWith({ designId: 'design-1' });
   });
 
   it('rejects hostile origins and cross-site browser requests even with the proxy token', async () => {

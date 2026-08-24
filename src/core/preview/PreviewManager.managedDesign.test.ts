@@ -92,10 +92,13 @@ describe('PreviewManager managed Design cutover', () => {
       candidate: { state: 'READY', routingState: 'ACTIVE' },
       designSettlement: {
         designId: 'design-1',
-        turnId: 'turn-1',
-        runId: 'run-1',
         commitSha: 'a'.repeat(40),
-        routeId: MANAGED_DESIGN_STATIC_ROUTE_ID
+        routeId: MANAGED_DESIGN_STATIC_ROUTE_ID,
+        settlement: {
+          kind: 'AGENT_TURN',
+          turnId: 'turn-1',
+          runId: 'run-1'
+        }
       }
     });
     expect(fixture.order).toEqual([
@@ -137,7 +140,7 @@ describe('PreviewManager managed Design cutover', () => {
     const settled = await fixture.manager.cutoverManagedDesignCandidate({
       generationId: candidate.id,
       designId: 'design-1',
-      settlement: { turnId: 'turn-1', runId: 'run-1' },
+      settlement: { kind: 'AGENT_TURN', turnId: 'turn-1', runId: 'run-1' },
       fence: fixture.designInput.fence
     });
     expect(settled).toMatchObject({ routingState: 'ACTIVE' });
@@ -305,7 +308,7 @@ async function createFixture(options: {
   await manager.init(0, { reconcile: false });
   const designInput: ExecuteManagedDesignPreviewInput = {
     designId: 'design-1',
-    settlement: { turnId: 'turn-1', runId: 'run-1' },
+    settlement: { kind: 'AGENT_TURN', turnId: 'turn-1', runId: 'run-1' },
     fence: {
       async begin() {
         order.push('fence-begin');

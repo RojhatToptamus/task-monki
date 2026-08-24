@@ -5,6 +5,7 @@ import type {
   Task,
   WorktreeRecord
 } from './contracts';
+import { DESIGN_LIMITS } from './design';
 
 export const TASK_MONKI_CONTEXT_LINE =
   'Task Monki is a local task board for running AI coding work in isolated Git worktrees.';
@@ -214,6 +215,7 @@ export function buildDesignTurnPrompt(input: {
   message: string;
   latestReadyCommitSha: string;
   recentConversation?: readonly string[];
+  readyStateContext?: readonly string[];
   referenceContext?: readonly string[];
 }): string {
   return buildDesignPrompt({
@@ -222,6 +224,7 @@ export function buildDesignTurnPrompt(input: {
     currentRequest: input.message,
     latestReadyCommitSha: input.latestReadyCommitSha,
     recentConversation: input.recentConversation,
+    readyStateContext: input.readyStateContext,
     referenceContext: input.referenceContext,
     requestLabel: 'Current refinement request'
   });
@@ -233,6 +236,7 @@ function buildDesignPrompt(input: {
   currentRequest: string;
   latestReadyCommitSha: string;
   recentConversation?: readonly string[];
+  readyStateContext?: readonly string[];
   referenceContext?: readonly string[];
   requestLabel: string;
 }): string {
@@ -243,6 +247,10 @@ function buildDesignPrompt(input: {
   const referenceContext = input.referenceContext
     ?.map((entry) => entry.trim())
     .filter(Boolean);
+  const readyStateContext = input.readyStateContext
+    ?.map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(-DESIGN_LIMITS.readyContextEntries);
   return [
     TASK_MONKI_CONTEXT_LINE,
     '',
@@ -264,6 +272,12 @@ function buildDesignPrompt(input: {
     recentConversation?.length ? '' : undefined,
     recentConversation?.length
       ? `Recent conversation context:\n${recentConversation.join('\n\n')}`
+      : undefined,
+    readyStateContext?.length ? '' : undefined,
+    readyStateContext?.length
+      ? `Earlier Ready states:\n${readyStateContext
+          .map((entry) => `- ${entry}`)
+          .join('\n')}`
       : undefined,
     '',
     `${input.requestLabel}:\n${input.currentRequest}`

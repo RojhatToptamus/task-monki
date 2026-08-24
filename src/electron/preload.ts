@@ -42,6 +42,10 @@ import type {
   SteerRunRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
   ListDesignConversationRequest,
   SaveDesignDraftRequest,
   SubmitDesignTurnRequest,
@@ -231,6 +235,14 @@ const api: TaskManagerApi = {
     invokeIpc('design:turn:cancel', input),
   restartDesignPreview: (input: RestartDesignPreviewRequest) =>
     invokeIpc('design:preview:restart', input),
+  restoreDesignRevision: (input: RestoreDesignRevisionRequest) =>
+    invokeIpc('design:revision:restore', input),
+  duplicateDesign: (input: DuplicateDesignRequest) =>
+    invokeIpc('design:duplicate', input),
+  renameDesign: (input: RenameDesignRequest) =>
+    invokeIpc('design:rename', input),
+  archiveDesign: (input: ArchiveDesignRequest) =>
+    invokeIpc('design:archive', input),
   refinePrompt: (input: RefinePromptRequest) => invokeIpc('prompt:refine', input),
   prepareWorktree: (input: PrepareWorktreeRequest) => invokeIpc('worktree:prepare', input),
   startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),

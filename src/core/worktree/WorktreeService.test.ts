@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import type { Task, WorktreeRecord } from '../../shared/contracts';
+import type { Repository, Task, WorktreeRecord } from '../../shared/contracts';
 import { parseGitWorktreeList, WorktreeService } from './WorktreeService';
 
 const execFileAsync = promisify(execFile);
@@ -93,6 +93,62 @@ describe('WorktreeService', () => {
     expect(created.headSha).toBe(baseSha);
     await expect(fs.access(path.join(record.worktreePath, 'README.md'))).resolves.toBeUndefined();
   }, 15_000);
+
+  it('removes only the exact managed Design branch and worktree', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-shared-design-'));
+    const repo = path.join(dir, 'repo');
+    const worktreeRoot = path.join(dir, 'worktrees');
+    await fs.mkdir(repo);
+    await git(repo, ['init']);
+    await git(repo, ['config', 'user.email', 'test@example.com']);
+    await git(repo, ['config', 'user.name', 'Test User']);
+    await fs.writeFile(path.join(repo, 'index.html'), '<h1>Design</h1>\n', 'utf8');
+    await git(repo, ['add', 'index.html']);
+    await git(repo, ['commit', '-m', 'init']);
+    const baseSha = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    const now = new Date().toISOString();
+    const repository: Repository = {
+      id: 'repository-design-shared',
+      kind: 'DESIGN_MANAGED',
+      name: 'Shared Design source',
+      path: repo,
+      status: 'AVAILABLE',
+      headSha: baseSha,
+      branch: 'main',
+      remotes: [],
+      createdAt: now,
+      updatedAt: now,
+      checkedAt: now
+    };
+    const records = ['12345678-first', '87654321-second'].map<WorktreeRecord>(
+      (taskId, index) => ({
+        id: `worktree-${index + 1}`,
+        taskId,
+        iterationId: `iteration-${index + 1}`,
+        repositoryId: repository.id,
+        worktreePath: path.join(worktreeRoot, taskId),
+        branchName: `task-monki/task-${taskId.slice(0, 8)}-${index + 1}`,
+        baseSha,
+        status: 'CREATING',
+        createdAt: now,
+        updatedAt: now
+      })
+    );
+    const service = new WorktreeService(worktreeRoot);
+    const first = await service.create(records[0]!, repo);
+    const second = await service.create(records[1]!, repo);
+
+    await service.removeOwnedManaged(first, repository);
+
+    await expect(fs.access(first.worktreePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(second.worktreePath)).resolves.toBeUndefined();
+    expect(await git(repo, ['branch', '--list', first.branchName])).toBe('');
+    expect(await git(repo, ['branch', '--list', second.branchName])).toContain(
+      second.branchName
+    );
+    await service.removeOwnedManaged(second, repository);
+    expect(await git(repo, ['branch', '--list', second.branchName])).toBe('');
+  }, 20_000);
 });
 
 async function git(cwd: string, argv: string[]): Promise<string> {

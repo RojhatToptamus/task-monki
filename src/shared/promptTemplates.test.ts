@@ -125,7 +125,11 @@ describe('prompt templates', () => {
       referenceContext: [
         'tone.md',
         'brand.png (editable project asset: assets/brand.png)'
-      ]
+      ],
+      readyStateContext: Array.from(
+        { length: 10 },
+        (_, index) => `Ready state ${index + 1}: request ${index + 1}`
+      )
     });
 
     expect(initial).toContain('Initial design brief:\nAdd a progress panel.');
@@ -137,6 +141,11 @@ describe('prompt templates', () => {
       'Selected references for this turn:\n- tone.md\n- brand.png (editable project asset: assets/brand.png)'
     );
     expect(refinement).toContain('Current refinement request:\nMake the primary action quieter.');
+    expect(refinement).toContain('Earlier Ready states:');
+    expect(refinement).not.toContain('Ready state 1: request 1');
+    expect(refinement).not.toContain('Ready state 2: request 2');
+    expect(refinement).toContain('Ready state 3: request 3');
+    expect(refinement).toContain('Ready state 10: request 10');
     expect(refinement).not.toContain(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS);
   });
 

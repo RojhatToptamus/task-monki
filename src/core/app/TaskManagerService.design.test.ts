@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DesignDetailSnapshot, PreviewGenerationRecord } from '../../shared/contracts';
 import { codexCapabilities } from '../agent/codex/codexCapabilities';
+import { git } from '../git/gitCli';
 import {
   createTaskMonkiScenario,
   type TaskMonkiScenario
@@ -488,6 +490,134 @@ describeMac('TaskManagerService Design vertical slice', () => {
     });
     await expect(scenario.service.getDesignDraft(detail.design.id)).resolves.toBeNull();
   }, 30_000);
+
+  it('restores and copies exact Ready states while sharing only the managed repository', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-ready-actions',
+      previewEnabled: true,
+      designMode: true
+    });
+    scenarios.push(scenario);
+
+    let source = await scenario.service.createBlankDesign({
+      brief: 'Create a compact product page.',
+      creationToken: 'design-ready-actions-create'
+    });
+    const sourceWorktreePath = requireWorktreePath(source);
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'index.html'),
+      '<!doctype html><title>First direction</title><h1>First direction</h1>',
+      'utf8'
+    );
+    await scenario.completeRun(requireRunId(source), 'The first direction is ready.');
+    source = await waitForDesign(
+      scenario,
+      source.design.id,
+      (candidate) => candidate.revisions.length === 1 && candidate.canvas.state === 'READY'
+    );
+    const firstRevision = source.revisions[0]!;
+
+    source = await scenario.service.submitDesignTurn({
+      designId: source.design.id,
+      clientMessageId: 'design-ready-actions-second',
+      message: 'Use the second direction.',
+      referenceIds: []
+    });
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'index.html'),
+      '<!doctype html><title>Second direction</title><h1>Second direction</h1>',
+      'utf8'
+    );
+    await scenario.completeRun(requireRunId(source), 'The second direction is ready.');
+    source = await waitForDesign(
+      scenario,
+      source.design.id,
+      (candidate) => candidate.revisions.length === 2 && candidate.canvas.state === 'READY'
+    );
+    const secondRevision = source.revisions[1]!;
+    const repositoryPath = source.repository.path;
+    const sourceBranch = source.currentWorktree!.branchName;
+
+    source = await scenario.service.restoreDesignRevision({
+      designId: source.design.id,
+      revisionId: firstRevision.id,
+      clientActionId: randomUUID()
+    });
+    expect(source.revisions.at(-1)).toMatchObject({
+      ordinal: 3,
+      changeSource: 'RESTORE',
+      sourceRevisionId: firstRevision.id
+    });
+    expect(await requestActiveRoute(requireActivePreview(source))).toContain(
+      'First direction'
+    );
+    expect(await fs.readFile(path.join(sourceWorktreePath, 'index.html'), 'utf8')).toContain(
+      'First direction'
+    );
+
+    const duplicateActionId = randomUUID();
+    let copy = await scenario.service.duplicateDesign({
+      designId: source.design.id,
+      revisionId: secondRevision.id,
+      clientActionId: duplicateActionId
+    });
+    const copyRetry = await scenario.service.duplicateDesign({
+      designId: source.design.id,
+      revisionId: secondRevision.id,
+      clientActionId: duplicateActionId
+    });
+    expect(copyRetry.design.id).toBe(copy.design.id);
+    expect(copy).toMatchObject({
+      turns: [],
+      conversation: [],
+      sessions: [],
+      origin: {
+        designId: source.design.id,
+        revisionId: secondRevision.id,
+        revisionOrdinal: 2
+      },
+      revisions: [
+        expect.objectContaining({
+          ordinal: 1,
+          commitSha: secondRevision.commitSha,
+          changeSource: 'DUPLICATE'
+        })
+      ],
+      canvas: { state: 'READY' }
+    });
+    expect(copy.repository.id).toBe(source.repository.id);
+    expect(copy.currentWorktree?.id).not.toBe(source.currentWorktree?.id);
+    expect(copy.currentWorktree?.branchName).not.toBe(sourceBranch);
+    expect(await requestActiveRoute(requireActivePreview(copy))).toContain(
+      'Second direction'
+    );
+
+    copy = await scenario.service.renameDesign({
+      designId: copy.design.id,
+      title: 'Second direction copy'
+    });
+    expect(copy.task).toMatchObject({
+      title: 'Second direction copy',
+      prompt: source.task.prompt
+    });
+    copy = await scenario.service.archiveDesign({ designId: copy.design.id });
+    expect(copy.design.status).toBe('ARCHIVED');
+
+    await scenario.service.deleteTask({
+      taskId: source.design.id,
+      removeWorktree: true
+    });
+    await expect(fs.access(repositoryPath)).resolves.toBeUndefined();
+    expect(await git(repositoryPath, ['branch', '--list', sourceBranch])).toBe('');
+    await expect(scenario.service.getDesign(copy.design.id)).resolves.toMatchObject({
+      design: { status: 'ARCHIVED' },
+      canvas: { state: 'READY' }
+    });
+
+    await scenario.service.deleteTask({ taskId: copy.design.id, removeWorktree: true });
+    await expect(fs.access(repositoryPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(scenario.service.listDesigns()).resolves.toEqual([]);
+  }, 60_000);
 
   it('removes a sent attachment draft left behind by an interrupted composer cleanup', async () => {
     const scenario = await createTaskMonkiScenario({

@@ -160,6 +160,9 @@ describe('Design workspace view model', () => {
             queuedTurnCount: 0,
             canStop: false,
             canRestart: true,
+            canRestore: true,
+            canDuplicate: true,
+            canArchive: true,
             canDelete: true
           }
         }),
@@ -339,6 +342,7 @@ function designProject(
     projectFiles: [],
     projectFilesTruncated: false,
     revisions: [],
+    readyContext: [],
     conversation: [],
     interactions: [],
     sessions: [],
@@ -354,6 +358,9 @@ function designProject(
       queuedTurnCount: 0,
       canStop: false,
       canRestart: false,
+      canRestore: false,
+      canDuplicate: false,
+      canArchive: true,
       canDelete: true
     },
     ...overrides

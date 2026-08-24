@@ -104,6 +104,7 @@ describe('migratePersistedStateToCurrent', () => {
       changed: true,
       state: {
         schemaVersion: TASK_STORE_SCHEMA_VERSION,
+        designSourceActions: [],
         designReferences: [
           {
             id: 'reference-1',
@@ -114,6 +115,24 @@ describe('migratePersistedStateToCurrent', () => {
             createdAt: '2026-08-20T10:00:00.000Z'
           }
         ]
+      }
+    });
+  });
+
+  it('adds the source-action owner when a schema 22 store is opened', () => {
+    expect(
+      migratePersistedStateToCurrent({
+        schemaVersion: 22,
+        tasks: [{ id: 'design-1', kind: 'DESIGN' }],
+        designRevisions: []
+      })
+    ).toEqual({
+      changed: true,
+      state: {
+        schemaVersion: TASK_STORE_SCHEMA_VERSION,
+        tasks: [{ id: 'design-1', kind: 'DESIGN' }],
+        designRevisions: [],
+        designSourceActions: []
       }
     });
   });

@@ -190,13 +190,15 @@ export class WorktreeService {
       if (await pathExists(record.worktreePath)) {
         throw new Error('Unregistered content remains at the managed worktree path.');
       }
-      return {
+      const removed = {
         ...verified,
         status: 'REMOVED',
         error: undefined,
         updatedAt: new Date().toISOString(),
         lastVerifiedAt: new Date().toISOString()
-      };
+      } as WorktreeRecord;
+      await this.removeOwnedManagedBranch(removed, repositoryPath);
+      return removed;
     }
     await git(
       repositoryPath,
@@ -206,13 +208,41 @@ export class WorktreeService {
     if (await pathExists(record.worktreePath)) {
       throw new Error('Git did not remove the managed Design worktree.');
     }
-    return {
+    const removed = {
       ...verified,
       status: 'REMOVED',
       error: undefined,
       updatedAt: new Date().toISOString(),
       lastVerifiedAt: new Date().toISOString()
-    };
+    } as WorktreeRecord;
+    await this.removeOwnedManagedBranch(removed, repositoryPath);
+    return removed;
+  }
+
+  private async removeOwnedManagedBranch(
+    record: WorktreeRecord,
+    repositoryPath: string
+  ): Promise<void> {
+    const taskPrefix = `task-monki/task-${record.taskId.slice(0, 8)}-`;
+    const legacyDesignBranch = `task-monki/design-${record.taskId.slice(0, 8)}`;
+    if (
+      !record.branchName.startsWith(taskPrefix) &&
+      record.branchName !== legacyDesignBranch
+    ) {
+      throw new Error('Managed Design branch does not match its task owner.');
+    }
+    await git(repositoryPath, [
+      'check-ref-format',
+      `refs/heads/${record.branchName}`
+    ]);
+    const exists = await gitSucceeds(repositoryPath, [
+      'show-ref',
+      '--verify',
+      '--quiet',
+      `refs/heads/${record.branchName}`
+    ]);
+    if (!exists) return;
+    await git(repositoryPath, ['branch', '-D', '--', record.branchName]);
   }
 
   private async ensureOwnedRoot(): Promise<void> {

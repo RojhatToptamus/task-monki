@@ -6,6 +6,7 @@ export const DESIGN_LIMITS = {
   queuedTurns: 20,
   transcriptPageSize: 50,
   recentTelemetryItems: 100,
+  readyContextEntries: 8,
   draftBytes: 1024 * 1024
 } as const;
 
@@ -85,17 +86,85 @@ export interface DesignProjectFile {
   byteCount: number;
 }
 
-export interface DesignRevision {
+interface DesignRevisionBase {
   id: string;
   designId: string;
   ordinal: number;
   commitSha: string;
-  changeSource: 'AGENT_TURN';
-  turnId: string;
-  runId: string;
   routeId: string;
   createdAt: string;
 }
+
+export type DesignRevision = DesignRevisionBase &
+  (
+    | {
+        changeSource: 'AGENT_TURN';
+        turnId: string;
+        runId: string;
+      }
+    | {
+        changeSource: 'RESTORE';
+        sourceRevisionId: string;
+        clientActionId: string;
+      }
+    | {
+        changeSource: 'DUPLICATE';
+      }
+  );
+
+export type DesignRestoreCheckpoint =
+  | { boundary: 'RECORDED' }
+  | {
+      boundary: 'SOURCE_CAPTURED';
+      expectedParentCommit: string;
+      treeSha: string;
+    }
+  | {
+      boundary: 'COMMIT_PUBLISHED';
+      expectedParentCommit: string;
+      treeSha: string;
+      targetCommitSha: string;
+    }
+  | {
+      boundary: 'WORKTREE_MATERIALIZED';
+      targetCommitSha: string;
+    }
+  | {
+      boundary: 'PREVIEW_CANDIDATE_READY';
+      targetCommitSha: string;
+      previewGenerationId: string;
+    };
+
+export type DesignDuplicateCheckpoint =
+  | { boundary: 'TARGET_CREATED' }
+  | { boundary: 'WORKTREE_CREATED' }
+  | {
+      boundary: 'PREVIEW_CANDIDATE_READY';
+      previewGenerationId: string;
+    };
+
+interface DesignSourceActionBase {
+  id: string;
+  designId: string;
+  clientActionId: string;
+  sourceRevisionId: string;
+  failureReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type DesignSourceAction = DesignSourceActionBase &
+  (
+    | {
+        kind: 'RESTORE';
+        checkpoint: DesignRestoreCheckpoint;
+      }
+    | {
+        kind: 'DUPLICATE';
+        targetDesignId: string;
+        checkpoint: DesignDuplicateCheckpoint;
+      }
+  );
 
 export interface CreateBlankDesignRequest {
   brief: string;
@@ -177,12 +246,34 @@ export interface RestartDesignPreviewRequest {
   designId: string;
 }
 
+export interface RestoreDesignRevisionRequest {
+  designId: string;
+  revisionId: string;
+  clientActionId: string;
+}
+
+export interface DuplicateDesignRequest {
+  designId: string;
+  revisionId: string;
+  clientActionId: string;
+}
+
+export interface RenameDesignRequest {
+  designId: string;
+  title: string;
+}
+
+export interface ArchiveDesignRequest {
+  designId: string;
+}
+
 export type DesignStatus =
   | 'STARTING'
   | 'READY'
   | 'UPDATING'
   | 'NEEDS_INPUT'
-  | 'NEEDS_ATTENTION';
+  | 'NEEDS_ATTENTION'
+  | 'ARCHIVED';
 
 export interface DesignCanvasTarget {
   generationId: string;
@@ -202,8 +293,18 @@ export interface DesignActionAvailability {
   canStop: boolean;
   stopTurnId?: string;
   canRestart: boolean;
+  canRestore: boolean;
+  canDuplicate: boolean;
+  canArchive: boolean;
   canDelete: boolean;
   deleteDisabledReason?: string;
+}
+
+export interface DesignOrigin {
+  designId: string;
+  revisionId: string;
+  designTitle?: string;
+  revisionOrdinal?: number;
 }
 
 export interface DesignListItem {
@@ -220,4 +321,11 @@ export interface DesignConversationEntry {
   userMessage: string;
   assistantMessage?: string;
   runStatus?: import('./agent').AgentRunStatus;
+  readyRevision?: DesignRevision;
+}
+
+export interface DesignReadyContextEntry {
+  revision: DesignRevision;
+  userRequest?: string;
+  sourceRevisionOrdinal?: number;
 }
