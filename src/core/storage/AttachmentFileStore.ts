@@ -49,6 +49,11 @@ export interface PreparedAttachmentDraft {
   records: TaskAttachmentRecord[];
 }
 
+export interface PreparedAttachmentAppend extends PreparedAttachmentDraft {
+  existingRecords: TaskAttachmentRecord[];
+  createdTaskDirectory: boolean;
+}
+
 export class AttachmentAdoptionAmbiguousError extends AggregateError {
   readonly name = 'AttachmentAdoptionAmbiguousError';
 
@@ -315,6 +320,124 @@ export class AttachmentFileStore {
     });
   }
 
+  prepareDraftForExistingTask(
+    draftId: string,
+    taskId: string,
+    existingRecords: readonly TaskAttachmentRecord[]
+  ): Promise<PreparedAttachmentAppend> {
+    return this.enqueue(async () => {
+      assertSafeId(taskId);
+      validateTaskAttachmentRecords(existingRecords, taskId);
+      const taskDirectory = this.taskDirectory(taskId);
+      const taskDirectoryExists = await exists(taskDirectory);
+      if (existingRecords.length > 0 && !taskDirectoryExists) {
+        throw attachmentIntegrityError();
+      }
+      const draft = await this.readDraftManifest(draftId);
+      if (draft.attachments.length === 0) {
+        throw new AttachmentStoreError(
+          'ATTACHMENT_INVALID_REQUEST',
+          'Add at least one reference.',
+          400
+        );
+      }
+      if (existingRecords.length + draft.attachments.length > ATTACHMENT_MAX_COUNT) {
+        throw new AttachmentStoreError(
+          'ATTACHMENT_LIMIT_EXCEEDED',
+          `A task can have at most ${ATTACHMENT_MAX_COUNT} attachments.`,
+          413
+        );
+      }
+      const totalBytes = [...existingRecords, ...draft.attachments].reduce(
+        (total, record) => total + record.byteCount,
+        0
+      );
+      if (totalBytes > ATTACHMENT_MAX_TOTAL_BYTES) {
+        throw new AttachmentStoreError(
+          'ATTACHMENT_TOTAL_TOO_LARGE',
+          'Attachments exceed the per-task size limit.',
+          413
+        );
+      }
+      if (existingRecords.length > 0) {
+        await this.verifyTaskUnlocked(taskId, existingRecords);
+      }
+      await Promise.all(
+        draft.attachments.map((record) =>
+          this.readVerified(this.draftFile(draft.id, record), record)
+        )
+      );
+      await this.ensureCapacity(
+        draft.attachments.reduce((total, record) => total + record.byteCount, 0)
+      );
+      const records: TaskAttachmentRecord[] = [];
+      const allocated: Array<{ id: string }> = [...existingRecords];
+      for (const staged of draft.attachments) {
+        const id = this.uniqueId(allocated);
+        allocated.push({ id });
+        records.push({
+          id,
+          taskId,
+          ordinal: existingRecords.length + records.length,
+          displayName: staged.displayName,
+          kind: staged.kind,
+          mediaType: staged.mediaType,
+          byteCount: staged.byteCount,
+          sha256: staged.sha256,
+          createdAt: this.timestamp()
+        });
+      }
+      validateTaskAttachmentRecords([...existingRecords, ...records], taskId);
+      const receipt: PreparedAttachmentAppend = {
+        draft: publicDraft(draft),
+        taskId,
+        existingRecords: structuredClone([...existingRecords]),
+        createdTaskDirectory: !taskDirectoryExists,
+        records
+      };
+      try {
+        if (!taskDirectoryExists) {
+          await fs.mkdir(taskDirectory, { mode: 0o700 });
+          await enforcePosixMode(taskDirectory, 0o700);
+          await syncDirectoryIfSupported(this.tasksDir);
+        }
+        for (let index = 0; index < records.length; index += 1) {
+          const bytes = await this.readVerified(
+            this.draftFile(draft.id, draft.attachments[index]!),
+            draft.attachments[index]!
+          );
+          await writeAtomic(this.taskFile(taskId, records[index]!), bytes, 0o400, true);
+        }
+        await syncDirectoryIfSupported(this.taskDirectory(taskId));
+        return structuredClone(receipt);
+      } catch (error) {
+        try {
+          await this.rollbackDraftForExistingTaskUnlocked(receipt);
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            'Reference adoption failed and its prepared files could not be removed.'
+          );
+        }
+        throw error;
+      }
+    });
+  }
+
+  finalizeDraftForExistingTask(receipt: PreparedAttachmentAppend): Promise<void> {
+    return this.enqueue(async () => {
+      validateTaskAttachmentRecords(
+        [...receipt.existingRecords, ...receipt.records],
+        receipt.taskId
+      );
+      await this.removeManagedDirectory(this.draftDirectory(receipt.draft.id), true);
+    });
+  }
+
+  rollbackDraftForExistingTask(receipt: PreparedAttachmentAppend): Promise<void> {
+    return this.enqueue(() => this.rollbackDraftForExistingTaskUnlocked(receipt));
+  }
+
   finalizeDraftForTask(receipt: PreparedAttachmentDraft): Promise<void> {
     return this.enqueue(async () => {
       validateTaskAttachmentRecords(receipt.records, receipt.taskId);
@@ -333,9 +456,38 @@ export class AttachmentFileStore {
     targetTaskId: string,
     sourceRecords: readonly TaskAttachmentRecord[]
   ): Promise<TaskAttachmentRecord[]> {
+    return this.copyTaskAttachmentSelection(
+      sourceTaskId,
+      targetTaskId,
+      sourceRecords,
+      true
+    );
+  }
+
+  copySelectedTaskAttachments(
+    sourceTaskId: string,
+    targetTaskId: string,
+    sourceRecords: readonly TaskAttachmentRecord[]
+  ): Promise<TaskAttachmentRecord[]> {
+    return this.copyTaskAttachmentSelection(
+      sourceTaskId,
+      targetTaskId,
+      sourceRecords,
+      false
+    );
+  }
+
+  private copyTaskAttachmentSelection(
+    sourceTaskId: string,
+    targetTaskId: string,
+    sourceRecords: readonly TaskAttachmentRecord[],
+    requireCompleteTaskSet: boolean
+  ): Promise<TaskAttachmentRecord[]> {
     return this.enqueue(async () => {
       if (sourceRecords.length === 0) return [];
-      const verified = await this.verifyTaskUnlocked(sourceTaskId, sourceRecords);
+      const verified = requireCompleteTaskSet
+        ? await this.verifyTaskUnlocked(sourceTaskId, sourceRecords)
+        : await this.verifyTaskSelectionUnlocked(sourceTaskId, sourceRecords);
       await this.ensureCapacity(
         verified.reduce((total, source) => total + source.record.byteCount, 0)
       );
@@ -373,6 +525,13 @@ export class AttachmentFileStore {
     return this.enqueue(() => this.verifyTaskUnlocked(taskId, records));
   }
 
+  verifyTaskSelection(
+    taskId: string,
+    records: readonly TaskAttachmentRecord[]
+  ): Promise<VerifiedTaskAttachment[]> {
+    return this.enqueue(() => this.verifyTaskSelectionUnlocked(taskId, records));
+  }
+
   readTask(record: TaskAttachmentRecord): Promise<StoredAttachmentContent> {
     return this.enqueue(async () => content(record, await this.readVerified(this.taskFile(record.taskId, record), record)));
   }
@@ -386,13 +545,26 @@ export class AttachmentFileStore {
     });
   }
 
-  reconcile(records: readonly TaskAttachmentRecord[]): Promise<AttachmentReconciliationResult> {
+  reconcile(
+    records: readonly TaskAttachmentRecord[],
+    retainedDraftIds: ReadonlySet<string> = new Set()
+  ): Promise<AttachmentReconciliationResult> {
     return this.enqueue(async () => {
       validateGlobalTaskRecords(records);
+      for (const draftId of retainedDraftIds) assertSafeId(draftId);
       let purgedDrafts = 0;
       for (const entry of await safeDirectoryEntries(this.stagingDir)) {
         assertSafeId(entry.name);
         if (!entry.isDirectory() || entry.isSymbolicLink()) throw attachmentIntegrityError();
+        if (retainedDraftIds.has(entry.name)) {
+          const draft = await this.readDraftManifest(entry.name);
+          await Promise.all(
+            draft.attachments.map((record) =>
+              this.readVerified(this.draftFile(draft.id, record), record)
+            )
+          );
+          continue;
+        }
         await this.removeManagedDirectory(path.join(this.stagingDir, entry.name), true);
         purgedDrafts += 1;
       }
@@ -409,6 +581,25 @@ export class AttachmentFileStore {
           await this.removeManagedDirectory(taskDirectory, true);
           purgedBlobs += 1;
           continue;
+        }
+        const expectedNames = new Set(expected.map((record) => managedFileName(record)));
+        for (const file of await safeDirectoryEntries(taskDirectory)) {
+          if (
+            file.name === 'manifest.json' ||
+            ATOMIC_TEMP_FILE.test(file.name) ||
+            expectedNames.has(file.name)
+          ) {
+            continue;
+          }
+          if (
+            !file.isFile() ||
+            file.isSymbolicLink() ||
+            !SAFE_ID.test(path.parse(file.name).name)
+          ) {
+            throw attachmentIntegrityError();
+          }
+          await unlinkManagedFile(path.join(taskDirectory, file.name), 0o400);
+          purgedBlobs += 1;
         }
         await this.verifyTaskUnlocked(entry.name, expected);
         await unlinkManagedFile(this.taskManifest(entry.name), 0o600).catch((error) => {
@@ -429,6 +620,21 @@ export class AttachmentFileStore {
 
   private async verifyTaskUnlocked(taskId: string, records: readonly TaskAttachmentRecord[]): Promise<VerifiedTaskAttachment[]> {
     validateTaskAttachmentRecords(records, taskId);
+    return this.readTaskRecordsUnlocked(taskId, records);
+  }
+
+  private async verifyTaskSelectionUnlocked(
+    taskId: string,
+    records: readonly TaskAttachmentRecord[]
+  ): Promise<VerifiedTaskAttachment[]> {
+    validateTaskAttachmentSelection(records, taskId);
+    return this.readTaskRecordsUnlocked(taskId, records);
+  }
+
+  private async readTaskRecordsUnlocked(
+    taskId: string,
+    records: readonly TaskAttachmentRecord[]
+  ): Promise<VerifiedTaskAttachment[]> {
     await assertPrivateDirectory(this.taskDirectory(taskId));
     return Promise.all(records.map(async (record) => {
       const absolutePath = this.taskFile(taskId, record);
@@ -481,6 +687,32 @@ export class AttachmentFileStore {
     await fs.rename(source, target);
     await syncDirectoryIfSupported(this.tasksDir);
     await syncDirectoryIfSupported(this.stagingDir);
+  }
+
+  private async rollbackDraftForExistingTaskUnlocked(
+    receipt: PreparedAttachmentAppend
+  ): Promise<void> {
+    validateTaskAttachmentRecords(
+      [...receipt.existingRecords, ...receipt.records],
+      receipt.taskId
+    );
+    for (const record of receipt.records) {
+      await unlinkManagedFile(this.taskFile(receipt.taskId, record), 0o400).catch(
+        (error) => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      );
+    }
+    const taskDirectory = this.taskDirectory(receipt.taskId);
+    if (receipt.createdTaskDirectory) {
+      if (!(await exists(taskDirectory))) return;
+      const entries = await safeDirectoryEntries(taskDirectory);
+      if (entries.length > 0) throw attachmentIntegrityError();
+      await fs.rmdir(taskDirectory);
+      await syncDirectoryIfSupported(this.tasksDir);
+    } else {
+      await syncDirectoryIfSupported(taskDirectory);
+    }
   }
 
   private async readVerified(filePath: string, record: Pick<TaskAttachmentRecord, 'byteCount' | 'sha256'>): Promise<Buffer> {
@@ -555,6 +787,17 @@ export class AttachmentFileStore {
 }
 
 export function validateTaskAttachmentRecords(records: readonly TaskAttachmentRecord[], taskId: string): void {
+  validateTaskAttachmentSelection(records, taskId);
+  const ordinals = new Set(records.map((record) => record.ordinal));
+  if ([...ordinals].some((ordinal) => ordinal >= records.length)) {
+    throw attachmentIntegrityError();
+  }
+}
+
+function validateTaskAttachmentSelection(
+  records: readonly TaskAttachmentRecord[],
+  taskId: string
+): void {
   assertSafeId(taskId);
   if (records.length > ATTACHMENT_MAX_COUNT) throw attachmentIntegrityError();
   const ids = new Set<string>();
@@ -565,7 +808,10 @@ export function validateTaskAttachmentRecords(records: readonly TaskAttachmentRe
     if (record.taskId !== taskId || ids.has(record.id) || ordinals.has(record.ordinal)) throw attachmentIntegrityError();
     ids.add(record.id); ordinals.add(record.ordinal); total += record.byteCount;
   }
-  if (total > ATTACHMENT_MAX_TOTAL_BYTES || [...ordinals].some((ordinal) => ordinal < 0 || ordinal >= records.length)) {
+  if (
+    total > ATTACHMENT_MAX_TOTAL_BYTES ||
+    [...ordinals].some((ordinal) => ordinal < 0 || ordinal >= ATTACHMENT_MAX_COUNT)
+  ) {
     throw attachmentIntegrityError();
   }
 }

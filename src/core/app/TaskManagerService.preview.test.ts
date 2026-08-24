@@ -980,21 +980,28 @@ routes:
       ? await scenario.store.getMatchingPreviewApproval(task.id, plan.executionDigest)
       : undefined;
     const worktree = await scenario.store.getCurrentWorktree(task.id);
-    if (!plan || !approval || !worktree) throw new Error('Expected approved preview context.');
+    const sourceSnapshot = await scenario.store.getLatestGitSnapshot(task.id);
+    if (!plan || !approval || !worktree || !sourceSnapshot?.headSha) {
+      throw new Error('Expected approved preview context.');
+    }
     const now = new Date().toISOString();
     const active = await scenario.store.savePreviewGeneration({
       id: 'reset-order-active', previewKey: 'task-reset-order', taskId: task.id,
       iterationId: worktree.iterationId, worktreeId: worktree.id, planId: plan.id,
-      approvalId: approval.id, executionDigest: plan.executionDigest,
-      sourceGitSnapshotId: 'git-active', sourceHeadSha: worktree.headSha!,
-      sourceDirtyFingerprint: 'dirty-active', workspacePath: '/tmp/reset-order-active',
+      executionAuthority: {
+        type: 'USER_APPROVAL', approvalId: approval.id, executionDigest: plan.executionDigest
+      },
+      source: {
+        type: 'WORKTREE_SNAPSHOT', gitSnapshotId: sourceSnapshot.id,
+        headSha: sourceSnapshot.headSha, dirtyFingerprint: sourceSnapshot.dirtyFingerprint
+      },
+      workspacePath: '/tmp/reset-order-active',
       state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT', routes: [],
       createdAt: now, updatedAt: now
     });
     const recovery = await scenario.store.savePreviewGeneration({
       ...active,
       id: 'reset-order-recovery',
-      sourceGitSnapshotId: 'git-recovery',
       workspacePath: '/tmp/reset-order-recovery',
       state: 'RECOVERY_REQUIRED',
       routingState: 'CANDIDATE',

@@ -31,6 +31,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const adapter = new ScriptedAgentRuntimeAdapter(store);
+    vi.spyOn(adapter, 'listModels').mockResolvedValue([textModel()]);
     const service = new TaskManagerService(store, dir, undefined, {
       agentRuntimeAdapters: [adapter],
     });
@@ -235,5 +236,15 @@ function imageModel(): AgentModel {
     serviceTiers: [],
     inputModalities: ['text', 'image'],
     isDefault: true
+  };
+}
+
+function textModel(): AgentModel {
+  return {
+    ...imageModel(),
+    id: 'codex:openai/scenario-model',
+    model: 'scenario-model',
+    displayName: 'Scenario model',
+    inputModalities: ['text']
   };
 }

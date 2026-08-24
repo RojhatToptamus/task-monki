@@ -346,6 +346,55 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/designs') {
+        sendJson(response, requestId, 200, await options.service.listDesigns());
+        return;
+      }
+
+      const designConversationMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/conversation$/u
+      );
+      if (request.method === 'GET' && designConversationMatch) {
+        const limit = url.searchParams.get('limit');
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.listDesignConversation({
+            designId: decodeURIComponent(designConversationMatch[1]),
+            ...(url.searchParams.get('beforeCursor')
+              ? { beforeCursor: url.searchParams.get('beforeCursor')! }
+              : {}),
+            ...(limit !== null ? { limit: Number(limit) } : {})
+          })
+        );
+        return;
+      }
+
+      const designDraftMatch = url.pathname.match(/^\/api\/designs\/([^/]+)\/draft$/u);
+      if (request.method === 'GET' && designDraftMatch) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDesignDraft(
+            decodeURIComponent(designDraftMatch[1])
+          )
+        );
+        return;
+      }
+
+      const designDetailMatch = url.pathname.match(/^\/api\/designs\/([^/]+)$/u);
+      if (request.method === 'GET' && designDetailMatch) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDesign(decodeURIComponent(designDetailMatch[1]))
+        );
+        return;
+      }
+
       const taskDetailMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/u);
       if (request.method === 'GET' && taskDetailMatch) {
         sendJson(
@@ -476,6 +525,23 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      const designDraftAttachmentMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/draft\/attachments\/([^/]+)$/u
+      );
+      if (request.method === 'GET' && designDraftAttachmentMatch) {
+        await withAttachmentBudget(ATTACHMENT_MAX_IMAGE_BYTES, async () => {
+          await sendAttachment(
+            response,
+            requestId,
+            await options.service.readDesignDraftAttachment({
+              designId: decodeURIComponent(designDraftAttachmentMatch[1]),
+              attachmentId: decodeURIComponent(designDraftAttachmentMatch[2])
+            })
+          );
+        });
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/repositories') {
         const body = (await readJson()) as { path: string };
         sendJson(
@@ -578,6 +644,161 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
           requestId,
           200,
           await options.service.createTask((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/designs') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.createBlankDesign((await readJson()) as never)
+        );
+        return;
+      }
+
+      const designTurnMatch = url.pathname.match(/^\/api\/designs\/([^/]+)\/turns$/u);
+      if (request.method === 'POST' && designTurnMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.submitDesignTurn({
+            ...input,
+            designId: decodeURIComponent(designTurnMatch[1])
+          } as never)
+        );
+        return;
+      }
+
+      const designReferencesMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/references$/u
+      );
+      if (request.method === 'POST' && designReferencesMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.addDesignReferences({
+            ...input,
+            designId: decodeURIComponent(designReferencesMatch[1])
+          } as never)
+        );
+        return;
+      }
+
+      const designReferenceActionMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/references\/([^/]+)\/(remove|import)$/u
+      );
+      if (request.method === 'POST' && designReferenceActionMatch) {
+        const input = {
+          designId: decodeURIComponent(designReferenceActionMatch[1]),
+          referenceId: decodeURIComponent(designReferenceActionMatch[2])
+        };
+        sendJson(
+          response,
+          requestId,
+          200,
+          designReferenceActionMatch[3] === 'remove'
+            ? await options.service.removeDesignReference(input)
+            : await options.service.importDesignReferenceAsset(input)
+        );
+        return;
+      }
+
+      const designTurnCancelMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/turns\/([^/]+)\/cancel$/u
+      );
+      if (request.method === 'POST' && designTurnCancelMatch) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.cancelDesignTurn({
+            designId: decodeURIComponent(designTurnCancelMatch[1]),
+            turnId: decodeURIComponent(designTurnCancelMatch[2])
+          })
+        );
+        return;
+      }
+
+      const designDraftMutationMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/draft(?:\/(delete))?$/u
+      );
+      if (request.method === 'POST' && designDraftMutationMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        const designId = decodeURIComponent(designDraftMutationMatch[1]);
+        if (designDraftMutationMatch[2] === 'delete') {
+          await options.service.deleteDesignDraft({ ...input, designId } as never);
+          sendJson(response, requestId, 200, {});
+        } else {
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.saveDesignDraft({ ...input, designId } as never)
+          );
+        }
+        return;
+      }
+
+      const designRestartMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/preview\/restart$/u
+      );
+      if (request.method === 'POST' && designRestartMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.restartDesignPreview({
+            ...input,
+            designId: decodeURIComponent(designRestartMatch[1])
+          } as never)
+        );
+        return;
+      }
+
+      const designRevisionActionMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/revisions\/([^/]+)\/(restore|duplicate)$/u
+      );
+      if (request.method === 'POST' && designRevisionActionMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        const actionInput = {
+          ...input,
+          designId: decodeURIComponent(designRevisionActionMatch[1]),
+          revisionId: decodeURIComponent(designRevisionActionMatch[2])
+        } as never;
+        sendJson(
+          response,
+          requestId,
+          200,
+          designRevisionActionMatch[3] === 'restore'
+            ? await options.service.restoreDesignRevision(actionInput)
+            : await options.service.duplicateDesign(actionInput)
+        );
+        return;
+      }
+
+      const designMetadataActionMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/(rename|archive)$/u
+      );
+      if (request.method === 'POST' && designMetadataActionMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        const actionInput = {
+          ...input,
+          designId: decodeURIComponent(designMetadataActionMatch[1])
+        } as never;
+        sendJson(
+          response,
+          requestId,
+          200,
+          designMetadataActionMatch[2] === 'rename'
+            ? await options.service.renameDesign(actionInput)
+            : await options.service.archiveDesign(actionInput)
         );
         return;
       }

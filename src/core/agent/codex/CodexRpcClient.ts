@@ -7,8 +7,11 @@ import {
   redactCredentialText,
   redactCredentialValue
 } from '../AgentCredentialRedaction';
-import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import {
+  DesignToolProtocolSanitizer,
+  redactProtocolJournalRecord
+} from '../journal/AgentProtocolRedaction';
+import type { AgentProtocolRuntimeStore } from '../AgentRuntimeStore';
 import {
   decodeCodexProtocolMessage,
   type CodexRpcErrorPayload,
@@ -28,6 +31,10 @@ import type { ModelProviderCapabilitiesReadParams } from './protocol/generated/v
 import type { ModelProviderCapabilitiesReadResponse } from './protocol/generated/v2/ModelProviderCapabilitiesReadResponse';
 import type { ThreadReadParams } from './protocol/generated/v2/ThreadReadParams';
 import type { ThreadReadResponse } from './protocol/generated/v2/ThreadReadResponse';
+import type { ThreadListParams } from './protocol/generated/v2/ThreadListParams';
+import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
+import type { ThreadDeleteParams } from './protocol/generated/v2/ThreadDeleteParams';
+import type { ThreadDeleteResponse } from './protocol/generated/v2/ThreadDeleteResponse';
 import type { ThreadForkParams } from './protocol/generated/v2/ThreadForkParams';
 import type { ThreadForkResponse } from './protocol/generated/v2/ThreadForkResponse';
 import type { ThreadGoalGetParams } from './protocol/generated/v2/ThreadGoalGetParams';
@@ -38,6 +45,8 @@ import type { ThreadResumeParams } from './protocol/generated/v2/ThreadResumePar
 import type { ThreadResumeResponse } from './protocol/generated/v2/ThreadResumeResponse';
 import type { ThreadStartParams } from './protocol/generated/v2/ThreadStartParams';
 import type { ThreadStartResponse } from './protocol/generated/v2/ThreadStartResponse';
+import type { ThreadUnsubscribeParams } from './protocol/generated/v2/ThreadUnsubscribeParams';
+import type { ThreadUnsubscribeResponse } from './protocol/generated/v2/ThreadUnsubscribeResponse';
 import type { TurnInterruptParams } from './protocol/generated/v2/TurnInterruptParams';
 import type { TurnInterruptResponse } from './protocol/generated/v2/TurnInterruptResponse';
 import type { TurnStartParams } from './protocol/generated/v2/TurnStartParams';
@@ -61,6 +70,12 @@ interface CodexMethodMap {
   'thread/goal/set': { params: ThreadGoalSetParams; result: ThreadGoalSetResponse };
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse };
   'thread/read': { params: ThreadReadParams; result: ThreadReadResponse };
+  'thread/list': { params: ThreadListParams; result: ThreadListResponse };
+  'thread/delete': { params: ThreadDeleteParams; result: ThreadDeleteResponse };
+  'thread/unsubscribe': {
+    params: ThreadUnsubscribeParams;
+    result: ThreadUnsubscribeResponse;
+  };
   'turn/start': { params: TurnStartParams; result: TurnStartResponse };
   'turn/steer': { params: TurnSteerParams; result: TurnSteerResponse };
   'turn/interrupt': { params: TurnInterruptParams; result: TurnInterruptResponse };
@@ -124,10 +139,11 @@ export class CodexRpcClient {
   constructor(
     private readonly input: Writable,
     output: Readable,
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProtocolRuntimeStore,
     readonly serverInstanceId: string,
     private readonly requestTimeoutMs = 30_000,
-    private readonly sensitiveValues: readonly string[] = []
+    private readonly sensitiveValues: readonly string[] = [],
+    private readonly designToolSanitizer = new DesignToolProtocolSanitizer()
   ) {
     this.closedSignal = new Promise((resolve) => {
       this.resolveClosedSignal = resolve;
@@ -269,7 +285,7 @@ export class CodexRpcClient {
   ): Promise<AgentProtocolMessageReference> {
     const raw = JSON.stringify(message);
     const safe = redactProtocolJournalRecord(
-      raw,
+      this.designToolSanitizer.sanitizeRaw(raw, 'OUTBOUND'),
       { transport: 'stdio' },
       this.sensitiveValues
     );
@@ -312,7 +328,10 @@ export class CodexRpcClient {
     let rawReference: AgentProtocolMessageReference | undefined;
     try {
       const safe = redactProtocolJournalRecord(
-        redactInboundStreamingJournalPayload(line),
+        this.designToolSanitizer.sanitizeRaw(
+          redactInboundStreamingJournalPayload(line),
+          'INBOUND'
+        ),
         { transport: 'stdio' },
         this.sensitiveValues
       );

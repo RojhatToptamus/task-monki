@@ -23,12 +23,14 @@ import { PreviewPrivateVault, type PreviewSecretProtector } from './private/Prev
 import { PreviewComposeCliAdapter } from './compose/PreviewComposeCliAdapter';
 import { PreviewComposeInspector } from './compose/PreviewComposeInspector';
 import { PreviewComposeRuntime } from './compose/PreviewComposeRuntime';
+import { ManagedDesignStaticPreview } from './ManagedDesignStaticPreview';
 
 export interface CreatePreviewManagerOptions {
   previewRoot: string;
   launcherPath: string;
   launcherExecPath?: string;
   launcherEnv?: NodeJS.ProcessEnv;
+  managedDesignStaticServerPath?: string;
   ociExecutablePath?: string;
   ociContextName?: string;
   ociEnv?: NodeJS.ProcessEnv;
@@ -105,6 +107,12 @@ export function createPreviewManager(
     options.secretProtector
       ? new PreviewPrivateVault(path.join(options.previewRoot, 'private-vault'), options.secretProtector)
       : undefined,
-    composeRuntime
+    composeRuntime,
+    options.managedDesignStaticServerPath
+      ? new ManagedDesignStaticPreview({
+          executablePath: options.launcherExecPath ?? process.execPath,
+          serverPath: options.managedDesignStaticServerPath
+        })
+      : undefined
   );
 }

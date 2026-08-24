@@ -48,6 +48,7 @@ export interface ScenarioOptions {
   previewOciContextName?: string;
   previewOciEnv?: NodeJS.ProcessEnv;
   previewRecipeGenerator?: PreviewRecipeGenerationService;
+  designMode?: boolean;
 }
 
 interface CreateScenarioTaskInput {
@@ -88,6 +89,8 @@ export async function createTaskMonkiScenario(
   const repositoryPath = path.join(rootDir, 'repo');
   const worktreeRoot = path.join(rootDir, 'worktrees');
   const previewRoot = path.join(rootDir, 'preview-runtime');
+  const designRepositoryRoot = path.join(rootDir, 'design-repositories');
+  const designWorktreeRoot = path.join(rootDir, 'design-worktrees');
   await fs.mkdir(repositoryPath, { recursive: true });
   await initRepository(repositoryPath);
 
@@ -105,9 +108,44 @@ export async function createTaskMonkiScenario(
       process.cwd(),
       'src/core/preview/runtime/native-preview-launcher.mjs'
     ),
+    managedDesignStaticServerPath: path.join(
+      process.cwd(),
+      'src/core/preview/runtime/managed-design-static-server.mjs'
+    ),
     previewOciExecutablePath: options.previewOciExecutablePath,
     previewOciContextName: options.previewOciContextName,
-    previewOciEnv: options.previewOciEnv
+    previewOciEnv: options.previewOciEnv,
+    ...(options.designMode
+      ? {
+          designRepositoryRoot,
+          designWorktreeRoot,
+          designBrowserRuntime: {
+            async attest() {},
+            async recover() {},
+            async openCandidate() {
+              return {
+                snapshot: 'test page',
+                console: '(no output)',
+                errors: '(no output)'
+              };
+            },
+            async inspect() {
+              return { text: 'test page' };
+            },
+            abortRun() {},
+            async closeRun() {},
+            async shutdown() {}
+          },
+          designCanvasFence: {
+            async begin() {
+              return {
+                async commit() {},
+                async rollback() {}
+              };
+            }
+          }
+        }
+      : {})
   });
   await service.init();
   const repository = await service.addRepository(repositoryPath);
@@ -143,6 +181,32 @@ export async function createTaskMonkiScenario(
     },
     async completeRun(runId, finalMessage = 'Scenario run completed.') {
       const run = await requireRun(store, runId);
+      if (run.mode === 'DESIGN') {
+        const detail = await store.getDesignDetail(run.taskId);
+        const worktree = await store.getWorktree(run.worktreeId);
+        const sourceChanged = worktree
+          ? (await git(worktree.worktreePath, [
+              'status',
+              '--porcelain=v1',
+              '--untracked-files=all'
+            ])).trim().length > 0
+          : false;
+        if (detail.revisions.length === 0 || sourceChanged) {
+          const designUpdates = (
+            service as unknown as {
+              designUpdates?: {
+                inspectDesign(input: {
+                  runId: string;
+                  operation: { operation: 'open_candidate' };
+                }): Promise<unknown>;
+              };
+            }
+          ).designUpdates;
+          await designUpdates
+            ?.inspectDesign({ runId, operation: { operation: 'open_candidate' } })
+            .catch(() => undefined);
+        }
+      }
       const artifact = await store.writeFinalArtifact(run.taskId, run.id, finalMessage);
       await appendRunEvent(store, run, 'AGENT_RUN_COMPLETED', {
         terminalStatus: 'completed',
@@ -212,7 +276,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         supportedReasoningEfforts: ['low', 'medium', 'high'],
         defaultReasoningEffort: 'low',
         serviceTiers: [],
-        inputModalities: ['text'],
+        inputModalities: ['text', 'image'],
         isDefault: true
       }
     ]);
@@ -314,6 +378,10 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   respondToInteraction(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  deleteTaskProviderHistory(): Promise<void> {
     return Promise.resolve();
   }
 

@@ -38,4 +38,15 @@ describe('codexCapabilities', () => {
       networkAccess: 'DISABLED'
     });
   });
+
+  it('reports scoped Design skill access only after the app pack is available', () => {
+    expect(
+      codexCapabilities().extensions['task-monki.design-skill-access']
+    ).toMatchObject({ maturity: 'stable' });
+    expect(
+      codexCapabilities({
+        designSkillAccess: { available: false, detail: 'Pack validation failed.' }
+      }).extensions['task-monki.design-skill-access']
+    ).toEqual({ maturity: 'unsupported', detail: 'Pack validation failed.' });
+  });
 });

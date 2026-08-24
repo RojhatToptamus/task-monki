@@ -200,6 +200,14 @@ runtime workspace root before provider input. Live settings drift terminates
 the provider and fails active runs. Attachment reads therefore need no separate
 permission escalation or path expansion flow.
 
+Codex keeps the active permission-profile identity when it resumes a thread.
+It cannot replace that identity with a different exact attachment scope.
+When a Design turn selects a different reference set, Task Monki uses the
+existing native thread-fork operation. The fork keeps the conversation history
+but starts with a new, attested profile for only that turn's selected files.
+Task Monki then updates the same local primary session to own the forked thread.
+If the reference scope is unchanged, it resumes the current thread as usual.
+
 Full access remains available for attachment-free tasks and requires the
 runtime to attest the exact `:danger-full-access` profile and sole Task Monki
 worktree root. It is rejected when attachments are present. Attachment tasks

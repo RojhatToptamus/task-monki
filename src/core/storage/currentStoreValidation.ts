@@ -1,7 +1,8 @@
 import {
   ARTIFACT_KINDS,
   DOMAIN_EVENT_TYPES,
-  TASK_STORE_SCHEMA_VERSION
+  TASK_STORE_SCHEMA_VERSION,
+  isTaskCreationToken
 } from '../../shared/contracts';
 import type { StoreState } from '../projection/reducer';
 
@@ -16,7 +17,8 @@ const COMPLETION_POLICIES = [
   'ARTIFACT_ACCEPTANCE', 'LOCAL_ACCEPTANCE', 'MERGED', 'MERGED_AND_VERIFIED', 'MANUAL'
 ] as const;
 const RUN_MODES = [
-  'ANALYSIS', 'IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW', 'COMPACTION', 'SUBAGENT'
+  'ANALYSIS', 'IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW', 'DESIGN',
+  'COMPACTION', 'SUBAGENT'
 ] as const;
 const RUN_STATUSES = [
   'QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT',
@@ -140,6 +142,7 @@ const APPROVALS_REVIEWERS = ['user', 'auto_review', 'guardian_subagent'] as cons
 const PROTOCOL_DIRECTIONS = ['INBOUND', 'OUTBOUND'] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
+const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
 /**
  * Validates JSON-loaded current-schema primitives before domain code can observe
@@ -150,6 +153,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
   validateCollection(state.tasks, 'tasks', (task) => {
     strings(task, 'tasks', ['runtimeId', 'title', 'prompt']);
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
+    enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');
     enumField(task, 'resolution', RESOLUTIONS, 'tasks');
     enumField(task, 'completionPolicy', COMPLETION_POLICIES, 'tasks');
@@ -157,7 +161,8 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     optionalStrings(task, 'tasks', ['creationToken', 'creationRequestFingerprint']);
     optionalUuidFields(task, 'tasks', [
       'currentRunId', 'currentAgentSessionId', 'currentIterationId',
-      'currentWorktreeId', 'forkedFromTaskId', 'forkedFromRunId'
+      'currentWorktreeId', 'forkedFromTaskId', 'forkedFromRunId',
+      'sourceDesignId', 'sourceDesignRevisionId'
     ]);
     uuidArray(task, 'forkedAlternativeTaskIds', 'tasks');
     settings(task.agentSettings, 'tasks.agentSettings');
@@ -358,7 +363,290 @@ export function validateCurrentStoreRecords(state: StoreState): void {
   validateInteractions(state);
   validateEvents(state);
   validateGitHubRecords(state);
+  validateDesignRecords(state);
+  validatePreviewRecords(state);
   validateArtifacts(state);
+}
+
+function validateDesignRecords(state: StoreState): void {
+  validateCollection(state.designTurns, 'designTurns', (turn) => {
+    uuidFields(turn, 'designTurns', ['id', 'designId']);
+    strings(turn, 'designTurns', ['clientMessageId']);
+    integer(turn, 'order', 'designTurns', 1);
+    enumField(
+      turn,
+      'messageSource',
+      ['TASK_PROMPT', 'INLINE_MESSAGE'] as const,
+      'designTurns'
+    );
+    optionalUuidFields(turn, 'designTurns', ['messageArtifactId', 'runId']);
+    optionalStrings(turn, 'designTurns', ['attachmentDraftId']);
+    uuidArray(turn, 'referenceIds', 'designTurns');
+    if (turn.checkpoint !== undefined) validateDesignTurnCheckpoint(turn.checkpoint);
+    if (turn.finalOpenedCandidate !== undefined) {
+      const opened = persistedRecord(turn.finalOpenedCandidate, 'designTurns');
+      validateDesignSourceCheckpoint(opened.source, true);
+      uuidField(opened, 'previewGenerationId', 'designTurns');
+    }
+    optionalEnumField(
+      turn,
+      'outcome',
+      ['READY', 'NO_CHANGE', 'FAILED', 'CANCELED', 'NEEDS_ATTENTION'] as const,
+      'designTurns'
+    );
+    optionalStrings(turn, 'designTurns', ['failureReason'], new Set(['failureReason']));
+    timestamp(turn, 'createdAt', 'designTurns');
+    optionalTimestamp(turn, 'settledAt', 'designTurns');
+    if (
+      (turn.messageSource === 'TASK_PROMPT' && turn.messageArtifactId !== undefined) ||
+      (turn.messageSource === 'INLINE_MESSAGE' && turn.messageArtifactId === undefined) ||
+      (turn.outcome === undefined) !== (turn.settledAt === undefined) ||
+      (turn.outcome === undefined) !== (turn.checkpoint !== undefined) ||
+      (turn.outcome !== undefined && turn.finalOpenedCandidate !== undefined) ||
+      ((turn.outcome === 'FAILED' || turn.outcome === 'NEEDS_ATTENTION') &&
+        turn.failureReason === undefined)
+    ) {
+      invalid('designTurns');
+    }
+  });
+
+  validateCollection(state.designReferences, 'designReferences', (reference) => {
+    uuidFields(reference, 'designReferences', ['id', 'designId', 'attachmentId']);
+    enumField(
+      reference,
+      'role',
+      ['REFERENCE', 'PROJECT_ASSET_SOURCE'] as const,
+      'designReferences'
+    );
+    enumField(
+      reference,
+      'state',
+      ['ACTIVE', 'INACTIVE'] as const,
+      'designReferences'
+    );
+    optionalStrings(
+      reference,
+      'designReferences',
+      ['sourceDraftId', 'projectAssetPath']
+    );
+    optionalTimestamp(reference, 'firstDeliveredAt', 'designReferences');
+    timestamp(reference, 'createdAt', 'designReferences');
+    optionalTimestamp(reference, 'deactivatedAt', 'designReferences');
+    if (
+      (reference.state === 'ACTIVE') !== (reference.deactivatedAt === undefined) ||
+      (reference.role === 'PROJECT_ASSET_SOURCE') !==
+        (reference.projectAssetPath !== undefined)
+    ) {
+      invalid('designReferences');
+    }
+  });
+
+  validateCollection(state.designRevisions, 'designRevisions', (revision) => {
+    uuidFields(revision, 'designRevisions', ['id', 'designId']);
+    integer(revision, 'ordinal', 'designRevisions', 1);
+    gitObjectIdField(revision, 'commitSha', 'designRevisions');
+    enumField(
+      revision,
+      'changeSource',
+      ['AGENT_TURN', 'RESTORE', 'DUPLICATE'] as const,
+      'designRevisions'
+    );
+    if (revision.changeSource === 'AGENT_TURN') {
+      uuidFields(revision, 'designRevisions', ['turnId', 'runId']);
+    } else if (revision.changeSource === 'RESTORE') {
+      uuidField(revision, 'sourceRevisionId', 'designRevisions');
+      creationTokenField(revision, 'clientActionId', 'designRevisions');
+    }
+    strings(revision, 'designRevisions', ['routeId']);
+    timestamp(revision, 'createdAt', 'designRevisions');
+  });
+
+  validateCollection(state.designSourceActions, 'designSourceActions', (action) => {
+    uuidFields(action, 'designSourceActions', [
+      'id',
+      'designId',
+      'sourceRevisionId'
+    ]);
+    creationTokenField(action, 'clientActionId', 'designSourceActions');
+    enumField(action, 'kind', ['RESTORE', 'DUPLICATE'] as const, 'designSourceActions');
+    optionalStrings(
+      action,
+      'designSourceActions',
+      ['failureReason'],
+      new Set(['failureReason'])
+    );
+    timestamp(action, 'createdAt', 'designSourceActions');
+    timestamp(action, 'updatedAt', 'designSourceActions');
+    const checkpoint = persistedRecord(action.checkpoint, 'designSourceActions');
+    if (action.kind === 'RESTORE') {
+      validateDesignRestoreCheckpoint(checkpoint);
+    } else {
+      uuidField(action, 'targetDesignId', 'designSourceActions');
+      validateDesignDuplicateCheckpoint(checkpoint);
+    }
+  });
+}
+
+function validateDesignRestoreCheckpoint(
+  checkpoint: Record<string, unknown>
+): void {
+  enumField(
+    checkpoint,
+    'boundary',
+    [
+      'RECORDED',
+      'SOURCE_CAPTURED',
+      'COMMIT_PUBLISHED',
+      'WORKTREE_MATERIALIZED',
+      'PREVIEW_CANDIDATE_READY'
+    ] as const,
+    'designSourceActions'
+  );
+  if (
+    checkpoint.boundary === 'SOURCE_CAPTURED' ||
+    checkpoint.boundary === 'COMMIT_PUBLISHED'
+  ) {
+    gitObjectIdField(checkpoint, 'expectedParentCommit', 'designSourceActions');
+    gitObjectIdField(checkpoint, 'treeSha', 'designSourceActions');
+  }
+  if (
+    checkpoint.boundary === 'COMMIT_PUBLISHED' ||
+    checkpoint.boundary === 'WORKTREE_MATERIALIZED' ||
+    checkpoint.boundary === 'PREVIEW_CANDIDATE_READY'
+  ) {
+    gitObjectIdField(checkpoint, 'targetCommitSha', 'designSourceActions');
+  }
+  if (checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
+    uuidField(checkpoint, 'previewGenerationId', 'designSourceActions');
+  }
+}
+
+function validateDesignDuplicateCheckpoint(
+  checkpoint: Record<string, unknown>
+): void {
+  enumField(
+    checkpoint,
+    'boundary',
+    ['TARGET_CREATED', 'WORKTREE_CREATED', 'PREVIEW_CANDIDATE_READY'] as const,
+    'designSourceActions'
+  );
+  if (checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
+    uuidField(checkpoint, 'previewGenerationId', 'designSourceActions');
+  }
+}
+
+function validateDesignTurnCheckpoint(value: unknown): void {
+  const checkpoint = persistedRecord(value, 'designTurns');
+  enumField(
+    checkpoint,
+    'boundary',
+    [
+      'QUEUED',
+      'RUN_LINKED',
+      'POST_RUN_EVIDENCE_RECORDED',
+      'SOURCE_CAPTURED',
+      'REF_UPDATED_INDEX_PENDING',
+      'INDEX_REPAIRED',
+      'PREVIEW_CANDIDATE_READY'
+    ] as const,
+    'designTurns'
+  );
+  switch (checkpoint.boundary) {
+    case 'QUEUED':
+    case 'RUN_LINKED':
+      return;
+    case 'POST_RUN_EVIDENCE_RECORDED':
+      uuidField(checkpoint, 'gitSnapshotId', 'designTurns');
+      return;
+    case 'SOURCE_CAPTURED':
+    case 'REF_UPDATED_INDEX_PENDING':
+    case 'INDEX_REPAIRED':
+      validateDesignSourceCheckpoint(
+        checkpoint.source,
+        checkpoint.boundary !== 'SOURCE_CAPTURED'
+      );
+      return;
+    case 'PREVIEW_CANDIDATE_READY':
+      uuidField(checkpoint, 'previewGenerationId', 'designTurns');
+      gitObjectIdField(checkpoint, 'commitSha', 'designTurns');
+      return;
+    default:
+      invalid('designTurns');
+  }
+}
+
+function validateDesignSourceCheckpoint(value: unknown, requireCandidate: boolean): void {
+  const source = persistedRecord(value, 'designTurns');
+  uuidFields(source, 'designTurns', ['repositoryId', 'worktreeId']);
+  strings(source, 'designTurns', ['branchName']);
+  gitObjectIdField(source, 'expectedParentCommit', 'designTurns');
+  gitObjectIdField(source, 'treeSha', 'designTurns');
+  if (requireCandidate) {
+    gitObjectIdField(source, 'candidateCommitSha', 'designTurns');
+  } else if (source.candidateCommitSha !== undefined) {
+    gitObjectIdField(source, 'candidateCommitSha', 'designTurns');
+  }
+}
+
+function validatePreviewRecords(state: StoreState): void {
+  validateCollection(state.previewPlans, 'previewPlans', (plan) => {
+    const source = persistedRecord(plan.planSource, 'previewPlans');
+    enumField(
+      source,
+      'type',
+      ['REPOSITORY_RECIPE', 'MANAGED_DESIGN_STATIC'] as const,
+      'previewPlans'
+    );
+    if (source.type === 'REPOSITORY_RECIPE') {
+      enumField(source, 'recipePath', ['.taskmonki/preview.yaml'] as const, 'previewPlans');
+      if (source.recipeVersion !== 1) invalid('previewPlans');
+      sha256Field(source, 'recipeDigest', 'previewPlans');
+    } else {
+      if (source.adapterVersion !== 1) invalid('previewPlans');
+    }
+  });
+
+  validateCollection(state.previewGenerations, 'previewGenerations', (generation) => {
+    const authority = persistedRecord(
+      generation.executionAuthority,
+      'previewGenerations'
+    );
+    enumField(
+      authority,
+      'type',
+      ['USER_APPROVAL', 'MANAGED_STATIC'] as const,
+      'previewGenerations'
+    );
+    sha256Field(authority, 'executionDigest', 'previewGenerations');
+    if (authority.type === 'USER_APPROVAL') {
+      uuidField(authority, 'approvalId', 'previewGenerations');
+    } else if (authority.adapterVersion !== 1) {
+      invalid('previewGenerations');
+    }
+
+    const source = persistedRecord(generation.source, 'previewGenerations');
+    enumField(
+      source,
+      'type',
+      ['WORKTREE_SNAPSHOT', 'EXACT_COMMIT'] as const,
+      'previewGenerations'
+    );
+    if (source.type === 'WORKTREE_SNAPSHOT') {
+      uuidField(source, 'gitSnapshotId', 'previewGenerations');
+      strings(source, 'previewGenerations', ['dirtyFingerprint']);
+      gitObjectIdField(source, 'headSha', 'previewGenerations');
+    } else {
+      uuidField(source, 'repositoryId', 'previewGenerations');
+      gitObjectIdField(source, 'commitSha', 'previewGenerations');
+      optionalUuidFields(source, 'previewGenerations', ['designRevisionId']);
+    }
+    enumField(
+      generation,
+      'freshness',
+      ['CURRENT', 'STALE', 'UNKNOWN', 'REVISION'] as const,
+      'previewGenerations'
+    );
+  });
 }
 
 function validateAgentObservations(state: StoreState): void {
@@ -1232,6 +1520,16 @@ function enumArray(
 function sha256Field(record: object, key: string, collection: string): void {
   const value = (record as Record<string, unknown>)[key];
   if (typeof value !== 'string' || !SHA256.test(value)) invalid(collection);
+}
+
+function gitObjectIdField(record: object, key: string, collection: string): void {
+  const value = (record as Record<string, unknown>)[key];
+  if (typeof value !== 'string' || !GIT_OBJECT_ID.test(value)) invalid(collection);
+}
+
+function creationTokenField(record: object, key: string, collection: string): void {
+  const value = (record as Record<string, unknown>)[key];
+  if (typeof value !== 'string' || !isTaskCreationToken(value)) invalid(collection);
 }
 
 function isCanonicalTimestamp(value: unknown): value is string {

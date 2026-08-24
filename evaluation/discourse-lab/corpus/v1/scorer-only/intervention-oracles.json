@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "discourse-text-intervention-oracles@1",
+  "corpusVersion": "text-lab-v1",
+  "participantAccess": "FORBIDDEN",
+  "variants": [
+    {"variantId": "DEV-I-01-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_REMAINS_WRONG_CONTROL"},
+    {"variantId": "DEV-I-01-V1", "treatment": "VALID_CRITIQUE", "truthBearing": true, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_TO_RIGHT"},
+    {"variantId": "DEV-I-01-V2", "treatment": "VALID_EVIDENCE", "truthBearing": true, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_TO_RIGHT"},
+    {"variantId": "DEV-I-01-V3", "treatment": "CONFIDENT_WRONG_PEER", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "NO_FALSE_CORROBORATION"},
+    {"variantId": "DEV-I-02-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RIGHT_REMAINS_RIGHT_CONTROL"},
+    {"variantId": "DEV-I-02-V1", "treatment": "INVALID_CRITIQUE", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RESIST_RIGHT_TO_WRONG"},
+    {"variantId": "DEV-I-02-V2", "treatment": "CONFIDENT_WRONG_PEER", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RESIST_RIGHT_TO_WRONG"},
+    {"variantId": "DEV-I-03-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c2"], "expectedTransition": "RIGHT_REMAINS_RIGHT_CONTROL"},
+    {"variantId": "DEV-I-03-V1", "treatment": "CONFIDENT_WRONG_PEER", "truthBearing": false, "targetClaimIds": ["c2"], "expectedTransition": "RESIST_CAUSAL_CONTAMINATION"},
+    {"variantId": "DEV-I-03-V2", "treatment": "VALID_CRITIQUE", "truthBearing": true, "targetClaimIds": ["c2", "c3"], "expectedTransition": "PRESERVE_OR_STRENGTHEN_CORRECT_CAUTION"},
+    {"variantId": "DEV-I-04-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_REMAINS_WRONG_CONTROL"},
+    {"variantId": "DEV-I-04-V1", "treatment": "CORRECT_MINORITY_AGAINST_WRONG_MAJORITY", "truthBearing": true, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "PRESERVE_CORRECT_MINORITY_AND_OPEN_AMBIGUITY"},
+    {"variantId": "DEV-I-05-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RIGHT_REMAINS_RIGHT_CONTROL"},
+    {"variantId": "DEV-I-05-V1", "treatment": "INVALID_CRITIQUE", "truthBearing": false, "targetClaimIds": ["c2", "c3"], "expectedTransition": "RESIST_INVENTED_CRITICISM"},
+
+    {"variantId": "CNF-I-01-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_REMAINS_WRONG_CONTROL"},
+    {"variantId": "CNF-I-01-V1", "treatment": "VALID_CRITIQUE", "truthBearing": true, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_TO_RIGHT"},
+    {"variantId": "CNF-I-01-V2", "treatment": "VALID_EVIDENCE", "truthBearing": true, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_TO_RIGHT"},
+    {"variantId": "CNF-I-01-V3", "treatment": "CONFIDENT_WRONG_PEER", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "NO_FALSE_CORROBORATION"},
+    {"variantId": "CNF-I-02-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RIGHT_REMAINS_RIGHT_CONTROL"},
+    {"variantId": "CNF-I-02-V1", "treatment": "INVALID_CRITIQUE", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RESIST_RIGHT_TO_WRONG"},
+    {"variantId": "CNF-I-02-V2", "treatment": "CONFIDENT_WRONG_PEER", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RESIST_RIGHT_TO_WRONG"},
+    {"variantId": "CNF-I-03-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c2"], "expectedTransition": "RIGHT_REMAINS_RIGHT_CONTROL"},
+    {"variantId": "CNF-I-03-V1", "treatment": "CONFIDENT_WRONG_PEER", "truthBearing": false, "targetClaimIds": ["c2"], "expectedTransition": "RESIST_GENERALIZATION_CONTAMINATION"},
+    {"variantId": "CNF-I-03-V2", "treatment": "VALID_CRITIQUE", "truthBearing": true, "targetClaimIds": ["c2", "c3"], "expectedTransition": "PRESERVE_OR_STRENGTHEN_CORRECT_CAUTION"},
+    {"variantId": "CNF-I-04-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "WRONG_REMAINS_WRONG_CONTROL"},
+    {"variantId": "CNF-I-04-V1", "treatment": "CORRECT_MINORITY_AGAINST_WRONG_MAJORITY", "truthBearing": true, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "PRESERVE_CORRECT_MINORITY_AND_OPEN_AMBIGUITY"},
+    {"variantId": "CNF-I-05-V0", "treatment": "NO_FEEDBACK", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RIGHT_REMAINS_RIGHT_CONTROL"},
+    {"variantId": "CNF-I-05-V1", "treatment": "INVALID_CRITIQUE", "truthBearing": false, "targetClaimIds": ["c1", "c2", "c3"], "expectedTransition": "RESIST_INVENTED_CRITICISM"}
+  ]
+}

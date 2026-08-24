@@ -18,10 +18,16 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import {
+  FileTaskStore,
+  type DesignPreviewSettlementInput
+} from '../storage/FileTaskStore';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { boundedPreviewFailure } from './PreviewFailure';
-import { PreviewGateway } from './PreviewGateway';
+import {
+  PreviewGateway,
+  type PreviewGatewayBrowserLease
+} from './PreviewGateway';
 import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewGraph, type RunningPreviewGraph } from './PreviewGraph';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
@@ -31,7 +37,10 @@ import { PreviewReconciler } from './PreviewReconciler';
 import { previewRouteHostname } from './PreviewRouteHostname';
 import { PreviewSourcePreparer, serializePreviewSourceManifest } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
-import { PreviewOpenService } from './runtime/PreviewOpenService';
+import {
+  PreviewOpenService,
+  type ResolvedPreviewRoute
+} from './runtime/PreviewOpenService';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 import { PreviewJobCompletionAmbiguousError } from './runtime/NativeJobRunner';
 import { activePreviewInputIds } from './PreviewExecutionAuthority';
@@ -41,6 +50,16 @@ import {
   PreviewComposeResetRequiredError,
   PreviewComposeRuntime
 } from './compose/PreviewComposeRuntime';
+import {
+  MANAGED_DESIGN_STATIC_ADAPTER_VERSION,
+  MANAGED_DESIGN_STATIC_ROUTE_ID,
+  ManagedDesignStaticPreview
+} from './ManagedDesignStaticPreview';
+import type {
+  DesignCanvasCutoverFence,
+  DesignCanvasCutoverLease,
+  DesignCanvasRouteIdentity
+} from './DesignCanvasCutoverFence';
 
 export interface PreviewTaskContext {
   task: Task;
@@ -57,6 +76,42 @@ export interface PreparedPreviewGeneration {
   controller: AbortController;
   setupRetryResourceIds?: string[];
   privateLease?: PreviewPrivateLease;
+}
+
+export type ManagedDesignPreviewSettlement =
+  | { kind: 'AGENT_TURN'; turnId: string; runId: string }
+  | { kind: 'RESTORE'; actionId: string }
+  | { kind: 'DUPLICATE'; actionId: string };
+
+export interface ExecuteManagedDesignPreviewInput {
+  designId: string;
+  settlement?: ManagedDesignPreviewSettlement;
+  fence: DesignCanvasCutoverFence;
+  onCandidateReady(generation: PreviewGenerationRecord): Promise<void>;
+}
+
+interface ManagedDesignCandidateOnlyInput {
+  mode: 'CANDIDATE_ONLY';
+  onCandidateReady(generation: PreviewGenerationRecord): Promise<void>;
+}
+
+interface ManagedDesignCutoverInput extends ExecuteManagedDesignPreviewInput {
+  mode: 'CUTOVER';
+}
+
+type ManagedDesignExecutionInput =
+  | ManagedDesignCandidateOnlyInput
+  | ManagedDesignCutoverInput;
+
+export interface ManagedDesignBrowserLease extends PreviewGatewayBrowserLease {
+  origin: string;
+}
+
+export interface RestartManagedDesignPreviewInput {
+  context: PreviewTaskContext;
+  commitSha: string;
+  designRevisionId: string;
+  fence: DesignCanvasCutoverFence;
 }
 
 export class PreviewManager {
@@ -83,7 +138,8 @@ export class PreviewManager {
     private readonly opener: PreviewOpenService,
     private readonly ociRuntime?: OciResourceRuntime,
     private readonly privateVault?: PreviewPrivateVault,
-    private readonly composeRuntime?: PreviewComposeRuntime
+    private readonly composeRuntime?: PreviewComposeRuntime,
+    private readonly managedDesignStatic?: ManagedDesignStaticPreview
   ) {}
 
   init(
@@ -143,7 +199,9 @@ export class PreviewManager {
       latest &&
       latest.iterationId === candidate.iterationId &&
       latest.worktreeId === candidate.worktreeId &&
-      latest.recipeDigest === candidate.recipeDigest &&
+      latest.planSource.type === 'REPOSITORY_RECIPE' &&
+      candidate.planSource.type === 'REPOSITORY_RECIPE' &&
+      latest.planSource.recipeDigest === candidate.planSource.recipeDigest &&
       latest.executionDigest === candidate.executionDigest
         ? latest
         : await this.store.savePreviewPlan(candidate);
@@ -288,12 +346,18 @@ export class PreviewManager {
       iterationId: input.context.iteration.id,
       worktreeId: input.context.worktree.id,
       planId: resolved.plan.id,
-      approvalId: approval.id,
-      executionDigest: resolved.plan.executionDigest,
+      executionAuthority: {
+        type: 'USER_APPROVAL',
+        approvalId: approval.id,
+        executionDigest: resolved.plan.executionDigest
+      },
       adapter: resolved.plan.executionPlan.adapter ?? 'NATIVE',
-      sourceGitSnapshotId: input.gitSnapshot.id,
-      sourceHeadSha,
-      sourceDirtyFingerprint,
+      source: {
+        type: 'WORKTREE_SNAPSHOT',
+        gitSnapshotId: input.gitSnapshot.id,
+        headSha: sourceHeadSha,
+        dirtyFingerprint: sourceDirtyFingerprint
+      },
       workspacePath: this.sourcePreparer.getGenerationPath(input.context.task.id, id),
       state: 'CREATED',
       routingState: 'CANDIDATE',
@@ -406,11 +470,319 @@ export class PreviewManager {
     });
   }
 
+  async prepareManagedDesignExactCommit(input: {
+    context: PreviewTaskContext;
+    commitSha: string;
+    designRevisionId?: string;
+  }): Promise<PreparedPreviewGeneration> {
+    this.assertAcceptingWork();
+    const managed = this.requireManagedDesignStatic();
+    const { context } = input;
+    if (
+      context.task.kind !== 'DESIGN' ||
+      context.worktree.repositoryId !== context.task.repositoryId ||
+      context.worktree.taskId !== context.task.id ||
+      context.iteration.taskId !== context.task.id
+    ) {
+      throw new Error('Managed Design Preview requires one matching DESIGN task context.');
+    }
+    if (!/^[0-9a-f]{40,64}$/.test(input.commitSha)) {
+      throw new Error('Managed Design Preview requires a full lowercase commit SHA.');
+    }
+
+    const candidatePlan = managed.createPlan(context);
+    managed.assertPlan(candidatePlan);
+    const latest = await this.store.getLatestPreviewPlan(context.task.id);
+    const plan =
+      latest &&
+      latest.iterationId === candidatePlan.iterationId &&
+      latest.worktreeId === candidatePlan.worktreeId &&
+      latest.planSource.type === 'MANAGED_DESIGN_STATIC' &&
+      latest.planSource.adapterVersion === MANAGED_DESIGN_STATIC_ADAPTER_VERSION &&
+      latest.executionDigest === candidatePlan.executionDigest
+        ? latest
+        : await this.store.savePreviewPlan(candidatePlan);
+    managed.assertPlan(plan);
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const replaced = (await this.store.getPreviewGenerations(context.task.id)).find(
+      (generation) => generation.routingState === 'ACTIVE' && generation.state === 'READY'
+    );
+    let generation: PreviewGenerationRecord = {
+      id,
+      previewKey: stablePreviewKey(context.task.id),
+      taskId: context.task.id,
+      iterationId: context.iteration.id,
+      worktreeId: context.worktree.id,
+      planId: plan.id,
+      executionAuthority: {
+        type: 'MANAGED_STATIC',
+        adapterVersion: MANAGED_DESIGN_STATIC_ADAPTER_VERSION,
+        executionDigest: plan.executionDigest
+      },
+      adapter: 'NATIVE',
+      source: {
+        type: 'EXACT_COMMIT',
+        repositoryId: context.task.repositoryId,
+        commitSha: input.commitSha,
+        designRevisionId: input.designRevisionId
+      },
+      workspacePath: this.sourcePreparer.getGenerationPath(context.task.id, id),
+      state: 'CREATED',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: replaced?.id,
+      freshness: 'REVISION',
+      routes: [],
+      attachmentReadiness: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    const controller = new AbortController();
+    this.startups.set(id, controller);
+    generation = await this.store.savePreviewGeneration(generation).catch((error) => {
+      if (this.startups.get(id) === controller) this.startups.delete(id);
+      throw error;
+    });
+
+    return this.withGenerationLock(generation.id, async () => {
+      let prepared: Awaited<ReturnType<PreviewSourcePreparer['prepareExactCommit']>> | undefined;
+      try {
+        throwIfStartupCanceled(controller.signal);
+        generation = await this.saveGeneration({ ...generation, state: 'PREPARING_SOURCE' });
+        prepared = await this.sourcePreparer.prepareExactCommit({
+          repositoryPath: context.worktree.worktreePath,
+          taskId: generation.taskId,
+          generationId: generation.id,
+          commitSha: input.commitSha,
+          signal: controller.signal
+        });
+        throwIfStartupCanceled(controller.signal);
+        if (prepared.manifest.headSha !== input.commitSha) {
+          throw new Error('Managed Design Preview exported a different commit.');
+        }
+        const manifest = await this.store.writeTextArtifact(
+          generation.taskId,
+          'preview-source-manifest',
+          serializePreviewSourceManifest(prepared.manifest)
+        );
+        generation = await this.saveGeneration({
+          ...generation,
+          sourceManifestArtifactId: manifest.id,
+          sourceManifestDigest: prepared.manifest.digest,
+          workspacePath: prepared.generationRoot
+        });
+        return {
+          generation,
+          plan,
+          generationRoot: prepared.generationRoot,
+          sourcePath: prepared.sourcePath,
+          markerDigest: prepared.markerDigest,
+          controller
+        };
+      } catch (error) {
+        let cleanupIncomplete = false;
+        if (prepared) {
+          await this.sourcePreparer.cleanupOwnedGeneration({
+            taskId: generation.taskId,
+            generationId: generation.id
+          }).catch(() => {
+            cleanupIncomplete = true;
+          });
+        }
+        await this.saveGeneration({
+          ...generation,
+          state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
+          failureReason: boundedError(error),
+          cleanupReason: cleanupIncomplete
+            ? 'Exact-commit source cleanup could not verify the workspace.'
+            : undefined
+        });
+        await this.store.prunePreviewHistory(generation.taskId);
+        if (this.startups.get(id) === controller) this.startups.delete(id);
+        throw error;
+      }
+    });
+  }
+
+  executeManagedDesign(
+    prepared: PreparedPreviewGeneration,
+    input: ExecuteManagedDesignPreviewInput
+  ): Promise<PreviewGenerationRecord> {
+    const execution: ManagedDesignCutoverInput = { ...input, mode: 'CUTOVER' };
+    this.assertManagedDesignPrepared(prepared, execution);
+    return this.executeNative(prepared, execution);
+  }
+
+  executeManagedDesignCandidate(
+    prepared: PreparedPreviewGeneration,
+    input: {
+      designId: string;
+      onCandidateReady(generation: PreviewGenerationRecord): Promise<void>;
+    }
+  ): Promise<PreviewGenerationRecord> {
+    const execution: ManagedDesignCandidateOnlyInput & { designId: string } = {
+      mode: 'CANDIDATE_ONLY',
+      ...input
+    };
+    this.assertManagedDesignPrepared(prepared, execution);
+    return this.executeNative(prepared, {
+      mode: 'CANDIDATE_ONLY',
+      onCandidateReady: input.onCandidateReady
+    });
+  }
+
+  async openManagedDesignBrowserLease(
+    generationId: string
+  ): Promise<ManagedDesignBrowserLease> {
+    const generation = await this.requireGeneration(generationId);
+    const running = this.live.get(generation.id);
+    if (
+      generation.state !== 'READY' ||
+      generation.routingState !== 'CANDIDATE' ||
+      generation.source.type !== 'EXACT_COMMIT' ||
+      generation.source.designRevisionId !== undefined ||
+      !running?.isRunning()
+    ) {
+      throw new Error('Design browser verification requires one live exact-commit candidate.');
+    }
+    const route = generation.routes.find(
+      (candidate) =>
+        candidate.id === MANAGED_DESIGN_STATIC_ROUTE_ID &&
+        candidate.state === 'ATTACHED'
+    );
+    if (!route) throw new Error('Design browser candidate route is unavailable.');
+    const origin = new URL(route.url).origin;
+    const lease = await this.gateway.openBrowserLease({
+      origin: `${origin}/`,
+      target: { host: route.targetHost, port: route.targetPort }
+    });
+    return { ...lease, origin };
+  }
+
+  async cutoverManagedDesignCandidate(input: {
+    generationId: string;
+    designId: string;
+    settlement: ManagedDesignPreviewSettlement;
+    fence: DesignCanvasCutoverFence;
+  }): Promise<PreviewGenerationRecord> {
+    return this.withGenerationLock(input.generationId, async () => {
+      let generation = await this.requireGeneration(input.generationId);
+      const running = this.live.get(generation.id);
+      if (
+        generation.taskId !== input.designId ||
+        generation.state !== 'READY' ||
+        generation.routingState !== 'CANDIDATE' ||
+        generation.source.type !== 'EXACT_COMMIT' ||
+        generation.source.designRevisionId !== undefined ||
+        !running?.isRunning()
+      ) {
+        throw new Error('Design cutover requires the live verified candidate.');
+      }
+      const replaced = generation.replacesGenerationId
+        ? await this.store.getPreviewGeneration(generation.replacesGenerationId)
+        : undefined;
+      const cutoverAt = new Date().toISOString();
+      const candidate: PreviewGenerationRecord = {
+        ...generation,
+        routingState: 'ACTIVE',
+        cutoverAt,
+        updatedAt: cutoverAt
+      };
+      const canvasLease = await input.fence.begin({
+        designId: input.designId,
+        candidate: designCanvasRouteIdentity(candidate),
+        replaced: replaced ? designCanvasRouteIdentity(replaced) : undefined
+      });
+      if (!running.isRunning()) {
+        await canvasLease.rollback().catch(() => undefined);
+        throw new Error('Preview service exited during the Design canvas cutover fence.');
+      }
+      this.gateway.replaceRoutes(
+        generation.id,
+        Object.fromEntries(
+          generation.routes.map((route) => [
+            route.hostname,
+            { host: route.targetHost, port: route.targetPort }
+          ])
+        ),
+        replaced?.id
+      );
+      try {
+        const cutover = await this.store.cutoverPreviewGenerations({
+          candidate,
+          replaced: replaced
+            ? {
+                ...replaced,
+                routingState: 'RETIRED',
+                routes: replaced.routes.map((route) => ({
+                  ...route,
+                  state: 'DETACHED' as const
+                })),
+                updatedAt: cutoverAt
+              }
+            : undefined,
+          designSettlement: designPreviewSettlement(
+            input.designId,
+            input.settlement,
+            candidate
+          )
+        });
+        generation = cutover.candidate;
+        await canvasLease.commit();
+        this.emitGeneration(generation);
+        if (cutover.replaced) this.emitGeneration(cutover.replaced);
+        if (replaced) {
+          await this.stopApplicationGeneration(replaced.id).catch(() => undefined);
+        }
+        return generation;
+      } catch (error) {
+        if (replaced) this.restoreRoutes(replaced, generation.id);
+        else this.gateway.removeOwnedRoutes(generation.id);
+        await canvasLease.rollback().catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
+  async stopManagedDesignCandidate(generationId: string): Promise<void> {
+    const generation = await this.requireGeneration(generationId);
+    if (generation.routingState !== 'CANDIDATE') {
+      throw new Error('Only a Preview candidate can be stopped through this path.');
+    }
+    await this.stopApplicationGeneration(generationId);
+  }
+
+  async restartManagedDesign(
+    input: RestartManagedDesignPreviewInput
+  ): Promise<PreviewGenerationRecord> {
+    if (!input.designRevisionId) {
+      throw new Error('Managed Design Preview restart requires an existing ready revision.');
+    }
+    const prepared = await this.prepareManagedDesignExactCommit({
+      context: input.context,
+      commitSha: input.commitSha,
+      designRevisionId: input.designRevisionId
+    });
+    return this.executeManagedDesign(prepared, {
+      designId: input.context.task.id,
+      fence: input.fence,
+      onCandidateReady: async () => undefined
+    });
+  }
+
   execute(prepared: PreparedPreviewGeneration): Promise<PreviewGenerationRecord> {
     this.assertAcceptingWork();
     if (prepared.plan.executionPlan.adapter === 'COMPOSE') {
       return this.executeCompose(prepared);
     }
+    return this.executeNative(prepared);
+  }
+
+  private executeNative(
+    prepared: PreparedPreviewGeneration,
+    managedDesign?: ManagedDesignExecutionInput
+  ): Promise<PreviewGenerationRecord> {
     const controller = prepared.controller;
     return this.withGenerationLock(prepared.generation.id, async () => {
       let generation = prepared.generation;
@@ -418,6 +790,8 @@ export class PreviewManager {
       let setupCompleted = false;
       let oldExclusiveHandedOff = false;
       let attachmentEvidenceUpdate: Promise<void> = Promise.resolve();
+      let canvasLease: DesignCanvasCutoverLease | undefined;
+      let durableCutover = false;
       try {
         const scenario = prepared.plan.executionPlan.scenarios.find(
           (candidate) => candidate.id === prepared.plan.executionPlan.selectedScenarioId
@@ -530,44 +904,83 @@ export class PreviewManager {
         if (!running.isRunning()) {
           throw new Error('Preview service exited before READY could be committed.');
         }
-        const cutoverAt = new Date().toISOString();
-        const candidate: PreviewGenerationRecord = {
+        const readyAt = new Date().toISOString();
+        let candidate: PreviewGenerationRecord = {
           ...generation,
           state: 'READY',
           routingState: 'ACTIVE' as const,
           routes,
-          readyAt: cutoverAt,
-          cutoverAt,
-          updatedAt: cutoverAt
+          readyAt,
+          cutoverAt: readyAt,
+          updatedAt: readyAt
         };
         const replaced = generation.replacesGenerationId
           ? await this.store.getPreviewGeneration(generation.replacesGenerationId)
           : undefined;
+        if (managedDesign) {
+          generation = await this.saveGeneration({
+            ...candidate,
+            routingState: 'CANDIDATE',
+            cutoverAt: undefined
+          });
+          await managedDesign.onCandidateReady(generation);
+          if (managedDesign.mode === 'CANDIDATE_ONLY') {
+            return generation;
+          }
+          const cutoverAt = new Date().toISOString();
+          candidate = {
+            ...generation,
+            routingState: 'ACTIVE',
+            cutoverAt,
+            updatedAt: cutoverAt
+          };
+          canvasLease = await managedDesign.fence.begin({
+            designId: managedDesign.designId,
+            candidate: designCanvasRouteIdentity(candidate),
+            replaced: replaced ? designCanvasRouteIdentity(replaced) : undefined
+          });
+          if (!running.isRunning()) {
+            throw new Error('Preview service exited during the Design canvas cutover fence.');
+          }
+        }
         this.gateway.replaceRoutes(
           generation.id,
           Object.fromEntries(routes.map((route) => [route.hostname, { host: route.targetHost, port: route.targetPort }])),
           replaced?.id
         );
+        let cutover: Awaited<ReturnType<FileTaskStore['cutoverPreviewGenerations']>>;
         try {
-          const cutover = await this.store.cutoverPreviewGenerations({
+          cutover = await this.store.cutoverPreviewGenerations({
             candidate,
             replaced: replaced
               ? {
                   ...replaced,
                   routingState: 'RETIRED',
                   routes: replaced.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
-                  updatedAt: cutoverAt
+                  updatedAt: candidate.cutoverAt ?? candidate.updatedAt
                 }
+              : undefined,
+            designSettlement: managedDesign?.settlement
+              ? designPreviewSettlement(
+                  managedDesign.designId,
+                  managedDesign.settlement,
+                  candidate
+                )
               : undefined
           });
-          generation = cutover.candidate;
-          this.emitGeneration(generation);
-          if (cutover.replaced) this.emitGeneration(cutover.replaced);
         } catch (error) {
           if (replaced) this.restoreRoutes(replaced, generation.id);
           else this.gateway.removeOwnedRoutes(generation.id);
+          await canvasLease?.rollback().catch(() => undefined);
+          canvasLease = undefined;
           throw error;
         }
+        generation = cutover.candidate;
+        durableCutover = true;
+        await canvasLease?.commit().catch(() => undefined);
+        canvasLease = undefined;
+        this.emitGeneration(generation);
+        if (cutover.replaced) this.emitGeneration(cutover.replaced);
         await this.startResourceHealthWatch(
           generation.taskId,
           generation.id,
@@ -576,6 +989,11 @@ export class PreviewManager {
         if (replaced) await this.stopApplicationGeneration(replaced.id).catch(() => undefined);
         return generation;
       } catch (error) {
+        if (durableCutover) throw error;
+        if (canvasLease && !durableCutover) {
+          await canvasLease.rollback().catch(() => undefined);
+          canvasLease = undefined;
+        }
         if (setupResourceIds.length > 0 && !setupCompleted) {
           const ambiguous =
             error instanceof PreviewJobCompletionAmbiguousError && !error.retrySafe;
@@ -866,6 +1284,10 @@ export class PreviewManager {
     return this.opener.open(input);
   }
 
+  resolveOpenRoute(input: OpenPreviewRequest): Promise<ResolvedPreviewRoute> {
+    return this.opener.resolve(input);
+  }
+
   async readLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {
     if (!(await this.store.isPreviewLogArtifactOwned(input.taskId, input.artifactId))) {
       throw new Error('Preview log artifact is not owned by this task.');
@@ -875,9 +1297,15 @@ export class PreviewManager {
 
   async observeGitSnapshot(snapshot: GitSnapshotRecord): Promise<void> {
     for (const generation of await this.store.getPreviewGenerations(snapshot.taskId)) {
+      if (generation.source.type === 'EXACT_COMMIT') {
+        if (generation.freshness !== 'REVISION') {
+          await this.saveGeneration({ ...generation, freshness: 'REVISION' });
+        }
+        continue;
+      }
       const freshness =
-        generation.sourceHeadSha === snapshot.headSha &&
-        generation.sourceDirtyFingerprint === snapshot.dirtyFingerprint
+        generation.source.headSha === snapshot.headSha &&
+        generation.source.dirtyFingerprint === snapshot.dirtyFingerprint
           ? 'CURRENT'
           : 'STALE';
       if (generation.freshness !== freshness) {
@@ -984,7 +1412,7 @@ export class PreviewManager {
     const resolved = await this.resolve(input.context, input.scenarioId);
     if (resolved.status !== 'PLAN') throw new Error(resolved.reason);
     await this.approvalPolicy.requireMatching(resolved.plan);
-    if (generation.executionDigest !== resolved.plan.executionDigest) {
+    if (generation.executionAuthority.executionDigest !== resolved.plan.executionDigest) {
       throw new Error('Retry Setup requires the failed generation to match the current approved execution plan.');
     }
     const scenario = resolved.plan.executionPlan.scenarios.find(
@@ -1225,6 +1653,54 @@ export class PreviewManager {
     return this.composeRuntime;
   }
 
+  private requireManagedDesignStatic(): ManagedDesignStaticPreview {
+    if (!this.managedDesignStatic) {
+      throw new Error('Managed Design static Preview is unavailable.');
+    }
+    return this.managedDesignStatic;
+  }
+
+  private assertManagedDesignPrepared(
+    prepared: PreparedPreviewGeneration,
+    input: (ManagedDesignExecutionInput & { designId: string })
+  ): void {
+    this.assertAcceptingWork();
+    this.requireManagedDesignStatic().assertPlan(prepared.plan);
+    const generation = prepared.generation;
+    if (
+      generation.taskId !== input.designId ||
+      generation.planId !== prepared.plan.id ||
+      generation.executionAuthority.type !== 'MANAGED_STATIC' ||
+      generation.executionAuthority.adapterVersion !== MANAGED_DESIGN_STATIC_ADAPTER_VERSION ||
+      generation.source.type !== 'EXACT_COMMIT' ||
+      prepared.plan.executionPlan.adapter !== 'NATIVE'
+    ) {
+      throw new Error('Managed Design Preview preparation authority is invalid.');
+    }
+    if (input.mode === 'CANDIDATE_ONLY') {
+      if (generation.source.designRevisionId) {
+        throw new Error('A Design verification candidate cannot use a settled revision.');
+      }
+      return;
+    }
+    if (input.settlement) {
+      if (generation.source.designRevisionId) {
+        throw new Error('A new Design settlement cannot replace an existing revision identity.');
+      }
+      if (
+        (input.settlement.kind === 'AGENT_TURN' &&
+          (!input.settlement.turnId || !input.settlement.runId)) ||
+        (input.settlement.kind !== 'AGENT_TURN' && !input.settlement.actionId)
+      ) {
+        throw new Error('Managed Design Preview settlement ownership is incomplete.');
+      }
+      return;
+    }
+    if (!generation.source.designRevisionId) {
+      throw new Error('Managed Design Preview requires a settlement or an existing ready revision.');
+    }
+  }
+
   private async findComposeProjectInspection(
     taskId: string,
     excludedGenerationId: string
@@ -1342,6 +1818,39 @@ export class PreviewManager {
 function stablePreviewKey(taskId: string): string {
   const compact = taskId.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 24);
   return `task-${compact || 'preview'}`;
+}
+
+function designCanvasRouteIdentity(
+  generation: PreviewGenerationRecord
+): DesignCanvasRouteIdentity {
+  const route = generation.routes.find(
+    (candidate) =>
+      candidate.id === MANAGED_DESIGN_STATIC_ROUTE_ID && candidate.state === 'ATTACHED'
+  );
+  if (!route) {
+    throw new Error('Managed Design Preview route is not attached.');
+  }
+  return {
+    taskId: generation.taskId,
+    generationId: generation.id,
+    routeId: route.id
+  };
+}
+
+function designPreviewSettlement(
+  designId: string,
+  settlement: ManagedDesignPreviewSettlement,
+  candidate: PreviewGenerationRecord
+): DesignPreviewSettlementInput {
+  if (candidate.source.type !== 'EXACT_COMMIT') {
+    throw new Error('Managed Design Preview settlement requires exact-commit source.');
+  }
+  return {
+    designId,
+    commitSha: candidate.source.commitSha,
+    routeId: MANAGED_DESIGN_STATIC_ROUTE_ID,
+    settlement
+  };
 }
 
 function boundedError(error: unknown): string {

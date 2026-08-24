@@ -1,17 +1,25 @@
 import type {
   AcceptPreviewRecipeDraftRequest,
+  AddDesignReferencesRequest,
   AppUpdateEvent,
   Board,
   BoardSnapshot,
   ApprovePreviewPlanRequest,
   CancelRunRequest,
+  CancelDesignTurnRequest,
   ContinueRunRequest,
+  CreateBlankDesignRequest,
   BranchPublicationRecord,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DeleteDesignDraftRequest,
   DeleteTaskResult,
+  DesignDetailSnapshot,
+  DesignConversationPage,
+  DesignDraftRecord,
+  DesignListItem,
   DiscardPreviewRecipeDraftRequest,
   DeletePreviewLocalAttachmentBindingRequest,
   ExecuteOpenTargetActionRequest,
@@ -21,6 +29,7 @@ import type {
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
   InspectOpenTargetRequest,
+  ImportDesignReferenceAssetRequest,
   OpenTargetActionResult,
   OpenTargetInspection,
   OpenPreviewRequest,
@@ -35,6 +44,7 @@ import type {
   RepositoryImpact,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
   ResolvePreviewRequest,
@@ -52,9 +62,18 @@ import type {
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RefinePromptRequest,
+  RemoveDesignReferenceRequest,
   RefinePromptResponse,
   RespondToInteractionRequest,
   RetryRunRequest,
+  RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
+  ListDesignConversationRequest,
+  SaveDesignDraftRequest,
+  SubmitDesignTurnRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   StartReviewRequest,
@@ -317,9 +336,109 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     discardTaskAttachmentDraft: (input: DiscardTaskAttachmentDraftRequest) =>
       post<void>(baseUrl, '/api/attachments/drafts/discard', input),
     readTaskAttachment: (input: ReadTaskAttachmentRequest) =>
-      readAttachment(baseUrl, input),
+      readAttachment(
+        baseUrl,
+        `/api/attachments/content?${new URLSearchParams({ attachmentId: input.attachmentId }).toString()}`
+      ),
     readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
+    listDesigns: () => get<DesignListItem[]>(baseUrl, '/api/designs'),
+    getDesign: (designId: string) =>
+      get<DesignDetailSnapshot>(baseUrl, `/api/designs/${encodeURIComponent(designId)}`),
+    listDesignConversation: (input: ListDesignConversationRequest) => {
+      const query = new URLSearchParams();
+      if (input.beforeCursor) query.set('beforeCursor', input.beforeCursor);
+      if (input.limit !== undefined) query.set('limit', String(input.limit));
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return get<DesignConversationPage>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/conversation${suffix}`
+      );
+    },
+    getDesignDraft: (designId: string) =>
+      get<DesignDraftRecord | null>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(designId)}/draft`
+      ),
+    readDesignDraftAttachment: (input: ReadDesignDraftAttachmentRequest) =>
+      readAttachment(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/draft/attachments/${encodeURIComponent(input.attachmentId)}`
+      ),
+    saveDesignDraft: (input: SaveDesignDraftRequest) =>
+      post<DesignDraftRecord>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/draft`,
+        input
+      ),
+    deleteDesignDraft: (input: DeleteDesignDraftRequest) =>
+      post<void>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/draft/delete`,
+        input
+      ),
+    createBlankDesign: (input: CreateBlankDesignRequest) =>
+      post<DesignDetailSnapshot>(baseUrl, '/api/designs', input),
+    submitDesignTurn: (input: SubmitDesignTurnRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/turns`,
+        input
+      ),
+    addDesignReferences: (input: AddDesignReferencesRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/references`,
+        input
+      ),
+    removeDesignReference: (input: RemoveDesignReferenceRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/references/${encodeURIComponent(input.referenceId)}/remove`,
+        input
+      ),
+    importDesignReferenceAsset: (input: ImportDesignReferenceAssetRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/references/${encodeURIComponent(input.referenceId)}/import`,
+        input
+      ),
+    cancelDesignTurn: (input: CancelDesignTurnRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/turns/${encodeURIComponent(input.turnId)}/cancel`,
+        input
+      ),
+    restartDesignPreview: (input: RestartDesignPreviewRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/preview/restart`,
+        input
+      ),
+    restoreDesignRevision: (input: RestoreDesignRevisionRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/revisions/${encodeURIComponent(input.revisionId)}/restore`,
+        input
+      ),
+    duplicateDesign: (input: DuplicateDesignRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/revisions/${encodeURIComponent(input.revisionId)}/duplicate`,
+        input
+      ),
+    renameDesign: (input: RenameDesignRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/rename`,
+        input
+      ),
+    archiveDesign: (input: ArchiveDesignRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/archive`,
+        input
+      ),
     refinePrompt: (input: RefinePromptRequest) =>
       post<RefinePromptResponse>(baseUrl, '/api/prompt/refine', input),
     prepareWorktree: (input: PrepareWorktreeRequest) =>
@@ -413,10 +532,9 @@ function arrayBufferToBase64(bytes: ArrayBuffer): string {
 
 async function readAttachment(
   baseUrl: string,
-  input: ReadTaskAttachmentRequest
+  resourcePath: string
 ): Promise<AttachmentContent> {
-  const query = new URLSearchParams({ attachmentId: input.attachmentId });
-  const response = await fetch(`${baseUrl}/api/attachments/content?${query.toString()}`);
+  const response = await fetch(`${baseUrl}${resourcePath}`);
   if (!response.ok) {
     return readResponse<never>(response);
   }

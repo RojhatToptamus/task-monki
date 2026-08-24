@@ -919,6 +919,7 @@ describe('task card view model', () => {
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    kind: overrides.kind ?? 'NORMAL',
     runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',

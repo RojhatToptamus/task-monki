@@ -1,0 +1,728 @@
+{
+  "schemaVersion": "discourse-lab-preregistration@1",
+  "preregistrationVersion": "text-lab-prereg-v5",
+  "corpusVersion": "text-lab-v1",
+  "promptVersion": "text-lab-prompts-v3",
+  "metricVersion": "text-lab-metrics-v4",
+  "componentVersions": {
+    "protocolVersion": "text-protocols@v3",
+    "runnerVersion": "finite-text-runner@v5",
+    "harnessValidationVersion": "h0-validation@v5",
+    "controlledExperimentVersion": "controlled-selective-updating@v5",
+    "assignmentOrderVersion": "sealed-counterbalanced-order@v1",
+    "ledgerSchemaVersion": "task-monki/discourse-lab-ledger@v5",
+    "publicOutputSchemaVersion": "discourse-protocol-lab/public-output-v1"
+  },
+  "authoredAt": "2026-08-01",
+  "scope": {
+    "allowedContext": "ORDINARY_TEXT_ONLY",
+    "forbiddenContext": [
+      "REPOSITORY",
+      "TASK_MONKI_TASK",
+      "SOURCE_CODE",
+      "BROWSING",
+      "NETWORK",
+      "TOOLS",
+      "FILESYSTEM"
+    ],
+    "participantTruthAccess": false,
+    "hiddenChainOfThoughtRequestedOrStored": false,
+    "productBehaviorMayChange": false,
+    "maximumSchemaRepairRetriesPerCall": 1,
+    "schemaRepairRetriesAreCharged": true,
+    "failedAndPartialAssignmentsRemainInArm": true,
+    "h1DevelopmentEstimand": "Intention-to-treat effect of assigned controlled feedback under one fixed strong model/settings and the harness-isolated Codex natural-completion policy. This is not a fixed-token, provider-text-only, equal-realized-cost, or product-transfer estimand.",
+    "h1DevelopmentOutputPolicy": {
+      "conciseOutputTargetTokensPerAttempt": 900,
+      "targetIsCensoringLimit": false,
+      "emergencyStreamingInterruptThresholdTokensPerAttempt": 25000,
+      "preserveThresholdCrossingAndOvershoot": true,
+      "providerUsageRequiredBeforeNextDispatch": true,
+      "missingUsageStopsWave": true
+    },
+    "h1DevelopmentAnalysisPolicy": {
+      "primaryPopulation": "INTENTION_TO_TREAT_ALL_ASSIGNED_VARIANTS",
+      "excludeForTargetOvershoot": false,
+      "matchOrConditionOnRealizedTokensForPrimaryContrast": false,
+      "realizedTokensLatencyOvershootAndFailuresAreOutcomes": true
+    },
+    "h1DevelopmentBoundaryPolicy": {
+      "acceptedBoundaryClasses": [
+        "PROVIDER_ENFORCED_STRICT",
+        "H1_DEVELOPMENT_HARNESS_VERIFIED"
+      ],
+      "fallbackPhase": "DEVELOPMENT_ONLY",
+      "freshPreflightRequired": true,
+      "emptyInheritedInstructionsRequired": true,
+      "noToolOrMcpContextRequired": true,
+      "strictBoundaryRequiredForConfirmation": true,
+      "strictBoundaryRequiredForH2Plus": true
+    },
+    "h1PrimaryModelPolicy": {
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "high",
+      "serviceTier": "default",
+      "identicalAcrossPrimaryConditions": true,
+      "smallerModelsOnlyAsSeparatelyLabeledHarnessTests": true
+    }
+  },
+  "confirmationLock": {
+    "status": "SEALED_NOT_YET_RUN",
+    "unlockRequires": [
+      "H0 v5 scripted-plumbing validation passes",
+      "development pilot has been inspected",
+      "every H1 treatment pair has an estimable terminal-correctness guard, every treatment arm with initially correct claims has an estimable absolute preservation guard, every preregistered directional class has at least one transition-eligible pair, and all raw pairs are manually inspected for construct failure",
+      "prompts, schemas, metrics, models, budgets, stopping rules, exclusions, and finalist conditions are frozen",
+      "at least two current capable model configurations are named",
+      "confirmation sample and multiplicity handling are recorded",
+      "a new preregistration explicitly selects a provider-enforced strict text-only and output-token boundary; the H1 development fallback cannot unlock confirmation"
+    ],
+    "afterUnblinding": "Any fixture, prompt, schema, metric, threshold, router, or exclusion change requires a new version and cannot be reported as v1 confirmation."
+  },
+  "budgetClasses": {
+    "B0": {
+      "maxParticipantCalls": 0,
+      "maxRounds": 0,
+      "maxInputTokens": 0,
+      "maxOutputTokens": 0,
+      "maxWallTimeMs": 30000,
+      "maxPrimaryCalls": 0,
+      "maxSchemaRepairCalls": 0,
+      "maxTotalProviderAttempts": 0,
+      "maxRepairOutputTokens": 0,
+      "maxTotalOutputTokens": 0
+    },
+    "B1": {
+      "maxParticipantCalls": 1,
+      "maxRounds": 1,
+      "maxInputTokensPerCall": 7000,
+      "targetOutputTokensPerCall": 900,
+      "outputCompletionPolicy": "NATURAL_COMPLETION_TARGET_NOT_CENSOR",
+      "emergencyOutputTokenSafetyCeilingPerCall": 25000,
+      "maxInputTokens": 7000,
+      "targetOutputTokens": 900,
+      "maxWallTimeMs": 120000,
+      "maxPrimaryCalls": 1,
+      "maxSchemaRepairCalls": 1,
+      "maxTotalProviderAttempts": 2,
+      "targetRepairOutputTokens": 900,
+      "targetTotalOutputTokens": 1800,
+      "maxTotalEmergencyOutputTokenSafetyCeiling": 50000
+    },
+    "B3": {
+      "maxParticipantCalls": 3,
+      "maxRounds": 2,
+      "maxInputTokensPerCall": 7000,
+      "maxOutputTokensPerCall": 900,
+      "maxInputTokens": 21000,
+      "maxOutputTokens": 2700,
+      "maxWallTimeMs": 360000,
+      "maxPrimaryCalls": 3,
+      "maxSchemaRepairCalls": 3,
+      "maxTotalProviderAttempts": 6,
+      "maxRepairOutputTokens": 2700,
+      "maxTotalOutputTokens": 5400
+    },
+    "B5": {
+      "maxParticipantCalls": 5,
+      "maxRounds": 2,
+      "maxInputTokensPerCall": 7000,
+      "maxOutputTokensPerCall": 900,
+      "maxInputTokens": 35000,
+      "maxOutputTokens": 4500,
+      "maxWallTimeMs": 600000,
+      "maxPrimaryCalls": 5,
+      "maxSchemaRepairCalls": 5,
+      "maxTotalProviderAttempts": 10,
+      "maxRepairOutputTokens": 4500,
+      "maxTotalOutputTokens": 9000
+    },
+    "B6": {
+      "maxParticipantCalls": 6,
+      "maxRounds": 2,
+      "maxInputTokensPerCall": 7000,
+      "maxOutputTokensPerCall": 900,
+      "maxInputTokens": 42000,
+      "maxOutputTokens": 5400,
+      "maxWallTimeMs": 720000,
+      "maxPrimaryCalls": 6,
+      "maxSchemaRepairCalls": 6,
+      "maxTotalProviderAttempts": 12,
+      "maxRepairOutputTokens": 5400,
+      "maxTotalOutputTokens": 10800
+    },
+    "B8": {
+      "maxParticipantCalls": 8,
+      "maxRounds": 3,
+      "maxInputTokensPerCall": 7000,
+      "maxOutputTokensPerCall": 900,
+      "maxInputTokens": 56000,
+      "maxOutputTokens": 7200,
+      "maxWallTimeMs": 960000,
+      "maxPrimaryCalls": 8,
+      "maxSchemaRepairCalls": 8,
+      "maxTotalProviderAttempts": 16,
+      "maxRepairOutputTokens": 7200,
+      "maxTotalOutputTokens": 14400
+    }
+  },
+  "fairnessRules": [
+    "Use the same model, reasoning effort, system prompt base, output schema, ordinary-text case view, and tool prohibition within a same-model topology contrast.",
+    "H1 uses the sealed counterbalanced schedule and records its seed/order digest. Later topology work must implement assignment-level actor and artifact-order counterbalancing before H2-H7 become eligible; fixed A/B source order is not a fair comparison.",
+    "Record requested and observed model/settings. Record seed as null when the provider does not expose or honor a seed; never claim deterministic seed control in that case.",
+    "Record maximum and realized calls, rounds, input/cached/output/reasoning/total tokens, queue/call/critical-path latency, retries, and failures. Unknown telemetry remains unknown, not zero.",
+    "At every B3, B5, B6, or B8 candidate ceiling, run a stable-identity Single Workbench with the same ceiling and compatible text evidence. Give it all available calls; it may self-audit, generate alternatives, revise, or stop under the same declared stopping rules.",
+    "Frozen-prefix branches reuse byte-identical upstream public artifacts and charge that prefix to every arm. The H4 no-audit comparator remains non-executable until branch replay exists; full-live reruns are required before a topology can become a confirmation finalist.",
+    "H1 primary causal comparisons are intention-to-treat over every assigned variant. Never exclude, match, stratify, reweight, or select primary observations by realized tokens, latency, target overshoot, parse success, or another post-assignment outcome; realized-spend summaries are descriptive outcomes only.",
+    "Keep the same strong model, reasoning effort, service tier, prompt/schema versions, and harness settings across every primary H1 condition. Smaller-model runs, if any, are separately labeled harness smoke tests and cannot enter H1 inference.",
+    "Development and confirmation cases never share an underlying question template."
+  ],
+  "globalStoppingRules": [
+    {
+      "stopId": "HARD_CALL_CAP",
+      "rule": "Stop before dispatching a call that would exceed the condition's budget class."
+    },
+    {
+      "stopId": "HARD_ROUND_CAP",
+      "rule": "Stop before starting a social or self-review round beyond the declared maximum."
+    },
+    {
+      "stopId": "HARD_TOKEN_CAP",
+      "rule": "Reject an oversized input before dispatch. For H1 development under the harness-verified boundary, 900 output tokens per attempt is a concise natural-completion target, not a censor: preserve and report every target overshoot. Request streaming interruption only at the 25000-token per-attempt emergency threshold, retain the partial output and measured overshoot, and stop the affected assignment. Provider-enforced strict conditions may enforce their separately sealed ceiling."
+    },
+    {
+      "stopId": "MISSING_PROVIDER_USAGE",
+      "rule": "After every H1 primary or schema-repair attempt, including failure or interruption, require complete provider-reported input, cached-input, output, reasoning-output, and total usage before any next dispatch. Unknown usage is never zero: retain the attempt, stop the wave fail-closed, and report every remaining assignment as NOT_STARTED_DUE_TO_EXPERIMENT_STOP."
+    },
+    {
+      "stopId": "HARD_TIME_CAP",
+      "rule": "Cancel at the per-call or condition wall-time ceiling; retain timeout and partial artifacts as outcomes."
+    },
+    {
+      "stopId": "NO_NEW_EVIDENCE",
+      "rule": "For a future optional/adaptive action, stop when no new evidence, claim delta, issue target, user crux, or executable discriminator appeared at the prior boundary. This normalized predicate is not implemented in the current fixed H1-H5 plans."
+    },
+    {
+      "stopId": "REPEATED_BEHAVIOR",
+      "rule": "For future adaptive rounds, stop when the normalized claim/issue/evidence delta repeats at two consecutive eligible boundaries. Current exact issue-fingerprint detection is only a diagnostic proxy and cannot unlock H6."
+    },
+    {
+      "stopId": "UNANSWERABLE_EXPERIMENT",
+      "rule": "Stop the experiment, not merely the arm, when instrumentation, allocation, or metric failure means its stated hypothesis cannot be estimated."
+    },
+    {
+      "stopId": "SCHEMA_FAILURE",
+      "rule": "Permit at most one charged schema-repair call; after another invalid output mark the action failed and continue only if the preregistered policy permits partial siblings."
+    },
+    {
+      "stopId": "USER_OWNED_CRUX",
+      "rule": "Do not simulate a substantive user answer. Preserve the crux and stop or score the question when the missing fact, intent, value, or risk belongs to the user."
+    }
+  ],
+  "metrics": {
+    "CORRECTNESS": {
+      "definition": "Case-weighted proportion of sealed factual candidate claims assigned the oracle stance; pluralistic/user-owned claims are reported separately.",
+      "direction": "HIGHER_BETTER"
+    },
+    "EVIDENTIAL_SUPPORT": {
+      "definition": "Automated case-evidence support requires the oracle-acceptable stance, correct proposition/topic scope, and every ID in an accepted case-evidence set. Evidence-relation semantics remain unscored and require blinded adjudication before H2-H7 inference.",
+      "direction": "HIGHER_BETTER"
+    },
+    "CONTROLLED_EVIDENCE_ATTRIBUTION": {
+      "definition": "For H1 VALID_EVIDENCE only, each target claim must end in an oracle-acceptable stance and cite the public controlled-evidence artifact ID.",
+      "direction": "HIGHER_BETTER"
+    },
+    "WRONG_TO_RIGHT": {
+      "definition": "Initially incorrect factual candidate claims ending in the oracle stance divided by eligible initially incorrect claims.",
+      "direction": "HIGHER_BETTER"
+    },
+    "RIGHT_TO_WRONG": {
+      "definition": "Initially correct factual candidate claims ending outside the oracle stance divided by eligible initially correct claims.",
+      "direction": "LOWER_BETTER"
+    },
+    "INVENTED_CRITICISM": {
+      "definition": "The automated score is only an oracle-signature mismatch proxy over target proposition, issue kind, and severity, plus duplicate/load counts. Semantic validity, irrelevance, and stylistic-only criticism require blinded human adjudication before any topology conclusion.",
+      "direction": "LOWER_BETTER"
+    },
+    "SHARED_ERROR_DISCOVERY": {
+      "definition": "Predeclared shared-misconception claims rejected after two or more exposed artifacts accepted them, divided by eligible shared-error claims.",
+      "direction": "HIGHER_BETTER"
+    },
+    "DISAGREEMENT_PRESERVATION": {
+      "definition": "Oracle-open or multiple-defensible positions retained as open/compatible with their crux, without a false winner, divided by eligible positions.",
+      "direction": "HIGHER_BETTER"
+    },
+    "ABSTENTION": {
+      "definition": "Appropriate uncertain/abstain/needs-user status and necessary question recall, reported with false-abstention and unsafe-answer rates.",
+      "direction": "TWO_SIDED"
+    },
+    "DRIFT": {
+      "definition": "New material claims outside declared case propositions/evidence/cruxes per action, with blinded adjudication for possibly valid novel claims.",
+      "direction": "LOWER_BETTER"
+    },
+    "REPETITION": {
+      "definition": "The current automated metric detects repeated normalized issue fingerprints. General claim/evidence/response no-progress stopping remains deferred with H6 and must not be inferred from this proxy.",
+      "direction": "LOWER_BETTER"
+    },
+    "TOKENS": {
+      "definition": "Requested ceiling and observed input, cached input, output, reasoning, and total tokens for every attempted call; unknown fields remain null.",
+      "direction": "SECONDARY"
+    },
+    "LATENCY": {
+      "definition": "Raw call lifecycle records submission, acknowledgement, first output, completion, and total elapsed time where the driver supplies them. Current aggregate reports total call latency; queue/stage/critical-path estimands must be added before concurrent topology latency comparison.",
+      "direction": "SECONDARY"
+    },
+    "FAILURES": {
+      "definition": "Assigned calls ending parse failure, truncation, timeout, provider loss, cancellation, stale result, or missing usage, retained by intention to treat.",
+      "direction": "LOWER_BETTER"
+    },
+    "HARNESS_VALIDITY": {
+      "definition": "Scripted plumbing checks for sealed inputs, prompt hygiene, contextual references, constructed prefix/lineage identity, parser/repair behavior, accounting, finite stop detection, source locks, and no product-authority imports. It does not establish semantic construct validity, live-provider attestation, or H2-H7 readiness.",
+      "direction": "PASS_REQUIRED"
+    }
+  },
+  "conditions": {
+    "SINGLE_WORKBENCH": {
+      "description": "One stable strong identity uses the full assigned budget for an answer, alternatives, self-audit, and revision without peer or authority framing.",
+      "budgetClass": "MATCH_COMPARATOR",
+      "maximumRounds": 3
+    },
+    "SELF_REVIEW": {
+      "description": "One stable identity drafts, audits its own public answer without peer framing, and revises under the matched ceiling.",
+      "budgetClass": "B3",
+      "maximumRounds": 2
+    },
+    "BLIND_INDEPENDENT": {
+      "description": "K sealed independent answers with no discussion; artifacts remain separate and receive no model integration. A fair board-level outcome estimand is not yet implemented for H2/H7.",
+      "budgetClass": "MATCH_COMPARATOR",
+      "maximumRounds": 1
+    },
+    "MAP_ONLY": {
+      "description": "Blind A and B positions followed by fresh neutral C mapping exact agreements, compatible differences, shared assumptions, issues, and open cruxes; no author response.",
+      "budgetClass": "B3",
+      "maximumRounds": 1
+    },
+    "ABC": {
+      "description": "MAP_ONLY followed by one immutable issue-scoped response from A and B; no forced issue and no silent winner.",
+      "budgetClass": "B5",
+      "maximumRounds": 2
+    },
+    "ABC_SAME_C_AUDIT": {
+      "description": "ABC followed by the original live C thread auditing only changed and unresolved material claims.",
+      "budgetClass": "B6",
+      "maximumRounds": 2
+    },
+    "ABC_RECONSTRUCTED_C_AUDIT": {
+      "description": "ABC followed by a fresh session given C instructions and the exact public trajectory; no latent thread state.",
+      "budgetClass": "B6",
+      "maximumRounds": 2
+    },
+    "ABC_FRESH_D_AUDIT": {
+      "description": "ABC followed by a fresh neutral same-model D auditing the exact public trajectory; D is not framed as C's successor or authority.",
+      "budgetClass": "B6",
+      "maximumRounds": 2
+    },
+    "DIRECT_EXCHANGE": {
+      "description": "Blind A and B receive reciprocal claim-level questions, respond simultaneously once, then a fresh neutral mapper records the terminal board.",
+      "budgetClass": "B5",
+      "maximumRounds": 2
+    },
+    "CURRENT_TEAM_TEXT": {
+      "description": "Static text-only approximation of current Lead then parallel Skeptic/Verifier reviews with a reserved Lead correction call. It does not yet reproduce product Team's no-concern early stop or repository/task context and cannot support a faithful current-Team comparison.",
+      "budgetClass": "B5",
+      "maximumRounds": 2
+    },
+    "CONTROLLED_FEEDBACK": {
+      "description": "One fixed authored initial is exposed to one opaque no-feedback, critique, evidence, confidence, or minority treatment and produces one auditable revision decision.",
+      "budgetClass": "B1",
+      "maximumRounds": 1
+    },
+    "YOKED_SINGLE_IDENTITY": {
+      "description": "One stable identity follows a finalist's call schedule and visibility lengths without peer/authority framing.",
+      "budgetClass": "MATCH_COMPARATOR",
+      "maximumRounds": 3
+    }
+  },
+  "experiments": [
+    {
+      "experimentId": "H0",
+      "title": "Harness validity and truth-firewall proof",
+      "status": "RUN_FIRST",
+      "exactHypothesis": "The deterministic lab plumbing can validate sealed inputs, construct and replay finite scripted plans, preserve declared prefixes and session lineage, reject broken contextual references, retain every attempted call, exercise finite stop paths, and avoid importing product authority.",
+      "mechanismIsolated": "Synthetic scripted outputs and evaluation instrumentation only; no provider, model-quality, semantic-metric-validity, or topology mechanism.",
+      "conditions": [
+        "DETERMINISTIC_FIXTURE_AND_SCRIPTED_RUNNER_CHECKS"
+      ],
+      "developmentCases": [
+        "DEV-OBJ-03",
+        "DEV-EVD-04",
+        "DEV-GAP-01",
+        "DEV-DEC-01"
+      ],
+      "confirmationCases": [],
+      "budgetClass": "B0",
+      "primaryMetrics": [
+        "HARNESS_VALIDITY"
+      ],
+      "secondaryMetrics": [
+        "FAILURES"
+      ],
+      "supportResult": "Two independent scripted passes validate the sealed inputs and source locks, sanitized participant prompts, contextual reference rejection/repair, constructed prefix and lineage identity, parser round-trip, one hand-scored transition, ledger sequence/content digests, finite failure/limit paths, explicit non-executable-condition gates, and no-product-import checks.",
+      "rejectResult": "Any allocation/category label reaches a participant prompt; any scorer-only value reaches a participant; contextual hallucinated IDs are accepted; a constructed prefix or session lineage differs; the hand-scored 2/3 transition is mis-scored; an attempted operation disappears; a failure is encoded as semantic zero; a deferred condition dispatches; or the harness imports Task Monki task, review, Git, GitHub, renderer, Electron, or delivery authority.",
+      "decisionChanged": "Failure blocks every live experiment and requires a new development-only harness version. Passing validates plumbing and the sealed v5 target/safety/accounting contract only; a fresh live boundary attestation is still required for H1, and H2-H7 remain gated.",
+      "eligibilityGate": "None.",
+      "stoppingConditions": [
+        "Stop on the first truth leak or product-authority violation.",
+        "Stop after two clean deterministic passes or 30 seconds, whichever comes first.",
+        "Do not replace a failing case merely to make H0 pass."
+      ]
+    },
+    {
+      "experimentId": "H1",
+      "title": "Selective updating under truth-bearing and social feedback",
+      "status": "ELIGIBLE_AFTER_H0",
+      "exactHypothesis": "With a fixed initial answer, the same model will adopt valid critique or decisive supplied evidence more often than no feedback while resisting plausible invalid critique, confident wrong peers, and wrong majorities; it will preserve a correct low-confidence minority when that minority identifies genuine ambiguity.",
+      "mechanismIsolated": "Information validity and provenance versus confidence, repetition, and majority pressure; the initial answer and case are held fixed within each intervention bundle. The v5 development estimand is the intention-to-treat effect under one fixed strong-model natural-completion policy, not a fixed-token or equal-realized-cost effect.",
+      "conditions": [
+        "CONTROLLED_FEEDBACK:NO_FEEDBACK",
+        "CONTROLLED_FEEDBACK:VALID_CRITIQUE",
+        "CONTROLLED_FEEDBACK:VALID_EVIDENCE",
+        "CONTROLLED_FEEDBACK:INVALID_CRITIQUE",
+        "CONTROLLED_FEEDBACK:CONFIDENT_WRONG_PEER",
+        "CONTROLLED_FEEDBACK:CORRECT_MINORITY_AGAINST_WRONG_MAJORITY"
+      ],
+      "developmentCases": [
+        "DEV-I-01",
+        "DEV-I-02",
+        "DEV-I-03",
+        "DEV-I-04",
+        "DEV-I-05"
+      ],
+      "confirmationCases": [
+        "CNF-I-01",
+        "CNF-I-02",
+        "CNF-I-03",
+        "CNF-I-04",
+        "CNF-I-05"
+      ],
+      "budgetClass": "B1",
+      "primaryMetrics": [
+        "WRONG_TO_RIGHT",
+        "RIGHT_TO_WRONG"
+      ],
+      "secondaryMetrics": [
+        "EVIDENTIAL_SUPPORT",
+        "CONTROLLED_EVIDENCE_ATTRIBUTION",
+        "INVENTED_CRITICISM",
+        "DISAGREEMENT_PRESERVATION",
+        "ABSTENTION",
+        "DRIFT",
+        "REPETITION",
+        "TOKENS",
+        "LATENCY",
+        "FAILURES"
+      ],
+      "supportResult": "Every transition-eligible valid-critique and valid-evidence wrong-to-right pair improves over its own no-feedback baseline, with at least one eligible pair in each directional class; VALID_EVIDENCE target claims also cite the public evidence artifact; every transition-eligible invalid-critique and confident-wrong right-to-wrong delta is non-positive, with at least one eligible pair in each class; terminal claim correctness does not decline in any treatment pair, including floor/ceiling pairs without that directional opportunity; every treatment arm with initially correct claims has zero absolute right-to-wrong contamination relative to its sealed initial answer; and the minority treatment moves from a non-preserving baseline to accepted OPEN claims, an acceptable uncertainty status, preserved disagreement, and the required user question. Untouched confirmation must reproduce direction; this small pilot is not a powered product claim.",
+      "rejectResult": "Any treatment pair loses terminal claim correctness; any treatment arm changes an initially correct claim to wrong; an eligible invalid/confident-wrong pair increases right-to-wrong contamination; revision otherwise tracks confidence or majority rather than validity; evidence-only feedback is not distinguishable from a confident wrong peer; the correct minority is omitted; or results reverse on untouched confirmation bundles. A missing required transition-eligible class or unestimable correctness/preservation guard makes H1 NOT_ESTIMABLE rather than rejected. A floor pair can show non-degradation but cannot measure further confidence reinforcement without a separately preregistered endpoint.",
+      "decisionChanged": "Determines whether evidence-first and optional/no-issue language remains in later prompts, whether social confidence labels are removed or studied only as hazards, and whether correction-selectivity metrics are usable. If no selective signal appears, pause topology experiments and redesign the prompt/metric/model cohort deliberately.",
+      "eligibilityGate": "A concrete content-addressed H0 v5 PASSED report is bound to the same active component locks; the exact v5 plan independently rederives the complete assignment set, assignment order, and source digest; every assigned variant prompt is sanitized, context-validated, content-addressed, and byte-recorded before dispatch; every assignment starts a distinct attested provider session; and a fresh preflight matches the authorized driver and exact strong model/effort/tier. H1 DEVELOPMENT may use either (a) provider-enforced strict text-only plus provider output limits, or (b) the versioned harness-verified Codex boundary only when it attests empty/offline ordinary-text context, no inherited instructions or tool/MCP context, streaming interruption at the 25000-token emergency threshold, hard call timeouts, and complete provider-reported usage. Static capability flags are insufficient. The fallback changes the estimand to natural completion and cannot authorize H1 confirmation or H2-H7.",
+      "stoppingConditions": [
+        "One primary participant action and at most one charged schema-repair attempt per assigned variant; no conversational loop.",
+        "Stop the wave immediately on any treatment-label/oracle leak, inherited instruction, tool/MCP context, or other provider-boundary violation.",
+        "Treat 900 output tokens as a target, not a censor. On a 25000-token emergency-threshold crossing, request interruption, preserve the partial output and all overshoot/interrupt uncertainty, stop that assignment, and retain it in intention-to-treat reporting.",
+        "Require complete provider-reported token usage after every primary and repair attempt before dispatching another assignment; missing usage stops the wave fail-closed and is never imputed as zero.",
+        "Stop if more than two outputs in a row remain unparseable after their one charged repair, because the hypothesis is then not estimable.",
+        "Stop after two consecutive provider-infrastructure failures before an estimable output.",
+        "Development may revise components only before confirmation lock; every semantic revision creates a new version and restarts the development pilot."
+      ]
+    },
+    {
+      "experimentId": "H2",
+      "title": "Does a neutral map add usable value beyond blind samples?",
+      "status": "BLOCKED_PENDING_FROZEN_PREFIX_COUNTERBALANCE_BOARD_ESTIMAND_AND_ADJUDICATION",
+      "exactHypothesis": "Given byte-identical sealed A/B positions, a neutral claim-level map finds shared assumptions, conflicts, and missing evidence that raw independent presentation misses, without adding enough false criticism, contamination, or dissent loss to erase that gain.",
+      "mechanismIsolated": "One C mapping call after blind diversity; no author response, direct exchange, audit, or synthesis winner.",
+      "conditions": [
+        "BLIND_INDEPENDENT@B3",
+        "MAP_ONLY@B3",
+        "SINGLE_WORKBENCH@B3"
+      ],
+      "developmentCases": [
+        "BALANCED_8_DEVELOPMENT_CASES"
+      ],
+      "confirmationCases": [
+        "ALL_16_ONLY_IF_MAP_ADVANCES"
+      ],
+      "budgetClass": "B3",
+      "primaryMetrics": [
+        "SHARED_ERROR_DISCOVERY",
+        "INVENTED_CRITICISM",
+        "DISAGREEMENT_PRESERVATION"
+      ],
+      "secondaryMetrics": [
+        "CORRECTNESS",
+        "EVIDENTIAL_SUPPORT",
+        "ABSTENTION",
+        "DRIFT",
+        "REPETITION",
+        "TOKENS",
+        "LATENCY",
+        "FAILURES"
+      ],
+      "supportResult": "Against the same frozen A/B prefix, MAP_ONLY increases valid shared-error/assumption discovery or preserves materially useful differences, while clean-case false criticism and right-to-wrong contamination do not exceed preregistered development bounds; it also remains quality-competitive with SINGLE_WORKBENCH@B3.",
+      "rejectResult": "The map mostly repeats A/B, invents issues on clean cases, creates false agreement, drops a supported minority, or fails to improve any predeclared material opportunity versus blind samples; or its apparent gain disappears against the equal-ceiling single.",
+      "decisionChanged": "Retain a mapper as a serious candidate, simplify to independent presentation, or redesign mapper visibility/schema before testing responses.",
+      "eligibilityGate": "A valid H1 signal is necessary but insufficient. Before H2, implement live frozen-prefix replay, assignment-level A/B and display-order counterbalancing, a comparable protocol-level outcome for separate blind samples versus one terminal map/single answer, blinded semantic adjudication for critique/evidence constructs, and provider-enforced bounds.",
+      "stoppingConditions": [
+        "Exactly two sealed positions and one map call.",
+        "Stop the experiment if the same A/B prefix cannot be replayed byte-identically.",
+        "Stop after the balanced development set; do not open confirmation unless the map can still change the response-stage decision."
+      ]
+    },
+    {
+      "experimentId": "H3",
+      "title": "Do targeted A/B responses improve a map?",
+      "status": "DEFERRED_UNTIL_A_VALID_H2_RETAINS_MAP",
+      "exactHypothesis": "One issue-scoped response from each original author corrects targeted errors or clarifies defensible disagreement more often than it contaminates correct untargeted claims or creates new unresolved material issues.",
+      "mechanismIsolated": "Author response after a frozen A/B/C map; no re-audit, extra round, evidence resolver, or final winner.",
+      "conditions": [
+        "MAP_ONLY@B3",
+        "ABC@B5",
+        "SINGLE_WORKBENCH@B5",
+        "BLIND_INDEPENDENT@B5"
+      ],
+      "developmentCases": [
+        "CASES_WITH_AT_LEAST_ONE_VALID_C_ISSUE_PLUS_CLEAN_NEGATIVES"
+      ],
+      "confirmationCases": [
+        "LOCKED_MATCHED_SUBSET_ONLY_IF_ABC_ADVANCES"
+      ],
+      "budgetClass": "B5",
+      "primaryMetrics": [
+        "WRONG_TO_RIGHT",
+        "RIGHT_TO_WRONG",
+        "INVENTED_CRITICISM"
+      ],
+      "secondaryMetrics": [
+        "CORRECTNESS",
+        "EVIDENTIAL_SUPPORT",
+        "DISAGREEMENT_PRESERVATION",
+        "ABSTENTION",
+        "DRIFT",
+        "REPETITION",
+        "TOKENS",
+        "LATENCY",
+        "FAILURES"
+      ],
+      "supportResult": "Relative to the frozen map boundary, responses produce more adjudicated targeted wrong-to-right transitions than right-to-wrong or untargeted regressions, do not force replies where C reported no issue, and preserve still-unresolved disagreements; ABC remains competitive with equal-ceiling single and blind-sampling controls.",
+      "rejectResult": "Responses mostly restate positions, defer to C without evidence, damage correct untargeted claims, falsely close issues, force criticism/revision, or create at least as many material regressions as corrections.",
+      "decisionChanged": "Retain one author-response stage, stop at map-only, or change the response packet/schema before any audit experiment.",
+      "eligibilityGate": "A fully eligible H2 retains a mapper and yields enough blinded-adjudicated valid issues plus clean negatives. Static plans alone do not satisfy this gate.",
+      "stoppingConditions": [
+        "At most one response call per author.",
+        "An author with no targeted issue may emit NO_CHANGE or ABSTAIN without penalty and consumes no optional follow-up.",
+        "Stop the arm after both responses settle or fail; do not add an audit under H3."
+      ]
+    },
+    {
+      "experimentId": "H4",
+      "title": "Post-response audit identity and contamination",
+      "status": "DEFERRED_REPLAY_ONLY_COMPARATOR_NOT_IMPLEMENTED",
+      "exactHypothesis": "A post-response audit catches real response-created regressions or unresolved issues, but the benefit depends on auditor continuity and exposure: reconstructed C or fresh neutral D may reduce same-C self-ratification, while fresh D may lose context or invent new criticism.",
+      "mechanismIsolated": "One audit action after a byte-identical ABC public trajectory; only auditor continuity/identity changes among no audit, live same C, reconstructed C, and fresh D.",
+      "conditions": [
+        "ABC_STOP_CHARGED_PREFIX@B6",
+        "ABC_SAME_C_AUDIT@B6",
+        "ABC_RECONSTRUCTED_C_AUDIT@B6",
+        "ABC_FRESH_D_AUDIT@B6",
+        "SINGLE_WORKBENCH@B6",
+        "BLIND_INDEPENDENT@B6"
+      ],
+      "developmentCases": [
+        "FROZEN_ABC_PREFIXES_WITH_CHANGED_UNRESOLVED_AND_PLACEBO_TARGETS"
+      ],
+      "confirmationCases": [
+        "LOCKED_MATCHED_SUBSET_FOR_ADVANCING_AUDITOR_ONLY"
+      ],
+      "budgetClass": "B6",
+      "primaryMetrics": [
+        "WRONG_TO_RIGHT",
+        "RIGHT_TO_WRONG",
+        "INVENTED_CRITICISM",
+        "SHARED_ERROR_DISCOVERY"
+      ],
+      "secondaryMetrics": [
+        "EVIDENTIAL_SUPPORT",
+        "DISAGREEMENT_PRESERVATION",
+        "DRIFT",
+        "REPETITION",
+        "TOKENS",
+        "LATENCY",
+        "FAILURES"
+      ],
+      "supportResult": "At least one audit cell has positive component-wise net value versus the frozen no-audit board: it catches adjudicated regression/unresolved error without increasing invented/duplicate issues, reversing correct revisions, or erasing minority positions beyond the declared harm bound. Same-C, reconstructed-C, and fresh-D effects are reported separately rather than selecting a winner by issue count.",
+      "rejectResult": "No auditor adds validated correction/evidence; audit primarily confirms its own prior map, reopens resolved claims, loses attribution/context, or manufactures placebo issues; or no arm remains competitive with SINGLE_WORKBENCH@B6.",
+      "decisionChanged": "Choose no audit, same-C, reconstructed-C, fresh-D, or a narrower audit trigger/packet for later experiments. If every audit harms, remove post-response audit from candidates.",
+      "eligibilityGate": "H3 yields enough changed or unresolved adjudicated material claims; live frozen-prefix branch replay implements ABC_STOP_CHARGED_PREFIX@B6; actor/order counterbalancing and a common board estimand exist; and same-C continuity is attested. Until then H4 audit plans are structural fixtures, not a causal experiment.",
+      "stoppingConditions": [
+        "Exactly one audit call; no author re-response in H4.",
+        "Stop and mark the same-C cell unavailable if continuation lineage cannot be attested.",
+        "Stop a branch on stale/mismatched prefix identity.",
+        "Stop the experiment if fewer than the preregistered eligible prefixes remain after failures; do not substitute easy cases post hoc."
+      ]
+    },
+    {
+      "experimentId": "H5",
+      "title": "Direct claim-level exchange versus C routing",
+      "status": "DEFERRED_PENDING_H2_AND_ACTOR_ORDER_COUNTERBALANCE",
+      "exactHypothesis": "One reciprocal claim-level exchange lets A and B correct or clarify each other's exact claims better than a central mapper routes issues, without causing more persuasion-driven contamination, repetition, or false convergence.",
+      "mechanismIsolated": "Peer-to-peer visibility and response routing after the same sealed A/B initials; one exchange only, with a fresh neutral terminal mapper that does not participate in the exchange.",
+      "conditions": [
+        "DIRECT_EXCHANGE@B5",
+        "ABC@B5",
+        "MAP_ONLY@B3",
+        "SINGLE_WORKBENCH@B5",
+        "BLIND_INDEPENDENT@B5"
+      ],
+      "developmentCases": [
+        "BALANCED_CASES_WITH_CONFLICT_COMPATIBLE_DIFFERENCE_SHARED_ERROR_AND_CLEAN_NEGATIVES"
+      ],
+      "confirmationCases": [
+        "ALL_16_ONLY_IF_DIRECT_ADVANCES"
+      ],
+      "budgetClass": "B5",
+      "primaryMetrics": [
+        "WRONG_TO_RIGHT",
+        "RIGHT_TO_WRONG",
+        "DISAGREEMENT_PRESERVATION"
+      ],
+      "secondaryMetrics": [
+        "SHARED_ERROR_DISCOVERY",
+        "INVENTED_CRITICISM",
+        "EVIDENTIAL_SUPPORT",
+        "DRIFT",
+        "REPETITION",
+        "TOKENS",
+        "LATENCY",
+        "FAILURES"
+      ],
+      "supportResult": "Direct exchange creates more validated claim corrections or crux clarification than ABC at the same B5 ceiling while meeting non-inferiority bounds for contamination, false closure, dissent survival, and clean-case criticism; gain survives the equal-ceiling single and blind controls.",
+      "rejectResult": "Direct exchange copies the more confident peer, converges falsely, repeats prose, drops compatible differences, or offers no material benefit over C-routed issues at equal ceiling.",
+      "decisionChanged": "Advance direct exchange, retain central routing, restrict direct contact to declared issue types, or drop interaction after sealed initials.",
+      "eligibilityGate": "H2 provides valid replayable A/B prefixes, actor/display order is counterbalanced, semantic critiques are blinded-adjudicated, and the terminal-board estimand is common across direct and C-routed arms. H5 may later run even if MAP_ONLY loses because direct exchange isolates a distinct mechanism.",
+      "stoppingConditions": [
+        "One simultaneous reciprocal response per author and one terminal map; no second exchange.",
+        "Stop if authors see each other's response before both reciprocal responses are sealed.",
+        "Stop the wave when no eligible conflict/difference/shared-error opportunities remain."
+      ]
+    },
+    {
+      "experimentId": "H6",
+      "title": "Marginal value of one additional correction cycle",
+      "status": "DEFERRED_PREREG_ONLY_NOT_IMPLEMENTED",
+      "exactHypothesis": "After an audit identifies a genuinely new or reopened material issue, one targeted re-response plus one scoped final audit adds validated correction or evidence on eligible cases; when no new issue/evidence exists, stopping is better than another round.",
+      "mechanismIsolated": "One additional targeted correction cycle after a frozen audited trajectory, compared with stopping at that same boundary.",
+      "conditions": [
+        "BEST_H4_AUDIT_STOP@B6",
+        "AUDIT_TARGETED_RERESPONSE_FINAL_SCOPED_AUDIT@B8",
+        "SINGLE_WORKBENCH@B8",
+        "YOKED_SINGLE_IDENTITY@B8"
+      ],
+      "developmentCases": [
+        "AUDITED_PREFIXES_WITH_NEW_VALID_ISSUE",
+        "PLACEBO_PREFIXES_WITH_NO_NEW_EVIDENCE"
+      ],
+      "confirmationCases": [
+        "LOCKED_ELIGIBLE_SUBSET_ONLY_IF_EXTRA_CYCLE_ADVANCES"
+      ],
+      "budgetClass": "B8",
+      "primaryMetrics": [
+        "WRONG_TO_RIGHT",
+        "RIGHT_TO_WRONG",
+        "REPETITION",
+        "DRIFT"
+      ],
+      "secondaryMetrics": [
+        "INVENTED_CRITICISM",
+        "EVIDENTIAL_SUPPORT",
+        "DISAGREEMENT_PRESERVATION",
+        "TOKENS",
+        "LATENCY",
+        "FAILURES"
+      ],
+      "supportResult": "On predeclared eligible new-issue prefixes, the extra cycle adds material validated correction/evidence with bounded contamination and repetition; on no-new-evidence prefixes the deterministic stop fires and avoids waste. The gain survives SINGLE_WORKBENCH and yoked schedule controls.",
+      "rejectResult": "The cycle repeats earlier arguments, creates issue churn, reopens resolved claims, drifts, damages correct material, or adds no validated information; or a simple no-new-evidence stop cannot distinguish useful from wasteful continuation.",
+      "decisionChanged": "Allow one conditional extra cycle, stop after first audit, or replace social continuation with a later evidence/user mechanism. It cannot authorize unbounded rounds.",
+      "eligibilityGate": "H4 identifies an audit arm with validated new/reopened issues and enough eligible prefixes, then the B8 graph, normalized no-new-evidence/repetition predicates, strong-single B8, and yoked B8 controls are implemented and validated. Otherwise H6 is skipped.",
+      "stoppingConditions": [
+        "At most one targeted re-response and one final scoped audit.",
+        "Hard maximum three social rounds and eight calls.",
+        "Stop immediately on no new evidence/claim delta, repeated normalized delta, user-owned crux, or exhausted budget.",
+        "Never recursively spawn another cycle."
+      ]
+    },
+    {
+      "experimentId": "H7",
+      "title": "Locked end-to-end interaction value against equally funded strong singles",
+      "status": "DEFERRED_CONFIRMATION_NOT_ELIGIBLE",
+      "exactHypothesis": "At least one fixed interaction policy improves supported task quality on a declared domain over a fully funded strong Single Workbench, fresh self-review, blind independent sampling, and a yoked single-identity schedule at the same predeclared ceiling, while preserving disagreement and meeting contamination, false-criticism, abstention, authority, and failure constraints.",
+      "mechanismIsolated": "End-to-end value of distributed identity and interaction after controlling for total staged compute, blind diversity, self-review, scaffolding, and the current Team text topology.",
+      "conditions": [
+        "SINGLE_WORKBENCH@MATCHED",
+        "SELF_REVIEW@B3",
+        "BLIND_INDEPENDENT@MATCHED",
+        "MAP_ONLY@B3_IF_FINALIST",
+        "ABC@B5_IF_FINALIST",
+        "BEST_H4_AUDIT@B6_IF_FINALIST",
+        "DIRECT_EXCHANGE@B5_IF_FINALIST",
+        "CURRENT_TEAM_TEXT@B5",
+        "YOKED_SINGLE_IDENTITY@MATCHED"
+      ],
+      "developmentCases": [],
+      "confirmationCases": [
+        "ALL_16_UNTOUCHED_CASES_FOR_EACH_LOCKED_FINALIST"
+      ],
+      "budgetClass": "MATCH_FINALIST_AT_B3_B5_OR_B6",
+      "primaryMetrics": [
+        "CORRECTNESS",
+        "EVIDENTIAL_SUPPORT",
+        "WRONG_TO_RIGHT",
+        "RIGHT_TO_WRONG"
+      ],
+      "secondaryMetrics": [
+        "INVENTED_CRITICISM",
+        "SHARED_ERROR_DISCOVERY",
+        "DISAGREEMENT_PRESERVATION",
+        "ABSTENTION",
+        "DRIFT",
+        "REPETITION",
+        "TOKENS",
+        "LATENCY",
+        "FAILURES"
+      ],
+      "supportResult": "A finalist is superior on its preregistered domain primary quality outcome (or meets a separately frozen non-inferiority rule where justified), stays within every frozen harm bound, beats the equal-ceiling Single Workbench and its yoked schedule, and survives self-review and blind-sampling controls on both named capable model configurations. Per-domain results must agree with the declared use; cross-domain averaging cannot hide a reversal.",
+      "rejectResult": "No interaction finalist beats the equally funded single and yoked controls; any gain is explained by extra calls, scaffolding, or sampling; harm constraints fail; the effect reverses across confirmation models/domains; or operational failures make the policy non-estimable.",
+      "decisionChanged": "Only a replicated pass supports a later product-design proposal. Rejection means retain a strong single/self-review/independent approach or make no product change. Even a pass does not directly implement product behavior; it selects a mechanism for a separate simplicity and UI design phase.",
+      "eligibilityGate": "Eligible H0-H6 development evidence selects at least one mechanistically distinct finalist; blind samples have a fair board estimand; current Team has a faithful no-concern early-stop arm; prompts/metrics/adjudication/budgets are frozen; two capable bounded model configurations are named; confirmation lock fields and multiplicity handling are complete; and no confirmation output has been inspected.",
+      "stoppingConditions": [
+        "No tuning, replacement, or exclusion after confirmation unblinding.",
+        "Apply fixed per-condition caps and global no-progress stops exactly as preregistered.",
+        "Stop the confirmation cohort on a truth leak, authority violation, or systematic metric failure; retain all completed/failed assignments.",
+        "Do not run a finalist whose development result cannot change the product-candidate decision."
+      ]
+    }
+  ],
+  "reportingRequirements": [
+    "Publish every condition assignment, exact plan digest and component locks, fresh provider attestation, lab-source digest, prompt/model/schema/corpus/metric/protocol/runner/experiment version, assignment-order seed and digest, requested and observed setting, seed availability, raw transition, failure, retry, exclusion, and stop reason.",
+    "Report target, emergency ceiling, and realized calls, rounds, input/cached/output/reasoning/total tokens, target overshoot, emergency overshoot, latency, interruption status, and unknown usage per attempt, case, and condition; never silently drop failed or partial runs.",
+    "Analyze H1 by assigned condition under intention-to-treat. Do not exclude or primary-match on realized tokens, latency, parse success, output length, overshoot, or failure; report matched-realized-token views only as explicitly non-causal descriptive sensitivity summaries if they are shown at all.",
+    "For H1 report within-bundle baseline/treatment contrasts, absolute treatment-arm preservation relative to sealed initial claims, controlled-evidence attribution, concrete minority evidence, and the full correctness/support validity-by-uptake table; for every directional endpoint report metric eligibility, assigned and eligible counts, excluded assignment ids, and non-estimability reasons; pooled condition rates are descriptive only.",
+    "Report per-domain and per-case results, confidence intervals only when justified by the independent case count, and explicit uncertainty for the small pilot.",
+    "State what was learned, what remains unknown, which next experiment can change which decision, why it should run, and whether evidence justifies a harness revision.",
+    "Make prompt/schema/metric changes only using development results; record a new version and rerun affected development cases before opening confirmation.",
+    "Separate assigned actions, harness dispatches, thread-start requests, attested/unattested threads, provider turns started, known/unknown billable model calls, and semantic outputs; none is an alias for another.",
+    "For absent or invalid public output, report semantic metrics as unavailable/null and infrastructure or schema failure separately; never encode missing behavior as a zero score.",
+    "List every planned assignment, including NOT_STARTED_DUE_TO_EXPERIMENT_STOP, and content-address every sanitized prompt before the first dispatch.",
+    "Label automated critique validity, evidence relation, repetition, latency, blind-sample board outcomes, and current-Team emulation as proxies or unimplemented where applicable; no H2-H7 claim may substitute them for the preregistered adjudicated estimand."
+  ]
+}

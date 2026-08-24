@@ -628,6 +628,7 @@ function event(
 function taskFixture(input: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    kind: input.kind ?? 'NORMAL',
     runtimeId: 'codex',
     title: 'Add task activity',
     prompt: 'Build a useful overview history.',

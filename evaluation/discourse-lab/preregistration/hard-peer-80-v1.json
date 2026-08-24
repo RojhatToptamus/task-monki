@@ -1,0 +1,182 @@
+{
+  "schemaVersion": "discourse-lab/hard-peer-80-preregistration@v1",
+  "preregistrationVersion": "hard-peer-80-preregistration@v3",
+  "studyId": "HARD-PEER-80",
+  "status": "AUTHORIZED_TERMINAL_DEVELOPMENT_ONLY",
+  "question": "Can a fresh oracle-blinded peer critic correct hard-task errors better than an equally allocated same-model workbench or explicit same-agent self-review?",
+  "hypothesis": {
+    "mechanism": "A fresh peer that sees the case and shared initial answer may identify a specific evidence-based defect that two additional same-agent turns do not correct.",
+    "support": "At least three incremental critique-attributable peer corrections span at least two unique evaluation cases, peer final correctness exceeds each comparator by at least two of ten blocks, and every contamination, execution, disagreement, and equal-allocation gate passes.",
+    "rejectOrFailToSupport": "Any calibration stop, invalid or non-informative evaluation, fewer attributable corrections, comparator parity, contamination, boundary ambiguity, or gate failure permanently defaults the product recommendation to one strong agent with optional bounded self-review.",
+    "decisionAffected": "Whether Task Monki should pilot one bounded anonymous peer critique followed by one direct author response; it cannot authorize a broader Team, debate, evidence-agent, or review-authority design."
+  },
+  "scope": {
+    "partition": "DEVELOPMENT_ONLY_NO_CONFIRMATION",
+    "ordinaryTextOnly": true,
+    "toolsBrowsingRepositoriesTasksExternalRetrieval": "FORBIDDEN",
+    "hiddenChainOfThoughtRequestedOrStored": false,
+    "taskMonkiProductBehaviorMayChange": false,
+    "taskMonkiReviewAuthorityMayChange": false,
+    "calibrationBatches": 1,
+    "evaluationRuns": 1,
+    "followUpExperiments": 0,
+    "postProviderHarnessChanges": 0,
+    "retriesRepairsReplacementCases": 0
+  },
+  "corpus": {
+    "calibrationCases": [
+      "HP80-CAL-MATH-01",
+      "HP80-CAL-LOGIC-01",
+      "HP80-CAL-HIDDEN-01",
+      "HP80-CAL-DEBUG-01",
+      "HP80-CAL-TECH-01"
+    ],
+    "evaluationCases": [
+      "HP80-EVAL-MATH-01",
+      "HP80-EVAL-LOGIC-01",
+      "HP80-EVAL-HIDDEN-01",
+      "HP80-EVAL-DEBUG-01",
+      "HP80-EVAL-TECH-01"
+    ],
+    "domains": [
+      "ERDOS_STYLE_MATHEMATICS",
+      "RIGOROUS_LOGIC",
+      "HIDDEN_ASSUMPTION_REASONING",
+      "SELF_CONTAINED_DEBUGGING",
+      "TASK_MONKI_TECHNICAL_DECISION"
+    ],
+    "evaluationRepetitionsPerCase": 2,
+    "repetitionsAreIndependentProblems": false,
+    "calibrationGate": "PROCEED_IFF_EXACTLY_2_OR_3_OF_5_INITIAL_ANSWERS_ARE_COMPOSITE_CORRECT"
+  },
+  "conditions": [
+    {
+      "id": "STRONG_WORKBENCH",
+      "allocation": "SHARED_A0_PLUS_TWO_NEUTRAL_SAME_AGENT_CONTINUATIONS"
+    },
+    {
+      "id": "SAME_AGENT_SELF_REVIEW",
+      "allocation": "SHARED_A0_PLUS_EXPLICIT_SELF_AUDIT_PLUS_DIRECT_FINALIZATION"
+    },
+    {
+      "id": "ORACLE_BLINDED_PEER_CRITIQUE",
+      "allocation": "SHARED_A0_PLUS_ONE_FRESH_TARGETED_PEER_REVIEW_PLUS_ONE_DIRECT_AUTHOR_RESPONSE"
+    }
+  ],
+  "blinding": {
+    "peerSeesA0": true,
+    "peerBlindToOracle": true,
+    "peerBlindToAuthorIdentityAndAuthority": true,
+    "peerBlindToConditionLabelsSiblingBranchesAndOutcomes": true,
+    "independentlyFormedBlindPeerPosition": false,
+    "sharedErrorDiscoveryEstimable": false
+  },
+  "topology": {
+    "semanticModelCalls": 76,
+    "boundaryProbeCalls": 1,
+    "calibrationCalls": 5,
+    "evaluationBlocks": 10,
+    "semanticCallsPerEvaluationBlock": 7,
+    "sharedInitialPerEvaluationBlock": 1,
+    "marginalTurnsPerCondition": 2,
+    "authorForksPerEvaluationBlock": 3,
+    "allForksBeforeAnyBranchTurn": true,
+    "nonModelRpcMutationsCountAsSemanticCalls": false,
+    "unusedAbsoluteCallMargin": 4
+  },
+  "model": {
+    "id": "gpt-5.6-sol",
+    "reasoningEffort": "high",
+    "serviceTier": "default",
+    "samplingSeed": null,
+    "identicalAcrossAllSemanticCalls": true
+  },
+  "budget": {
+    "scheduledSemanticCalls": 76,
+    "absoluteSemanticCallCeiling": 80,
+    "maximumObservedIncrementalTokens": 1500000,
+    "maximumCallMs": 120000,
+    "maximumExperimentMs": 18000000,
+    "targetOutputTokensPerCall": 3000,
+    "emergencyOutputTokenSafetyCeilingPerCall": 10000,
+    "nextCallObservedTokenReservation": 25000,
+    "providerEnforcedAggregateTokenCap": false,
+    "thresholdCrossingAtomicCallRetained": true
+  },
+  "metrics": {
+    "critiqueAttributionScope": "TYPED_PROPOSITION_ANSWER_SELECTION_EPISTEMIC_STATE_AND_CERTIFICATE_ERRORS",
+    "primary": [
+      "COMPOSITE_CORRECTNESS",
+      "TYPED_CERTIFICATE_SEMANTIC_VALIDITY",
+      "WRONG_TO_RIGHT_CORRECTION",
+      "RIGHT_TO_WRONG_CONTAMINATION",
+      "CRITIQUE_ATTRIBUTABLE_INCREMENTAL_CORRECTION"
+    ],
+    "critique": [
+      "TYPED_TARGET_VALIDITY",
+      "VISIBLE_EVIDENCE_VALIDITY",
+      "PEER_CORRESPONDING_ASSESSMENT_AND_CERTIFICATE_VALIDITY",
+      "INVENTED_OR_FALSE_MATERIAL_CRITICISM",
+      "HARMFUL_ADOPTION",
+      "DIRECT_RESPONSE_AND_CORRESPONDING_TYPED_TARGET_CHANGE"
+    ],
+    "epistemic": [
+      "DISAGREEMENT_PRESERVATION",
+      "CORRECT_MINORITY_NOT_ESTIMABLE_A0_ANCHORED_PEER",
+      "UNCERTAINTY",
+      "ABSTENTION",
+      "USER_INFORMATION_REQUEST",
+      "CONFIDENCE_BRIER_SCORE"
+    ],
+    "operations": [
+      "PROVIDER_REPORTED_INCREMENTAL_TOKENS",
+      "LATENCY",
+      "FAILURES",
+      "EXCLUSIONS",
+      "OUTPUT_TARGET_AND_SAFETY_OVERSHOOT"
+    ],
+    "analysisUnits": [
+      "TEN_PAIRED_BLOCKS",
+      "FIVE_UNIQUE_CASE_CLUSTERS",
+      "FIVE_DOMAINS"
+    ],
+    "significanceTest": null
+  },
+  "informativenessGate": {
+    "minimumWrongInitialBlocks": 3,
+    "minimumWrongInitialUniqueCases": 2,
+    "minimumCorrectInitialBlocks": 3,
+    "minimumCorrectInitialUniqueCases": 2
+  },
+  "peerPilotSuccessGate": {
+    "minimumIncrementalAttributablePeerCorrections": 3,
+    "minimumUniqueCasesWithIncrementalCorrection": 2,
+    "minimumPeerCorrectnessLeadOverEachComparatorInTenBlocks": 2,
+    "maximumInitialRightToPeerWrong": 0,
+    "maximumHarmfulInvalidCritiqueAdoptions": 0,
+    "maximumUnsupportedDefiniteClosures": 0,
+    "maximumFalseDisagreementResolutions": 0,
+    "requiredUserRequestsAndUnresolvedStatesPreserved": true,
+    "allExecutionScoringAncestryAllocationArchiveChecksPass": true,
+    "maximumPeerTokenRatioToEachComparator": 1.1
+  },
+  "stoppingRules": [
+    "STOP_BEFORE_PROVIDER_IF_SEAL_SOURCE_H0_PLAN_OR_AUTH_ROOT_INVALID",
+    "STOP_AFTER_FAILED_SINGLE_BOUNDARY_OUTPUT_FORK_PROBE",
+    "STOP_AFTER_CALIBRATION_UNLESS_EXACTLY_2_OR_3_OF_5_ARE_CORRECT",
+    "STOP_ON_BOUNDARY_SETTINGS_ANCESTRY_ROUTING_CONTEXT_USAGE_TIMEOUT_OR_CLOSE_AMBIGUITY",
+    "STOP_BEFORE_NEXT_CALL_IF_25000_TOKEN_RESERVATION_WOULD_CROSS_1500000",
+    "STOP_AND_RETAIN_ANY_ATOMIC_CALL_OVERSHOOT",
+    "NEVER_RETRY_REPAIR_RESUME_REPLACE_EXCLUDE_OR_REDESIGN"
+  ],
+  "terminalDecision": {
+    "success": "RECOMMEND_ONLY_ONE_BOUNDED_ORACLE_BLINDED_PEER_CRITIQUE_AND_DIRECT_AUTHOR_RESPONSE_PRODUCT_PILOT",
+    "otherwise": "PERMANENTLY_RECOMMEND_ONE_STRONG_AGENT_WITH_OPTIONAL_ONE_BOUNDED_SAME_AGENT_SELF_REVIEW",
+    "furtherExperimentAllowed": false
+  },
+  "authorization": {
+    "providerCallsAuthorized": true,
+    "reuseCodexAuthenticationAuthorized": true,
+    "confirmationOpened": false
+  }
+}

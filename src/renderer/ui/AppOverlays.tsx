@@ -255,6 +255,106 @@ export function GlobalNotifier({ notifications }: { notifications: AppNotificati
   );
 }
 
+export function DesignExternalLinkModal({
+  destinationHost,
+  onCancel,
+  onConfirm,
+  fallbackReturnFocusRef
+}: {
+  destinationHost: string;
+  onCancel(): void;
+  onConfirm(): Promise<boolean>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const submittingRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [expired, setExpired] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: cancelRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
+
+  const confirm = async () => {
+    if (submittingRef.current || expired) return;
+    submittingRef.current = true;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const opened = await onConfirm();
+      if (opened) {
+        onCancel();
+      } else {
+        submittingRef.current = false;
+        setBusy(false);
+        setExpired(true);
+        setError('This link request expired. Close this dialog and select the link again.');
+      }
+    } catch {
+      submittingRef.current = false;
+      setBusy(false);
+      setError('Task Monki could not open this site. Try again or cancel.');
+    }
+  };
+
+  return (
+    <div
+      className="tm-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="design-external-link-title"
+      aria-describedby="design-external-link-detail"
+    >
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <div
+        ref={panelRef}
+        className="tm-modal__panel tm-design-external"
+        tabIndex={-1}
+      >
+        <h3 id="design-external-link-title">Open external site?</h3>
+        <p id="design-external-link-detail">
+          This Design wants to open an HTTPS site in your default browser.
+        </p>
+        <div className="tm-design-external__destination" aria-label="External destination">
+          <span>HTTPS destination</span>
+          <strong>{destinationHost}</strong>
+        </div>
+        <p>Only open destinations that you trust.</p>
+        {error ? (
+          <p className="tm-design-external__error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        <div className="tm-modal__actions">
+          <button
+            ref={cancelRef}
+            type="button"
+            className="outline-button"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            {expired ? 'Close' : 'Cancel'}
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={busy || expired}
+            onClick={() => void confirm()}
+          >
+            {busy ? 'Opening…' : 'Open site'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function RepositoryDisconnectModal({
   repository,
   impact,

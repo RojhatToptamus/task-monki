@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "discourse-lab-h1b-seal@1",
+  "sealVersion": "h1b-seal-v1",
+  "corpusVersion": "h1b-text-corpus-v1",
+  "preregistrationVersion": "h1b-preregistration-v1",
+  "digestAlgorithm": "SHA-256",
+  "partition": "DEVELOPMENT_ONLY",
+  "confirmationStatus": "ABSENT_CLOSED",
+  "files": [
+    {
+      "path": "evaluation/discourse-lab/corpus/h1b-v1/participants/development.json",
+      "audience": "PARTICIPANT",
+      "sha256": "361e4b2dff43dbd22a60b6145ec6d1b5fc270cfa2e2096483a1c062ba391933b"
+    },
+    {
+      "path": "evaluation/discourse-lab/corpus/h1b-v1/scorer-only/development-oracles.json",
+      "audience": "SCORER_ONLY",
+      "sha256": "72ee19bbb2933326fc6e980bb4050596842c5a6bf21ebb35e6e9353f18a633f7"
+    },
+    {
+      "path": "evaluation/discourse-lab/preregistration/h1b-v1.json",
+      "audience": "HARNESS",
+      "sha256": "0dfa3d67620d2afd69ac6a71ad59609c5cd19f29f1baf5271702ba722069ee0c"
+    }
+  ]
+}

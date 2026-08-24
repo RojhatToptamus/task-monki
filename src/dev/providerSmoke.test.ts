@@ -744,6 +744,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     const now = new Date().toISOString();
     const repository = {
       id: 'repository-smoke',
+      kind: 'USER_REGISTERED' as const,
       name: path.basename(repositoryPath),
       path: repositoryPath,
       status: 'AVAILABLE' as const,
@@ -759,6 +760,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     const now = new Date().toISOString();
     const task = {
       id: `task-${++this.taskSequence}`,
+      kind: 'NORMAL' as const,
       runtimeId: input.runtimeId!,
       title: input.title,
       prompt: input.prompt,

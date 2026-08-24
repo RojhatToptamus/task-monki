@@ -128,6 +128,7 @@ function reviewTask(): Task {
   const now = '2026-07-19T12:00:00.000Z';
   return {
     id: 'task-review',
+    kind: 'NORMAL',
     title: 'Review task',
     prompt: 'Implement the change.',
     repositoryId: 'repository-a',

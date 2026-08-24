@@ -17,7 +17,11 @@ import {
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
+  type CreateBlankDesignRequest,
   type DeleteTaskResult,
+  type DesignDetailSnapshot,
+  type DesignDraftRecord,
+  type DesignListItem,
   type ExternalToolStatusReport,
   type InteractionRequestRecord,
   type Repository,
@@ -33,6 +37,11 @@ import {
   type UpdateAppSettingsRequest,
   type WorkflowPhase
 } from '../../shared/contracts';
+import type {
+  HideDesignCanvasRequest,
+  RefreshDesignCanvasRequest,
+  ShowDesignCanvasRequest
+} from '../../shared/designCanvas';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
@@ -60,6 +69,13 @@ import {
 } from '../model/taskDataReadCoordinator';
 import { selectBoardTasks } from '../model/boards';
 import {
+  designCanvasClientEvent,
+  eligibleDesignRuntimeCatalog,
+  mergeDesignConversationPage,
+  mergeDesignDetailHistory,
+  type DesignCanvasExternalLinkRequest
+} from '../model/designs';
+import {
   dragNewTaskCanvas,
   NEW_TASK_CANVAS_PAN_DURATION_MS,
   newTaskCanvasPanPosition,
@@ -70,6 +86,7 @@ import {
   resolveRepositorySetupState,
   resolveSelectedRepositoryId
 } from '../model/repositories';
+import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from '../model/taskView';
@@ -77,11 +94,13 @@ import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
+import { DesignsWorkspace } from './DesignsWorkspace';
 import { DiscourseNavIcon } from './DiscourseIcons';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
 import {
   BoardEditorModal,
   DeleteTaskModal,
+  DesignExternalLinkModal,
   GlobalNotifier,
   RepositoryDisconnectModal,
   type AppNotification,
@@ -92,6 +111,7 @@ import {
   ArrowLeftIcon,
   ArrowRightIcon,
   BoardIcon,
+  DesignIcon,
   DoneIcon,
   InboxIcon,
   NavItem,
@@ -103,6 +123,8 @@ import {
 
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
+const DESIGN_CANVAS_LOAD_FAILED_NOTICE =
+  'The Design preview could not load. Select the Design again to retry.';
 
 const emptyBoardSnapshot: BoardSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -141,7 +163,7 @@ function isPreviewRecipeGenerationSnapshot(
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
-type AppView = NavView | 'discourse';
+type AppView = NavView | 'discourse' | 'designs';
 
 function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
@@ -168,6 +190,14 @@ export function App() {
   const [error, setError] = useState<string | undefined>();
   const [view, setView] = useState<AppView>('board');
   const [discourseAttentionCount, setDiscourseAttentionCount] = useState(0);
+  const [designs, setDesigns] = useState<DesignListItem[]>([]);
+  const [selectedDesignId, setSelectedDesignId] = useState<string | undefined>();
+  const [designDetail, setDesignDetail] = useState<DesignDetailSnapshot>();
+  const [designDraft, setDesignDraft] = useState<DesignDraftRecord | null>(null);
+  const [designsLoading, setDesignsLoading] = useState(false);
+  const [designsError, setDesignsError] = useState<string | undefined>();
+  const [designExternalLinkRequest, setDesignExternalLinkRequest] =
+    useState<DesignCanvasExternalLinkRequest>();
   const [selectedBoardId, setSelectedBoardId] = useState<string | undefined>();
   const [boardEditor, setBoardEditor] = useState<Board | 'new' | undefined>();
   const [areSavedViewsExpanded, setAreSavedViewsExpanded] = useState(true);
@@ -207,6 +237,20 @@ export function App() {
     { pointerId: number; startX: number; startScrollLeft: number } | undefined
   >(undefined);
   const deleteCandidateGenerationRef = useRef(0);
+  const selectedDesignIdRef = useRef<string | undefined>(undefined);
+  const designListReadGenerationRef = useRef(0);
+  const designReadGenerationRef = useRef(0);
+  const pendingDesignTurnRef = useRef<{
+    designId: string;
+    message: string;
+    referenceIds: string[];
+    attachmentDraftId?: string;
+    clientMessageId: string;
+  } | undefined>(undefined);
+  const pendingDesignActionIdsRef = useRef(new Map<string, string>());
+  const designCanvasErrorRef = useRef<string | undefined>(undefined);
+  const viewRef = useRef<AppView>(view);
+  viewRef.current = view;
   const [previewExecutionReadiness, setPreviewExecutionReadiness] = useState<
     Record<string, PreviewExecutionReadiness>
   >({});
@@ -482,6 +526,609 @@ export function App() {
       ).length
     );
   }, []);
+  const upsertDesignSummary = useCallback((next: DesignListItem) => {
+    setDesigns((current) => [
+      next,
+      ...current.filter((candidate) => candidate.id !== next.id)
+    ]);
+  }, []);
+  const refreshDesignList = useCallback(async () => {
+    const generation = ++designListReadGenerationRef.current;
+    try {
+      const next = await taskManagerApi.listDesigns();
+      if (generation !== designListReadGenerationRef.current) {
+        return undefined;
+      }
+      setDesigns(next);
+      const currentDesignId = selectedDesignIdRef.current;
+      if (
+        currentDesignId &&
+        !next.some((candidate) => candidate.id === currentDesignId)
+      ) {
+        designReadGenerationRef.current += 1;
+        selectedDesignIdRef.current = undefined;
+        setSelectedDesignId(undefined);
+        setDesignDetail(undefined);
+        setDesignDraft(null);
+        setDesignExternalLinkRequest((current) =>
+          current?.designId === currentDesignId ? undefined : current
+        );
+        setDesignsLoading(false);
+        setDesignsError(undefined);
+      } else if (!currentDesignId) {
+        setDesignsError(undefined);
+      }
+      return next;
+    } catch (caught) {
+      if (generation === designListReadGenerationRef.current) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not load Designs.';
+        setDesignsError(message);
+      }
+      return undefined;
+    }
+  }, []);
+  const loadDesign = useCallback(
+    async (
+      designId: string,
+      options: { select?: boolean; showLoading?: boolean } = {}
+    ) => {
+      const select = options.select ?? false;
+      const showLoading = options.showLoading ?? false;
+      const loadDraft = select || showLoading;
+      if (select) {
+        selectedDesignIdRef.current = designId;
+        setSelectedDesignId(designId);
+        setDesignDetail((current) =>
+          current?.design.id === designId ? current : undefined
+        );
+        setDesignDraft(null);
+      } else if (selectedDesignIdRef.current !== designId) {
+        return;
+      }
+
+      const generation = ++designReadGenerationRef.current;
+      if (showLoading) {
+        setDesignsLoading(true);
+        setDesignsError(undefined);
+      }
+      try {
+        const [detail, draft] = await Promise.all([
+          taskManagerApi.getDesign(designId),
+          loadDraft
+            ? taskManagerApi.getDesignDraft(designId)
+            : Promise.resolve(undefined)
+        ]);
+        if (
+          generation !== designReadGenerationRef.current ||
+          selectedDesignIdRef.current !== designId
+        ) {
+          return;
+        }
+        setDesignDetail((current) => mergeDesignDetailHistory(current, detail));
+        if (draft !== undefined) setDesignDraft(draft);
+        upsertDesignSummary(detail.design);
+        setDesignsError(undefined);
+      } catch (caught) {
+        if (
+          generation === designReadGenerationRef.current &&
+          selectedDesignIdRef.current === designId
+        ) {
+          const message =
+            caught instanceof Error ? caught.message : 'Could not load this Design.';
+          setDesignsError(message);
+          if (showLoading) {
+            notify(message, 'error');
+          }
+        }
+      } finally {
+        if (generation === designReadGenerationRef.current) {
+          setDesignsLoading(false);
+        }
+      }
+    },
+    [notify, upsertDesignSummary]
+  );
+  const applyDesignActionDetail = useCallback(
+    (detail: DesignDetailSnapshot, select: boolean) => {
+      designListReadGenerationRef.current += 1;
+      upsertDesignSummary(detail.design);
+      if (select || selectedDesignIdRef.current === detail.design.id) {
+        designReadGenerationRef.current += 1;
+        selectedDesignIdRef.current = detail.design.id;
+        setSelectedDesignId(detail.design.id);
+        setDesignDetail((current) => mergeDesignDetailHistory(current, detail));
+        if (select) setDesignDraft(null);
+        setDesignsLoading(false);
+        setDesignsError(undefined);
+      }
+    },
+    [upsertDesignSummary]
+  );
+  const openDesignWorkspace = useCallback(async () => {
+    setDesignsLoading(true);
+    setDesignsError(undefined);
+    const listed = await refreshDesignList();
+    const availableDesigns = listed ?? designs;
+    const currentDesignId = selectedDesignIdRef.current;
+    const nextDesignId =
+      currentDesignId &&
+      (listed === undefined ||
+        availableDesigns.some((candidate) => candidate.id === currentDesignId))
+        ? currentDesignId
+        : availableDesigns[0]?.id;
+    if (!nextDesignId) {
+      designReadGenerationRef.current += 1;
+      selectedDesignIdRef.current = undefined;
+      setSelectedDesignId(undefined);
+      setDesignDetail(undefined);
+      setDesignDraft(null);
+      setDesignsLoading(false);
+      return;
+    }
+    await loadDesign(nextDesignId, {
+      select: nextDesignId !== currentDesignId,
+      showLoading: false
+    });
+  }, [designs, loadDesign, refreshDesignList]);
+  const createBlankDesign = useCallback(
+    async (
+      input: Pick<
+        CreateBlankDesignRequest,
+        'brief' | 'creationToken' | 'model' | 'reasoningEffort' | 'attachmentDraftId'
+      >
+    ) => {
+      const brief = input.brief.trim();
+      try {
+        const detail = await taskManagerApi.createBlankDesign({
+          brief,
+          creationToken: input.creationToken,
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          ...(input.attachmentDraftId
+            ? { attachmentDraftId: input.attachmentDraftId }
+            : {})
+        });
+        applyDesignActionDetail(detail, true);
+        notify('Design created.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not create the Design.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const submitDesignRefinement = useCallback(
+    async (
+      designId: string,
+      message: string,
+      referenceIds: string[],
+      attachmentDraftId?: string
+    ) => {
+      const pending =
+        pendingDesignTurnRef.current?.designId === designId &&
+        pendingDesignTurnRef.current.message === message &&
+        pendingDesignTurnRef.current.referenceIds.length === referenceIds.length &&
+        pendingDesignTurnRef.current.referenceIds.every(
+          (referenceId, index) => referenceId === referenceIds[index]
+        ) &&
+        pendingDesignTurnRef.current.attachmentDraftId === attachmentDraftId
+          ? pendingDesignTurnRef.current
+          : {
+              designId,
+              message,
+              referenceIds: [...referenceIds],
+              attachmentDraftId,
+              clientMessageId: crypto.randomUUID()
+            };
+      pendingDesignTurnRef.current = pending;
+      try {
+        const detail = await taskManagerApi.submitDesignTurn({
+          designId,
+          clientMessageId: pending.clientMessageId,
+          message,
+          referenceIds: pending.referenceIds,
+          ...(pending.attachmentDraftId
+            ? { attachmentDraftId: pending.attachmentDraftId }
+            : {})
+        });
+        if (pendingDesignTurnRef.current === pending) {
+          pendingDesignTurnRef.current = undefined;
+        }
+        applyDesignActionDetail(detail, false);
+        const accepted = detail.conversation.find(
+          (entry) => entry.turn.clientMessageId === pending.clientMessageId
+        );
+        notify(accepted?.turn.runId ? 'Design update started.' : 'Message queued.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        if (!creationRequiresUnchangedRetry(caught) && pendingDesignTurnRef.current === pending) {
+          pendingDesignTurnRef.current = undefined;
+        }
+        const errorMessage =
+          caught instanceof Error ? caught.message : 'Could not send the refinement.';
+        notify(errorMessage, 'error');
+        throw caught instanceof Error ? caught : new Error(errorMessage);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const addDesignReferences = useCallback(
+    async (designId: string, attachmentDraftId: string) => {
+      try {
+        const detail = await taskManagerApi.addDesignReferences({
+          designId,
+          attachmentDraftId
+        });
+        applyDesignActionDetail(detail, false);
+        notify('References added.', 'success');
+        void refreshDesignList();
+        return detail.references
+          .filter((reference) => reference.sourceDraftId === attachmentDraftId)
+          .map((reference) => reference.id);
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not add references.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const removeDesignReference = useCallback(
+    async (designId: string, referenceId: string) => {
+      try {
+        const detail = await taskManagerApi.removeDesignReference({
+          designId,
+          referenceId
+        });
+        applyDesignActionDetail(detail, false);
+        notify('Reference removed from future messages.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not remove the reference.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const importDesignReferenceAsset = useCallback(
+    async (designId: string, referenceId: string) => {
+      try {
+        const detail = await taskManagerApi.importDesignReferenceAsset({
+          designId,
+          referenceId
+        });
+        applyDesignActionDetail(detail, false);
+        notify('Project asset imported.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not import the asset.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const stopDesignTurn = useCallback(
+    async (designId: string, turnId: string) => {
+      try {
+        const detail = await taskManagerApi.cancelDesignTurn({ designId, turnId });
+        applyDesignActionDetail(detail, false);
+        notify('Stopping Design work.', 'info');
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not stop work.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify]
+  );
+  const loadEarlierDesignConversation = useCallback(
+    async (designId: string) => {
+      const cursor =
+        designDetail?.design.id === designId
+          ? designDetail.previousConversationCursor
+          : undefined;
+      if (!cursor) return;
+      try {
+        const page = await taskManagerApi.listDesignConversation({
+          designId,
+          beforeCursor: cursor
+        });
+        setDesignDetail((current) =>
+          current?.design.id === designId
+            ? mergeDesignConversationPage(current, page)
+            : current
+        );
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not load earlier messages.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [designDetail, notify]
+  );
+  const saveDesignDraft = useCallback(
+    async (
+      designId: string,
+      body: string,
+      referenceIds: string[],
+      attachmentDraftId: string | undefined,
+      expectedRevision: number
+    ) => {
+      const saved = await taskManagerApi.saveDesignDraft({
+        designId,
+        body,
+        referenceIds,
+        ...(attachmentDraftId ? { attachmentDraftId } : {}),
+        expectedRevision
+      });
+      if (selectedDesignIdRef.current === designId) setDesignDraft(saved);
+      return saved;
+    },
+    []
+  );
+  const deleteDesignDraft = useCallback(
+    async (designId: string, expectedRevision: number) => {
+      await taskManagerApi.deleteDesignDraft({ designId, expectedRevision });
+      if (selectedDesignIdRef.current === designId) setDesignDraft(null);
+    },
+    []
+  );
+  const respondToDesignInteraction = useCallback(
+    async (
+      interaction: InteractionRequestRecord,
+      decision: AgentInteractionDecision
+    ) => {
+      try {
+        await taskManagerApi.respondToInteraction({
+          taskId: interaction.taskId,
+          runId: interaction.runId,
+          interactionRequestId: interaction.id,
+          decision
+        });
+        notify('Provider request answered.', 'success');
+        await loadDesign(interaction.taskId, { showLoading: false });
+        void refreshDesignList();
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not submit the response.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [loadDesign, notify, refreshDesignList]
+  );
+  const restartDesignCanvas = useCallback(
+    async (designId: string) => {
+      try {
+        const detail = await taskManagerApi.restartDesignPreview({ designId });
+        applyDesignActionDetail(detail, false);
+        notify('Preview restarted.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not restart the preview.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const restoreDesignRevision = useCallback(
+    async (designId: string, revisionId: string) => {
+      const key = `restore:${designId}:${revisionId}`;
+      const clientActionId =
+        pendingDesignActionIdsRef.current.get(key) ?? crypto.randomUUID();
+      pendingDesignActionIdsRef.current.set(key, clientActionId);
+      try {
+        const detail = await taskManagerApi.restoreDesignRevision({
+          designId,
+          revisionId,
+          clientActionId
+        });
+        pendingDesignActionIdsRef.current.delete(key);
+        applyDesignActionDetail(detail, false);
+        notify('Earlier version restored.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not restore this version.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const duplicateDesign = useCallback(
+    async (designId: string, revisionId: string) => {
+      const key = `duplicate:${designId}:${revisionId}`;
+      const clientActionId =
+        pendingDesignActionIdsRef.current.get(key) ?? crypto.randomUUID();
+      pendingDesignActionIdsRef.current.set(key, clientActionId);
+      try {
+        const detail = await taskManagerApi.duplicateDesign({
+          designId,
+          revisionId,
+          clientActionId
+        });
+        pendingDesignActionIdsRef.current.delete(key);
+        applyDesignActionDetail(detail, true);
+        notify('Design duplicated.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not duplicate the Design.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const renameDesign = useCallback(
+    async (designId: string, title: string) => {
+      try {
+        const detail = await taskManagerApi.renameDesign({ designId, title });
+        applyDesignActionDetail(detail, false);
+        notify('Design renamed.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not rename the Design.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const archiveDesign = useCallback(
+    async (designId: string) => {
+      try {
+        const detail = await taskManagerApi.archiveDesign({ designId });
+        applyDesignActionDetail(detail, false);
+        notify('Design archived.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not archive the Design.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const deleteDesign = useCallback(
+    async (designId: string) => {
+      try {
+        await taskManagerApi.deleteTask({ taskId: designId, removeWorktree: true });
+        designListReadGenerationRef.current += 1;
+        designReadGenerationRef.current += 1;
+        const remainingDesigns = designs.filter(
+          (candidate) => candidate.id !== designId
+        );
+        setDesigns(remainingDesigns);
+        if (pendingDesignTurnRef.current?.designId === designId) {
+          pendingDesignTurnRef.current = undefined;
+        }
+        if (selectedDesignIdRef.current === designId) {
+          selectedDesignIdRef.current = undefined;
+          setSelectedDesignId(undefined);
+          setDesignDetail(undefined);
+          setDesignDraft(null);
+          setDesignExternalLinkRequest((current) =>
+            current?.designId === designId ? undefined : current
+          );
+          const nextDesign = remainingDesigns[0];
+          if (nextDesign) {
+            await loadDesign(nextDesign.id, { select: true, showLoading: true });
+          } else {
+            setDesignsLoading(false);
+            setDesignsError(undefined);
+          }
+        }
+        notify('Design deleted.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not delete the Design.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [designs, loadDesign, notify, refreshDesignList]
+  );
+  const reportDesignCanvasError = useCallback(
+    (caught: unknown, fallback: string) => {
+      const message = caught instanceof Error ? caught.message : fallback;
+      if (designCanvasErrorRef.current !== message) {
+        designCanvasErrorRef.current = message;
+        notify(message, 'error');
+      }
+      return message;
+    },
+    [notify]
+  );
+  const showDesignCanvas = useCallback(
+    (input: ShowDesignCanvasRequest) => {
+      const canvas = window.designCanvas;
+      if (!canvas) return;
+      void canvas
+        .show(input)
+        .then(() => {
+          designCanvasErrorRef.current = undefined;
+        })
+        .catch(() => {
+          reportDesignCanvasError(undefined, DESIGN_CANVAS_LOAD_FAILED_NOTICE);
+        });
+    },
+    [reportDesignCanvasError]
+  );
+  const hideDesignCanvas = useCallback(
+    (input: HideDesignCanvasRequest) => {
+      const canvas = window.designCanvas;
+      if (!canvas) return;
+      void canvas
+        .hide(input)
+        .then(() => {
+          designCanvasErrorRef.current = undefined;
+        })
+        .catch((caught) => {
+          reportDesignCanvasError(caught, 'Could not hide the Design canvas.');
+        });
+    },
+    [reportDesignCanvasError]
+  );
+  const refreshDesignCanvas = useCallback(
+    async (input: RefreshDesignCanvasRequest) => {
+      const canvas = window.designCanvas;
+      if (!canvas) {
+        const error = new Error('The Design canvas is available in the desktop app.');
+        reportDesignCanvasError(error, error.message);
+        throw error;
+      }
+      try {
+        await canvas.refresh(input);
+        designCanvasErrorRef.current = undefined;
+      } catch (caught) {
+        const message = reportDesignCanvasError(
+          caught,
+          'Could not refresh the Design canvas.'
+        );
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [reportDesignCanvasError]
+  );
+  const approveDesignExternalLink = useCallback(
+    async (request: DesignCanvasExternalLinkRequest) => {
+      const canvas = window.designCanvas;
+      if (!canvas) {
+        throw new Error('External Design links are available in the desktop app.');
+      }
+      return canvas.approveExternal({
+        designId: request.designId,
+        pendingId: request.pendingId
+      });
+    },
+    []
+  );
+  const dismissDesignExternalLink = useCallback(
+    (request: DesignCanvasExternalLinkRequest) => {
+      setDesignExternalLinkRequest((current) =>
+        current?.designId === request.designId &&
+        current.pendingId === request.pendingId
+          ? undefined
+          : current
+      );
+    },
+    []
+  );
+  const refreshSelectedDesign = useCallback(async () => {
+    const designId = selectedDesignIdRef.current;
+    if (!designId) return;
+    await loadDesign(designId, { showLoading: false });
+  }, [loadDesign]);
   const discoverAgentRuntimeModels = useCallback(async (runtimeId: string) => {
     const runtime = await taskManagerApi.discoverAgentRuntimeModels(runtimeId);
     setRuntimeCatalog((current) => {
@@ -558,7 +1205,8 @@ export function App() {
           taskManagerApi.getAppSettings(),
           taskManagerApi.getExternalToolStatus(),
           refresh(),
-          refreshDiscourseAttention()
+          refreshDiscourseAttention(),
+          refreshDesignList()
         ]);
         if (!canceled) {
           setRuntimeCatalog(catalog);
@@ -580,7 +1228,7 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [refresh, refreshDiscourseAttention]);
+  }, [refresh, refreshDesignList, refreshDiscourseAttention]);
 
   useEffect(() => {
     const boardRefresh = createUpdateRefreshScheduler({
@@ -615,10 +1263,77 @@ export function App() {
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle as number)
     });
+    const designListRefresh = createUpdateRefreshScheduler({
+      delayMs: AUTHORITATIVE_REFRESH_DELAY_MS,
+      refresh: async () => {
+        await refreshDesignList();
+      },
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const designDetailRefresh = createUpdateRefreshScheduler({
+      delayMs: AUTHORITATIVE_REFRESH_DELAY_MS,
+      refresh: refreshSelectedDesign,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const designActivityRefresh = createUpdateRefreshScheduler({
+      delayMs: SELECTED_ACTIVITY_REFRESH_DELAY_MS,
+      refresh: refreshSelectedDesign,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
     const unsubscribe = taskManagerApi.onUpdate((event) => {
       if (event.scope.kind === 'DISCOURSE') {
         discourseAttentionRefresh.request();
         return;
+      }
+      const selectedDesignId = selectedDesignIdRef.current;
+      const canvasEvent = designCanvasClientEvent(event);
+      if (
+        canvasEvent?.kind === 'EXTERNAL_LINK_REQUESTED' &&
+        window.designCanvas &&
+        viewRef.current === 'designs' &&
+        canvasEvent.request.designId === selectedDesignId
+      ) {
+        setDesignExternalLinkRequest((current) =>
+          current?.designId === canvasEvent.request.designId &&
+          current.pendingId === canvasEvent.request.pendingId
+            ? current
+            : canvasEvent.request
+        );
+      } else if (canvasEvent?.kind === 'LOAD_FAILED') {
+        reportDesignCanvasError(undefined, DESIGN_CANVAS_LOAD_FAILED_NOTICE);
+      }
+      if (event.scope.kind === 'APP' && event.type === 'projection.updated') {
+        designListRefresh.request();
+        if (selectedDesignId) {
+          designDetailRefresh.request();
+        }
+      }
+      const designEventId =
+        event.scope.kind === 'DESIGN'
+          ? event.scope.designId
+          : event.scope.kind === 'TASK' && event.taskId === selectedDesignId
+            ? event.taskId
+            : undefined;
+      if (designEventId) {
+        if (event.type === 'run.output' || event.type === 'preview.log.updated') {
+          return;
+        }
+        if (event.type === 'run.activity') {
+          designActivityRefresh.request();
+          return;
+        }
+        designListRefresh.request();
+        if (designEventId === selectedDesignId && event.type !== 'task.deleted') {
+          designActivityRefresh.cancelPending();
+          designDetailRefresh.request();
+        }
+        return;
+      }
+      if (event.type === 'task.deleted') {
+        designListRefresh.request();
       }
       if (event.type === 'runtime.updated') {
         runtimeCatalogRefresh.request();
@@ -656,8 +1371,17 @@ export function App() {
       selectedActivityRefresh.dispose();
       runtimeCatalogRefresh.dispose();
       discourseAttentionRefresh.dispose();
+      designListRefresh.dispose();
+      designDetailRefresh.dispose();
+      designActivityRefresh.dispose();
     };
-  }, [refreshDiscourseAttention, taskDataCoordinator]);
+  }, [
+    refreshDesignList,
+    refreshDiscourseAttention,
+    refreshSelectedDesign,
+    reportDesignCanvasError,
+    taskDataCoordinator
+  ]);
 
   const theme = appSettings.theme;
   const isSidebarCollapsed = appSettings.sidebarCollapsed;
@@ -843,6 +1567,35 @@ export function App() {
   const enabledRuntimeModels = useMemo(
     () => runtimeModels.filter((model) => enabledRuntimeIds.has(model.runtimeId)),
     [enabledRuntimeIds, runtimeModels]
+  );
+  const designRuntimeCatalog = useMemo(
+    () =>
+      runtimeCatalog
+        ? eligibleDesignRuntimeCatalog({
+            ...runtimeCatalog,
+            runtimes: enabledRuntimes,
+            models: enabledRuntimeModels
+          })
+        : undefined,
+    [enabledRuntimeModels, enabledRuntimes, runtimeCatalog]
+  );
+  const defaultDesignSettings = useMemo(
+    () =>
+      designRuntimeCatalog
+        ? resolveModelExecutionSettings(
+            designRuntimeCatalog.models,
+            appSettings.defaultModel,
+            appSettings.defaultReasoningEffort,
+            designRuntimeCatalog.defaultRuntimeId,
+            appSettings.defaultModelProvider
+          )
+        : undefined,
+    [
+      appSettings.defaultModel,
+      appSettings.defaultModelProvider,
+      appSettings.defaultReasoningEffort,
+      designRuntimeCatalog
+    ]
   );
   const readyPromptRefinementRuntimes = enabledRuntimes.filter(
     (runtime) =>
@@ -1720,6 +2473,12 @@ export function App() {
     setView(next);
     setSelectedBoardId(undefined);
     closeTaskDetail();
+    if (next !== 'designs') {
+      setDesignExternalLinkRequest(undefined);
+    }
+    if (next === 'designs') {
+      void openDesignWorkspace();
+    }
   };
 
   const showBoard = (boardId: string) => {
@@ -1746,7 +2505,12 @@ export function App() {
   }, [selectedTask?.id, showDetail]);
 
   const resolvedTheme = resolveTheme(theme, prefersDark);
-  const appOwnedModalOpen = Boolean(deleteCandidate || repositoryDisconnect || boardEditor);
+  const appOwnedModalOpen = Boolean(
+    deleteCandidate ||
+      repositoryDisconnect ||
+      boardEditor ||
+      designExternalLinkRequest
+  );
   const appBackgroundModalOpen = appOwnedModalOpen || isTaskDetailModalOpen;
 
   return (
@@ -1874,6 +2638,13 @@ export function App() {
                 active={!showDetail && view === 'board' && !selectedBoardId}
                 collapsed={isSidebarCollapsed}
                 onClick={() => showView('board')}
+              />
+              <NavItem
+                label="Designs"
+                icon={<DesignIcon />}
+                active={!showDetail && view === 'designs'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('designs')}
               />
               <NavItem
                 label="Discourse"
@@ -2086,6 +2857,61 @@ export function App() {
             </div>
             {error ? <div className="tm-error">{error}</div> : null}
           </main>
+        ) : view === 'designs' ? (
+          <DesignsWorkspace
+            designs={designs}
+            selectedDesignId={selectedDesignId}
+            project={
+              designDetail?.design.id === selectedDesignId
+                ? designDetail
+                : undefined
+            }
+            draft={designDraft}
+            models={designRuntimeCatalog?.models ?? []}
+            runtimes={designRuntimeCatalog?.runtimes ?? []}
+            defaultAgentSettings={defaultDesignSettings}
+            loading={designsLoading}
+            error={designsError}
+            desktopCanvasAvailable={Boolean(window.designCanvas)}
+            canvasOccluded={appBackgroundModalOpen || isNewTaskOpen}
+            onSelectDesign={(designId) => {
+              void loadDesign(designId, { select: true, showLoading: true });
+            }}
+            onCreateBlankDesign={createBlankDesign}
+            onSubmitRefinement={submitDesignRefinement}
+            onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
+            onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
+            onReadClipboardImage={taskManagerApi.readClipboardImage}
+            onReadDesignDraftAttachment={(designId, attachmentId) =>
+              taskManagerApi.readDesignDraftAttachment({ designId, attachmentId })
+            }
+            onAddReferences={addDesignReferences}
+            onRemoveReference={removeDesignReference}
+            onImportReferenceAsset={importDesignReferenceAsset}
+            onStopTurn={stopDesignTurn}
+            onLoadEarlier={loadEarlierDesignConversation}
+            onSaveDraft={saveDesignDraft}
+            onDeleteDraft={deleteDesignDraft}
+            onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
+            onRespondToInteraction={respondToDesignInteraction}
+            onRefreshCanvas={refreshDesignCanvas}
+            onRestartCanvas={restartDesignCanvas}
+            onRestoreRevision={restoreDesignRevision}
+            onDuplicateDesign={duplicateDesign}
+            onRenameDesign={renameDesign}
+            onArchiveDesign={archiveDesign}
+            onDeleteDesign={deleteDesign}
+            onShowCanvas={window.designCanvas ? showDesignCanvas : undefined}
+            onHideCanvas={window.designCanvas ? hideDesignCanvas : undefined}
+            onRetryLoad={() => {
+              const designId = selectedDesignIdRef.current;
+              if (designId) {
+                void loadDesign(designId, { showLoading: true });
+              } else {
+                void openDesignWorkspace();
+              }
+            }}
+          />
         ) : view === 'discourse' ? (
           <DiscourseWorkspace onNotify={notify} onError={reportActionError} />
         ) : (
@@ -2182,6 +3008,16 @@ export function App() {
           onCancel={() => setBoardEditor(undefined)}
           onSave={saveBoard}
           onDelete={deleteBoard}
+          fallbackReturnFocusRef={appRootRef}
+        />
+      ) : null}
+
+      {designExternalLinkRequest ? (
+        <DesignExternalLinkModal
+          key={designExternalLinkRequest.pendingId}
+          destinationHost={designExternalLinkRequest.destinationHost}
+          onCancel={() => dismissDesignExternalLink(designExternalLinkRequest)}
+          onConfirm={() => approveDesignExternalLink(designExternalLinkRequest)}
           fallbackReturnFocusRef={appRootRef}
         />
       ) : null}

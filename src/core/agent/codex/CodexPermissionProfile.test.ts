@@ -25,11 +25,13 @@ describe('Codex permission profile', () => {
       attachmentPaths: [attachment]
     });
 
+    const profileId = config.default_permissions as string;
+    expect(profileId).toMatch(/^task_monki_session-1_[a-f0-9]{16}$/u);
     expect(config).toEqual({
       model_reasoning_effort: 'high',
-      default_permissions: 'task_monki_session-1',
+      default_permissions: profileId,
       permissions: {
-        'task_monki_session-1': {
+        [profileId]: {
           filesystem: {
             ':minimal': 'read',
             [worktree]: 'write',
@@ -149,9 +151,34 @@ describe('Codex permission profile', () => {
       settings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
       worktreePath: nativeAbsolute('worktrees', 'task-3'),
       attachmentPaths: [nativeAbsolute('attachments', 'file.txt')]
-    }) as { permissions: Record<string, { network: { enabled: boolean } }> };
+    }) as {
+      default_permissions: string;
+      permissions: Record<string, { network: { enabled: boolean } }>;
+    };
 
-    expect(config.permissions['task_monki_session-3']?.network.enabled).toBe(false);
+    const profileId = config.default_permissions;
+    expect(config.permissions[profileId]?.network.enabled).toBe(false);
+  });
+
+  it('uses a stable, exact profile id for each attachment scope', () => {
+    const worktree = nativeAbsolute('worktrees', 'task-3');
+    const first = nativeAbsolute('attachments', 'first.txt');
+    const second = nativeAbsolute('attachments', 'second.txt');
+    const create = (attachmentPaths: string[]) =>
+      codexPermissionProfileConfig({
+        sessionId: 'session-3',
+        settings: { sandbox: 'WORKSPACE_WRITE', networkAccess: false },
+        worktreePath: worktree,
+        attachmentPaths
+      }) as { default_permissions: string };
+
+    expect(create([first, second]).default_permissions).toBe(
+      create([second, first]).default_permissions
+    );
+    expect(create([first]).default_permissions).not.toBe(
+      create([second]).default_permissions
+    );
+    expect(create([]).default_permissions).toBe('task_monki_session-3');
   });
 
   it('requires the exact active profile and sole runtime worktree root', () => {

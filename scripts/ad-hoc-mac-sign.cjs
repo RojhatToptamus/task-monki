@@ -27,6 +27,7 @@ module.exports = async function adHocMacSign(configuration) {
     ignore: createIgnore(configuration.ignore)
   });
 
+  await removeDetachedCodeSignatureXattrs(appPath);
   await assertNoDetachedCodeSignatureXattrs(appPath);
   await execFileAsync('codesign', [
     '--verify',
@@ -37,13 +38,33 @@ module.exports = async function adHocMacSign(configuration) {
   ]);
 };
 
+async function removeDetachedCodeSignatureXattrs(appPath) {
+  for (const attribute of [
+    'com.apple.cs.CodeDirectory',
+    'com.apple.cs.CodeRequirements',
+    'com.apple.cs.CodeSignature'
+  ]) {
+    await execFileAsync('xattr', ['-dr', attribute, appPath]);
+  }
+}
+
 function createIgnore(existingIgnore) {
   return (filePath) => {
     if (matchesExistingIgnore(existingIgnore, filePath)) {
       return true;
     }
-    return shouldIgnoreDataResource(filePath);
+    return (
+      shouldIgnoreDataResource(filePath) ||
+      shouldKeepPinnedAgentBrowserSignature(filePath)
+    );
   };
+}
+
+function shouldKeepPinnedAgentBrowserSignature(filePath) {
+  return (
+    path.basename(filePath) === 'agent-browser' &&
+    filePath.split(path.sep).includes('design-browser-runtime')
+  );
 }
 
 function matchesExistingIgnore(existingIgnore, filePath) {

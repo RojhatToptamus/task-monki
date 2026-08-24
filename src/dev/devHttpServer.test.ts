@@ -85,6 +85,160 @@ describe('development HTTP server', () => {
     expect(getTaskDetail).toHaveBeenCalledWith('task-1');
   });
 
+  it('routes Design conversation and project actions with path-owned ids', async () => {
+    const listDesignConversation = vi.fn(async (input: unknown) => ({ input }));
+    const getDesignDraft = vi.fn(async () => null);
+    const saveDesignDraft = vi.fn(async (input: unknown) => input);
+    const deleteDesignDraft = vi.fn(async () => undefined);
+    const addDesignReferences = vi.fn(async (input: unknown) => input);
+    const removeDesignReference = vi.fn(async (input: unknown) => input);
+    const importDesignReferenceAsset = vi.fn(async (input: unknown) => input);
+    const cancelDesignTurn = vi.fn(async (input: unknown) => input);
+    const restoreDesignRevision = vi.fn(async (input: unknown) => input);
+    const duplicateDesign = vi.fn(async (input: unknown) => input);
+    const renameDesign = vi.fn(async (input: unknown) => input);
+    const archiveDesign = vi.fn(async (input: unknown) => input);
+    const running = await startServer({
+      listDesignConversation,
+      getDesignDraft,
+      saveDesignDraft,
+      deleteDesignDraft,
+      addDesignReferences,
+      removeDesignReference,
+      importDesignReferenceAsset,
+      cancelDesignTurn,
+      restoreDesignRevision,
+      duplicateDesign,
+      renameDesign,
+      archiveDesign
+    });
+
+    const page = await fetch(
+      `${running.baseUrl}/api/designs/design-1/conversation?beforeCursor=before-1&limit=25`,
+      { headers: running.headers }
+    );
+    expect(page.status).toBe(200);
+    expect(listDesignConversation).toHaveBeenCalledWith({
+      designId: 'design-1',
+      beforeCursor: 'before-1',
+      limit: 25
+    });
+
+    const draft = await fetch(`${running.baseUrl}/api/designs/design-1/draft`, {
+      headers: running.headers
+    });
+    expect(draft.status).toBe(200);
+    await expect(draft.json()).resolves.toBeNull();
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/draft`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', expectedRevision: 0, body: 'Draft' })
+    });
+    expect(saveDesignDraft).toHaveBeenCalledWith({
+      designId: 'design-1',
+      expectedRevision: 0,
+      body: 'Draft'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/draft/delete`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', expectedRevision: 1 })
+    });
+    expect(deleteDesignDraft).toHaveBeenCalledWith({
+      designId: 'design-1',
+      expectedRevision: 1
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/references`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', attachmentDraftId: 'draft-1' })
+    });
+    expect(addDesignReferences).toHaveBeenCalledWith({
+      designId: 'design-1',
+      attachmentDraftId: 'draft-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/references/reference-1/remove`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', referenceId: 'wrong' })
+    });
+    expect(removeDesignReference).toHaveBeenCalledWith({
+      designId: 'design-1',
+      referenceId: 'reference-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/references/reference-1/import`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', referenceId: 'wrong' })
+    });
+    expect(importDesignReferenceAsset).toHaveBeenCalledWith({
+      designId: 'design-1',
+      referenceId: 'reference-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/turns/turn-1/cancel`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', turnId: 'wrong' })
+    });
+    expect(cancelDesignTurn).toHaveBeenCalledWith({
+      designId: 'design-1',
+      turnId: 'turn-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/revisions/revision-1/restore`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        designId: 'wrong',
+        revisionId: 'wrong',
+        clientActionId: 'restore-1'
+      })
+    });
+    expect(restoreDesignRevision).toHaveBeenCalledWith({
+      designId: 'design-1',
+      revisionId: 'revision-1',
+      clientActionId: 'restore-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/revisions/revision-1/duplicate`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        designId: 'wrong',
+        revisionId: 'wrong',
+        clientActionId: 'duplicate-1'
+      })
+    });
+    expect(duplicateDesign).toHaveBeenCalledWith({
+      designId: 'design-1',
+      revisionId: 'revision-1',
+      clientActionId: 'duplicate-1'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/rename`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong', title: 'New name' })
+    });
+    expect(renameDesign).toHaveBeenCalledWith({
+      designId: 'design-1',
+      title: 'New name'
+    });
+
+    await fetch(`${running.baseUrl}/api/designs/design-1/archive`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ designId: 'wrong' })
+    });
+    expect(archiveDesign).toHaveBeenCalledWith({ designId: 'design-1' });
+  });
+
   it('rejects hostile origins and cross-site browser requests even with the proxy token', async () => {
     const running = await startServer();
 
@@ -308,6 +462,14 @@ describe('development HTTP server', () => {
   });
 
   it('returns safe attachment errors and inert no-store preview responses', async () => {
+    const readDesignDraftAttachment = vi.fn(async () => ({
+      attachmentId: 'draft-attachment-1',
+      displayName: 'draft.svg',
+      kind: 'text' as const,
+      mediaType: 'text/plain',
+      byteCount: 11,
+      bytes: new TextEncoder().encode('<svg></svg>').buffer
+    }));
     const running = await startServer({
       discardTaskAttachmentDraft: vi.fn(async () => {
         throw new AttachmentStoreError(
@@ -323,7 +485,8 @@ describe('development HTTP server', () => {
         mediaType: 'text/plain',
         byteCount: 11,
         bytes: new TextEncoder().encode('<svg></svg>').buffer
-      }))
+      })),
+      readDesignDraftAttachment
     });
 
     const missing = await fetch(`${running.baseUrl}/api/attachments/drafts/discard`, {
@@ -347,6 +510,20 @@ describe('development HTTP server', () => {
     expect(preview.headers.get('content-security-policy')).toContain('sandbox');
     expect(preview.headers.get('x-content-type-options')).toBe('nosniff');
     await expect(preview.text()).resolves.toBe('<svg></svg>');
+
+    const draftPreview = await fetch(
+      `${running.baseUrl}/api/designs/design%2F1/draft/attachments/draft-attachment-1`,
+      { headers: running.headers }
+    );
+    expect(draftPreview.status).toBe(200);
+    expect(draftPreview.headers.get('content-disposition')).toContain('attachment');
+    expect(draftPreview.headers.get('cache-control')).toBe('private, no-store');
+    expect(draftPreview.headers.get('content-security-policy')).toContain('sandbox');
+    await expect(draftPreview.text()).resolves.toBe('<svg></svg>');
+    expect(readDesignDraftAttachment).toHaveBeenCalledWith({
+      designId: 'design/1',
+      attachmentId: 'draft-attachment-1'
+    });
   });
 
   it('returns a structured 409 when a task creation token is reused differently', async () => {

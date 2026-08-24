@@ -529,7 +529,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
       ['FAILED', 'RECOVERY_REQUIRED'].includes(candidate.state)
   );
   const currentFailedReplacement =
-    failedReplacement?.executionDigest === plan.executionDigest &&
+    failedReplacement?.executionAuthority.executionDigest === plan.executionDigest &&
     (!activeGeneration || failedReplacement.replacesGenerationId === activeGeneration.id)
       ? failedReplacement
       : undefined;
@@ -563,7 +563,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     };
   }
   if (
-    (!generation || generation.executionDigest !== plan.executionDigest) &&
+    (!generation || generation.executionAuthority.executionDigest !== plan.executionDigest) &&
     !currentFailedReplacement
   ) {
     return {
@@ -838,7 +838,7 @@ function evaluateSetupRecovery(
   plan: PreviewPlanRecord,
   generation?: PreviewGenerationRecord
 ): { hasManagedFailure: boolean; canRetry: boolean } {
-  if (!generation || generation.executionDigest !== plan.executionDigest) {
+  if (!generation || generation.executionAuthority.executionDigest !== plan.executionDigest) {
     return { hasManagedFailure: false, canRetry: false };
   }
   const scenario = plan.executionPlan.scenarios.find(

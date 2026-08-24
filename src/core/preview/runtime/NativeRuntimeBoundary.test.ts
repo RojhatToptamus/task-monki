@@ -132,7 +132,10 @@ async function runtimeFixture() {
   const now = new Date().toISOString();
   const plan = await store.savePreviewPlan({
     id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-    recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+    planSource: {
+      type: 'REPOSITORY_RECIPE', recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1, recipeDigest: 'recipe'
+    },
     executionDigest: 'execution', executionPlan: {
       version: 1, jobs: [], resources: [], services: [], workers: [], routes: [],
       scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
@@ -143,11 +146,25 @@ async function runtimeFixture() {
     id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
     scope: 'TASK', approvedAt: now
   });
+  const snapshot = await store.recordGitSnapshot({
+    taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+    worktreePath: root, repoRoot: root, gitCommonDir: path.join(root, '.git'),
+    headSha: 'head', branch: worktree.branchName, aheadCount: 0, behindCount: 0,
+    stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictedCount: 0,
+    commitsAheadOfBase: 0, committedDiffFileCount: 0, workingDiffFileCount: 0,
+    diffStat: '', dirtyFingerprint: 'dirty', status: 'DIRTY'
+  }, '');
   const generation = await store.savePreviewGeneration({
     id: 'generation', previewKey: 'task-boundary', taskId: task.id, iterationId: iteration.id,
-    worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
-    executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
-    sourceDirtyFingerprint: 'dirty', workspacePath: path.dirname(sourcePath), state: 'CREATED', routingState: 'CANDIDATE',
+    worktreeId: worktree.id, planId: plan.id,
+    executionAuthority: {
+      type: 'USER_APPROVAL', approvalId: approval.id, executionDigest: plan.executionDigest
+    },
+    source: {
+      type: 'WORKTREE_SNAPSHOT', gitSnapshotId: snapshot.id,
+      headSha: snapshot.headSha!, dirtyFingerprint: snapshot.dirtyFingerprint
+    },
+    workspacePath: path.dirname(sourcePath), state: 'CREATED', routingState: 'CANDIDATE',
     freshness: 'CURRENT', routes: [], createdAt: now, updatedAt: now
   });
   return {

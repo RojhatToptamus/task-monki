@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AgentExecutionSettings,
+  AgentInstructionProfile,
   AgentRuntimeCatalog,
   AgentRuntimeId,
   AgentRuntimeState,
@@ -57,6 +58,7 @@ export interface StartOrchestratedTurn {
   worktree: WorktreeRecord;
   mode: AgentRunMode;
   prompt: string;
+  instructionProfile?: AgentInstructionProfile;
   settings: AgentExecutionSettings;
   generationKey?: string;
   beforeGitSnapshotId?: string;
@@ -301,6 +303,16 @@ export class AgentOrchestrator {
     }
   }
 
+  async deleteTaskProviderHistory(task: Task): Promise<void> {
+    const adapter = this.runtimes.require(task.runtimeId);
+    if (!adapter.deleteTaskProviderHistory) {
+      throw new Error(
+        `${adapter.descriptor.displayName} cannot delete provider history safely.`
+      );
+    }
+    await adapter.deleteTaskProviderHistory(task.id);
+  }
+
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {
     const operation = this.startQueue.then(() => this.startTurnSerially(input));
     this.startQueue = operation.then(
@@ -312,7 +324,11 @@ export class AgentOrchestrator {
 
   private async startTurnSerially(input: StartOrchestratedTurn): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
-    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const taskAttachments = await this.store.getTurnAttachments({
+      taskId: input.task.id,
+      mode: input.mode,
+      generationKey: input.generationKey
+    });
     let session = input.sessionId
       ? await this.requireSession(input.sessionId)
       : await this.store.getPrimaryAgentSession(input.task.id, input.iteration.id);
@@ -798,6 +814,7 @@ export class AgentOrchestrator {
       mode: input.mode,
       prompt: input.prompt,
       authoritativeGoal: input.task.prompt,
+      instructionProfile: input.instructionProfile,
       attachments,
       settings
     });

@@ -466,6 +466,14 @@ export function acpCapabilities(
       detail: 'Provider-owned ACP session selectors are projected as typed, revisioned boolean/select controls.'
     },
     extensions: {
+      'task-monki.design-instructions': {
+        maturity: 'unsupported',
+        detail: 'ACP currently receives Design guidance only as user prompt text.'
+      },
+      'task-monki.design-skill-access': {
+        maturity: 'unsupported',
+        detail: 'ACP cannot attest a restricted app-owned read root for Design skills.'
+      },
       nativeSessionConfiguration: {
         maturity: 'stable',
         detail: 'Stable ACP mode and config IDs remain exact; renderer state is schema-selected and opaque metadata stays in the protected journal.'

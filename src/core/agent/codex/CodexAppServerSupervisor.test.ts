@@ -119,6 +119,31 @@ describe('Codex App Server launch configuration', () => {
     ]);
   });
 
+  it('forwards an explicit MCP disable through the resolved App Server argv', async () => {
+    await expect(
+      resolveCodexAppServerArgv({
+        executable: '/definitely/not/codex',
+        cwd: process.cwd(),
+        toolSettings: {
+          webSearchMode: 'disabled',
+          mcpServers: 'disabled',
+          apps: 'disabled'
+        },
+        additionalConfigOverrides: [SAMPLE_MCP_DISABLE_OVERRIDE],
+        failClosedMcpDiscovery: true
+      })
+    ).resolves.toEqual([
+      'app-server',
+      '--stdio',
+      '-c',
+      'features.apps=false',
+      '-c',
+      'web_search="disabled"',
+      '-c',
+      SAMPLE_MCP_DISABLE_OVERRIDE
+    ]);
+  });
+
   it('projects every external tool config variation into App Server argv', () => {
     for (const webSearchMode of WEB_SEARCH_MODES) {
       for (const mcpServers of MCP_SERVER_MODES) {
@@ -250,6 +275,7 @@ describe('Codex App Server launch configuration', () => {
     const diagnostics: string[] = [];
     let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
     let detached: boolean | undefined;
+    let defaultAdditionalConfigOverrides: readonly string[] | undefined;
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
       appVersion: 'test',
@@ -259,14 +285,17 @@ describe('Codex App Server launch configuration', () => {
         OPENAI_API_KEY: 'codex-environment-secret'
       },
       runtimeResolver: async () => resolvedCodexRuntime(),
-      argvResolver: async () => [
-        'app-server',
-        '--stdio',
-        '--token',
-        'codex-argv-secret',
-        '-c',
-        'mcp_servers.remote={url="https://user:codex-url-secret@example.test/rpc?token=codex-query-secret"}'
-      ],
+      argvResolver: async (input) => {
+        defaultAdditionalConfigOverrides = input.additionalConfigOverrides;
+        return [
+          'app-server',
+          '--stdio',
+          '--token',
+          'codex-argv-secret',
+          '-c',
+          'mcp_servers.remote={url="https://user:codex-url-secret@example.test/rpc?token=codex-query-secret"}'
+        ];
+      },
       spawnProcess: (_executable, _argv, options) => {
         spawnedEnvironment = options.env;
         detached = options.detached;
@@ -288,6 +317,7 @@ describe('Codex App Server launch configuration', () => {
       CODEX_HOME: path.join(directory, 'codex-home')
     });
     expect(detached).toBe(process.platform !== 'win32');
+    expect(defaultAdditionalConfigOverrides).toBeUndefined();
     expect(durable).toContain('[REDACTED]');
     for (const secret of [
       'codex-environment-secret',
@@ -496,6 +526,94 @@ describe('Codex App Server launch configuration', () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
+  it('confirms process-tree absence after a signal-send race during normal shutdown', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-close-race-'));
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeCodexChild({ closeAfterSignalFailure: true });
+    const supervisor = new CodexAppServerSupervisor(store, {
+      cwd: directory,
+      appVersion: 'test',
+      runtimeResolver: async () => resolvedCodexRuntime(),
+      argvResolver: async () => ['app-server', '--stdio'],
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      },
+      shutdownGraceTimeoutMs: 100,
+      shutdownKillTimeoutMs: 10,
+      closeHandlingTimeoutMs: 1_000
+    });
+
+    const client = await supervisor.start();
+    const lifecycleOrder: string[] = [];
+    const updateAgentServer = store.updateAgentServer.bind(store);
+    vi.spyOn(store, 'updateAgentServer').mockImplementation(async (serverId, patch) => {
+      if (patch.status === 'STOPPING') lifecycleOrder.push('stopping');
+      return updateAgentServer(serverId, patch);
+    });
+    const closeClient = client.close.bind(client);
+    vi.spyOn(client, 'close').mockImplementation((reason) => {
+      lifecycleOrder.push('client-close');
+      closeClient(reason);
+    });
+
+    await supervisor.shutdown();
+
+    expect(lifecycleOrder.slice(0, 2)).toEqual(['stopping', 'client-close']);
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(supervisor.currentServer).toMatchObject({
+      status: 'EXITED',
+      exitCode: 0,
+      signal: null
+    });
+    await store.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('preserves signal failures when process-tree absence cannot be confirmed', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-signal-failure-'));
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeCodexChild({ closeOnKill: false });
+    child.kill.mockImplementation((signal: NodeJS.Signals = 'SIGTERM') => {
+      throw Object.assign(new Error(`${signal} kill EPERM`), {
+        code: 'EPERM',
+        syscall: 'kill'
+      });
+    });
+    const supervisor = new CodexAppServerSupervisor(store, {
+      cwd: directory,
+      appVersion: 'test',
+      runtimeResolver: async () => resolvedCodexRuntime(),
+      argvResolver: async () => ['app-server', '--stdio'],
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      },
+      shutdownGraceTimeoutMs: 10,
+      shutdownKillTimeoutMs: 10,
+      closeHandlingTimeoutMs: 10
+    });
+
+    await supervisor.start();
+    const failure = await supervisor.shutdown().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    const terminationFailure = Array.from((failure as AggregateError).errors)[0];
+    expect(terminationFailure).toBeInstanceOf(AggregateError);
+    expect(
+      Array.from((terminationFailure as AggregateError).errors).map(
+        (error) => (error as Error).message
+      )
+    ).toEqual([
+      'SIGTERM kill EPERM',
+      'SIGKILL kill EPERM',
+      'Codex App Server process 7676 did not exit after SIGKILL.'
+    ]);
+    expect(child.kill).toHaveBeenCalledTimes(2);
+    await store.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
   it('refuses a replacement generation when prior exit cleanup cannot confirm termination', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-prior-tree-'));
     const store = new FileTaskStore(path.join(directory, 'store'));
@@ -546,7 +664,11 @@ function resolvedCodexRuntime() {
 }
 
 function fakeCodexChild(
-  options: { closeOnKill?: boolean; closeBeforeExitConfirmation?: boolean } = {}
+  options: {
+    closeOnKill?: boolean;
+    closeBeforeExitConfirmation?: boolean;
+    closeAfterSignalFailure?: boolean;
+  } = {}
 ): ChildProcessWithoutNullStreams & {
   stderr: PassThrough;
   kill: ReturnType<typeof vi.fn>;
@@ -555,11 +677,22 @@ function fakeCodexChild(
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  let exitCode: number | null = null;
   let signalCode: NodeJS.Signals | null = null;
   let killed = false;
   const kill = vi.fn((signal: NodeJS.Signals = 'SIGTERM') => {
     if (child.exitCode !== null || child.signalCode !== null) return false;
     killed = true;
+    if (options.closeAfterSignalFailure) {
+      queueMicrotask(() => {
+        exitCode = 0;
+        child.emit('close', 0, null);
+      });
+      throw Object.assign(new Error('kill EPERM'), {
+        code: 'EPERM',
+        syscall: 'kill'
+      });
+    }
     if (options.closeOnKill !== false) {
       if (options.closeBeforeExitConfirmation) {
         queueMicrotask(() => {
@@ -580,10 +713,10 @@ function fakeCodexChild(
     stdout,
     stderr,
     pid: 7676,
-    exitCode: null,
     kill
   });
   Object.defineProperties(child, {
+    exitCode: { get: () => exitCode },
     signalCode: { get: () => signalCode },
     killed: { get: () => killed }
   });

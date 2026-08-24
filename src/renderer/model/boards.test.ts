@@ -66,6 +66,7 @@ function taskFixture(
 ): Task {
   return {
     id,
+    kind: 'NORMAL',
     title: id,
     prompt: 'Do it.',
     repositoryId,

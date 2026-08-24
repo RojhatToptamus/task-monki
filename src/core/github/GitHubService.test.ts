@@ -409,6 +409,7 @@ async function readGhInvocations(logPath: string): Promise<string[][]> {
 function taskFixture(repositoryId: string): Task {
   return {
     id: 'task-1',
+    kind: 'NORMAL',
     runtimeId: 'codex',
     title: 'Test task',
     prompt: 'Do work.',

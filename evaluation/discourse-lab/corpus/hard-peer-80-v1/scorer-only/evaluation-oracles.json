@@ -1,0 +1,233 @@
+{
+  "schemaVersion": "discourse-lab/hard-peer-80-oracle-corpus@v1",
+  "corpusVersion": "hard-peer-80-corpus@v1",
+  "partition": "EVALUATION",
+  "records": [
+    {
+      "caseId": "HP80-EVAL-MATH-01",
+      "domain": "ERDOS_STYLE_MATHEMATICS",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "RESOLVED",
+      "acceptedOptionIds": ["hp80-eval-math-16"],
+      "acceptedAnswerValues": ["16"],
+      "acceptedCertificateKinds": ["PROOF_SKETCH", "DIRECT"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-eval-math-p1", "expected": "ACCEPT", "required": true, "text": "The stated optimum is the true maximum cardinality." },
+        { "id": "hp80-eval-math-p2", "expected": "ACCEPT", "required": true, "text": "The proposed construction lies in [31], has no repeated elements, and has the stated size." },
+        { "id": "hp80-eval-math-p3", "expected": "ACCEPT", "required": true, "text": "The construction contains exactly three elements of S and no forbidden difference." },
+        { "id": "hp80-eval-math-p4", "expected": "ACCEPT", "required": true, "text": "The upper-bound argument rules out every larger feasible set." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-eval-math-g1", "text": "A construction with a duplicate, out-of-range value, forbidden difference, or wrong special count is invalid." },
+        { "id": "hp80-eval-math-g2", "text": "A 15-edge matching on 30 of 31 vertices yields an upper bound of 16, not 15." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-eval-math-c1", "targetClaimIds": ["hp80-eval-math-p1", "hp80-eval-math-p4"], "kinds": ["LOGIC", "EVIDENCE"], "severity": "MATERIAL", "validWhen": "The draft gives a different optimum or mishandles the unmatched vertex in the universal upper bound." },
+        { "id": "hp80-eval-math-c2", "targetClaimIds": ["hp80-eval-math-p2", "hp80-eval-math-p3"], "kinds": ["FACTUAL", "LOGIC"], "severity": "MATERIAL", "validWhen": "The draft construction has the wrong size, special count, range, uniqueness, or a difference of 6 or 10." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "FORBIDDEN_DIFFERENCE_MATCHING",
+        "universeSize": 31,
+        "forbiddenDifferences": [6, 10],
+        "specialElements": [2, 7, 12, 17, 22, 27],
+        "exactSpecialCount": 3,
+        "optimum": 16,
+        "construction": [1,2,5,6,9,10,13,14,17,18,21,22,25,26,29,30],
+        "upperBoundMatching": [[1,7],[3,9],[4,10],[5,11],[6,12],[8,14],[13,19],[15,21],[16,22],[17,27],[18,28],[20,26],[23,29],[24,30],[25,31]]
+      },
+      "verification": {
+        "method": "Check the construction directly. Check that the 15 matching edges are disjoint and each has forbidden difference 6 or 10; they cover 30 vertices, so any feasible set uses at most 15 endpoints plus the unmatched vertex.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-EVAL-LOGIC-01",
+      "domain": "RIGOROUS_LOGIC",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "UNDERDETERMINED",
+      "acceptedOptionIds": ["hp80-eval-logic-open"],
+      "acceptedAnswerValues": ["OPEN"],
+      "acceptedCertificateKinds": ["COUNTEREXAMPLE", "PROOF_SKETCH"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-eval-logic-p1", "expected": "ACCEPT", "required": true, "text": "The premises are satisfiable." },
+        { "id": "hp80-eval-logic-p2", "expected": "REJECT", "required": true, "text": "The query has the same truth value in every satisfying assignment." },
+        { "id": "hp80-eval-logic-p3", "expected": "ACCEPT", "required": true, "text": "There is a satisfying assignment where the query is true and one where it is false." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-eval-logic-g1", "text": "One countermodel disproves entailment but does not by itself prove contradiction." },
+        { "id": "hp80-eval-logic-g2", "text": "Both witnesses must satisfy all nine premises under the stated XOR semantics." },
+        { "id": "hp80-eval-logic-g3", "text": "A correct OPEN conclusion is a substantive logical result, not model abstention." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-eval-logic-c1", "targetClaimIds": ["hp80-eval-logic-p2", "hp80-eval-logic-p3"], "kinds": ["LOGIC"], "severity": "MATERIAL", "validWhen": "The draft says ENTAILED or CONTRADICTED despite a valid opposite-truth witness, or labels OPEN without two valid witnesses." },
+        { "id": "hp80-eval-logic-c2", "targetClaimIds": ["hp80-eval-logic-p1"], "kinds": ["FACTUAL", "EVIDENCE"], "severity": "MATERIAL", "validWhen": "The draft claims the premise set is inconsistent." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "BOOLEAN_TRUTH_TABLE",
+        "variableOrder": ["P","Q","R","S","T","U","V","W","X","Y"],
+        "satisfyingAssignments": ["0110100101", "0110111011", "1001101101", "1010000111"],
+        "queryTrueAssignments": ["0110100101", "0110111011", "1010000111"],
+        "queryFalseAssignments": ["1001101101"],
+        "classification": "OPEN"
+      },
+      "verification": {
+        "method": "Enumerate all 2^10 assignments using the nine stated premises and evaluate (T and Y) implies Q. The four listed assignments are exactly the satisfying models; three make the query true and one false.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-EVAL-HIDDEN-01",
+      "domain": "HIDDEN_ASSUMPTION_REASONING",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "UNDERDETERMINED",
+      "acceptedOptionIds": ["hp80-eval-hidden-open"],
+      "acceptedAnswerValues": ["OPEN", "7..37", "x=flagged-and-defective"],
+      "acceptedCertificateKinds": ["COUNTEREXAMPLE", "MISSING_INFORMATION", "PROOF_SKETCH"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-eval-hidden-p1", "expected": "REJECT", "required": true, "text": "The treatment is guaranteed to reduce expected defects from 30." },
+        { "id": "hp80-eval-hidden-p2", "expected": "REJECT", "required": true, "text": "The supplied marginals determine how many initially defective parts were flagged." },
+        { "id": "hp80-eval-hidden-p3", "expected": "ACCEPT", "required": true, "text": "Both improvement and worsening are compatible with the supplied marginals." },
+        { "id": "hp80-eval-hidden-p4", "expected": "ACCEPT", "required": true, "text": "The stated final-count range is tight under the supplied constraints." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-eval-hidden-g1", "text": "No independence, random sampling, or representative flagging assumption is supplied." },
+        { "id": "hp80-eval-hidden-g2", "text": "The probabilities determine conditional expected transitions, not the missing joint count." },
+        { "id": "hp80-eval-hidden-g3", "text": "A correct OPEN conclusion is a substantive answer, not model abstention." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-eval-hidden-c1", "targetClaimIds": ["hp80-eval-hidden-p1", "hp80-eval-hidden-p3"], "kinds": ["ASSUMPTION", "LOGIC"], "severity": "MATERIAL", "validWhen": "The draft assumes independence or guarantees improvement/worsening without conditioning on x." },
+        { "id": "hp80-eval-hidden-c2", "targetClaimIds": ["hp80-eval-hidden-p2", "hp80-eval-hidden-p4"], "kinds": ["FACTUAL", "LOGIC"], "severity": "MATERIAL", "validWhen": "The draft gives a different feasible range, formula, overlap bound, or missing statistic." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "CONTINGENCY_EXPECTATION_BOUNDS",
+        "population": 100,
+        "initialPositive": 30,
+        "flagged": 35,
+        "intersectionRange": [0,30],
+        "repairProbability": 0.8,
+        "damageProbability": 0.2,
+        "finalExpectationIntercept": 37,
+        "finalExpectationSlope": -1,
+        "finalExpectationRange": [7,37],
+        "strictImprovementMinimumIntegerIntersection": 8,
+        "witnessTables": [
+          { "intersection": 0, "flaggedGood": 35, "unflaggedDefective": 30, "unflaggedGood": 35, "finalExpectation": 37 },
+          { "intersection": 30, "flaggedGood": 5, "unflaggedDefective": 0, "unflaggedGood": 65, "finalExpectation": 7 }
+        ]
+      },
+      "verification": {
+        "method": "Enumerate integer x in the Frechet interval [max(0,30+35-100), min(30,35)]. Compute 30-0.8x+0.2(35-x)=37-x and confirm both endpoint contingency tables sum to 100.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-EVAL-DEBUG-01",
+      "domain": "SELF_CONTAINED_DEBUGGING",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "RESOLVED",
+      "acceptedOptionIds": ["hp80-eval-debug-all"],
+      "acceptedAnswerValues": ["CURRENT:[running,running,interrupted]", "REQUIRED:[completed,interrupted,completed]"],
+      "acceptedCertificateKinds": ["TRACE", "DIRECT"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-eval-debug-p1", "expected": "ACCEPT", "required": true, "text": "The current outputs for A, B, C are running, running, interrupted." },
+        { "id": "hp80-eval-debug-p2", "expected": "ACCEPT", "required": true, "text": "The required outputs for A, B, C are completed, interrupted, completed." },
+        { "id": "hp80-eval-debug-p3", "expected": "REJECT", "required": true, "text": "Moving the active-run filter before ordinal handling is sufficient to repair every trace." },
+        { "id": "hp80-eval-debug-p4", "expected": "REJECT", "required": true, "text": "Ignoring provider-completed for workflow status is sufficient to repair every trace." },
+        { "id": "hp80-eval-debug-p5", "expected": "REJECT", "required": true, "text": "Allowing report-verified to overwrite interrupted is sufficient to repair every trace." },
+        { "id": "hp80-eval-debug-p6", "expected": "ACCEPT", "required": true, "text": "A complete repair must address multiple independent scoping, authority, and precedence defects." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-eval-debug-g1", "text": "Moving the run filter alone fixes trace A but not B or C." },
+        { "id": "hp80-eval-debug-g2", "text": "Treating provider completion as evidence violates the stated authority boundary." },
+        { "id": "hp80-eval-debug-g3", "text": "Arrival order must not override later or earlier verified local evidence." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-eval-debug-c1", "targetClaimIds": ["hp80-eval-debug-p1", "hp80-eval-debug-p2"], "kinds": ["FACTUAL"], "severity": "MATERIAL", "validWhen": "The draft mis-traces any current or required output." },
+        { "id": "hp80-eval-debug-c2", "targetClaimIds": ["hp80-eval-debug-p3", "hp80-eval-debug-p4", "hp80-eval-debug-p5"], "kinds": ["LOGIC", "ASSUMPTION"], "severity": "MATERIAL", "validWhen": "The draft omits any independent root cause needed by the three traces." },
+        { "id": "hp80-eval-debug-c3", "targetClaimIds": ["hp80-eval-debug-p6"], "kinds": ["LOGIC", "EVIDENCE"], "severity": "MATERIAL", "validWhen": "The proposed repair fails a supplied trace, trusts telemetry, or preserves arrival-order-dependent terminal precedence." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "RUN_PROJECTION_TRACES",
+        "activeRunId": "Y",
+        "traces": [
+          { "name": "A", "events": [["X",40,"process-exit"],["Y",1,"provider-completed"],["Y",2,"process-exit"],["Y",3,"report-verified"]], "current": "running", "required": "completed" },
+          { "name": "B", "events": [["Y",1,"provider-completed"],["Y",2,"process-exit"]], "current": "running", "required": "interrupted" },
+          { "name": "C", "events": [["Y",1,"process-exit"],["Y",2,"report-verified"]], "current": "interrupted", "required": "completed" }
+        ],
+        "repair": {
+          "scopeOrdinalFilteringToActiveRun": true,
+          "treatProviderCompletionAsTelemetryOnly": true,
+          "deriveStatusAfterEvidenceAccumulation": true
+        }
+      },
+      "verification": {
+        "method": "Execute the supplied projector over all three traces. Compare with a reference facts-first projector; also permute active-run terminal records and require the reference result to remain unchanged.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    },
+    {
+      "caseId": "HP80-EVAL-TECH-01",
+      "domain": "TASK_MONKI_TECHNICAL_DECISION",
+      "acceptedStatus": "ANSWER",
+      "epistemicState": "RESOLVED",
+      "acceptedOptionIds": ["hp80-eval-tech-impossible"],
+      "acceptedAnswerValues": ["IMPOSSIBLE"],
+      "acceptedCertificateKinds": ["PROOF_SKETCH", "COUNTEREXAMPLE", "TRADEOFF"],
+      "requiredEvidenceIds": ["PROMPT"],
+      "requestExpectation": "NONE",
+      "abstentionIsCorrect": false,
+      "atomicClaims": [
+        { "id": "hp80-eval-tech-p1", "expected": "REJECT", "required": true, "text": "A local-only protocol can guarantee both at-most-once safety and eventual-application liveness." },
+        { "id": "hp80-eval-tech-p2", "expected": "REJECT", "required": true, "text": "Persisting an interrupt intent before calling the provider eliminates every post-send ambiguity." },
+        { "id": "hp80-eval-tech-p3", "expected": "REJECT", "required": true, "text": "Retrying whenever no reply was durably recorded preserves the at-most-once safety requirement." },
+        { "id": "hp80-eval-tech-p4", "expected": "ACCEPT", "required": true, "text": "Satisfying both requires a provider-visible idempotency/query capability or relaxing one guarantee." }
+      ],
+      "guardClaims": [
+        { "id": "hp80-eval-tech-g1", "text": "A transactional outbox makes intent durable but cannot atomically include the remote side effect." },
+        { "id": "hp80-eval-tech-g2", "text": "Persist-before-send plus never-retry violates liveness when the request is lost." },
+        { "id": "hp80-eval-tech-g3", "text": "Persist-before-send plus retry violates at-most-once safety when the first request was applied." }
+      ],
+      "validCritiquePredicates": [
+        { "id": "hp80-eval-tech-c1", "targetClaimIds": ["hp80-eval-tech-p1", "hp80-eval-tech-p2", "hp80-eval-tech-p3"], "kinds": ["LOGIC", "ASSUMPTION"], "severity": "MATERIAL", "validWhen": "The draft claims a local write or outbox resolves the post-send ambiguity without a provider observation." },
+        { "id": "hp80-eval-tech-c2", "targetClaimIds": ["hp80-eval-tech-p4"], "kinds": ["ASSUMPTION", "MISSING_INFORMATION"], "severity": "MATERIAL", "validWhen": "The draft silently assumes idempotency, query, history, receipt, a reliable network, or probabilistic success." }
+      ],
+      "disagreementPolicy": { "preserveUnresolvedMaterialIssue": true, "userOwnedCrux": false },
+      "certificate": {
+        "kind": "INDISTINGUISHABLE_CRASH_WORLDS",
+        "worlds": [
+          { "name": "world-alpha", "durableLocalState": "same-observation", "providerAppliedCount": 1 },
+          { "name": "world-beta", "durableLocalState": "same-observation", "providerAppliedCount": 0 }
+        ],
+        "recoveryChoices": [
+          { "choice": "action-alpha", "sendsInterrupt": true, "violates": "SAFETY", "world": "world-alpha" },
+          { "choice": "action-beta", "sendsInterrupt": false, "violates": "LIVENESS", "world": "world-beta" }
+        ]
+      },
+      "verification": {
+        "method": "Explore the finite pre-send/write/send/apply/reply/crash transitions. Pair the two states with identical durable local observations and different provider-applied counts; every recovery policy chooses the same action in both and violates one property.",
+        "humanExpertRequired": false,
+        "independentReimplementationRequiredBeforeSeal": true
+      }
+    }
+  ]
+}

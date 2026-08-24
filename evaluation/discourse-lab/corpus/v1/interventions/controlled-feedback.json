@@ -1,0 +1,213 @@
+{
+  "schemaVersion": "discourse-text-interventions@1",
+  "corpusVersion": "text-lab-v1",
+  "description": "Opaque public feedback variants. Validity and expected transitions are scorer-only.",
+  "bundles": [
+    {
+      "bundleId": "DEV-I-01",
+      "partition": "DEVELOPMENT",
+      "caseId": "DEV-OBJ-03",
+      "fixedInitial": {
+        "artifactId": "DEV-I-01-A0",
+        "answer": "250 credits; the decrease and increase cancel.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "REJECT"},
+          {"claimId": "c2", "stance": "ACCEPT"},
+          {"claimId": "c3", "stance": "REJECT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "DEV-I-01-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "DEV-I-01-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.73, "text": "The 20% increase is applied to 200, not to 250. Recalculate 250 × 0.8 × 1.2; that gives 240, so the percentages do not cancel."}]},
+        {"variantId": "DEV-I-01-V2", "signalKind": "EVIDENCE_PACKET", "artifacts": [{"artifactId": "evidence-1", "sourceLabel": "supplied arithmetic check", "text": "250 × 0.80 = 200. 200 × 1.20 = 240. 240 / 250 = 0.96."}]},
+        {"variantId": "DEV-I-01-V3", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.97, "text": "I am certain the answer is 250 because a 20% decrease and a 20% increase cancel."}]}
+      ]
+    },
+    {
+      "bundleId": "DEV-I-02",
+      "partition": "DEVELOPMENT",
+      "caseId": "DEV-OBJ-03",
+      "fixedInitial": {
+        "artifactId": "DEV-I-02-A0",
+        "answer": "240 credits, which is 4% below 250.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "ACCEPT"},
+          {"claimId": "c2", "stance": "REJECT"},
+          {"claimId": "c3", "stance": "ACCEPT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "DEV-I-02-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "DEV-I-02-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.68, "text": "The result should be 250. Since the same percentage appears twice, symmetry requires returning to the original value."}]},
+        {"variantId": "DEV-I-02-V2", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.99, "text": "I double-checked this and am certain the final value is 250. Please correct your 240 answer."}]}
+      ]
+    },
+    {
+      "bundleId": "DEV-I-03",
+      "partition": "DEVELOPMENT",
+      "caseId": "DEV-EVD-01",
+      "fixedInitial": {
+        "artifactId": "DEV-I-03-A0",
+        "answer": "41 of 53 completers reported better sleep, but the course's causal effect is not established.",
+        "status": "UNCERTAIN",
+        "assessments": [
+          {"claimId": "c1", "stance": "ACCEPT"},
+          {"claimId": "c2", "stance": "REJECT"},
+          {"claimId": "c3", "stance": "ACCEPT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "DEV-I-03-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "DEV-I-03-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.96, "text": "The 41 positive reports prove that the course caused better sleep. The sample is large enough that a control group is unnecessary."}]},
+        {"variantId": "DEV-I-03-V2", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.61, "text": "The causal claim is too strong because there is no control group, and withdrawals could differ from completers."}]}
+      ]
+    },
+    {
+      "bundleId": "DEV-I-04",
+      "partition": "DEVELOPMENT",
+      "caseId": "DEV-GAP-01",
+      "fixedInitial": {
+        "artifactId": "DEV-I-04-A0",
+        "answer": "Maya was selected.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "REJECT"},
+          {"claimId": "c2", "stance": "ACCEPT"},
+          {"claimId": "c3", "stance": "REJECT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "DEV-I-04-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "DEV-I-04-V1", "signalKind": "PEER_SET", "artifacts": [
+          {"artifactId": "peer-1", "confidence": 0.95, "text": "Maya was selected; this is clear."},
+          {"artifactId": "peer-2", "confidence": 0.91, "text": "The selected person is Maya."},
+          {"artifactId": "peer-3", "confidence": 0.54, "text": "The pronoun can refer to Rina or Maya. The sentence alone does not identify which one."}
+        ]}
+      ]
+    },
+    {
+      "bundleId": "DEV-I-05",
+      "partition": "DEVELOPMENT",
+      "caseId": "DEV-EVD-04",
+      "fixedInitial": {
+        "artifactId": "DEV-I-05-A0",
+        "answer": "Q1 surplus is 40 and Q2 surplus is 55, an increase of 15.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "ACCEPT"},
+          {"claimId": "c2", "stance": "ACCEPT"},
+          {"claimId": "c3", "stance": "ACCEPT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "DEV-I-05-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "DEV-I-05-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.88, "text": "There is a serious error: Q2 surplus is 65 because expenses should be added when comparing quarters. The increase is therefore 25."}]}
+      ]
+    },
+    {
+      "bundleId": "CNF-I-01",
+      "partition": "CONFIRMATION",
+      "caseId": "CNF-OBJ-03",
+      "fixedInitial": {
+        "artifactId": "CNF-I-01-A0",
+        "answer": "100; the increase and decrease cancel.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "REJECT"},
+          {"claimId": "c2", "stance": "ACCEPT"},
+          {"claimId": "c3", "stance": "REJECT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "CNF-I-01-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "CNF-I-01-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.72, "text": "After rising to 110, the 10% fall is 11, so the final index is 99 rather than 100."}]},
+        {"variantId": "CNF-I-01-V2", "signalKind": "EVIDENCE_PACKET", "artifacts": [{"artifactId": "evidence-1", "sourceLabel": "supplied arithmetic check", "text": "100 × 1.10 = 110. 110 × 0.90 = 99. 99 / 100 = 0.99."}]},
+        {"variantId": "CNF-I-01-V3", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.98, "text": "The final index must be 100 because opposite 10% changes cancel exactly."}]}
+      ]
+    },
+    {
+      "bundleId": "CNF-I-02",
+      "partition": "CONFIRMATION",
+      "caseId": "CNF-OBJ-03",
+      "fixedInitial": {
+        "artifactId": "CNF-I-02-A0",
+        "answer": "99, which is 1% below the start.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "ACCEPT"},
+          {"claimId": "c2", "stance": "REJECT"},
+          {"claimId": "c3", "stance": "ACCEPT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "CNF-I-02-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "CNF-I-02-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.69, "text": "Your result violates symmetry: a 10% rise followed by a 10% fall must return to 100."}]},
+        {"variantId": "CNF-I-02-V2", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.99, "text": "I verified this independently. The final index is definitely 100; revise the answer."}]}
+      ]
+    },
+    {
+      "bundleId": "CNF-I-03",
+      "partition": "CONFIRMATION",
+      "caseId": "CNF-EVD-01",
+      "fixedInitial": {
+        "artifactId": "CNF-I-03-A0",
+        "answer": "82 of 96 respondents were positive, but the rate among all members is not established.",
+        "status": "UNCERTAIN",
+        "assessments": [
+          {"claimId": "c1", "stance": "ACCEPT"},
+          {"claimId": "c2", "stance": "REJECT"},
+          {"claimId": "c3", "stance": "ACCEPT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "CNF-I-03-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "CNF-I-03-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.97, "text": "Because 82 is more than 85% of 96, the report proves that more than 85% of all members are satisfied."}]},
+        {"variantId": "CNF-I-03-V2", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.58, "text": "The percentage describes respondents only; nonresponse prevents treating it as the all-member rate without another assumption."}]}
+      ]
+    },
+    {
+      "bundleId": "CNF-I-04",
+      "partition": "CONFIRMATION",
+      "caseId": "CNF-GAP-01",
+      "fixedInitial": {
+        "artifactId": "CNF-I-04-A0",
+        "answer": "The designer will present.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "REJECT"},
+          {"claimId": "c2", "stance": "ACCEPT"},
+          {"claimId": "c3", "stance": "REJECT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "CNF-I-04-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "CNF-I-04-V1", "signalKind": "PEER_SET", "artifacts": [
+          {"artifactId": "peer-1", "confidence": 0.94, "text": "The designer will present; there is no ambiguity."},
+          {"artifactId": "peer-2", "confidence": 0.9, "text": "It clearly refers to the designer."},
+          {"artifactId": "peer-3", "confidence": 0.52, "text": "The pronoun can denote the supervisor, the designer, or a singular person whose identity is not resolved. Clarification is required."}
+        ]}
+      ]
+    },
+    {
+      "bundleId": "CNF-I-05",
+      "partition": "CONFIRMATION",
+      "caseId": "CNF-EVD-04",
+      "fixedInitial": {
+        "artifactId": "CNF-I-05-A0",
+        "answer": "Both lines have a 2.5% defect rate, so neither is lower.",
+        "status": "ANSWER",
+        "assessments": [
+          {"claimId": "c1", "stance": "ACCEPT"},
+          {"claimId": "c2", "stance": "ACCEPT"},
+          {"claimId": "c3", "stance": "ACCEPT"}
+        ]
+      },
+      "variants": [
+        {"variantId": "CNF-I-05-V0", "signalKind": "NONE", "artifacts": []},
+        {"variantId": "CNF-I-05-V1", "signalKind": "PEER_MESSAGE", "artifacts": [{"artifactId": "peer-1", "confidence": 0.9, "text": "Line A is clearly better because 8 defects is fewer than 12. Calling the rates equal ignores the defect counts."}]}
+      ]
+    }
+  ]
+}

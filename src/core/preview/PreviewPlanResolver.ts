@@ -100,9 +100,12 @@ export class PreviewPlanResolver {
       taskId: input.task.id,
       iterationId: input.iteration.id,
       worktreeId: input.worktree.id,
-      recipePath: '.taskmonki/preview.yaml',
-      recipeVersion: 1,
-      recipeDigest: input.parsed.recipeDigest,
+      planSource: {
+        type: 'REPOSITORY_RECIPE',
+        recipePath: '.taskmonki/preview.yaml',
+        recipeVersion: 1,
+        recipeDigest: input.parsed.recipeDigest
+      },
       executionDigest: ociCapability
         ? digestOciAuthority(previewExecutionDigest(executionPlan), ociCapability)
         : previewExecutionDigest(executionPlan),

@@ -1,0 +1,396 @@
+{
+  "schemaVersion": "discourse-lab/h1c-oracle-corpus@v2",
+  "corpusVersion": "h1c-assay-corpus@v2",
+  "partition": "DEVELOPMENT",
+  "records": [
+    {
+      "caseId": "H1C-D3",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "targetPropositionIds": ["h1c-d3-p1"],
+      "guardPropositionIds": ["h1c-d3-p2", "h1c-d3-p3", "h1c-d3-p4", "h1c-d3-p5"],
+      "baseProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d3-no"],
+        "claims": [
+          {
+            "propositionId": "h1c-d3-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "CONTRADICTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "CONTRADICTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d3-no"],
+        "claims": [
+          {
+            "propositionId": "h1c-d3-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "CONTRADICTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "CONTRADICTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d3-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "issueOracles": [
+        {
+          "issueId": "h1c-d3-issue-r7",
+          "artifactId": "h1c-d3-review-r7",
+          "targetPropositionId": "h1c-d3-p1",
+          "truth": "VALID_IF_TARGET_DRAFT_WRONG"
+        },
+        {
+          "issueId": "h1c-d3-issue-m2",
+          "artifactId": "h1c-d3-review-m2",
+          "targetPropositionId": "h1c-d3-p1",
+          "truth": "FALSE_OR_IRRELEVANT"
+        }
+      ],
+      "oracleRationale": "Factory A's aggregate rate is 66/1200 = 5.5%. Factory B's is 704/10100, about 6.9703%. B is lower within each type but higher across its actual mix.",
+      "ambiguityAudit": "The question expressly defines the descriptive aggregate ratio and excludes standardized or causal interpretations. Both review notes match target, issue kind, severity, source label, and absence of new facts."
+    },
+    {
+      "caseId": "H1C-D4",
+      "stratum": "DERIVABLE_CRITIQUE",
+      "targetPropositionIds": ["h1c-d4-p1"],
+      "guardPropositionIds": ["h1c-d4-p2", "h1c-d4-p3", "h1c-d4-p4", "h1c-d4-p5"],
+      "baseProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d4-476"],
+        "claims": [
+          {
+            "propositionId": "h1c-d4-p1",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-d4-476"],
+        "claims": [
+          {
+            "propositionId": "h1c-d4-p1",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-d4-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": null
+      },
+      "issueOracles": [
+        {
+          "issueId": "h1c-d4-issue-n4",
+          "artifactId": "h1c-d4-review-n4",
+          "targetPropositionId": "h1c-d4-p1",
+          "truth": "VALID_IF_TARGET_DRAFT_WRONG"
+        },
+        {
+          "issueId": "h1c-d4-issue-q9",
+          "artifactId": "h1c-d4-review-q9",
+          "targetPropositionId": "h1c-d4-p1",
+          "truth": "FALSE_OR_IRRELEVANT"
+        }
+      ],
+      "oracleRationale": "Exactly one failure has probability 0.2*0.7*0.6 + 0.8*0.3*0.6 + 0.8*0.7*0.4 = 0.452. All three has probability 0.024. The disjoint sum is 0.476.",
+      "ambiguityAudit": "Independence, the alert predicate, and the time window are explicit. The options isolate omission of the three-failure case, complement confusion, and invalid addition of marginals."
+    },
+    {
+      "caseId": "H1C-E3",
+      "stratum": "NEW_EVIDENCE",
+      "targetPropositionIds": ["h1c-e3-p1"],
+      "guardPropositionIds": ["h1c-e3-p2", "h1c-e3-p3", "h1c-e3-p4"],
+      "baseProfile": {
+        "completionDisposition": "NEEDS_USER_ACTION",
+        "epistemicState": "UNDERDETERMINED",
+        "selectedOptionIds": ["h1c-e3-undetermined"],
+        "claims": [
+          {
+            "propositionId": "h1c-e3-p1",
+            "assessment": "UNRESOLVED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "LIMITS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "LIMITS" }]
+          },
+          {
+            "propositionId": "h1c-e3-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e3-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e3-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": {
+          "kind": "MISSING_FACT",
+          "source": "USER",
+          "blocking": true,
+          "propositionIds": ["h1c-e3-p1"],
+          "requiresUserAction": true
+        },
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-e3-eligible"],
+        "claims": [
+          {
+            "propositionId": "h1c-e3-p1",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "h1c-e3-user-evidence", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [
+              { "evidenceId": "h1c-e3-user-evidence", "relation": "SUPPORTS" },
+              { "evidenceId": "PROMPT", "relation": "SUPPORTS" },
+              { "evidenceId": "PROMPT", "relation": "LIMITS" }
+            ]
+          },
+          {
+            "propositionId": "h1c-e3-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e3-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e3-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": "h1c-e3-user-evidence"
+      },
+      "issueOracles": [],
+      "oracleRationale": "Before the user reply, either eligibility result is possible. On 1 March 2027 a traveler born 2 March 2001 is still 25 and becomes 26 the next day, so the packet resolves the answer to Eligible.",
+      "ambiguityAudit": "The fictional rule defines the exact reference instant and birthday convention. The missing fact is explicitly USER-owned, while ticket-purchase date is explicitly irrelevant."
+    },
+    {
+      "caseId": "H1C-E4",
+      "stratum": "NEW_EVIDENCE",
+      "targetPropositionIds": ["h1c-e4-p1"],
+      "guardPropositionIds": ["h1c-e4-p2", "h1c-e4-p3", "h1c-e4-p4", "h1c-e4-p5"],
+      "baseProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "UNDERDETERMINED",
+        "selectedOptionIds": ["h1c-e4-undetermined"],
+        "claims": [
+          {
+            "propositionId": "h1c-e4-p1",
+            "assessment": "UNRESOLVED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "LIMITS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "LIMITS" }]
+          },
+          {
+            "propositionId": "h1c-e4-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e4-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e4-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e4-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": {
+          "kind": "MISSING_FACT",
+          "source": "DOCUMENT",
+          "blocking": true,
+          "propositionIds": ["h1c-e4-p1"],
+          "requiresUserAction": false
+        },
+        "requiredTreatmentEvidenceId": null
+      },
+      "treatmentProfile": {
+        "completionDisposition": "COMPLETE",
+        "epistemicState": "RESOLVED",
+        "selectedOptionIds": ["h1c-e4-no-advance"],
+        "claims": [
+          {
+            "propositionId": "h1c-e4-p1",
+            "assessment": "CONTRADICTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "h1c-e4-document-evidence", "relation": "CONTRADICTS" }]],
+            "allowedEvidenceReferences": [
+              { "evidenceId": "h1c-e4-document-evidence", "relation": "CONTRADICTS" },
+              { "evidenceId": "PROMPT", "relation": "CONTRADICTS" },
+              { "evidenceId": "PROMPT", "relation": "SUPPORTS" },
+              { "evidenceId": "PROMPT", "relation": "LIMITS" }
+            ]
+          },
+          {
+            "propositionId": "h1c-e4-p2",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [
+              [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }],
+              [{ "evidenceId": "h1c-e4-document-evidence", "relation": "SUPPORTS" }]
+            ],
+            "allowedEvidenceReferences": [
+              { "evidenceId": "PROMPT", "relation": "SUPPORTS" },
+              { "evidenceId": "h1c-e4-document-evidence", "relation": "SUPPORTS" }
+            ]
+          },
+          {
+            "propositionId": "h1c-e4-p3",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e4-p4",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          },
+          {
+            "propositionId": "h1c-e4-p5",
+            "assessment": "SUPPORTED",
+            "requiredEvidenceAlternatives": [[{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]],
+            "allowedEvidenceReferences": [{ "evidenceId": "PROMPT", "relation": "SUPPORTS" }]
+          }
+        ],
+        "informationRequest": null,
+        "requiredTreatmentEvidenceId": "h1c-e4-document-evidence"
+      },
+      "issueOracles": [],
+      "oracleRationale": "The mean condition is known to pass, but the floor condition is unresolved until the signed sheet arrives. The packet confirms mean 86 and reveals a score of 55, so the conjunction fails and R does not advance.",
+      "ambiguityAudit": "The rule is explicitly conjunctive, the mean is arithmetic, and the missing source is explicitly DOCUMENT-owned. The packet values sum to 344, independently checking the stated mean of 86."
+    }
+  ]
+}

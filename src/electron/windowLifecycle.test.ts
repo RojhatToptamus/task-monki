@@ -6,7 +6,8 @@ describe('shouldCreateWindowOnActivate', () => {
     expect(
       shouldCreateWindowOnActivate({
         ipcHandlersInstalled: false,
-        openWindowCount: 0
+        openWindowCount: 0,
+        shuttingDown: false
       })
     ).toBe(false);
   });
@@ -15,7 +16,8 @@ describe('shouldCreateWindowOnActivate', () => {
     expect(
       shouldCreateWindowOnActivate({
         ipcHandlersInstalled: true,
-        openWindowCount: 0
+        openWindowCount: 0,
+        shuttingDown: false
       })
     ).toBe(true);
   });
@@ -24,7 +26,18 @@ describe('shouldCreateWindowOnActivate', () => {
     expect(
       shouldCreateWindowOnActivate({
         ipcHandlersInstalled: true,
-        openWindowCount: 1
+        openWindowCount: 1,
+        shuttingDown: false
+      })
+    ).toBe(false);
+  });
+
+  it('does not reopen a macOS window after shutdown starts', () => {
+    expect(
+      shouldCreateWindowOnActivate({
+        ipcHandlersInstalled: true,
+        openWindowCount: 0,
+        shuttingDown: true
       })
     ).toBe(false);
   });

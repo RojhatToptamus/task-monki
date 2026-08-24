@@ -1,0 +1,19 @@
+Chrome for Testing
+Version 152.0.7977.54
+
+Task Monki packages Chrome for Testing only for its isolated Design browser
+verification runtime.
+
+Chrome for Testing binaries are supplied by the Chromium project:
+https://googlechromelabs.github.io/chrome-for-testing/
+
+Chromium source and license information:
+https://chromium.googlesource.com/chromium/src/
+https://www.chromium.org/Home/chromium-security/oss-licenses/
+
+The packaged browser also makes its component notices available through
+chrome://credits when it runs.
+
+Google Chrome and Chrome for Testing are subject to Google's applicable terms.
+Google Chrome is a trademark of Google LLC. Task Monki is not affiliated with
+or endorsed by Google.

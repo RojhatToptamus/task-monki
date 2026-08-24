@@ -108,6 +108,16 @@ export function BoardIcon() {
   );
 }
 
+export function DesignIcon() {
+  return (
+    <svg {...ICON_PROPS}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 8h18" />
+      <path d="m8 15 2.5-2.5 2 2L16 11l2 2" />
+    </svg>
+  );
+}
+
 export function SavedViewsFolderIcon({ open }: { open: boolean }) {
   return (
     <svg {...ICON_PROPS} aria-hidden="true">

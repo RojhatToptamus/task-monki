@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
   AgentExecutionSettings,
@@ -53,6 +53,10 @@ import {
 
 export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v4';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
+
+function seedSha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
 
 export type DevSeedScenarioSet = 'all' | DevSeedScenarioGroup;
 
@@ -1521,13 +1525,16 @@ async function createPreviewScenario(
     taskId: state.task.id,
     iterationId: state.iteration.id,
     worktreeId: state.worktree.id,
-    recipePath: '.taskmonki/preview.yaml',
-    recipeVersion: 1,
-    recipeDigest: `seed-recipe-${definition.slug}`,
+    planSource: {
+      type: 'REPOSITORY_RECIPE',
+      recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1,
+      recipeDigest: seedSha256(`preview-recipe:${definition.slug}`)
+    },
     executionDigest:
       definition.slug === 'preview-active-approval-required'
-        ? 'seed-preview-execution-v2'
-        : 'seed-preview-execution-v1',
+        ? seedSha256('preview-execution:v2')
+        : seedSha256('preview-execution:v1'),
     executionPlan: {
       version: 1,
       jobs: [
@@ -1658,18 +1665,24 @@ async function createPreviewScenario(
     });
   }
   if (['preview-approval-required', 'preview-compose-approval-required'].includes(definition.slug)) return state;
+  if (plan.planSource.type !== 'REPOSITORY_RECIPE' || !state.gitSnapshot?.headSha) {
+    throw new Error('Seeded repository Preview authority is incomplete.');
+  }
   const generationPlan =
     definition.slug === 'preview-active-approval-required'
       ? await ctx.store.savePreviewPlan({
           ...plan,
           id: `seed-plan-${definition.slug}-active`,
-          recipeDigest: `seed-recipe-${definition.slug}-active`,
-          executionDigest: 'seed-preview-execution-v1',
+          planSource: {
+            ...plan.planSource,
+            recipeDigest: seedSha256(`preview-recipe:${definition.slug}:active`)
+          },
+          executionDigest: seedSha256('preview-execution:v1'),
           createdAt: new Date(Date.parse(now) - 1).toISOString()
         })
       : plan;
   const approval = await ctx.store.savePreviewApproval({
-    id: `seed-approval-${definition.slug}`,
+    id: randomUUID(),
     taskId: state.task.id,
     planId: generationPlan.id,
     executionDigest: generationPlan.executionDigest,
@@ -1692,13 +1705,19 @@ async function createPreviewScenario(
     iterationId: state.iteration.id,
     worktreeId: state.worktree.id,
     planId: generationPlan.id,
-    approvalId: approval.id,
-    executionDigest: generationPlan.executionDigest,
+    executionAuthority: {
+      type: 'USER_APPROVAL',
+      approvalId: approval.id,
+      executionDigest: generationPlan.executionDigest
+    },
     adapter: composePreview ? 'COMPOSE' : 'NATIVE',
     composeChange: composePreview ? 'RESTART_PRESERVE_DATA' : undefined,
-    sourceGitSnapshotId: state.gitSnapshot?.id ?? 'seed-git',
-    sourceHeadSha: state.gitSnapshot?.headSha ?? ctx.baseSha,
-    sourceDirtyFingerprint: state.gitSnapshot?.dirtyFingerprint ?? 'seed-dirty',
+    source: {
+      type: 'WORKTREE_SNAPSHOT',
+      gitSnapshotId: state.gitSnapshot.id,
+      headSha: state.gitSnapshot.headSha,
+      dirtyFingerprint: state.gitSnapshot.dirtyFingerprint
+    },
     sourceManifestArtifactId: manifest.id,
     sourceManifestDigest: 'seed-manifest',
     workspacePath: path.join(ctx.previewRoot, state.task.id, generationId),

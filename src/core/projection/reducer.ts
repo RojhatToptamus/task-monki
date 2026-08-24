@@ -24,6 +24,10 @@ export function createEmptyState(): StoreState {
     repositories: [],
     boards: [],
     tasks: [],
+    designTurns: [],
+    designReferences: [],
+    designRevisions: [],
+    designSourceActions: [],
     iterations: [],
     worktrees: [],
     gitSnapshots: [],
@@ -65,6 +69,10 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     repositories: [...state.repositories],
     boards: [...state.boards],
     tasks: [...state.tasks],
+    designTurns: [...state.designTurns],
+    designReferences: [...state.designReferences],
+    designRevisions: [...state.designRevisions],
+    designSourceActions: [...state.designSourceActions],
     iterations: [...state.iterations],
     worktrees: [...state.worktrees],
     gitSnapshots: [...state.gitSnapshots],
@@ -306,6 +314,9 @@ function isAuthoritativeAgentProgress(eventType: string | undefined): boolean {
 }
 
 function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): Task['workflowPhase'] {
+  if (task.kind === 'DESIGN') {
+    return task.workflowPhase;
+  }
   switch (event.type) {
     case 'TRANSITION_REQUESTED':
       if (isReviewRunEvent(task, event, run)) {

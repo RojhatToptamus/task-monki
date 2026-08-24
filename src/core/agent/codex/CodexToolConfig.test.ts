@@ -69,7 +69,7 @@ describe('Codex external tool config', () => {
               executable: '/not/used/when/overrides/are/provided',
               cwd: process.cwd(),
               settings,
-              mcpServerConfigOverrides: [SAMPLE_MCP_DISABLE_OVERRIDE]
+              additionalConfigOverrides: [SAMPLE_MCP_DISABLE_OVERRIDE]
             })
           ).resolves.toEqual([
             `features.apps=${apps === 'enabled' ? 'true' : 'false'}`,
@@ -91,7 +91,7 @@ describe('Codex external tool config', () => {
           mcpServers: true,
           apps: 'yes'
         } as unknown as CodexExternalToolSettings,
-        mcpServerConfigOverrides: [SAMPLE_MCP_DISABLE_OVERRIDE]
+        additionalConfigOverrides: [SAMPLE_MCP_DISABLE_OVERRIDE]
       })
     ).resolves.toEqual([
       'features.apps=false',

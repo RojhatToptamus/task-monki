@@ -14,6 +14,7 @@ import type {
   AgentSessionSnapshot,
   AgentExecutionSettings,
   AgentInteractionDecision,
+  AgentInstructionProfile,
   InteractionRequestRecord
 } from '../../shared/agent';
 import type { RefinePromptResponse } from '../../shared/contracts';
@@ -45,6 +46,7 @@ export interface StartAgentTurn {
   mode: AgentRunMode;
   prompt: string;
   authoritativeGoal: string;
+  instructionProfile?: AgentInstructionProfile;
   attachments?: AgentTurnAttachment[];
   settings?: AgentExecutionSettings;
 }
@@ -168,6 +170,8 @@ export interface AgentRuntimeAdapter {
   respondToInteraction(input: AgentInteractionResponse): Promise<void>;
   /** Release runtime-owned processes/streams for a task after Task Monki proves no work is active. */
   releaseTask?(taskId: string): Promise<void>;
+  /** Permanently delete provider history owned by a task. Unsupported runtimes must fail closed. */
+  deleteTaskProviderHistory?(taskId: string): Promise<void>;
   reconcile(): Promise<AgentReconciliationResult>;
   shutdown(): Promise<void>;
 }

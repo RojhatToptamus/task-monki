@@ -1090,7 +1090,11 @@ function PreviewTechnicalDetails({
         <dl className="tm-preview-keyvalues">
           <div><dt>Generation</dt><dd><code>{shortId(current.id)}</code></dd></div>
           <div><dt>State</dt><dd>{humanizeEnum(current.state)}</dd></div>
-          <div><dt>Source</dt><dd><code>{shortId(current.sourceHeadSha)}</code></dd></div>
+          <div><dt>Source</dt><dd><code>{shortId(
+            current.source.type === 'WORKTREE_SNAPSHOT'
+              ? current.source.headSha
+              : current.source.commitSha
+          )}</code></dd></div>
           <div><dt>Routing</dt><dd>{humanizeEnum(current.routingState)}</dd></div>
         </dl>
         {currentRuntime.length > 0 ? (

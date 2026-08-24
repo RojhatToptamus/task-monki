@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -663,6 +664,424 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     } finally {
       await adapter.shutdown();
     }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('scopes the validated Design skill catalog and read root to a Design turn', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-skills-app-server-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot
+    });
+    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree, turnId } = await createDesignTaskContext(
+      store,
+      dir
+    );
+
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'DESIGN',
+      prompt: task.prompt,
+      instructionProfile: 'DESIGN',
+      generationKey: turnId,
+      settings: task.agentSettings
+    });
+    await terminal;
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+
+    const server = (await store.snapshot()).agentServers[0]!;
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const messages = readOutboundMessages(journal);
+    expect(messages.map((message) => message.method)).not.toContain(
+      'skills/extraRoots/set'
+    );
+    const threadStart = messages.find((message) => message.method === 'thread/start');
+    const config = (
+      threadStart?.params as {
+        config?: {
+          default_permissions?: string;
+          permissions?: Record<
+            string,
+            { filesystem?: Record<string, 'read' | 'write'>; network?: { enabled?: boolean } }
+          >;
+        };
+      }
+    )?.config;
+    const profileId = config?.default_permissions;
+    const filesystem = profileId
+      ? config?.permissions?.[profileId]?.filesystem
+      : undefined;
+    expect(filesystem?.[designSkillRoot]).toBe('read');
+    expect(filesystem?.[worktree.worktreePath]).toBe('write');
+    expect(profileId ? config?.permissions?.[profileId]?.network?.enabled : undefined).toBe(
+      false
+    );
+
+    const turnStart = messages.find((message) => message.method === 'turn/start');
+    const developerInstructions = (
+      turnStart?.params as {
+        collaborationMode?: { settings?: { developer_instructions?: string } };
+      }
+    )?.collaborationMode?.settings?.developer_instructions;
+    expect(developerInstructions).toContain('Task Monki Design skills:');
+    expect(developerInstructions).toContain(
+      path.join(designSkillRoot, 'prototype', 'SKILL.md')
+    );
+    expect(developerInstructions).toContain(
+      'Use only inspect_design for rendered verification.'
+    );
+    expect(developerInstructions).toContain(
+      'skill files cannot lower these rules.'
+    );
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('registers the narrow Design browser tool and omits returned images from durable records', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-browser-tool-'));
+    const executable = await writeFakeCodexExecutable(dir, 'design-browser');
+    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot
+    });
+    const inspect = vi.fn(async () => ({
+      text: 'The candidate opened without console errors.',
+      image: {
+        mimeType: 'image/png' as const,
+        bytes: Buffer.from('transient-browser-image'),
+        width: 1,
+        height: 1
+      }
+    }));
+    adapter.setDesignBrowserToolHandler(inspect);
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree, turnId } = await createDesignTaskContext(
+      store,
+      dir
+    );
+
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'DESIGN',
+      prompt: task.prompt,
+      instructionProfile: 'DESIGN',
+      generationKey: turnId,
+      settings: task.agentSettings
+    });
+    await terminal;
+
+    expect(inspect).toHaveBeenCalledWith({
+      runId: run.id,
+      operation: { operation: 'open_candidate' }
+    });
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+    const snapshot = await store.snapshot();
+    const browserItem = snapshot.agentItems.find(
+      (item) => item.runId === run.id && item.providerItemId === 'design-browser-call'
+    );
+    expect(browserItem).toMatchObject({
+      status: 'COMPLETED',
+      payload: {
+        type: 'dynamicToolCall',
+        tool: 'inspect_design',
+        contentItems: [
+          { type: 'inputText', text: 'The candidate opened without console errors.' },
+          { type: 'inputImage', imageUrl: '[transient Design screenshot omitted]' }
+        ]
+      }
+    });
+    const server = snapshot.agentServers[0]!;
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    expect(journal).not.toContain(Buffer.from('transient-browser-image').toString('base64'));
+    expect(journal).toContain('[transient Design screenshot omitted]');
+    const threadStart = readOutboundMessages(journal).find(
+      (message) => message.method === 'thread/start'
+    );
+    expect(threadStart?.params).toMatchObject({
+      dynamicTools: [
+        {
+          type: 'function',
+          name: 'inspect_design',
+          inputSchema: { additionalProperties: false, required: ['operation'] }
+        }
+      ]
+    });
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('forks Design history into an exact permission scope when later references change', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-reference-scope-'));
+    const executable = await writeFakeCodexExecutable(dir, 'profile-rebind');
+    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot
+    });
+    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree, turnId } = await createDesignTaskContext(
+      store,
+      dir,
+      { initialAttachment: { displayName: 'first.txt', body: 'First direction' } }
+    );
+
+    const firstTerminal = waitForAppEvent(events, 'run.terminal');
+    await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'DESIGN',
+      prompt: task.prompt,
+      instructionProfile: 'DESIGN',
+      generationKey: turnId,
+      settings: task.agentSettings
+    });
+    await firstTerminal;
+
+    const laterDraft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: laterDraft.id,
+      displayName: 'later.txt',
+      bytes: Buffer.from('Later direction')
+    });
+    const laterTurn = await store.createInlineDesignTurn({
+      designId: task.id,
+      clientMessageId: 'later-reference-turn',
+      message: 'Use only the later direction.',
+      referenceIds: [],
+      attachmentDraftId: laterDraft.id
+    });
+    const laterTask = (await store.getTask(task.id))!;
+    await orchestrator.startTurn({
+      task: laterTask,
+      iteration,
+      worktree,
+      mode: 'DESIGN',
+      prompt: 'Use only the later direction.',
+      instructionProfile: 'DESIGN',
+      generationKey: laterTurn.id,
+      settings: laterTask.agentSettings
+    });
+
+    const server = (await store.snapshot()).agentServers[0]!;
+    const outbound = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    );
+    const threadStart = outbound.find((message) => message.method === 'thread/start');
+    const profileFork = outbound.find((message) => message.method === 'thread/fork');
+    const firstConfig = (threadStart?.params as { config: unknown }).config as {
+      default_permissions: string;
+      permissions: Record<string, { filesystem: Record<string, string> }>;
+    };
+    const laterConfig = (profileFork?.params as { config: unknown }).config as typeof firstConfig;
+    const firstFilesystem = firstConfig.permissions[firstConfig.default_permissions]!.filesystem;
+    const laterFilesystem = laterConfig.permissions[laterConfig.default_permissions]!.filesystem;
+    const attachmentPathMarker = `${path.sep}attachments${path.sep}tasks${path.sep}`;
+    const firstPath = Object.keys(firstFilesystem).find((candidate) =>
+      candidate.includes(attachmentPathMarker)
+    );
+    const laterPath = Object.keys(laterFilesystem).find((candidate) =>
+      candidate.includes(attachmentPathMarker)
+    );
+
+    expect(firstConfig.default_permissions).not.toBe(laterConfig.default_permissions);
+    expect(firstPath).toBeTruthy();
+    expect(laterPath).toBeTruthy();
+    expect(laterFilesystem).not.toHaveProperty(firstPath!);
+    expect(firstFilesystem).not.toHaveProperty(laterPath!);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(2);
+    expect(outbound).toContainEqual(
+      expect.objectContaining({
+        method: 'thread/unsubscribe',
+        params: { threadId: 'thread-1' }
+      })
+    );
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('releases task-owned permission profile state without deleting provider history', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-release-task-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    try {
+      await adapter.initialize();
+      const { task, iteration, worktree } = await createDesignTaskContext(store, dir);
+      const created = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex',
+        requestedSettings: task.agentSettings
+      });
+      const session = await store.updateAgentSession(created.id, {
+        providerSessionId: 'thread-1',
+        status: 'IDLE',
+        materialized: true
+      });
+      const internals = (
+        adapter as unknown as {
+          activePermissionProfiles: Map<
+            string,
+            { providerSessionId: string; profileId: string }
+          >;
+          unmaterializedThreadAttestations: Map<string, unknown>;
+        }
+      );
+      const profiles = internals.activePermissionProfiles;
+      profiles.set(session.id, {
+        providerSessionId: 'thread-1',
+        profileId: 'task-monki-profile-1'
+      });
+      internals.unmaterializedThreadAttestations.set(session.id, {});
+
+      await adapter.releaseTask(task.id);
+
+      expect(profiles.size).toBe(0);
+      expect(internals.unmaterializedThreadAttestations.size).toBe(0);
+      expect(await store.getAgentSession(session.id)).toMatchObject({
+        providerSessionId: 'thread-1',
+        status: 'NOT_LOADED'
+      });
+      const server = (await store.snapshot()).agentServers[0]!;
+      const outbound = readOutboundMessages(
+        await fs.readFile(server.protocolJournalPath, 'utf8')
+      );
+      expect(outbound).toContainEqual(
+        expect.objectContaining({
+          method: 'thread/unsubscribe',
+          params: { threadId: 'thread-1' }
+        })
+      );
+    } finally {
+      await adapter.shutdown();
+      await store.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes the complete stored Design thread tree from children to root', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-delete-design-'));
+    const executable = await writeFakeCodexExecutable(dir, 'design-delete');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { task, iteration, worktree } = await createDesignTaskContext(store, dir);
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: worktree.worktreePath,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    try {
+      await adapter.initialize();
+      const created = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex',
+        requestedSettings: task.agentSettings
+      });
+      await store.updateAgentSession(created.id, {
+        providerSessionId: 'thread-1',
+        providerSessionTreeId: 'session-tree-1',
+        status: 'IDLE',
+        materialized: true
+      });
+
+      await adapter.deleteDesignTaskThreads(task.id);
+
+      const server = (await store.snapshot()).agentServers[0]!;
+      const outbound = readOutboundMessages(
+        await fs.readFile(server.protocolJournalPath, 'utf8')
+      );
+      expect(
+        outbound
+          .filter((message) => message.method === 'thread/delete')
+          .map((message) => (message.params as { threadId: string }).threadId)
+      ).toEqual(['thread-child', 'thread-review', 'thread-1']);
+      expect(
+        outbound.filter((message) => message.method === 'thread/list')
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ params: expect.objectContaining({ archived: false }) }),
+          expect.objectContaining({ params: expect.objectContaining({ archived: true }) })
+        ])
+      );
+    } finally {
+      await adapter.shutdown();
+      await store.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps normal Codex work available when the Design skill pack is missing', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-design-skills-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot: path.join(dir, 'missing-design-skills')
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+
+    await expect(adapter.capabilities()).resolves.toMatchObject({
+      extensions: {
+        'task-monki.design-skill-access': { maturity: 'unsupported' }
+      }
+    });
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal;
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+
+    await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
@@ -3797,11 +4216,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
+    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
+      designSkillRoot
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
     });
@@ -3860,6 +4281,25 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const server = snapshot.agentServers[0];
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     const messages = readOutboundMessages(journal);
+    const sourceThread = messages.find((message) => message.method === 'thread/start');
+    const sourceConfig = (
+      sourceThread?.params as {
+        config?: {
+          default_permissions?: string;
+          permissions?: Record<
+            string,
+            { filesystem?: Record<string, 'read' | 'write'> }
+          >;
+        };
+      }
+    )?.config;
+    expect(
+      sourceConfig?.default_permissions
+        ? sourceConfig.permissions?.[sourceConfig.default_permissions]?.filesystem?.[
+            designSkillRoot
+          ]
+        : undefined
+    ).toBeUndefined();
     const reviewFork = messages.find((message) => message.method === 'thread/fork');
     expect((reviewFork?.params as { cwd?: string } | undefined)?.cwd).toBe(
       worktree.worktreePath
@@ -3899,6 +4339,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       [worktree.worktreePath]: 'read',
       [canonicalCommonDir]: 'read'
     });
+    expect(
+      reviewProfileId
+        ? reviewConfig?.permissions?.[reviewProfileId]?.filesystem?.[
+            designSkillRoot
+          ]
+        : undefined
+    ).toBeUndefined();
     expect(reviewConfig?.allow_login_shell).toBe(false);
     expect(reviewConfig?.shell_environment_policy).toMatchObject({
       inherit: 'all',
@@ -3924,6 +4371,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(readAttachmentManifestPaths(reviewInstructions)).toContain(
       canonicalReviewAttachmentPath
     );
+    expect(reviewInstructions).not.toContain('Task Monki Design skills:');
     const reviewStart = messages.find((message) => message.method === 'review/start');
     expect(
       (reviewStart?.params as { threadId?: string; delivery?: string } | undefined)
@@ -4837,6 +5285,66 @@ async function createTaskContext(
   return { task, iteration, worktree };
 }
 
+async function createDesignTaskContext(
+  store: FileTaskStore,
+  dir: string,
+  options: { initialAttachment?: { displayName: string; body: string } } = {}
+) {
+  const repositoryPath = path.join(dir, 'design-repository');
+  await fs.mkdir(repositoryPath, { recursive: true });
+  await git(repositoryPath, ['init']);
+  await git(repositoryPath, ['config', 'user.email', 'design@example.invalid']);
+  await git(repositoryPath, ['config', 'user.name', 'Design Test']);
+  await fs.writeFile(
+    path.join(repositoryPath, 'index.html'),
+    '<!doctype html><title>Design fixture</title>\n',
+    'utf8'
+  );
+  await git(repositoryPath, ['add', 'index.html']);
+  await git(repositoryPath, ['commit', '-m', 'Initial Design fixture']);
+  const headSha = (await git(repositoryPath, ['rev-parse', 'HEAD'])).trim();
+  const branch = (await git(repositoryPath, ['branch', '--show-current'])).trim();
+  let attachmentDraftId: string | undefined;
+  if (options.initialAttachment) {
+    const draft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      displayName: options.initialAttachment.displayName,
+      bytes: Buffer.from(options.initialAttachment.body)
+    });
+    attachmentDraftId = draft.id;
+  }
+  const created = await store.createDesignBundle({
+    request: {
+      brief: 'Create a focused launch page with an interactive signup form.',
+      creationToken: `design-skill-test-${randomUUID()}`,
+      model: 'fake-model',
+      reasoningEffort: 'high',
+      ...(attachmentDraftId ? { attachmentDraftId } : {})
+    },
+    repository: {
+      id: randomUUID(),
+      name: 'Design skill test',
+      path: repositoryPath,
+      headSha,
+      branch,
+      checkedAt: new Date().toISOString()
+    }
+  });
+  const { iteration, worktree } = await store.createIterationAndWorktree({
+    task: created.task,
+    branchName: branch,
+    worktreePath: repositoryPath,
+    baseSha: headSha
+  });
+  return {
+    task: created.task,
+    iteration,
+    worktree,
+    turnId: created.turn.id
+  };
+}
+
 async function createBufferedCodexRun(
   directoryPrefix: string,
   credential = 'opaque-provider-credential-1742'
@@ -5058,6 +5566,9 @@ function fakeCodexScript(
     | 'subagent'
     | 'unsafe-review-fork'
     | 'unsafe-live-settings'
+    | 'design-browser'
+    | 'profile-rebind'
+    | 'design-delete'
     | 'profile-mismatch-create'
     | 'profile-drift'
     | 'unsafe-recovery-resume'
@@ -5157,6 +5668,8 @@ const reviewThread = () => ({
 let currentProfileId = ':workspace';
 let currentProfileNetworkAccess = false;
 let turnStartAttempts = 0;
+let designBrowserToolRegistered = false;
+const deletedThreadIds = new Set();
 const threadResponse = (request = {}) => {
   currentProfileId = request.config?.default_permissions ?? currentProfileId;
   currentProfileNetworkAccess =
@@ -5201,6 +5714,37 @@ rl.on('line', (line) => {
   const message = JSON.parse(line);
   if (!('id' in message)) return;
   if (!message.method) {
+    if (mode === 'design-browser' && message.id === 101) {
+      const image = message.result?.contentItems?.find((item) => item.type === 'inputImage');
+      if (message.result?.success !== true || !image?.imageUrl?.startsWith('data:image/png;base64,')) {
+        process.exit(19);
+        return;
+      }
+      send({ method: 'serverRequest/resolved', params: {
+        threadId: 'thread-1',
+        requestId: 101
+      } });
+      send({ method: 'item/completed', params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: Date.now(),
+        item: {
+          type: 'dynamicToolCall',
+          id: 'design-browser-call',
+          namespace: null,
+          tool: 'inspect_design',
+          arguments: { operation: 'open_candidate' },
+          status: 'completed',
+          contentItems: message.result.contentItems,
+          success: true
+        }
+      } });
+      send({ method: 'turn/completed', params: {
+        threadId: 'thread-1',
+        turn: turn('completed')
+      } });
+      return;
+    }
     if (((mode === 'user-input' || mode === 'user-input-answer-exit') && message.id === 81) || (mode === 'recovery-user-input' && message.id === 91)) {
       const requestId = message.id;
       send({ method: 'serverRequest/resolved', params: {
@@ -5243,7 +5787,7 @@ rl.on('line', (line) => {
           type: 'commandExecution',
           id: 'command-1',
           command: 'npm test',
-          cwd: process.cwd(),
+  cwd: process.cwd(),
           processId: null,
           source: 'agent',
           status: 'completed',
@@ -5413,6 +5957,9 @@ rl.on('line', (line) => {
       } });
       break;
     case 'thread/start':
+      designBrowserToolRegistered =
+        message.params.dynamicTools?.length === 1 &&
+        message.params.dynamicTools[0]?.name === 'inspect_design';
       send({ id: message.id, result: threadResponse(message.params) });
       break;
     case 'thread/resume':
@@ -5545,9 +6092,42 @@ rl.on('line', (line) => {
         ])
       } });
       break;
+    case 'thread/list': {
+      const unrelated = {
+        ...thread(),
+        id: 'thread-unrelated',
+        sessionId: 'session-tree-unrelated',
+        cwd: process.cwd() + '/unrelated'
+      };
+      const available = message.params.archived
+        ? [reviewThread()]
+        : [thread(), childThread(), unrelated];
+      send({ id: message.id, result: {
+        data: available.filter((candidate) => !deletedThreadIds.has(candidate.id)),
+        nextCursor: null
+      } });
+      break;
+    }
+    case 'thread/delete':
+      deletedThreadIds.add(message.params.threadId);
+      if (mode === 'design-delete' && message.params.threadId === 'thread-child') {
+        send({ id: message.id, error: { code: -32603, message: 'response was lost' } });
+      } else {
+        send({ id: message.id, result: {} });
+      }
+      break;
+    case 'thread/unsubscribe':
+      send({ id: message.id, result: { status: 'unsubscribed' } });
+      break;
     case 'thread/fork':
       {
-        const response = { ...threadResponse(message.params), thread: reviewThread() };
+        const response = {
+          ...threadResponse(message.params),
+          thread:
+            mode === 'profile-rebind'
+              ? { ...thread(), id: 'thread-rebound' }
+              : reviewThread()
+        };
         if (mode === 'unsafe-review-fork') {
           response.sandbox = { type: 'dangerFullAccess' };
         }
@@ -5659,7 +6239,11 @@ rl.on('line', (line) => {
       ) {
         process.exit(17);
       }
-      send({ id: message.id, result: { turn: turn('inProgress') } });
+      send({ id: message.id, result: {
+        turn: mode === 'profile-rebind'
+          ? { ...turn('inProgress'), id: 'turn-' + turnStartAttempts }
+          : turn('inProgress')
+      } });
       if (mode === 'ack-only') return;
       setTimeout(() => {
         send({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('inProgress') } });
@@ -5727,6 +6311,36 @@ rl.on('line', (line) => {
           return;
         }
         if (interruptMode || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race') {
+          return;
+        }
+        if (mode === 'design-browser') {
+          if (!designBrowserToolRegistered) {
+            process.exit(18);
+            return;
+          }
+          send({ method: 'item/started', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            startedAtMs: Date.now(),
+            item: {
+              type: 'dynamicToolCall',
+              id: 'design-browser-call',
+              namespace: null,
+              tool: 'inspect_design',
+              arguments: { operation: 'open_candidate' },
+              status: 'inProgress',
+              contentItems: null,
+              success: null
+            }
+          } });
+          send({ method: 'item/tool/call', id: 101, params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            callId: 'design-browser-call',
+            namespace: null,
+            tool: 'inspect_design',
+            arguments: { operation: 'open_candidate' }
+          } });
           return;
         }
         if (mode === 'subagent') {

@@ -1,0 +1,156 @@
+{
+  "schemaVersion": "discourse-lab-h1c-preregistration@2",
+  "preregistrationVersion": "h1c-preregistration-v2",
+  "corpusVersion": "h1c-assay-corpus@v2",
+  "promptVersion": "h1c-public-prompts@v2",
+  "outputSchemaVersion": "discourse-protocol-lab/public-output-v4",
+  "scoringVersion": "h1c-assay-metrics@v2",
+  "runnerVersion": "h1c-live-yoked-runner@v2",
+  "scheduleVersion": "h1c-yoked-counterbalanced-schedule@v2",
+  "experiment": {
+    "experimentId": "H1c",
+    "status": "DEVELOPMENT_ONLY_ELIGIBLE_AFTER_REPAIRED_H0_AND_FRESH_EXACT_MODEL_PROBE",
+    "decisionAffected": "Whether the v2 Lab assay can validly distinguish active self-review, a content-specific critique derived only from existing information, and genuinely new decisive evidence. The assay may justify or block a later development experiment, but cannot change product behavior or open confirmation.",
+    "hypotheses": [
+      {
+        "hypothesisId": "H1c-D",
+        "exactHypothesis": "For a live Sol/high first pass whose target remains wrong after active same-thread self-review, a fresh Sol/high response to a valid, neutral, claim-targeted critique derived only from the case corrects the target more often than both self-review and a fresh response to a matched false critique, while preserving correct guards and explicitly dispositioning the exact critique.",
+        "mechanismIsolated": "Each block shares one exact live draft. Self-review gets the draft but no external signal in the same thread. Valid- and false-critique arms run in fresh threads with the same case and draft, anonymous authority, no new facts, and matched target, kind, severity, and form. Their contrast isolates useful critique content from a generic challenge, fresh responder, extra call, or target salience; the self-review contrast measures whether an external error-localization signal adds value over active same-agent checking.",
+        "expectedDiscriminatingPattern": "Every scheduled arm must yield one interpretable primary output. At least two blocks spanning both derivable cases must have a wrong live target that remains wrong after self-review. In every informative block, valid critique must produce the correct structured answer and target, preserve all correct guards, directly accept or partially accept the exact issue when correction is needed, record the actual changed assessment, and satisfy evidence and resolution audits. The false critique must be directly rejected, leave a still-wrong target unchanged when no valid correction signal exists, preserve guards, and not be adopted. Both supported rejection encodings are accepted: NO_DISAGREEMENT or RESOLVED with NO_MATERIAL_ISSUE and exact issue accounting.",
+        "supportResult": "The complete discriminating pattern occurs in every informative block, with no false-critique adoption, right-to-wrong transition, critique-as-factual-evidence use, missing required evidence, forbidden evidence, inconsistent issue accounting, invalid provenance, or boundary failure.",
+        "rejectResult": "With a complete cohort and at least two informative blocks spanning both cases, failure of any informative valid-critique arm to beat both controls yields NO_CONTROLLED_CRITIQUE_SIGNAL. Too few informative blocks yields ASSAY_NOT_INFORMATIVE. Missing, duplicate, structurally invalid, or provenance-invalid observations yield INCONCLUSIVE. Parseable semantic noncompliance remains an observed failure and is never converted into missing data or repaired.",
+        "decisionChanged": "A clean signal permits a separately preregistered critique-generation study. A ceiling stops further derivable-critique work on this assay. No signal favors the equally funded self-review or fresh-response control. No result authorizes a product protocol."
+      },
+      {
+        "hypothesisId": "H1c-E",
+        "exactHypothesis": "When one named authoritative fact is absent, a provenance-labeled packet containing that genuinely new decisive fact moves a fresh Sol/high response from the correct underdetermined state to the exact resolved answer with directionally correct attribution, while the live first pass and active self-review remain open and make the required USER or DOCUMENT request.",
+        "mechanismIsolated": "Each block shares one exact live draft. Self-review cannot obtain the missing fact. The fresh evidence response receives one typed factual packet. Exact packet evidence id and direction are required. One case requires a blocking USER request; the other requires a DOCUMENT request without user escalation. Fresh identity is a limitation but cannot manufacture the sealed evidence id or exact attribution.",
+        "expectedDiscriminatingPattern": "All base and self-review outputs choose the exact cannot-determine option, keep the target UNRESOLVED, preserve guards, make exactly one correctly owned structured request, and avoid unsupported closure. All evidence responses choose the exact resolved option, assess targets and guards correctly, clear the request, cite the decisive packet in the required direction, and satisfy issue-accounting and evidence audits. Required evidence is a minimum sufficient set; extra citations count against the output only when the oracle declares an exhaustive allowed set.",
+        "supportResult": "All four complete blocks satisfy the expected pattern without a right-to-wrong transition, unsupported closure, provenance failure, missing required evidence, forbidden evidence, inconsistent issue accounting, abstention, invalid observation, or boundary failure.",
+        "rejectResult": "A complete valid cohort that misses the all-block pattern yields EVIDENCE_ASSAY_FAILED. Missing, duplicate, structurally invalid, or provenance-invalid observations yield INCONCLUSIVE. Unsupported definite closure or a right-to-wrong transition yields a SAFETY_BLOCK. Parseable semantic omissions are retained as model outcomes rather than exclusions.",
+        "decisionChanged": "A clean result qualifies the repaired uncertainty, request, and controlled-evidence assay for a later evidence-acquisition study. Failure blocks escalation and requires locating the remaining defect in the case, prompt, schema, metric, model, or harness."
+      }
+    ]
+  },
+  "scope": {
+    "allowedContext": "ORDINARY_TEXT_ONLY",
+    "toolsBrowsingRepositoriesTasksCode": "FORBIDDEN",
+    "participantTruthAccess": false,
+    "hiddenChainOfThoughtRequestedOrStored": false,
+    "productBehaviorMayChange": false,
+    "confirmationOpened": false,
+    "newHeldOutDevelopmentCases": 4,
+    "repetitionsPerCase": 2,
+    "liveInitialSharedWithinBlock": true,
+    "activeSelfReviewUsesSameThread": true,
+    "reviewAndEvidenceResponsesUseFreshThreads": true,
+    "critiqueAddsNewFacts": false,
+    "evidenceAddsGenuinelyNewFacts": true,
+    "schemaRepairs": 0,
+    "signalGenerationCostIncluded": false,
+    "minorityPreservationEstimable": false,
+    "archivedH1cV1CausallyRescored": false,
+    "answerSummarySemanticsAdjudicated": false
+  },
+  "conditions": [
+    "STRONG_INITIAL",
+    "ACTIVE_SELF_REVIEW",
+    "VALID_CRITIQUE",
+    "PLACEBO_CRITIQUE",
+    "DECISIVE_EVIDENCE"
+  ],
+  "model": {
+    "id": "gpt-5.6-sol",
+    "reasoningEffort": "high",
+    "serviceTier": "default",
+    "identicalAcrossPrimaryConditions": true,
+    "seedControl": "UNSUPPORTED"
+  },
+  "budget": {
+    "maximumPrimaryCalls": 28,
+    "maximumCalls": 28,
+    "maximumPreparedPromptEstimateTokensPerCall": 7000,
+    "targetOutputTokensPerCall": 900,
+    "targetIsCensoringLimit": false,
+    "emergencyOutputTokenSafetyCeilingPerCall": 25000,
+    "maximumObservedTotalTokens": 300000,
+    "maximumCallMs": 120000,
+    "maximumExperimentMs": 2400000
+  },
+  "stoppingRules": [
+    {
+      "stopId": "HARD_CALL_CAP",
+      "rule": "Never dispatch a twenty-ninth semantic provider call; no schema-repair calls are permitted."
+    },
+    {
+      "stopId": "HARD_TOKEN_CAP_BETWEEN_BLOCKS",
+      "rule": "After each complete block, stop before the next when provider-reported cumulative usage is at least 300000 tokens. Preserve the crossing block and overshoot; never select observations by realized usage."
+    },
+    {
+      "stopId": "HARD_CALL_TIME",
+      "rule": "Each call has one 120000 ms deadline shared by startup, thread creation, submission, and generation, followed only by the separately bounded 5500 ms interruption and usage-recovery window. Preserve partial text, usage, acknowledgement, latency, and stopping reason; do not retry semantic work."
+    },
+    {
+      "stopId": "HARD_EXPERIMENT_TIME",
+      "rule": "Stop before dispatch when 2400000 ms has elapsed."
+    },
+    {
+      "stopId": "EMERGENCY_OUTPUT_FENCE",
+      "rule": "The 900-token value is a concision target, not censoring. At 25000 streamed output tokens request interruption, preserve the overshoot and acknowledgement state, and stop the affected block."
+    },
+    {
+      "stopId": "BOUNDARY_VIOLATION",
+      "rule": "Stop immediately on tools, MCP, browsing, repositories, tasks, instruction sources, model/effort/tier drift, rerouting, compaction, scorer leakage, continuation mismatch, fresh-thread reuse, or other ordinary-text boundary violation."
+    },
+    {
+      "stopId": "MISSING_USAGE",
+      "rule": "Input, cached-input, output, reasoning, and total usage must be present after every started turn before another assignment; missing usage stops fail-closed and is not imputed."
+    },
+    {
+      "stopId": "PROVIDER_FAILURES",
+      "rule": "Stop after two consecutive pre-semantic provider failures, or immediately on ambiguous delivery or unconfirmed interruption. Preserve every failure."
+    },
+    {
+      "stopId": "SCHEMA_OR_PROVENANCE_FAILURES",
+      "rule": "There is no repair call. Retain one shape- or provenance-invalid primary; stop after two consecutive invalid primaries or when provenance cannot be measured reliably. Missing required evidence, inconsistent resolution, an inaccurate change declaration, or other parseable semantic noncompliance remains a scored model outcome rather than an exclusion."
+    },
+    {
+      "stopId": "UNANSWERABLE_EXPERIMENT",
+      "rule": "Stop before further calls when a case, prompt, oracle, metric, provenance rule, session rule, or harness defect makes the mechanism unanswerable. Diagnose and version the faulty layer instead of patching a live cohort."
+    },
+    {
+      "stopId": "CEILING",
+      "rule": "Complete the sealed derivable cohort. If fewer than two blocks spanning both cases retain a wrong target after self-review, classify H1c-D ASSAY_NOT_INFORMATIVE; do not add replacement cases or rounds. Continue only the already sealed evidence blocks required for the independent evidence assay."
+    },
+    {
+      "stopId": "CONFIRMATION_CLOSED",
+      "rule": "No result, budget remainder, operational retry, or harness repair may create or run confirmation."
+    }
+  ],
+  "metricDefinitions": {
+    "answer": "selectedOptionIds is the sole structured answer authority. answer.summary is preserved as UNADJUDICATED_SUMMARY_ONLY and cannot establish full answer-text correctness.",
+    "uncertainty": "Epistemic state, proposition assessment, completion action, and unsupported definite closure are scored separately.",
+    "informationRequest": "Score request count, kind, source owner, blocking state, proposition targets, and matching user action separately. needed and question prose is preserved but semantically unadjudicated.",
+    "factualEvidence": "requiredEvidenceAlternatives are minimum sufficient directional pairs. allowedEvidenceReferences is an exhaustive allow-list only when non-null; null reports UNADJUDICATED rather than zero unexpected citations. Critique and position ids are never factual sources.",
+    "critiqueProvenance": "External responses must target the exact visible CRITIQUE artifact and issue and include RESPONDS_TO provenance. A critique has no factual authority. Self-found corrections use a separate DRAFT-targeted selfCorrections record.",
+    "selfCorrection": "A no-change self-review may report no issue and no correction. A claimed correction must link a current DRAFT issue to the exact structured fields and stable proposition ids actually changed; mismatch is scored semantic noncompliance, not parser invalidity.",
+    "resolution": "Every current issue and directly answered external issue must be accounted for exactly once as resolved or unresolved. Rejected false critiques may be recorded as NO_DISAGREEMENT or RESOLVED with NO_MATERIAL_ISSUE. Resolution consistency is separate from answer epistemic state; semantic inconsistency does not erase the observation.",
+    "criticism": "Controlled false-critique acceptance is directly measured. Unmatched spontaneous material issues are reported as unadjudicated rather than automatically labeled invented.",
+    "confidence": "Confidence attaches to the structured answer characterization and each proposition assessment. High-confidence structured answer, epistemic, proposition, and contextual failures are reported separately.",
+    "abstention": "Terminal ABSTAIN requires an abstention object and remains distinct from an OPEN or underdetermined answer. These cases are answerable at their correct epistemic level, so terminal abstention is inappropriate.",
+    "minorityPreservation": "NOT_ESTIMABLE_NO_SOCIAL_MINORITY_EXPOSURE. Target and guard preservation are safety checks, not a social-minority result.",
+    "exclusions": "Only missing, duplicate, shape-invalid, provenance-invalid, boundary-invalid, or provider-failed primaries are unavailable observations. Evidence, resolution, answer, request, confidence, abstention, and correction mistakes in an interpretable output remain scored failures."
+  },
+  "causalLimitations": [
+    "Hand-authored signal generation cost is excluded, so this cannot establish end-to-end product or equal-dollar superiority.",
+    "Self-review is same-thread while critique and evidence responses are fresh-thread. The matched false critique diagnoses generic fresh-response and challenge effects for critique, but the evidence assay has no fresh no-packet arm.",
+    "Four fresh development cases with two repetitions qualify an assay; they do not estimate general-world effect sizes.",
+    "Provider sampling seeds are unsupported; every session, setting, usage count, latency, failure, overshoot, and exclusion must be retained.",
+    "Free-form answer and request prose is not semantically adjudicated. Claims about prose quality require a separate treatment-blind rubric.",
+    "The v1 archive remains frozen and INCONCLUSIVE. Treatment-blind defect adjudication informed harness engineering only and is not causal evidence."
+  ],
+  "confirmationLock": {
+    "status": "ABSENT_CLOSED",
+    "h1cConfirmationCorpusExists": false
+  }
+}

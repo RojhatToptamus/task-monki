@@ -161,6 +161,7 @@ function attentionTask(): Task {
   const now = '2026-07-19T12:00:00.000Z';
   return {
     id: 'task-attention',
+    kind: 'NORMAL',
     title: 'Awaiting approval',
     prompt: 'Approve the requested action.',
     repositoryId: 'repository-a',

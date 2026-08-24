@@ -16,6 +16,7 @@ const now = '2026-06-24T10:00:00.000Z';
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    kind: overrides.kind ?? 'NORMAL',
     runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',

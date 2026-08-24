@@ -62,14 +62,26 @@ import type {
   StageTaskAttachmentBatchRequest,
   TaskAttachmentRecord
 } from './attachments';
+import type {
+  CreateBlankDesignRequest,
+  DesignActionAvailability,
+  DesignCanvasProjection,
+  DesignConversationEntry,
+  DesignListItem,
+  DesignReference,
+  DesignRevision,
+  DesignTurn,
+  SubmitDesignTurnRequest
+} from './design';
 
 export * from './agent';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
+export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 19 as const;
+export const TASK_STORE_SCHEMA_VERSION = 23 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -391,6 +403,7 @@ export const ARTIFACT_KINDS = [
   'agent-output',
   'agent-diagnostics',
   'agent-final',
+  'design-message',
   'diff',
   'git-snapshot',
   'pr-body',
@@ -446,6 +459,7 @@ export interface StatusProjection {
 
 export interface Task {
   id: string;
+  kind: 'NORMAL' | 'DESIGN';
   /** Immutable agent-runtime binding for this task. */
   runtimeId: AgentRuntimeId;
   title: string;
@@ -469,6 +483,9 @@ export interface Task {
   forkedAlternativeTaskIds: string[];
   forkedFromTaskId?: string;
   forkedFromRunId?: string;
+  /** Historical source links for a copied Design. */
+  sourceDesignId?: string;
+  sourceDesignRevisionId?: string;
   agentSettings: AgentExecutionSettings;
   createdAt: string;
   updatedAt: string;
@@ -730,6 +747,7 @@ export type RepositoryStatus = 'AVAILABLE' | 'MISSING' | 'INVALID' | 'DISCONNECT
 /** Durable repository identity. The filesystem path is mutable connection metadata. */
 export interface Repository {
   id: string;
+  kind: 'USER_REGISTERED' | 'DESIGN_MANAGED';
   name: string;
   path: string;
   status: RepositoryStatus;
@@ -799,6 +817,10 @@ export interface TaskSnapshot {
   repositories: Repository[];
   boards: Board[];
   tasks: Task[];
+  designTurns: DesignTurn[];
+  designReferences: DesignReference[];
+  designRevisions: DesignRevision[];
+  designSourceActions: import('./design').DesignSourceAction[];
   iterations: TaskIteration[];
   worktrees: WorktreeRecord[];
   gitSnapshots: GitSnapshotRecord[];
@@ -831,6 +853,33 @@ export interface TaskSnapshot {
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
   attachments: TaskAttachmentRecord[];
+}
+
+export interface DesignDetailSnapshot {
+  schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
+  design: DesignListItem;
+  task: Task;
+  repository: Repository;
+  turns: DesignTurn[];
+  references: DesignReference[];
+  attachments: TaskAttachmentRecord[];
+  projectFiles: import('./design').DesignProjectFile[];
+  projectFilesTruncated: boolean;
+  revisions: DesignRevision[];
+  readyContext: import('./design').DesignReadyContextEntry[];
+  conversation: DesignConversationEntry[];
+  previousConversationCursor?: string;
+  interactions: InteractionRequestRecord[];
+  sessions: AgentSessionRecord[];
+  items: AgentItemRecord[];
+  currentIteration?: TaskIteration;
+  currentWorktree?: WorktreeRecord;
+  currentRun?: RunRecord;
+  currentSession?: AgentSessionRecord;
+  currentPreview?: PreviewGenerationRecord;
+  origin?: import('./design').DesignOrigin;
+  canvas: DesignCanvasProjection;
+  actions: DesignActionAvailability;
 }
 
 export interface BoardAgentReviewSummary {
@@ -1211,6 +1260,7 @@ export interface RefreshGitHubRequest {
 export type AppEventScope =
   | { kind: 'APP' }
   | { kind: 'TASK'; taskId: string }
+  | { kind: 'DESIGN'; designId: string }
   | { kind: 'DISCOURSE'; conversationId: string; waveId?: string; jobId?: string };
 
 export interface AppUpdateEvent {
@@ -1238,6 +1288,7 @@ export interface AppUpdateEvent {
     | 'preview.recipe-generation.updated'
     | 'preview.log.updated'
     | 'task.deleted'
+    | 'design.updated'
     | 'discourse.summary.updated'
     | 'discourse.message.appended'
     | 'discourse.wave.updated'
@@ -1287,6 +1338,48 @@ export interface TaskManagerApi {
   ): Promise<UpdateAgentNativeSessionResult>;
   getBoardSnapshot(): Promise<BoardSnapshot>;
   getTaskDetail(taskId: string): Promise<TaskDetailSnapshot>;
+  listDesigns(): Promise<DesignListItem[]>;
+  getDesign(designId: string): Promise<DesignDetailSnapshot>;
+  listDesignConversation(
+    input: import('./design').ListDesignConversationRequest
+  ): Promise<import('./design').DesignConversationPage>;
+  createBlankDesign(input: CreateBlankDesignRequest): Promise<DesignDetailSnapshot>;
+  submitDesignTurn(input: SubmitDesignTurnRequest): Promise<DesignDetailSnapshot>;
+  addDesignReferences(
+    input: import('./design').AddDesignReferencesRequest
+  ): Promise<DesignDetailSnapshot>;
+  removeDesignReference(
+    input: import('./design').RemoveDesignReferenceRequest
+  ): Promise<DesignDetailSnapshot>;
+  importDesignReferenceAsset(
+    input: import('./design').ImportDesignReferenceAssetRequest
+  ): Promise<DesignDetailSnapshot>;
+  cancelDesignTurn(
+    input: import('./design').CancelDesignTurnRequest
+  ): Promise<DesignDetailSnapshot>;
+  getDesignDraft(designId: string): Promise<import('./design').DesignDraftRecord | null>;
+  readDesignDraftAttachment(
+    input: import('./design').ReadDesignDraftAttachmentRequest
+  ): Promise<AttachmentContent>;
+  saveDesignDraft(
+    input: import('./design').SaveDesignDraftRequest
+  ): Promise<import('./design').DesignDraftRecord>;
+  deleteDesignDraft(input: import('./design').DeleteDesignDraftRequest): Promise<void>;
+  restartDesignPreview(
+    input: import('./design').RestartDesignPreviewRequest
+  ): Promise<DesignDetailSnapshot>;
+  restoreDesignRevision(
+    input: import('./design').RestoreDesignRevisionRequest
+  ): Promise<DesignDetailSnapshot>;
+  duplicateDesign(
+    input: import('./design').DuplicateDesignRequest
+  ): Promise<DesignDetailSnapshot>;
+  renameDesign(
+    input: import('./design').RenameDesignRequest
+  ): Promise<DesignDetailSnapshot>;
+  archiveDesign(
+    input: import('./design').ArchiveDesignRequest
+  ): Promise<DesignDetailSnapshot>;
   listDiscourseConversations(
     input?: import('./discourse').ListDiscourseConversationsRequest
   ): Promise<import('./discourse').DiscourseConversationPage>;

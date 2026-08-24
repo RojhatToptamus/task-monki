@@ -14,8 +14,12 @@ files:
   - package.json
 
 extraResources:
+  - from: resources/design-skills
+    to: design-skills
   - from: src/core/preview/runtime/native-preview-launcher.mjs
     to: native-preview-launcher.mjs
+  - from: src/core/preview/runtime/managed-design-static-server.mjs
+    to: managed-design-static-server.mjs
   - from: src/core/process/owned-process-launcher.mjs
     to: owned-process-launcher.mjs
   - from: build/icon.png
@@ -26,6 +30,8 @@ extraResources:
     to: legal/THIRD_PARTY_NOTICES.md
   - from: THIRD_PARTY_LICENSES/OpenAI-Codex-Apache-2.0.txt
     to: legal/third-party/OpenAI-Codex-Apache-2.0.txt
+  - from: THIRD_PARTY_LICENSES/Claude-Design-System-MIT.txt
+    to: legal/third-party/Claude-Design-System-MIT.txt
   - from: node_modules/electron/dist/LICENSE
     to: legal/electron/LICENSE
   - from: node_modules/electron/dist/LICENSES.chromium.html
@@ -52,6 +58,9 @@ mac:
   identity: "-"
   hardenedRuntime: false
   sign: scripts/ad-hoc-mac-sign.cjs
+  extraResources:
+    - from: .local/design-browser-runtime/${arch}
+      to: design-browser-runtime
   extendInfo:
     NSBluetoothAlwaysUsageDescription: Task Monki does not use Bluetooth access.
     NSBluetoothPeripheralUsageDescription: Task Monki does not use Bluetooth access.
