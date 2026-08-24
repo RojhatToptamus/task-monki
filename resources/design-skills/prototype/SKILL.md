@@ -60,5 +60,7 @@ Respect reduced-motion preferences when motion exists.
 Inspect the full source flow.
 Run available local lint, type, test, or build checks.
 Use `interaction-states-review` and `accessibility-review` for the applicable surface.
-Do not use a screenshot or claim rendered visual proof.
+Use `browser-verification` to exercise the changed controls and states.
+Use a screenshot only when appearance needs visual judgment.
+Open and verify a fresh candidate after a source correction.
 Report untested behavior and simulated data clearly.

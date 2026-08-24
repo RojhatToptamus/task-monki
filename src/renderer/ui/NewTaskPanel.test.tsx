@@ -9,11 +9,11 @@ import {
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import {
   capAttachmentValidationFailures,
+  creationRequiresUnchangedRetry,
   getOrCreateTaskCreationToken,
   imageAttachmentModelError,
   reserveClipboardAttachmentRead,
-  shouldPreventDefaultAttachmentPaste,
-  taskCreationNeedsUnchangedRetry
+  shouldPreventDefaultAttachmentPaste
 } from '../model/taskAttachmentComposer';
 import {
   clampNewTaskPanelWidth,
@@ -23,7 +23,8 @@ import {
   resizeNewTaskPanelFromPointer,
   shouldInterruptNewTaskCanvasPanForWheel
 } from '../model/newTaskPanel';
-import { AttachmentChip, NewTaskPanel } from './NewTaskPanel';
+import { AttachmentChip } from './AttachmentChip';
+import { NewTaskPanel } from './NewTaskPanel';
 
 describe('NewTaskPanel', () => {
   it('keeps the dock resize width within desktop and narrow viewport bounds', () => {
@@ -68,12 +69,12 @@ describe('NewTaskPanel', () => {
   });
 
   it('locks only ambiguous task-creation failures to an unchanged retry', () => {
-    expect(taskCreationNeedsUnchangedRetry(new Error('connection lost'))).toBe(true);
-    expect(taskCreationNeedsUnchangedRetry({ status: 503 })).toBe(true);
+    expect(creationRequiresUnchangedRetry(new Error('connection lost'))).toBe(true);
+    expect(creationRequiresUnchangedRetry({ status: 503 })).toBe(true);
     expect(
-      taskCreationNeedsUnchangedRetry({ status: 409, code: 'TASK_CREATION_CONFLICT' })
+      creationRequiresUnchangedRetry({ status: 409, code: 'TASK_CREATION_CONFLICT' })
     ).toBe(true);
-    expect(taskCreationNeedsUnchangedRetry({ status: 400, code: 'INVALID_REQUEST' })).toBe(
+    expect(creationRequiresUnchangedRetry({ status: 400, code: 'INVALID_REQUEST' })).toBe(
       false
     );
   });

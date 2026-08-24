@@ -52,4 +52,6 @@ Restore focus after a temporary surface closes.
 
 Fix missing applicable states in the same turn.
 Run available source and project checks.
-Do not claim rendered interaction proof without a supported rendered test.
+Use `browser-verification` to exercise the applicable changed states.
+For meaningful motion, inspect enough relevant frames to judge the transition.
+Do not use a fixed frame count.

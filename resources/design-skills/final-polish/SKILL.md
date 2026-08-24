@@ -13,10 +13,11 @@ Read and apply the focused skills in this order:
 2. `generic-design-review`
 3. `hierarchy-rhythm-review`
 4. `interaction-states-review` when the surface is interactive
+5. `browser-verification`
 
 Read each exact skill path from the validated Task Monki catalog.
 Run the passes yourself in the current Design turn.
-Do not start another agent, reviewer, hidden turn, or screenshot flow.
+Do not start another agent, reviewer, or hidden turn.
 
 ## Set the scope
 
@@ -41,9 +42,9 @@ Preserve brand-backed choices and note false positives.
 ## Verify and report
 
 Run available local lint, type, test, and build checks that match the project.
-Recheck the changed source after fixes.
-Do not use a canvas screenshot.
-Do not claim rendered visual proof.
+Use `inspect_design` for the applicable rendered checks.
+Use screenshots only when visual judgment needs them.
+After a source fix, open and verify a fresh candidate.
 
 Report `prototype-ready` when the source and available checks pass.
 Do not report `production-ready` without the product, content, browser, accessibility, and deployment checks that production needs.

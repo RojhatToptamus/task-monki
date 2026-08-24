@@ -107,6 +107,50 @@ describe('PreviewManager managed Design cutover', () => {
     ]);
   });
 
+  it('keeps a candidate unrouted during browser checks and cuts over the same live process', async () => {
+    const fixture = await createFixture();
+
+    const candidate = await fixture.manager.executeManagedDesignCandidate(
+      fixture.prepared,
+      {
+        designId: 'design-1',
+        async onCandidateReady() {
+          fixture.order.push('candidate-ready');
+        }
+      }
+    );
+
+    expect(candidate).toMatchObject({ state: 'READY', routingState: 'CANDIDATE' });
+    expect(fixture.gateway.replaceRoutes).not.toHaveBeenCalled();
+    expect(fixture.store.cutoverInput).toBeUndefined();
+    const origin = new URL(candidate.routes[0]!.url).origin;
+    const lease = await fixture.manager.openManagedDesignBrowserLease(candidate.id);
+    expect(lease).toMatchObject({
+      origin,
+      proxyUrl: 'http://127.0.0.1:45000'
+    });
+    expect(fixture.gateway.openBrowserLease).toHaveBeenCalledWith({
+      origin: `${origin}/`,
+      target: { host: '127.0.0.1', port: 41_000 }
+    });
+
+    const settled = await fixture.manager.cutoverManagedDesignCandidate({
+      generationId: candidate.id,
+      designId: 'design-1',
+      settlement: { turnId: 'turn-1', runId: 'run-1' },
+      fence: fixture.designInput.fence
+    });
+    expect(settled).toMatchObject({ routingState: 'ACTIVE' });
+    expect(fixture.graph.start).toHaveBeenCalledOnce();
+    expect(fixture.order).toEqual([
+      'candidate-ready',
+      'fence-begin',
+      'gateway-replace:candidate-1',
+      'store-cutover',
+      'fence-commit'
+    ]);
+  });
+
   it('does not route or settle a candidate that exits during the canvas fence', async () => {
     const fixture = await createFixture({ runningResults: [true, true, false] });
 
@@ -215,11 +259,11 @@ async function createFixture(options: {
     stop: vi.fn(async () => 'STOPPED' as const)
   };
   const graph = {
-    async start(input: { updateGenerationState(state: PreviewGenerationRecord['state']): Promise<void> }) {
+    start: vi.fn(async (input: { updateGenerationState(state: PreviewGenerationRecord['state']): Promise<void> }) => {
       await input.updateGenerationState('RUNNING_GRAPH');
       await input.updateGenerationState('WAITING_READY');
       return running;
-    }
+    })
   };
   const gateway = {
     async listen() { return { port: 4_000, relocated: false }; },
@@ -229,7 +273,11 @@ async function createFixture(options: {
     }),
     replaceRoutes: vi.fn((generationId: string) => {
       order.push(`gateway-replace:${generationId}`);
-    })
+    }),
+    openBrowserLease: vi.fn(async () => ({
+      proxyUrl: 'http://127.0.0.1:45000',
+      async close() {}
+    }))
   };
   const fence = {
     commit: vi.fn(async () => { order.push('fence-commit'); }),

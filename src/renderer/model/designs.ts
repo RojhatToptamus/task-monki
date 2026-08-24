@@ -273,6 +273,8 @@ export function eligibleDesignRuntimeCatalog(
       runtime.preflight.readiness.canStart &&
       capabilities.extensions['task-monki.design-instructions']?.maturity === 'stable' &&
       capabilities.extensions['task-monki.design-skill-access']?.maturity === 'stable' &&
+      capabilities.extensions['task-monki.design-browser-verification']?.maturity === 'stable' &&
+      capabilities.attachmentDelivery.maturity === 'stable' &&
       capabilities.turnInterruption.maturity === 'stable'
     );
   });
@@ -282,7 +284,13 @@ export function eligibleDesignRuntimeCatalog(
   return {
     ...catalog,
     runtimes,
-    models: catalog.models.filter((model) => runtimeIds.has(model.runtimeId)),
+    models: catalog.models.filter(
+      (model) =>
+        runtimeIds.has(model.runtimeId) &&
+        (model.inputModalities ?? []).some(
+          (modality) => modality.toLowerCase() === 'image'
+        )
+    ),
     defaultRuntimeId: runtimeIds.has(catalog.defaultRuntimeId)
       ? catalog.defaultRuntimeId
       : runtimes[0]?.preflight.runtime.id ?? catalog.defaultRuntimeId

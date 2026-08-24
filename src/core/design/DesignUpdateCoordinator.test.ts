@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   DesignSourceCheckpoint,
   GitSnapshotRecord,
+  PreviewGenerationRecord,
+  PreviewPlanRecord,
   RunRecord
 } from '../../shared/contracts';
 import type {
@@ -74,7 +76,8 @@ describe('DesignUpdateCoordinator', () => {
     const secondTurn = await harness.store.createInlineDesignTurn({
       designId: harness.designId,
       clientMessageId: 'design-queue-follow-up',
-      message: 'Make the status easier to scan.'
+      message: 'Make the status easier to scan.',
+      referenceIds: []
     });
     await harness.store.updateRun(firstRun.id, {
       status: 'FAILED',
@@ -108,7 +111,8 @@ describe('DesignUpdateCoordinator', () => {
     const queued = await harness.store.createInlineDesignTurn({
       designId: harness.designId,
       clientMessageId: 'design-queue-cancel',
-      message: 'Add a secondary chart.'
+      message: 'Add a secondary chart.',
+      referenceIds: []
     });
 
     await harness.coordinator.cancelTurn(harness.designId, queued.id);
@@ -198,7 +202,7 @@ describe('DesignUpdateCoordinator', () => {
 
     await harness.coordinator.handleRunTerminal(run.id);
 
-    expect(harness.source.publishCandidateCommit).toHaveBeenCalledTimes(1);
+    expect(harness.source.publishPreparedCandidateCommit).toHaveBeenCalledTimes(1);
     expect(harness.source.repairCandidateIndex).not.toHaveBeenCalled();
     let turn = (await harness.store.getDesignDetail(harness.designId)).turns[0]!;
     expect(turn.outcome).toBeUndefined();
@@ -207,21 +211,46 @@ describe('DesignUpdateCoordinator', () => {
     checkpointWrite.mockRestore();
     const previewEntered = deferred<void>();
     const releasePreview = deferred<never>();
-    harness.previews.prepareManagedDesignExactCommit.mockImplementation(async () => {
+    harness.previews.cutoverManagedDesignCandidate.mockImplementation(async () => {
       previewEntered.resolve();
       return releasePreview.promise;
     });
     const recovery = harness.coordinator.handleRunTerminal(run.id);
     await previewEntered.promise;
 
-    expect(harness.source.publishCandidateCommit).toHaveBeenCalledTimes(2);
+    expect(harness.source.publishPreparedCandidateCommit).toHaveBeenCalledTimes(2);
     expect(harness.source.repairCandidateIndex).toHaveBeenCalledTimes(1);
     turn = (await harness.store.getDesignDetail(harness.designId)).turns[0]!;
     expect(turn.outcome).toBeUndefined();
-    expect(turn.checkpoint).toMatchObject({ boundary: 'INDEX_REPAIRED' });
+    expect(turn.checkpoint).toMatchObject({ boundary: 'PREVIEW_CANDIDATE_READY' });
 
     releasePreview.reject(new Error('Stop after the source recovery check.'));
     await recovery;
+  });
+
+  it('keeps the last Ready result when final source differs from the opened candidate', async () => {
+    const harness = await createHarness();
+    const run = await startAndCompleteCurrentTurn(harness);
+    const detail = await harness.store.getDesignDetail(harness.designId);
+    harness.source.captureCandidate.mockResolvedValueOnce({
+      kind: 'CAPTURED',
+      checkpoint: {
+        repositoryId: detail.repository.id,
+        worktreeId: detail.currentWorktree!.id,
+        branchName: detail.currentWorktree!.branchName,
+        expectedParentCommit: COMMIT,
+        treeSha: 'd'.repeat(40)
+      }
+    });
+
+    await harness.coordinator.handleRunTerminal(run.id);
+
+    expect(harness.source.publishPreparedCandidateCommit).not.toHaveBeenCalled();
+    expect(harness.previews.cutoverManagedDesignCandidate).not.toHaveBeenCalled();
+    expect((await harness.store.getDesignDetail(harness.designId)).turns[0]).toMatchObject({
+      outcome: 'NEEDS_ATTENTION',
+      failureReason: 'The final Design source changed after the final candidate was opened.'
+    });
   });
 
   it('keeps the ref checkpoint when index repair cannot be recorded', async () => {
@@ -241,7 +270,7 @@ describe('DesignUpdateCoordinator', () => {
 
     await harness.coordinator.handleRunTerminal(run.id);
 
-    expect(harness.source.publishCandidateCommit).toHaveBeenCalledTimes(1);
+    expect(harness.source.publishPreparedCandidateCommit).toHaveBeenCalledTimes(1);
     expect(harness.source.repairCandidateIndex).toHaveBeenCalledTimes(1);
     let turn = (await harness.store.getDesignDetail(harness.designId)).turns[0]!;
     expect(turn.outcome).toBeUndefined();
@@ -252,18 +281,18 @@ describe('DesignUpdateCoordinator', () => {
     checkpointWrite.mockRestore();
     const previewEntered = deferred<void>();
     const releasePreview = deferred<never>();
-    harness.previews.prepareManagedDesignExactCommit.mockImplementation(async () => {
+    harness.previews.cutoverManagedDesignCandidate.mockImplementation(async () => {
       previewEntered.resolve();
       return releasePreview.promise;
     });
     const recovery = harness.coordinator.handleRunTerminal(run.id);
     await previewEntered.promise;
 
-    expect(harness.source.publishCandidateCommit).toHaveBeenCalledTimes(1);
+    expect(harness.source.publishPreparedCandidateCommit).toHaveBeenCalledTimes(1);
     expect(harness.source.repairCandidateIndex).toHaveBeenCalledTimes(2);
     turn = (await harness.store.getDesignDetail(harness.designId)).turns[0]!;
     expect(turn.outcome).toBeUndefined();
-    expect(turn.checkpoint).toMatchObject({ boundary: 'INDEX_REPAIRED' });
+    expect(turn.checkpoint).toMatchObject({ boundary: 'PREVIEW_CANDIDATE_READY' });
 
     releasePreview.reject(new Error('Stop after the source recovery check.'));
     await recovery;
@@ -278,12 +307,14 @@ interface CoordinatorHarness {
   startTurn: ReturnType<typeof vi.fn<(input: StartOrchestratedTurn) => Promise<RunRecord>>>;
   source: {
     captureCandidate: ReturnType<typeof vi.fn>;
-    publishCandidateCommit: ReturnType<typeof vi.fn>;
+    prepareCandidateCommit: ReturnType<typeof vi.fn>;
+    publishPreparedCandidateCommit: ReturnType<typeof vi.fn>;
     repairCandidateIndex: ReturnType<typeof vi.fn>;
   };
   previews: {
     prepareManagedDesignExactCommit: ReturnType<typeof vi.fn>;
     executeManagedDesign: ReturnType<typeof vi.fn>;
+    cutoverManagedDesignCandidate: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -362,7 +393,11 @@ async function createHarness(
       kind: 'CAPTURED' as const,
       checkpoint: sourceCheckpoint
     })),
-    publishCandidateCommit: vi.fn(async () => ({
+    prepareCandidateCommit: vi.fn(async () => ({
+      ...sourceCheckpoint,
+      candidateCommitSha: 'c'.repeat(40)
+    })),
+    publishPreparedCandidateCommit: vi.fn(async () => ({
       ...sourceCheckpoint,
       candidateCommitSha: 'c'.repeat(40)
     })),
@@ -374,13 +409,30 @@ async function createHarness(
     }),
     executeManagedDesign: vi.fn(async () => {
       throw new Error('Unexpected Preview execution.');
-    })
+    }),
+    cutoverManagedDesignCandidate: vi.fn(async () => {
+      throw new Error('Unexpected Preview cutover.');
+    }),
+    stopManagedDesignCandidate: vi.fn(async () => undefined)
   };
   const coordinator = new DesignUpdateCoordinator({
     store,
     agents,
     previews: previews as unknown as PreviewManager,
     source: source as unknown as DesignSourceService,
+    browser: {
+      attest: vi.fn(async () => undefined),
+      recover: vi.fn(async () => undefined),
+      openCandidate: vi.fn(async () => ({
+        snapshot: 'page',
+        console: '(no output)',
+        errors: '(no output)'
+      })),
+      inspect: vi.fn(async () => ({ text: 'page' })),
+      abortRun: vi.fn(),
+      closeRun: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined)
+    },
     fence: {
       async begin() {
         return { async commit() {}, async rollback() {} };
@@ -412,12 +464,115 @@ async function startAndCompleteCurrentTurn(
   if (!run.beforeGitSnapshotId) {
     throw new Error('Expected the Design Run to have start Git evidence.');
   }
+  const detail = await harness.store.getDesignDetail(harness.designId);
+  const plan = await harness.store.savePreviewPlan(
+    managedPlan({
+      taskId: harness.designId,
+      iterationId: detail.currentIteration!.id,
+      worktreeId: detail.currentWorktree!.id
+    })
+  );
+  const generation = await harness.store.savePreviewGeneration(
+    managedCandidate({
+      taskId: harness.designId,
+      repositoryId: detail.repository.id,
+      iterationId: detail.currentIteration!.id,
+      worktreeId: detail.currentWorktree!.id,
+      planId: plan.id
+    })
+  );
+  await harness.store.updateDesignOpenedCandidate({
+    designId: harness.designId,
+    turnId: detail.turns[0]!.id,
+    candidate: {
+      source: {
+        repositoryId: detail.repository.id,
+        worktreeId: detail.currentWorktree!.id,
+        branchName: detail.currentWorktree!.branchName,
+        expectedParentCommit: COMMIT,
+        treeSha: 'b'.repeat(40),
+        candidateCommitSha: 'c'.repeat(40)
+      },
+      previewGenerationId: generation.id
+    }
+  });
   return harness.store.updateRun(run.id, {
     status: 'COMPLETED',
     finalMessage: 'The Design update is ready.',
     afterGitSnapshotId: run.beforeGitSnapshotId,
     endedAt: new Date().toISOString()
   });
+}
+
+function managedPlan(input: {
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+}): PreviewPlanRecord {
+  return {
+    id: randomUUID(),
+    ...input,
+    planSource: { type: 'MANAGED_DESIGN_STATIC', adapterVersion: 1 },
+    executionDigest: 'd'.repeat(64),
+    executionPlan: {
+      version: 1,
+      jobs: [],
+      resources: [],
+      services: [],
+      workers: [],
+      routes: [],
+      scenarios: [{ id: 'default', jobs: [], resources: [] }],
+      selectedScenarioId: 'default'
+    },
+    warnings: [],
+    createdAt: new Date().toISOString()
+  };
+}
+
+function managedCandidate(input: {
+  taskId: string;
+  repositoryId: string;
+  iterationId: string;
+  worktreeId: string;
+  planId: string;
+}): PreviewGenerationRecord {
+  const now = new Date().toISOString();
+  return {
+    id: randomUUID(),
+    previewKey: `design-${input.taskId}`,
+    taskId: input.taskId,
+    iterationId: input.iterationId,
+    worktreeId: input.worktreeId,
+    planId: input.planId,
+    executionAuthority: {
+      type: 'MANAGED_STATIC',
+      adapterVersion: 1,
+      executionDigest: 'd'.repeat(64)
+    },
+    source: {
+      type: 'EXACT_COMMIT',
+      repositoryId: input.repositoryId,
+      commitSha: 'c'.repeat(40)
+    },
+    workspacePath: path.join('/tmp', randomUUID()),
+    state: 'READY',
+    routingState: 'CANDIDATE',
+    freshness: 'CURRENT',
+    routes: [
+      {
+        id: 'main',
+        hostname: 'design.localhost',
+        url: 'http://design.localhost:41000/',
+        gatewayPort: 41000,
+        targetHost: '127.0.0.1',
+        targetPort: 41001,
+        state: 'ATTACHED'
+      }
+    ],
+    createdAt: now,
+    updatedAt: now,
+    readyAt: now
+  };
 }
 
 function managedRepository(dir: string): ManagedDesignRepositoryInput {

@@ -23,10 +23,11 @@ describe('DesignSkillPack', () => {
     const pack = await loadDesignSkillPack(root);
 
     expect(pack.rootPath).toBe(await fs.realpath(root));
-    expect(pack.skills).toHaveLength(11);
+    expect(pack.skills).toHaveLength(12);
     expect(pack.skills.map((skill) => skill.name)).toEqual([
       'accessibility-review',
       'aesthetic-direction',
+      'browser-verification',
       'design-system-inspection',
       'discovery-questions',
       'final-polish',

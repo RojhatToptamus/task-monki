@@ -18,8 +18,12 @@ const unsupported = (detail?: string): AgentCapability => ({
 
 export function codexCapabilities(input: {
   designSkillAccess?: { available: boolean; detail?: string };
+  designBrowserVerification?: { available: boolean; detail?: string };
 } = {}): AgentRuntimeCapabilities {
   const designSkillAccess = input.designSkillAccess ?? { available: true };
+  const designBrowserVerification = input.designBrowserVerification ?? {
+    available: true
+  };
   return {
     runtimeId: CODEX_RUNTIME_ID,
     executionPolicy: {
@@ -113,6 +117,14 @@ export function codexCapabilities(input: {
         ? stable('Adds a validated app-owned skill root to verified Design session read access.')
         : unsupported(
             designSkillAccess.detail ?? 'The app-owned Design skill pack is unavailable.'
+          ),
+      'task-monki.design-browser-verification': designBrowserVerification.available
+        ? stable(
+            'Uses one app-owned, same-turn browser tool with bounded text and image output.'
+          )
+        : unsupported(
+            designBrowserVerification.detail ??
+              'The packaged Design browser runtime is unavailable.'
           ),
       'codex.review.start': stable('Native review/start with inline or detached delivery.'),
       'codex.thread.goal': stable('Native persisted thread goal operations.'),

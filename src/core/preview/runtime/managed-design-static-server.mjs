@@ -141,7 +141,7 @@ function setSecurityHeaders(response) {
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
     "media-src 'self' data: blob:",
-    "connect-src 'self' ws://*.localhost:*",
+    "connect-src 'self'",
     "worker-src 'self' blob:"
   ].join('; '));
   response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');

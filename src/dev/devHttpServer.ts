@@ -525,6 +525,23 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      const designDraftAttachmentMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/draft\/attachments\/([^/]+)$/u
+      );
+      if (request.method === 'GET' && designDraftAttachmentMatch) {
+        await withAttachmentBudget(ATTACHMENT_MAX_IMAGE_BYTES, async () => {
+          await sendAttachment(
+            response,
+            requestId,
+            await options.service.readDesignDraftAttachment({
+              designId: decodeURIComponent(designDraftAttachmentMatch[1]),
+              attachmentId: decodeURIComponent(designDraftAttachmentMatch[2])
+            })
+          );
+        });
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/repositories') {
         const body = (await readJson()) as { path: string };
         sendJson(
@@ -652,6 +669,42 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
             ...input,
             designId: decodeURIComponent(designTurnMatch[1])
           } as never)
+        );
+        return;
+      }
+
+      const designReferencesMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/references$/u
+      );
+      if (request.method === 'POST' && designReferencesMatch) {
+        const input = (await readJson()) as Record<string, unknown>;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.addDesignReferences({
+            ...input,
+            designId: decodeURIComponent(designReferencesMatch[1])
+          } as never)
+        );
+        return;
+      }
+
+      const designReferenceActionMatch = url.pathname.match(
+        /^\/api\/designs\/([^/]+)\/references\/([^/]+)\/(remove|import)$/u
+      );
+      if (request.method === 'POST' && designReferenceActionMatch) {
+        const input = {
+          designId: decodeURIComponent(designReferenceActionMatch[1]),
+          referenceId: decodeURIComponent(designReferenceActionMatch[2])
+        };
+        sendJson(
+          response,
+          requestId,
+          200,
+          designReferenceActionMatch[3] === 'remove'
+            ? await options.service.removeDesignReference(input)
+            : await options.service.importDesignReferenceAsset(input)
         );
         return;
       }

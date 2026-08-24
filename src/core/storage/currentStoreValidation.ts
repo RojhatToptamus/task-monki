@@ -378,8 +378,14 @@ function validateDesignRecords(state: StoreState): void {
       'designTurns'
     );
     optionalUuidFields(turn, 'designTurns', ['messageArtifactId', 'runId']);
+    optionalStrings(turn, 'designTurns', ['attachmentDraftId']);
     uuidArray(turn, 'referenceIds', 'designTurns');
     if (turn.checkpoint !== undefined) validateDesignTurnCheckpoint(turn.checkpoint);
+    if (turn.finalOpenedCandidate !== undefined) {
+      const opened = persistedRecord(turn.finalOpenedCandidate, 'designTurns');
+      validateDesignSourceCheckpoint(opened.source, true);
+      uuidField(opened, 'previewGenerationId', 'designTurns');
+    }
     optionalEnumField(
       turn,
       'outcome',
@@ -394,6 +400,7 @@ function validateDesignRecords(state: StoreState): void {
       (turn.messageSource === 'INLINE_MESSAGE' && turn.messageArtifactId === undefined) ||
       (turn.outcome === undefined) !== (turn.settledAt === undefined) ||
       (turn.outcome === undefined) !== (turn.checkpoint !== undefined) ||
+      (turn.outcome !== undefined && turn.finalOpenedCandidate !== undefined) ||
       ((turn.outcome === 'FAILED' || turn.outcome === 'NEEDS_ATTENTION') &&
         turn.failureReason === undefined)
     ) {
@@ -403,7 +410,33 @@ function validateDesignRecords(state: StoreState): void {
 
   validateCollection(state.designReferences, 'designReferences', (reference) => {
     uuidFields(reference, 'designReferences', ['id', 'designId', 'attachmentId']);
+    enumField(
+      reference,
+      'role',
+      ['REFERENCE', 'PROJECT_ASSET_SOURCE'] as const,
+      'designReferences'
+    );
+    enumField(
+      reference,
+      'state',
+      ['ACTIVE', 'INACTIVE'] as const,
+      'designReferences'
+    );
+    optionalStrings(
+      reference,
+      'designReferences',
+      ['sourceDraftId', 'projectAssetPath']
+    );
+    optionalTimestamp(reference, 'firstDeliveredAt', 'designReferences');
     timestamp(reference, 'createdAt', 'designReferences');
+    optionalTimestamp(reference, 'deactivatedAt', 'designReferences');
+    if (
+      (reference.state === 'ACTIVE') !== (reference.deactivatedAt === undefined) ||
+      (reference.role === 'PROJECT_ASSET_SOURCE') !==
+        (reference.projectAssetPath !== undefined)
+    ) {
+      invalid('designReferences');
+    }
   });
 
   validateCollection(state.designRevisions, 'designRevisions', (revision) => {

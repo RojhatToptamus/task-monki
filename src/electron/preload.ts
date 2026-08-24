@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AcceptPreviewRecipeDraftRequest,
+  AddDesignReferencesRequest,
   AppUpdateEvent,
   CancelRunRequest,
   CancelDesignTurnRequest,
@@ -17,12 +18,14 @@ import type {
   GeneratePreviewRecipeRequest,
   GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
+  ImportDesignReferenceAssetRequest,
   PrepareWorktreeRequest,
   ApprovePreviewPlanRequest,
   OpenPreviewRequest,
   PublishBranchRequest,
   ReadArtifactRequest,
   ReadPreviewLogRequest,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   SetPreviewLocalAttachmentBindingRequest,
   DeletePreviewLocalAttachmentBindingRequest,
@@ -32,6 +35,7 @@ import type {
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
+  RemoveDesignReferenceRequest,
   StartRunRequest,
   StartPreviewRequest,
   StartReviewRequest,
@@ -195,6 +199,10 @@ const api: TaskManagerApi = {
     attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
       invokeIpc('attachment:read', input)
     ),
+  readDesignDraftAttachment: (input: ReadDesignDraftAttachmentRequest) =>
+    attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
+      invokeIpc('design:draft:attachment:read', input)
+    ),
   readClipboardImage: () =>
     attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
       invokeIpc('attachment:clipboard:readImage')
@@ -213,6 +221,12 @@ const api: TaskManagerApi = {
     invokeIpc('design:create', input),
   submitDesignTurn: (input: SubmitDesignTurnRequest) =>
     invokeIpc('design:turn:submit', input),
+  addDesignReferences: (input: AddDesignReferencesRequest) =>
+    invokeIpc('design:reference:add', input),
+  removeDesignReference: (input: RemoveDesignReferenceRequest) =>
+    invokeIpc('design:reference:remove', input),
+  importDesignReferenceAsset: (input: ImportDesignReferenceAssetRequest) =>
+    invokeIpc('design:reference:import-asset', input),
   cancelDesignTurn: (input: CancelDesignTurnRequest) =>
     invokeIpc('design:turn:cancel', input),
   restartDesignPreview: (input: RestartDesignPreviewRequest) =>

@@ -1,5 +1,6 @@
 import type {
   AcceptPreviewRecipeDraftRequest,
+  AddDesignReferencesRequest,
   AppUpdateEvent,
   Board,
   BoardSnapshot,
@@ -28,6 +29,7 @@ import type {
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
   InspectOpenTargetRequest,
+  ImportDesignReferenceAssetRequest,
   OpenTargetActionResult,
   OpenTargetInspection,
   OpenPreviewRequest,
@@ -42,6 +44,7 @@ import type {
   RepositoryImpact,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
   ResolvePreviewRequest,
@@ -59,6 +62,7 @@ import type {
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RefinePromptRequest,
+  RemoveDesignReferenceRequest,
   RefinePromptResponse,
   RespondToInteractionRequest,
   RetryRunRequest,
@@ -328,7 +332,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     discardTaskAttachmentDraft: (input: DiscardTaskAttachmentDraftRequest) =>
       post<void>(baseUrl, '/api/attachments/drafts/discard', input),
     readTaskAttachment: (input: ReadTaskAttachmentRequest) =>
-      readAttachment(baseUrl, input),
+      readAttachment(
+        baseUrl,
+        `/api/attachments/content?${new URLSearchParams({ attachmentId: input.attachmentId }).toString()}`
+      ),
     readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
     listDesigns: () => get<DesignListItem[]>(baseUrl, '/api/designs'),
@@ -349,6 +356,11 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
         baseUrl,
         `/api/designs/${encodeURIComponent(designId)}/draft`
       ),
+    readDesignDraftAttachment: (input: ReadDesignDraftAttachmentRequest) =>
+      readAttachment(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/draft/attachments/${encodeURIComponent(input.attachmentId)}`
+      ),
     saveDesignDraft: (input: SaveDesignDraftRequest) =>
       post<DesignDraftRecord>(
         baseUrl,
@@ -367,6 +379,24 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<DesignDetailSnapshot>(
         baseUrl,
         `/api/designs/${encodeURIComponent(input.designId)}/turns`,
+        input
+      ),
+    addDesignReferences: (input: AddDesignReferencesRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/references`,
+        input
+      ),
+    removeDesignReference: (input: RemoveDesignReferenceRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/references/${encodeURIComponent(input.referenceId)}/remove`,
+        input
+      ),
+    importDesignReferenceAsset: (input: ImportDesignReferenceAssetRequest) =>
+      post<DesignDetailSnapshot>(
+        baseUrl,
+        `/api/designs/${encodeURIComponent(input.designId)}/references/${encodeURIComponent(input.referenceId)}/import`,
         input
       ),
     cancelDesignTurn: (input: CancelDesignTurnRequest) =>
@@ -474,10 +504,9 @@ function arrayBufferToBase64(bytes: ArrayBuffer): string {
 
 async function readAttachment(
   baseUrl: string,
-  input: ReadTaskAttachmentRequest
+  resourcePath: string
 ): Promise<AttachmentContent> {
-  const query = new URLSearchParams({ attachmentId: input.attachmentId });
-  const response = await fetch(`${baseUrl}/api/attachments/content?${query.toString()}`);
+  const response = await fetch(`${baseUrl}${resourcePath}`);
   if (!response.ok) {
     return readResponse<never>(response);
   }

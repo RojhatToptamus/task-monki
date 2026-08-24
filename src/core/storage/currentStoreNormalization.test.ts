@@ -87,6 +87,37 @@ describe('migratePersistedStateToCurrent', () => {
     ).toThrow('designTurns contains unsupported Design records');
   });
 
+  it('migrates schema 20 references to active immutable references', () => {
+    const migrated = migratePersistedStateToCurrent({
+      schemaVersion: 20,
+      designReferences: [
+        {
+          id: 'reference-1',
+          designId: 'design-1',
+          attachmentId: 'attachment-1',
+          createdAt: '2026-08-20T10:00:00.000Z'
+        }
+      ]
+    });
+
+    expect(migrated).toEqual({
+      changed: true,
+      state: {
+        schemaVersion: TASK_STORE_SCHEMA_VERSION,
+        designReferences: [
+          {
+            id: 'reference-1',
+            designId: 'design-1',
+            attachmentId: 'attachment-1',
+            role: 'REFERENCE',
+            state: 'ACTIVE',
+            createdAt: '2026-08-20T10:00:00.000Z'
+          }
+        ]
+      }
+    });
+  });
+
   it('loads and republishes an on-disk schema 19 store', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-schema-19-'));
     const storePath = path.join(dir, 'store.json');

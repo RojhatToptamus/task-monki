@@ -107,6 +107,8 @@ import {
   AttachmentStoreError,
   validateTaskAttachmentRecords,
   type PreparedAttachmentDraft,
+  type PreparedAttachmentAppend,
+  type StoredAttachmentContent,
   type VerifiedTaskAttachment
 } from './AttachmentFileStore';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
@@ -180,12 +182,20 @@ export interface CreateInlineDesignTurnInput {
   designId: string;
   clientMessageId: string;
   message: string;
+  referenceIds: string[];
+  attachmentDraftId?: string;
 }
 
 export interface UpdateDesignTurnCheckpointInput {
   designId: string;
   turnId: string;
   checkpoint: DesignTurnCheckpoint;
+}
+
+export interface UpdateDesignOpenedCandidateInput {
+  designId: string;
+  turnId: string;
+  candidate: NonNullable<DesignTurn['finalOpenedCandidate']>;
 }
 
 export interface SettleDesignTurnInput {
@@ -543,6 +553,28 @@ function deriveDesignTitle(brief: string): string {
   return `${compact.slice(0, 57).trimEnd()}…`;
 }
 
+function validateInlineDesignTurnInput(input: CreateInlineDesignTurnInput): void {
+  if (!isTaskCreationToken(input.clientMessageId)) {
+    throw new Error('Design message id is invalid.');
+  }
+  if (!input.message.trim()) throw new Error('Design message is required.');
+  if (Buffer.byteLength(input.message, 'utf8') > ARTIFACT_BYTE_LIMITS['design-message']) {
+    throw new Error('Design message exceeds its durable byte limit.');
+  }
+  if (
+    !Array.isArray(input.referenceIds) ||
+    new Set(input.referenceIds).size !== input.referenceIds.length
+  ) {
+    throw new Error('Design reference selection is invalid.');
+  }
+  if (
+    input.attachmentDraftId !== undefined &&
+    !isTaskCreationToken(input.attachmentDraftId)
+  ) {
+    throw new Error('Design attachment draft id is invalid.');
+  }
+}
+
 function normalizedOptionalString(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized || undefined;
@@ -722,6 +754,7 @@ export class FileTaskStore {
   private lifecycle: StoreLifecycle = 'NEW';
   private initialization?: Promise<void>;
   private closePromise?: Promise<void>;
+  private retainedAttachmentDraftIds = new Set<string>();
   private lease?: StoreOwnershipLease;
   private mutationQueue: Promise<unknown> = Promise.resolve();
   private readonly mutationContext = new AsyncLocalStorage<boolean>();
@@ -755,6 +788,16 @@ export class FileTaskStore {
 
   getStoreIdentity(): string {
     return createHash('sha256').update(path.resolve(this.baseDir)).digest('hex');
+  }
+
+  /** Registers durable composer drafts before the first store initialization. */
+  retainAttachmentDrafts(draftIds: readonly string[]): void {
+    if (this.loaded || this.initialization || this.lifecycle !== 'NEW') {
+      throw new Error(
+        'Attachment draft retention must be configured before task-store initialization.'
+      );
+    }
+    this.retainedAttachmentDraftIds = new Set(draftIds);
   }
 
   async init(): Promise<void> {
@@ -817,7 +860,10 @@ export class FileTaskStore {
       }
       if (raw === undefined) {
         this.state = createEmptyState();
-        await this.attachmentFiles.reconcile(this.state.attachments);
+        await this.attachmentFiles.reconcile(
+          this.state.attachments,
+          this.retainedAttachmentDraftIds
+        );
         await this.reconcileArtifacts();
         await this.persist();
       } else {
@@ -826,7 +872,10 @@ export class FileTaskStore {
         const repaired = normalizePersistedStateBeforeValidation(migrated.state);
         const normalized = normalizeLoadedState(requireCurrentState(repaired.state));
         this.state = normalized.state;
-        await this.attachmentFiles.reconcile(this.state.attachments);
+        await this.attachmentFiles.reconcile(
+          this.state.attachments,
+          this.retainedAttachmentDraftIds
+        );
         await this.reconcileArtifacts();
         const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
         if (
@@ -1090,6 +1139,11 @@ export class FileTaskStore {
       references: state.designReferences.filter(
         (reference) => reference.designId === designId
       ),
+      attachments: state.attachments
+        .filter((attachment) => attachment.taskId === designId)
+        .sort((left, right) => left.ordinal - right.ordinal),
+      projectFiles: [],
+      projectFilesTruncated: false,
       revisions,
       conversation,
       previousConversationCursor: conversationPage.previousCursor,
@@ -1433,6 +1487,22 @@ export class FileTaskStore {
     );
   }
 
+  async getTurnAttachments(input: {
+    taskId: string;
+    mode: AgentRunMode;
+    generationKey?: string;
+  }): Promise<TaskAttachmentRecord[]> {
+    await this.init();
+    const task = this.state.tasks.find((candidate) => candidate.id === input.taskId);
+    if (!task) throw new Error('Task not found.');
+    if (input.mode !== 'DESIGN') return this.getTaskAttachments(input.taskId);
+    if (task.kind !== 'DESIGN' || !input.generationKey) {
+      throw new Error('DESIGN attachments require a DesignTurn generation key.');
+    }
+    const turn = this.requireDesignTurn(task.id, input.generationKey);
+    return clone(this.attachmentRecordsForDesignTurn(turn));
+  }
+
   verifyTaskAttachments(taskId: string): Promise<VerifiedTaskAttachment[]> {
     return this.withOwnedIo(async () => {
       const records = await this.getTaskAttachments(taskId);
@@ -1447,7 +1517,22 @@ export class FileTaskStore {
   ): Promise<VerifiedTaskAttachment[]> {
     return this.withOwnedIo(async () => {
       const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
-      const attachments = await this.verifyTaskAttachments(taskId);
+      const run = this.state.runs.find(
+        (candidate) => candidate.id === runId && candidate.taskId === taskId
+      );
+      if (!run) throw new Error('Run attachments do not belong to the selected task and run.');
+      const records =
+        run.mode === 'DESIGN'
+          ? this.attachmentRecordsForDesignTurn(
+              this.requireDesignTurn(taskId, run.generationKey ?? '')
+            )
+          : this.state.attachments.filter((attachment) => attachment.taskId === taskId);
+      const attachments =
+        records.length === 0
+          ? []
+          : run.mode === 'DESIGN'
+            ? await this.attachmentFiles.verifyTaskSelection(taskId, records)
+            : await this.attachmentFiles.verifyTask(taskId, records);
       assertAttachmentsOutsideWorktree(attachments, worktreePath);
       return attachments;
     });
@@ -1460,7 +1545,22 @@ export class FileTaskStore {
   ): Promise<VerifiedTaskAttachment[]> {
     return this.withOwnedIo(async () => {
       const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
-      const attachments = await this.verifyTaskAttachments(taskId);
+      const run = this.state.runs.find(
+        (candidate) => candidate.id === runId && candidate.taskId === taskId
+      );
+      if (!run) throw new Error('Run attachments do not belong to the selected task and run.');
+      const records =
+        run.mode === 'DESIGN'
+          ? this.attachmentRecordsForDesignTurn(
+              this.requireDesignTurn(taskId, run.generationKey ?? '')
+            )
+          : this.state.attachments.filter((attachment) => attachment.taskId === taskId);
+      const attachments =
+        records.length === 0
+          ? []
+          : run.mode === 'DESIGN'
+            ? await this.attachmentFiles.verifyTaskSelection(taskId, records)
+            : await this.attachmentFiles.verifyTask(taskId, records);
       assertAttachmentsOutsideWorktree(attachments, worktreePath);
       return attachments;
     });
@@ -2035,6 +2135,7 @@ export class FileTaskStore {
         settledTurn = {
           ...turn,
           checkpoint: undefined,
+          finalOpenedCandidate: undefined,
           outcome: 'READY',
           settledAt: now
         };
@@ -2319,9 +2420,31 @@ export class FileTaskStore {
         `Provider turn ${stored.providerTurnId} is already owned by another ${stored.runtimeId} run.`
       );
     }
+    let designReferences = this.state.designReferences;
+    if (
+      existing.mode === 'DESIGN' &&
+      existing.generationKey &&
+      update.attachmentSubmissions?.length
+    ) {
+      const turn = this.requireDesignTurn(existing.taskId, existing.generationKey);
+      const selectedReferenceIds = new Set(turn.referenceIds);
+      const deliveryTimeByAttachment = new Map(
+        update.attachmentSubmissions.map((submission) => [
+          submission.attachmentId,
+          submission.submittedAt
+        ])
+      );
+      designReferences = this.state.designReferences.map((reference) => {
+        const deliveredAt = deliveryTimeByAttachment.get(reference.attachmentId);
+        return selectedReferenceIds.has(reference.id) && deliveredAt && !reference.firstDeliveredAt
+          ? { ...reference, firstDeliveredAt: deliveredAt }
+          : reference;
+      });
+    }
     this.state = {
       ...this.state,
-      runs: this.state.runs.map((run) => (run.id === runId ? stored : run))
+      runs: this.state.runs.map((run) => (run.id === runId ? stored : run)),
+      designReferences
     };
     await this.persistSnapshot();
     return clone(stored);
@@ -2562,6 +2685,9 @@ export class FileTaskStore {
           id: randomUUID(),
           designId: task.id,
           attachmentId: attachment.id,
+          role: 'REFERENCE',
+          state: 'ACTIVE',
+          sourceDraftId: input.request.attachmentDraftId,
           createdAt: now
         }));
         const turn: DesignTurn = {
@@ -2570,6 +2696,7 @@ export class FileTaskStore {
           clientMessageId: input.request.creationToken,
           order: 1,
           messageSource: 'TASK_PROMPT',
+          attachmentDraftId: input.request.attachmentDraftId,
           referenceIds: references.map((reference) => reference.id),
           checkpoint: { boundary: 'QUEUED' },
           createdAt: now
@@ -2635,31 +2762,14 @@ export class FileTaskStore {
     return this.serializeMutation(async () => {
       await this.init();
       const design = this.requireDesign(input.designId);
-      if (!isTaskCreationToken(input.clientMessageId)) {
-        throw new Error('Design message id is invalid.');
-      }
-      if (!input.message.trim()) throw new Error('Design message is required.');
-      if (Buffer.byteLength(input.message, 'utf8') > ARTIFACT_BYTE_LIMITS['design-message']) {
-        throw new Error('Design message exceeds its durable byte limit.');
-      }
+      validateInlineDesignTurnInput(input);
       const existing = this.state.designTurns.find(
         (turn) =>
           turn.designId === design.id &&
           turn.clientMessageId === input.clientMessageId
       );
       if (existing) {
-        const artifact = existing.messageArtifactId
-          ? this.state.artifacts.find((candidate) => candidate.id === existing.messageArtifactId)
-          : undefined;
-        const storedMessage = artifact
-          ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
-          : undefined;
-        if (
-          existing.messageSource !== 'INLINE_MESSAGE' ||
-          storedMessage !== input.message
-        ) {
-          throw new Error('This Design message id was already used for different content.');
-        }
+        await this.assertInlineDesignTurnRetry(existing, input);
         return clone(existing);
       }
       const queuedTurnCount = this.state.designTurns.filter(
@@ -2673,48 +2783,306 @@ export class FileTaskStore {
       }
 
       const now = new Date().toISOString();
-      const referenceIds = this.state.designReferences
-        .filter((reference) => reference.designId === design.id)
-        .map((reference) => reference.id);
+      const selectedReferences = input.referenceIds.map((referenceId) =>
+        this.state.designReferences.find(
+          (reference) =>
+            reference.id === referenceId &&
+            reference.designId === design.id &&
+            reference.state === 'ACTIVE'
+        )
+      );
+      if (selectedReferences.some((reference) => !reference)) {
+        throw new Error('A selected Design reference is not active.');
+      }
+      const referenceIds = [...input.referenceIds];
       const previousState = this.state;
-      const artifact = await this.createArtifactRecord(design.id, 'design-message');
-      await writeNewArtifactFiles(this.artifactsDir, [
-        { artifact, content: input.message }
-      ]);
-      const order =
-        Math.max(
-          0,
-          ...this.state.designTurns
-            .filter((turn) => turn.designId === design.id)
-            .map((turn) => turn.order)
-        ) + 1;
-      const turn: DesignTurn = {
-        id: randomUUID(),
-        designId: design.id,
-        clientMessageId: input.clientMessageId,
-        order,
-        messageSource: 'INLINE_MESSAGE',
-        messageArtifactId: artifact.id,
-        referenceIds,
-        checkpoint: { boundary: 'QUEUED' },
-        createdAt: now
+      let prepared: PreparedAttachmentAppend | undefined;
+      let artifact: ArtifactRecord | undefined;
+      try {
+        if (input.attachmentDraftId) {
+          const existingRecords = this.state.attachments
+            .filter((attachment) => attachment.taskId === design.id)
+            .sort((left, right) => left.ordinal - right.ordinal);
+          prepared = await this.attachmentFiles.prepareDraftForExistingTask(
+            input.attachmentDraftId,
+            design.id,
+            existingRecords
+          );
+        }
+        const addedReferences = (prepared?.records ?? []).map<DesignReference>(
+          (attachment) => ({
+            id: randomUUID(),
+            designId: design.id,
+            attachmentId: attachment.id,
+            role: 'REFERENCE',
+            state: 'ACTIVE',
+            sourceDraftId: input.attachmentDraftId,
+            createdAt: now
+          })
+        );
+        artifact = await this.createArtifactRecord(design.id, 'design-message');
+        await writeNewArtifactFiles(this.artifactsDir, [
+          { artifact, content: input.message }
+        ]);
+        const order =
+          Math.max(
+            0,
+            ...this.state.designTurns
+              .filter((turn) => turn.designId === design.id)
+              .map((turn) => turn.order)
+          ) + 1;
+        const turn: DesignTurn = {
+          id: randomUUID(),
+          designId: design.id,
+          clientMessageId: input.clientMessageId,
+          order,
+          messageSource: 'INLINE_MESSAGE',
+          messageArtifactId: artifact.id,
+          attachmentDraftId: input.attachmentDraftId,
+          referenceIds: [...referenceIds, ...addedReferences.map((reference) => reference.id)],
+          checkpoint: { boundary: 'QUEUED' },
+          createdAt: now
+        };
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((task) =>
+            task.id === design.id ? { ...task, updatedAt: now } : task
+          ),
+          attachments: [...this.state.attachments, ...(prepared?.records ?? [])],
+          designReferences: [...this.state.designReferences, ...addedReferences],
+          designTurns: [turn, ...this.state.designTurns],
+          artifacts: [artifact, ...this.state.artifacts]
+        };
+        const directorySynced = await this.persistSnapshot();
+        if (directorySynced && prepared) {
+          await this.attachmentFiles
+            .finalizeDraftForExistingTask(prepared)
+            .catch(() => undefined);
+        }
+        return clone(turn);
+      } catch (error) {
+        this.state = previousState;
+        if (artifact) await this.cleanupUnpublishedArtifacts([artifact]);
+        if (prepared) {
+          try {
+            await this.attachmentFiles.rollbackDraftForExistingTask(prepared);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'Design message failed and its prepared reference files could not be removed.'
+            );
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  async resolveInlineDesignTurnRetry(
+    input: CreateInlineDesignTurnInput
+  ): Promise<DesignTurn | undefined> {
+    await this.init();
+    validateInlineDesignTurnInput(input);
+    const existing = this.state.designTurns.find(
+      (turn) =>
+        turn.designId === input.designId &&
+        turn.clientMessageId === input.clientMessageId
+    );
+    if (!existing) return undefined;
+    await this.assertInlineDesignTurnRetry(existing, input);
+    return clone(existing);
+  }
+
+  async addDesignReferences(input: {
+    designId: string;
+    attachmentDraftId: string;
+  }): Promise<DesignReference[]> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const retry = this.state.designReferences.filter(
+        (reference) =>
+          reference.designId === design.id &&
+          reference.sourceDraftId === input.attachmentDraftId
+      );
+      if (retry.length > 0) {
+        await this.attachmentFiles
+          .discardDraft(input.attachmentDraftId)
+          .catch(() => undefined);
+        return clone(retry);
+      }
+
+      const existingRecords = this.state.attachments
+        .filter((attachment) => attachment.taskId === design.id)
+        .sort((left, right) => left.ordinal - right.ordinal);
+      const previousState = this.state;
+      let prepared: PreparedAttachmentAppend | undefined;
+      try {
+        prepared = await this.attachmentFiles.prepareDraftForExistingTask(
+          input.attachmentDraftId,
+          design.id,
+          existingRecords
+        );
+        const now = new Date().toISOString();
+        const references = prepared.records.map<DesignReference>((attachment) => ({
+          id: randomUUID(),
+          designId: design.id,
+          attachmentId: attachment.id,
+          role: 'REFERENCE',
+          state: 'ACTIVE',
+          sourceDraftId: input.attachmentDraftId,
+          createdAt: now
+        }));
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((task) =>
+            task.id === design.id ? { ...task, updatedAt: now } : task
+          ),
+          attachments: [...this.state.attachments, ...prepared.records],
+          designReferences: [...this.state.designReferences, ...references]
+        };
+        const directorySynced = await this.persistSnapshot();
+        if (directorySynced) {
+          await this.attachmentFiles
+            .finalizeDraftForExistingTask(prepared)
+            .catch(() => undefined);
+        }
+        return clone(references);
+      } catch (error) {
+        this.state = previousState;
+        if (prepared) {
+          try {
+            await this.attachmentFiles.rollbackDraftForExistingTask(prepared);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'Reference adoption failed and its prepared files could not be removed.'
+            );
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  async removeDesignReference(input: {
+    designId: string;
+    referenceId: string;
+  }): Promise<DesignReference> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.requireDesign(input.designId);
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === input.referenceId &&
+          candidate.designId === input.designId
+      );
+      if (!reference) throw new Error('Design reference not found.');
+      if (reference.state === 'INACTIVE') return clone(reference);
+      const now = new Date().toISOString();
+      const updated: DesignReference = {
+        ...reference,
+        state: 'INACTIVE',
+        deactivatedAt: now
       };
+      const previousState = this.state;
       this.state = {
         ...this.state,
         tasks: this.state.tasks.map((task) =>
-          task.id === design.id ? { ...task, updatedAt: now } : task
+          task.id === input.designId ? { ...task, updatedAt: now } : task
         ),
-        designTurns: [turn, ...this.state.designTurns],
-        artifacts: [artifact, ...this.state.artifacts]
+        designReferences: this.state.designReferences.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
       };
       try {
         await this.persistSnapshot();
       } catch (error) {
         this.state = previousState;
-        await this.cleanupUnpublishedArtifacts([artifact]);
         throw error;
       }
-      return clone(turn);
+      return clone(updated);
+    });
+  }
+
+  async readDesignReferenceContent(
+    designId: string,
+    referenceId: string
+  ): Promise<{
+    reference: DesignReference;
+    content: StoredAttachmentContent;
+    sha256: string;
+  }> {
+    return this.withOwnedIo(async () => {
+      await this.init();
+      this.requireDesign(designId);
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === referenceId && candidate.designId === designId
+      );
+      if (!reference || reference.state !== 'ACTIVE') {
+        throw new Error('Active Design reference not found.');
+      }
+      const attachment = this.state.attachments.find(
+        (candidate) =>
+          candidate.id === reference.attachmentId && candidate.taskId === designId
+      );
+      if (!attachment) throw new Error('Design reference attachment not found.');
+      return {
+        reference: clone(reference),
+        content: await this.attachmentFiles.readTask(attachment),
+        sha256: attachment.sha256
+      };
+    });
+  }
+
+  async recordDesignReferenceAsset(input: {
+    designId: string;
+    referenceId: string;
+    projectAssetPath: string;
+  }): Promise<DesignReference> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!isSafeDesignProjectPath(input.projectAssetPath)) {
+        throw new Error('Design project asset path is invalid.');
+      }
+      this.requireDesign(input.designId);
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === input.referenceId &&
+          candidate.designId === input.designId &&
+          candidate.state === 'ACTIVE'
+      );
+      if (!reference) throw new Error('Active Design reference not found.');
+      if (reference.role === 'PROJECT_ASSET_SOURCE') {
+        if (reference.projectAssetPath !== input.projectAssetPath) {
+          throw new Error('Design reference already owns another project asset.');
+        }
+        return clone(reference);
+      }
+      const now = new Date().toISOString();
+      const updated: DesignReference = {
+        ...reference,
+        role: 'PROJECT_ASSET_SOURCE',
+        projectAssetPath: input.projectAssetPath
+      };
+      const previousState = this.state;
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === input.designId ? { ...task, updatedAt: now } : task
+        ),
+        designReferences: this.state.designReferences.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        this.state = previousState;
+        throw error;
+      }
+      return clone(updated);
     });
   }
 
@@ -2814,6 +3182,79 @@ export class FileTaskStore {
     });
   }
 
+  async updateDesignOpenedCandidate(
+    input: UpdateDesignOpenedCandidateInput
+  ): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      if (turn.outcome !== undefined || !turn.runId) {
+        throw new Error('Only an active Design turn can record an opened candidate.');
+      }
+      if (sameJsonValue(turn.finalOpenedCandidate, input.candidate)) {
+        return clone(turn);
+      }
+      const run = this.state.runs.find(
+        (candidate) =>
+          candidate.id === turn.runId &&
+          candidate.taskId === design.id &&
+          candidate.mode === 'DESIGN' &&
+          candidate.generationKey === turn.id &&
+          [
+            'QUEUED',
+            'STARTING',
+            'RUNNING',
+            'AWAITING_APPROVAL',
+            'AWAITING_USER_INPUT'
+          ].includes(candidate.status)
+      );
+      const source = input.candidate.source;
+      const worktree = this.state.worktrees.find(
+        (candidate) =>
+          candidate.id === source.worktreeId &&
+          candidate.id === design.currentWorktreeId &&
+          candidate.taskId === design.id &&
+          candidate.repositoryId === design.repositoryId &&
+          candidate.branchName === source.branchName
+      );
+      const generation = this.state.previewGenerations.find(
+        (candidate) =>
+          candidate.id === input.candidate.previewGenerationId &&
+          candidate.taskId === design.id &&
+          candidate.state === 'READY' &&
+          candidate.routingState === 'CANDIDATE' &&
+          candidate.source.type === 'EXACT_COMMIT' &&
+          candidate.source.repositoryId === design.repositoryId &&
+          candidate.source.commitSha === source.candidateCommitSha &&
+          candidate.source.designRevisionId === undefined
+      );
+      if (
+        !run ||
+        !worktree ||
+        source.repositoryId !== design.repositoryId ||
+        !isGitObjectId(source.expectedParentCommit) ||
+        !isGitObjectId(source.treeSha) ||
+        !isGitObjectId(source.candidateCommitSha) ||
+        !generation
+      ) {
+        throw new Error('Opened Design candidate ownership is inconsistent.');
+      }
+      const updated: DesignTurn = {
+        ...turn,
+        finalOpenedCandidate: clone(input.candidate)
+      };
+      this.state = {
+        ...this.state,
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
   async settleDesignTurn(input: SettleDesignTurnInput): Promise<DesignTurn> {
     return this.serializeMutation(async () => {
       await this.init();
@@ -2856,6 +3297,7 @@ export class FileTaskStore {
       const updated: DesignTurn = {
         ...turn,
         checkpoint: undefined,
+        finalOpenedCandidate: undefined,
         outcome: input.outcome,
         failureReason,
         settledAt: now
@@ -3320,6 +3762,64 @@ export class FileTaskStore {
     );
     if (!turn) throw new Error('Design turn not found.');
     return turn;
+  }
+
+  private attachmentRecordsForDesignTurn(
+    turn: DesignTurn
+  ): TaskAttachmentRecord[] {
+    return turn.referenceIds.map((referenceId) => {
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === referenceId && candidate.designId === turn.designId
+      );
+      const attachment = reference
+        ? this.state.attachments.find(
+            (candidate) =>
+              candidate.id === reference.attachmentId &&
+              candidate.taskId === turn.designId
+          )
+        : undefined;
+      if (!reference || !attachment) {
+        throw new Error('Design turn reference attachment is unavailable.');
+      }
+      return attachment;
+    });
+  }
+
+  private async assertInlineDesignTurnRetry(
+    existing: DesignTurn,
+    input: CreateInlineDesignTurnInput
+  ): Promise<void> {
+    const artifact = existing.messageArtifactId
+      ? this.state.artifacts.find(
+          (candidate) => candidate.id === existing.messageArtifactId
+        )
+      : undefined;
+    const storedMessage = artifact
+      ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
+      : undefined;
+    const adoptedReferenceIds = input.attachmentDraftId
+      ? existing.referenceIds.filter((referenceId) =>
+          this.state.designReferences.some(
+            (reference) =>
+              reference.id === referenceId &&
+              reference.designId === input.designId &&
+              reference.sourceDraftId === input.attachmentDraftId
+          )
+        )
+      : [];
+    const expectedReferenceIds = [...input.referenceIds, ...adoptedReferenceIds];
+    if (
+      existing.messageSource !== 'INLINE_MESSAGE' ||
+      storedMessage !== input.message ||
+      existing.attachmentDraftId !== input.attachmentDraftId ||
+      existing.referenceIds.length !== expectedReferenceIds.length ||
+      existing.referenceIds.some(
+        (referenceId, index) => referenceId !== expectedReferenceIds[index]
+      )
+    ) {
+      throw new Error('This Design message id was already used for different content.');
+    }
   }
 
   private resolveDesignCreationRetryFromState(
@@ -6429,6 +6929,19 @@ function sameAbsolutePath(left: string, right: string): boolean {
   return path.isAbsolute(left) && path.isAbsolute(right) && path.relative(left, right) === '';
 }
 
+function isSafeDesignProjectPath(value: string): boolean {
+  return (
+    value.length > 0 &&
+    Buffer.byteLength(value, 'utf8') <= 1_024 &&
+    value.startsWith('assets/') &&
+    !path.posix.isAbsolute(value) &&
+    !value.includes('\\') &&
+    path.posix.normalize(value) === value &&
+    value !== '..' &&
+    !value.startsWith('../')
+  );
+}
+
 function requireCurrentState(state: PersistedState): StoreState {
   if (state.schemaVersion !== TASK_STORE_SCHEMA_VERSION) {
     throw new Error(
@@ -7290,7 +7803,12 @@ function validatePersistedDesignRelationships(state: StoreState): void {
         : turn.order > 1 && turn.messageArtifactId !== undefined;
     if (
       !hasValidMessageLineage ||
-      new Set(turn.referenceIds).size !== turn.referenceIds.length
+      new Set(turn.referenceIds).size !== turn.referenceIds.length ||
+      (turn.attachmentDraftId !== undefined &&
+        !turn.referenceIds.some(
+          (referenceId) =>
+            references.get(referenceId)?.sourceDraftId === turn.attachmentDraftId
+        ))
     ) {
       invalidPersistedRelationship('Design turn lineage');
     }
@@ -7339,9 +7857,12 @@ function validatePersistedDesignRelationships(state: StoreState): void {
   }
   for (const ownerTurns of turnsByDesign.values()) {
     const orders = ownerTurns.map((turn) => turn.order).sort((a, b) => a - b);
+    const unsettled = ownerTurns.filter((turn) => turn.outcome === undefined);
     if (
       orders.some((order, index) => order !== index + 1) ||
-      ownerTurns.filter((turn) => turn.outcome === undefined).length > 1
+      unsettled.filter((turn) => turn.runId !== undefined).length > 1 ||
+      unsettled.filter((turn) => turn.runId === undefined).length >
+        DESIGN_LIMITS.queuedTurns
     ) {
       invalidPersistedRelationship('Design turn sequence');
     }
@@ -7353,9 +7874,32 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     if (
       design?.kind !== 'DESIGN' ||
       !attachment ||
-      attachment.taskId !== design.id
+      attachment.taskId !== design.id ||
+      (reference.projectAssetPath !== undefined &&
+        !isSafeDesignProjectPath(reference.projectAssetPath)) ||
+      (reference.firstDeliveredAt !== undefined &&
+        !state.designTurns.some((turn) => {
+          if (!turn.referenceIds.includes(reference.id) || !turn.runId) return false;
+          const run = runs.get(turn.runId);
+          return run?.attachmentSubmissions?.some(
+            (submission) =>
+              submission.attachmentId === reference.attachmentId &&
+              submission.submittedAt === reference.firstDeliveredAt
+          );
+        }))
     ) {
       invalidPersistedRelationship('Design reference ownership');
+    }
+  }
+  for (const attachment of state.attachments) {
+    const task = tasks.get(attachment.taskId);
+    if (task?.kind !== 'DESIGN') continue;
+    if (
+      state.designReferences.filter(
+        (reference) => reference.attachmentId === attachment.id
+      ).length !== 1
+    ) {
+      invalidPersistedRelationship('Design attachment reference ownership');
     }
   }
 
@@ -7455,7 +7999,9 @@ function validatePersistedDesignCheckpoint(
 ): void {
   const checkpoint = turn.checkpoint;
   if (turn.outcome !== undefined) {
-    if (checkpoint) invalidPersistedRelationship('settled Design turn checkpoint');
+    if (checkpoint || turn.finalOpenedCandidate) {
+      invalidPersistedRelationship('settled Design turn checkpoint');
+    }
     return;
   }
   if (!checkpoint) invalidPersistedRelationship('unsettled Design turn checkpoint');
@@ -7464,6 +8010,38 @@ function validatePersistedDesignCheckpoint(
     return;
   }
   if (!run) invalidPersistedRelationship('Design checkpoint Run ownership');
+  if (turn.finalOpenedCandidate) {
+    const opened = turn.finalOpenedCandidate;
+    const source = opened.source;
+    const worktree = state.worktrees.find(
+      (candidate) =>
+        candidate.id === source.worktreeId &&
+        candidate.id === design.currentWorktreeId &&
+        candidate.taskId === design.id &&
+        candidate.repositoryId === design.repositoryId &&
+        candidate.branchName === source.branchName
+    );
+    const generation = state.previewGenerations.find(
+      (candidate) => candidate.id === opened.previewGenerationId
+    );
+    if (
+      source.repositoryId !== design.repositoryId ||
+      !worktree ||
+      !generation ||
+      generation.taskId !== design.id ||
+      generation.source.type !== 'EXACT_COMMIT' ||
+      generation.source.repositoryId !== design.repositoryId ||
+      generation.source.commitSha !== source.candidateCommitSha ||
+      generation.source.designRevisionId !== undefined ||
+      !(
+        (generation.state === 'READY' && generation.routingState === 'CANDIDATE') ||
+        generation.state === 'STOPPED' ||
+        generation.state === 'FAILED'
+      )
+    ) {
+      invalidPersistedRelationship('opened Design candidate ownership');
+    }
+  }
   if (checkpoint.boundary === 'RUN_LINKED') return;
   if (checkpoint.boundary === 'POST_RUN_EVIDENCE_RECORDED') {
     const snapshot = state.gitSnapshots.find(

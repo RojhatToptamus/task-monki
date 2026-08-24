@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -142,9 +142,16 @@ describe('DesignSourceService', () => {
         }
       )
     ).trim();
-    const published = await source.publishCandidateCommit({
+    const preparedCandidate = await source.prepareCandidateCommit({
       ...ownership,
       checkpoint: capture.checkpoint
+    });
+    expect(
+      (await git(repository.path, ['rev-parse', `refs/heads/${worktree.branchName}`])).trim()
+    ).toBe(capture.checkpoint.expectedParentCommit);
+    const published = await source.publishPreparedCandidateCommit({
+      ...ownership,
+      checkpoint: preparedCandidate
     });
     expect(published.candidateCommitSha).toBe(danglingCandidate);
     expect(
@@ -200,7 +207,163 @@ describe('DesignSourceService', () => {
     await expect(fs.access(orphaned.path)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(unknownPath)).resolves.toBeUndefined();
   }, 20_000);
+
+  it('imports exact reference bytes at one safe editable project path', async () => {
+    const project = await createManagedProject('asset', 'design-asset-import-token');
+    const bytes = Buffer.from('editable asset bytes');
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+
+    const imported = await project.source.importProjectAsset({
+      designId: project.designId,
+      repository: project.repository,
+      worktree: project.worktree,
+      displayName: 'brand.txt',
+      bytes,
+      sha256
+    });
+
+    expect(imported).toMatchObject({
+      relativePath: 'assets/brand.txt',
+      sha256,
+      created: true
+    });
+    expect(await fs.readFile(imported.absolutePath)).toEqual(bytes);
+    await expect(
+      project.source.importProjectAsset({
+        designId: project.designId,
+        repository: project.repository,
+        worktree: project.worktree,
+        displayName: 'brand.txt',
+        bytes,
+        sha256
+      })
+    ).resolves.toMatchObject({ relativePath: 'assets/brand.txt', created: false });
+    await expect(
+      project.source.importProjectAsset({
+        designId: project.designId,
+        repository: project.repository,
+        worktree: project.worktree,
+        displayName: '../escape.txt',
+        bytes,
+        sha256
+      })
+    ).rejects.toThrow('not safe');
+    await expect(
+      project.source.importProjectAsset({
+        designId: project.designId,
+        repository: project.repository,
+        worktree: project.worktree,
+        displayName: 'brand.txt',
+        bytes: Buffer.from('different'),
+        sha256: createHash('sha256').update('different').digest('hex')
+      })
+    ).rejects.toThrow('different project file');
+
+    await expect(
+      project.source.listProjectFiles({
+        designId: project.designId,
+        repository: project.repository,
+        worktree: project.worktree
+      })
+    ).resolves.toEqual({
+      files: [
+        { path: 'assets/brand.txt', byteCount: bytes.byteLength },
+        expect.objectContaining({ path: 'index.html' })
+      ],
+      truncated: false
+    });
+
+    await project.source.rollbackProjectAsset(imported);
+    await expect(fs.access(imported.absolutePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 20_000);
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a symbolic-link asset directory and an ignored destination',
+    async () => {
+      const project = await createManagedProject('asset-security', 'design-asset-security-token');
+      const bytes = Buffer.from('protected bytes');
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      const outside = path.join(project.root, 'outside');
+      await fs.mkdir(outside);
+      await fs.symlink(outside, path.join(project.worktree.worktreePath, 'assets'));
+
+      await expect(
+        project.source.importProjectAsset({
+          designId: project.designId,
+          repository: project.repository,
+          worktree: project.worktree,
+          displayName: 'escape.txt',
+          bytes,
+          sha256
+        })
+      ).rejects.toThrow('not a safe directory');
+      await expect(fs.access(path.join(outside, 'escape.txt'))).rejects.toMatchObject({
+        code: 'ENOENT'
+      });
+
+      await fs.unlink(path.join(project.worktree.worktreePath, 'assets'));
+      await fs.writeFile(
+        path.join(project.worktree.worktreePath, '.gitignore'),
+        'assets/\n',
+        'utf8'
+      );
+      await expect(
+        project.source.importProjectAsset({
+          designId: project.designId,
+          repository: project.repository,
+          worktree: project.worktree,
+          displayName: 'ignored.txt',
+          bytes,
+          sha256
+        })
+      ).rejects.toThrow('Git cannot preserve it');
+      await expect(
+        fs.access(path.join(project.worktree.worktreePath, 'assets', 'ignored.txt'))
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+    20_000
+  );
 });
+
+async function createManagedProject(prefix: string, creationToken: string) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-design-${prefix}-`));
+  const repositoryRoot = path.join(root, 'repositories');
+  const worktreeRoot = path.join(root, 'worktrees');
+  const source = new DesignSourceService({ repositoryRoot, worktreeRoot });
+  const prepared = await source.prepareBlankRepository({ creationToken });
+  const designId = randomUUID();
+  const now = new Date().toISOString();
+  const repository: Repository = {
+    id: prepared.id,
+    kind: 'DESIGN_MANAGED',
+    name: prepared.name,
+    path: prepared.path,
+    status: 'AVAILABLE',
+    headSha: prepared.headSha,
+    branch: prepared.branch,
+    remotes: [],
+    createdAt: now,
+    updatedAt: now,
+    checkedAt: prepared.checkedAt
+  };
+  const requestedWorktree: WorktreeRecord = {
+    id: randomUUID(),
+    taskId: designId,
+    iterationId: randomUUID(),
+    repositoryId: repository.id,
+    worktreePath: path.join(worktreeRoot, designId),
+    branchName: `task-monki/design-${designId.slice(0, 8)}`,
+    baseSha: prepared.headSha,
+    status: 'CREATING',
+    createdAt: now,
+    updatedAt: now
+  };
+  const worktree = await new WorktreeService(worktreeRoot).create(
+    requestedWorktree,
+    repository.path
+  );
+  return { root, source, designId, repository, worktree };
+}
 
 async function git(
   cwd: string,

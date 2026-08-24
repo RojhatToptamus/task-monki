@@ -35,71 +35,69 @@ type LegacyTaskStore = UnvalidatedCurrentStore & {
 export function migratePersistedStateToCurrent<T extends LegacyTaskStore>(
   state: T
 ): { state: T; changed: boolean } {
-  if (state.schemaVersion !== 19) {
-    return { state, changed: false };
-  }
-  assertLegacyCollection(state.tasks, 'tasks');
-  assertLegacyCollection(state.repositories, 'repositories');
-  assertNoLegacyDesignRecords(state.designTurns, 'designTurns');
-  assertNoLegacyDesignRecords(state.designReferences, 'designReferences');
-  assertNoLegacyDesignRecords(state.designRevisions, 'designRevisions');
-  assertLegacyCollection(state.previewPlans, 'previewPlans');
-  assertLegacyCollection(state.previewGenerations, 'previewGenerations');
+  let current = state;
+  let changed = false;
+  if (current.schemaVersion === 19) {
+    assertLegacyCollection(current.tasks, 'tasks');
+    assertLegacyCollection(current.repositories, 'repositories');
+    assertNoLegacyDesignRecords(current.designTurns, 'designTurns');
+    assertNoLegacyDesignRecords(current.designReferences, 'designReferences');
+    assertNoLegacyDesignRecords(current.designRevisions, 'designRevisions');
+    assertLegacyCollection(current.previewPlans, 'previewPlans');
+    assertLegacyCollection(current.previewGenerations, 'previewGenerations');
 
-  const tasks = state.tasks.map((value) =>
-    isRecord(value) ? { ...value, kind: 'NORMAL' } : value
-  );
-  const repositories = state.repositories.map((value) =>
-    isRecord(value) ? { ...value, kind: 'USER_REGISTERED' } : value
-  );
-  const previewPlans = state.previewPlans.map((value) => {
-    if (!isRecord(value)) return value;
-    const {
-      recipePath,
-      recipeVersion,
-      recipeDigest,
-      ...plan
-    } = value;
-    return {
-      ...plan,
-      planSource: {
-        type: 'REPOSITORY_RECIPE',
+    const tasks = current.tasks.map((value) =>
+      isRecord(value) ? { ...value, kind: 'NORMAL' } : value
+    );
+    const repositories = current.repositories.map((value) =>
+      isRecord(value) ? { ...value, kind: 'USER_REGISTERED' } : value
+    );
+    const previewPlans = current.previewPlans.map((value) => {
+      if (!isRecord(value)) return value;
+      const {
         recipePath,
         recipeVersion,
-        recipeDigest
-      }
-    };
-  });
-  const previewGenerations = state.previewGenerations.map((value) => {
-    if (!isRecord(value)) return value;
-    const {
-      approvalId,
-      executionDigest,
-      sourceGitSnapshotId,
-      sourceHeadSha,
-      sourceDirtyFingerprint,
-      ...generation
-    } = value;
-    return {
-      ...generation,
-      executionAuthority: {
-        type: 'USER_APPROVAL',
+        recipeDigest,
+        ...plan
+      } = value;
+      return {
+        ...plan,
+        planSource: {
+          type: 'REPOSITORY_RECIPE',
+          recipePath,
+          recipeVersion,
+          recipeDigest
+        }
+      };
+    });
+    const previewGenerations = current.previewGenerations.map((value) => {
+      if (!isRecord(value)) return value;
+      const {
         approvalId,
-        executionDigest
-      },
-      source: {
-        type: 'WORKTREE_SNAPSHOT',
-        gitSnapshotId: sourceGitSnapshotId,
-        headSha: sourceHeadSha,
-        dirtyFingerprint: sourceDirtyFingerprint
-      }
-    };
-  });
-
-  return {
-    state: {
-      ...state,
-      schemaVersion: TASK_STORE_SCHEMA_VERSION,
+        executionDigest,
+        sourceGitSnapshotId,
+        sourceHeadSha,
+        sourceDirtyFingerprint,
+        ...generation
+      } = value;
+      return {
+        ...generation,
+        executionAuthority: {
+          type: 'USER_APPROVAL',
+          approvalId,
+          executionDigest
+        },
+        source: {
+          type: 'WORKTREE_SNAPSHOT',
+          gitSnapshotId: sourceGitSnapshotId,
+          headSha: sourceHeadSha,
+          dirtyFingerprint: sourceDirtyFingerprint
+        }
+      };
+    });
+    current = {
+      ...current,
+      schemaVersion: 20,
       tasks,
       repositories,
       designTurns: [],
@@ -107,9 +105,33 @@ export function migratePersistedStateToCurrent<T extends LegacyTaskStore>(
       designRevisions: [],
       previewPlans,
       previewGenerations
-    } as T,
-    changed: true
-  };
+    } as T;
+    changed = true;
+  }
+
+  if (current.schemaVersion === 20) {
+    assertLegacyCollection(current.designReferences, 'designReferences');
+    current = {
+      ...current,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION,
+      designReferences: current.designReferences.map((value) =>
+        isRecord(value)
+          ? { ...value, role: 'REFERENCE', state: 'ACTIVE' }
+          : value
+      )
+    } as T;
+    changed = true;
+  }
+
+  if (current.schemaVersion === 21) {
+    current = {
+      ...current,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION
+    } as T;
+    changed = true;
+  }
+
+  return { state: current, changed };
 }
 
 /**
@@ -157,7 +179,7 @@ function assertLegacyCollection(
   name: string
 ): asserts value is unknown[] {
   if (!Array.isArray(value)) {
-    throw new Error(`Task Monki store schema 19 is invalid: ${name} is missing.`);
+    throw new Error(`Task Monki legacy store is invalid: ${name} is missing.`);
   }
 }
 

@@ -45,6 +45,90 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(scenario.service.listDesigns()).resolves.toEqual([]);
   });
 
+  it('delivers adopted references with the first Design turn and preserves them on reopen', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-initial-references',
+      previewEnabled: true,
+      designMode: true
+    });
+    scenarios.push(scenario);
+    vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
+      {
+        id: 'codex:openai/scenario-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
+        model: 'scenario-model',
+        displayName: 'Scenario model',
+        hidden: false,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+        inputModalities: ['text', 'image'],
+        isDefault: true
+      }
+    ]);
+    const imageBytes = new Uint8Array(
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64'
+      )
+    );
+    const draft = await scenario.service.stageTaskAttachmentBatch({
+      attachments: [
+        {
+          clientToken: 'design-initial-reference-image',
+          displayName: 'layout.png',
+          declaredMediaType: 'image/png',
+          bytes: imageBytes.buffer
+        },
+        {
+          clientToken: 'design-initial-reference-copy',
+          displayName: 'copy.md',
+          declaredMediaType: 'text/markdown',
+          bytes: new TextEncoder().encode('# Keep the copy direct.').buffer
+        }
+      ]
+    });
+
+    const createInput = {
+      brief: 'Create a product page from the supplied direction.',
+      creationToken: 'design-initial-references-create',
+      model: 'scenario-model',
+      reasoningEffort: 'medium',
+      attachmentDraftId: draft.id
+    };
+    const detail = await scenario.service.createBlankDesign(createInput);
+    const retry = await scenario.service.createBlankDesign(createInput);
+
+    expect(retry.design.id).toBe(detail.design.id);
+    expect(scenario.agent.startedTurns).toHaveLength(1);
+    expect(detail.references).toHaveLength(2);
+    expect(detail.references.every(({ state }) => state === 'ACTIVE')).toBe(true);
+    expect(detail.conversation[0]?.turn.referenceIds).toEqual(
+      detail.references.map(({ id }) => id)
+    );
+    expect(scenario.agent.startedTurns[0]?.attachments).toEqual([
+      expect.objectContaining({ displayName: 'layout.png', kind: 'image' }),
+      expect.objectContaining({ displayName: 'copy.md', kind: 'text' })
+    ]);
+    expect(scenario.agent.startedTurns[0]?.prompt).toContain('layout.png');
+    expect(scenario.agent.startedTurns[0]?.prompt).toContain('copy.md');
+    const worktreePath = requireWorktreePath(detail);
+    expect(
+      scenario.agent.startedTurns[0]?.attachments?.every(
+        (attachment) => !attachment.path.startsWith(worktreePath)
+      )
+    ).toBe(true);
+    expect(detail.task.agentSettings.networkAccess).toBe(false);
+
+    const reopened = await scenario.service.getDesign(detail.design.id);
+    expect(reopened.references).toEqual(detail.references);
+    expect(reopened.attachments.map(({ displayName }) => displayName)).toEqual([
+      'layout.png',
+      'copy.md'
+    ]);
+  });
+
   it('creates, refines, keeps no-change history compact, and preserves the last ready preview on failure', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-vertical',
@@ -79,7 +163,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
     detail = await scenario.service.submitDesignTurn({
       designId: detail.design.id,
       clientMessageId: 'design-vertical-refine',
-      message: 'Change the title to Refined design.'
+      message: 'Change the title to Refined design.',
+      referenceIds: []
     });
     expect(scenario.agent.startedTurns).toHaveLength(2);
     expect(scenario.agent.startedTurns[1].session.localSessionId).toBe(
@@ -100,7 +185,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
     detail = await scenario.service.submitDesignTurn({
       designId: detail.design.id,
       clientMessageId: 'design-vertical-no-change',
-      message: 'Keep the result exactly as it is.'
+      message: 'Keep the result exactly as it is.',
+      referenceIds: []
     });
     await scenario.completeRun(requireRunId(detail), 'No source change was needed.');
     detail = await waitForDesign(scenario, detail.design.id, (candidate) =>
@@ -111,7 +197,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
     detail = await scenario.service.submitDesignTurn({
       designId: detail.design.id,
       clientMessageId: 'design-vertical-failure',
-      message: 'Remove the page entry point.'
+      message: 'Remove the page entry point.',
+      referenceIds: []
     });
     await fs.rm(path.join(worktreePath, 'index.html'));
     await scenario.completeRun(requireRunId(detail), 'The entry point was removed.');
@@ -137,6 +224,157 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(fs.stat(repositoryPath)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 45_000);
 
+  it('adds selected references, imports an editable asset, and keeps inactive provenance', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-references',
+      previewEnabled: true,
+      designMode: true
+    });
+    scenarios.push(scenario);
+
+    let detail = await scenario.service.createBlankDesign({
+      brief: 'Create a small editorial page.',
+      creationToken: 'design-reference-service-create',
+      model: 'scenario-model',
+      reasoningEffort: 'medium'
+    });
+    const worktreePath = requireWorktreePath(detail);
+    await fs.writeFile(
+      path.join(worktreePath, 'index.html'),
+      '<!doctype html><title>Editorial page</title>',
+      'utf8'
+    );
+    await scenario.completeRun(requireRunId(detail), 'The first page is ready.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.revisions.length === 1 && candidate.canvas.state === 'READY'
+    );
+
+    const referenceBytes = new TextEncoder().encode(
+      ':root { --brand-accent: #765447; }\n'
+    );
+    const draft = await scenario.service.stageTaskAttachmentBatch({
+      attachments: [{
+        clientToken: 'design-service-reference-client',
+        displayName: 'brand.css',
+        declaredMediaType: 'text/css',
+        bytes: referenceBytes.buffer
+      }]
+    });
+    detail = await scenario.service.addDesignReferences({
+      designId: detail.design.id,
+      attachmentDraftId: draft.id
+    });
+    const reference = detail.references[0]!;
+    expect(reference).toMatchObject({ role: 'REFERENCE', state: 'ACTIVE' });
+    expect(detail.task.agentSettings).toMatchObject({
+      sandbox: 'WORKSPACE_WRITE',
+      networkAccess: false,
+      approvalPolicy: 'never'
+    });
+
+    detail = await scenario.service.importDesignReferenceAsset({
+      designId: detail.design.id,
+      referenceId: reference.id
+    });
+    expect(detail.references[0]).toMatchObject({
+      role: 'PROJECT_ASSET_SOURCE',
+      projectAssetPath: 'assets/brand.css'
+    });
+    expect(detail.projectFiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'assets/brand.css' }),
+        expect.objectContaining({ path: 'index.html' })
+      ])
+    );
+
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-reference-service-refine',
+      message: 'Use the imported brand asset and make its accent warmer.',
+      referenceIds: [reference.id]
+    });
+    expect(scenario.agent.startedTurns[1]?.attachments).toEqual([
+      expect.objectContaining({
+        attachmentId: reference.attachmentId,
+        displayName: 'brand.css'
+      })
+    ]);
+    expect(scenario.agent.startedTurns[1]?.attachments?.[0]?.path.startsWith(worktreePath)).toBe(
+      false
+    );
+    expect(scenario.agent.startedTurns[1]?.prompt).toContain(
+      'brand.css (editable project asset: assets/brand.css)'
+    );
+    await fs.writeFile(
+      path.join(worktreePath, 'assets', 'brand.css'),
+      ':root { --brand-accent: #a05f43; }\n',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(worktreePath, 'index.html'),
+      '<!doctype html><title>Warm editorial page</title>',
+      'utf8'
+    );
+    await scenario.completeRun(requireRunId(detail), 'The imported asset is now warmer.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.revisions.length === 2 && candidate.canvas.state === 'READY'
+    );
+
+    detail = await scenario.service.removeDesignReference({
+      designId: detail.design.id,
+      referenceId: reference.id
+    });
+    expect(detail.references[0]).toMatchObject({
+      state: 'INACTIVE',
+      projectAssetPath: 'assets/brand.css'
+    });
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-reference-service-without-reference',
+      message: 'Keep the page unchanged.',
+      referenceIds: []
+    });
+    expect(scenario.agent.startedTurns[2]?.attachments).toEqual([]);
+    await scenario.completeRun(requireRunId(detail), 'No source change was needed.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.turns.at(-1)?.outcome === 'NO_CHANGE'
+    );
+
+    const reopened = await scenario.service.getDesign(detail.design.id);
+    expect(reopened.attachments).toEqual([
+      expect.objectContaining({ id: reference.attachmentId, displayName: 'brand.css' })
+    ]);
+    expect(reopened.references).toEqual([
+      expect.objectContaining({
+        id: reference.id,
+        state: 'INACTIVE',
+        projectAssetPath: 'assets/brand.css'
+      })
+    ]);
+    expect(reopened.projectFiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'assets/brand.css', byteCount: 35 })
+      ])
+    );
+    const snapshot = await scenario.store.snapshot();
+    expect(
+      snapshot.agentSessions
+        .filter((session) => session.taskId === detail.design.id)
+        .every((session) => session.requestedSettings?.networkAccess === false)
+    ).toBe(true);
+    expect(
+      snapshot.runs
+        .filter((run) => run.taskId === detail.design.id)
+        .every((run) => run.requestedSettings?.networkAccess === false)
+    ).toBe(true);
+  }, 45_000);
+
   it('queues follow-up messages, stops active work, and persists an unsent draft', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-long-conversation',
@@ -152,21 +390,58 @@ describeMac('TaskManagerService Design vertical slice', () => {
       reasoningEffort: 'medium'
     });
     const firstRun = detail.currentRun!;
+    const attachmentDraft = await scenario.service.stageTaskAttachmentBatch({
+      attachments: [{
+        clientToken: 'design-long-queued-reference',
+        displayName: 'queued-direction.txt',
+        declaredMediaType: 'text/plain',
+        bytes: new TextEncoder().encode('Make the queued update more spacious.').buffer
+      }]
+    });
     const draft = await scenario.service.saveDesignDraft({
       designId: detail.design.id,
       expectedRevision: 0,
-      body: 'Try a less dense layout.'
+      body: 'Try a less dense layout.',
+      referenceIds: [],
+      attachmentDraftId: attachmentDraft.id
     });
-    await expect(scenario.service.getDesignDraft(detail.design.id)).resolves.toEqual(draft);
+    const reopenedDraft = await scenario.service.getDesignDraft(detail.design.id);
+    expect(reopenedDraft).toMatchObject({
+      ...draft,
+      attachmentDraft: {
+        id: attachmentDraft.id,
+        attachments: [expect.objectContaining({ displayName: 'queued-direction.txt' })]
+      }
+    });
+    const stagedAttachment = reopenedDraft?.attachmentDraft?.attachments[0];
+    if (!stagedAttachment) throw new Error('Saved Design draft attachment is missing.');
+    const draftContent = await scenario.service.readDesignDraftAttachment({
+      designId: detail.design.id,
+      attachmentId: stagedAttachment.id
+    });
+    expect(new TextDecoder().decode(draftContent.bytes)).toBe(
+      'Make the queued update more spacious.'
+    );
 
-    detail = await scenario.service.submitDesignTurn({
+    const queuedInput = {
       designId: detail.design.id,
       clientMessageId: 'design-long-queued',
-      message: 'Use larger section headings.'
-    });
+      message: 'Use larger section headings.',
+      referenceIds: [],
+      attachmentDraftId: attachmentDraft.id
+    };
+    detail = await scenario.service.submitDesignTurn(queuedInput);
+    const retry = await scenario.service.submitDesignTurn(queuedInput);
     expect(scenario.agent.startedTurns).toHaveLength(1);
+    expect(retry.turns).toHaveLength(detail.turns.length);
     expect(detail.turns.at(-1)).toMatchObject({ order: 2 });
+    expect(detail.turns.at(-1)?.attachmentDraftId).toBe(attachmentDraft.id);
+    expect(detail.turns.at(-1)?.referenceIds).toHaveLength(1);
     expect(detail.turns.at(-1)).not.toHaveProperty('runId');
+    const queuedReference = detail.references.find(
+      (reference) => reference.sourceDraftId === attachmentDraft.id
+    );
+    expect(detail.turns.at(-1)?.referenceIds).toEqual([queuedReference?.id]);
     expect(detail.actions).toMatchObject({
       canRefine: true,
       queuedTurnCount: 1,
@@ -199,12 +474,84 @@ describeMac('TaskManagerService Design vertical slice', () => {
       mode: 'DESIGN',
       instructionProfile: 'DESIGN'
     });
+    expect(scenario.agent.startedTurns[1]?.attachments).toEqual([
+      expect.objectContaining({
+        attachmentId: queuedReference?.attachmentId,
+        displayName: 'queued-direction.txt'
+      })
+    ]);
+    expect(scenario.agent.startedTurns[1]?.prompt).toContain('queued-direction.txt');
 
     await scenario.service.deleteDesignDraft({
       designId: detail.design.id,
       expectedRevision: draft.recordRevision
     });
     await expect(scenario.service.getDesignDraft(detail.design.id)).resolves.toBeNull();
+  }, 30_000);
+
+  it('removes a sent attachment draft left behind by an interrupted composer cleanup', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-adopted-draft-recovery',
+      previewEnabled: true,
+      designMode: true
+    });
+    scenarios.push(scenario);
+
+    const detail = await scenario.service.createBlankDesign({
+      brief: 'Create a compact reporting page.',
+      creationToken: 'design-adopted-draft-create'
+    });
+    const attachmentDraft = await scenario.service.stageTaskAttachmentBatch({
+      attachments: [{
+        clientToken: 'design-adopted-draft-reference',
+        displayName: 'direction.txt',
+        declaredMediaType: 'text/plain',
+        bytes: new TextEncoder().encode('Use a quiet visual hierarchy.').buffer
+      }]
+    });
+    const draft = await scenario.service.saveDesignDraft({
+      designId: detail.design.id,
+      expectedRevision: 0,
+      body: 'Apply the attached direction.',
+      referenceIds: [],
+      attachmentDraftId: attachmentDraft.id
+    });
+    const attachmentFiles = (
+      scenario.store as unknown as {
+        attachmentFiles: {
+          finalizeDraftForExistingTask(): Promise<void>;
+        };
+      }
+    ).attachmentFiles;
+    vi.spyOn(attachmentFiles, 'finalizeDraftForExistingTask').mockResolvedValue();
+
+    await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-adopted-draft-turn',
+      message: draft.body,
+      referenceIds: [],
+      attachmentDraftId: attachmentDraft.id
+    });
+    await expect(scenario.store.listAttachmentDraft(attachmentDraft.id)).resolves.toMatchObject({
+      id: attachmentDraft.id
+    });
+
+    const internals = scenario.service as unknown as {
+      reconcileDesignDrafts(drafts: readonly typeof draft[]): Promise<void>;
+    };
+    await internals.reconcileDesignDrafts([draft]);
+
+    await expect(scenario.service.getDesignDraft(detail.design.id)).resolves.toBeNull();
+    await expect(scenario.store.listAttachmentDraft(attachmentDraft.id)).rejects.toMatchObject({
+      code: 'ATTACHMENT_DRAFT_NOT_FOUND'
+    });
+    const reopened = await scenario.service.getDesign(detail.design.id);
+    expect(reopened.turns.at(-1)?.attachmentDraftId).toBe(attachmentDraft.id);
+    expect(reopened.references).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceDraftId: attachmentDraft.id })
+      ])
+    );
   }, 30_000);
 
   it('does not delete a Design while its Preview restart is running', async () => {

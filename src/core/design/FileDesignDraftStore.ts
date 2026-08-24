@@ -14,6 +14,7 @@ import {
 } from '../filesystem/secureFilesystem';
 
 const DESIGN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const ATTACHMENT_DRAFT_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const MAX_DRAFT_FILE_BYTES = DESIGN_LIMITS.draftBytes + 4 * 1024;
 
 /** Stores high-frequency composer text outside the durable task snapshot. */
@@ -33,6 +34,30 @@ export class FileDesignDraftStore {
     return this.read(designId);
   }
 
+  async list(): Promise<DesignDraftRecord[]> {
+    await this.init();
+    const entries = await fs.readdir(this.rootDirectory, { withFileTypes: true });
+    const designIds = entries.flatMap((entry) => {
+      const match = /^([0-9a-f-]+)\.json$/u.exec(entry.name);
+      if (!match) return [];
+      if (!entry.isFile() || entry.isSymbolicLink() || !DESIGN_ID.test(match[1]!)) {
+        throw new Error('Design draft directory contains an invalid entry.');
+      }
+      return [match[1]!];
+    });
+    const records = (await Promise.all(designIds.map((designId) => this.read(designId))))
+      .filter((record): record is DesignDraftRecord => record !== undefined);
+    const attachmentDraftOwners = new Set<string>();
+    for (const record of records) {
+      if (!record.attachmentDraftId) continue;
+      if (attachmentDraftOwners.has(record.attachmentDraftId)) {
+        throw new Error('An attachment draft belongs to more than one Design draft.');
+      }
+      attachmentDraftOwners.add(record.attachmentDraftId);
+    }
+    return records;
+  }
+
   save(input: SaveDesignDraftRequest): Promise<DesignDraftRecord> {
     return this.enqueue(async () => {
       await this.init();
@@ -40,6 +65,18 @@ export class FileDesignDraftStore {
       assertRevision(input.expectedRevision);
       if (Buffer.byteLength(input.body, 'utf8') > DESIGN_LIMITS.draftBytes) {
         throw new Error('Design draft exceeds its text-size limit.');
+      }
+      assertReferenceIds(input.referenceIds);
+      if (input.attachmentDraftId !== undefined) {
+        assertAttachmentDraftId(input.attachmentDraftId);
+        const owner = (await this.list()).find(
+          (draft) =>
+            draft.designId !== input.designId &&
+            draft.attachmentDraftId === input.attachmentDraftId
+        );
+        if (owner) {
+          throw new Error('Attachment draft already belongs to another Design draft.');
+        }
       }
       const existing = await this.read(input.designId);
       if ((existing?.recordRevision ?? 0) !== input.expectedRevision) {
@@ -49,6 +86,8 @@ export class FileDesignDraftStore {
         designId: input.designId,
         recordRevision: input.expectedRevision + 1,
         body: input.body,
+        referenceIds: [...input.referenceIds],
+        attachmentDraftId: input.attachmentDraftId,
         updatedAt: new Date().toISOString()
       };
       await writePrivateFileAtomically(
@@ -115,7 +154,10 @@ export class FileDesignDraftStore {
     if (!isDraftRecord(value, designId)) {
       throw new Error('Design draft file is invalid.');
     }
-    return value;
+    return {
+      ...value,
+      referenceIds: [...(value.referenceIds ?? [])]
+    };
   }
 
   private draftPath(designId: string): string {
@@ -140,13 +182,39 @@ function assertRevision(revision: number): void {
   }
 }
 
+function assertAttachmentDraftId(draftId: string): void {
+  if (!ATTACHMENT_DRAFT_ID.test(draftId)) {
+    throw new Error('Attachment draft id is invalid.');
+  }
+}
+
+function assertReferenceIds(referenceIds: readonly string[]): void {
+  if (
+    !Array.isArray(referenceIds) ||
+    referenceIds.length > 10 ||
+    new Set(referenceIds).size !== referenceIds.length ||
+    referenceIds.some((referenceId) => !DESIGN_ID.test(referenceId))
+  ) {
+    throw new Error('Design draft reference selection is invalid.');
+  }
+}
+
 function isDraftRecord(value: unknown, designId: string): value is DesignDraftRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const draft = value as Partial<DesignDraftRecord>;
+  const referenceIds = draft.referenceIds ?? [];
   return (
     draft.designId === designId &&
     typeof draft.body === 'string' &&
     Buffer.byteLength(draft.body, 'utf8') <= DESIGN_LIMITS.draftBytes &&
+    Array.isArray(referenceIds) &&
+    referenceIds.length <= 10 &&
+    new Set(referenceIds).size === referenceIds.length &&
+    referenceIds.every((referenceId) => DESIGN_ID.test(referenceId)) &&
+    (draft.attachmentDraftId === undefined ||
+      (typeof draft.attachmentDraftId === 'string' &&
+        ATTACHMENT_DRAFT_ID.test(draft.attachmentDraftId))) &&
+    draft.attachmentDraft === undefined &&
     Number.isSafeInteger(draft.recordRevision) &&
     (draft.recordRevision ?? 0) >= 1 &&
     typeof draft.updatedAt === 'string' &&

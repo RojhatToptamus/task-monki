@@ -86,11 +86,11 @@ import {
 } from '../AgentCredentialRedaction';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from './codexCapabilities';
 import {
-  assertCodexActivePermissionProfile,
   assertCodexActivePermissionProfileId,
   assertCodexPermissionProfileEvidence,
   assertCodexReadOnlyScopeEvidence,
   codexPermissionProfileConfig,
+  codexPermissionProfileId,
   codexReadOnlyScopeProfile,
   type CodexPermissionProfileEvidence
 } from './CodexPermissionProfile';
@@ -138,6 +138,8 @@ import type { TurnStatus } from './protocol/generated/v2/TurnStatus';
 import type { ReviewTarget } from './protocol/generated/v2/ReviewTarget';
 import type { TurnStartParams } from './protocol/generated/v2/TurnStartParams';
 import type { JsonValue } from './protocol/generated/serde_json/JsonValue';
+import type { DynamicToolSpec } from './protocol/generated/v2/DynamicToolSpec';
+import type { DynamicToolCallResponse } from './protocol/generated/v2/DynamicToolCallResponse';
 import {
   describeAccount,
   formatFinalArtifact,
@@ -173,6 +175,12 @@ import {
   parseAgentReviewResult
 } from '../../review/AgentReviewContract';
 import { PromptRefinementService } from '../../prompt/PromptRefinementService';
+import { DesignToolProtocolSanitizer } from '../journal/AgentProtocolRedaction';
+import {
+  parseInspectDesignOperation,
+  type DesignBrowserToolResult,
+  type InspectDesignOperation
+} from '../../design/AgentBrowserRuntime';
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -205,6 +213,12 @@ const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
 const RECOVERY_CONTINUATION_WAIT_MS = 1_000;
+const DESIGN_BROWSER_TOOL_NAME = 'inspect_design';
+
+export type CodexDesignBrowserToolHandler = (input: {
+  runId: string;
+  operation: InspectDesignOperation;
+}) => Promise<DesignBrowserToolResult>;
 
 interface CodexRunOutputBuffer {
   groups: Array<{ source: string; chunks: string[] }>;
@@ -280,6 +294,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       designSkillAccess: {
         available: false,
         detail: 'The app-owned Design skill pack has not been validated yet.'
+      },
+      designBrowserVerification: {
+        available: false,
+        detail: 'The packaged Design browser runtime has not been attested yet.'
       }
     }),
   };
@@ -306,6 +324,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     string,
     UnmaterializedThreadAttestation
   >();
+  private readonly activePermissionProfiles = new Map<
+    string,
+    { providerSessionId: string; profileId: string }
+  >();
   private initialized = false;
   private shuttingDown = false;
   private runtimeConfigRestartPending = false;
@@ -320,6 +342,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   private readonly scopedTurnListeners = new Set<(event: AgentScopedTurnEvent) => void>();
   private readonly scopedRunByProviderTurn = new Map<string, string>();
   private readonly scopedRunByProviderThread = new Map<string, string>();
+  private readonly designToolProtocolSanitizer = new DesignToolProtocolSanitizer();
+  private designBrowserToolHandler?: CodexDesignBrowserToolHandler;
+  private readonly activeDesignBrowserCalls = new Map<string, string>();
 
   constructor(
     private readonly store: FileTaskStore,
@@ -439,6 +464,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
 
   get currentRuntimeExecutable(): string | undefined {
     return this.supervisor.currentServer?.executable;
+  }
+
+  setDesignBrowserToolHandler(handler: CodexDesignBrowserToolHandler): void {
+    this.designBrowserToolHandler = handler;
+    this.preflightState = {
+      ...this.preflightState,
+      capabilities: this.runtimeCapabilities()
+    };
   }
 
   async initialize(): Promise<void> {
@@ -574,7 +607,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     let threadAcknowledged = false;
     try {
       const response = threadId
-        ? await client.requestMutation('thread/resume', {
+        ? await client.requestMutation('thread/resume', withDynamicTools({
             threadId,
             model: settings.model ?? null,
             modelProvider: settings.modelProvider ?? null,
@@ -583,8 +616,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
             approvalPolicy: 'never',
             approvalsReviewer: 'user',
             config: profile.config
-          })
-        : await client.requestMutation('thread/start', {
+          }, []))
+        : await client.requestMutation('thread/start', withDynamicTools({
             model: settings.model ?? null,
             modelProvider: settings.modelProvider ?? null,
             serviceTier: settings.serviceTier ?? null,
@@ -593,7 +626,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
             approvalsReviewer: 'user',
             config: profile.config,
             ephemeral: false
-          });
+          }, []));
       threadAcknowledged = true;
       assertCodexReadOnlyScopeEvidence({
         profileId: profile.profileId,
@@ -834,11 +867,13 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       settings,
       attachmentPaths
     );
+    const expectedProfileId = permissionProfileIdFromConfig(config);
+    const dynamicTools = await this.dynamicToolsForSession(session);
     const inboundFailureGeneration =
       this.inboundMaterializationFailureGeneration;
     let response;
     try {
-      response = await client.requestMutation('thread/start', {
+      response = await client.requestMutation('thread/start', withDynamicTools({
         model: settings.model ?? null,
         modelProvider: settings.modelProvider ?? null,
         serviceTier: settings.serviceTier ?? null,
@@ -847,7 +882,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         approvalsReviewer: toApprovalsReviewer(settings),
         config,
         ephemeral: false
-      });
+      }, dynamicTools));
     } catch (error) {
       throw mapMutationError('thread/start', error);
     }
@@ -855,9 +890,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       sessionId: session.id,
       settings,
       worktreePath: session.worktreePath,
+      expectedProfileId,
       operation: 'thread/start',
       providerReference: response.thread.id,
       response
+    });
+    this.activePermissionProfiles.set(session.id, {
+      providerSessionId: response.thread.id,
+      profileId: expectedProfileId
     });
     const observedSettings = await this.prepareObservedSettings(
       settingsFromThreadResponse(response),
@@ -928,7 +968,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     this.unmaterializedThreadAttestations.delete(session.id);
     await this.recordSettingsObservation(
       stored,
-      'THREAD_RESUME_RESPONSE',
+      response.taskMonkiProfileOperation === 'FORK'
+        ? 'THREAD_FORK_RESPONSE'
+        : 'THREAD_RESUME_RESPONSE',
       observedSettings
     );
     return stored;
@@ -980,15 +1022,27 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     const settings = input.settings ?? session.requestedSettings;
     assertAttachmentSandboxSupportsDelivery(settings, attachments);
     assertCodexAttachmentExternalToolsDisabled(this.externalToolSettings, attachments.length > 0);
-    if (attachments.length > 0) {
+    if (attachments.length > 0 || input.mode === 'DESIGN') {
       const selectedModel =
         this.models.find((candidate) => candidate.model === settings.model) ??
         this.models.find((candidate) => candidate.id === settings.model) ??
         this.models.find((candidate) => candidate.isDefault);
       if (!selectedModel) {
-        throw new Error('Codex did not report an available model for attachment delivery.');
+        throw new Error('Codex did not report an available model for this turn.');
       }
-      assertModelSupportsAttachments(selectedModel, attachments);
+      if (
+        input.mode === 'DESIGN' &&
+        !selectedModel.inputModalities.some(
+          (modality) => modality.toLowerCase() === 'image'
+        )
+      ) {
+        throw new Error(
+          'Design browser verification requires a Codex model with image input support.'
+        );
+      }
+      if (attachments.length > 0) {
+        assertModelSupportsAttachments(selectedModel, attachments);
+      }
     }
     const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
     if (!session.providerSessionId) {
@@ -1037,13 +1091,17 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         'Turn permission profile observed settings'
       );
       session = await this.store.updateAgentSession(session.id, {
+        providerSessionId: profileResponse.thread.id,
+        providerSessionTreeId: profileResponse.thread.sessionId,
         requestedSettings: settings,
         observedSettings,
         lastAttachedAt: new Date().toISOString()
       });
       await this.recordSettingsObservation(
         session,
-        'THREAD_RESUME_RESPONSE',
+        profileResponse.taskMonkiProfileOperation === 'FORK'
+          ? 'THREAD_FORK_RESPONSE'
+          : 'THREAD_RESUME_RESPONSE',
         observedSettings,
         input.localRunId
       );
@@ -1373,9 +1431,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       throw new Error('Cannot fork a session without a provider thread id.');
     }
     const client = await this.ensureClient();
+    const config = await this.permissionProfileConfigForSession(
+      target,
+      input.settings
+    );
+    const expectedProfileId = permissionProfileIdFromConfig(config);
+    const dynamicTools = await this.dynamicToolsForSession(target);
     let response;
     try {
-      response = await client.requestMutation('thread/fork', {
+      response = await client.requestMutation('thread/fork', withDynamicTools({
         threadId: providerSessionId,
         model: input.settings.model ?? null,
         modelProvider: input.settings.modelProvider ?? null,
@@ -1383,12 +1447,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         cwd: target.worktreePath,
         approvalPolicy: toApprovalPolicy(input.settings),
         approvalsReviewer: toApprovalsReviewer(input.settings),
-        config: await this.permissionProfileConfigForSession(
-          target,
-          input.settings
-        ),
+        config,
         ephemeral: false
-      });
+      }, dynamicTools));
     } catch (error) {
       throw mapMutationError('thread/fork', error);
     }
@@ -1396,9 +1457,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       sessionId: target.id,
       settings: input.settings,
       worktreePath: target.worktreePath,
+      expectedProfileId,
       operation: 'thread/fork',
       providerReference: response.thread.id,
       response
+    });
+    this.activePermissionProfiles.set(target.id, {
+      providerSessionId: response.thread.id,
+      profileId: expectedProfileId
     });
     const observedSettings = await this.prepareObservedSettings(
       settingsFromThreadResponse(response),
@@ -1422,6 +1488,54 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       return stored;
     } catch {
       throw postAcknowledgementPersistenceError('thread/fork', response.thread.id);
+    }
+  }
+
+  async releaseSession(ref: AgentSessionRef): Promise<void> {
+    await this.drainInbound();
+    const session = await this.requireSession(ref.localSessionId);
+    if (
+      ref.providerSessionId &&
+      session.providerSessionId &&
+      ref.providerSessionId !== session.providerSessionId
+    ) {
+      throw new Error('Codex session release does not match the stored provider thread.');
+    }
+    const activeRun = (await this.store.snapshot()).runs.find(
+      (run) =>
+        run.sessionId === session.id &&
+        ACTIVE_RUN_STATES.includes(run.status)
+    );
+    if (activeRun) {
+      throw new Error(
+        `Cannot release Codex session ${session.id} while run ${activeRun.id} is ${activeRun.status}.`
+      );
+    }
+    const providerSessionId = ref.providerSessionId ?? session.providerSessionId;
+    const client = this.supervisor.currentClient;
+    if (providerSessionId && client) {
+      await client.requestMutation('thread/unsubscribe', {
+        threadId: providerSessionId
+      });
+    }
+    if (providerSessionId) {
+      await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+    }
+    this.activePermissionProfiles.delete(session.id);
+    this.recoveryRunBySession.delete(session.id);
+    this.unmaterializedThreadAttestations.delete(session.id);
+  }
+
+  async releaseTask(taskId: string): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    const sessions = snapshot.agentSessions.filter(
+      (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
+    );
+    for (const session of sessions) {
+      await this.releaseSession({
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      });
     }
   }
 
@@ -1462,9 +1576,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       attachments: await verifyAgentTurnAttachments(attachments),
       includeLocalImages: false
     });
+    const config = await this.permissionProfileConfigForSession(
+      reviewSession,
+      settings,
+      attachmentDelivery.attachments.map((attachment) => attachment.path)
+    );
+    const expectedProfileId = permissionProfileIdFromConfig(config);
     let reviewBase;
     try {
-      reviewBase = await client.requestMutation('thread/fork', {
+      reviewBase = await client.requestMutation('thread/fork', withDynamicTools({
         threadId: providerSessionId,
         model: settings.model ?? null,
         modelProvider: settings.modelProvider ?? null,
@@ -1472,14 +1592,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         cwd: reviewSession.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        config: await this.permissionProfileConfigForSession(
-          reviewSession,
-          settings,
-          attachmentDelivery.attachments.map((attachment) => attachment.path)
-        ),
+        config,
         developerInstructions: attachmentDelivery.prompt,
         ephemeral: false
-      });
+      }, []));
     } catch (error) {
       throw mapMutationError('thread/fork', error);
     }
@@ -1487,9 +1603,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       sessionId: reviewSession.id,
       settings,
       worktreePath: reviewSession.worktreePath,
+      expectedProfileId,
       operation: 'thread/fork',
       providerReference: reviewBase.thread.id,
       response: reviewBase
+    });
+    this.activePermissionProfiles.set(reviewSession.id, {
+      providerSessionId: reviewBase.thread.id,
+      profileId: expectedProfileId
     });
     const observedSettings = await this.prepareObservedSettings(
       settingsFromThreadResponse(reviewBase),
@@ -1750,7 +1871,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           session,
           session.providerSessionId,
           session.requestedSettings,
-          attachments.map((attachment) => attachment.path)
+          attachments.map((attachment) => attachment.path),
+          { allowProfileFork: false }
         );
         const observedSettings = await this.prepareObservedSettings(
           settingsFromThreadResponse(response),
@@ -2088,6 +2210,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     sessionId: string;
     settings: AgentExecutionSettings;
     worktreePath: string;
+    expectedProfileId: string;
     operation: string;
     providerReference: string;
     response: unknown;
@@ -2097,6 +2220,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         input.sessionId,
         input.settings,
         input.worktreePath,
+        input.expectedProfileId,
         input.response
       );
     } catch (cause) {
@@ -3002,6 +3126,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       return;
     }
     if (await this.handleScopedServerRequest(client, request, raw)) return;
+    if (await this.handleDesignBrowserToolRequest(client, request, raw)) return;
     const mapped = mapCodexInteractionRequest(request);
     if (!mapped) {
       await client.respondError(request.id, {
@@ -3109,6 +3234,181 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       (mapped.type === 'USER_INPUT' && policy.allowedActions.length === 0)
     ) {
       await this.resolveBlockedInteraction(interaction);
+    }
+  }
+
+  private async handleDesignBrowserToolRequest(
+    client: CodexRpcClient,
+    request: ServerRequest,
+    raw: AgentProtocolMessageReference
+  ): Promise<boolean> {
+    if (
+      request.method !== 'item/tool/call' ||
+      request.params.namespace !== null ||
+      request.params.tool !== DESIGN_BROWSER_TOOL_NAME
+    ) {
+      return false;
+    }
+    const params = request.params;
+    const session = await this.store.getAgentSessionByProviderId(
+      this.descriptor.id,
+      params.threadId
+    );
+    const run = await this.store.getRunByProviderTurnId(
+      this.descriptor.id,
+      params.turnId
+    );
+    const server = this.supervisor.currentServer;
+    if (
+      !this.designBrowserToolHandler ||
+      !session ||
+      !run ||
+      !server ||
+      run.mode !== 'DESIGN' ||
+      run.status !== 'RUNNING' ||
+      run.sessionId !== session.id ||
+      run.worktreeId !== session.worktreeId ||
+      run.providerTurnId !== params.turnId ||
+      session.providerSessionId !== params.threadId ||
+      session.role !== 'PRIMARY' ||
+      client.serverInstanceId !== server.id ||
+      !this.isCurrentClientEvent(client, raw)
+    ) {
+      await client.respond(request.id, failedDesignToolResponse(
+        'inspect_design is available only in the current active Design Run.'
+      ));
+      return true;
+    }
+    const task = await this.store.getTask(run.taskId);
+    const worktree = await this.store.getWorktree(run.worktreeId);
+    if (
+      task?.kind !== 'DESIGN' ||
+      task.currentWorktreeId !== run.worktreeId ||
+      worktree?.taskId !== task.id ||
+      worktree.worktreePath !== session.worktreePath
+    ) {
+      await client.respond(request.id, failedDesignToolResponse(
+        'inspect_design does not own this Design workspace.'
+      ));
+      return true;
+    }
+    const existing = await this.store.getAgentItemByProviderId(run.id, params.callId);
+    if (
+      hasDesignToolAdmission(existing?.payload) ||
+      (existing && ['COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED'].includes(existing.status))
+    ) {
+      await client.respond(request.id, failedDesignToolResponse(
+        'This inspect_design call was already admitted. Task Monki will not repeat it.'
+      ));
+      return true;
+    }
+    if (this.activeDesignBrowserCalls.has(run.id)) {
+      await client.respond(request.id, failedDesignToolResponse(
+        'Another inspect_design operation is still running for this Design.'
+      ));
+      return true;
+    }
+    let operation: InspectDesignOperation;
+    try {
+      operation = parseInspectDesignOperation(params.arguments);
+    } catch (error) {
+      await client.respond(
+        request.id,
+        failedDesignToolResponse(errorMessage(error))
+      );
+      return true;
+    }
+    await this.store.upsertAgentItem({
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      sessionId: session.id,
+      providerItemId: params.callId,
+      type: 'DYNAMIC_TOOL_CALL',
+      status:
+        existing?.status === 'IN_PROGRESS' || existing?.status === 'STARTED'
+          ? existing.status
+          : 'STARTED',
+      payload: designToolItemPayload(params, operation, 'ADMITTED'),
+      rawMessage: raw,
+      providerStartedAt: existing?.providerStartedAt ?? new Date().toISOString()
+    });
+    this.activeDesignBrowserCalls.set(run.id, params.callId);
+    this.emitRunActivity(run, {
+      itemType: 'DYNAMIC_TOOL_CALL',
+      status: 'IN_PROGRESS',
+      label: 'Checking the design'
+    });
+    void this.executeDesignBrowserTool({
+      client,
+      requestId: request.id,
+      raw,
+      run,
+      session,
+      callId: params.callId,
+      operation
+    });
+    return true;
+  }
+
+  private async executeDesignBrowserTool(input: {
+    client: CodexRpcClient;
+    requestId: ServerRequest['id'];
+    raw: AgentProtocolMessageReference;
+    run: RunRecord;
+    session: AgentSessionRecord;
+    callId: string;
+    operation: InspectDesignOperation;
+  }): Promise<void> {
+    let result: DesignBrowserToolResult | undefined;
+    let response: DynamicToolCallResponse;
+    try {
+      result = await this.designBrowserToolHandler!({
+        runId: input.run.id,
+        operation: input.operation
+      });
+      response = successfulDesignToolResponse(result);
+    } catch (error) {
+      response = failedDesignToolResponse(safeDesignToolFailure(error));
+    }
+    try {
+      if (!this.isCurrentClientEvent(input.client, input.raw)) return;
+      const responseRaw = await input.client.respond(input.requestId, response);
+      await this.store.upsertAgentItem({
+        taskId: input.run.taskId,
+        iterationId: input.run.iterationId,
+        runId: input.run.id,
+        sessionId: input.session.id,
+        providerItemId: input.callId,
+        type: 'DYNAMIC_TOOL_CALL',
+        status: response.success ? 'COMPLETED' : 'FAILED',
+        payload: designToolItemPayload(
+          {
+            callId: input.callId,
+            namespace: null,
+            tool: DESIGN_BROWSER_TOOL_NAME,
+            arguments: input.operation
+          },
+          input.operation,
+          response.success ? 'COMPLETED' : 'FAILED',
+          response
+        ),
+        rawMessage: responseRaw,
+        providerStartedAt: new Date().toISOString(),
+        providerCompletedAt: new Date().toISOString()
+      });
+      this.emitRunActivity(input.run, {
+        itemType: 'DYNAMIC_TOOL_CALL',
+        status: response.success ? 'COMPLETED' : 'FAILED',
+        label: 'Checking the design'
+      });
+    } catch {
+      // The admitted provider request remains durable and is never replayed.
+    } finally {
+      if (this.activeDesignBrowserCalls.get(input.run.id) === input.callId) {
+        this.activeDesignBrowserCalls.delete(input.run.id);
+      }
+      void result;
     }
   }
 
@@ -3886,9 +4186,16 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (session) {
       try {
-        assertCodexActivePermissionProfile(
-          session.id,
-          session.requestedSettings.sandbox,
+        const activeProfile = this.activePermissionProfiles.get(session.id);
+        const expectedProfileId =
+          activeProfile?.providerSessionId === threadId
+            ? activeProfile.profileId
+            : codexPermissionProfileId(
+                session.id,
+                session.requestedSettings.sandbox
+              );
+        assertCodexActivePermissionProfileId(
+          expectedProfileId,
           settings.activePermissionProfile
         );
       } catch (error) {
@@ -4986,7 +5293,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }
 
   private redactProviderValue<T>(value: T): T {
-    return redactCredentialValue(value, this.sensitiveValues);
+    return redactCredentialValue(
+      this.designToolProtocolSanitizer.sanitizeValue(value),
+      this.sensitiveValues
+    );
   }
 
   /**
@@ -5156,12 +5466,39 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     session: AgentSessionRecord,
     providerSessionId: string,
     settings: AgentExecutionSettings,
-    attachmentPaths: readonly string[]
+    attachmentPaths: readonly string[],
+    options: { allowProfileFork?: boolean } = {}
   ) {
     const client = await this.ensureClient();
+    const config = await this.permissionProfileConfigForSession(
+      session,
+      settings,
+      attachmentPaths
+    );
+    const expectedProfileId = permissionProfileIdFromConfig(config);
+    const activeProfile = this.activePermissionProfiles.get(session.id);
+    const currentProfileId =
+      activeProfile?.providerSessionId === providerSessionId
+        ? activeProfile.profileId
+        : undefined;
+    const task = await this.store.getTask(session.taskId);
+    const shouldFork =
+      options.allowProfileFork !== false &&
+      settings.sandbox !== 'DANGER_FULL_ACCESS' &&
+      (currentProfileId
+        ? currentProfileId !== expectedProfileId
+        : task?.kind === 'DESIGN' || attachmentPaths.length > 0);
+    const operation = shouldFork ? 'thread/fork' : 'thread/resume';
+    const dynamicTools = await this.dynamicToolsForSession(session);
+    if (!shouldFork) {
+      this.activePermissionProfiles.set(session.id, {
+        providerSessionId,
+        profileId: expectedProfileId
+      });
+    }
     let response;
     try {
-      response = await client.requestMutation('thread/resume', {
+      const params = {
         threadId: providerSessionId,
         model: settings.model ?? null,
         modelProvider: settings.modelProvider ?? null,
@@ -5169,24 +5506,48 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         cwd: session.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        config: await this.permissionProfileConfigForSession(
-          session,
-          settings,
-          attachmentPaths
-        )
-      });
+        config
+      };
+      response = shouldFork
+        ? await client.requestMutation(
+            'thread/fork',
+            withDynamicTools({ ...params, ephemeral: false }, dynamicTools)
+          )
+        : await client.requestMutation(
+            'thread/resume',
+            withDynamicTools(params, dynamicTools)
+          );
     } catch (error) {
-      throw mapMutationError('thread/resume', error);
+      throw mapMutationError(operation, error);
     }
     await this.assertProviderPermissionProfileOrFence({
       sessionId: session.id,
       settings,
       worktreePath: session.worktreePath,
-      operation: 'thread/resume',
+      expectedProfileId,
+      operation,
       providerReference: response.thread.id,
       response
     });
-    return response;
+    if (shouldFork && response.thread.id !== providerSessionId) {
+      // The fork is already acknowledged and attested. Failure to unload its
+      // source must not make Task Monki retry the fork and create another thread.
+      await client
+        .requestMutation(
+          'thread/unsubscribe',
+          { threadId: providerSessionId },
+          2_000
+        )
+        .catch(() => undefined);
+    }
+    this.activePermissionProfiles.set(session.id, {
+      providerSessionId: response.thread.id,
+      profileId: expectedProfileId
+    });
+    return {
+      ...response,
+      taskMonkiProfileOperation: shouldFork ? 'FORK' as const : 'RESUME' as const
+    };
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
@@ -5222,6 +5583,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
             detail:
               this.designSkillFailure ??
               'The app-owned Design skill pack has not been validated yet.'
+          },
+      designBrowserVerification: this.designBrowserToolHandler
+        ? { available: true }
+        : {
+            available: false,
+            detail: 'The packaged Design browser runtime has not been attested yet.'
           }
     });
   }
@@ -5235,6 +5602,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       );
     }
     return this.designSkillPack;
+  }
+
+  private async dynamicToolsForSession(
+    session: AgentSessionRecord
+  ): Promise<DynamicToolSpec[]> {
+    const task = await this.store.getTask(session.taskId);
+    if (task?.kind !== 'DESIGN' || session.role !== 'PRIMARY') return [];
+    this.requireDesignSkillPack();
+    if (!this.designBrowserToolHandler) {
+      throw new Error(
+        'Task Monki cannot start Design work because browser verification is unavailable.'
+      );
+    }
+    return [INSPECT_DESIGN_TOOL_SPEC];
   }
 
   private async codexInteractiveCollaborationModeForSession(
@@ -5474,6 +5855,258 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const INSPECT_DESIGN_TOOL_SPEC: DynamicToolSpec = {
+  type: 'function',
+  name: DESIGN_BROWSER_TOOL_NAME,
+  description:
+    'Open and inspect the exact current Design candidate. Use only the operations needed for this change.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['operation'],
+    properties: {
+      operation: {
+        type: 'string',
+        description:
+          'Choose one bridge operation. Browser actions use operation "act" plus an action.',
+        enum: [
+          'open_candidate',
+          'observe',
+          'act',
+          'set_viewport',
+          'set_media',
+          'screenshot',
+          'accessibility'
+        ]
+      },
+      action: {
+        type: 'string',
+        description: 'Required only when operation is "act".',
+        enum: [
+          'click',
+          'double_click',
+          'hover',
+          'focus',
+          'fill',
+          'type',
+          'key',
+          'select',
+          'check',
+          'uncheck',
+          'scroll',
+          'scroll_into_view',
+          'drag',
+          'wait'
+        ]
+      },
+      ref: {
+        type: 'string',
+        description: 'A current snapshot reference including its @ prefix, for example @e4.',
+        pattern: '^@e[1-9][0-9]{0,4}$'
+      },
+      targetRef: {
+        type: 'string',
+        description: 'A second current snapshot reference including its @ prefix.',
+        pattern: '^@e[1-9][0-9]{0,4}$'
+      },
+      value: { type: 'string', maxLength: 4096 },
+      values: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 20,
+        items: { type: 'string', maxLength: 4096 }
+      },
+      direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
+      amount: { type: 'integer', minimum: 1, maximum: 2000 },
+      milliseconds: { type: 'integer', minimum: 0, maximum: 2000 },
+      width: {
+        type: 'integer',
+        description: 'Required only for set_viewport.',
+        minimum: 320,
+        maximum: 2560
+      },
+      height: {
+        type: 'integer',
+        description: 'Required only for set_viewport.',
+        minimum: 320,
+        maximum: 2000
+      },
+      colorScheme: {
+        type: 'string',
+        enum: ['light', 'dark']
+      },
+      reducedMotion: { type: 'boolean' },
+      fullPage: { type: 'boolean' }
+    },
+    oneOf: [
+      {
+        title: 'Open the exact current candidate',
+        properties: { operation: { const: 'open_candidate' } },
+        required: ['operation']
+      },
+      {
+        title: 'Refresh the snapshot, console, and runtime errors',
+        properties: { operation: { const: 'observe' } },
+        required: ['operation']
+      },
+      {
+        title: 'Perform one browser action, then observe',
+        properties: {
+          operation: { const: 'act' },
+          action: {
+            enum: [
+              'click',
+              'double_click',
+              'hover',
+              'focus',
+              'fill',
+              'type',
+              'key',
+              'select',
+              'check',
+              'uncheck',
+              'scroll',
+              'scroll_into_view',
+              'drag',
+              'wait'
+            ]
+          },
+          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
+          targetRef: { pattern: '^@e[1-9][0-9]{0,4}$' },
+          value: { type: 'string' },
+          values: { type: 'array' },
+          direction: { enum: ['up', 'down', 'left', 'right'] },
+          amount: { type: 'integer' },
+          milliseconds: { type: 'integer' }
+        },
+        required: ['operation', 'action']
+      },
+      {
+        title: 'Set the viewport, then observe',
+        properties: {
+          operation: { const: 'set_viewport' },
+          width: { type: 'integer' },
+          height: { type: 'integer' }
+        },
+        required: ['operation', 'width', 'height']
+      },
+      {
+        title: 'Set color and motion media, then observe',
+        properties: {
+          operation: { const: 'set_media' },
+          colorScheme: { enum: ['light', 'dark'] },
+          reducedMotion: { type: 'boolean' }
+        },
+        required: ['operation', 'colorScheme', 'reducedMotion']
+      },
+      {
+        title: 'Capture a transient screenshot',
+        properties: {
+          operation: { const: 'screenshot' },
+          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
+          fullPage: { type: 'boolean' }
+        },
+        required: ['operation']
+      },
+      {
+        title: 'Run the bounded accessibility audit',
+        properties: { operation: { const: 'accessibility' } },
+        required: ['operation']
+      }
+    ]
+  } as JsonValue
+};
+
+function withDynamicTools<T extends object>(
+  params: T,
+  dynamicTools: readonly DynamicToolSpec[]
+): T & { dynamicTools: DynamicToolSpec[] } {
+  return { ...params, dynamicTools: [...dynamicTools] };
+}
+
+function successfulDesignToolResponse(
+  result: DesignBrowserToolResult
+): DynamicToolCallResponse {
+  return {
+    success: true,
+    contentItems: [
+      { type: 'inputText', text: result.text },
+      ...(result.image
+        ? [
+            {
+              type: 'inputImage' as const,
+              imageUrl: `data:${result.image.mimeType};base64,${result.image.bytes.toString('base64')}`
+            }
+          ]
+        : [])
+    ]
+  };
+}
+
+function failedDesignToolResponse(message: string): DynamicToolCallResponse {
+  return {
+    success: false,
+    contentItems: [{ type: 'inputText', text: message.slice(0, 1_000) }]
+  };
+}
+
+function safeDesignToolFailure(error: unknown): string {
+  const message = errorMessage(error).trim();
+  if (
+    message.length > 0 &&
+    message.length <= 1_000 &&
+    !message.includes('/') &&
+    !message.includes('\\')
+  ) {
+    return message;
+  }
+  return 'The Design browser operation failed. Correct the source or open a fresh candidate.';
+}
+
+function designToolItemPayload(
+  params: {
+    callId: string;
+    namespace: string | null;
+    tool: string;
+    arguments: unknown;
+  },
+  operation: InspectDesignOperation,
+  admission: 'ADMITTED' | 'COMPLETED' | 'FAILED',
+  response?: DynamicToolCallResponse
+): Record<string, unknown> {
+  return {
+    type: 'dynamicToolCall',
+    id: params.callId,
+    namespace: params.namespace,
+    tool: params.tool,
+    arguments: operation,
+    status:
+      admission === 'ADMITTED'
+        ? 'inProgress'
+        : admission === 'COMPLETED'
+          ? 'completed'
+          : 'failed',
+    contentItems: response?.contentItems.map((item) =>
+      item.type === 'inputImage'
+        ? { type: 'inputImage', imageUrl: '[transient Design screenshot omitted]' }
+        : item
+    ) ?? null,
+    success: response?.success ?? null,
+    taskMonkiDesignToolAdmission: admission
+  };
+}
+
+function hasDesignToolAdmission(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      ['ADMITTED', 'COMPLETED', 'FAILED'].includes(
+        String((value as Record<string, unknown>).taskMonkiDesignToolAdmission)
+      )
+  );
+}
+
 function redactOptionalProviderText(
   value: string | null | undefined,
   sensitiveValues: readonly string[]
@@ -5575,14 +6208,24 @@ function assertProviderPermissionProfile(
   sessionId: string,
   settings: AgentExecutionSettings,
   worktreePath: string,
+  expectedProfileId: string,
   response: unknown
 ): void {
   assertCodexPermissionProfileEvidence({
     sessionId,
     sandbox: settings.sandbox,
     worktreePath,
+    expectedProfileId,
     response: response as CodexPermissionProfileEvidence
   });
+}
+
+function permissionProfileIdFromConfig(config: Record<string, JsonValue>): string {
+  const profileId = config.default_permissions;
+  if (typeof profileId !== 'string' || profileId.length === 0) {
+    throw new Error('Codex permission config does not select a permission profile.');
+  }
+  return profileId;
 }
 
 function activeTurnIdFromInterruptMismatch(error: Error): string | undefined {

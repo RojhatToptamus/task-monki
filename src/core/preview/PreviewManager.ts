@@ -24,7 +24,10 @@ import {
 } from '../storage/FileTaskStore';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { boundedPreviewFailure } from './PreviewFailure';
-import { PreviewGateway } from './PreviewGateway';
+import {
+  PreviewGateway,
+  type PreviewGatewayBrowserLease
+} from './PreviewGateway';
 import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewGraph, type RunningPreviewGraph } from './PreviewGraph';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
@@ -85,6 +88,23 @@ export interface ExecuteManagedDesignPreviewInput {
   settlement?: ManagedDesignPreviewSettlement;
   fence: DesignCanvasCutoverFence;
   onCandidateReady(generation: PreviewGenerationRecord): Promise<void>;
+}
+
+interface ManagedDesignCandidateOnlyInput {
+  mode: 'CANDIDATE_ONLY';
+  onCandidateReady(generation: PreviewGenerationRecord): Promise<void>;
+}
+
+interface ManagedDesignCutoverInput extends ExecuteManagedDesignPreviewInput {
+  mode: 'CUTOVER';
+}
+
+type ManagedDesignExecutionInput =
+  | ManagedDesignCandidateOnlyInput
+  | ManagedDesignCutoverInput;
+
+export interface ManagedDesignBrowserLease extends PreviewGatewayBrowserLease {
+  origin: string;
 }
 
 export interface RestartManagedDesignPreviewInput {
@@ -589,8 +609,148 @@ export class PreviewManager {
     prepared: PreparedPreviewGeneration,
     input: ExecuteManagedDesignPreviewInput
   ): Promise<PreviewGenerationRecord> {
-    this.assertManagedDesignPrepared(prepared, input);
-    return this.executeNative(prepared, input);
+    const execution: ManagedDesignCutoverInput = { ...input, mode: 'CUTOVER' };
+    this.assertManagedDesignPrepared(prepared, execution);
+    return this.executeNative(prepared, execution);
+  }
+
+  executeManagedDesignCandidate(
+    prepared: PreparedPreviewGeneration,
+    input: {
+      designId: string;
+      onCandidateReady(generation: PreviewGenerationRecord): Promise<void>;
+    }
+  ): Promise<PreviewGenerationRecord> {
+    const execution: ManagedDesignCandidateOnlyInput & { designId: string } = {
+      mode: 'CANDIDATE_ONLY',
+      ...input
+    };
+    this.assertManagedDesignPrepared(prepared, execution);
+    return this.executeNative(prepared, {
+      mode: 'CANDIDATE_ONLY',
+      onCandidateReady: input.onCandidateReady
+    });
+  }
+
+  async openManagedDesignBrowserLease(
+    generationId: string
+  ): Promise<ManagedDesignBrowserLease> {
+    const generation = await this.requireGeneration(generationId);
+    const running = this.live.get(generation.id);
+    if (
+      generation.state !== 'READY' ||
+      generation.routingState !== 'CANDIDATE' ||
+      generation.source.type !== 'EXACT_COMMIT' ||
+      generation.source.designRevisionId !== undefined ||
+      !running?.isRunning()
+    ) {
+      throw new Error('Design browser verification requires one live exact-commit candidate.');
+    }
+    const route = generation.routes.find(
+      (candidate) =>
+        candidate.id === MANAGED_DESIGN_STATIC_ROUTE_ID &&
+        candidate.state === 'ATTACHED'
+    );
+    if (!route) throw new Error('Design browser candidate route is unavailable.');
+    const origin = new URL(route.url).origin;
+    const lease = await this.gateway.openBrowserLease({
+      origin: `${origin}/`,
+      target: { host: route.targetHost, port: route.targetPort }
+    });
+    return { ...lease, origin };
+  }
+
+  async cutoverManagedDesignCandidate(input: {
+    generationId: string;
+    designId: string;
+    settlement: ManagedDesignPreviewSettlement;
+    fence: DesignCanvasCutoverFence;
+  }): Promise<PreviewGenerationRecord> {
+    return this.withGenerationLock(input.generationId, async () => {
+      let generation = await this.requireGeneration(input.generationId);
+      const running = this.live.get(generation.id);
+      if (
+        generation.taskId !== input.designId ||
+        generation.state !== 'READY' ||
+        generation.routingState !== 'CANDIDATE' ||
+        generation.source.type !== 'EXACT_COMMIT' ||
+        generation.source.designRevisionId !== undefined ||
+        !running?.isRunning()
+      ) {
+        throw new Error('Design cutover requires the live verified candidate.');
+      }
+      const replaced = generation.replacesGenerationId
+        ? await this.store.getPreviewGeneration(generation.replacesGenerationId)
+        : undefined;
+      const cutoverAt = new Date().toISOString();
+      const candidate: PreviewGenerationRecord = {
+        ...generation,
+        routingState: 'ACTIVE',
+        cutoverAt,
+        updatedAt: cutoverAt
+      };
+      const canvasLease = await input.fence.begin({
+        designId: input.designId,
+        candidate: designCanvasRouteIdentity(candidate),
+        replaced: replaced ? designCanvasRouteIdentity(replaced) : undefined
+      });
+      if (!running.isRunning()) {
+        await canvasLease.rollback().catch(() => undefined);
+        throw new Error('Preview service exited during the Design canvas cutover fence.');
+      }
+      this.gateway.replaceRoutes(
+        generation.id,
+        Object.fromEntries(
+          generation.routes.map((route) => [
+            route.hostname,
+            { host: route.targetHost, port: route.targetPort }
+          ])
+        ),
+        replaced?.id
+      );
+      try {
+        const cutover = await this.store.cutoverPreviewGenerations({
+          candidate,
+          replaced: replaced
+            ? {
+                ...replaced,
+                routingState: 'RETIRED',
+                routes: replaced.routes.map((route) => ({
+                  ...route,
+                  state: 'DETACHED' as const
+                })),
+                updatedAt: cutoverAt
+              }
+            : undefined,
+          designSettlement: designPreviewSettlement(
+            input.designId,
+            input.settlement,
+            candidate
+          )
+        });
+        generation = cutover.candidate;
+        await canvasLease.commit();
+        this.emitGeneration(generation);
+        if (cutover.replaced) this.emitGeneration(cutover.replaced);
+        if (replaced) {
+          await this.stopApplicationGeneration(replaced.id).catch(() => undefined);
+        }
+        return generation;
+      } catch (error) {
+        if (replaced) this.restoreRoutes(replaced, generation.id);
+        else this.gateway.removeOwnedRoutes(generation.id);
+        await canvasLease.rollback().catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
+  async stopManagedDesignCandidate(generationId: string): Promise<void> {
+    const generation = await this.requireGeneration(generationId);
+    if (generation.routingState !== 'CANDIDATE') {
+      throw new Error('Only a Preview candidate can be stopped through this path.');
+    }
+    await this.stopApplicationGeneration(generationId);
   }
 
   async restartManagedDesign(
@@ -621,7 +781,7 @@ export class PreviewManager {
 
   private executeNative(
     prepared: PreparedPreviewGeneration,
-    managedDesign?: ExecuteManagedDesignPreviewInput
+    managedDesign?: ManagedDesignExecutionInput
   ): Promise<PreviewGenerationRecord> {
     const controller = prepared.controller;
     return this.withGenerationLock(prepared.generation.id, async () => {
@@ -764,6 +924,9 @@ export class PreviewManager {
             cutoverAt: undefined
           });
           await managedDesign.onCandidateReady(generation);
+          if (managedDesign.mode === 'CANDIDATE_ONLY') {
+            return generation;
+          }
           const cutoverAt = new Date().toISOString();
           candidate = {
             ...generation,
@@ -1499,7 +1662,7 @@ export class PreviewManager {
 
   private assertManagedDesignPrepared(
     prepared: PreparedPreviewGeneration,
-    input: ExecuteManagedDesignPreviewInput
+    input: (ManagedDesignExecutionInput & { designId: string })
   ): void {
     this.assertAcceptingWork();
     this.requireManagedDesignStatic().assertPlan(prepared.plan);
@@ -1513,6 +1676,12 @@ export class PreviewManager {
       prepared.plan.executionPlan.adapter !== 'NATIVE'
     ) {
       throw new Error('Managed Design Preview preparation authority is invalid.');
+    }
+    if (input.mode === 'CANDIDATE_ONLY') {
+      if (generation.source.designRevisionId) {
+        throw new Error('A Design verification candidate cannot use a settled revision.');
+      }
+      return;
     }
     if (input.settlement) {
       if (generation.source.designRevisionId) {

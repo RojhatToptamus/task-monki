@@ -394,7 +394,8 @@ describe('createBrowserTaskManagerApi Design conversation', () => {
     await api.saveDesignDraft({
       designId: 'design/1',
       expectedRevision: 2,
-      body: 'Unsent change'
+      body: 'Unsent change',
+      referenceIds: []
     });
     await api.deleteDesignDraft({ designId: 'design/1', expectedRevision: 3 });
     await api.cancelDesignTurn({ designId: 'design/1', turnId: 'turn/1' });
@@ -409,8 +410,42 @@ describe('createBrowserTaskManagerApi Design conversation', () => {
     expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
       designId: 'design/1',
       expectedRevision: 2,
-      body: 'Unsent change'
+      body: 'Unsent change',
+      referenceIds: []
     });
+  });
+
+  it('reads a saved Design draft attachment from its Design-scoped endpoint', async () => {
+    const bytes = new TextEncoder().encode('saved draft file');
+    const fetchMock = vi.fn(async () => new Response(bytes, {
+      status: 200,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'x-task-monki-attachment-id': 'attachment/1',
+        'x-task-monki-attachment-name': encodeURIComponent('saved direction.txt'),
+        'x-task-monki-attachment-kind': 'text',
+        'x-task-monki-attachment-media-type': 'text/plain'
+      }
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const api = createBrowserTaskManagerApi('');
+
+    const content = await api.readDesignDraftAttachment({
+      designId: 'design/1',
+      attachmentId: 'attachment/1'
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/designs/design%2F1/draft/attachments/attachment%2F1'
+    );
+    expect(content).toMatchObject({
+      attachmentId: 'attachment/1',
+      displayName: 'saved direction.txt',
+      kind: 'text',
+      mediaType: 'text/plain',
+      byteCount: bytes.byteLength
+    });
+    expect(new TextDecoder().decode(content.bytes)).toBe('saved draft file');
   });
 });
 

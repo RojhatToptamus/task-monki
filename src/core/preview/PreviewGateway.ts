@@ -15,6 +15,11 @@ export interface PreviewGatewayListenResult {
   relocated: boolean;
 }
 
+export interface PreviewGatewayBrowserLease {
+  proxyUrl: string;
+  close(): Promise<void>;
+}
+
 const HOP_BY_HOP = new Set([
   'connection',
   'keep-alive',
@@ -30,6 +35,7 @@ export class PreviewGateway {
   private readonly routes = new Map<string, PreviewGatewayTarget>();
   private readonly sockets = new Set<net.Socket>();
   private readonly upstreamSockets = new Set<net.Socket>();
+  private readonly browserLeases = new Set<() => Promise<void>>();
   private readonly server = http.createServer((request, response) => {
     this.proxyRequest(request, response);
   });
@@ -91,8 +97,68 @@ export class PreviewGateway {
     return this.routes.has(normalizeHostname(hostname));
   }
 
+  async openBrowserLease(input: {
+    origin: string;
+    target: Omit<PreviewGatewayTarget, 'generationId'>;
+  }): Promise<PreviewGatewayBrowserLease> {
+    const origin = new URL(input.origin);
+    validateRoute(origin.hostname, input.target);
+    if (
+      origin.protocol !== 'http:' ||
+      origin.username ||
+      origin.password ||
+      origin.pathname !== '/' ||
+      origin.search ||
+      origin.hash ||
+      Number(origin.port) !== this.requireListeningPort()
+    ) {
+      throw new Error('Preview browser lease requires one exact Task Monki HTTP origin.');
+    }
+
+    const sockets = new Set<net.Socket>();
+    const upstreamSockets = new Set<net.Socket>();
+    let closed = false;
+    const server = http.createServer((request, response) => {
+      if (closed || !matchesForwardProxyOrigin(request.url, origin)) {
+        sendBoundedError(response, 403, 'Preview browser lease rejected this destination.');
+        return;
+      }
+      proxyExactRequest(
+        request,
+        response,
+        input.target,
+        origin,
+        upstreamSockets
+      );
+    });
+    server.headersTimeout = 10_000;
+    server.requestTimeout = 30_000;
+    server.keepAliveTimeout = 5_000;
+    server.on('connection', (socket) => trackSocket(sockets, socket));
+    server.on('connect', (_request, socket) => {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    });
+    server.on('upgrade', (_request, socket) => {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    });
+    const port = await bindLoopbackServer(server);
+    const close = async () => {
+      if (closed) return;
+      closed = true;
+      this.browserLeases.delete(close);
+      for (const socket of [...sockets, ...upstreamSockets]) socket.destroy();
+      if (!server.listening) return;
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
+    };
+    this.browserLeases.add(close);
+    return { proxyUrl: `http://127.0.0.1:${port}`, close };
+  }
+
   async close(): Promise<void> {
     this.routes.clear();
+    await Promise.allSettled([...this.browserLeases].map((close) => close()));
     for (const socket of [...this.sockets, ...this.upstreamSockets]) socket.destroy();
     if (!this.server.listening) return;
     await new Promise<void>((resolve, reject) =>
@@ -200,6 +266,95 @@ export class PreviewGateway {
   private targetFor(request: IncomingMessage): PreviewGatewayTarget | undefined {
     return this.routes.get(normalizeHostname(request.headers.host ?? ''));
   }
+
+  private requireListeningPort(): number {
+    const address = this.server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Preview gateway is not listening.');
+    }
+    return address.port;
+  }
+}
+
+function matchesForwardProxyOrigin(value: string | undefined, expected: URL): boolean {
+  if (!value) return false;
+  try {
+    const requested = new URL(value);
+    return (
+      requested.protocol === expected.protocol &&
+      requested.hostname === expected.hostname &&
+      requested.port === expected.port &&
+      !requested.username &&
+      !requested.password
+    );
+  } catch {
+    return false;
+  }
+}
+
+function proxyExactRequest(
+  request: IncomingMessage,
+  response: http.ServerResponse,
+  target: Omit<PreviewGatewayTarget, 'generationId'>,
+  origin: URL,
+  upstreamSockets: Set<net.Socket>
+): void {
+  const requested = new URL(request.url!);
+  const upstream = http.request(
+    {
+      host: target.host,
+      port: target.port,
+      method: request.method,
+      path: `${requested.pathname}${requested.search}`,
+      headers: {
+        ...stripHopByHopHeaders(request.headers),
+        host: origin.host,
+        'x-forwarded-host': origin.host,
+        'x-forwarded-port': origin.port,
+        'x-forwarded-proto': 'http'
+      }
+    },
+    (upstreamResponse) => {
+      response.writeHead(
+        upstreamResponse.statusCode ?? 502,
+        upstreamResponse.statusMessage,
+        rewriteResponseHeaders(upstreamResponse.headers, target, origin.host)
+      );
+      upstreamResponse.pipe(response);
+    }
+  );
+  upstream.setTimeout(30_000, () => upstream.destroy(new Error('Preview upstream timed out.')));
+  upstream.on('socket', (socket) => trackSocket(upstreamSockets, socket));
+  upstream.once('error', () => {
+    if (!response.headersSent) sendBoundedError(response, 502, 'Preview target is unavailable.');
+    else response.destroy();
+  });
+  request.once('aborted', () => upstream.destroy());
+  response.once('close', () => {
+    if (!response.writableEnded) upstream.destroy();
+  });
+  request.pipe(upstream);
+}
+
+function bindLoopbackServer(server: http.Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      const address = server.address();
+      if (!address || typeof address === 'string' || address.address !== '127.0.0.1') {
+        reject(new Error('Preview browser lease did not bind IPv4 loopback.'));
+        return;
+      }
+      resolve(address.port);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(0, '127.0.0.1');
+  });
 }
 
 function normalizeHostname(value: string): string {
@@ -230,7 +385,7 @@ function forwardedHeaders(
 
 function rewriteResponseHeaders(
   source: IncomingHttpHeaders,
-  target: PreviewGatewayTarget,
+  target: Pick<PreviewGatewayTarget, 'host' | 'port'>,
   stableAuthority: string | undefined
 ): http.OutgoingHttpHeaders {
   const headers = stripHopByHopHeaders(source);
@@ -304,5 +459,6 @@ function isValidPort(port: number): boolean {
 function trackSocket(set: Set<net.Socket>, socket: net.Socket): void {
   if (set.has(socket)) return;
   set.add(socket);
+  socket.on('error', () => undefined);
   socket.once('close', () => set.delete(socket));
 }

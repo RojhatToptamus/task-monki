@@ -35,6 +35,16 @@ Task Monki desktop builds include Electron and Chromium components. Packaged
 applications include Electron's `LICENSE` and `LICENSES.chromium.html`, which
 contain the applicable Electron, Chromium, and bundled component notices.
 
+## agent-browser and Chrome for Testing
+
+Design browser verification packages `agent-browser` 0.34.0 from Vercel Labs.
+It is licensed under Apache License 2.0. Desktop packages include the upstream
+license beside the Design browser runtime.
+
+The same runtime packages Chrome for Testing 152.0.7977.54. Desktop packages
+include `CHROME_FOR_TESTING_NOTICES` beside the browser. Chromium component
+notices are also available from `chrome://credits` while the browser runs.
+
 ## Main runtime dependencies
 
 Task Monki's direct open-source runtime dependencies include React and React

@@ -11,6 +11,9 @@ import type {
   CreateBoardRequest,
   CreateTaskRequest,
   CreateBlankDesignRequest,
+  AddDesignReferencesRequest,
+  RemoveDesignReferenceRequest,
+  ImportDesignReferenceAssetRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
   DesignDetailSnapshot,
@@ -81,6 +84,7 @@ import type {
   PreviewRecipeValidation,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
   ResolvePreviewRequest,
@@ -200,6 +204,10 @@ import {
 import { DesignSourceService } from '../design/DesignSourceService';
 import { DesignUpdateCoordinator } from '../design/DesignUpdateCoordinator';
 import { FileDesignDraftStore } from '../design/FileDesignDraftStore';
+import {
+  AgentBrowserRuntime,
+  type DesignBrowserOwner
+} from '../design/AgentBrowserRuntime';
 
 type TaskManagerLifecycleState =
   | 'NEW'
@@ -224,6 +232,7 @@ export class TaskManagerService {
   private readonly designWorktrees?: WorktreeService;
   private readonly designSource?: DesignSourceService;
   private readonly designUpdates?: DesignUpdateCoordinator;
+  private readonly designBrowser?: DesignBrowserOwner;
   private readonly designDrafts?: FileDesignDraftStore;
   private readonly github: GitHubService;
   private readonly appSettingsStore: AppSettingsStorage;
@@ -290,6 +299,12 @@ export class TaskManagerService {
       designCanvasFence?: DesignCanvasCutoverFence;
       designSkillRoot?: string;
       designDraftRoot?: string;
+      designBrowserRuntime?: DesignBrowserOwner;
+      designBrowserExecutablePath?: string;
+      designBrowserChromeExecutablePath?: string;
+      designBrowserScratchRoot?: string;
+      designBrowserSocketRoot?: string;
+      designBrowserRequireCodeSignature?: boolean;
     } = {}
   ) {
     if (Boolean(options.agentRuntimeStore) !== Boolean(options.discourseStore)) {
@@ -408,11 +423,21 @@ export class TaskManagerService {
         options.designDraftRoot ??
           path.join(path.dirname(options.designRepositoryRoot), 'design-drafts')
       );
+      this.designBrowser =
+        options.designBrowserRuntime ??
+        createDesignBrowserRuntime({
+          executablePath: options.designBrowserExecutablePath,
+          browserExecutablePath: options.designBrowserChromeExecutablePath,
+          scratchRoot: options.designBrowserScratchRoot,
+          socketRoot: options.designBrowserSocketRoot,
+          requireCodeSignature: options.designBrowserRequireCodeSignature
+        });
       this.designUpdates = new DesignUpdateCoordinator({
         store,
         agents: this.agents,
         previews: this.previews,
         source: this.designSource,
+        browser: this.designBrowser,
         fence: options.designCanvasFence,
         events: this.events,
         refreshGitEvidence: (designId) => this.refreshDesignGitEvidence(designId),
@@ -458,13 +483,36 @@ export class TaskManagerService {
   }
 
   private async initializeInternal(): Promise<void> {
+    let designDrafts: DesignDraftRecord[] = [];
+    if (this.designDrafts) {
+      await this.designDrafts.init();
+      designDrafts = await this.designDrafts.list();
+      this.store.retainAttachmentDrafts(
+        designDrafts.flatMap((draft) =>
+          draft.attachmentDraftId ? [draft.attachmentDraftId] : []
+        )
+      );
+    }
     await this.store.init();
-    await this.designDrafts?.init();
+    if (this.designDrafts) {
+      await this.reconcileDesignDrafts(designDrafts);
+    }
     this.assertInitializing();
     if (this.designSource) {
       const stored = await this.store.snapshot();
       await this.designSource.reconcileOrphanedRepositories(stored.repositories);
       this.assertInitializing();
+    }
+    if (this.designBrowser) {
+      await this.designBrowser.attest();
+      this.assertInitializing();
+      await this.designBrowser.recover();
+      this.assertInitializing();
+      if (this.codexAdapter && this.designUpdates) {
+        this.codexAdapter.setDesignBrowserToolHandler((input) =>
+          this.designUpdates!.inspectDesign(input)
+        );
+      }
     }
     this.appSettings = await this.loadBoundarySafeAppSettings();
     this.assertInitializing();
@@ -1375,8 +1423,19 @@ export class TaskManagerService {
     return this.store.listDesigns();
   }
 
-  getDesign(designId: string): Promise<DesignDetailSnapshot> {
-    return this.store.getDesignDetail(designId);
+  async getDesign(designId: string): Promise<DesignDetailSnapshot> {
+    const detail = await this.store.getDesignDetail(designId);
+    if (!detail.currentWorktree) return detail;
+    const project = await this.requireDesignSource().listProjectFiles({
+      designId,
+      repository: detail.repository,
+      worktree: detail.currentWorktree
+    });
+    return {
+      ...detail,
+      projectFiles: project.files,
+      projectFilesTruncated: project.truncated
+    };
   }
 
   listDesignConversation(
@@ -1387,20 +1446,68 @@ export class TaskManagerService {
 
   async getDesignDraft(designId: string): Promise<DesignDraftRecord | null> {
     await this.requireDesignTask(designId, 'Design draft read');
-    return (await this.requireDesignDrafts().get(designId)) ?? null;
+    const draft = await this.requireDesignDrafts().get(designId);
+    if (!draft) return null;
+    return this.resolveDesignDraftAttachments(draft);
+  }
+
+  async readDesignDraftAttachment(
+    input: ReadDesignDraftAttachmentRequest
+  ): Promise<AttachmentContent> {
+    await this.requireDesignTask(input.designId, 'Design draft attachment read');
+    const draft = await this.requireDesignDrafts().get(input.designId);
+    const attachmentDraft = draft?.attachmentDraftId
+      ? await this.store.listAttachmentDraft(draft.attachmentDraftId)
+      : undefined;
+    const attachment = attachmentDraft?.attachments.find(
+      (candidate) => candidate.id === input.attachmentId
+    );
+    if (!draft?.attachmentDraftId || !attachment) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_NOT_FOUND',
+        'Design draft attachment not found.',
+        404
+      );
+    }
+    return this.store.readDraftAttachment(draft.attachmentDraftId, attachment.id);
   }
 
   saveDesignDraft(input: SaveDesignDraftRequest): Promise<DesignDraftRecord> {
     return this.withTaskAction(input.designId, 'Design draft save', async () => {
-      await this.requireDesignTask(input.designId, 'Design draft save');
-      return this.requireDesignDrafts().save(input);
+      const task = await this.requireDesignTask(input.designId, 'Design draft save');
+      const save = async () => {
+        await this.validateDesignDraftSelection(input.designId, input.referenceIds);
+        if (input.attachmentDraftId) {
+          await this.validateDesignAttachmentDraft(task, input.attachmentDraftId);
+        }
+        const previous = await this.requireDesignDrafts().get(input.designId);
+        const saved = await this.requireDesignDrafts().save(input);
+        if (
+          previous?.attachmentDraftId &&
+          previous.attachmentDraftId !== saved.attachmentDraftId
+        ) {
+          await this.store
+            .discardAttachmentDraft(previous.attachmentDraftId)
+            .catch(() => undefined);
+        }
+        return this.resolveDesignDraftAttachments(saved);
+      };
+      return input.attachmentDraftId
+        ? this.withAttachmentDraft(input.attachmentDraftId, save)
+        : save();
     });
   }
 
   deleteDesignDraft(input: DeleteDesignDraftRequest): Promise<void> {
     return this.withTaskAction(input.designId, 'Design draft deletion', async () => {
       await this.requireDesignTask(input.designId, 'Design draft deletion');
-      return this.requireDesignDrafts().delete(input);
+      const draft = await this.requireDesignDrafts().get(input.designId);
+      await this.requireDesignDrafts().delete(input);
+      if (draft?.attachmentDraftId) {
+        await this.store
+          .discardAttachmentDraft(draft.attachmentDraftId)
+          .catch(() => undefined);
+      }
     });
   }
 
@@ -1424,7 +1531,7 @@ export class TaskManagerService {
         const updates = await this.requireDesignUpdates().catch(() => undefined);
         await updates?.dispatch(acknowledged.task.id).catch(() => undefined);
       }
-      return this.store.getDesignDetail(acknowledged.task.id);
+      return this.getDesign(acknowledged.task.id);
     }
 
     const designUpdates = await this.requireDesignUpdates();
@@ -1452,7 +1559,7 @@ export class TaskManagerService {
     await this.ensureDesignWorktree(bundle.task.id);
     await designUpdates.dispatch(bundle.task.id).catch(() => undefined);
     this.emitDesignUpdate(bundle.task.id, { reason: 'created' });
-    return this.store.getDesignDetail(bundle.task.id);
+    return this.getDesign(bundle.task.id);
   }
 
   submitDesignTurn(
@@ -1461,12 +1568,144 @@ export class TaskManagerService {
     return this.withTaskAction(input.designId, 'Design update', () =>
       this.withRuntimeOperation(async () => {
         const designUpdates = await this.requireDesignUpdates();
-        await this.store.createInlineDesignTurn(input);
+        const accept = async () => {
+          const retry = await this.store.resolveInlineDesignTurnRetry(input);
+          if (!retry && input.attachmentDraftId) {
+            const task = await this.requireDesignTask(input.designId, 'Design update');
+            const draft = await this.requireDesignDrafts().get(input.designId);
+            if (draft?.attachmentDraftId !== input.attachmentDraftId) {
+              throw new Error('The attached files do not belong to this Design draft.');
+            }
+            await this.validateDesignAttachmentDraft(task, input.attachmentDraftId);
+          }
+          await this.store.createInlineDesignTurn(input);
+        };
+        if (input.attachmentDraftId) {
+          await this.withAttachmentDraft(input.attachmentDraftId, accept);
+        } else {
+          await accept();
+        }
         await designUpdates.dispatch(input.designId).catch(() => undefined);
         this.emitDesignUpdate(input.designId, { reason: 'message-accepted' });
-        return this.store.getDesignDetail(input.designId);
+        return this.getDesign(input.designId);
       })
     );
+  }
+
+  addDesignReferences(
+    input: AddDesignReferencesRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Reference addition', () =>
+      this.withRuntimeOperation(() =>
+        this.withAttachmentDraft(input.attachmentDraftId, async () => {
+          await this.requireDesignUpdates();
+          const task = await this.requireDesignTask(input.designId, 'Reference addition');
+          const draft = await this.store.listAttachmentDraft(input.attachmentDraftId);
+          const adapter = this.runtimeRegistry.require(task.runtimeId);
+          const settings = await prepareTaskCreationSettings(
+            adapter,
+            task.agentSettings,
+            draft.attachments
+          );
+          if (
+            settings.networkAccess !== false ||
+            settings.sandbox !== 'WORKSPACE_WRITE' ||
+            settings.approvalPolicy !== 'never'
+          ) {
+            throw new Error('Design references require the restricted Design permission profile.');
+          }
+          await this.store.addDesignReferences(input);
+          this.emitDesignUpdate(input.designId, { reason: 'references-added' });
+          return this.getDesign(input.designId);
+        })
+      )
+    );
+  }
+
+  removeDesignReference(
+    input: RemoveDesignReferenceRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Reference removal', async () => {
+      await this.requireDesignTask(input.designId, 'Reference removal');
+      await this.store.removeDesignReference(input);
+      const draft = await this.requireDesignDrafts().get(input.designId);
+      if (draft?.referenceIds.includes(input.referenceId)) {
+        await this.requireDesignDrafts().save({
+          designId: input.designId,
+          expectedRevision: draft.recordRevision,
+          body: draft.body,
+          referenceIds: draft.referenceIds.filter(
+            (referenceId) => referenceId !== input.referenceId
+          ),
+          attachmentDraftId: draft.attachmentDraftId
+        });
+      }
+      this.emitDesignUpdate(input.designId, {
+        reason: 'reference-removed',
+        referenceId: input.referenceId
+      });
+      return this.getDesign(input.designId);
+    });
+  }
+
+  importDesignReferenceAsset(
+    input: ImportDesignReferenceAssetRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Asset import', async () => {
+      const designUpdates = await this.requireDesignUpdates();
+      return designUpdates.withExclusiveAccess(input.designId, async () => {
+        const detail = await this.store.getDesignDetail(input.designId);
+        this.assertNoActiveTaskRun(
+          await this.store.snapshot(),
+          input.designId,
+          'importing a project asset'
+        );
+        if (
+          detail.turns.some(
+            (turn) => turn.outcome === undefined && turn.runId === undefined
+          )
+        ) {
+          throw new Error('Wait for queued Design messages before importing a project asset.');
+        }
+        if (!detail.currentWorktree) {
+          throw new Error('The Design workspace is not ready.');
+        }
+        const stored = await this.store.readDesignReferenceContent(
+          input.designId,
+          input.referenceId
+        );
+        const receipt = await this.requireDesignSource().importProjectAsset({
+          designId: input.designId,
+          repository: detail.repository,
+          worktree: detail.currentWorktree,
+          displayName: stored.content.displayName,
+          bytes: stored.content.bytes,
+          sha256: stored.sha256
+        });
+        try {
+          await this.store.recordDesignReferenceAsset({
+            ...input,
+            projectAssetPath: receipt.relativePath
+          });
+        } catch (error) {
+          try {
+            await this.requireDesignSource().rollbackProjectAsset(receipt);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'The asset link failed and the copied project file could not be removed.'
+            );
+          }
+          throw error;
+        }
+        await this.refreshDesignGitEvidence(input.designId);
+        this.emitDesignUpdate(input.designId, {
+          reason: 'reference-imported',
+          referenceId: input.referenceId
+        });
+        return this.getDesign(input.designId);
+      });
+    });
   }
 
   cancelDesignTurn(
@@ -1476,7 +1715,7 @@ export class TaskManagerService {
       this.withRuntimeOperation(async () => {
         const designUpdates = await this.requireDesignUpdates();
         await designUpdates.cancelTurn(input.designId, input.turnId);
-        return this.store.getDesignDetail(input.designId);
+        return this.getDesign(input.designId);
       })
     );
   }
@@ -1488,7 +1727,7 @@ export class TaskManagerService {
       this.withRuntimeOperation(async () => {
         const designUpdates = await this.requireDesignUpdates();
         await designUpdates.restartLatestReady(input.designId);
-        return this.store.getDesignDetail(input.designId);
+        return this.getDesign(input.designId);
       })
     );
   }
@@ -3010,8 +3249,14 @@ export class TaskManagerService {
       removedWorktree = true;
     }
 
+    const designDraft = await this.designDrafts?.get(task.id).catch(() => null);
     const released = await this.store.deleteTaskAndReleaseManagedRepository(task.id);
     await this.designDrafts?.deleteForDesign(task.id).catch(() => undefined);
+    if (designDraft?.attachmentDraftId) {
+      await this.store
+        .discardAttachmentDraft(designDraft.attachmentDraftId)
+        .catch(() => undefined);
+    }
     await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
     if (released.removedManagedRepository) {
       await source.removeManagedRepository(released.removedManagedRepository);
@@ -3438,6 +3683,148 @@ export class TaskManagerService {
     return this.designDrafts;
   }
 
+  private async resolveDesignDraftAttachments(
+    draft: DesignDraftRecord
+  ): Promise<DesignDraftRecord> {
+    if (!draft.attachmentDraftId) {
+      return { ...draft, attachmentDraft: undefined };
+    }
+    try {
+      return {
+        ...draft,
+        attachmentDraft: await this.store.listAttachmentDraft(draft.attachmentDraftId)
+      };
+    } catch (error) {
+      if (
+        error instanceof AttachmentStoreError &&
+        error.code === 'ATTACHMENT_DRAFT_NOT_FOUND'
+      ) {
+        return {
+          ...draft,
+          attachmentDraftId: undefined,
+          attachmentDraft: undefined
+        };
+      }
+      throw error;
+    }
+  }
+
+  private async validateDesignDraftSelection(
+    designId: string,
+    referenceIds: readonly string[]
+  ): Promise<void> {
+    if (
+      !Array.isArray(referenceIds) ||
+      new Set(referenceIds).size !== referenceIds.length
+    ) {
+      throw new Error('Design draft reference selection is invalid.');
+    }
+    const detail = await this.store.getDesignDetail(designId);
+    const activeReferenceIds = new Set(
+      detail.references
+        .filter((reference) => reference.state === 'ACTIVE')
+        .map((reference) => reference.id)
+    );
+    if (referenceIds.some((referenceId) => !activeReferenceIds.has(referenceId))) {
+      throw new Error('A selected Design draft reference is not active.');
+    }
+  }
+
+  private async validateDesignAttachmentDraft(
+    task: Task,
+    attachmentDraftId: string
+  ): Promise<AttachmentDraftSnapshot> {
+    const [draft, existing] = await Promise.all([
+      this.store.listAttachmentDraft(attachmentDraftId),
+      this.store.getTaskAttachments(task.id)
+    ]);
+    if (existing.length + draft.attachments.length > ATTACHMENT_MAX_COUNT) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_LIMIT_EXCEEDED',
+        `A Design can have at most ${ATTACHMENT_MAX_COUNT} references.`,
+        413
+      );
+    }
+    const totalBytes = [...existing, ...draft.attachments].reduce(
+      (total, attachment) => total + attachment.byteCount,
+      0
+    );
+    if (totalBytes > ATTACHMENT_MAX_TOTAL_BYTES) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_TOTAL_TOO_LARGE',
+        'Design references exceed the total size limit.',
+        413
+      );
+    }
+    const adapter = this.runtimeRegistry.require(task.runtimeId);
+    const settings = await prepareTaskCreationSettings(
+      adapter,
+      task.agentSettings,
+      draft.attachments
+    );
+    if (
+      settings.networkAccess !== false ||
+      settings.sandbox !== 'WORKSPACE_WRITE' ||
+      settings.approvalPolicy !== 'never'
+    ) {
+      throw new Error('Design references require the restricted Design permission profile.');
+    }
+    return draft;
+  }
+
+  private async reconcileDesignDrafts(drafts: readonly DesignDraftRecord[]): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    const designIds = new Set(
+      snapshot.tasks.filter((task) => task.kind === 'DESIGN').map((task) => task.id)
+    );
+    const adoptedAttachmentDrafts = new Set(
+      snapshot.designTurns.flatMap((turn) =>
+        turn.attachmentDraftId
+          ? [`${turn.designId}\u0000${turn.attachmentDraftId}`]
+          : []
+      )
+    );
+    for (const draft of drafts) {
+      if (!designIds.has(draft.designId)) {
+        await this.requireDesignDrafts().deleteForDesign(draft.designId);
+        if (draft.attachmentDraftId) {
+          await this.store
+            .discardAttachmentDraft(draft.attachmentDraftId)
+            .catch(() => undefined);
+        }
+        continue;
+      }
+      if (!draft.attachmentDraftId) continue;
+      if (
+        adoptedAttachmentDrafts.has(
+          `${draft.designId}\u0000${draft.attachmentDraftId}`
+        )
+      ) {
+        // The task snapshot is authoritative once the turn owns this staging id.
+        // A crash can occur before the renderer clears its saved composer draft.
+        await this.requireDesignDrafts().deleteForDesign(draft.designId);
+        await this.store.discardAttachmentDraft(draft.attachmentDraftId);
+        continue;
+      }
+      try {
+        await this.store.listAttachmentDraft(draft.attachmentDraftId);
+      } catch (error) {
+        if (
+          !(error instanceof AttachmentStoreError) ||
+          error.code !== 'ATTACHMENT_DRAFT_NOT_FOUND'
+        ) {
+          throw error;
+        }
+        await this.requireDesignDrafts().save({
+          designId: draft.designId,
+          expectedRevision: draft.recordRevision,
+          body: draft.body,
+          referenceIds: draft.referenceIds
+        });
+      }
+    }
+  }
+
   private async requireDesignTask(designId: string, action: string): Promise<Task> {
     const task = await this.requireTask(designId);
     if (task.kind !== 'DESIGN') throw new Error(`${action} requires a Design.`);
@@ -3459,10 +3846,13 @@ export class TaskManagerService {
         'stable' ||
       capabilities.extensions['task-monki.design-skill-access']?.maturity !==
         'stable' ||
+      capabilities.extensions['task-monki.design-browser-verification']?.maturity !==
+        'stable' ||
+      capabilities.attachmentDelivery.maturity !== 'stable' ||
       capabilities.turnInterruption.maturity !== 'stable'
     ) {
       throw new Error(
-        'The configured Codex runtime cannot apply Design instructions and skills safely or support Stop.'
+        'The configured Codex runtime cannot apply Design instructions and skills safely, verify the rendered result, protect Design references, or support Stop.'
       );
     }
     return this.designUpdates;
@@ -3867,4 +4257,30 @@ function latestEventForIteration(
     .sort((left, right) =>
       right.receivedAt.localeCompare(left.receivedAt)
     )[0];
+}
+
+function createDesignBrowserRuntime(input: {
+  executablePath?: string;
+  browserExecutablePath?: string;
+  scratchRoot?: string;
+  socketRoot?: string;
+  requireCodeSignature?: boolean;
+}): DesignBrowserOwner {
+  if (
+    !input.executablePath ||
+    !input.browserExecutablePath ||
+    !input.scratchRoot ||
+    !input.socketRoot
+  ) {
+    throw new Error(
+      'Design Mode requires the packaged agent-browser, browser executable, scratch root, and socket root.'
+    );
+  }
+  return new AgentBrowserRuntime({
+    executablePath: input.executablePath,
+    browserExecutablePath: input.browserExecutablePath,
+    scratchRoot: input.scratchRoot,
+    socketRoot: input.socketRoot,
+    requireCodeSignature: input.requireCodeSignature
+  });
 }

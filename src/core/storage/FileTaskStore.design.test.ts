@@ -17,12 +17,26 @@ describe('FileTaskStore Design ownership', () => {
   it('creates an idempotent Codex-owned Design bundle and excludes it from boards', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-store-'));
     const store = new FileTaskStore(dir);
+    const draft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      clientToken: 'design-create-reference-client-0001',
+      displayName: 'direction.md',
+      bytes: Buffer.from('# Keep the layout calm.')
+    });
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      clientToken: 'design-create-reference-client-0002',
+      displayName: 'content.txt',
+      bytes: Buffer.from('Primary action: Open dashboard')
+    });
     const request = {
       brief:
         '  Create a calm dashboard for monitoring a small greenhouse with clear status.  ',
       creationToken: 'design-request-0001',
       model: '  gpt-5.5  ',
-      reasoningEffort: ' high '
+      reasoningEffort: ' high ',
+      attachmentDraftId: draft.id
     };
     const repository = managedRepository(dir);
 
@@ -60,14 +74,38 @@ describe('FileTaskStore Design ownership', () => {
       messageSource: 'TASK_PROMPT',
       checkpoint: { boundary: 'QUEUED' }
     });
+    expect(created.references).toHaveLength(2);
+    expect(created.turn.referenceIds).toEqual(created.references.map(({ id }) => id));
+    await expect(
+      store.getTurnAttachments({
+        taskId: created.task.id,
+        mode: 'DESIGN',
+        generationKey: created.turn.id
+      })
+    ).resolves.toEqual([
+      expect.objectContaining({ displayName: 'direction.md' }),
+      expect.objectContaining({ displayName: 'content.txt' })
+    ]);
     expect((await store.getBoardSnapshot()).tasks).toEqual([]);
     expect((await store.getBoardSnapshot()).repositories).toEqual([]);
     await expect(store.listDesigns()).resolves.toEqual([
       expect.objectContaining({ id: created.task.id, status: 'STARTING' })
     ]);
-    await expect(store.getDesignDetail(created.task.id)).resolves.toMatchObject({
+    const detail = await store.getDesignDetail(created.task.id);
+    expect(detail.references).toEqual([
+      expect.objectContaining({ id: created.references[0]?.id, state: 'ACTIVE' }),
+      expect.objectContaining({ id: created.references[1]?.id, state: 'ACTIVE' })
+    ]);
+    expect(detail.attachments).toEqual([
+      expect.objectContaining({ displayName: 'direction.md' }),
+      expect.objectContaining({ displayName: 'content.txt' })
+    ]);
+    expect(detail).toMatchObject({
       conversation: [
-        expect.objectContaining({ userMessage: request.brief.trim() })
+        expect.objectContaining({
+          userMessage: request.brief.trim(),
+          turn: expect.objectContaining({ referenceIds: created.turn.referenceIds })
+        })
       ],
       canvas: { state: 'UPDATING' },
       actions: {
@@ -104,7 +142,8 @@ describe('FileTaskStore Design ownership', () => {
     const input = {
       designId: created.task.id,
       clientMessageId: 'design-message-0001',
-      message: 'Make the primary action easier to find.'
+      message: 'Make the primary action easier to find.',
+      referenceIds: []
     };
     const turn = await store.createInlineDesignTurn(input);
     await expect(store.createInlineDesignTurn(input)).resolves.toEqual(turn);
@@ -114,7 +153,8 @@ describe('FileTaskStore Design ownership', () => {
     const queued = await store.createInlineDesignTurn({
       ...input,
       clientMessageId: 'design-message-0002',
-      message: 'Use a warmer accent color.'
+      message: 'Use a warmer accent color.',
+      referenceIds: []
     });
 
     const detail = await store.getDesignDetail(created.task.id);
@@ -140,19 +180,274 @@ describe('FileTaskStore Design ownership', () => {
       await store.createInlineDesignTurn({
         designId: created.task.id,
         clientMessageId: `design-message-${index.toString().padStart(4, '0')}`,
-        message: `Queued change ${index}`
+        message: `Queued change ${index}`,
+        referenceIds: []
       });
     }
     await expect(
       store.createInlineDesignTurn({
         designId: created.task.id,
         clientMessageId: 'design-message-0021',
-        message: 'This message exceeds the queue limit.'
+        message: 'This message exceeds the queue limit.',
+        referenceIds: []
       })
     ).rejects.toThrow('queue is full');
     await expect(store.getDesignDetail(created.task.id)).resolves.toMatchObject({
       actions: { canRefine: false, queuedTurnCount: 20 }
     });
+    await store.close();
+  });
+
+  it('adopts post-create references, records exact turn selection, and keeps inactive history', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-references-'));
+    const store = new FileTaskStore(dir);
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create the initial page.',
+        creationToken: 'design-reference-create'
+      },
+      repository: managedRepository(dir)
+    });
+    await store.settleDesignTurn({
+      designId: created.task.id,
+      turnId: created.turn.id,
+      outcome: 'CANCELED'
+    });
+    const draft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      clientToken: 'design-reference-client-0001',
+      displayName: 'mood.png',
+      bytes: Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64'
+      )
+    });
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      clientToken: 'design-reference-client-0002',
+      displayName: 'content.txt',
+      bytes: Buffer.from('Use a concise heading.')
+    });
+
+    const references = await store.addDesignReferences({
+      designId: created.task.id,
+      attachmentDraftId: draft.id
+    });
+    await expect(
+      store.addDesignReferences({
+        designId: created.task.id,
+        attachmentDraftId: draft.id
+      })
+    ).resolves.toEqual(references);
+    const selected = references[1]!;
+    const unselected = references[0]!;
+    const turn = await store.createInlineDesignTurn({
+      designId: created.task.id,
+      clientMessageId: 'design-reference-turn-0001',
+      message: 'Use only the selected content reference.',
+      referenceIds: [selected.id]
+    });
+
+    await expect(
+      store.getTurnAttachments({
+        taskId: created.task.id,
+        mode: 'DESIGN',
+        generationKey: turn.id
+      })
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: selected.attachmentId,
+        displayName: 'content.txt'
+      })
+    ]);
+    const storedContent = await store.readDesignReferenceContent(
+      created.task.id,
+      selected.id
+    );
+    expect(Buffer.from(storedContent.content.bytes).toString('utf8')).toBe(
+      'Use a concise heading.'
+    );
+    await expect(
+      store.recordDesignReferenceAsset({
+        designId: created.task.id,
+        referenceId: selected.id,
+        projectAssetPath: 'assets/content.txt'
+      })
+    ).resolves.toMatchObject({
+      role: 'PROJECT_ASSET_SOURCE',
+      projectAssetPath: 'assets/content.txt'
+    });
+
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task: created.task,
+      branchName: 'task-monki/design-references',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: COMMIT
+    });
+    const session = await store.createAgentSession({
+      task: created.task,
+      iteration,
+      worktree,
+      runtimeId: 'codex',
+      requestedSettings: created.task.agentSettings
+    });
+    const run = await store.createRun({
+      task: created.task,
+      session,
+      mode: 'DESIGN',
+      generationKey: turn.id,
+      prompt: 'Use only the selected content reference.'
+    });
+    await expect(store.prepareRunAttachments(run.id, created.task.id)).resolves.toEqual([
+      expect.objectContaining({
+        record: expect.objectContaining({
+          id: selected.attachmentId,
+          ordinal: 1,
+          displayName: 'content.txt'
+        })
+      })
+    ]);
+    await store.linkDesignTurnRun({
+      designId: created.task.id,
+      turnId: turn.id,
+      runId: run.id
+    });
+    const attachment = (await store.getTurnAttachments({
+      taskId: created.task.id,
+      mode: 'DESIGN',
+      generationKey: turn.id
+    }))[0]!;
+    const submittedAt = new Date().toISOString();
+    await store.updateRun(run.id, {
+      providerTurnId: 'provider-design-reference-turn',
+      attachmentSubmissions: [{
+        attachmentId: attachment.id,
+        ordinal: attachment.ordinal,
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        byteCount: attachment.byteCount,
+        sha256: attachment.sha256,
+        submittedAs: 'prompt-file-reference',
+        verifiedAt: submittedAt,
+        providerTurnId: 'provider-design-reference-turn',
+        submittedAt
+      }]
+    });
+    expect(
+      (await store.getDesignDetail(created.task.id)).references.find(
+        (reference) => reference.id === selected.id
+      )
+    ).toMatchObject({ firstDeliveredAt: submittedAt });
+
+    await store.removeDesignReference({
+      designId: created.task.id,
+      referenceId: selected.id
+    });
+    await expect(
+      store.createInlineDesignTurn({
+        designId: created.task.id,
+        clientMessageId: 'design-reference-turn-0002',
+        message: 'Try to reuse an inactive reference.',
+        referenceIds: [selected.id]
+      })
+    ).rejects.toThrow('not active');
+    const detail = await store.getDesignDetail(created.task.id);
+    expect(detail.references).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: selected.id, state: 'INACTIVE' }),
+        expect.objectContaining({ id: unselected.id, state: 'ACTIVE' })
+      ])
+    );
+    expect(detail.attachments).toHaveLength(2);
+    expect(detail.turns.find((candidate) => candidate.id === turn.id)?.referenceIds).toEqual([
+      selected.id
+    ]);
+    await store.close();
+  });
+
+  it('adopts message files once and records exact references for consecutive queued turns', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-turn-files-'));
+    const store = new FileTaskStore(dir);
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create the initial page.',
+        creationToken: 'design-turn-files-create'
+      },
+      repository: managedRepository(dir)
+    });
+    const reusableDraft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: reusableDraft.id,
+      clientToken: 'design-turn-existing-reference',
+      displayName: 'existing.md',
+      bytes: Buffer.from('Existing direction')
+    });
+    const [existingReference] = await store.addDesignReferences({
+      designId: created.task.id,
+      attachmentDraftId: reusableDraft.id
+    });
+    const messageDraft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: messageDraft.id,
+      clientToken: 'design-turn-new-reference',
+      displayName: 'new-direction.txt',
+      bytes: Buffer.from('New direction')
+    });
+    const firstInput = {
+      designId: created.task.id,
+      clientMessageId: 'design-turn-files-first',
+      message: 'Use the two selected directions.',
+      referenceIds: [existingReference!.id],
+      attachmentDraftId: messageDraft.id
+    };
+
+    const first = await store.createInlineDesignTurn(firstInput);
+    const retry = await store.createInlineDesignTurn(firstInput);
+    const firstDetail = await store.getDesignDetail(created.task.id);
+    const newReference = firstDetail.references.find(
+      (reference) => reference.sourceDraftId === messageDraft.id
+    );
+    expect(retry).toEqual(first);
+    expect(first).toMatchObject({ attachmentDraftId: messageDraft.id });
+    expect(first.referenceIds).toEqual([existingReference!.id, newReference!.id]);
+    await expect(
+      store.getTurnAttachments({
+        taskId: created.task.id,
+        mode: 'DESIGN',
+        generationKey: first.id
+      })
+    ).resolves.toEqual([
+      expect.objectContaining({ displayName: 'existing.md' }),
+      expect.objectContaining({ displayName: 'new-direction.txt' })
+    ]);
+    await expect(store.listAttachmentDraft(messageDraft.id)).rejects.toMatchObject({
+      code: 'ATTACHMENT_DRAFT_NOT_FOUND'
+    });
+
+    const second = await store.createInlineDesignTurn({
+      designId: created.task.id,
+      clientMessageId: 'design-turn-files-second',
+      message: 'Use only the newly added direction.',
+      referenceIds: [newReference!.id]
+    });
+    const third = await store.createInlineDesignTurn({
+      designId: created.task.id,
+      clientMessageId: 'design-turn-files-third',
+      message: 'Do not use a reference for this message.',
+      referenceIds: []
+    });
+
+    expect(second.referenceIds).toEqual([newReference!.id]);
+    expect(third.referenceIds).toEqual([]);
+    await expect(
+      store.getTurnAttachments({
+        taskId: created.task.id,
+        mode: 'DESIGN',
+        generationKey: third.id
+      })
+    ).resolves.toEqual([]);
+    expect((await store.getDesignDetail(created.task.id)).actions.queuedTurnCount).toBe(4);
     await store.close();
   });
 
@@ -167,7 +462,8 @@ describe('FileTaskStore Design ownership', () => {
       const turn = await store.createInlineDesignTurn({
         designId: created.task.id,
         clientMessageId: `design-paging-${index.toString().padStart(4, '0')}`,
-        message: `Refinement ${index}`
+        message: `Refinement ${index}`,
+        referenceIds: []
       });
       await store.settleDesignTurn({
         designId: created.task.id,
@@ -238,6 +534,51 @@ describe('FileTaskStore Design ownership', () => {
     await store.close();
   });
 
+  it('publishes a post-create attachment and reference together or publishes neither', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-reference-rollback-'));
+    const store = new FileTaskStore(dir);
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create a page.',
+        creationToken: 'design-reference-rollback-create'
+      },
+      repository: managedRepository(dir)
+    });
+    const draft = await store.createAttachmentDraft();
+    const staged = await store.stageTaskAttachment({
+      draftId: draft.id,
+      clientToken: 'design-reference-rollback-client',
+      displayName: 'reference.txt',
+      bytes: Buffer.from('Reference bytes')
+    });
+    const restoreFailure = injectNextSnapshotSyncFailure(
+      dir,
+      'injected Design reference persistence failure'
+    );
+
+    try {
+      await expect(
+        store.addDesignReferences({
+          designId: created.task.id,
+          attachmentDraftId: draft.id
+        })
+      ).rejects.toThrow('Design reference persistence failure');
+    } finally {
+      restoreFailure();
+    }
+
+    const detail = await store.getDesignDetail(created.task.id);
+    expect(detail.references).toEqual([]);
+    expect(detail.attachments).toEqual([]);
+    await expect(store.listAttachmentDraft(draft.id)).resolves.toMatchObject({
+      attachments: [expect.objectContaining({ id: staged.id })]
+    });
+    await expect(
+      fs.access(path.join(dir, 'attachments', 'tasks', created.task.id))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await store.close();
+  });
+
   it('rolls back an inline turn and its artifact when snapshot publication fails', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-turn-rollback-'));
     const store = new FileTaskStore(dir);
@@ -253,6 +594,13 @@ describe('FileTaskStore Design ownership', () => {
       turnId: created.turn.id,
       outcome: 'CANCELED'
     });
+    const draft = await store.createAttachmentDraft();
+    const staged = await store.stageTaskAttachment({
+      draftId: draft.id,
+      clientToken: 'design-turn-rollback-reference',
+      displayName: 'rollback-reference.txt',
+      bytes: Buffer.from('Keep this staged after failure.')
+    });
     const restoreFailure = injectNextSnapshotSyncFailure(
       dir,
       'injected Design turn persistence failure'
@@ -263,7 +611,9 @@ describe('FileTaskStore Design ownership', () => {
         store.createInlineDesignTurn({
           designId: created.task.id,
           clientMessageId: 'design-message-turn-rollback',
-          message: 'Add a more prominent primary action.'
+          message: 'Add a more prominent primary action.',
+          referenceIds: [],
+          attachmentDraftId: draft.id
         })
       ).rejects.toThrow('Design turn persistence failure');
     } finally {
@@ -274,9 +624,14 @@ describe('FileTaskStore Design ownership', () => {
     expect(snapshot.designTurns).toEqual([
       expect.objectContaining({ id: created.turn.id, outcome: 'CANCELED' })
     ]);
+    expect(snapshot.designReferences).toEqual([]);
+    expect(snapshot.attachments).toEqual([]);
     expect(snapshot.artifacts.filter((artifact) => artifact.kind === 'design-message')).toEqual(
       []
     );
+    await expect(store.listAttachmentDraft(draft.id)).resolves.toMatchObject({
+      attachments: [expect.objectContaining({ id: staged.id })]
+    });
     await store.close();
   });
 
@@ -641,7 +996,8 @@ describe('FileTaskStore Design ownership', () => {
     const stoppedTurn = await store.createInlineDesignTurn({
       designId: created.task.id,
       clientMessageId: 'design-stop-after-ready',
-      message: 'Try a different direction.'
+      message: 'Try a different direction.',
+      referenceIds: []
     });
     await store.settleDesignTurn({
       designId: created.task.id,

@@ -11,6 +11,7 @@ import {
 } from 'react';
 import type { AgentModel } from '../../shared/contracts';
 import type {
+  AttachmentContent,
   AttachmentDraftSnapshot,
   ClipboardAttachmentImage,
   StageTaskAttachmentBatchRequest
@@ -37,6 +38,9 @@ interface UseTaskAttachmentsOptions {
   onStageBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscard(draftId: string): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
+  initialDraft?: AttachmentDraftSnapshot;
+  onReadDraftAttachment?(attachmentId: string): Promise<AttachmentContent>;
+  preserveDraftOnClose?: boolean;
 }
 
 export interface TaskAttachmentController {
@@ -47,24 +51,28 @@ export interface TaskAttachmentController {
   hasErrors: boolean;
   isDragging: boolean;
   isReadingClipboardImage: boolean;
+  isRestoringDraft: boolean;
+  contentRevision: number;
   overflowError?: string;
   modelError?: string;
   interactionBlocked: boolean;
   inputRef: RefObject<HTMLInputElement | null>;
   closedRef: MutableRefObject<boolean>;
   selectFiles(event: ChangeEvent<HTMLInputElement>): void;
-  paste(event: ClipboardEvent<HTMLTextAreaElement>): void;
+  paste(event: ClipboardEvent<HTMLElement>): void;
   dragEnter(event: DragEvent<HTMLDivElement>): void;
   dragOver(event: DragEvent<HTMLDivElement>): void;
   dragLeave(event: DragEvent<HTMLDivElement>): void;
   drop(event: DragEvent<HTMLDivElement>): void;
   remove(clientId: string): Promise<void>;
   prepareForCreate(): Promise<string | undefined>;
+  acknowledgeDraftSave(draftId: string | undefined): Promise<void>;
   markCreateFailed(preserveDraft: boolean): Promise<void>;
+  finishAdoption(): Promise<void>;
   close(): void;
 }
 
-/** Keeps file bytes renderer-local until the user submits the task. */
+/** Owns one bounded attachment selection and its existing staging lifecycle. */
 export function useTaskAttachments(
   options: UseTaskAttachmentsOptions
 ): TaskAttachmentController {
@@ -72,12 +80,20 @@ export function useTaskAttachments(
   const [overflowError, setOverflowError] = useState<string>();
   const [isDragging, setIsDragging] = useState(false);
   const [isReadingClipboardImage, setIsReadingClipboardImage] = useState(false);
+  const [isRestoringDraft, setIsRestoringDraft] = useState(false);
+  const [draftRestoreFailed, setDraftRestoreFailed] = useState(false);
+  const [contentRevision, setContentRevision] = useState(0);
   const itemsRef = useRef<AttachmentComposerItem[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const closedRef = useRef(false);
   const submittingRef = useRef(false);
-  const adoptedRef = useRef(false);
   const draftIdRef = useRef<string | undefined>(undefined);
+  const durableDraftIdRef = useRef<string | undefined>(undefined);
+  const durableRevisionRef = useRef(-1);
+  const preparedRevisionRef = useRef(-1);
+  const contentRevisionRef = useRef(0);
+  const knownDraftIdsRef = useRef(new Set<string>());
+  const restoredDraftIdRef = useRef<string | undefined>(undefined);
   const sequenceRef = useRef(0);
   const dragDepthRef = useRef(0);
   const clipboardReadPendingRef = useRef(false);
@@ -90,6 +106,8 @@ export function useTaskAttachments(
     (update: (current: AttachmentComposerItem[]) => AttachmentComposerItem[]) => {
       const next = capAttachmentValidationFailures(update(itemsRef.current));
       itemsRef.current = next;
+      contentRevisionRef.current += 1;
+      setContentRevision(contentRevisionRef.current);
       if (!closedRef.current) setItems(next);
     },
     []
@@ -101,20 +119,22 @@ export function useTaskAttachments(
     }
   }, []);
 
-  const discardDraft = useCallback(async () => {
-    const draftId = draftIdRef.current;
-    draftIdRef.current = undefined;
-    if (draftId && !adoptedRef.current) {
-      await discardRef.current(draftId).catch(() => undefined);
-    }
+  const discardDraftsExcept = useCallback(async (retainedDraftId?: string) => {
+    const discardIds = [...knownDraftIdsRef.current].filter(
+      (draftId) => draftId !== retainedDraftId
+    );
+    knownDraftIdsRef.current = new Set(retainedDraftId ? [retainedDraftId] : []);
+    await Promise.all(
+      discardIds.map((draftId) => discardRef.current(draftId).catch(() => undefined))
+    );
   }, []);
 
   const close = useCallback(() => {
     if (closedRef.current) return;
     closedRef.current = true;
     for (const item of itemsRef.current) releasePreview(item);
-    void discardDraft();
-  }, [discardDraft, releasePreview]);
+    if (!options.preserveDraftOnClose) void discardDraftsExcept();
+  }, [discardDraftsExcept, options.preserveDraftOnClose, releasePreview]);
 
   useEffect(() => {
     closedRef.current = false;
@@ -162,6 +182,78 @@ export function useTaskAttachments(
     [options.enabled, updateItems]
   );
 
+  useEffect(() => {
+    const draft = options.initialDraft;
+    if (!draft || restoredDraftIdRef.current === draft.id) return;
+    if (draftIdRef.current === draft.id) {
+      restoredDraftIdRef.current = draft.id;
+      return;
+    }
+    if (!options.onReadDraftAttachment) {
+      setOverflowError('Saved draft files cannot be read in this app build.');
+      return;
+    }
+    restoredDraftIdRef.current = draft.id;
+    draftIdRef.current = draft.id;
+    durableDraftIdRef.current = draft.id;
+    knownDraftIdsRef.current.add(draft.id);
+    const restoredRevision = contentRevisionRef.current;
+    preparedRevisionRef.current = restoredRevision;
+    durableRevisionRef.current = restoredRevision;
+    setDraftRestoreFailed(false);
+    setIsRestoringDraft(true);
+    void Promise.all(
+      draft.attachments.map(async (record) => {
+        const content = await options.onReadDraftAttachment!(record.id);
+        if (
+          content.attachmentId !== record.id ||
+          content.displayName !== record.displayName ||
+          content.kind !== record.kind ||
+          content.mediaType !== record.mediaType ||
+          content.byteCount !== record.byteCount ||
+          content.bytes.byteLength !== record.byteCount
+        ) {
+          throw new Error('Saved draft attachment metadata changed.');
+        }
+        const file = new File([content.bytes], content.displayName, {
+          type: content.mediaType
+        });
+        return {
+          clientId: nextClientId(sequenceRef),
+          clientToken: record.clientToken ?? createAttachmentClientToken(),
+          file,
+          kind: record.kind,
+          status: 'ready' as const,
+          previewUrl:
+            record.kind === 'image' && typeof URL.createObjectURL === 'function'
+              ? URL.createObjectURL(file)
+              : undefined
+        };
+      })
+    )
+      .then((restored) => {
+        if (closedRef.current) {
+          for (const item of restored) releasePreview(item);
+          return;
+        }
+        itemsRef.current = restored;
+        setItems(restored);
+      })
+      .catch((error: unknown) => {
+        if (!closedRef.current) {
+          setDraftRestoreFailed(true);
+          setOverflowError(
+            error instanceof Error
+              ? error.message
+              : 'Saved draft files could not be loaded.'
+          );
+        }
+      })
+      .finally(() => {
+        if (!closedRef.current) setIsRestoringDraft(false);
+      });
+  }, [options.initialDraft, options.onReadDraftAttachment, releasePreview]);
+
   const remove = useCallback(
     async (clientId: string) => {
       if (blockedRef.current) return;
@@ -182,7 +274,7 @@ export function useTaskAttachments(
   );
 
   const paste = useCallback(
-    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    (event: ClipboardEvent<HTMLElement>) => {
       const plainText = event.clipboardData.getData('text/plain');
       const files = Array.from(event.clipboardData.items)
         .filter((item) => item.kind === 'file')
@@ -223,7 +315,7 @@ export function useTaskAttachments(
     [addFiles, options.enabled, options.onReadClipboardImage]
   );
 
-  const interactionBlocked = options.blocked || !options.enabled;
+  const interactionBlocked = options.blocked || !options.enabled || isRestoringDraft;
   const dragEnter = useCallback((event: DragEvent<HTMLDivElement>) => {
     if (!dragContainsFiles(event)) return;
     event.preventDefault();
@@ -260,16 +352,25 @@ export function useTaskAttachments(
 
   const prepareForCreate = useCallback(async () => {
     if (clipboardReadPendingRef.current) {
-      throw new Error('Wait for the clipboard image to finish before creating the task.');
+      throw new Error('Wait for the clipboard image to finish before continuing.');
     }
-    if (draftIdRef.current) return draftIdRef.current;
+    if (
+      draftIdRef.current &&
+      preparedRevisionRef.current === contentRevisionRef.current
+    ) {
+      return draftIdRef.current;
+    }
     const current = active(itemsRef.current);
     const imageError = imageAttachmentModelError(
       current.some((item) => item.kind === 'image'),
       options.model
     );
     if (imageError) throw new Error(imageError);
-    if (current.length === 0) return undefined;
+    if (current.length === 0) {
+      draftIdRef.current = undefined;
+      preparedRevisionRef.current = contentRevisionRef.current;
+      return undefined;
+    }
 
     submittingRef.current = true;
     try {
@@ -287,25 +388,65 @@ export function useTaskAttachments(
       }
       const draft = await options.onStageBatch({ attachments });
       draftIdRef.current = draft.id;
+      knownDraftIdsRef.current.add(draft.id);
+      preparedRevisionRef.current = contentRevisionRef.current;
       return draft.id;
     } finally {
       submittingRef.current = false;
     }
   }, [options.model, options.onStageBatch]);
 
+  const acknowledgeDraftSave = useCallback(async (draftId: string | undefined) => {
+    draftIdRef.current = draftId;
+    durableDraftIdRef.current = draftId;
+    durableRevisionRef.current = contentRevisionRef.current;
+    if (draftId) restoredDraftIdRef.current = draftId;
+    await discardDraftsExcept(draftId);
+  }, [discardDraftsExcept]);
+
   const markCreateFailed = useCallback(async (preserveDraft: boolean) => {
-    adoptedRef.current = false;
-    if (!preserveDraft) await discardDraft();
-  }, [discardDraft]);
+    if (preserveDraft) return;
+    const currentDraftId = draftIdRef.current;
+    if (currentDraftId && currentDraftId !== durableDraftIdRef.current) {
+      knownDraftIdsRef.current.delete(currentDraftId);
+      await discardRef.current(currentDraftId).catch(() => undefined);
+    }
+    draftIdRef.current = durableDraftIdRef.current;
+    preparedRevisionRef.current = durableRevisionRef.current;
+  }, []);
+
+  const finishAdoption = useCallback(async () => {
+    const adoptedDraftId = draftIdRef.current;
+    const obsoleteDraftIds = [...knownDraftIdsRef.current].filter(
+      (draftId) => draftId !== adoptedDraftId
+    );
+    draftIdRef.current = undefined;
+    durableDraftIdRef.current = undefined;
+    knownDraftIdsRef.current.clear();
+    preparedRevisionRef.current = -1;
+    durableRevisionRef.current = -1;
+    for (const item of itemsRef.current) releasePreview(item);
+    itemsRef.current = [];
+    setItems([]);
+    contentRevisionRef.current += 1;
+    setContentRevision(contentRevisionRef.current);
+    setOverflowError(undefined);
+    await Promise.all(
+      obsoleteDraftIds.map((draftId) => discardRef.current(draftId).catch(() => undefined))
+    );
+  }, [releasePreview]);
 
   return {
     items,
     activeItems,
     byteCount: totalBytes(activeItems),
-    busy: isReadingClipboardImage || submittingRef.current,
-    hasErrors: items.some((item) => item.status === 'error'),
+    busy: isReadingClipboardImage || isRestoringDraft || submittingRef.current,
+    hasErrors:
+      draftRestoreFailed || items.some((item) => item.status === 'error'),
     isDragging,
     isReadingClipboardImage,
+    isRestoringDraft,
+    contentRevision,
     overflowError,
     modelError,
     interactionBlocked,
@@ -319,7 +460,9 @@ export function useTaskAttachments(
     drop,
     remove,
     prepareForCreate,
+    acknowledgeDraftSave,
     markCreateFailed,
+    finishAdoption,
     close
   };
 }

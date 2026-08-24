@@ -16,7 +16,6 @@ import type {
   Repository
 } from '../../shared/contracts';
 import {
-  ATTACHMENT_FILE_INPUT_ACCEPT,
   type AttachmentDraftSnapshot,
   type ClipboardAttachmentImage,
   type DiscardTaskAttachmentDraftRequest,
@@ -29,9 +28,8 @@ import {
   formatAttachmentBytes
 } from '../model/taskAttachmentDraft';
 import {
+  creationRequiresUnchangedRetry,
   getOrCreateTaskCreationToken,
-  taskCreationNeedsUnchangedRetry,
-  type AttachmentComposerItem
 } from '../model/taskAttachmentComposer';
 import {
   formatReasoningEffort,
@@ -56,6 +54,7 @@ import {
   AgentModelSelector,
   type ModelDiscoveryStatus
 } from './AgentModelSelector';
+import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments } from './useTaskAttachments';
 
 export interface NewTaskTextDraft {
@@ -268,25 +267,19 @@ export function NewTaskPanel({
     onReadClipboardImage
   });
   const {
-    items: attachmentItems,
     activeItems: activeAttachmentItems,
     byteCount: attachmentByteCount,
     busy: attachmentsBusy,
     hasErrors: attachmentsHaveErrors,
-    isDragging: isDraggingFiles,
     isReadingClipboardImage,
     overflowError: attachmentOverflowError,
     modelError: attachmentModelError,
-    interactionBlocked: attachmentInteractionBlocked,
-    inputRef: attachmentInputRef,
     closedRef: panelClosedRef,
-    selectFiles: selectAttachmentFiles,
     paste: pasteAttachments,
     dragEnter: enterAttachmentDrag,
     dragOver: continueAttachmentDrag,
     dragLeave: leaveAttachmentDrag,
     drop: dropAttachments,
-    remove: removeAttachment,
     close: closeAttachments
   } = attachments;
   const attachmentsRestrictNetwork = activeAttachmentItems.length > 0;
@@ -382,7 +375,7 @@ export function NewTaskPanel({
         });
         created = true;
       } catch (caught) {
-        creationNeedsUnchangedRetry = taskCreationNeedsUnchangedRetry(caught);
+        creationNeedsUnchangedRetry = creationRequiresUnchangedRetry(caught);
         await attachments.markCreateFailed(creationNeedsUnchangedRetry);
         if (creationNeedsUnchangedRetry) {
           setCreationOutcomeUnknown(true);
@@ -652,10 +645,41 @@ export function NewTaskPanel({
                   </button>
                 </span>
               </span>
-              <div
-                className={`field__prompt-shell ${
-                  isRefining ? 'field__prompt-shell--running' : ''
-                } ${isDraggingFiles ? 'field__prompt-shell--dragging' : ''}`}
+              <AttachmentComposerShell
+                attachments={attachments}
+                attachmentLabel="Task attachments"
+                className={isRefining ? 'field__prompt-shell--running' : ''}
+                bindDropTarget={false}
+                removeDisabled={composerLocked}
+                addButtonTitle={
+                  fullAccessSelected
+                    ? 'Choose a runtime policy with managed attachment isolation.'
+                    : effectiveAttachmentsEnabled
+                    ? `Stored locally and shared read-only with ${
+                        selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent'
+                      } for this task.`
+                      : !runtimeSupportsAttachments
+                        ? `${
+                            selectedRuntime?.preflight.runtime.displayName ??
+                            'The selected agent runtime'
+                          } does not support task attachments.`
+                        : 'Attachments require file-read isolation between tasks.'
+                }
+                hint={
+                  fullAccessSelected
+                    ? `Unavailable with ${permissionPreset?.label ?? 'this policy'}`
+                    : !effectiveAttachmentsEnabled
+                      ? runtimeSupportsAttachments
+                        ? 'Unavailable in this build'
+                        : 'Unavailable for this runtime'
+                      : isReadingClipboardImage
+                        ? 'Reading clipboard image…'
+                        : activeAttachmentItems.length > 0
+                          ? `${activeAttachmentItems.length} ${
+                              activeAttachmentItems.length === 1 ? 'file' : 'files'
+                            } · ${formatAttachmentBytes(attachmentByteCount)}`
+                          : 'Paste or drop files'
+                }
               >
                 <textarea
                   id="task-description"
@@ -667,76 +691,7 @@ export function NewTaskPanel({
                   }
                   disabled={composerLocked || isRefining}
                 />
-                {attachmentItems.length > 0 ? (
-                  <ul className="task-attachments" aria-label="Task attachments">
-                    {attachmentItems.map((item) => (
-                      <AttachmentChip
-                        key={item.clientId}
-                        item={item}
-                        disabled={composerLocked}
-                        onRemove={() => void removeAttachment(item.clientId)}
-                      />
-                    ))}
-                  </ul>
-                ) : null}
-                <div className="field__prompt-toolbar">
-                  <input
-                    ref={attachmentInputRef}
-                    className="task-attachment-input"
-                    type="file"
-                    multiple
-                    accept={ATTACHMENT_FILE_INPUT_ACCEPT}
-                    disabled={attachmentInteractionBlocked}
-                    tabIndex={-1}
-                    aria-hidden="true"
-                    onChange={selectAttachmentFiles}
-                  />
-                  <button
-                    type="button"
-                    className="task-attachment-add"
-                    disabled={attachmentInteractionBlocked}
-                    title={
-                      fullAccessSelected
-                        ? 'Choose a runtime policy with managed attachment isolation.'
-                        : effectiveAttachmentsEnabled
-                        ? `Stored locally and shared read-only with ${
-                            selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent'
-                          } for this task.`
-                          : !runtimeSupportsAttachments
-                            ? `${
-                                selectedRuntime?.preflight.runtime.displayName ??
-                                'The selected agent runtime'
-                              } does not support task attachments.`
-                          : 'Attachments require file-read isolation between tasks.'
-                    }
-                    onClick={() => attachmentInputRef.current?.click()}
-                  >
-                    <PaperclipIcon />
-                    <span>Add files</span>
-                  </button>
-                  <span className="task-attachment-hint">
-                    {fullAccessSelected
-                      ? `Unavailable with ${permissionPreset?.label ?? 'this policy'}`
-                      : !effectiveAttachmentsEnabled
-                      ? runtimeSupportsAttachments
-                        ? 'Unavailable in this build'
-                        : 'Unavailable for this runtime'
-                      : isReadingClipboardImage
-                      ? 'Reading clipboard image…'
-                      : activeAttachmentItems.length > 0
-                      ? `${activeAttachmentItems.length} ${
-                          activeAttachmentItems.length === 1 ? 'file' : 'files'
-                        } · ${formatAttachmentBytes(attachmentByteCount)}`
-                      : 'Paste or drop files'}
-                  </span>
-                </div>
-                {effectiveAttachmentsEnabled && isDraggingFiles ? (
-                  <div className="task-attachment-drop" aria-hidden="true">
-                    <PaperclipIcon />
-                    <span>Drop to attach</span>
-                  </div>
-                ) : null}
-              </div>
+              </AttachmentComposerShell>
               {attachmentOverflowError ? (
                 <p
                   className="task-attachment-message task-attachment-message--error"
@@ -954,20 +909,6 @@ function SparkleIcon() {
   );
 }
 
-function PaperclipIcon() {
-  return (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none">
-      <path
-        d="m9.5 12.5 5.7-5.7a3.2 3.2 0 0 1 4.5 4.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.1-8.1"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 function CloseIcon() {
   return (
     <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none">
@@ -988,88 +929,6 @@ function ChevronIcon() {
         d="m8 10 4 4 4-4"
         stroke="currentColor"
         strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-export function AttachmentChip({
-  item,
-  disabled,
-  onRemove
-}: {
-  item: AttachmentComposerItem;
-  disabled: boolean;
-  onRemove(): void;
-}) {
-  return (
-    <li
-      className={`task-attachment ${
-        item.status === 'error' || item.error ? 'task-attachment--error' : ''
-      }`}
-    >
-      <span className="task-attachment__preview" aria-hidden="true">
-        {item.previewUrl ? (
-          <img src={item.previewUrl} alt="" loading="lazy" decoding="async" />
-        ) : item.kind === 'image' ? (
-          <ImageFileIcon />
-        ) : (
-          <TextFileIcon />
-        )}
-      </span>
-      <span className="task-attachment__body">
-        <span className="task-attachment__name" title={item.file.name}>
-          {item.file.name}
-        </span>
-        <span
-          className="task-attachment__meta"
-          role={item.error ? 'alert' : undefined}
-          aria-live={item.error ? 'assertive' : undefined}
-          aria-atomic={item.error ? 'true' : undefined}
-        >
-          {item.status === 'error'
-            ? item.error
-            : formatAttachmentBytes(item.file.size)}
-        </span>
-      </span>
-      <button
-        type="button"
-        className="task-attachment__remove"
-        aria-label={`Remove ${item.file.name}`}
-        disabled={disabled}
-        onClick={onRemove}
-      >
-        <CloseIcon />
-      </button>
-    </li>
-  );
-}
-
-function ImageFileIcon() {
-  return (
-    <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none">
-      <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.6" />
-      <circle cx="9" cy="10" r="1.4" fill="currentColor" />
-      <path
-        d="m6.5 17 4-4 2.5 2 2-2 2.5 4"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function TextFileIcon() {
-  return (
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none">
-      <path
-        d="M7 3.8h6l4 4V20H7zM13 4v4h4M9.5 12h5M9.5 15h5"
-        stroke="currentColor"
-        strokeWidth="1.6"
         strokeLinecap="round"
         strokeLinejoin="round"
       />

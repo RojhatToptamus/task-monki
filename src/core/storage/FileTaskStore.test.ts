@@ -1834,7 +1834,7 @@ describe('FileTaskStore', () => {
       `${JSON.stringify(
         {
           ...persisted,
-          schemaVersion: TASK_STORE_SCHEMA_VERSION - 2
+          schemaVersion: TASK_STORE_SCHEMA_VERSION + 1
         },
         null,
         2
@@ -1844,10 +1844,10 @@ describe('FileTaskStore', () => {
     await store.close();
 
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
-      `Unsupported Task Monki store schema ${TASK_STORE_SCHEMA_VERSION - 2}`
+      `Unsupported Task Monki store schema ${TASK_STORE_SCHEMA_VERSION + 1}`
     );
     const unchanged = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
-    expect(unchanged.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION - 2);
+    expect(unchanged.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION + 1);
   });
 
   it('allows stopped environment history but enforces one live environment per task', async () => {

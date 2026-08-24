@@ -224,20 +224,35 @@ describe('Design workspace view model', () => {
     ).toMatchObject({ status: 'CANCELED', statusLabel: 'Stopped' });
   });
 
-  it('keeps only startable runtimes with Design instructions, skills, and Stop', () => {
+  it('keeps only runtimes with Design instructions, attachments, skills, and Stop', () => {
     const supported = runtimeState('codex', codexCapabilities());
-    const unsupported = runtimeState('other', {
+    const unsupportedStop = runtimeState('without-stop', {
       ...codexCapabilities(),
-      runtimeId: 'other',
+      runtimeId: 'without-stop',
       turnInterruption: { maturity: 'unsupported' }
     });
+    const unsupportedAttachments = runtimeState('without-attachments', {
+      ...codexCapabilities(),
+      runtimeId: 'without-attachments',
+      attachmentDelivery: { maturity: 'unsupported' }
+    });
     const catalog = {
-      runtimes: [unsupported, supported],
+      runtimes: [unsupportedStop, unsupportedAttachments, supported],
       models: [
-        { id: 'other:model', runtimeId: 'other', model: 'model' },
-        { id: 'codex:model', runtimeId: 'codex', model: 'model' }
+        { id: 'stop:model', runtimeId: 'without-stop', model: 'model' },
+        {
+          id: 'attachments:model',
+          runtimeId: 'without-attachments',
+          model: 'model'
+        },
+        {
+          id: 'codex:model',
+          runtimeId: 'codex',
+          model: 'model',
+          inputModalities: ['text', 'image']
+        }
       ],
-      defaultRuntimeId: 'other'
+      defaultRuntimeId: 'without-stop'
     } as AgentRuntimeCatalog;
 
     expect(eligibleDesignRuntimeCatalog(catalog)).toMatchObject({
@@ -320,6 +335,9 @@ function designProject(
     design: designListItem(),
     turns: [],
     references: [],
+    attachments: [],
+    projectFiles: [],
+    projectFilesTruncated: false,
     revisions: [],
     conversation: [],
     interactions: [],

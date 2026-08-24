@@ -190,9 +190,13 @@ async function decodeBrowserImage(file: File): Promise<DecodedAttachmentImage> {
     decoder.close();
     throw new AttachmentValidationError('This image could not be safely decoded.');
   }
-  assertSafeDimensions(track.codedWidth, track.codedHeight);
-  const result = await decoder.decode({ frameIndex: 0, completeFramesOnly: true });
-  const frame = result.image;
+  let frame: Awaited<ReturnType<NativeImageDecoder['decode']>>['image'];
+  try {
+    frame = (await decoder.decode({ frameIndex: 0, completeFramesOnly: true })).image;
+  } catch (error) {
+    decoder.close();
+    throw error;
+  }
   const encode = async (
     width: number,
     height: number,
@@ -240,7 +244,7 @@ function assertSafeDimensions(width: number, height: number): void {
 interface NativeImageDecoder {
   tracks: {
     ready: Promise<void>;
-    selectedTrack?: { codedWidth: number; codedHeight: number };
+    selectedTrack?: object;
   };
   decode(input: { frameIndex: number; completeFramesOnly: boolean }): Promise<{
     image: CanvasImageSource & {

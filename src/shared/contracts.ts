@@ -81,7 +81,7 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 20 as const;
+export const TASK_STORE_SCHEMA_VERSION = 22 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -858,6 +858,9 @@ export interface DesignDetailSnapshot {
   repository: Repository;
   turns: DesignTurn[];
   references: DesignReference[];
+  attachments: TaskAttachmentRecord[];
+  projectFiles: import('./design').DesignProjectFile[];
+  projectFilesTruncated: boolean;
   revisions: DesignRevision[];
   conversation: DesignConversationEntry[];
   previousConversationCursor?: string;
@@ -1336,10 +1339,22 @@ export interface TaskManagerApi {
   ): Promise<import('./design').DesignConversationPage>;
   createBlankDesign(input: CreateBlankDesignRequest): Promise<DesignDetailSnapshot>;
   submitDesignTurn(input: SubmitDesignTurnRequest): Promise<DesignDetailSnapshot>;
+  addDesignReferences(
+    input: import('./design').AddDesignReferencesRequest
+  ): Promise<DesignDetailSnapshot>;
+  removeDesignReference(
+    input: import('./design').RemoveDesignReferenceRequest
+  ): Promise<DesignDetailSnapshot>;
+  importDesignReferenceAsset(
+    input: import('./design').ImportDesignReferenceAssetRequest
+  ): Promise<DesignDetailSnapshot>;
   cancelDesignTurn(
     input: import('./design').CancelDesignTurnRequest
   ): Promise<DesignDetailSnapshot>;
   getDesignDraft(designId: string): Promise<import('./design').DesignDraftRecord | null>;
+  readDesignDraftAttachment(
+    input: import('./design').ReadDesignDraftAttachmentRequest
+  ): Promise<AttachmentContent>;
   saveDesignDraft(
     input: import('./design').SaveDesignDraftRequest
   ): Promise<import('./design').DesignDraftRecord>;

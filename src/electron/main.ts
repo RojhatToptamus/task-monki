@@ -22,6 +22,7 @@ import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProje
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
   AcceptPreviewRecipeDraftRequest,
+  AddDesignReferencesRequest,
   AppUpdateEvent,
   ContinueRunRequest,
   CreateBlankDesignRequest,
@@ -40,6 +41,7 @@ import type {
   ApprovePreviewPlanRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
+  ImportDesignReferenceAssetRequest,
   OpenPreviewRequest,
   ExecuteOpenTargetActionRequest,
   PrepareWorktreeRequest,
@@ -47,6 +49,7 @@ import type {
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   ReadPreviewLogRequest,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
   RestartDesignPreviewRequest,
@@ -54,6 +57,7 @@ import type {
   ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
+  RemoveDesignReferenceRequest,
   ReconnectRepositoryRequest,
   StartRunRequest,
   StartPreviewRequest,
@@ -124,6 +128,10 @@ import {
 } from '../core/process/ownedProcess';
 import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
 import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
+import {
+  resolveDesignBrowserRuntimePaths,
+  resolveDesignBrowserSocketRoot
+} from '../core/design/AgentBrowserRuntimePath';
 import { createElectronPreviewUrlHost } from './previewOpenHost';
 import {
   createRendererTrustPolicy,
@@ -475,6 +483,11 @@ function installIpcHandlers(): void {
     service.getDesignDraft(designId)
   );
   handleTrustedIpc(
+    'design:draft:attachment:read',
+    async (_, input: ReadDesignDraftAttachmentRequest) =>
+      service.readDesignDraftAttachment(input)
+  );
+  handleTrustedIpc(
     'design:draft:save',
     async (_, input: SaveDesignDraftRequest) => service.saveDesignDraft(input)
   );
@@ -489,6 +502,20 @@ function installIpcHandlers(): void {
   handleTrustedIpc(
     'design:turn:submit',
     async (_, input: SubmitDesignTurnRequest) => service.submitDesignTurn(input)
+  );
+  handleTrustedIpc(
+    'design:reference:add',
+    async (_, input: AddDesignReferencesRequest) => service.addDesignReferences(input)
+  );
+  handleTrustedIpc(
+    'design:reference:remove',
+    async (_, input: RemoveDesignReferenceRequest) =>
+      service.removeDesignReference(input)
+  );
+  handleTrustedIpc(
+    'design:reference:import-asset',
+    async (_, input: ImportDesignReferenceAssetRequest) =>
+      service.importDesignReferenceAsset(input)
   );
   handleTrustedIpc(
     'design:turn:cancel',
@@ -1044,6 +1071,13 @@ void app.whenReady().then(async () => {
       emit: broadcastDesignCanvasEvent
     });
   }
+  const designBrowserPaths = designCanvasHost
+    ? resolveDesignBrowserRuntimePaths({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      })
+    : undefined;
   service = new TaskManagerService(
     new FileTaskStore(taskStoreDir),
     defaultRepositoryPath,
@@ -1089,6 +1123,15 @@ void app.whenReady().then(async () => {
             designRepositoryRoot: path.join(userDataDir, 'design-repositories'),
             designWorktreeRoot: path.join(userDataDir, 'design-worktrees'),
             designDraftRoot: path.join(userDataDir, 'design-drafts'),
+            designBrowserExecutablePath: designBrowserPaths!.executablePath,
+            designBrowserChromeExecutablePath:
+              designBrowserPaths!.browserExecutablePath,
+            designBrowserScratchRoot: path.join(
+              userDataDir,
+              'design-browser-runtime'
+            ),
+            designBrowserSocketRoot: resolveDesignBrowserSocketRoot(userDataDir),
+            designBrowserRequireCodeSignature: app.isPackaged,
             designCanvasFence: designCanvasHost
           }
         : {})

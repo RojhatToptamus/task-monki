@@ -7,7 +7,9 @@ description: Use for interactive work, forms, navigation, broad first builds, ma
 
 Review the changed source against WCAG 2.2 AA and inclusive interaction practices.
 Use source evidence and available project checks.
-Do not use a screenshot or claim a complete rendered audit.
+Use `browser-verification` for applicable keyboard, focus, state, and bounded audit checks.
+Use a screenshot only when visual judgment is relevant.
+Do not claim that one audit or screenshot proves complete accessibility.
 
 ## Pass 1: Structure and content
 

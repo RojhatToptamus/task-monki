@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  DesignProjectFile,
   DesignSourceCheckpoint,
   Repository,
   WorktreeRecord
@@ -41,6 +42,8 @@ const INITIAL_INDEX_HTML = `<!doctype html>
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const MAX_MARKER_BYTES = 64 * 1024;
+const MAX_PROJECT_FILES = 500;
+const MAX_PROJECT_FILE_LIST_BYTES = 256 * 1024;
 
 interface DesignRepositoryMarker {
   schemaVersion: typeof MARKER_SCHEMA_VERSION;
@@ -79,8 +82,12 @@ export type DesignCandidateCapture =
       checkpoint: DesignSourceCheckpoint;
     };
 
-export interface PublishDesignCandidateInput extends DesignSourceOwnership {
+export interface PrepareDesignCandidateInput extends DesignSourceOwnership {
   checkpoint: DesignSourceCheckpoint;
+}
+
+export interface PublishPreparedDesignCandidateInput extends DesignSourceOwnership {
+  checkpoint: PublishedDesignCandidateCheckpoint;
 }
 
 export interface PublishedDesignCandidateCheckpoint
@@ -98,6 +105,24 @@ export type DesignCandidateRecovery =
 export interface DesignRepositoryReconciliation {
   removedRepositoryIds: string[];
   retainedPaths: string[];
+}
+
+export interface DesignProjectOwnership {
+  designId: string;
+  repository: Repository;
+  worktree: WorktreeRecord;
+}
+
+export interface DesignProjectFileList {
+  files: DesignProjectFile[];
+  truncated: boolean;
+}
+
+export interface DesignAssetImportReceipt {
+  relativePath: string;
+  absolutePath: string;
+  sha256: string;
+  created: boolean;
 }
 
 /**
@@ -139,6 +164,117 @@ export class DesignSourceService {
     };
     await writeMarker(repositoryPath, marker);
     return this.completeStagingRepository(repositoryPath, marker);
+  }
+
+  async listProjectFiles(
+    input: DesignProjectOwnership
+  ): Promise<DesignProjectFileList> {
+    await this.assertManagedProjectOwnership(input);
+    const output = await managedGit(input.worktree.worktreePath, [
+      'ls-files',
+      '--cached',
+      '--others',
+      '--exclude-standard',
+      '--deduplicate',
+      '-z'
+    ]);
+    if (Buffer.byteLength(output, 'utf8') > MAX_PROJECT_FILE_LIST_BYTES) {
+      throw new Error('Design project contains too many file paths to inspect safely.');
+    }
+    const paths = output
+      .split('\0')
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right));
+    const files: DesignProjectFile[] = [];
+    const realWorktree = await fs.realpath(input.worktree.worktreePath);
+    for (const relativePath of paths.slice(0, MAX_PROJECT_FILES)) {
+      const absolutePath = safeProjectFilePath(
+        input.worktree.worktreePath,
+        relativePath
+      );
+      const stat = await fs.lstat(absolutePath).catch(missingAsUndefined);
+      if (!stat || !stat.isFile() || stat.isSymbolicLink()) continue;
+      const realFile = await fs.realpath(absolutePath);
+      if (!isPathInside(realWorktree, realFile)) {
+        throw new Error('A Design project file escaped its worktree.');
+      }
+      files.push({ path: relativePath, byteCount: stat.size });
+    }
+    return { files, truncated: paths.length > MAX_PROJECT_FILES };
+  }
+
+  async importProjectAsset(input: DesignProjectOwnership & {
+    displayName: string;
+    bytes: Uint8Array;
+    sha256: string;
+  }): Promise<DesignAssetImportReceipt> {
+    await this.assertManagedProjectOwnership(input);
+    const fileName = safeAssetFileName(input.displayName);
+    const bytes = Buffer.from(input.bytes);
+    if (digest(bytes) !== input.sha256) {
+      throw new Error('Design asset bytes do not match their attachment record.');
+    }
+    const assetDirectory = path.join(input.worktree.worktreePath, 'assets');
+    const existingDirectory = await fs.lstat(assetDirectory).catch(missingAsUndefined);
+    if (existingDirectory) {
+      if (!existingDirectory.isDirectory() || existingDirectory.isSymbolicLink()) {
+        throw new Error('The Design assets path is not a safe directory.');
+      }
+    } else {
+      await fs.mkdir(assetDirectory, { mode: 0o700 });
+      await syncDirectoryIfSupported(input.worktree.worktreePath);
+    }
+    const realWorktree = await fs.realpath(input.worktree.worktreePath);
+    const realAssetDirectory = await fs.realpath(assetDirectory);
+    if (!isPathInside(realWorktree, realAssetDirectory)) {
+      throw new Error('The Design assets directory escaped its worktree.');
+    }
+    const absolutePath = path.join(realAssetDirectory, fileName);
+    const relativePath = path.posix.join('assets', fileName);
+    const existing = await fs.lstat(absolutePath).catch(missingAsUndefined);
+    if (existing) {
+      await assertExistingAssetMatches(absolutePath, existing, input.sha256);
+      await assertProjectAssetVisibleToGit(
+        input.worktree.worktreePath,
+        relativePath
+      );
+      return {
+        relativePath,
+        absolutePath,
+        sha256: input.sha256,
+        created: false
+      };
+    }
+    await writeProjectAsset(absolutePath, bytes);
+    try {
+      await assertProjectAssetVisibleToGit(
+        input.worktree.worktreePath,
+        relativePath
+      );
+    } catch (error) {
+      await fs.unlink(absolutePath).catch(missingAsUndefined);
+      await syncDirectoryIfSupported(realAssetDirectory).catch(() => undefined);
+      throw error;
+    }
+    return {
+      relativePath,
+      absolutePath,
+      sha256: input.sha256,
+      created: true
+    };
+  }
+
+  async rollbackProjectAsset(receipt: DesignAssetImportReceipt): Promise<void> {
+    if (!receipt.created) return;
+    const stat = await fs.lstat(receipt.absolutePath).catch(missingAsUndefined);
+    if (!stat) return;
+    await assertExistingAssetMatches(
+      receipt.absolutePath,
+      stat,
+      receipt.sha256
+    );
+    await fs.unlink(receipt.absolutePath);
+    await syncDirectoryIfSupported(path.dirname(receipt.absolutePath));
   }
 
   async captureCandidate(
@@ -184,8 +320,8 @@ export class DesignSourceService {
     };
   }
 
-  async publishCandidateCommit(
-    input: PublishDesignCandidateInput
+  async prepareCandidateCommit(
+    input: PrepareDesignCandidateInput
   ): Promise<PublishedDesignCandidateCheckpoint> {
     await this.assertCheckpointOwnership(input);
     const recovered = await this.recoverCandidate(input);
@@ -193,12 +329,6 @@ export class DesignSourceService {
 
     const recoverableCommit = await this.findRecoverableCandidateCommit(input);
     if (recoverableCommit) {
-      await managedGit(input.repository.path, [
-        'update-ref',
-        `refs/heads/${input.checkpoint.branchName}`,
-        recoverableCommit,
-        input.checkpoint.expectedParentCommit
-      ]);
       await this.assertCandidateCommit(input, recoverableCommit);
       return { ...input.checkpoint, candidateCommitSha: recoverableCommit };
     }
@@ -226,18 +356,37 @@ export class DesignSourceService {
     );
     assertGitObjectId(candidateCommitSha, 'candidate commit');
     await this.assertCandidateCommit(input, candidateCommitSha);
-    await managedGit(input.repository.path, [
-      'update-ref',
-      `refs/heads/${input.checkpoint.branchName}`,
-      candidateCommitSha,
-      input.checkpoint.expectedParentCommit
-    ]);
-    await this.assertCandidateCommit(input, candidateCommitSha);
     return { ...input.checkpoint, candidateCommitSha };
   }
 
+  async publishPreparedCandidateCommit(
+    input: PublishPreparedDesignCandidateInput
+  ): Promise<PublishedDesignCandidateCheckpoint> {
+    await this.assertCheckpointOwnership(input);
+    const currentCommit = await this.readBranchCommit(
+      input.repository.path,
+      input.checkpoint.branchName
+    );
+    if (currentCommit === input.checkpoint.candidateCommitSha) {
+      await this.assertCandidateCommit(input, currentCommit);
+      return input.checkpoint;
+    }
+    if (currentCommit !== input.checkpoint.expectedParentCommit) {
+      throw new Error('Design candidate branch no longer matches its expected parent.');
+    }
+    await this.assertCandidateCommit(input, input.checkpoint.candidateCommitSha);
+    await managedGit(input.repository.path, [
+      'update-ref',
+      `refs/heads/${input.checkpoint.branchName}`,
+      input.checkpoint.candidateCommitSha,
+      input.checkpoint.expectedParentCommit
+    ]);
+    await this.assertCandidateCommit(input, input.checkpoint.candidateCommitSha);
+    return input.checkpoint;
+  }
+
   async recoverCandidate(
-    input: PublishDesignCandidateInput
+    input: PrepareDesignCandidateInput
   ): Promise<DesignCandidateRecovery> {
     await this.assertCheckpointOwnership(input);
     const currentCommit = await this.readBranchCommit(
@@ -430,23 +579,39 @@ export class DesignSourceService {
     input: DesignSourceOwnership,
     expectedCommit: string
   ): Promise<void> {
-    await this.ensureRoots();
+    await this.assertManagedProjectOwnership(input);
     if (
-      input.repository.kind !== 'DESIGN_MANAGED' ||
-      input.worktree.taskId !== input.designId ||
-      input.worktree.repositoryId !== input.repository.id ||
-      !UUID.test(input.designId) ||
       !UUID.test(input.turnId) ||
       !UUID.test(input.runId)
     ) {
       throw new Error('Design source ownership is inconsistent.');
     }
     assertGitObjectId(expectedCommit, 'expected parent');
+    const currentCommit = cleanGitOutput(
+      await managedGit(input.worktree.worktreePath, ['rev-parse', '--verify', 'HEAD'])
+    );
+    if (currentCommit !== expectedCommit) {
+      throw new Error('Design source branch changed from its expected parent.');
+    }
+  }
+
+  private async assertManagedProjectOwnership(
+    input: DesignProjectOwnership
+  ): Promise<void> {
+    await this.ensureRoots();
+    if (
+      input.repository.kind !== 'DESIGN_MANAGED' ||
+      input.worktree.taskId !== input.designId ||
+      input.worktree.repositoryId !== input.repository.id ||
+      !UUID.test(input.designId)
+    ) {
+      throw new Error('Design project ownership is inconsistent.');
+    }
     const expectedRepositoryPath = this.expectedRepositoryPath(input.repository.id);
+    const expectedWorktreePath = path.join(this.worktreeRoot, input.designId);
     if (!samePath(path.resolve(input.repository.path), expectedRepositoryPath)) {
       throw new Error('Design source repository escaped its managed root.');
     }
-    const expectedWorktreePath = path.join(this.worktreeRoot, input.designId);
     if (!samePath(path.resolve(input.worktree.worktreePath), expectedWorktreePath)) {
       throw new Error('Design source worktree escaped its managed root.');
     }
@@ -459,10 +624,7 @@ export class DesignSourceService {
       await fs.lstat(expectedWorktreePath)
     );
     const marker = await readMarker(expectedRepositoryPath);
-    if (
-      marker?.state !== 'READY' ||
-      marker.repositoryId !== input.repository.id
-    ) {
+    if (marker?.state !== 'READY' || marker.repositoryId !== input.repository.id) {
       throw new Error('Design source repository marker is invalid.');
     }
     const worktrees = await listGitWorktrees(expectedRepositoryPath);
@@ -482,16 +644,10 @@ export class DesignSourceService {
     if (branchRef !== `refs/heads/${input.worktree.branchName}`) {
       throw new Error('Design source worktree is on an unexpected branch.');
     }
-    const currentCommit = cleanGitOutput(
-      await managedGit(expectedWorktreePath, ['rev-parse', '--verify', 'HEAD'])
-    );
-    if (currentCommit !== expectedCommit) {
-      throw new Error('Design source branch changed from its expected parent.');
-    }
   }
 
   private async assertCheckpointOwnership(
-    input: PublishDesignCandidateInput
+    input: PrepareDesignCandidateInput
   ): Promise<void> {
     if (
       input.checkpoint.repositoryId !== input.repository.id ||
@@ -505,7 +661,7 @@ export class DesignSourceService {
   }
 
   private async assertSourceOwnershipForCandidate(
-    input: PublishDesignCandidateInput
+    input: PrepareDesignCandidateInput
   ): Promise<void> {
     const current = await this.readBranchCommit(
       input.repository.path,
@@ -515,7 +671,7 @@ export class DesignSourceService {
   }
 
   private async assertCandidateCommit(
-    input: PublishDesignCandidateInput,
+    input: PrepareDesignCandidateInput,
     candidateCommitSha: string
   ): Promise<void> {
     if (!(await this.candidateCommitMatches(input, candidateCommitSha))) {
@@ -524,7 +680,7 @@ export class DesignSourceService {
   }
 
   private async findRecoverableCandidateCommit(
-    input: PublishDesignCandidateInput
+    input: PrepareDesignCandidateInput
   ): Promise<string | undefined> {
     const output = await managedGit(input.repository.path, [
       'fsck',
@@ -543,7 +699,7 @@ export class DesignSourceService {
   }
 
   private async candidateCommitMatches(
-    input: PublishDesignCandidateInput,
+    input: PrepareDesignCandidateInput,
     candidateCommitSha: string
   ): Promise<boolean> {
     assertGitObjectId(candidateCommitSha, 'candidate commit');
@@ -649,6 +805,149 @@ async function managedGit(
       ...options.env
     }
   });
+}
+
+function safeProjectFilePath(worktreePath: string, relativePath: string): string {
+  if (
+    relativePath.length === 0 ||
+    relativePath.includes('\\') ||
+    path.posix.isAbsolute(relativePath) ||
+    path.posix.normalize(relativePath) !== relativePath ||
+    relativePath === '..' ||
+    relativePath.startsWith('../')
+  ) {
+    throw new Error('Design project contains an unsafe file path.');
+  }
+  const root = path.resolve(worktreePath);
+  const absolutePath = path.resolve(root, ...relativePath.split('/'));
+  if (!isPathInside(root, absolutePath)) {
+    throw new Error('Design project file escaped its worktree.');
+  }
+  return absolutePath;
+}
+
+function safeAssetFileName(displayName: string): string {
+  const trimmed = displayName.trim();
+  const fileName = path.posix.basename(trimmed);
+  if (
+    fileName.length === 0 ||
+    fileName === '.' ||
+    fileName === '..' ||
+    fileName !== trimmed ||
+    fileName.includes('\\') ||
+    Buffer.byteLength(fileName, 'utf8') > 255
+  ) {
+    throw new Error('The reference name is not safe for a project asset.');
+  }
+  return fileName;
+}
+
+function digest(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function isPathInside(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function assertExistingAssetMatches(
+  absolutePath: string,
+  stat: Awaited<ReturnType<typeof fs.lstat>>,
+  expectedSha256: string
+): Promise<void> {
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error('The project asset destination is not a safe regular file.');
+  }
+  const handle = await fs.open(
+    absolutePath,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+  );
+  try {
+    if (digest(await handle.readFile()) !== expectedSha256) {
+      throw new Error('A different project file already uses this asset name.');
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeProjectAsset(
+  absolutePath: string,
+  bytes: Uint8Array
+): Promise<void> {
+  const directory = path.dirname(absolutePath);
+  const temporaryPath = path.join(directory, `.task-monki-asset-${randomUUID()}.tmp`);
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined = await fs.open(
+    temporaryPath,
+    fsConstants.O_WRONLY |
+      fsConstants.O_CREAT |
+      fsConstants.O_EXCL |
+      (fsConstants.O_NOFOLLOW ?? 0),
+    0o600
+  );
+  let published = false;
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await enforcePosixMode(handle, 0o600);
+    await handle.close();
+    handle = undefined;
+    await fs.link(temporaryPath, absolutePath);
+    published = true;
+    await fs.unlink(temporaryPath);
+    await syncDirectoryIfSupported(directory);
+  } catch (error) {
+    const rollbackErrors: unknown[] = [];
+    if (published) {
+      await fs.unlink(absolutePath).catch((rollbackError) => {
+        if ((rollbackError as NodeJS.ErrnoException).code !== 'ENOENT') {
+          rollbackErrors.push(rollbackError);
+        }
+      });
+    }
+    await fs.unlink(temporaryPath).catch((rollbackError) => {
+      if ((rollbackError as NodeJS.ErrnoException).code !== 'ENOENT') {
+        rollbackErrors.push(rollbackError);
+      }
+    });
+    await syncDirectoryIfSupported(directory).catch((rollbackError) => {
+      rollbackErrors.push(rollbackError);
+    });
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...rollbackErrors],
+        'Design asset import failed and its temporary files could not be removed.'
+      );
+    }
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function assertProjectAssetVisibleToGit(
+  worktreePath: string,
+  relativePath: string
+): Promise<void> {
+  const status = await managedGit(worktreePath, [
+    'status',
+    '--porcelain=v1',
+    '--untracked-files=all',
+    '--',
+    relativePath
+  ]);
+  if (status.trim().length > 0) return;
+  try {
+    await managedGit(worktreePath, [
+      'ls-files',
+      '--error-unmatch',
+      '--',
+      relativePath
+    ]);
+  } catch {
+    throw new Error('The project ignores this asset path, so Git cannot preserve it.');
+  }
 }
 
 async function ensurePrivateOwnedRoot(root: string): Promise<void> {

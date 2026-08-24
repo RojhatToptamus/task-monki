@@ -314,7 +314,11 @@ export class AgentOrchestrator {
 
   private async startTurnSerially(input: StartOrchestratedTurn): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
-    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const taskAttachments = await this.store.getTurnAttachments({
+      taskId: input.task.id,
+      mode: input.mode,
+      generationKey: input.generationKey
+    });
     let session = input.sessionId
       ? await this.requireSession(input.sessionId)
       : await this.store.getPrimaryAgentSession(input.task.id, input.iteration.id);

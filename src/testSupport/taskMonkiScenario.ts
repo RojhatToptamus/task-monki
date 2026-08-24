@@ -119,6 +119,23 @@ export async function createTaskMonkiScenario(
       ? {
           designRepositoryRoot,
           designWorktreeRoot,
+          designBrowserRuntime: {
+            async attest() {},
+            async recover() {},
+            async openCandidate() {
+              return {
+                snapshot: 'test page',
+                console: '(no output)',
+                errors: '(no output)'
+              };
+            },
+            async inspect() {
+              return { text: 'test page' };
+            },
+            abortRun() {},
+            async closeRun() {},
+            async shutdown() {}
+          },
           designCanvasFence: {
             async begin() {
               return {
@@ -164,6 +181,32 @@ export async function createTaskMonkiScenario(
     },
     async completeRun(runId, finalMessage = 'Scenario run completed.') {
       const run = await requireRun(store, runId);
+      if (run.mode === 'DESIGN') {
+        const detail = await store.getDesignDetail(run.taskId);
+        const worktree = await store.getWorktree(run.worktreeId);
+        const sourceChanged = worktree
+          ? (await git(worktree.worktreePath, [
+              'status',
+              '--porcelain=v1',
+              '--untracked-files=all'
+            ])).trim().length > 0
+          : false;
+        if (detail.revisions.length === 0 || sourceChanged) {
+          const designUpdates = (
+            service as unknown as {
+              designUpdates?: {
+                inspectDesign(input: {
+                  runId: string;
+                  operation: { operation: 'open_candidate' };
+                }): Promise<unknown>;
+              };
+            }
+          ).designUpdates;
+          await designUpdates
+            ?.inspectDesign({ runId, operation: { operation: 'open_candidate' } })
+            .catch(() => undefined);
+        }
+      }
       const artifact = await store.writeFinalArtifact(run.taskId, run.id, finalMessage);
       await appendRunEvent(store, run, 'AGENT_RUN_COMPLETED', {
         terminalStatus: 'completed',
@@ -233,7 +276,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         supportedReasoningEfforts: ['low', 'medium', 'high'],
         defaultReasoningEffort: 'low',
         serviceTiers: [],
-        inputModalities: ['text'],
+        inputModalities: ['text', 'image'],
         isDefault: true
       }
     ]);

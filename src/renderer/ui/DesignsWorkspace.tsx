@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -13,6 +14,13 @@ import type {
   DesignDraftRecord,
   InteractionRequestRecord
 } from '../../shared/contracts';
+import {
+  type AttachmentDraftSnapshot,
+  type AttachmentContent,
+  type ClipboardAttachmentImage,
+  type DiscardTaskAttachmentDraftRequest,
+  type StageTaskAttachmentBatchRequest
+} from '../../shared/attachments';
 import {
   designProjectStatus,
   designStatusView,
@@ -31,13 +39,18 @@ import {
   type DesignCanvasShowRequest
 } from './DesignCanvas';
 import { DesignConversation } from './DesignConversation';
+import { DesignFilesDrawer } from './DesignFilesDrawer';
+import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { AgentModelSelector } from './AgentModelSelector';
 import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
+import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
+import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
+import { useTaskAttachments } from './useTaskAttachments';
 
 export type CreateBlankDesignInput = Pick<
   CreateBlankDesignRequest,
-  'brief' | 'creationToken' | 'model' | 'reasoningEffort'
+  'brief' | 'creationToken' | 'model' | 'reasoningEffort' | 'attachmentDraftId'
 >;
 
 export interface DesignsWorkspaceProps {
@@ -54,10 +67,31 @@ export interface DesignsWorkspaceProps {
   canvasOccluded?: boolean;
   onSelectDesign(designId: string): void;
   onCreateBlankDesign(input: CreateBlankDesignInput): Promise<void>;
-  onSubmitRefinement(designId: string, message: string): Promise<void>;
+  onSubmitRefinement(
+    designId: string,
+    message: string,
+    referenceIds: string[],
+    attachmentDraftId?: string
+  ): Promise<void>;
+  onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
+  onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
+  onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
+  onReadDesignDraftAttachment(
+    designId: string,
+    attachmentId: string
+  ): Promise<AttachmentContent>;
+  onAddReferences(designId: string, attachmentDraftId: string): Promise<string[]>;
+  onRemoveReference(designId: string, referenceId: string): Promise<void>;
+  onImportReferenceAsset(designId: string, referenceId: string): Promise<void>;
   onStopTurn(designId: string, turnId: string): Promise<void>;
   onLoadEarlier(designId: string): Promise<void>;
-  onSaveDraft(designId: string, body: string, expectedRevision: number): Promise<DesignDraftRecord>;
+  onSaveDraft(
+    designId: string,
+    body: string,
+    referenceIds: string[],
+    attachmentDraftId: string | undefined,
+    expectedRevision: number
+  ): Promise<DesignDraftRecord>;
   onDeleteDraft(designId: string, expectedRevision: number): Promise<void>;
   onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
   onRespondToInteraction(
@@ -89,6 +123,13 @@ export function DesignsWorkspace({
   onSelectDesign,
   onCreateBlankDesign,
   onSubmitRefinement,
+  onStageAttachmentBatch,
+  onDiscardAttachmentDraft,
+  onReadClipboardImage,
+  onReadDesignDraftAttachment,
+  onAddReferences,
+  onRemoveReference,
+  onImportReferenceAsset,
   onStopTurn,
   onLoadEarlier,
   onSaveDraft,
@@ -107,8 +148,43 @@ export function DesignsWorkspace({
   const [compact, setCompact] = useState(false);
   const [compactPane, setCompactPane] = useState<CompactPane>('conversation');
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
+  const referenceDesignId = useRef<string | undefined>(undefined);
+  const restoredDraftRevision = useRef<number | undefined>(undefined);
   const sortedDesigns = sortedDesignProjects(designs);
   const activeDesignId = project?.design.id ?? selectedDesignId;
+
+  useEffect(() => {
+    if (!project) {
+      setSelectedReferenceIds([]);
+      referenceDesignId.current = undefined;
+      restoredDraftRevision.current = undefined;
+      return;
+    }
+    const activeSet = new Set(project.references
+      .filter((reference) => reference.state === 'ACTIVE')
+      .map((reference) => reference.id));
+    if (referenceDesignId.current !== project.design.id) {
+      referenceDesignId.current = project.design.id;
+      restoredDraftRevision.current = draft?.recordRevision;
+      setSelectedReferenceIds(
+        (draft?.referenceIds ?? []).filter((referenceId) => activeSet.has(referenceId))
+      );
+      setFilesOpen(false);
+      return;
+    }
+    if (draft && restoredDraftRevision.current !== draft.recordRevision) {
+      restoredDraftRevision.current = draft.recordRevision;
+      setSelectedReferenceIds(
+        draft.referenceIds.filter((referenceId) => activeSet.has(referenceId))
+      );
+      return;
+    }
+    setSelectedReferenceIds((current) =>
+      current.filter((referenceId) => activeSet.has(referenceId))
+    );
+  }, [draft, project?.design.id, project?.references]);
 
   useLayoutEffect(() => {
     const workspace = workspaceRef.current;
@@ -190,6 +266,9 @@ export function DesignsWorkspace({
             runtimes={runtimes}
             defaultAgentSettings={defaultAgentSettings}
             onDiscoverAgentRuntimeModels={onDiscoverAgentRuntimeModels}
+            onStageAttachmentBatch={onStageAttachmentBatch}
+            onDiscardAttachmentDraft={onDiscardAttachmentDraft}
+            onReadClipboardImage={onReadClipboardImage}
             onCancel={() => setCreatingBlank(false)}
             onCreate={async (input) => {
               await onCreateBlankDesign(input);
@@ -216,6 +295,8 @@ export function DesignsWorkspace({
           <>
             <DesignHeader
               project={project}
+              filesOpen={filesOpen}
+              onToggleFiles={() => setFilesOpen((open) => !open)}
               onDelete={() => setDeleteOpen(true)}
             />
             {compact ? (
@@ -248,13 +329,39 @@ export function DesignsWorkspace({
                     key={project.design.id}
                     project={project}
                     draft={draft}
-                    onSubmit={(message) =>
-                      onSubmitRefinement(project.design.id, message)
+                    model={models.find(
+                      (model) =>
+                        model.runtimeId === project.task.runtimeId &&
+                        model.model === project.task.agentSettings.model
+                    )}
+                    selectedReferenceIds={selectedReferenceIds}
+                    onSelectionChange={setSelectedReferenceIds}
+                    onSubmit={(message, referenceIds, attachmentDraftId) =>
+                      onSubmitRefinement(
+                        project.design.id,
+                        message,
+                        referenceIds,
+                        attachmentDraftId
+                      )
+                    }
+                    onStageAttachmentBatch={onStageAttachmentBatch}
+                    onDiscardAttachmentDraft={(draftId) =>
+                      onDiscardAttachmentDraft({ draftId })
+                    }
+                    onReadClipboardImage={onReadClipboardImage}
+                    onReadDraftAttachment={(attachmentId) =>
+                      onReadDesignDraftAttachment(project.design.id, attachmentId)
                     }
                     onStop={(turnId) => onStopTurn(project.design.id, turnId)}
                     onLoadEarlier={() => onLoadEarlier(project.design.id)}
-                    onSaveDraft={(body, expectedRevision) =>
-                      onSaveDraft(project.design.id, body, expectedRevision)
+                    onSaveDraft={(body, referenceIds, attachmentDraftId, expectedRevision) =>
+                      onSaveDraft(
+                        project.design.id,
+                        body,
+                        referenceIds,
+                        attachmentDraftId,
+                        expectedRevision
+                      )
                     }
                     onDeleteDraft={(expectedRevision) =>
                       onDeleteDraft(project.design.id, expectedRevision)
@@ -273,7 +380,7 @@ export function DesignsWorkspace({
                   <DesignCanvas
                     project={project}
                     desktopAvailable={desktopCanvasAvailable}
-                    occluded={canvasOccluded || deleteOpen}
+                    occluded={canvasOccluded || deleteOpen || filesOpen}
                     onShowCanvas={onShowCanvas}
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
@@ -282,6 +389,31 @@ export function DesignsWorkspace({
                 </div>
               ) : null}
             </div>
+            {filesOpen ? (
+              <DesignFilesDrawer
+                project={project}
+                models={models}
+                selectedReferenceIds={selectedReferenceIds}
+                onSelectionChange={setSelectedReferenceIds}
+                onClose={() => setFilesOpen(false)}
+                onStageAttachmentBatch={onStageAttachmentBatch}
+                onDiscardAttachmentDraft={onDiscardAttachmentDraft}
+                onReadClipboardImage={onReadClipboardImage}
+                onAddReferences={async (draftId) => {
+                  const referenceIds = await onAddReferences(project.design.id, draftId);
+                  setSelectedReferenceIds((current) => [
+                    ...current,
+                    ...referenceIds.filter((referenceId) => !current.includes(referenceId))
+                  ]);
+                }}
+                onRemoveReference={(referenceId) =>
+                  onRemoveReference(project.design.id, referenceId)
+                }
+                onImportReferenceAsset={(referenceId) =>
+                  onImportReferenceAsset(project.design.id, referenceId)
+                }
+              />
+            ) : null}
           </>
         )}
       </section>
@@ -302,9 +434,13 @@ export function DesignsWorkspace({
 
 function DesignHeader({
   project,
+  filesOpen,
+  onToggleFiles,
   onDelete
 }: {
   project: DesignProjectDetail;
+  filesOpen: boolean;
+  onToggleFiles(): void;
   onDelete(): void;
 }) {
   const status = designStatusView(designProjectStatus(project));
@@ -319,6 +455,17 @@ function DesignHeader({
           <i aria-hidden="true" />
           {status.label}
         </span>
+        <button
+          type="button"
+          className="tm-designs-header__files"
+          aria-expanded={filesOpen}
+          aria-controls="design-files-drawer"
+          onClick={onToggleFiles}
+        >
+          <FilesIcon />
+          Files
+          <span>{project.references.filter((reference) => reference.state === 'ACTIVE').length}</span>
+        </button>
         <button
           type="button"
           className="tm-designs-header__delete"
@@ -343,6 +490,9 @@ function BlankDesignForm({
   runtimes,
   defaultAgentSettings,
   onDiscoverAgentRuntimeModels,
+  onStageAttachmentBatch,
+  onDiscardAttachmentDraft,
+  onReadClipboardImage,
   onCancel,
   onCreate
 }: {
@@ -351,6 +501,9 @@ function BlankDesignForm({
   runtimes: AgentRuntimeState[];
   defaultAgentSettings?: AgentExecutionSettings;
   onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
+  onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
+  onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
+  onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   onCancel(): void;
   onCreate(input: CreateBlankDesignInput): Promise<void>;
 }) {
@@ -369,28 +522,79 @@ function BlankDesignForm({
     resolveReasoningEffort(initialModel, defaultAgentSettings?.reasoningEffort) ?? ''
   );
   const [submitting, setSubmitting] = useState(false);
+  const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const submittingRef = useRef(false);
+  const availableRuntimeIds = new Set(
+    runtimes.map((runtime) => runtime.preflight.runtime.id)
+  );
+  const selectedRuntimeId = availableRuntimeIds.has(runtimeId)
+    ? runtimeId
+    : defaultAgentSettings?.runtimeId &&
+        availableRuntimeIds.has(defaultAgentSettings.runtimeId)
+      ? defaultAgentSettings.runtimeId
+      : runtimes[0]?.preflight.runtime.id ?? '';
+  const selectedModel =
+    models.find(
+      (model) => model.id === modelId && model.runtimeId === selectedRuntimeId
+    ) ?? selectModel(models, defaultAgentSettings?.model, selectedRuntimeId);
+  const selectedModelId = selectedModel?.id ?? '';
+  const selectedReasoningEffort =
+    resolveReasoningEffort(
+      selectedModel,
+      reasoningEffort || defaultAgentSettings?.reasoningEffort
+    ) ?? '';
+  const selectedRuntime = runtimes.find(
+    (runtime) => runtime.preflight.runtime.id === selectedRuntimeId
+  );
+  const attachmentsEnabled = Boolean(
+    selectedRuntime &&
+      selectedRuntime.preflight.capabilities.attachmentDelivery.maturity !== 'unsupported'
+  );
+  const composerLocked = submitting || creationOutcomeUnknown;
+  const attachments = useTaskAttachments({
+    enabled: attachmentsEnabled,
+    blocked: composerLocked,
+    model: selectedModel,
+    onStageBatch: onStageAttachmentBatch,
+    onDiscard: (draftId) => onDiscardAttachmentDraft({ draftId }),
+    onReadClipboardImage
+  });
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const nextBrief = brief.trim();
-    const selectedModel = models.find(
-      (model) => model.id === modelId && model.runtimeId === runtimeId
-    );
-    if (!nextBrief || !runtimeId || !selectedModel || submittingRef.current) return;
+    if (!nextBrief || !selectedRuntimeId || !selectedModel || submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(undefined);
+    let unchangedRetry = false;
     try {
-      await onCreate({
-        brief: nextBrief,
-        creationToken,
-        model: selectedModel.model,
-        reasoningEffort: reasoningEffort || undefined
-      });
+      const attachmentDraftId = await attachments.prepareForCreate();
+      try {
+        await onCreate({
+          brief: nextBrief,
+          creationToken,
+          model: selectedModel.model,
+          reasoningEffort: selectedReasoningEffort || undefined,
+          ...(attachmentDraftId ? { attachmentDraftId } : {})
+        });
+      } catch (caught) {
+        unchangedRetry = creationRequiresUnchangedRetry(caught);
+        await attachments.markCreateFailed(unchangedRetry);
+        if (unchangedRetry) setCreationOutcomeUnknown(true);
+        throw caught;
+      }
+      await attachments.finishAdoption();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Could not create the Design.');
+      const detail = caught instanceof Error ? caught.message : 'Could not create the Design.';
+      setError(
+        unchangedRetry
+          ? `Design creation could not be confirmed. Retry unchanged to recover safely${
+              canCancel ? ', or close and check the Design list' : ''
+            }. ${detail}`
+          : detail
+      );
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -399,7 +603,10 @@ function BlankDesignForm({
 
   return (
     <div className="tm-design-create">
-      <form className="tm-design-create__form" onSubmit={(event) => void submit(event)}>
+      <form
+        className="tm-design-create__form"
+        onSubmit={(event) => void submit(event)}
+      >
         <div className="tm-design-create__intro">
           <span className="tm-design-create__mark" aria-hidden="true">
             <DesignMark />
@@ -409,26 +616,57 @@ function BlankDesignForm({
         </div>
 
         <label htmlFor="new-design-brief">Brief</label>
-        <textarea
-          id="new-design-brief"
-          value={brief}
-          rows={7}
-          placeholder="A focused landing page for…"
-          disabled={submitting}
-          autoFocus
-          onChange={(event) => setBrief(event.target.value)}
-        />
+        <AttachmentComposerShell
+          attachments={attachments}
+          className="tm-design-create__composer"
+          attachmentLabel="Design references"
+          removeDisabled={composerLocked}
+          addButtonTitle={
+            attachmentsEnabled
+              ? 'Stored locally and shared read-only with the Design agent.'
+              : 'The selected agent runtime does not support references.'
+          }
+          hint={
+            !attachmentsEnabled
+              ? 'Unavailable for this runtime'
+              : attachments.isReadingClipboardImage
+                ? 'Reading clipboard image…'
+                : attachments.activeItems.length > 0
+                  ? `${attachments.activeItems.length} ${
+                      attachments.activeItems.length === 1 ? 'file' : 'files'
+                    } · ${formatAttachmentBytes(attachments.byteCount)}`
+                  : 'Paste or drop files'
+          }
+        >
+          <textarea
+            id="new-design-brief"
+            value={brief}
+            rows={7}
+            placeholder="A focused landing page for…"
+            disabled={composerLocked}
+            autoFocus
+            onChange={(event) => setBrief(event.target.value)}
+            onPaste={attachments.paste}
+          />
+        </AttachmentComposerShell>
+
+        {attachments.overflowError || attachments.modelError ? (
+          <p className="task-attachment-message task-attachment-message--error" role="alert">
+            {attachments.overflowError ?? attachments.modelError}
+          </p>
+        ) : null}
 
         <div className="tm-design-create__runtime" aria-label="Design agent settings">
           <AgentModelSelector
             label="Design"
-            runtimeId={runtimeId}
-            modelId={modelId}
-            reasoningEffort={reasoningEffort}
+            runtimeId={selectedRuntimeId}
+            modelId={selectedModelId}
+            reasoningEffort={selectedReasoningEffort}
             models={models}
             runtimes={runtimes}
+            disabled={composerLocked}
             compact
-            selectionUnavailable={!runtimeId || !modelId}
+            selectionUnavailable={!selectedRuntimeId || !selectedModelId}
             selectionUnavailableMessage="No ready agent supports Design Mode."
             onDiscoverModels={onDiscoverAgentRuntimeModels}
             onSelectionChange={(nextRuntimeId, nextModelId) => {
@@ -448,15 +686,27 @@ function BlankDesignForm({
         <div className="tm-design-create__actions">
           {canCancel ? (
             <button type="button" className="outline-button" disabled={submitting} onClick={onCancel}>
-              Cancel
+              {creationOutcomeUnknown ? 'Close' : 'Cancel'}
             </button>
           ) : null}
           <button
             type="submit"
             className="primary-button"
-            disabled={submitting || brief.trim().length === 0 || !runtimeId || !modelId}
+            disabled={
+              submitting ||
+              brief.trim().length === 0 ||
+              !selectedRuntimeId ||
+              !selectedModelId ||
+              attachments.busy ||
+              attachments.hasErrors ||
+              Boolean(attachments.modelError)
+            }
           >
-            {submitting ? 'Creating…' : 'Create Design'}
+            {submitting
+              ? 'Creating…'
+              : creationOutcomeUnknown
+                ? 'Retry creation'
+                : 'Create Design'}
           </button>
         </div>
       </form>
@@ -570,6 +820,15 @@ function PlusIcon() {
   return (
     <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M8 3v10M3 8h10" />
+    </svg>
+  );
+}
+
+function FilesIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2.5 4.5h4l1.2 1.4h5.8v6.6h-11z" />
+      <path d="M2.5 4.5v-1h4.2l1 1" />
     </svg>
   );
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   admitAttachmentFiles,
   createAttachmentClientToken,
@@ -8,6 +8,10 @@ import {
 } from './taskAttachmentDraft';
 
 describe('task attachment draft model', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('admits only bounded allowlisted files', () => {
     const files = [
       candidate('notes.md', 20),
@@ -57,6 +61,72 @@ describe('task attachment draft model', () => {
       )
     ).rejects.toThrow('16 megapixel');
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('validates native decoded-frame dimensions without unsupported track dimensions', async () => {
+    const frameClose = vi.fn();
+    const decoderClose = vi.fn();
+    class TestImageDecoder {
+      readonly tracks = {
+        ready: Promise.resolve(),
+        selectedTrack: { frameCount: 1 }
+      };
+
+      decode() {
+        return Promise.resolve({
+          image: {
+            displayWidth: 32,
+            displayHeight: 24,
+            close: frameClose
+          }
+        });
+      }
+
+      close = decoderClose;
+    }
+    class TestOffscreenCanvas {
+      getContext() {
+        return { drawImage: vi.fn() };
+      }
+
+      convertToBlob(input: { type: string }) {
+        return Promise.resolve(new Blob(['normalized'], { type: input.type }));
+      }
+    }
+    vi.stubGlobal('ImageDecoder', TestImageDecoder);
+    vi.stubGlobal('OffscreenCanvas', TestOffscreenCanvas);
+
+    const prepared = await prepareImageAttachment(
+      new File([new Uint8Array([1])], 'screen.png', { type: 'image/png' })
+    );
+
+    expect(prepared.file.type).toBe('image/png');
+    expect(frameClose).toHaveBeenCalledOnce();
+    expect(decoderClose).toHaveBeenCalledOnce();
+  });
+
+  it('closes the native decoder when frame decoding fails', async () => {
+    const decoderClose = vi.fn();
+    class FailingImageDecoder {
+      readonly tracks = {
+        ready: Promise.resolve(),
+        selectedTrack: { frameCount: 1 }
+      };
+
+      decode() {
+        return Promise.reject(new Error('decode failed'));
+      }
+
+      close = decoderClose;
+    }
+    vi.stubGlobal('ImageDecoder', FailingImageDecoder);
+
+    await expect(
+      prepareImageAttachment(
+        new File([new Uint8Array([1])], 'screen.png', { type: 'image/png' })
+      )
+    ).rejects.toThrow('safely decoded');
+    expect(decoderClose).toHaveBeenCalledOnce();
   });
 
   it('creates validated tokens and formats byte counts', () => {

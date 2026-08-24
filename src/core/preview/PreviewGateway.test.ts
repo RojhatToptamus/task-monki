@@ -196,6 +196,87 @@ describe('PreviewGateway', () => {
     }
   });
 
+  it('leases one exact candidate origin and rejects other browser destinations', async () => {
+    let upstreamHost: string | undefined;
+    const candidate = await fixture((request, response) => {
+      upstreamHost = request.headers.host;
+      response.end(`candidate:${request.url}`);
+    });
+    const gateway = await startGateway();
+    const hostname = previewRouteHostname('design-browser', 'app');
+    const origin = `http://${hostname}:${gateway.port}/`;
+    const lease = await gateway.instance.openBrowserLease({
+      origin,
+      target: { host: '127.0.0.1', port: candidate }
+    });
+    const proxyPort = Number(new URL(lease.proxyUrl).port);
+
+    await expect(proxyRequest(proxyPort, `${origin}state?step=2`)).resolves.toMatchObject({
+      status: 200,
+      body: 'candidate:/state?step=2'
+    });
+    expect(upstreamHost).toBe(`${hostname}:${gateway.port}`);
+    await expect(
+      proxyRequest(proxyPort, 'http://example.com/escape')
+    ).resolves.toMatchObject({
+      status: 403,
+      body: 'Preview browser lease rejected this destination.'
+    });
+    await expect(rawProxyMethod(proxyPort, 'CONNECT', 'example.com:443')).resolves.toContain(
+      '403 Forbidden'
+    );
+    await expect(
+      rawProxyMethod(proxyPort, 'GET', origin, {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket'
+      })
+    ).resolves.toContain('403 Forbidden');
+
+    await lease.close();
+    await expect(proxyRequest(proxyPort, origin)).rejects.toBeDefined();
+  });
+
+  it('closes active browser leases when the gateway stops', async () => {
+    const candidate = await fixture((_request, response) => response.end('candidate'));
+    const gateway = await startGateway();
+    const hostname = previewRouteHostname('design-browser-close', 'app');
+    const lease = await gateway.instance.openBrowserLease({
+      origin: `http://${hostname}:${gateway.port}/`,
+      target: { host: '127.0.0.1', port: candidate }
+    });
+    const proxyPort = Number(new URL(lease.proxyUrl).port);
+
+    await gateway.instance.close();
+    await expect(proxyRequest(proxyPort, `http://${hostname}:${gateway.port}/`)).rejects.toBeDefined();
+  });
+
+  it('contains a reset browser connection inside its lease', async () => {
+    const candidate = await fixture((_request, response) => {
+      response.write('partial');
+      setTimeout(() => response.end('complete'), 20);
+    });
+    const gateway = await startGateway();
+    const hostname = previewRouteHostname('design-browser-reset', 'app');
+    const origin = `http://${hostname}:${gateway.port}/`;
+    const lease = await gateway.instance.openBrowserLease({
+      origin,
+      target: { host: '127.0.0.1', port: candidate }
+    });
+    const proxyPort = Number(new URL(lease.proxyUrl).port);
+    const socket = net.connect(proxyPort, '127.0.0.1');
+    socket.on('error', () => undefined);
+    await new Promise<void>((resolve) => socket.once('connect', resolve));
+    socket.write(`GET ${origin} HTTP/1.1\r\nHost: ${hostname}\r\n\r\n`);
+    socket.resetAndDestroy();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    await expect(proxyRequest(proxyPort, origin)).resolves.toMatchObject({
+      status: 200,
+      body: 'partialcomplete'
+    });
+    await lease.close();
+  });
+
   it('rejects legacy, malformed, and foreign route registrations', async () => {
     const upstream = await fixture((_request, response) => response.end('unused'));
     const gateway = await startGateway();
@@ -248,6 +329,57 @@ function requestWithHeaders(
     });
     req.once('error', reject);
     req.end();
+  });
+}
+
+function proxyRequest(
+  port: number,
+  absoluteUrl: string
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      { host: '127.0.0.1', port, path: absoluteUrl },
+      (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => (body += chunk));
+        response.once('end', () => resolve({ status: response.statusCode ?? 0, body }));
+      }
+    );
+    request.once('error', reject);
+    request.end();
+  });
+}
+
+function rawProxyMethod(
+  port: number,
+  method: string,
+  target: string,
+  headers: Record<string, string> = {}
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1');
+    let output = '';
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('Proxy request timed out.'));
+    }, 2_000);
+    socket.setEncoding('utf8');
+    socket.once('connect', () => {
+      const headerLines = Object.entries(headers).map(([key, value]) => `${key}: ${value}`);
+      socket.write(
+        [`${method} ${target} HTTP/1.1`, `Host: ${target}`, ...headerLines, '', ''].join('\r\n')
+      );
+    });
+    socket.on('data', (chunk) => {
+      output += chunk;
+      if (output.includes('\r\n\r\n')) {
+        clearTimeout(timer);
+        socket.end();
+        resolve(output);
+      }
+    });
+    socket.once('error', reject);
   });
 }
 

@@ -86,6 +86,7 @@ import {
   resolveRepositorySetupState,
   resolveSelectedRepositoryId
 } from '../model/repositories';
+import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from '../model/taskView';
@@ -242,6 +243,8 @@ export function App() {
   const pendingDesignTurnRef = useRef<{
     designId: string;
     message: string;
+    referenceIds: string[];
+    attachmentDraftId?: string;
     clientMessageId: string;
   } | undefined>(undefined);
   const designCanvasErrorRef = useRef<string | undefined>(undefined);
@@ -671,7 +674,7 @@ export function App() {
     async (
       input: Pick<
         CreateBlankDesignRequest,
-        'brief' | 'creationToken' | 'model' | 'reasoningEffort'
+        'brief' | 'creationToken' | 'model' | 'reasoningEffort' | 'attachmentDraftId'
       >
     ) => {
       const brief = input.brief.trim();
@@ -680,7 +683,10 @@ export function App() {
           brief,
           creationToken: input.creationToken,
           model: input.model,
-          reasoningEffort: input.reasoningEffort
+          reasoningEffort: input.reasoningEffort,
+          ...(input.attachmentDraftId
+            ? { attachmentDraftId: input.attachmentDraftId }
+            : {})
         });
         applyDesignActionDetail(detail, true);
         notify('Design created.', 'success');
@@ -695,18 +701,38 @@ export function App() {
     [applyDesignActionDetail, notify, refreshDesignList]
   );
   const submitDesignRefinement = useCallback(
-    async (designId: string, message: string) => {
+    async (
+      designId: string,
+      message: string,
+      referenceIds: string[],
+      attachmentDraftId?: string
+    ) => {
       const pending =
         pendingDesignTurnRef.current?.designId === designId &&
-        pendingDesignTurnRef.current.message === message
+        pendingDesignTurnRef.current.message === message &&
+        pendingDesignTurnRef.current.referenceIds.length === referenceIds.length &&
+        pendingDesignTurnRef.current.referenceIds.every(
+          (referenceId, index) => referenceId === referenceIds[index]
+        ) &&
+        pendingDesignTurnRef.current.attachmentDraftId === attachmentDraftId
           ? pendingDesignTurnRef.current
-          : { designId, message, clientMessageId: crypto.randomUUID() };
+          : {
+              designId,
+              message,
+              referenceIds: [...referenceIds],
+              attachmentDraftId,
+              clientMessageId: crypto.randomUUID()
+            };
       pendingDesignTurnRef.current = pending;
       try {
         const detail = await taskManagerApi.submitDesignTurn({
           designId,
           clientMessageId: pending.clientMessageId,
-          message
+          message,
+          referenceIds: pending.referenceIds,
+          ...(pending.attachmentDraftId
+            ? { attachmentDraftId: pending.attachmentDraftId }
+            : {})
         });
         if (pendingDesignTurnRef.current === pending) {
           pendingDesignTurnRef.current = undefined;
@@ -718,10 +744,70 @@ export function App() {
         notify(accepted?.turn.runId ? 'Design update started.' : 'Message queued.', 'success');
         void refreshDesignList();
       } catch (caught) {
+        if (!creationRequiresUnchangedRetry(caught) && pendingDesignTurnRef.current === pending) {
+          pendingDesignTurnRef.current = undefined;
+        }
         const errorMessage =
           caught instanceof Error ? caught.message : 'Could not send the refinement.';
         notify(errorMessage, 'error');
         throw caught instanceof Error ? caught : new Error(errorMessage);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const addDesignReferences = useCallback(
+    async (designId: string, attachmentDraftId: string) => {
+      try {
+        const detail = await taskManagerApi.addDesignReferences({
+          designId,
+          attachmentDraftId
+        });
+        applyDesignActionDetail(detail, false);
+        notify('References added.', 'success');
+        void refreshDesignList();
+        return detail.references
+          .filter((reference) => reference.sourceDraftId === attachmentDraftId)
+          .map((reference) => reference.id);
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not add references.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const removeDesignReference = useCallback(
+    async (designId: string, referenceId: string) => {
+      try {
+        const detail = await taskManagerApi.removeDesignReference({
+          designId,
+          referenceId
+        });
+        applyDesignActionDetail(detail, false);
+        notify('Reference removed from future messages.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not remove the reference.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify, refreshDesignList]
+  );
+  const importDesignReferenceAsset = useCallback(
+    async (designId: string, referenceId: string) => {
+      try {
+        const detail = await taskManagerApi.importDesignReferenceAsset({
+          designId,
+          referenceId
+        });
+        applyDesignActionDetail(detail, false);
+        notify('Project asset imported.', 'success');
+        void refreshDesignList();
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not import the asset.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
       }
     },
     [applyDesignActionDetail, notify, refreshDesignList]
@@ -767,10 +853,18 @@ export function App() {
     [designDetail, notify]
   );
   const saveDesignDraft = useCallback(
-    async (designId: string, body: string, expectedRevision: number) => {
+    async (
+      designId: string,
+      body: string,
+      referenceIds: string[],
+      attachmentDraftId: string | undefined,
+      expectedRevision: number
+    ) => {
       const saved = await taskManagerApi.saveDesignDraft({
         designId,
         body,
+        referenceIds,
+        ...(attachmentDraftId ? { attachmentDraftId } : {}),
         expectedRevision
       });
       if (selectedDesignIdRef.current === designId) setDesignDraft(saved);
@@ -2706,6 +2800,15 @@ export function App() {
             }}
             onCreateBlankDesign={createBlankDesign}
             onSubmitRefinement={submitDesignRefinement}
+            onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
+            onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
+            onReadClipboardImage={taskManagerApi.readClipboardImage}
+            onReadDesignDraftAttachment={(designId, attachmentId) =>
+              taskManagerApi.readDesignDraftAttachment({ designId, attachmentId })
+            }
+            onAddReferences={addDesignReferences}
+            onRemoveReference={removeDesignReference}
+            onImportReferenceAsset={importDesignReferenceAsset}
             onStopTurn={stopDesignTurn}
             onLoadEarlier={loadEarlierDesignConversation}
             onSaveDraft={saveDesignDraft}

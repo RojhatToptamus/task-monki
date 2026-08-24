@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type {
+  AgentModel,
   AgentInteractionDecision,
+  AttachmentContent,
+  AttachmentDraftSnapshot,
+  ClipboardAttachmentImage,
   DesignConversationEntry,
   DesignDraftRecord,
-  InteractionRequestRecord
+  InteractionRequestRecord,
+  StageTaskAttachmentBatchRequest
 } from '../../shared/contracts';
 import {
   designActivityRows,
@@ -15,14 +20,35 @@ import {
 import { DiscourseMarkdown } from './DiscourseMarkdown';
 import { InteractionPanel } from './InteractionPanel';
 import { RunActivityTimeline } from './RunActivityTimeline';
+import { AttachmentComposerShell } from './AttachmentComposerShell';
+import { StoredAttachmentChip } from './AttachmentChip';
+import { useTaskAttachments } from './useTaskAttachments';
+import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
+import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
   draft: DesignDraftRecord | null;
-  onSubmit(message: string): Promise<void>;
+  model?: AgentModel;
+  selectedReferenceIds: string[];
+  onSelectionChange(referenceIds: string[]): void;
+  onSubmit(
+    message: string,
+    referenceIds: string[],
+    attachmentDraftId?: string
+  ): Promise<void>;
+  onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
+  onDiscardAttachmentDraft(draftId: string): Promise<void>;
+  onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
+  onReadDraftAttachment(attachmentId: string): Promise<AttachmentContent>;
   onStop(turnId: string): Promise<void>;
   onLoadEarlier(): Promise<void>;
-  onSaveDraft(body: string, expectedRevision: number): Promise<DesignDraftRecord>;
+  onSaveDraft(
+    body: string,
+    referenceIds: string[],
+    attachmentDraftId: string | undefined,
+    expectedRevision: number
+  ): Promise<DesignDraftRecord>;
   onDeleteDraft(expectedRevision: number): Promise<void>;
   onRespond(
     interaction: InteractionRequestRecord,
@@ -33,7 +59,14 @@ export interface DesignConversationProps {
 export function DesignConversation({
   project,
   draft,
+  model,
+  selectedReferenceIds,
+  onSelectionChange,
   onSubmit,
+  onStageAttachmentBatch,
+  onDiscardAttachmentDraft,
+  onReadClipboardImage,
+  onReadDraftAttachment,
   onStop,
   onLoadEarlier,
   onSaveDraft,
@@ -42,22 +75,51 @@ export function DesignConversation({
 }: DesignConversationProps) {
   const [message, setMessage] = useState(draft?.body ?? '');
   const [submitting, setSubmitting] = useState(false);
+  const [submissionOutcomeUnknown, setSubmissionOutcomeUnknown] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | undefined>();
   const submittingRef = useRef(false);
   const draftRevisionRef = useRef(draft?.recordRevision ?? 0);
-  const savedDraftBodyRef = useRef(draft?.body ?? '');
+  const savedDraftSignatureRef = useRef(
+    draftSignature(
+      draft?.body ?? '',
+      draft?.referenceIds ?? [],
+      draft?.attachmentDraftId
+    )
+  );
   const messageRef = useRef(message);
+  const referenceIdsRef = useRef(selectedReferenceIds);
+  referenceIdsRef.current = selectedReferenceIds;
   const draftTimerRef = useRef<number | undefined>(undefined);
   const draftTailRef = useRef<Promise<unknown>>(Promise.resolve());
   const mountedRef = useRef(true);
+  const suppressDraftSaveRef = useRef(false);
   const saveDraftRef = useRef(onSaveDraft);
   saveDraftRef.current = onSaveDraft;
+  const attachments = useTaskAttachments({
+    enabled: true,
+    blocked: submitting || submissionOutcomeUnknown || !project.actions.canRefine,
+    model,
+    onStageBatch: onStageAttachmentBatch,
+    onDiscard: onDiscardAttachmentDraft,
+    onReadClipboardImage,
+    initialDraft: draft?.attachmentDraft,
+    onReadDraftAttachment,
+    preserveDraftOnClose: true
+  });
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
   const activityRows = designActivityRows(project);
   const detailedActivityRows = designDetailedActivityRows(project);
-  const canSubmit = project.actions.canRefine && message.trim().length > 0 && !submitting;
+  const canSubmit =
+    project.actions.canRefine &&
+    message.trim().length > 0 &&
+    !submitting &&
+    !attachments.busy &&
+    !attachments.hasErrors &&
+    !attachments.modelError;
   const disabledReason = project.actions.canRefine
     ? undefined
     : project.actions.refineDisabledReason;
@@ -67,19 +129,46 @@ export function DesignConversation({
         project.currentRun.status
       )
   );
+  const selectedReferences = selectedReferenceIds.flatMap((referenceId) => {
+    const reference = project.references.find((candidate) => candidate.id === referenceId);
+    const attachment = reference
+      ? project.attachments.find(
+          (candidate) => candidate.id === reference.attachmentId
+        )
+      : undefined;
+    return reference && attachment ? [{ referenceId, attachment }] : [];
+  });
 
   const persistDraft = useCallback(
-    (body: string) => {
-      if (body === savedDraftBodyRef.current) return Promise.resolve();
+    (body: string, referenceIds: readonly string[]) => {
       const operation = draftTailRef.current
         .catch(() => undefined)
         .then(async () => {
-          if (body === savedDraftBodyRef.current) return;
+          const attachmentDraftId = await attachmentsRef.current.prepareForCreate();
+          const signature = draftSignature(body, referenceIds, attachmentDraftId);
+          if (signature === savedDraftSignatureRef.current) return;
           if (mountedRef.current) setDraftStatus('saving');
-          const saved = await saveDraftRef.current(body, draftRevisionRef.current);
+          const saved = await saveDraftRef.current(
+            body,
+            [...referenceIds],
+            attachmentDraftId,
+            draftRevisionRef.current
+          );
           draftRevisionRef.current = saved.recordRevision;
-          savedDraftBodyRef.current = saved.body;
-          if (mountedRef.current && messageRef.current === saved.body) {
+          savedDraftSignatureRef.current = draftSignature(
+            saved.body,
+            saved.referenceIds,
+            saved.attachmentDraftId
+          );
+          await attachmentsRef.current.acknowledgeDraftSave(saved.attachmentDraftId);
+          if (
+            mountedRef.current &&
+            draftSignature(
+              messageRef.current,
+              referenceIdsRef.current,
+              saved.attachmentDraftId
+            ) === savedDraftSignatureRef.current
+          ) {
             setDraftStatus('saved');
           }
         });
@@ -92,14 +181,14 @@ export function DesignConversation({
     []
   );
 
-  const scheduleDraftSave = (body: string) => {
+  const scheduleDraftSave = (body: string, referenceIds = referenceIdsRef.current) => {
     if (draftTimerRef.current !== undefined) {
       window.clearTimeout(draftTimerRef.current);
     }
     setDraftStatus('idle');
     draftTimerRef.current = window.setTimeout(() => {
       draftTimerRef.current = undefined;
-      void persistDraft(body).catch(() => undefined);
+      void persistDraft(body, referenceIds).catch(() => undefined);
     }, 600);
   };
 
@@ -111,9 +200,14 @@ export function DesignConversation({
         window.clearTimeout(draftTimerRef.current);
         draftTimerRef.current = undefined;
       }
-      void persistDraft(messageRef.current).catch(() => undefined);
+      void persistDraft(messageRef.current, referenceIdsRef.current).catch(() => undefined);
     };
   }, [persistDraft]);
+
+  useEffect(() => {
+    if (suppressDraftSaveRef.current) return;
+    scheduleDraftSave(messageRef.current, selectedReferenceIds);
+  }, [attachments.contentRevision, selectedReferenceIds.join('\u0000')]);
 
   const submit = async () => {
     const nextMessage = message.trim();
@@ -126,11 +220,16 @@ export function DesignConversation({
         window.clearTimeout(draftTimerRef.current);
         draftTimerRef.current = undefined;
       }
-      await persistDraft(nextMessage).catch(() => undefined);
-      await onSubmit(nextMessage);
+      await persistDraft(nextMessage, selectedReferenceIds);
+      const attachmentDraftId = await attachments.prepareForCreate();
+      await onSubmit(nextMessage, selectedReferenceIds, attachmentDraftId);
+      suppressDraftSaveRef.current = true;
+      await attachments.finishAdoption();
       setMessage('');
       messageRef.current = '';
-      savedDraftBodyRef.current = '';
+      onSelectionChange([]);
+      savedDraftSignatureRef.current = draftSignature('', [], undefined);
+      setSubmissionOutcomeUnknown(false);
       const revision = draftRevisionRef.current;
       if (revision > 0) {
         try {
@@ -144,9 +243,20 @@ export function DesignConversation({
           }
         }
       }
+      suppressDraftSaveRef.current = false;
     } catch (caught) {
+      suppressDraftSaveRef.current = false;
+      const unchangedRetry = creationRequiresUnchangedRetry(caught);
+      await attachments.markCreateFailed(unchangedRetry);
+      if (unchangedRetry) setSubmissionOutcomeUnknown(true);
       setError(
-        caught instanceof Error ? caught.message : 'Could not send the refinement.'
+        unchangedRetry
+          ? `Message delivery could not be confirmed. Retry unchanged to recover safely. ${
+              caught instanceof Error ? caught.message : 'Could not send the refinement.'
+            }`
+          : caught instanceof Error
+            ? caught.message
+            : 'Could not send the refinement.'
       );
     } finally {
       submittingRef.current = false;
@@ -208,7 +318,21 @@ export function DesignConversation({
           </div>
         ) : (
           project.conversation.map((entry) => (
-            <DesignTurnMessages key={entry.turn.id} entry={entry} />
+            <DesignTurnMessages
+              key={entry.turn.id}
+              entry={entry}
+              references={entry.turn.referenceIds.map((referenceId) => {
+                const reference = project.references.find(
+                  (candidate) => candidate.id === referenceId
+                );
+                const attachment = reference
+                  ? project.attachments.find(
+                      (candidate) => candidate.id === reference.attachmentId
+                    )
+                  : undefined;
+                return attachment?.displayName ?? 'Unavailable reference';
+              })}
+            />
           ))
         )}
 
@@ -237,24 +361,71 @@ export function DesignConversation({
           void submit();
         }}
       >
-        <label className="tm-visually-hidden" htmlFor="design-refinement-message">
-          Refine this Design
-        </label>
-        <textarea
-          id="design-refinement-message"
-          value={message}
-          rows={3}
-          placeholder="Describe the next change…"
-          disabled={!project.actions.canRefine || submitting}
-          aria-describedby={disabledReason ? 'design-refinement-help' : undefined}
-          onChange={(event) => {
-            const body = event.target.value;
-            setMessage(body);
-            messageRef.current = body;
-            scheduleDraftSave(body);
-          }}
-          onKeyDown={onComposerKeyDown}
-        />
+        <AttachmentComposerShell
+          attachments={attachments}
+          attachmentLabel="Files for this Design message"
+          className="tm-design-composer__shell"
+          removeDisabled={submitting || submissionOutcomeUnknown}
+          addButtonTitle="Add read-only references to this Design message."
+          hint={
+            attachments.isRestoringDraft
+              ? 'Loading draft files…'
+              : attachments.isReadingClipboardImage
+                ? 'Reading clipboard image…'
+                : attachments.activeItems.length > 0
+                  ? `${attachments.activeItems.length} ${
+                      attachments.activeItems.length === 1 ? 'new file' : 'new files'
+                    } · ${formatAttachmentBytes(attachments.byteCount)}`
+                  : 'Paste or drop files'
+          }
+        >
+          <label className="tm-visually-hidden" htmlFor="design-refinement-message">
+            Refine this Design
+          </label>
+          <textarea
+            id="design-refinement-message"
+            value={message}
+            rows={3}
+            placeholder="Describe the next change…"
+            disabled={
+              !project.actions.canRefine ||
+              submitting ||
+              submissionOutcomeUnknown ||
+              attachments.isRestoringDraft
+            }
+            aria-describedby={disabledReason ? 'design-refinement-help' : undefined}
+            onChange={(event) => {
+              const body = event.target.value;
+              setMessage(body);
+              messageRef.current = body;
+              scheduleDraftSave(body);
+            }}
+            onPaste={attachments.paste}
+            onKeyDown={onComposerKeyDown}
+          />
+          {selectedReferences.length > 0 ? (
+            <ul className="task-attachments" aria-label="Selected existing references">
+              {selectedReferences.map(({ referenceId, attachment }) => (
+                <StoredAttachmentChip
+                  key={referenceId}
+                  attachment={attachment}
+                  label="Reference"
+                  disabled={submitting || submissionOutcomeUnknown}
+                  onRemove={() =>
+                    onSelectionChange(
+                      selectedReferenceIds.filter((candidate) => candidate !== referenceId)
+                    )
+                  }
+                />
+              ))}
+            </ul>
+          ) : null}
+        </AttachmentComposerShell>
+        {attachments.overflowError || attachments.modelError ? (
+          <p className="task-attachment-message task-attachment-message--error" role="alert">
+            {attachments.overflowError ?? attachments.modelError}
+          </p>
+        ) : null}
         <div className="tm-design-composer__footer">
           <span id="design-refinement-help">
             {disabledReason ??
@@ -287,7 +458,13 @@ export function DesignConversation({
             </button>
           ) : null}
           <button type="submit" className="primary-button" disabled={!canSubmit}>
-            {submitting ? 'Sending…' : activeWork ? 'Queue' : 'Send'}
+            {submitting
+              ? 'Sending…'
+              : submissionOutcomeUnknown
+                ? 'Retry'
+                : activeWork
+                  ? 'Queue'
+                  : 'Send'}
           </button>
         </div>
         {error ? <p className="tm-design-composer__error" role="alert">{error}</p> : null}
@@ -296,7 +473,13 @@ export function DesignConversation({
   );
 }
 
-function DesignTurnMessages({ entry }: { entry: DesignConversationEntry }) {
+function DesignTurnMessages({
+  entry,
+  references
+}: {
+  entry: DesignConversationEntry;
+  references: string[];
+}) {
   const view = designTurnView(entry);
   return (
     <article className="tm-design-turn">
@@ -308,6 +491,11 @@ function DesignTurnMessages({ entry }: { entry: DesignConversationEntry }) {
           </time>
         </header>
         <p>{entry.userMessage}</p>
+        {references.length > 0 ? (
+          <small className="tm-design-message__references">
+            {references.length === 1 ? 'Reference' : 'References'}: {references.join(', ')}
+          </small>
+        ) : null}
       </div>
 
       <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
@@ -342,4 +530,12 @@ function ConversationGlyph() {
       </svg>
     </span>
   );
+}
+
+function draftSignature(
+  body: string,
+  referenceIds: readonly string[],
+  attachmentDraftId: string | undefined
+): string {
+  return JSON.stringify([body, referenceIds, attachmentDraftId ?? null]);
 }
