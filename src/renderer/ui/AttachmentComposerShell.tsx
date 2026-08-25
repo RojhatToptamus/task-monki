@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Paperclip } from 'lucide-react';
 import { ATTACHMENT_FILE_INPUT_ACCEPT } from '../../shared/attachments';
 import type { TaskAttachmentController } from './useTaskAttachments';
 import { AttachmentChip } from './AttachmentChip';
@@ -8,6 +9,8 @@ export function AttachmentComposerShell({
   children,
   attachmentLabel,
   addButtonTitle,
+  addButtonLabel = 'Add files',
+  onAddButtonClick,
   hint,
   className = '',
   removeDisabled = false,
@@ -17,6 +20,8 @@ export function AttachmentComposerShell({
   children: ReactNode;
   attachmentLabel: string;
   addButtonTitle: string;
+  addButtonLabel?: string;
+  onAddButtonClick?(): void;
   hint: ReactNode;
   className?: string;
   removeDisabled?: boolean;
@@ -62,10 +67,13 @@ export function AttachmentComposerShell({
           className="task-attachment-add"
           disabled={attachments.interactionBlocked}
           title={addButtonTitle}
-          onClick={() => attachments.inputRef.current?.click()}
+          onClick={() => {
+            if (onAddButtonClick) onAddButtonClick();
+            else attachments.inputRef.current?.click();
+          }}
         >
           <PaperclipIcon />
-          <span>Add files</span>
+          <span>{addButtonLabel}</span>
         </button>
         <span className="task-attachment-hint">{hint}</span>
       </div>
@@ -80,15 +88,5 @@ export function AttachmentComposerShell({
 }
 
 export function PaperclipIcon() {
-  return (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none">
-      <path
-        d="m9.5 12.5 5.7-5.7a3.2 3.2 0 0 1 4.5 4.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.1-8.1"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <Paperclip aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />;
 }

@@ -10,6 +10,7 @@ describe('collapsed navigation semantics', () => {
         icon={<span aria-hidden="true">icon</span>}
         count={16}
         urgent
+        overlapCount
         active={false}
         collapsed
         onClick={() => undefined}
@@ -18,6 +19,7 @@ describe('collapsed navigation semantics', () => {
 
     expect(html).toContain('aria-label="Inbox"');
     expect(html).toContain('data-tip="Inbox"');
+    expect(html).toContain('tm-nav__item--overlap-count');
     expect(html).toMatch(/aria-describedby="([^"]+)"/);
     expect(html).toContain('aria-hidden="true">16</span>');
     expect(html).toContain('>16 tasks</span>');

@@ -29,13 +29,25 @@ export type DesignProjectDetail = DesignDetailSnapshot;
 export interface DesignTurnView {
   status: DesignTurnStatus;
   statusLabel: string;
+  tone: DesignStatusTone;
   detail?: string;
 }
+
+export type DesignStatusTone = 'idle' | 'working' | 'waiting' | 'verified' | 'blocked';
 
 export interface DesignStatusView {
   label: string;
   detail: string;
-  tone: 'idle' | 'working' | 'waiting' | 'verified' | 'blocked';
+  tone: DesignStatusTone;
+}
+
+export type DesignWorkspaceLayoutMode = 'chat' | 'split' | 'canvas';
+export type DesignHistoryFilter = 'all' | 'active' | 'archived';
+
+export interface DesignWorkspaceLayoutView {
+  availableModes: readonly DesignWorkspaceLayoutMode[];
+  splitAvailable: boolean;
+  mainWidth: number;
 }
 
 export type DesignCanvasPresentation =
@@ -114,6 +126,20 @@ export function sortedDesignProjects(
     (left, right) =>
       right.updatedAt.localeCompare(left.updatedAt) || left.title.localeCompare(right.title)
   );
+}
+
+export function visibleDesignProjects(
+  projects: readonly DesignProjectSummary[],
+  query: string,
+  filter: DesignHistoryFilter
+): DesignProjectSummary[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  return sortedDesignProjects(projects).filter((project) => {
+    const matchesQuery = !normalized || project.title.toLocaleLowerCase().includes(normalized);
+    const matchesFilter = filter === 'all' ||
+      (filter === 'archived' ? project.status === 'ARCHIVED' : project.status !== 'ARCHIVED');
+    return matchesQuery && matchesFilter;
+  });
 }
 
 export function designCanvasPresentation(input: {
@@ -224,18 +250,19 @@ export function designCanvasClientEvent(
 export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
   const outcome = entry.turn.outcome;
   if (outcome === 'READY') {
-    return { status: 'READY', statusLabel: 'Ready' };
+    return { status: 'READY', statusLabel: 'Ready', tone: 'verified' };
   }
   if (outcome === 'NO_CHANGE') {
-    return { status: 'NO_CHANGE', statusLabel: 'No visual change' };
+    return { status: 'NO_CHANGE', statusLabel: 'No visual change', tone: 'verified' };
   }
   if (outcome === 'CANCELED') {
-    return { status: 'CANCELED', statusLabel: 'Stopped' };
+    return { status: 'CANCELED', statusLabel: 'Stopped', tone: 'idle' };
   }
   if (outcome === 'FAILED' || outcome === 'NEEDS_ATTENTION') {
     return {
       status: 'FAILED',
       statusLabel: 'Update failed',
+      tone: 'blocked',
       detail: entry.turn.failureReason
     };
   }
@@ -250,11 +277,15 @@ export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
       statusLabel:
         entry.runStatus === 'AWAITING_APPROVAL' || entry.runStatus === 'AWAITING_USER_INPUT'
           ? 'Waiting for you'
-          : 'Working'
+          : 'Working',
+      tone:
+        entry.runStatus === 'AWAITING_APPROVAL' || entry.runStatus === 'AWAITING_USER_INPUT'
+          ? 'waiting'
+          : 'working'
     };
   }
   if (entry.runStatus === 'COMPLETED') {
-    return { status: 'RUNNING', statusLabel: 'Preparing preview' };
+    return { status: 'RUNNING', statusLabel: 'Preparing preview', tone: 'working' };
   }
   if (
     entry.runStatus &&
@@ -263,10 +294,11 @@ export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
     return {
       status: 'FAILED',
       statusLabel: 'Needs attention',
+      tone: 'blocked',
       detail: entry.turn.failureReason
     };
   }
-  return { status: 'QUEUED', statusLabel: 'Queued' };
+  return { status: 'QUEUED', statusLabel: 'Queued', tone: 'waiting' };
 }
 
 export function eligibleDesignRuntimeCatalog(
@@ -379,8 +411,31 @@ export function finiteDesignCanvasBounds(
   return bounds;
 }
 
+export function designWorkspaceLayout(
+  width: number,
+  historyCollapsed: boolean,
+  historyWidth = 268
+): DesignWorkspaceLayoutView {
+  const safeWidth = Number.isFinite(width) ? Math.max(0, width) : 0;
+  const safeHistoryWidth = Number.isFinite(historyWidth)
+    ? Math.min(360, Math.max(220, historyWidth))
+    : 268;
+  const mainWidth = Math.max(
+    0,
+    safeWidth - (historyCollapsed ? 0 : safeHistoryWidth + 5)
+  );
+  const splitAvailable = mainWidth >= 780;
+  return {
+    mainWidth,
+    splitAvailable,
+    availableModes: splitAvailable
+      ? ['chat', 'split', 'canvas']
+      : ['chat', 'canvas']
+  };
+}
+
 export function designWorkspaceIsCompact(width: number): boolean {
-  return Number.isFinite(width) && width < 1_020;
+  return Number.isFinite(width) && !designWorkspaceLayout(width, false).splitAvailable;
 }
 
 export function formatDesignUpdatedAt(value: string, now = new Date()): string {

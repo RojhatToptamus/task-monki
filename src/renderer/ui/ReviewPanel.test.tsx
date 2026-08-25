@@ -62,6 +62,8 @@ describe('ReviewPanel', () => {
         gitSnapshot={gitSnapshotFixture()}
         actionBusy={false}
         reviewPending={false}
+        onReviewAgain={() => {}}
+        action={<button type="button">Run review again</button>}
         onStopReview={() => {}}
       />
     );
@@ -71,6 +73,7 @@ describe('ReviewPanel', () => {
     expect(html).toContain('feedface');
     expect(html).toContain('Request can hang');
     expect(html).not.toContain('Run review again');
+    expect(html.match(/Re-review/gu)).toHaveLength(1);
     expect(html).toContain('Blocker');
     expect(html).not.toContain('Major');
     expect(html).not.toContain('Minor');

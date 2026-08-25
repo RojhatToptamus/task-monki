@@ -29,6 +29,7 @@ import { git } from '../core/git/gitCli';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import { DesignSourceService } from '../core/design/DesignSourceService';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
 import { validateRepositoryPath } from '../core/repository/RepositoryPreflight';
@@ -51,7 +52,7 @@ import {
   type DevSeedScenarioGroup
 } from './seedScenarios';
 
-export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v4';
+export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v6';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
 
 function seedSha256(value: string): string {
@@ -81,6 +82,9 @@ export interface DevSeedManifest {
   discourseDir: string;
   agentRuntimeDir: string;
   discourseWorkspaceRoot: string;
+  designRepositoryRoot: string;
+  designWorktreeRoot: string;
+  designDraftRoot: string;
   appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
@@ -93,6 +97,9 @@ export interface DevSeedManifest {
     TASK_MANAGER_DISCOURSE_DIR: string;
     TASK_MANAGER_AGENT_RUNTIME_DIR: string;
     TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: string;
+    TASK_MANAGER_DESIGN_REPOSITORY_ROOT: string;
+    TASK_MANAGER_DESIGN_WORKTREE_ROOT: string;
+    TASK_MANAGER_DESIGN_DRAFT_ROOT: string;
     TASK_MANAGER_PREVIEW_RECONCILE: '0';
     TASK_MANAGER_DETERMINISTIC_SEED: '1';
     TASK_MANAGER_DEV_SEED_MODE: '1';
@@ -104,6 +111,7 @@ export interface DevSeedManifest {
     worktrees: number;
     events: number;
     conversations: number;
+    designs: number;
   };
   scenarios: DevSeedManifestScenario[];
 }
@@ -118,6 +126,9 @@ export interface SeedTaskMonkiDevelopmentDataOptions {
   discourseDir?: string;
   agentRuntimeDir?: string;
   discourseWorkspaceRoot?: string;
+  designRepositoryRoot?: string;
+  designWorktreeRoot?: string;
+  designDraftRoot?: string;
   appSettingsPath?: string;
   scenarioSet?: DevSeedScenarioSet;
   reset?: boolean;
@@ -142,6 +153,9 @@ interface SeedPaths {
   discourseDir: string;
   agentRuntimeDir: string;
   discourseWorkspaceRoot: string;
+  designRepositoryRoot: string;
+  designWorktreeRoot: string;
+  designDraftRoot: string;
   appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
@@ -273,6 +287,9 @@ export async function seedTaskMonkiDevelopmentData(
       relatedTaskIds: result.relatedTaskIds
     });
   }
+  if (scenarioSet === 'all') {
+    await seedDesignScenarios(ctx);
+  }
   await store.createBoard({
     name: 'Secondary repository',
     color: 'VIOLET',
@@ -309,6 +326,9 @@ export async function seedTaskMonkiDevelopmentData(
       TASK_MANAGER_DISCOURSE_DIR: paths.discourseDir,
       TASK_MANAGER_AGENT_RUNTIME_DIR: paths.agentRuntimeDir,
       TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: paths.discourseWorkspaceRoot,
+      TASK_MANAGER_DESIGN_REPOSITORY_ROOT: paths.designRepositoryRoot,
+      TASK_MANAGER_DESIGN_WORKTREE_ROOT: paths.designWorktreeRoot,
+      TASK_MANAGER_DESIGN_DRAFT_ROOT: paths.designDraftRoot,
       TASK_MANAGER_PREVIEW_RECONCILE: '0',
       [DETERMINISTIC_DEV_SEED_ENV_VAR]: '1',
       TASK_MANAGER_DEV_SEED_MODE: '1'
@@ -319,7 +339,8 @@ export async function seedTaskMonkiDevelopmentData(
       runs: snapshot.runs.length,
       worktrees: snapshot.worktrees.length,
       events: snapshot.events.length,
-      conversations: ctx.scenarios.filter((scenario) => scenario.conversationId).length
+      conversations: ctx.scenarios.filter((scenario) => scenario.conversationId).length,
+      designs: (await store.listDesigns()).length
     },
     scenarios: ctx.scenarios
   };
@@ -339,6 +360,112 @@ export async function seedTaskMonkiDevelopmentData(
   await discourseStore.close();
   await store.close();
   return manifest;
+}
+
+async function seedDesignScenarios(ctx: SeedContext): Promise<void> {
+  const source = new DesignSourceService({
+    repositoryRoot: ctx.designRepositoryRoot,
+    worktreeRoot: ctx.designWorktreeRoot
+  });
+  const definitions = [
+    {
+      slug: 'design-starting',
+      brief:
+        '[seed:design-starting] Create a calm release dashboard with a compact summary, one primary action, and a clear activity timeline.'
+    },
+    {
+      slug: 'design-needs-attention',
+      brief:
+        '[seed:design-needs-attention] Refine a focused task review surface with restrained status treatment and readable findings.',
+      outcome: 'NEEDS_ATTENTION' as const,
+      failureReason: 'The seeded Design turn requires provider recovery.'
+    }
+  ];
+
+  for (const definition of definitions) {
+    const creationToken = `seed-${definition.slug}-create`;
+    let repository = await source.prepareBlankRepository({ creationToken });
+    if (definition.slug === 'design-starting') {
+      await fs.writeFile(
+        path.join(repository.path, 'index.html'),
+        [
+          '<!doctype html>',
+          '<html lang="en">',
+          '<meta charset="utf-8">',
+          '<title>Calm release dashboard</title>',
+          '<main><h1>Release dashboard</h1><p>Seeded Design canvas.</p></main>',
+          '</html>',
+          ''
+        ].join('\n'),
+        'utf8'
+      );
+      await git(repository.path, ['add', 'index.html']);
+      await git(repository.path, ['commit', '-m', 'Seed Design canvas']);
+      repository = {
+        ...repository,
+        headSha: (await git(repository.path, ['rev-parse', 'HEAD'])).trim(),
+        checkedAt: new Date().toISOString()
+      };
+    }
+    const created = await ctx.store.createDesignBundle({
+      request: {
+        brief: definition.brief,
+        creationToken,
+        model: DEFAULT_AGENT_SETTINGS.model,
+        reasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort
+      },
+      repository
+    });
+    if (definition.slug === 'design-starting') {
+      if (!created.repository.headSha) {
+        throw new Error('Seeded Design repository is missing its head commit.');
+      }
+      const designWorktrees = new WorktreeService(ctx.designWorktreeRoot);
+      const worktreeSpec = designWorktrees.buildSpecFromBase(created.task, {
+        baseRef: created.repository.branch,
+        baseSha: created.repository.headSha
+      });
+      const iteration = await ctx.store.createIterationAndWorktree({
+        task: created.task,
+        ...worktreeSpec
+      });
+      const worktree = await designWorktrees.create(
+        iteration.worktree,
+        created.repository.path
+      );
+      await ctx.store.updateWorktree(worktree, 'WORKTREE_CREATED');
+      const referenceDraft = await ctx.store.createAttachmentDraft();
+      await ctx.store.stageTaskAttachment({
+        draftId: referenceDraft.id,
+        clientToken: 'seed-design-reference-image',
+        displayName: 'release-dashboard.png',
+        declaredMediaType: 'image/png',
+        bytes: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+          'base64'
+        )
+      });
+      await ctx.store.stageTaskAttachment({
+        draftId: referenceDraft.id,
+        clientToken: 'seed-design-reference-notes',
+        displayName: 'release-notes.txt',
+        declaredMediaType: 'text/plain',
+        bytes: Buffer.from('Keep the dashboard calm, compact, and focused on the next action.\n')
+      });
+      await ctx.store.addDesignReferences({
+        designId: created.task.id,
+        attachmentDraftId: referenceDraft.id
+      });
+    }
+    if (definition.outcome) {
+      await ctx.store.settleDesignTurn({
+        designId: created.task.id,
+        turnId: created.turn.id,
+        outcome: definition.outcome,
+        failureReason: definition.failureReason
+      });
+    }
+  }
 }
 
 async function seedDiscourseScenario(input: {
@@ -1260,6 +1387,15 @@ function resolveSeedPaths(options: SeedTaskMonkiDevelopmentDataOptions): SeedPat
     agentRuntimeDir: path.resolve(options.agentRuntimeDir ?? path.join(rootDir, 'agent-runtime')),
     discourseWorkspaceRoot: path.resolve(
       options.discourseWorkspaceRoot ?? path.join(rootDir, 'discourse-workspaces')
+    ),
+    designRepositoryRoot: path.resolve(
+      options.designRepositoryRoot ?? path.join(rootDir, 'design-repositories')
+    ),
+    designWorktreeRoot: path.resolve(
+      options.designWorktreeRoot ?? path.join(rootDir, 'design-worktrees')
+    ),
+    designDraftRoot: path.resolve(
+      options.designDraftRoot ?? path.join(rootDir, 'design-drafts')
     ),
     appSettingsPath: path.resolve(options.appSettingsPath ?? path.join(rootDir, 'app-settings.json')),
     manifestPath: path.join(rootDir, 'manifest.json'),

@@ -7,6 +7,7 @@ import {
   type FormEvent,
   type KeyboardEvent
 } from 'react';
+import { X } from 'lucide-react';
 import {
   canRedoDiscourseMentionSelection,
   canUndoDiscourseMentionSelection,
@@ -398,7 +399,7 @@ function MentionTokenGroup({
               }}
             >
               {token.labelSnapshot}
-              <span aria-hidden="true">×</span>
+              <X aria-hidden="true" absoluteStrokeWidth size={12} strokeWidth={1.5} />
             </button>
           </li>
         ))}

@@ -18,6 +18,26 @@ afterEach(() => {
 });
 
 describe('mounted Design workspace', () => {
+  it('keeps Design history on its own title-aligned control', () => {
+    const onHistoryCollapsedChange = vi.fn();
+    const view = render(
+      <DesignsWorkspace
+        {...workspaceProps({ onHistoryCollapsedChange })}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide Design history' }));
+    expect(onHistoryCollapsedChange).toHaveBeenCalledWith(true);
+
+    view.rerender(
+      <DesignsWorkspace
+        {...workspaceProps({ historyCollapsed: true, onHistoryCollapsedChange })}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Show Design history' }));
+    expect(onHistoryCollapsedChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('waits for the first list read before it shows the blank form', () => {
     const props = workspaceProps({
       designs: [],
@@ -28,10 +48,10 @@ describe('mounted Design workspace', () => {
     const view = render(<DesignsWorkspace {...props} />);
 
     expect(screen.getByText('Loading Design')).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: 'New blank Design' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'New Design' })).toBeNull();
 
     view.rerender(<DesignsWorkspace {...props} loading={false} />);
-    expect(screen.getByRole('heading', { name: 'New blank Design' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'New Design' })).toBeTruthy();
   });
 
   it('creates one blank Design with the selected compatible model', async () => {
@@ -47,7 +67,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getByRole('heading', { name: 'New blank Design' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'New Design' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Design: Codex · Luna/ })).toBeTruthy();
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
@@ -362,6 +382,8 @@ describe('mounted Design workspace', () => {
 
     expect(screen.getAllByText('Ready').length).toBeGreaterThan(0);
     expect(screen.getByText('Built the first page.')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Conversation' })).toBeNull();
+    expect(screen.queryByText(/Codex\s*·\s*scenario-model\s*·\s*low/)).toBeNull();
     const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
     fireEvent.change(composer, { target: { value: '  Increase the title contrast.  ' } });
     const send = screen.getByRole('button', { name: 'Send' });
@@ -597,9 +619,10 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Files/ }));
-    expect(screen.getByRole('complementary', { name: 'Files and references' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /References/ }));
+    expect(screen.getByRole('dialog', { name: 'Files and references' })).toBeTruthy();
     expect(screen.getByText('brand-notes.txt')).toBeTruthy();
+    fireEvent.click(screen.getByText('Project files'));
     expect(screen.getByText('assets/logo.svg')).toBeTruthy();
     fireEvent.click(screen.getByText('1 removed'));
     expect(screen.getByText('old-direction.md')).toBeTruthy();
@@ -642,7 +665,7 @@ describe('mounted Design workspace', () => {
         })}
       />
     );
-    fireEvent.click(screen.getByRole('button', { name: /Files/ }));
+    fireEvent.click(screen.getByRole('button', { name: /References/ }));
     const first = screen.getByRole('checkbox', { name: /first-direction.txt/ });
     const second = screen.getByRole('checkbox', { name: /second-direction.txt/ });
 
@@ -706,7 +729,7 @@ describe('mounted Design workspace', () => {
         {...workspaceProps({ onStageAttachmentBatch, onAddReferences })}
       />
     );
-    fireEvent.click(screen.getByRole('button', { name: /Files/ }));
+    fireEvent.click(screen.getByRole('button', { name: /References/ }));
     const input = view.container.querySelector<HTMLInputElement>(
       '#design-files-drawer input[type="file"]'
     );
@@ -1106,7 +1129,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Canvas' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Canvas only' }));
     expect(screen.getByText('Canvas is available in the desktop app')).toBeTruthy();
     expect(screen.queryByLabelText('Quiet portfolio preview')).toBeNull();
   });
@@ -1146,7 +1169,15 @@ describe('mounted Design workspace', () => {
       bounds: { x: 12, y: 24, width: 1_200, height: 720 }
     });
     expect(onShowCanvas.mock.calls[0]?.[0]).not.toHaveProperty('url');
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.getByText('v1').getAttribute('aria-current')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Desktop' }).getAttribute('aria-pressed'))
+      .toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Tablet' }));
+    expect(screen.getByRole('button', { name: 'Tablet' }).getAttribute('aria-pressed'))
+      .toBe('true');
+    expect(view.container.querySelector('.tm-design-canvas__viewport')?.getAttribute('data-device'))
+      .toBe('tablet');
+    fireEvent.click(screen.getByRole('button', { name: 'Reload preview' }));
     expect(onRefreshCanvas).toHaveBeenCalledWith({
       designId: 'design-1',
       generationId: 'generation-1',

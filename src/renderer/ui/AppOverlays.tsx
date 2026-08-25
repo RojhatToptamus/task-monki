@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
+import { Trash2 } from 'lucide-react';
 import {
   BOARD_COLORS,
   type Board,
@@ -16,6 +17,7 @@ import type { RepositoryOption } from '../model/repositories';
 import { formatShortId } from '../model/selectors';
 import { ImpactList } from './ImpactList';
 import { RepositoryPicker } from './RepositoryPicker';
+import { StatusGlyph } from './StatusBadge';
 import { useDialogFocusBoundary } from './dialogFocus';
 
 export type NotificationTone = 'info' | 'success' | 'error';
@@ -39,12 +41,12 @@ const BOARD_PHASE_OPTIONS: ReadonlyArray<{ value: WorkflowPhase; label: string }
 ];
 
 const BOARD_COLOR_LABELS: Record<BoardColor, string> = {
-  NEUTRAL: 'Neutral',
-  BLUE: 'Blue',
-  AMBER: 'Amber',
-  GREEN: 'Green',
-  ROSE: 'Rose',
-  VIOLET: 'Violet'
+  NEUTRAL: 'Marker 1',
+  BLUE: 'Marker 2',
+  AMBER: 'Marker 3',
+  GREEN: 'Marker 4',
+  ROSE: 'Marker 5',
+  VIOLET: 'Marker 6'
 };
 
 export function BoardEditorModal({
@@ -139,7 +141,7 @@ export function BoardEditorModal({
         </label>
 
         <fieldset className="tm-board-editor__color">
-          <legend>Color</legend>
+          <legend>Marker</legend>
           <div className="tm-board-editor__swatches">
             {BOARD_COLORS.map((option) => (
               <label
@@ -247,7 +249,15 @@ export function GlobalNotifier({ notifications }: { notifications: AppNotificati
           className={`tm-notifier__item tm-notifier__item--${notification.tone}`}
           key={notification.id}
         >
-          <span className="tm-notifier__dot" />
+          <StatusGlyph
+            kind={
+              notification.tone === 'success'
+                ? 'verified'
+                : notification.tone === 'error'
+                  ? 'blocked'
+                  : 'idle'
+            }
+          />
           <strong>{notification.message}</strong>
         </div>
       ))}
@@ -619,21 +629,5 @@ function describeWorktreeRemoval(
 }
 
 function TrashIcon() {
-  return (
-    <svg
-      width={18}
-      height={18}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M4 7h16" />
-      <path d="M10 11v6M14 11v6" />
-      <path d="M5 7l1 13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-13" />
-      <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
-    </svg>
-  );
+  return <Trash2 aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

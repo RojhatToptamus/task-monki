@@ -1115,6 +1115,7 @@ export interface RefinePromptResponse {
 
 export interface UpdateAppSettingsRequest {
   theme?: import('./agent').TaskManagerThemePreference;
+  themePreset?: import('./agent').TaskManagerThemePreset;
   sidebarCollapsed?: boolean;
   showMascot?: boolean;
   firstLaunchSetupCompleted?: boolean;

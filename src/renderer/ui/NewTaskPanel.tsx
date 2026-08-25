@@ -1,14 +1,17 @@
 import {
   useCallback,
   useEffect,
+  useId,
+  useLayoutEffect,
   useRef,
   useState,
-  type CSSProperties,
   type FormEvent,
   type RefObject
 } from 'react';
+import { Check, ChevronDown, Sparkles, X } from 'lucide-react';
 import type {
   AgentExecutionSettings,
+  AgentExecutionPolicyPreset,
   AgentModel,
   AgentRuntimeState,
   CreateTaskRequest,
@@ -41,8 +44,7 @@ import {
   clampNewTaskPanelWidth,
   DEFAULT_NEW_TASK_PANEL_WIDTH,
   getNewTaskPanelWidthBounds,
-  MAX_NEW_TASK_PANEL_WIDTH,
-  resizeNewTaskPanelFromPointer
+  MAX_NEW_TASK_PANEL_WIDTH
 } from '../model/newTaskPanel';
 import {
   buildRepositoryOptions,
@@ -56,6 +58,9 @@ import {
 } from './AgentModelSelector';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments } from './useTaskAttachments';
+import { PanelResizeHandle } from './PanelResizeHandle';
+import { StatusGlyph } from './StatusBadge';
+import { DisclosureChevron } from './DisclosureChevron';
 
 export interface NewTaskTextDraft {
   title: string;
@@ -83,6 +88,113 @@ interface NewTaskPanelProps {
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
   onResize?(): void;
   onClose(): void;
+}
+
+export function ExecutionPolicySelect({
+  presets,
+  selectedPreset,
+  attachmentsIncluded,
+  disabled,
+  onChange
+}: {
+  presets: readonly AgentExecutionPolicyPreset[];
+  selectedPreset?: AgentExecutionPolicyPreset;
+  attachmentsIncluded: boolean;
+  disabled: boolean;
+  onChange(presetId: string): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const popupId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    if (disabled) {
+      setOpen(false);
+      return undefined;
+    }
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
+  }, [disabled, open]);
+
+  const close = () => setOpen(false);
+
+  return (
+    <div
+      className={`tm-access-select ${open ? 'is-open' : ''}`}
+      ref={rootRef}
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget;
+        if (open && !(nextTarget instanceof Node && event.currentTarget.contains(nextTarget))) {
+          close();
+        }
+      }}
+      onKeyDown={(event) => {
+        if (open && event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          close();
+          triggerRef.current?.focus();
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="tm-access-select__trigger"
+        aria-label={`Execution policy: ${selectedPreset?.label ?? 'Unavailable'}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? popupId : undefined}
+        disabled={disabled || presets.length === 0}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="tm-access-select__summary">
+          <strong>{selectedPreset?.label ?? 'No execution policy'}</strong>
+          <small>{selectedPreset?.detail ?? 'The selected agent does not expose an execution policy.'}</small>
+        </span>
+        <SelectChevronIcon open={open} />
+      </button>
+
+      {open ? (
+        <div className="tm-access-select__menu" id={popupId} role="menu" aria-label="Execution policy">
+          {presets.map((preset) => {
+            const selected = preset.id === selectedPreset?.id;
+            const blockedByAttachments =
+              preset.sandbox === 'DANGER_FULL_ACCESS' && attachmentsIncluded;
+            return (
+              <button
+                type="button"
+                role="menuitemradio"
+                className={`tm-access-select__option ${selected ? 'is-selected' : ''}`}
+                aria-checked={selected}
+                disabled={disabled || blockedByAttachments}
+                key={preset.id}
+                title={blockedByAttachments ? 'Remove attachments to use full access.' : undefined}
+                onClick={() => {
+                  onChange(preset.id);
+                  close();
+                  triggerRef.current?.focus();
+                }}
+              >
+                <span>
+                  <strong>{preset.label}</strong>
+                  <small>{preset.detail}</small>
+                </span>
+                <span className="tm-access-select__check" aria-hidden="true">
+                  {selected ? <SelectCheckIcon /> : null}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function NewTaskPanel({
@@ -133,7 +245,7 @@ export function NewTaskPanel({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
-  const [isResizing, setIsResizing] = useState(false);
+  const slideoverRef = useRef<HTMLDivElement>(null);
   const [panelWidth, setPanelWidth] = useState(() =>
     clampNewTaskPanelWidth(
       DEFAULT_NEW_TASK_PANEL_WIDTH,
@@ -148,9 +260,6 @@ export function NewTaskPanel({
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
-  const resizeStateRef = useRef<{ startX: number; startWidth: number } | undefined>(
-    undefined
-  );
   const taskCreationTokenRef = useRef<string | undefined>(undefined);
   const returnFocusAfterCloseRef = useRef(true);
   // Refinement remains a reversible proposal instead of overwriting user input.
@@ -309,6 +418,10 @@ export function NewTaskPanel({
     return () => window.removeEventListener('resize', resizePanelForViewport);
   }, [onResize]);
 
+  useLayoutEffect(() => {
+    slideoverRef.current?.style.setProperty('--slideover-width', `${panelWidth}px`);
+  }, [panelWidth]);
+
   const closePanel = useCallback(() => {
     if (panelClosedRef.current || submittingRef.current) return;
     closeAttachments();
@@ -462,22 +575,17 @@ export function NewTaskPanel({
     attachmentsHaveErrors ||
     selectedRuntimeRejectsAttachments ||
     selectedModelRejectsImages;
-  const slideoverStyle = {
-    '--slideover-width': `${panelWidth}px`
-  } as CSSProperties;
-
   return (
     <div
-      className={`slideover ${isClosing ? 'slideover--closing' : ''} ${
-        isResizing ? 'slideover--resizing' : ''
-      }`}
-      style={slideoverStyle}
+      ref={slideoverRef}
+      className={`slideover ${isClosing ? 'slideover--closing' : ''}`}
       onDragEnter={enterAttachmentDrag}
       onDragOver={continueAttachmentDrag}
       onDragLeave={leaveAttachmentDrag}
       onDrop={dropAttachments}
     >
       <form
+        id="new-task-panel-content"
         ref={panelRef}
         className="slideover__panel"
         onSubmit={submit}
@@ -497,72 +605,17 @@ export function NewTaskPanel({
         aria-label="New task"
         tabIndex={-1}
       >
-        <div
+        <PanelResizeHandle
           className="slideover__resize"
-          role="separator"
-          aria-label="Resize new task panel"
-          aria-orientation="vertical"
-          aria-valuemin={panelWidthBounds.min}
-          aria-valuemax={panelWidthBounds.max}
-          aria-valuenow={panelWidth}
-          tabIndex={0}
-          title="Resize new task panel"
-          onPointerDown={(event) => {
-            resizeStateRef.current = {
-              startX: event.clientX,
-              startWidth: panelWidth
-            };
-            setIsResizing(true);
-            event.currentTarget.setPointerCapture(event.pointerId);
-          }}
-          onPointerMove={(event) => {
-            const resizeState = resizeStateRef.current;
-            if (!resizeState) {
-              return;
-            }
-            event.preventDefault();
-            setPanelWidth(
-              resizeNewTaskPanelFromPointer(
-                resizeState.startWidth,
-                resizeState.startX,
-                event.clientX,
-                window.innerWidth
-              )
-            );
-            onResize?.();
-          }}
-          onPointerUp={(event) => {
-            resizeStateRef.current = undefined;
-            setIsResizing(false);
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }
-          }}
-          onPointerCancel={(event) => {
-            resizeStateRef.current = undefined;
-            setIsResizing(false);
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'ArrowLeft') {
-              event.preventDefault();
-              resizePanel(panelWidth + 32);
-            } else if (event.key === 'ArrowRight') {
-              event.preventDefault();
-              resizePanel(panelWidth - 32);
-            } else if (event.key === 'Home') {
-              event.preventDefault();
-              resizePanel(panelWidthBounds.min);
-            } else if (event.key === 'End') {
-              event.preventDefault();
-              resizePanel(panelWidthBounds.max);
-            }
-          }}
-        >
-          <span aria-hidden="true" />
-        </div>
+          label="Resize new task panel"
+          value={panelWidth}
+          min={panelWidthBounds.min}
+          max={panelWidthBounds.max}
+          defaultValue={DEFAULT_NEW_TASK_PANEL_WIDTH}
+          direction={-1}
+          controls="new-task-panel-content"
+          onChange={resizePanel}
+        />
         <header className="slideover__header">
           <div className="slideover__heading">
             <strong>New task</strong>
@@ -632,14 +685,8 @@ export function NewTaskPanel({
                     title={refineDisabledReason}
                     onClick={() => void refine()}
                   >
-                    <SparkleIcon />
-                    <span
-                      className={
-                        isRefining
-                          ? 'field__refine-label tm-shimmer-text'
-                          : 'field__refine-label'
-                      }
-                    >
+                    {isRefining ? <StatusGlyph kind="working" /> : <SparkleIcon />}
+                    <span className="field__refine-label">
                       {isRefining ? 'Refining' : 'Refine'}
                     </span>
                   </button>
@@ -705,7 +752,6 @@ export function NewTaskPanel({
                   className="task-attachment-message task-attachment-message--error"
                   role="alert"
                 >
-                  <span aria-hidden="true" />
                   {attachmentModelError}
                 </p>
               ) : null}
@@ -737,7 +783,7 @@ export function NewTaskPanel({
                   ? ` · ${formatReasoningEffort(effectiveReasoningEffort)}`
                   : ''}
               </span>
-              <ChevronIcon />
+              <DisclosureChevron />
             </summary>
 
             <div className="newtask-settings__content">
@@ -765,34 +811,13 @@ export function NewTaskPanel({
                   <div className="tm-agent-console__row">
                     <span className="tm-agent-console__label">Access</span>
                     <div className="tm-agent-console__access">
-                      <div
-                        className="tm-agent-console__access-options"
-                        role="group"
-                        aria-label="Execution policy"
-                      >
-                        {permissionPresets.map((preset) => {
-                          const presetDisabled =
-                            preset.sandbox === 'DANGER_FULL_ACCESS' &&
-                            activeAttachmentItems.length > 0;
-                          return (
-                            <button
-                              type="button"
-                              className={preset.id === permissionPreset?.id ? 'is-selected' : ''}
-                              aria-pressed={preset.id === permissionPreset?.id}
-                              disabled={composerLocked || presetDisabled}
-                              key={preset.id}
-                              title={presetDisabled ? 'Remove attachments to use full access.' : undefined}
-                              onClick={() => setPermissionPresetId(preset.id)}
-                            >
-                              {preset.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <small>
-                        {permissionPreset?.detail ??
-                          'The selected agent does not expose an execution policy.'}
-                      </small>
+                      <ExecutionPolicySelect
+                        presets={permissionPresets}
+                        selectedPreset={permissionPreset}
+                        attachmentsIncluded={activeAttachmentItems.length > 0}
+                        disabled={composerLocked}
+                        onChange={setPermissionPresetId}
+                      />
                     </div>
                   </div>
                 }
@@ -896,44 +921,28 @@ export function NewTaskPanel({
   );
 }
 
-function SparkleIcon() {
+function SelectChevronIcon({ open }: { open: boolean }) {
   return (
-    <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none">
-      <path
-        d="M12 3l1.9 4.8L19 9.5l-4 3.4L16 18l-4-2.7L8 18l1-5.1-4-3.4 5.1-.7z"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <ChevronDown
+      absoluteStrokeWidth
+      className={`tm-access-select__chevron ${open ? 'tm-access-select__chevron--open' : ''}`}
+      aria-hidden="true"
+      size={12}
+      strokeWidth={1.5}
+    />
   );
+}
+
+function SelectCheckIcon() {
+  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
+}
+
+function SparkleIcon() {
+  return <Sparkles aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
 }
 
 function CloseIcon() {
-  return (
-    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none">
-      <path
-        d="m7 7 10 10M17 7 7 17"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function ChevronIcon() {
-  return (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none">
-      <path
-        d="m8 10 4 4 4-4"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <X aria-hidden="true" absoluteStrokeWidth size={15} strokeWidth={1.5} />;
 }
 
 function RefinementProposal({

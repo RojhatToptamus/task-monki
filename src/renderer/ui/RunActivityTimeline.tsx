@@ -1,5 +1,17 @@
 import { useState } from 'react';
+import {
+  CircleAlert,
+  Clock3,
+  FileText,
+  MessageSquareText,
+  Pencil,
+  Search,
+  SquareTerminal,
+  Wrench,
+  type LucideIcon
+} from 'lucide-react';
 import type { OverviewActivityLeaf, OverviewActivityRow } from '../model/overviewRunActivity';
+import { DisclosureChevron } from './DisclosureChevron';
 
 interface RunActivityTimelineProps {
   rows: OverviewActivityRow[];
@@ -66,6 +78,7 @@ function ActivityRow({ row }: { row: OverviewActivityRow }) {
         <summary className="tm-run-activity__summary">
           <ActivityIcon icon={row.icon} />
           <ActivityCopy row={row} />
+          <DisclosureChevron className="tm-run-activity__chevron" />
         </summary>
         <div className="tm-run-activity__children">
           {row.children?.map((child) => (
@@ -118,58 +131,15 @@ function ActivityIcon({ icon }: { icon: OverviewActivityLeaf['icon'] }) {
 }
 
 function ActivitySvg({ icon }: { icon: OverviewActivityLeaf['icon'] }) {
-  if (icon === 'message') {
-    return (
-      <svg viewBox="0 0 16 16" fill="none">
-        <path d="M3.5 3.5h9v6h-4L5 12v-2.5H3.5z" />
-        <path d="M5 5.75h6M5 7.75h3" />
-      </svg>
-    );
-  }
-  if (icon === 'terminal' || icon === 'error') {
-    return (
-      <svg viewBox="0 0 16 16" fill="none">
-        <path d="M2.75 3.25h10.5v9.5H2.75z" />
-        <path d="m5 6 2 2-2 2M8.25 10h3" />
-      </svg>
-    );
-  }
-  if (icon === 'search') {
-    return (
-      <svg viewBox="0 0 16 16" fill="none">
-        <circle cx="7" cy="7" r="3.75" />
-        <path d="m10 10 3 3" />
-      </svg>
-    );
-  }
-  if (icon === 'edit') {
-    return (
-      <svg viewBox="0 0 16 16" fill="none">
-        <path d="M3.25 11.5 4 8.75l5.5-5.5 2.25 2.25-5.5 5.5z" />
-        <path d="M8.75 4 11 6.25M3 13h10" />
-      </svg>
-    );
-  }
-  if (icon === 'wait') {
-    return (
-      <svg viewBox="0 0 16 16" fill="none">
-        <circle cx="8" cy="8" r="5" />
-        <path d="M8 5v3l2 1.5" />
-      </svg>
-    );
-  }
-  if (icon === 'tool') {
-    return (
-      <svg viewBox="0 0 16 16" fill="none">
-        <path d="M6 3.25 3.25 6 5 7.75l2.75-2.75M8.25 8.25 11 5.5 12.75 7.25 10 10" />
-        <path d="m6.5 9.5-3 3M9.5 6.5l3-3" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 16 16" fill="none">
-      <path d="M4.25 2.75h5L12 5.5v7.75H4.25z" />
-      <path d="M9.25 2.75V5.5H12" />
-    </svg>
-  );
+  const components: Partial<Record<OverviewActivityLeaf['icon'], LucideIcon>> = {
+    edit: Pencil,
+    error: CircleAlert,
+    message: MessageSquareText,
+    search: Search,
+    terminal: SquareTerminal,
+    tool: Wrench,
+    wait: Clock3
+  };
+  const Component = components[icon] ?? FileText;
+  return <Component absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

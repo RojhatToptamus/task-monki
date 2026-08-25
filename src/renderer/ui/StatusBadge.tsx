@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import { CircleCheck, CircleChevronRight, CircleX, LoaderCircle } from 'lucide-react';
 import { formatStatusValue } from './display';
 
 interface StatusBadgeProps {
@@ -30,7 +30,6 @@ export function StatusChip({ label, value, tone = 'neutral', muted = false }: St
   ].filter(Boolean);
   return (
     <span className={classes.join(' ')}>
-      <span className="status-pill__dot" aria-hidden="true" />
       <span className="status-pill__label">{label}</span>
       <strong className="status-pill__value">{formatStatusValue(value)}</strong>
     </span>
@@ -53,22 +52,76 @@ export function Chip({
   const classes = [
     'status-pill',
     `status-pill--${tone}`,
+    !showDot ? 'status-pill--word-only' : '',
     compact ? 'status-pill--compact' : ''
   ].filter(Boolean);
 
   return (
     <span className={classes.join(' ')}>
-      {showDot ? <span className="status-pill__dot" aria-hidden="true" /> : null}
+      {showDot ? <StatusGlyph kind={statusKindForTone(tone, false)} /> : null}
       <span className="status-pill__label">{label}</span>
     </span>
   );
 }
 
-export function dotStyle(tone: StatusPillTone): CSSProperties {
-  return { background: `var(--${tone})` };
+export type StatusGlyphKind = 'working' | 'waiting' | 'blocked' | 'verified' | 'idle';
+
+export function StatusGlyph({
+  kind,
+  className = '',
+  animate = kind === 'working'
+}: {
+  kind: StatusGlyphKind;
+  className?: string;
+  animate?: boolean;
+}) {
+  if (kind === 'idle') return null;
+  const classes = [
+    'tm-status-glyph',
+    `tm-status-glyph--${kind}`,
+    !animate ? 'tm-status-glyph--static' : '',
+    className
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const Component = kind === 'working'
+    ? LoaderCircle
+    : kind === 'waiting'
+      ? CircleChevronRight
+      : kind === 'blocked'
+        ? CircleX
+        : CircleCheck;
+  return (
+    <Component
+      absoluteStrokeWidth
+      aria-hidden="true"
+      className={classes}
+      size={14}
+      strokeWidth={1.5}
+    />
+  );
 }
 
-function toneForValue(value: string): StatusBadgeProps['tone'] {
+export function statusKindForTone(
+  tone: StatusPillTone | 'warning',
+  running: boolean
+): StatusGlyphKind {
+  if (running) return 'working';
+  if (tone === 'action' || tone === 'warning') return 'waiting';
+  if (tone === 'error') return 'blocked';
+  if (tone === 'success') return 'verified';
+  return 'idle';
+}
+
+export function statusKindForAvailabilityTone(tone: string): StatusGlyphKind {
+  if (tone === 'ok' || tone === 'success' || tone === 'ready') return 'verified';
+  if (tone === 'error' || tone === 'blocked') return 'blocked';
+  if (tone === 'warning' || tone === 'action' || tone === 'pending') return 'waiting';
+  if (tone === 'working' || tone === 'info') return 'working';
+  return 'idle';
+}
+
+function toneForValue(value: string): NonNullable<StatusBadgeProps['tone']> {
   if (
     ['COMPLETED', 'PASSED', 'PRESENT', 'VALID', 'HEALTHY', 'CLEAN', 'PUSHED', 'READY', 'OPEN_READY', 'MERGED', 'PASSING', 'APPROVED', 'SATISFIED'].includes(value)
   ) {

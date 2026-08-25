@@ -1,4 +1,5 @@
 import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { CircleCheck, GitFork } from 'lucide-react';
 import type {
   AgentInteractionDecision,
   Board,
@@ -19,13 +20,13 @@ import { shouldShowTaskRepository } from '../model/boards';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import type { RepositorySetupState } from '../model/repositories';
 import { describeTaskAttention } from '../model/taskAttention';
-import { Chip, dotStyle } from './StatusBadge';
+import { Chip } from './StatusBadge';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import {
   SettingsView
 } from './SettingsView';
 import { FirstLaunchSetup } from './FirstLaunchSetup';
-import type { ThemePreference } from './theme';
+import type { ThemePreference, ThemePreset } from './theme';
 import {
   BOARD_COLUMNS,
   buildTaskCardVM,
@@ -47,6 +48,7 @@ interface MainColumnProps {
   interactionRequests: InteractionRequestRecord[];
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
+  onPreviewThemePreset(themePreset: ThemePreset | null): void;
   appSettings: TaskManagerAppSettings;
   onSetAppSettings(
     settings: UpdateAppSettingsRequest,
@@ -134,6 +136,7 @@ export function MainColumn({
   interactionRequests,
   theme,
   onSetTheme,
+  onPreviewThemePreset,
   appSettings,
   onSetAppSettings,
   externalToolStatus,
@@ -174,7 +177,7 @@ export function MainColumn({
   return (
     <main className="tm-main">
       <div className="tm-main__head">
-        <div style={{ minWidth: 0 }}>
+        <div className="tm-main__head-copy">
           <h1 className="tm-main__title">
             {showRepositorySetup ? setupHead.title : board?.name ?? head.title}
           </h1>
@@ -245,6 +248,7 @@ export function MainColumn({
         <SettingsView
           theme={theme}
           onSetTheme={onSetTheme}
+          onPreviewThemePreset={onPreviewThemePreset}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
           externalToolStatus={externalToolStatus}
@@ -323,7 +327,6 @@ function BoardKanban({
         return (
           <section className="tm-col" key={column.key}>
             <div className="tm-col__head">
-              <span className="tm-col__dot" style={dotStyle(column.tone)} />
               <h2 className="tm-col__label">{column.label}</h2>
               <span className="tm-col__count">{cards.length}</span>
             </div>
@@ -400,6 +403,7 @@ function CardGrid({
               vm={buildTaskCardVM(task, {
                 showReviewCount,
                 columnKey: view === 'active' ? 'progress' : view,
+                statusContext: view === 'active' ? 'active' : undefined,
                 ...selectTaskCardRepositoryIdentity(
                   task.repositoryId,
                   repositoriesById,
@@ -478,7 +482,8 @@ export function TaskCard({
         </div>
         {vm.lineage ? (
           <div className="tm-card__lineage">
-            <span aria-hidden="true">↳</span> {vm.lineage}
+            <GitFork aria-hidden="true" absoluteStrokeWidth size={12} strokeWidth={1.5} />
+            <span>{vm.lineage}</span>
           </div>
         ) : null}
         {vm.evidence.length > 0 ? (
@@ -543,7 +548,9 @@ function Inbox({
       <div className="tm-inbox__inner">
         {decisions.length === 0 ? (
           <div className="tm-inbox__empty">
-            <span className="tm-inbox__empty-mark">✓</span>
+            <span className="tm-inbox__empty-mark">
+              <CircleCheck aria-hidden="true" absoluteStrokeWidth size={18} strokeWidth={1.5} />
+            </span>
             <strong>All clear</strong>
             <span>Nothing needs your decision. The pipeline is running itself.</span>
           </div>

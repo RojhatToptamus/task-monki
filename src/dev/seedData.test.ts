@@ -66,7 +66,10 @@ describe('Task Monki development seed data', () => {
     expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
     expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(settings.firstLaunchSetupCompleted).toBe(true);
-    expect(snapshot.repositories).toHaveLength(2);
+    expect(snapshot.repositories).toHaveLength(4);
+    expect(
+      snapshot.repositories.filter((repository) => repository.kind === 'DESIGN_MANAGED')
+    ).toHaveLength(2);
     const primaryRepository = snapshot.repositories.find(
       (repository) => repository.name === path.basename(manifest.repositoryPath)
     );
@@ -88,6 +91,9 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_DISCOURSE_DIR: manifest.discourseDir,
       TASK_MANAGER_AGENT_RUNTIME_DIR: manifest.agentRuntimeDir,
       TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: manifest.discourseWorkspaceRoot,
+      TASK_MANAGER_DESIGN_REPOSITORY_ROOT: manifest.designRepositoryRoot,
+      TASK_MANAGER_DESIGN_WORKTREE_ROOT: manifest.designWorktreeRoot,
+      TASK_MANAGER_DESIGN_DRAFT_ROOT: manifest.designDraftRoot,
       TASK_MANAGER_PREVIEW_RECONCILE: '0',
       TASK_MANAGER_DETERMINISTIC_SEED: '1',
       TASK_MANAGER_DEV_SEED_MODE: '1'
@@ -131,6 +137,40 @@ describe('Task Monki development seed data', () => {
     expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
       taskForScenario(manifest, snapshot, 'board-backlog').id
     ]);
+  });
+
+  it('materializes Design starting and recovery states', async () => {
+    const store = new FileTaskStore(manifest.storeDir);
+    try {
+      const designs = await store.listDesigns();
+      expect(manifest.counts.designs).toBe(2);
+      expect(designs).toHaveLength(2);
+      expect(designs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: expect.stringContaining('[seed:design-starting]'),
+            status: 'STARTING'
+          }),
+          expect.objectContaining({
+            title: expect.stringContaining('[seed:design-needs-attention]'),
+            status: 'NEEDS_ATTENTION'
+          })
+        ])
+      );
+      const starting = designs.find((design) => design.status === 'STARTING');
+      expect(starting).toBeTruthy();
+      const startingDetail = await store.getDesignDetail(starting!.id);
+      expect(startingDetail.currentWorktree).toMatchObject({ status: 'PRESENT' });
+      expect(startingDetail.references).toHaveLength(2);
+      expect(startingDetail.attachments.map((attachment) => attachment.displayName)).toEqual([
+        'release-dashboard.png',
+        'release-notes.txt'
+      ]);
+      await expect(fs.readFile(path.join(startingDetail.currentWorktree!.worktreePath, 'index.html'), 'utf8'))
+        .resolves.toContain('Release dashboard');
+    } finally {
+      await store.close();
+    }
   });
 
   it('materializes discourse running, partial, review, correction, queue, stale, and recovery states', async () => {

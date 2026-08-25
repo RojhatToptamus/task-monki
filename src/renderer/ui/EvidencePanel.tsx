@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import {
+  Check,
+  ListFilter,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  X
+} from 'lucide-react';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
@@ -11,6 +19,7 @@ import type {
   RunRecord,
   WorktreeRecord
 } from '../../shared/contracts';
+import { DisclosureChevron } from './DisclosureChevron';
 import {
   buildDiffFileTree,
   filterDiffFiles,
@@ -99,6 +108,7 @@ export function EvidencePanel({
   const [filePanelCollapsed, setFilePanelCollapsed] = useState(false);
   const [diffBrowserHeight, setDiffBrowserHeight] = useState(DEFAULT_DIFF_BROWSER_HEIGHT);
   const resizeStateRef = useRef<{ startY: number; startHeight: number } | undefined>(undefined);
+  const diffBrowserRef = useRef<HTMLElement>(null);
   const filterMenuRootRef = useRef<HTMLDivElement>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
   const filterMenuTriggerRef = useRef<HTMLButtonElement>(null);
@@ -189,11 +199,15 @@ export function EvidencePanel({
   const diffBrowserClassName = `tm-diffbrowser ${
     filePanelCollapsed ? 'tm-diffbrowser--files-collapsed' : ''
   }`;
-  const diffBrowserStyle = {
-    '--tm-diffbrowser-height': `${diffBrowserHeight}px`
-  } as CSSProperties;
   const filePanelToggleLabel = filePanelCollapsed ? 'Expand file panel' : 'Collapse file panel';
   const showDiffViewerEmpty = filePanelCollapsed;
+
+  useLayoutEffect(() => {
+    diffBrowserRef.current?.style.setProperty(
+      '--tm-diffbrowser-height',
+      `${diffBrowserHeight}px`
+    );
+  }, [diffBrowserHeight]);
 
   function toggleDirectory(directoryId: string) {
     setCollapsedDirectoryIds((current) => {
@@ -239,7 +253,7 @@ export function EvidencePanel({
     <>
       {artifactError ? <p className="form-error">{artifactError}</p> : null}
 
-      <section className={diffBrowserClassName} aria-label="Changed files" style={diffBrowserStyle}>
+      <section ref={diffBrowserRef} className={diffBrowserClassName} aria-label="Changed files">
         <aside className="tm-diffbrowser__files">
           <div className="tm-diffbrowser__files-head">
             {!filePanelCollapsed ? (
@@ -269,19 +283,13 @@ export function EvidencePanel({
                 />
                 <div className="tm-filefilter">
                   <div className="tm-filefilter__search">
-                    <svg
+                    <Search
+                      absoluteStrokeWidth
                       className="tm-filefilter__search-icon"
-                      width="14"
-                      height="14"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
+                      size={14}
+                      strokeWidth={1.5}
                       aria-hidden="true"
-                    >
-                      <circle cx="11" cy="11" r="7" />
-                      <path d="M21 21l-4.3-4.3" />
-                    </svg>
+                    />
                     <input
                       type="search"
                       value={fileFilter}
@@ -296,7 +304,7 @@ export function EvidencePanel({
                         aria-label="Clear file filter"
                         onClick={() => setFileFilter('')}
                       >
-                        ×
+                        <X aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />
                       </button>
                     ) : null}
                   </div>
@@ -329,19 +337,12 @@ export function EvidencePanel({
                         setFilterMenuOpen((open) => !open);
                       }}
                     >
-                      <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
+                      <ListFilter
+                        absoluteStrokeWidth
+                        size={15}
+                        strokeWidth={1.5}
                         aria-hidden="true"
-                      >
-                        <line x1="4" y1="7" x2="20" y2="7" />
-                        <line x1="7" y1="12" x2="17" y2="12" />
-                        <line x1="10" y1="17" x2="14" y2="17" />
-                      </svg>
+                      />
                     </button>
                     {filterMenuOpen ? (
                       <div
@@ -378,24 +379,21 @@ export function EvidencePanel({
                           >
                             <span className="tm-filefilter__status-label">
                               <span
-                                className={`tm-filefilter__status-dot tm-filefilter__status-dot--${option.value}`}
+                                className={`tm-filefilter__status-mark tm-filefilter__status-mark--${option.value}`}
                                 aria-hidden="true"
-                              />
+                              >
+                                {fileStatusMark(option.value)}
+                              </span>
                               <span>{option.label}</span>
                             </span>
                             {statusFilter === option.value ? (
-                              <svg
+                              <Check
+                                absoluteStrokeWidth
                                 className="tm-filefilter__check"
-                                width="13"
-                                height="13"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2.4"
+                                size={13}
+                                strokeWidth={1.5}
                                 aria-hidden="true"
-                              >
-                                <path d="M5 12l5 5L20 6" />
-                              </svg>
+                              />
                             ) : null}
                           </button>
                         ))}
@@ -518,7 +516,7 @@ export function EvidencePanel({
       <details className="tm-evidence-summary" aria-label="Verified evidence">
         <summary className="tm-evidence-summary__head">
           <span className="tm-evidence-summary__title">
-            <span className="tm-evidence-summary__caret" aria-hidden="true">›</span>
+            <DisclosureChevron className="tm-evidence-summary__caret" />
             <h3>Verified evidence</h3>
           </span>
           <span className="tm-evidence-summary__strip">
@@ -696,10 +694,6 @@ function DiffTreeRow({
   onSelectFile(fileId: string): void;
   onOpenPathMenu?(relativePath: string, event: MouseEvent): void;
 }) {
-  const rowStyle = {
-    '--tm-difftree-indent': `${depth * 14}px`
-  } as CSSProperties;
-
   if (node.type === 'directory') {
     const collapsed = collapsedDirectoryIds.has(node.id);
     return (
@@ -708,7 +702,7 @@ function DiffTreeRow({
           type="button"
           className="tm-difftree__row tm-difftree__row--directory"
           aria-expanded={!collapsed}
-          style={rowStyle}
+          ref={(element) => setDiffTreeIndent(element, depth)}
           onClick={() => onToggleDirectory(node.id)}
           onContextMenu={(event) => onOpenPathMenu?.(node.path, event)}
           onKeyDown={(event) => {
@@ -756,7 +750,7 @@ function DiffTreeRow({
           selected ? 'tm-difftree__row--selected' : ''
         }`}
         aria-current={selected ? 'true' : undefined}
-        style={rowStyle}
+        ref={(element) => setDiffTreeIndent(element, depth)}
         title={node.path}
         onClick={() => onSelectFile(node.file.id)}
         onContextMenu={(event) => onOpenPathMenu?.(node.file.path, event)}
@@ -815,7 +809,6 @@ function DiffFileView({
         {file.blocks.map((block) => (
           <section className="tm-diffblock" key={block.id}>
             <div className={`tm-diffblock__label tm-diffblock__label--${block.source}`}>
-              <span className={`tm-diffsource-dot tm-diffsource-dot--${block.source}`} />
               <strong>{blockTitle(block.source)}</strong>
               <span>{diffBlockLineCount(block.lines)}</span>
             </div>
@@ -866,40 +859,12 @@ function FilePanelToggleButton({
 }
 
 function ChevronIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.4"
-      aria-hidden="true"
-    >
-      <path d="M9 6l6 6-6 6" />
-    </svg>
-  );
+  return <DisclosureChevron className={className} />;
 }
 
 function PanelToggleIcon({ collapsed }: { collapsed: boolean }) {
-  return (
-    <svg
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="4" y="5" width="16" height="14" rx="2" />
-      <path d="M10 5v14" />
-      <path d={collapsed ? 'M14 9l3 3-3 3' : 'M17 9l-3 3 3 3'} />
-    </svg>
-  );
+  const Component = collapsed ? PanelLeftOpen : PanelLeftClose;
+  return <Component aria-hidden="true" absoluteStrokeWidth size={15} strokeWidth={1.5} />;
 }
 
 function StatusIcon({ status }: { status: DiffFile['status'] }) {
@@ -911,6 +876,18 @@ function StatusIcon({ status }: { status: DiffFile['status'] }) {
       {statusShortLabel(status)}
     </span>
   );
+}
+
+function fileStatusMark(status: DiffFileStatusFilter): string {
+  if (status === 'all') return '∗';
+  if (status === 'modified') return 'M';
+  if (status === 'added') return 'A';
+  if (status === 'deleted') return 'D';
+  return 'R';
+}
+
+function setDiffTreeIndent(element: HTMLElement | null, depth: number): void {
+  element?.style.setProperty('--tm-difftree-indent', `${depth * 14}px`);
 }
 
 function DiffStat({ additions, deletions }: { additions: number; deletions: number }) {

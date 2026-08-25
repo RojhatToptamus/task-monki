@@ -12,12 +12,14 @@ import {
   designProjectStatus,
   designStatusView,
   designTurnView,
+  designWorkspaceLayout,
   designWorkspaceIsCompact,
   eligibleDesignRuntimeCatalog,
   finiteDesignCanvasBounds,
   mergeDesignConversationPage,
   mergeDesignDetailHistory,
   sortedDesignProjects,
+  visibleDesignProjects,
   type DesignProjectDetail
 } from './designs';
 
@@ -112,6 +114,21 @@ describe('Design workspace view model', () => {
 
     expect(sortedDesignProjects(input).map(({ id }) => id)).toEqual(['newer', 'older']);
     expect(input.map(({ id }) => id)).toEqual(['older', 'newer']);
+  });
+
+  it('filters Design history without changing its authoritative summaries', () => {
+    const input = [
+      designListItem({ id: 'active', title: 'Launch page', status: 'READY' }),
+      designListItem({ id: 'archived', title: 'Old launch', status: 'ARCHIVED' })
+    ];
+
+    expect(visibleDesignProjects(input, 'launch', 'active').map(({ id }) => id)).toEqual([
+      'active'
+    ]);
+    expect(visibleDesignProjects(input, '', 'archived').map(({ id }) => id)).toEqual([
+      'archived'
+    ]);
+    expect(input).toHaveLength(2);
   });
 
   it('keeps a last ready canvas visible while an update runs', () => {
@@ -298,9 +315,19 @@ describe('Design workspace view model', () => {
     ).toBeUndefined();
   });
 
-  it('switches to one-pane tabs only below the workspace threshold', () => {
-    expect(designWorkspaceIsCompact(1_019)).toBe(true);
-    expect(designWorkspaceIsCompact(1_020)).toBe(false);
+  it('offers split only when the remaining main workspace can render it truthfully', () => {
+    expect(designWorkspaceLayout(1_052, false)).toMatchObject({
+      splitAvailable: false,
+      availableModes: ['chat', 'canvas']
+    });
+    expect(designWorkspaceLayout(1_053, false)).toMatchObject({
+      splitAvailable: true,
+      availableModes: ['chat', 'split', 'canvas']
+    });
+    expect(designWorkspaceLayout(780, true).splitAvailable).toBe(true);
+    expect(designWorkspaceLayout(1_100, false, 320).mainWidth).toBe(775);
+    expect(designWorkspaceIsCompact(1_052)).toBe(true);
+    expect(designWorkspaceIsCompact(1_053)).toBe(false);
     expect(designWorkspaceIsCompact(Number.NaN)).toBe(false);
   });
 });

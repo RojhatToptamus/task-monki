@@ -23,6 +23,7 @@ describe('AppSettingsStore', () => {
     expect(settings).toMatchObject({
       schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
       theme: 'device',
+      themePreset: 'umber',
       sidebarCollapsed: false,
       showMascot: true,
       firstLaunchSetupCompleted: false,
@@ -96,6 +97,27 @@ describe('AppSettingsStore', () => {
     expect(() => normalizeAppSettings({ schemaVersion: 3 })).toThrow(
       'Unsupported Task Monki app settings schema 3'
     );
+  });
+
+  it('migrates the previous settings schema to the default palette preset', () => {
+    const previous = currentSettings();
+    const { themePreset: _themePreset, ...withoutPreset } = previous;
+
+    expect(normalizeAppSettings({ ...withoutPreset, schemaVersion: 9 })).toMatchObject({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+      themePreset: 'umber'
+    });
+  });
+
+  it('persists only supported theme presets', async () => {
+    const store = new MemoryAppSettingsStore();
+
+    await expect(store.update({ themePreset: 'nocturne' })).resolves.toMatchObject({
+      themePreset: 'nocturne'
+    });
+    await expect(
+      store.update({ themePreset: 'unknown' as 'graphite' })
+    ).rejects.toThrow('Theme preset is not supported.');
   });
 
   it('rejects incomplete current-schema settings instead of filling defaults', () => {

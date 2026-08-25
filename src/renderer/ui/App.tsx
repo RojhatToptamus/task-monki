@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -86,16 +87,30 @@ import {
   resolveRepositorySetupState,
   resolveSelectedRepositoryId
 } from '../model/repositories';
+import { appendUniqueNotification } from '../model/notifications';
+import {
+  focusedPanelWidth,
+  focusedWorkspaceHistoryCollapsed,
+  focusedWorkspaceUsesCompactHistory,
+  persistFocusedPanelWidth,
+  persistFocusedWorkspaceHistoryCollapsed
+} from '../model/workspaceLayout';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { MainColumn } from './MainColumn';
-import { resolveTheme, type ThemePreference } from './theme';
+import {
+  applyThemeToRoot,
+  resolveTheme,
+  resolveThemePreset,
+  type ThemePreference,
+  type ThemePreset
+} from './theme';
 import { computeNavCounts, type NavView } from '../model/taskView';
 import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
 import { DesignsWorkspace } from './DesignsWorkspace';
-import { DiscourseNavIcon } from './DiscourseIcons';
+import { PanelResizeHandle } from './PanelResizeHandle';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
 import {
   BoardEditorModal,
@@ -112,10 +127,12 @@ import {
   ArrowRightIcon,
   BoardIcon,
   DesignIcon,
+  DiscourseIcon,
   DoneIcon,
   InboxIcon,
   NavItem,
   PanelIcon,
+  PlusIcon,
   ReviewIcon,
   SavedViewsFolderIcon,
   SettingsIcon
@@ -189,6 +206,14 @@ export function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [view, setView] = useState<AppView>('board');
+  const [designHistoryCollapsed, setDesignHistoryCollapsed] = useState(() =>
+    focusedWorkspaceHistoryCollapsed('designs') ||
+    focusedWorkspaceUsesCompactHistory(window.innerWidth)
+  );
+  const [discourseHistoryCollapsed, setDiscourseHistoryCollapsed] = useState(() =>
+    focusedWorkspaceHistoryCollapsed('discourse') ||
+    focusedWorkspaceUsesCompactHistory(window.innerWidth)
+  );
   const [discourseAttentionCount, setDiscourseAttentionCount] = useState(0);
   const [designs, setDesigns] = useState<DesignListItem[]>([]);
   const [selectedDesignId, setSelectedDesignId] = useState<string | undefined>();
@@ -221,16 +246,24 @@ export function App() {
   const [appSettings, setAppSettings] = useState<TaskManagerAppSettings>(
     DEFAULT_TASK_MANAGER_APP_SETTINGS
   );
+  const [previewThemePreset, setPreviewThemePreset] = useState<ThemePreset | null>(null);
+  const [appSidebarWidth, setAppSidebarWidth] = useState(() =>
+    focusedPanelWidth('app-navigation', 176, 176, 240)
+  );
   const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
   const [runtimeCatalog, setRuntimeCatalog] = useState<AgentRuntimeCatalog>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isCanvasDragging, setIsCanvasDragging] = useState(false);
   const newTaskButtonRef = useRef<HTMLButtonElement>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
+  const focusedHistoryCompactRef = useRef(
+    focusedWorkspaceUsesCompactHistory(window.innerWidth)
+  );
   const taskDetailHeadingRef = useRef<HTMLHeadingElement>(null);
   const taskNavigationReturnFocusRef = useRef<HTMLElement | null>(null);
   const taskNavigationReturnIdRef = useRef<string | undefined>(undefined);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
+  const canvasContentRef = useRef<HTMLDivElement>(null);
   const canvasPanFrameRef = useRef<number | undefined>(undefined);
   const canvasResizeFrameRef = useRef<number | undefined>(undefined);
   const canvasDragRef = useRef<
@@ -421,7 +454,7 @@ export function App() {
   }, []);
   const notify = useCallback((message: string, tone: NotificationTone = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setNotifications((current) => [...current.slice(-2), { id, tone, message }]);
+    setNotifications((current) => appendUniqueNotification(current, { id, tone, message }));
     window.setTimeout(() => {
       setNotifications((current) => current.filter((notification) => notification.id !== id));
     }, 4200);
@@ -491,9 +524,29 @@ export function App() {
     },
     [updateAppSettings]
   );
+  useEffect(() => {
+    const handleFocusedHistoryResize = () => {
+      const compact = focusedWorkspaceUsesCompactHistory(window.innerWidth);
+      if (compact === focusedHistoryCompactRef.current) return;
+      focusedHistoryCompactRef.current = compact;
+      if (compact) {
+        setDesignHistoryCollapsed(true);
+        setDiscourseHistoryCollapsed(true);
+        return;
+      }
+      setDesignHistoryCollapsed(focusedWorkspaceHistoryCollapsed('designs'));
+      setDiscourseHistoryCollapsed(focusedWorkspaceHistoryCollapsed('discourse'));
+    };
+    window.addEventListener('resize', handleFocusedHistoryResize);
+    return () => window.removeEventListener('resize', handleFocusedHistoryResize);
+  }, []);
   const toggleSidebar = useCallback(() => {
     void updateAppSettings({ sidebarCollapsed: !appSettings.sidebarCollapsed }, '');
   }, [appSettings.sidebarCollapsed, updateAppSettings]);
+
+  useLayoutEffect(() => {
+    canvasContentRef.current?.style.setProperty('--app-sidebar-width', `${appSidebarWidth}px`);
+  }, [appSidebarWidth]);
 
   const refresh = useCallback(async () => {
     await Promise.all([
@@ -1384,7 +1437,13 @@ export function App() {
   ]);
 
   const theme = appSettings.theme;
+  const themePreset = resolveThemePreset(appSettings.themePreset);
+  const activeThemePreset = previewThemePreset ?? themePreset;
+  useLayoutEffect(() => {
+    applyThemeToRoot(document.documentElement, activeThemePreset, theme);
+  }, [activeThemePreset, theme]);
   const isSidebarCollapsed = appSettings.sidebarCollapsed;
+  const panelToggleLabel = `${isSidebarCollapsed ? 'Expand' : 'Collapse'} navigation sidebar`;
   const selectedRepositoryId = appSettings.selectedRepositoryId ?? '';
 
   const repositoryOptions = useMemo(
@@ -2471,6 +2530,7 @@ export function App() {
 
   const showView = (next: AppView) => {
     setView(next);
+    if (next !== 'settings') setPreviewThemePreset(null);
     setSelectedBoardId(undefined);
     closeTaskDetail();
     if (next !== 'designs') {
@@ -2519,9 +2579,10 @@ export function App() {
       className="tm-app app-shell"
       tabIndex={-1}
       data-input-modality={inputModality}
-      data-theme={resolvedTheme}
       data-window-platform={windowChromePlatform}
-      onKeyDownCapture={() => setInputModality('keyboard')}
+      onKeyDownCapture={(event) => {
+        if (event.key === 'Tab') setInputModality('keyboard');
+      }}
       onPointerDownCapture={() => setInputModality('pointer')}
     >
       <div
@@ -2561,8 +2622,8 @@ export function App() {
                 type="button"
                 className="tm-iconbtn"
                 onClick={toggleSidebar}
-                aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-                title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                aria-label={panelToggleLabel}
+                title={panelToggleLabel}
               >
                 <PanelIcon />
               </button>
@@ -2597,12 +2658,14 @@ export function App() {
                 disabled={!canCreateTask}
                 title={canCreateTask ? 'New task' : 'Finish setup before creating tasks'}
               >
-                + New task
+                <PlusIcon />
+                <span>New task</span>
               </button>
             </header>
 
-            <div className="tm-canvas__content">
+            <div ref={canvasContentRef} className="tm-canvas__content">
             <aside
+              id="app-navigation-sidebar"
               className={`tm-nav ${isSidebarCollapsed ? 'tm-nav--collapsed' : ''}`}
               inert={isTaskDetailModalOpen ? true : undefined}
               aria-hidden={isTaskDetailModalOpen ? true : undefined}
@@ -2628,6 +2691,7 @@ export function App() {
                 icon={<InboxIcon />}
                 count={navCounts.inbox}
                 urgent={navCounts.inbox > 0}
+                overlapCount
                 active={!showDetail && view === 'inbox'}
                 collapsed={isSidebarCollapsed}
                 onClick={() => showView('inbox')}
@@ -2648,15 +2712,16 @@ export function App() {
               />
               <NavItem
                 label="Discourse"
-                icon={<DiscourseNavIcon />}
+                icon={<DiscourseIcon />}
                 count={discourseAttentionCount}
                 countNoun="conversation"
-                urgent={discourseAttentionCount > 0}
+                pillCount
                 active={!showDetail && view === 'discourse'}
                 collapsed={isSidebarCollapsed}
                 onClick={() => showView('discourse')}
               />
             </div>
+            <div className="tm-nav__divider" />
             <div className="tm-nav__section">
               <div className="tm-nav__saved-head">
                 <button
@@ -2677,7 +2742,7 @@ export function App() {
                   data-tip="New saved view"
                   onClick={() => setBoardEditor('new')}
                 >
-                  <span aria-hidden="true">+</span>
+                  <PlusIcon />
                 </button>
               </div>
               <div
@@ -2704,6 +2769,7 @@ export function App() {
                 ))}
               </div>
             </div>
+            <div className="tm-nav__divider" />
             <div className="tm-nav__section">
               <NavItem
                 label="Active runs"
@@ -2717,6 +2783,8 @@ export function App() {
                 label="Review queue"
                 icon={<ReviewIcon />}
                 count={navCounts.review}
+                urgent={navCounts.review > 0}
+                pillCount
                 active={!showDetail && view === 'review'}
                 collapsed={isSidebarCollapsed}
                 onClick={() => showView('review')}
@@ -2730,6 +2798,7 @@ export function App() {
                 onClick={() => showView('done')}
               />
             </div>
+            <div className="tm-nav__divider" />
             <div className="tm-nav__section">
               <NavItem
                 label="Settings"
@@ -2755,6 +2824,22 @@ export function App() {
             onDisconnectRepository={requestRepositoryDisconnect}
           />
         </aside>
+
+        {!isSidebarCollapsed ? (
+          <PanelResizeHandle
+            className="tm-nav__resize"
+            label="Resize navigation sidebar"
+            value={appSidebarWidth}
+            min={176}
+            max={240}
+            defaultValue={176}
+            controls="app-navigation-sidebar"
+            onChange={(width) => {
+              setAppSidebarWidth(width);
+              persistFocusedPanelWidth('app-navigation', width);
+            }}
+          />
+        ) : null}
 
         {showDetail && selectedTask && taskDetail ? (
           <TaskDetail
@@ -2859,6 +2944,11 @@ export function App() {
           </main>
         ) : view === 'designs' ? (
           <DesignsWorkspace
+            historyCollapsed={designHistoryCollapsed}
+            onHistoryCollapsedChange={(collapsed) => {
+              setDesignHistoryCollapsed(collapsed);
+              persistFocusedWorkspaceHistoryCollapsed('designs', collapsed);
+            }}
             designs={designs}
             selectedDesignId={selectedDesignId}
             project={
@@ -2896,6 +2986,7 @@ export function App() {
             onRespondToInteraction={respondToDesignInteraction}
             onRefreshCanvas={refreshDesignCanvas}
             onRestartCanvas={restartDesignCanvas}
+            onOpenCanvas={openPreview}
             onRestoreRevision={restoreDesignRevision}
             onDuplicateDesign={duplicateDesign}
             onRenameDesign={renameDesign}
@@ -2913,7 +3004,15 @@ export function App() {
             }}
           />
         ) : view === 'discourse' ? (
-          <DiscourseWorkspace onNotify={notify} onError={reportActionError} />
+          <DiscourseWorkspace
+            historyCollapsed={discourseHistoryCollapsed}
+            onHistoryCollapsedChange={(collapsed) => {
+              setDiscourseHistoryCollapsed(collapsed);
+              persistFocusedWorkspaceHistoryCollapsed('discourse', collapsed);
+            }}
+            onNotify={notify}
+            onError={reportActionError}
+          />
         ) : (
           <MainColumn
             view={view}
@@ -2923,6 +3022,7 @@ export function App() {
             interactionRequests={snapshot.interactionRequests}
             theme={theme}
             onSetTheme={updateTheme}
+            onPreviewThemePreset={setPreviewThemePreset}
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
             externalToolStatus={externalToolStatus}

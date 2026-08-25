@@ -16,7 +16,7 @@ describe('DiscourseModeMenu', () => {
     expect(html).toContain('aria-label="Response mode: Direct"');
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-expanded="false"');
-    expect(html).toContain('lucide-message-square');
+    expect(html).toContain('<svg');
     expect(html).not.toContain('One selected agent');
     expect(html).not.toContain('<select');
   });

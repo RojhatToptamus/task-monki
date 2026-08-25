@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { Folder, RefreshCw } from 'lucide-react';
 import type {
   AgentModel,
   AgentRuntimeState,
@@ -239,10 +240,9 @@ function SetupStep({
 }) {
   return (
     <div className={`tm-setup-step tm-setup-step--${tone}`}>
-      <span className="tm-setup-step__dot" aria-hidden="true" />
       <div className="tm-setup-step__body">
         <div className="tm-setup-step__head">
-          <div style={{ minWidth: 0 }}>
+          <div className="tm-setup-step__copy">
             <h2>{title}</h2>
             <p>{detail}</p>
           </div>
@@ -323,9 +323,6 @@ function SetupToolList({
   return (
     <div className="tm-setup-tools">
       <div className="tm-setup-tools__row">
-        <span
-          className={`tm-setup-tools__dot tm-setup-tools__dot--${runtimeReadiness.tone}`}
-        />
         <div className="tm-setup-tools__copy">
           <strong>
             {selectedRuntime?.preflight.runtime.displayName ?? 'Agent runtime'}
@@ -382,9 +379,6 @@ function ToolStatusRow({
 }) {
   return (
     <div className="tm-setup-tools__row">
-      <span
-        className={`tm-setup-tools__dot tm-setup-tools__dot--${badge.tone}`}
-      />
       <div className="tm-setup-tools__copy">
         <strong>{row.label}</strong>
         <span>{row.hint}</span>
@@ -424,40 +418,9 @@ function formatSettingsTime(value: string): string {
 }
 
 function FolderIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z" />
-    </svg>
-  );
+  return <Folder aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />;
 }
 
 function RefreshIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M21 12a9 9 0 0 1-15.1 6.6" />
-      <path d="M3 12A9 9 0 0 1 18.1 5.4" />
-      <path d="M7 18.5H4.5V21" />
-      <path d="M17 5.5h2.5V3" />
-    </svg>
-  );
+  return <RefreshCw aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />;
 }

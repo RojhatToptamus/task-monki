@@ -10,6 +10,7 @@ import {
   menuTriggerFocusTarget,
   type MenuFocusTarget
 } from './menuKeyboard';
+import { UiChevronDownIcon, UiFolderIcon } from './UiIcons';
 
 interface RepositorySwitcherProps {
   activeRepositoryId: string;
@@ -121,13 +122,13 @@ export function RepositorySwitcher({
         }}
       >
         <span className="tm-nav__repo-icon" aria-hidden="true">
-          <RepositoryIcon />
+          <UiFolderIcon />
         </span>
         <span className="tm-nav__repo-text">
           <span className="tm-nav__repo-label">New task repository</span>
           <span className="tm-nav__repo-name">{triggerLabel}</span>
         </span>
-        <ChevronIcon open={open} />
+        <UiChevronDownIcon open={open} className="tm-nav__repo-chevron" />
       </button>
 
       {open ? (
@@ -169,9 +170,6 @@ export function RepositorySwitcher({
                       setOpen(false);
                     }}
                   >
-                    <span
-                      className={`tm-repo-menu__status tm-repo-menu__status--${option.status.toLowerCase()}`}
-                    />
                     <span className="tm-repo-menu__text">
                       <span className="tm-repo-menu__name">{option.name}</span>
                       <span className="tm-repo-menu__path" title={option.path}>
@@ -180,7 +178,11 @@ export function RepositorySwitcher({
                     </span>
                     <span className="tm-repo-menu__meta">
                       {active ? <span>Default for new tasks</span> : null}
-                      {option.status !== 'AVAILABLE' ? <em>{option.status.toLowerCase()}</em> : null}
+                      <em
+                        className={`tm-repo-menu__availability tm-repo-menu__availability--${option.status.toLowerCase()}`}
+                      >
+                        {option.status === 'AVAILABLE' ? 'ready' : option.status.toLowerCase()}
+                      </em>
                       <strong>{formatTaskCount(option.taskCount)}</strong>
                     </span>
                   </button>
@@ -257,43 +259,4 @@ export function RepositorySwitcher({
 
 function formatTaskCount(count: number): string {
   return `${count} task${count === 1 ? '' : 's'}`;
-}
-
-function RepositoryIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M6 3h9a3 3 0 0 1 3 3v13.5" />
-      <path d="M6 3a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h11a1 1 0 0 0 1-1v-1.5" />
-      <path d="M6 16.5h11" />
-    </svg>
-  );
-}
-
-function ChevronIcon({ open }: { open: boolean }) {
-  return (
-    <svg
-      className="tm-nav__repo-chevron"
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points={open ? '6 15 12 9 18 15' : '6 9 12 15 18 9'} />
-    </svg>
-  );
 }

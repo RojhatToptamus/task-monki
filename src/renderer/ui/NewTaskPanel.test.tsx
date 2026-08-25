@@ -20,7 +20,6 @@ import {
   dragNewTaskCanvas,
   getNewTaskPanelWidthBounds,
   newTaskCanvasPanPosition,
-  resizeNewTaskPanelFromPointer,
   shouldInterruptNewTaskCanvasPanForWheel
 } from '../model/newTaskPanel';
 import { AttachmentChip } from './AttachmentChip';
@@ -28,14 +27,11 @@ import { NewTaskPanel } from './NewTaskPanel';
 
 describe('NewTaskPanel', () => {
   it('keeps the dock resize width within desktop and narrow viewport bounds', () => {
-    expect(getNewTaskPanelWidthBounds(1440)).toEqual({ min: 500, max: 760 });
-    expect(clampNewTaskPanelWidth(420, 1440)).toBe(500);
-    expect(clampNewTaskPanelWidth(820, 1440)).toBe(760);
-    expect(getNewTaskPanelWidthBounds(460)).toEqual({ min: 460, max: 460 });
-    expect(clampNewTaskPanelWidth(660, 460)).toBe(460);
-    expect(resizeNewTaskPanelFromPointer(520, 600, 500, 1440)).toBe(620);
-    expect(resizeNewTaskPanelFromPointer(520, 600, 200, 1440)).toBe(760);
-    expect(resizeNewTaskPanelFromPointer(520, 600, 700, 1440)).toBe(500);
+    expect(getNewTaskPanelWidthBounds(1440)).toEqual({ min: 380, max: 720 });
+    expect(clampNewTaskPanelWidth(320, 1440)).toBe(380);
+    expect(clampNewTaskPanelWidth(820, 1440)).toBe(720);
+    expect(getNewTaskPanelWidthBounds(360)).toEqual({ min: 360, max: 360 });
+    expect(clampNewTaskPanelWidth(660, 360)).toBe(360);
     expect(newTaskCanvasPanPosition(0, 520, 0)).toBe(0);
     expect(newTaskCanvasPanPosition(0, 520, 180)).toBe(260);
     expect(newTaskCanvasPanPosition(0, 520, 360)).toBe(520);
@@ -374,10 +370,10 @@ describe('NewTaskPanel', () => {
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('aria-label="New task"');
     expect(html).not.toContain('role="dialog"');
-    expect(html).toContain('Execution policy');
+    expect(html).toContain('Execution policy: Restricted');
     expect(html).toContain('Restricted');
-    expect(html).toMatch(/class="is-selected" aria-pressed="true">Restricted</u);
     expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
     expect(html).toContain('<strong>project</strong>');
     expect(html).toContain('title="/tmp/project"');
@@ -387,11 +383,7 @@ describe('NewTaskPanel', () => {
     expect(html).not.toContain('role="radiogroup"');
     expect(html).toContain('aria-label="Create task in project"');
     expect(html).toContain('aria-keyshortcuts="Meta+Enter Control+Enter"');
-    expect(html).toContain('aria-label="Execution policy"');
-    expect(html).toContain('aria-pressed="true">Restricted</button>');
-    expect(html).toContain('Ask for approval');
-    expect(html).toContain('Approve for me');
-    expect(html).toContain('Full access');
+    expect(html).not.toContain('aria-pressed=');
     expect(html).toContain('Network access');
     expect(html).toContain('Add files');
     expect(html).toContain(
@@ -404,7 +396,6 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('<details class="newtask-settings">');
     expect(html).toContain('>Agent<');
     expect(html).toContain('aria-label="Run configuration agent and model"');
-    expect(html).toContain('aria-label="Execution policy"');
     expect(html).toContain('OpenCode');
     expect(html).toContain('OpenCode-only model');
     expect(html).toContain('role="separator"');

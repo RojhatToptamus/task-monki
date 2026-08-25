@@ -40,6 +40,7 @@ describe('RequestCard attachments', () => {
     expect(html).toContain('&lt;unsafe&gt;.svg');
     expect(html).toContain('Image · 1 MB');
     expect(html).toContain('Text · 42 KB');
+    expect(html.indexOf('Configuration')).toBeLessThan(html.indexOf('Prompt · 1 lines'));
     expect(html).not.toContain('<img');
     expect(html).not.toContain('<object');
     expect(html).not.toContain('<iframe');

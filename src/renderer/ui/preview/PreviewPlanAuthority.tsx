@@ -2,6 +2,7 @@ import type { PreviewApprovalRecord, PreviewPlanRecord } from '../../../shared/c
 import { buildPreviewPlanGroups } from '../../model/preview';
 import { humanizeEnum } from '../../model/formatting';
 import { formatPreviewAttachmentTarget } from '../../model/previewPresentation';
+import { DisclosureChevron } from '../DisclosureChevron';
 
 export function PreviewPlanAuthority({
   plan,
@@ -34,7 +35,7 @@ export function PreviewPlanAuthority({
     return (
       <section className="tm-preview-approved-plan" aria-label="Approved plan">
         <details className="tm-preview-disclosure">
-          <summary>Approved plan details</summary>
+          <summary><DisclosureChevron /><span>Approved plan details</span></summary>
           {exactDetails}
           <PlanWarnings warnings={warnings} />
         </details>
@@ -58,7 +59,7 @@ export function PreviewPlanAuthority({
           </div>
         ))}
         <details className="tm-preview-disclosure tm-preview-plan-topology__exact">
-          <summary>Exact commands, recipients, readiness, and cleanup</summary>
+          <summary><DisclosureChevron /><span>Exact commands, recipients, readiness, and cleanup</span></summary>
           {exactDetails}
         </details>
       </section>
@@ -224,7 +225,7 @@ function buildPlanTopology(plan: PreviewPlanRecord): PlanTopologyGroupModel[] {
 function PlanTopologyRow({ title, value, meta }: PlanTopologyRowModel) {
   return (
     <div className="tm-preview-topology-row">
-      <span aria-hidden="true">›</span>
+      <DisclosureChevron className="tm-preview-topology-row__chevron" />
       <code>{title}</code>
       <code>{value}</code>
       {meta ? <small>{meta}</small> : <span />}
@@ -316,7 +317,7 @@ function PlanWarnings({ warnings }: { warnings: string[] }) {
   if (warnings.length === 0) return null;
   return (
     <details className="tm-preview-disclosure tm-preview-authority__warning-disclosure">
-      <summary>Plan warnings · {warnings.length}</summary>
+      <summary><DisclosureChevron /><span>Plan warnings · {warnings.length}</span></summary>
       <div className="tm-preview-authority__warnings">
         {warnings.map((warning) => <p key={warning}>{warning}</p>)}
       </div>

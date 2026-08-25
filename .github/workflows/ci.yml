@@ -27,6 +27,7 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - run: npm run check:themes
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
       - run: npm run typecheck

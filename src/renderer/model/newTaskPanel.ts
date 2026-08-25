@@ -1,6 +1,6 @@
 export const DEFAULT_NEW_TASK_PANEL_WIDTH = 520;
-export const MIN_NEW_TASK_PANEL_WIDTH = 500;
-export const MAX_NEW_TASK_PANEL_WIDTH = 760;
+export const MIN_NEW_TASK_PANEL_WIDTH = 380;
+export const MAX_NEW_TASK_PANEL_WIDTH = 720;
 export const NEW_TASK_CANVAS_PAN_DURATION_MS = 360;
 
 export function getNewTaskPanelWidthBounds(viewportWidth: number) {
@@ -14,15 +14,6 @@ export function getNewTaskPanelWidthBounds(viewportWidth: number) {
 export function clampNewTaskPanelWidth(width: number, viewportWidth: number): number {
   const bounds = getNewTaskPanelWidthBounds(viewportWidth);
   return Math.min(bounds.max, Math.max(bounds.min, width));
-}
-
-export function resizeNewTaskPanelFromPointer(
-  startWidth: number,
-  startX: number,
-  currentX: number,
-  viewportWidth: number
-): number {
-  return clampNewTaskPanelWidth(startWidth + startX - currentX, viewportWidth);
 }
 
 export function newTaskCanvasPanPosition(

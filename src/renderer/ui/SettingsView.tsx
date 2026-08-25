@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FocusEvent,
+  type ReactNode
+} from 'react';
 import {
   type AgentModel,
   type AgentRuntimeState,
@@ -18,6 +27,17 @@ import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { AccessibleTab } from './AccessibleTabs';
 import { AgentModelSetting } from './AgentModelSelector';
 import type { ThemePreference } from './theme';
+import {
+  resolveTheme,
+  resolveThemePreset,
+  THEME_PRESETS,
+  themePresetDefinition,
+  themeTokens,
+  type ThemePreset
+} from './theme';
+import { StatusGlyph } from './StatusBadge';
+import { DisclosureChevron } from './DisclosureChevron';
+import { UiCheckIcon, UiChevronDownIcon } from './UiIcons';
 
 type SettingsSection = 'agents' | 'models' | 'tools' | 'appearance';
 
@@ -31,6 +51,7 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
 export interface SettingsViewProps {
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
+  onPreviewThemePreset?(themePreset: ThemePreset | null): void;
   appSettings: TaskManagerAppSettings;
   onSetAppSettings(
     settings: UpdateAppSettingsRequest,
@@ -208,7 +229,6 @@ function AgentRuntimeSetting({
 }) {
   const readiness = runtimeReadinessView(runtime);
   const statusId = `agent-runtime-${runtime.preflight.runtime.id}-status`;
-  const readinessTone = enabled ? readiness.tone : 'muted';
   const statusDetail = enabled
     ? [
         readiness.label,
@@ -224,10 +244,6 @@ function AgentRuntimeSetting({
     <article className="tm-agent-setting">
       <div className="tm-agent-setting__summary">
         <div className="tm-agent-setting__identity">
-          <span
-            className={`tm-settings-status-dot tm-settings-status-dot--${readinessTone}`}
-            aria-hidden="true"
-          />
           <div>
             <h3>{runtime.preflight.runtime.displayName}</h3>
             <p id={statusId}>{statusDetail}</p>
@@ -244,7 +260,7 @@ function AgentRuntimeSetting({
 
       <details className="tm-agent-setting__details">
         <summary>
-          <span>Executable</span>
+          <span className="tm-disclosure__label"><DisclosureChevron /><span>Executable</span></span>
           <span>{executablePath ? 'Custom path' : 'Auto-detect'}</span>
         </summary>
         <div className="tm-agent-setting__editor">
@@ -565,37 +581,287 @@ function ToolSettings({
   );
 }
 
-function AppearanceSettings({ theme, onSetTheme, appSettings, onSetAppSettings }: SettingsViewProps) {
+function AppearanceSettings({
+  theme,
+  onSetTheme,
+  onPreviewThemePreset,
+  appSettings,
+  onSetAppSettings
+}: SettingsViewProps) {
+  const [previewThemePreset, setPreviewThemePreset] = useState<ThemePreset | null>(null);
+  const prefersDark =
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
+  const resolvedPreviewMode = resolveTheme(theme, prefersDark);
+  const persistedThemePreset = resolveThemePreset(appSettings.themePreset);
+  const activeThemePreset = previewThemePreset ?? persistedThemePreset;
+  const previewTheme = useCallback((themePreset: ThemePreset | null) => {
+    setPreviewThemePreset(themePreset);
+    onPreviewThemePreset?.(themePreset);
+  }, [onPreviewThemePreset]);
   return (
     <SettingsPane
       id="appearance"
       title="Appearance"
       detail="Visual preferences for this device."
     >
-      <div className="tm-settings__list">
-        <div className="tm-settings__row">
-          <span className="tm-settings__k">Theme</span>
-          <div className="tm-segtoggle" role="group" aria-label="Theme">
-            {(['light', 'dark', 'device'] as const).map((option) => (
-              <button
-                key={option}
-                type="button"
-                className={`tm-segtoggle__btn ${theme === option ? 'tm-segtoggle__btn--active' : ''}`}
-                aria-pressed={theme === option}
-                onClick={() => onSetTheme(option)}
-              >
-                {option === 'device' ? 'Device' : option === 'light' ? 'Light' : 'Dark'}
-              </button>
-            ))}
+      <>
+        <div className="tm-settings__list tm-appearance">
+          <div className="tm-settings__row tm-appearance__row">
+            <div className="tm-appearance__label">
+              <span className="tm-settings__k">Theme preset</span>
+              <span>Palette only — typeface and density are set separately.</span>
+            </div>
+            <ThemePresetPicker
+              value={persistedThemePreset}
+              mode={resolvedPreviewMode}
+              onPreview={previewTheme}
+              onChange={(themePreset) => onSetAppSettings({ themePreset }, 'Theme preset updated.')}
+            />
+          </div>
+          <div className="tm-settings__row tm-appearance__row">
+            <div className="tm-appearance__label">
+              <span className="tm-settings__k">Mode</span>
+              <span>
+                {theme === 'device'
+                  ? `Following the system — currently ${resolvedPreviewMode}.`
+                  : 'Fixed for this device.'}
+              </span>
+            </div>
+            <div className="tm-segtoggle" role="group" aria-label="Theme mode">
+              {(['light', 'dark', 'device'] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  className={`tm-segtoggle__btn ${theme === option ? 'tm-segtoggle__btn--active' : ''}`}
+                  aria-pressed={theme === option}
+                  onClick={() => onSetTheme(option)}
+                >
+                  {option === 'device' ? 'Device' : option === 'light' ? 'Light' : 'Dark'}
+                </button>
+              ))}
+            </div>
+          </div>
+          <SettingsSwitchRow
+            label="Mascot animation"
+            checked={appSettings.showMascot}
+            onChange={(showMascot) => onSetAppSettings({ showMascot })}
+          />
+          <ThemePreview preset={themePresetDefinition(activeThemePreset).label} mode={resolvedPreviewMode} />
+        </div>
+        <p className="tm-appearance__note">
+          Each preset replaces the shared role tokens, so surfaces, hairlines, and shadows stay
+          consistent without per-screen overrides.
+        </p>
+      </>
+    </SettingsPane>
+  );
+}
+
+function ThemePresetPicker({
+  value,
+  mode,
+  onPreview,
+  onChange
+}: {
+  value: ThemePreset;
+  mode: 'light' | 'dark';
+  onPreview(value: ThemePreset | null): void;
+  onChange(value: ThemePreset): void | Promise<unknown>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState<ThemePreset>(value);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef(new Map<ThemePreset, HTMLButtonElement>());
+  const selected = themePresetDefinition(value);
+  const groups = ['Authored', 'Catalog'] as const;
+  const orderedPresets = THEME_PRESETS.map((preset) => preset.id);
+
+  const focusOption = (themePreset: ThemePreset) => {
+    queueMicrotask(() => optionRefs.current.get(themePreset)?.focus());
+  };
+
+  const previewOption = (themePreset: ThemePreset) => {
+    setActive(themePreset);
+    onPreview(themePreset);
+  };
+
+  const openPicker = (themePreset = value) => {
+    setOpen(true);
+    setActive(themePreset);
+    focusOption(themePreset);
+  };
+
+  const cancelPreview = (restoreFocus = false) => {
+    setOpen(false);
+    setActive(value);
+    onPreview(null);
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    }
+  };
+
+  const moveActiveOption = (offset: number) => {
+    const currentIndex = Math.max(0, orderedPresets.indexOf(active));
+    const nextIndex = (currentIndex + offset + orderedPresets.length) % orderedPresets.length;
+    const next = orderedPresets[nextIndex]!;
+    previewOption(next);
+    focusOption(next);
+  };
+
+  const commit = async (themePreset: ThemePreset) => {
+    setOpen(false);
+    try {
+      await onChange(themePreset);
+    } finally {
+      onPreview(null);
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    }
+  };
+
+  useEffect(() => () => onPreview(null), [onPreview]);
+
+  const closeWhenFocusLeaves = (event: FocusEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) cancelPreview();
+  };
+
+  return (
+    <div
+      className="tm-theme-picker"
+      onBlur={closeWhenFocusLeaves}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && open) {
+          event.preventDefault();
+          event.stopPropagation();
+          cancelPreview(true);
+          return;
+        }
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          if (!open) {
+            openPicker();
+            return;
+          }
+          moveActiveOption(event.key === 'ArrowDown' ? 1 : -1);
+          return;
+        }
+        if (open && (event.key === 'Home' || event.key === 'End')) {
+          event.preventDefault();
+          const next = event.key === 'Home' ? orderedPresets[0]! : orderedPresets.at(-1)!;
+          previewOption(next);
+          focusOption(next);
+          return;
+        }
+        if (open && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          void commit(active);
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="tm-theme-picker__trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => {
+          if (open) cancelPreview();
+          else openPicker();
+        }}
+      >
+        <span
+          className="tm-theme-picker__dot"
+          style={{ '--theme-option-accent': themeTokens(value, mode)['--accent'] } as CSSProperties}
+        />
+        <span>{selected.label}</span>
+        <UiChevronDownIcon open={open} size={13} />
+      </button>
+      {open ? (
+        <div className="tm-theme-picker__menu" role="listbox" aria-label="Theme preset">
+          {groups.map((group) => (
+            <div key={group} className="tm-theme-picker__group" role="group" aria-label={group}>
+              <div className="tm-theme-picker__group-label">{group}</div>
+              {THEME_PRESETS.filter((preset) => preset.group === group).map((preset) => (
+                <button
+                  key={preset.id}
+                  ref={(element) => {
+                    if (element) optionRefs.current.set(preset.id, element);
+                    else optionRefs.current.delete(preset.id);
+                  }}
+                  type="button"
+                  role="option"
+                  aria-selected={preset.id === value}
+                  data-previewed={preset.id === active || undefined}
+                  className="tm-theme-picker__option"
+                  onFocus={() => previewOption(preset.id)}
+                  onClick={() => void commit(preset.id)}
+                >
+                  <span
+                    className="tm-theme-picker__dot"
+                    style={{ '--theme-option-accent': themeTokens(preset.id, mode)['--accent'] } as CSSProperties}
+                  />
+                  <span>{preset.label}</span>
+                  {preset.id === value ? <UiCheckIcon size={12} /> : null}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ThemePreview({ preset, mode }: { preset: string; mode: 'light' | 'dark' }) {
+  return (
+    <section className="tm-theme-preview" aria-label="Theme preview">
+      <div className="tm-theme-preview__label">
+        <strong>Preview</strong>
+        <span>{preset} · {mode}</span>
+      </div>
+      <div className="tm-theme-preview__window">
+        <aside className="tm-theme-preview__rail">
+          <div className="tm-theme-preview__brand-row">
+            <span className="tm-theme-preview__brand">M</span>
+            <strong>Task Monki</strong>
+          </div>
+          <div className="tm-theme-preview__nav-row">
+            <span>Inbox</span><small>18</small>
+          </div>
+          <div className="tm-theme-preview__nav-row tm-theme-preview__nav-row--selected">All tasks</div>
+          <div className="tm-theme-preview__nav-row">Designs</div>
+          <div className="tm-theme-preview__nav-row tm-theme-preview__nav-row--hover">
+            <span>Discourse</span><small>5</small>
+          </div>
+          <div className="tm-theme-preview__rail-divider" />
+          <div className="tm-theme-preview__nav-row tm-theme-preview__saved-view">
+            <i aria-hidden="true" /> <span>Review across</span>
+          </div>
+        </aside>
+        <div className="tm-theme-preview__content">
+          <div className="tm-theme-preview__heading">
+            <strong>All tasks</strong>
+            <span>74 tasks across the pipeline</span>
+          </div>
+          <article className="tm-theme-preview__card">
+            <div><span>repo</span><em>Ready for review</em></div>
+            <strong>[seed:completion-manual-merged] Manual completion with merged PR</strong>
+            <hr />
+            <div className="tm-theme-preview__evidence">
+              <i /><i /><i />
+              <small>PR #119 merged</small>
+            </div>
+          </article>
+          <div className="tm-theme-preview__composer">
+            <span>Write a message… Type @ for agents, tasks, or repositories</span>
+            <div>
+              <small>Direct</small>
+              <span className="tm-theme-preview__send">Send</span>
+            </div>
           </div>
         </div>
-        <SettingsSwitchRow
-          label="Mascot animation"
-          checked={appSettings.showMascot}
-          onChange={(showMascot) => onSetAppSettings({ showMascot })}
-        />
       </div>
-    </SettingsPane>
+    </section>
   );
 }
 
@@ -742,10 +1008,6 @@ function ExecutableToolSetting({
           <p>{hint}</p>
         </div>
         <span className="tm-settings-status">
-          <span
-            className={`tm-settings-status-dot tm-settings-status-dot--${availability.tone}`}
-            aria-hidden="true"
-          />
           {availability.label}
         </span>
       </div>
@@ -885,7 +1147,15 @@ export function ExecutablePathEditor({
           role={feedback.state === 'failed' ? 'alert' : 'status'}
           aria-live={feedback.state === 'failed' ? 'assertive' : 'polite'}
         >
-          <span aria-hidden="true" />
+          <StatusGlyph
+            kind={
+              feedback.state === 'running'
+                ? 'working'
+                : feedback.state === 'passed'
+                  ? 'verified'
+                  : 'blocked'
+            }
+          />
           {feedback.state === 'running'
             ? 'Testing…'
             : feedback.state === 'passed'

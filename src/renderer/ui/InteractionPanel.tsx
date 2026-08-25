@@ -12,6 +12,8 @@ import type {
 } from '../../shared/contracts';
 import { availableProviderCommandOptions } from '../model/agentPermissions';
 import { StructuredData } from './display';
+import { StatusGlyph } from './StatusBadge';
+import { DisclosureChevron } from './DisclosureChevron';
 
 interface InteractionPanelProps {
   interactions: InteractionRequestRecord[];
@@ -57,13 +59,13 @@ export function InteractionPanel({
       <header className="interaction-card__header">
         {commandApproval ? (
           <h3>
-            <span className="interaction-card__dot" aria-hidden="true" />
+            <StatusGlyph kind="waiting" />
             {interactionTitle(active)}
           </h3>
         ) : (
           <div>
             <span className="interaction-card__eyebrow">
-              <span className="interaction-card__dot" aria-hidden="true" />
+              <StatusGlyph kind="waiting" />
               Action required
             </span>
             <h3>{interactionTitle(active)}</h3>
@@ -126,7 +128,6 @@ function InteractionBody({
         ? null
         : interaction.policyWarnings.map((warning) => (
             <p className="interaction-card__warning" key={warning}>
-              <span aria-hidden="true" />
               {warning}
             </p>
           ))}
@@ -253,7 +254,6 @@ function CommandRequest({
       ) : null}
       {interaction.policyWarnings.map((warning) => (
         <p className="interaction-card__warning" key={warning}>
-          <span aria-hidden="true" />
           {warning}
         </p>
       ))}
@@ -427,7 +427,10 @@ function FileChangeRequest({
               {request.changes.map((change) => (
                 <details key={`${change.kind}:${change.path}`}>
                   <summary>
-                    {change.kind}: {change.path}
+                    <span className="tm-disclosure__label">
+                      <DisclosureChevron />
+                      {change.kind}: {change.path}
+                    </span>
                   </summary>
                   <pre>{change.diff}</pre>
                 </details>
@@ -1021,7 +1024,7 @@ function InteractionTechnicalDetails({
       : undefined;
   return (
     <details className="interaction-technical">
-      <summary>Request details</summary>
+      <summary><DisclosureChevron />Request details</summary>
       <dl className="interaction-details interaction-details--technical">
         <dt>Source</dt>
         <dd>{formatSessionSource(sourceSession, interaction.sessionId)}</dd>

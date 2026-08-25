@@ -73,15 +73,11 @@ export function DiscourseMessage({
           : ''
       }`}
     >
-      <div className="tm-discourse-message__rail" aria-hidden="true">
-        <span>
-          {user
-            ? 'Y'
-            : message.author.kind === 'AGENT'
-              ? message.author.displayNameSnapshot.slice(0, 1)
-              : 'M'}
-        </span>
-      </div>
+      {message.author.kind !== 'AGENT' ? (
+        <div className="tm-discourse-message__rail" aria-hidden="true">
+          <span>{user ? 'Y' : 'M'}</span>
+        </div>
+      ) : null}
       <article>
         <header>
           <strong>{messageAuthorLabel(message)}</strong>
@@ -106,7 +102,10 @@ export function DiscourseMessage({
             className="tm-discourse-reply-reference"
             onClick={() => onNavigate(replyTarget.id)}
           >
-            <span>↳ {messageAuthorLabel(replyTarget)}</span>
+            <span>
+              <DiscourseReplyIcon />
+              {messageAuthorLabel(replyTarget)}
+            </span>
             {replyTarget.status === 'TOMBSTONE'
               ? 'Deleted message'
               : compactText(replyTarget.body, 90)}

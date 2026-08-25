@@ -8,6 +8,7 @@ import {
   type ReactNode,
   type RefObject
 } from 'react';
+import { RefreshCw } from 'lucide-react';
 import {
   getImplementationRetryReason,
   normalizePullRequestTitle
@@ -71,8 +72,9 @@ import { ProviderActivityPanel } from './ProviderActivityPanel';
 import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
-import { Chip } from './StatusBadge';
+import { Chip, StatusGlyph, type StatusGlyphKind } from './StatusBadge';
 import { FindingRow } from './Findings';
+import { DisclosureChevron } from './DisclosureChevron';
 import {
   buildReviewFollowUpInstruction,
   defaultSelectedFindingIds
@@ -1119,15 +1121,15 @@ export function TaskDetail(props: TaskDetailProps) {
               {runFailure ? (
                 <div className="tm-failure">
                   <div className="tm-failure__head">
-                    <span className="tm-failure__dot" />
+                    <StatusGlyph kind="blocked" />
                     <span className="tm-failure__eyebrow">
                       {humanizeEnum(runFailure.status)}
                     </span>
                   </div>
-                  <h3 className="tm-panel__title" style={{ margin: '0 0 7px' }}>
+                  <h3 className="tm-panel__title tm-panel__title--failure">
                     {runFailure.title}
                   </h3>
-                  <p className="tm-panel__lead" style={{ margin: 0 }}>
+                  <p className="tm-panel__lead tm-panel__lead--flush">
                     {runFailure.detail}
                   </p>
                 </div>
@@ -1176,6 +1178,18 @@ export function TaskDetail(props: TaskDetailProps) {
                     reviewOutputLoading={reviewOutputLoading}
                     reviewOutputError={reviewOutputError}
                     onLoadReviewOutput={() => void loadAvailableReviewOutput()}
+                    onReviewAgain={() => onNextAction('run-review-again')}
+                    reviewAgainDisabled={nextActionState('run-review-again').disabled}
+                    reviewAgainTitle={nextActionState('run-review-again').title}
+                    action={shouldShowOverviewNextAction(reviewPhaseVisible, awaitingMoveToReview) ? (
+                      <NextActionPanel
+                        model={nextAction}
+                        requirements={[]}
+                        onAction={onNextAction}
+                        actionState={nextActionState}
+                        placement="state"
+                      />
+                    ) : undefined}
                     onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
                   />
                 ) : null}
@@ -1222,15 +1236,6 @@ export function TaskDetail(props: TaskDetailProps) {
             {/* CONTEXT RAIL — delivery state and history stay secondary to the
                 current decision and the work stream. */}
             <div className="tm-overview__col">
-              {shouldShowOverviewNextAction(reviewPhaseVisible, awaitingMoveToReview) ? (
-                <NextActionPanel
-                  model={nextAction}
-                  requirements={finishRequirements}
-                  onAction={onNextAction}
-                  actionState={nextActionState}
-                />
-              ) : null}
-
               {showPrStatus ? (
                 <PrStatusCard
                   view={prStatus}
@@ -1430,18 +1435,17 @@ export function RequestCard({
   return (
     <details className="tm-panel tm-requestcard" open={!hasRun}>
       <summary className="tm-requestcard__summary">
-        <span className="tm-requestcard__caret" aria-hidden="true">
-          ›
+        <span className="tm-disclosure__label">
+          <DisclosureChevron />
+          <h3 className="tm-panel__title tm-panel__title--flush">
+            Request
+          </h3>
         </span>
-        <h3 className="tm-panel__title" style={{ margin: 0 }}>
-          Request
-        </h3>
         <span className="tm-requestcard__line">{summaryLine}</span>
       </summary>
-      <details className="tm-raw tm-requestcard__prompt">
-        <summary>Prompt · {promptLineCount} lines</summary>
-        <pre>{prompt}</pre>
-      </details>
+      <div className="tm-config tm-config--request">
+        {config}
+      </div>
       {attachments.length > 0 ? (
         <div className="tm-requestcard__attachments" aria-label="Task attachments">
           <div className="tm-requestcard__attachments-head">
@@ -1461,17 +1465,21 @@ export function RequestCard({
           </ul>
         </div>
       ) : null}
-      <div className="tm-config" style={{ marginTop: 14 }}>
-        {config}
-      </div>
+      <details className="tm-raw tm-requestcard__prompt">
+        <summary>
+          <DisclosureChevron />
+          <span>Prompt · {promptLineCount} lines</span>
+        </summary>
+        <pre>{prompt}</pre>
+      </details>
     </details>
   );
 }
 
 /**
- * The one place a task answers "what should I do next?" It normally lives at
- * the top of the Overview rail; task-level transitions use the same surface
- * above the tabs so they remain available from every task tab.
+ * The one place a task answers "what should I do next?" Overview actions can
+ * be placed inside their owning state block; task-level transitions use the
+ * same surface above the tabs so they remain available from every task tab.
  */
 export function NextActionPanel({
   model,
@@ -1484,16 +1492,21 @@ export function NextActionPanel({
   requirements: FinishRequirement[];
   onAction(id: NextActionId): void;
   actionState(id: NextActionId): { disabled?: boolean; title?: string };
-  placement?: 'rail' | 'task';
+  placement?: 'rail' | 'task' | 'state';
 }) {
   const { primary, secondaries } = model;
-  const hasActions = Boolean(primary) || secondaries.length > 0;
+  const stateBlockPlacement = placement === 'state';
+  const visibleSecondaries = stateBlockPlacement ? [] : secondaries;
+  const hasActions = Boolean(primary) || visibleSecondaries.length > 0;
   const reasonIdPrefix = useId();
   // Drop the Review requirement — its verdict already lives in the run surface's
   // review card, so restating it here would say the same fact twice (DESIGN.md §6).
   const gatingRequirements = requirements.filter(
     (requirement) => requirement.label !== 'Review'
   );
+  if (stateBlockPlacement && !primary) {
+    return null;
+  }
   const renderAction = (
     choice: NonNullable<NextActionModel['primary']>,
     prominence: 'primary' | 'quiet'
@@ -1531,21 +1544,22 @@ export function NextActionPanel({
       className={`tm-nextaction tm-nextaction--${placement}`}
       aria-label="Next action"
     >
-      <p className="tm-nextaction__sentence">{model.sentence}</p>
+      {!stateBlockPlacement ? (
+        <p className="tm-nextaction__sentence">{model.sentence}</p>
+      ) : null}
       {hasActions ? (
         <div className="tm-nextaction__actions">
           {primary ? renderAction(primary, 'primary') : null}
-          {secondaries.map((secondary) => renderAction(secondary, 'quiet'))}
+          {visibleSecondaries.map((secondary) => renderAction(secondary, 'quiet'))}
         </div>
       ) : null}
-      {gatingRequirements.length > 0 ? (
+      {!stateBlockPlacement && gatingRequirements.length > 0 ? (
         <div className="tm-nextaction__requirements" aria-label="Finish requirements">
           {gatingRequirements.map((requirement) => (
             <span
               key={requirement.label}
               className={`tm-finishpanel__requirement tm-finishpanel__requirement--${requirement.tone}`}
             >
-              <span className="tm-finishpanel__requirement-dot" aria-hidden="true" />
               {requirement.label} {requirement.detail}
             </span>
           ))}
@@ -1615,11 +1629,14 @@ function PrStatusCard({
     view,
     actionState.createOrPushReason
   );
+  const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(view.kind);
+  const stateMark = prStatusMark(view);
 
   return (
     <section className={`tm-panel tm-prstatus tm-prstatus--${view.tone}`} aria-label="PR Status">
       <div className="tm-prstatus__head">
         <span className="tm-prstatus__titleline">
+          {stateMark !== 'idle' ? <StatusGlyph kind={stateMark} /> : null}
           <h3 className="tm-panel__title">PR Status</h3>
           {view.canRefresh ? (
             <ActionButtonTitle
@@ -1638,18 +1655,12 @@ function PrStatusCard({
             </ActionButtonTitle>
           ) : null}
         </span>
-        {view.refreshedLine ? <span className="tm-prstatus__refreshed">{view.refreshedLine}</span> : null}
+        <span className="tm-prstatus__state">{view.headline}</span>
       </div>
 
-      <div className="tm-prstatus__headline-row">
-        <span
-          className={`tm-prstatus__dot tm-prstatus__dot--${view.tone} ${
-            view.kind === 'CHECKS_PENDING' ? 'tm-prstatus__dot--pulse' : ''
-          }`}
-          aria-hidden="true"
-        />
-        <p className="tm-prstatus__headline">{view.headline}</p>
-      </div>
+      {freshnessProblem && view.freshnessLine ? (
+        <div className="tm-prstatus__freshness">{view.freshnessLine}</div>
+      ) : null}
 
       {view.leadLine ? <p className="tm-prstatus__lead">{view.leadLine}</p> : null}
 
@@ -1670,10 +1681,11 @@ function PrStatusCard({
             </div>
           ) : null}
 
-          {view.freshnessLine ? <p className="tm-prstatus__reason">{view.freshnessLine}</p> : null}
+          {!freshnessProblem && view.freshnessLine ? <p className="tm-prstatus__reason">{view.freshnessLine}</p> : null}
           {view.guidanceLine ? <p className="tm-prstatus__reason">{view.guidanceLine}</p> : null}
 
           {view.evidenceLine ? <div className="tm-prstatus__evidence">{view.evidenceLine}</div> : null}
+          {view.refreshedLine ? <span className="tm-prstatus__refreshed">{view.refreshedLine}</span> : null}
         </div>
       ) : null}
 
@@ -1738,11 +1750,11 @@ function PrStatusCard({
 function PrCheckDetails({ groups }: { groups: PrCheckGroup[] }) {
   const checks = groups.flatMap((group) => group.checks);
   return (
-    <div className="tm-prchecks" aria-label="GitHub check details">
-      <div className="tm-prchecks__head">
-        <span>Checks</span>
+    <details className="tm-prchecks" aria-label="GitHub check details">
+      <summary className="tm-prchecks__head">
+        <span className="tm-disclosure__label"><DisclosureChevron />Checks</span>
         <span>{checks.length}</span>
-      </div>
+      </summary>
       <div className="tm-prchecks__rows">
         {checks.map((check) => (
           <details
@@ -1751,10 +1763,7 @@ function PrCheckDetails({ groups }: { groups: PrCheckGroup[] }) {
           >
             <summary>
               <span className="tm-prcheck__name">
-                <span className="tm-prcheck__chevron" aria-hidden="true">
-                  <ChevronRightIcon />
-                </span>
-                <span className={`tm-prcheck__dot tm-prcheck__dot--${check.status}`} aria-hidden="true" />
+                <DisclosureChevron className="tm-prcheck__chevron" />
                 <span>{check.name}</span>
               </span>
               <span className="tm-prcheck__status">
@@ -1768,8 +1777,17 @@ function PrCheckDetails({ groups }: { groups: PrCheckGroup[] }) {
           </details>
         ))}
       </div>
-    </div>
+    </details>
   );
+}
+
+function prStatusMark(view: PrStatusViewModel): StatusGlyphKind {
+  if (view.tone === 'error') return 'blocked';
+  if (
+    view.tone === 'action' &&
+    !['CHECKS_PENDING', 'STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(view.kind)
+  ) return 'waiting';
+  return 'idle';
 }
 
 function checkStatusLabel(status: PrCheckGroup['status']): string {
@@ -1830,31 +1848,7 @@ function formatCheckDuration(startedAt?: string, completedAt?: string): string |
 }
 
 function RefreshIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"
-        stroke="currentColor"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ChevronRightIcon() {
-  return (
-    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M9 6l6 6-6 6"
-        stroke="currentColor"
-        strokeWidth="3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <RefreshCw aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
 }
 
 function healthFindingRank(severity: Finding['severity']): number {

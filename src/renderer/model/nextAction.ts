@@ -70,7 +70,7 @@ export function shouldShowOverviewNextAction(
   return reviewPhaseVisible && !awaitingMoveToReview;
 }
 
-const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };
+const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Address findings' };
 const RUN_REVIEW: NextActionChoice = { id: 'run-review', label: 'Run review' };
 const RUN_REVIEW_AGAIN: NextActionChoice = { id: 'run-review-again', label: 'Run review again' };
 const COMMIT: NextActionChoice = { id: 'commit', label: 'Commit' };

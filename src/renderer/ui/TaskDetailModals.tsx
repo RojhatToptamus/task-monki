@@ -1,4 +1,5 @@
 import { useRef, type FormEvent, type RefObject } from 'react';
+import { X } from 'lucide-react';
 import {
   PULL_REQUEST_TITLE_MAX_LENGTH,
   type AgentReviewFinding,
@@ -10,6 +11,7 @@ import { findingLevel, shortFindingRef } from '../model/findings';
 import { formatShortId } from '../model/selectors';
 import { markDoneModalCopy } from '../model/taskView';
 import { FindingRow } from './Findings';
+import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
 
 export function CreateDraftPrModal({
@@ -157,7 +159,7 @@ export function ReviewRequestDrawer({
             aria-label="Close request changes"
             onClick={onCancel}
           >
-            <span aria-hidden="true">×</span>
+            <X aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />
           </button>
         </header>
 
@@ -204,7 +206,7 @@ export function ReviewRequestDrawer({
           </label>
 
           <details className="tm-reviewdrawer__instruction">
-            <summary>Full instruction</summary>
+            <summary><DisclosureChevron /><span>Full instruction</span></summary>
             <label>
               <span>Instruction to agent</span>
               <textarea
@@ -282,7 +284,6 @@ export function MarkDoneModal({
                 className={`tm-modal__requirement tm-modal__requirement--${requirement.tone}`}
                 key={requirement.label}
               >
-                <span className="tm-modal__requirement-dot" aria-hidden="true" />
                 <span>
                   <strong>{requirement.label}</strong> — {requirement.detail}
                 </span>

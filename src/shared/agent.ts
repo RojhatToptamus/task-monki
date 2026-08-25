@@ -215,15 +215,41 @@ export interface ExternalExecutablePathSettings {
 
 export type TaskManagerThemePreference = 'light' | 'dark' | 'device';
 
+export const TASK_MANAGER_THEME_PRESETS = [
+  'graphite',
+  'umber',
+  'nocturne',
+  'parchment',
+  'harbor',
+  'forge',
+  'axis',
+  'paper',
+  'signal',
+  'monolith',
+  'workbench',
+  'blueprint',
+  'brasspants',
+  'codechimp',
+  'greaseball',
+  'sockpuppet'
+] as const;
+
+export type TaskManagerThemePreset = (typeof TASK_MANAGER_THEME_PRESETS)[number];
+
+export function isTaskManagerThemePreset(value: unknown): value is TaskManagerThemePreset {
+  return TASK_MANAGER_THEME_PRESETS.includes(value as TaskManagerThemePreset);
+}
+
 export interface PreviewGatewaySettings {
   port: number | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 9 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 10 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
   theme: TaskManagerThemePreference;
+  themePreset: TaskManagerThemePreset;
   sidebarCollapsed: boolean;
   showMascot: boolean;
   firstLaunchSetupCompleted: boolean;
@@ -264,6 +290,7 @@ export const DEFAULT_PROMPT_REFINEMENT_MODEL = 'gpt-5.3-codex-spark';
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
   theme: 'device',
+  themePreset: 'umber',
   sidebarCollapsed: false,
   showMascot: true,
   firstLaunchSetupCompleted: false,

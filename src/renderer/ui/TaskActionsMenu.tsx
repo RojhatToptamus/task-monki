@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { MoreHorizontal } from 'lucide-react';
 import type { OpenTargetRef } from '../../shared/contracts';
 import { OpenTargetMenuItems } from './OpenTargetMenu';
 import {
@@ -33,7 +34,14 @@ export function TaskActionsMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const initialFocusRef = useRef<MenuFocusTarget>('first');
+  const [geometry, setGeometry] = useState<TaskMenuGeometry>();
   const hasOpenTarget = Boolean(openTarget);
+
+  const prepareMenu = () => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    setGeometry(taskMenuGeometry(trigger.getBoundingClientRect(), window.innerHeight));
+  };
 
   useEffect(() => {
     if (!open) {
@@ -81,12 +89,14 @@ export function TaskActionsMenu({
           if (open) {
             focusMenuItem(menuRef.current, target);
           } else {
+            prepareMenu();
             setOpen(true);
           }
         }}
         onClick={(event) => {
           event.stopPropagation();
           initialFocusRef.current = 'first';
+          prepareMenu();
           setOpen((current) => !current);
         }}
       >
@@ -95,7 +105,10 @@ export function TaskActionsMenu({
       {open ? (
         <div
           ref={menuRef}
-          className="tm-taskmenu__menu"
+          className={`tm-taskmenu__menu ${
+            geometry?.placement === 'top' ? 'tm-taskmenu__menu--top' : ''
+          }`}
+          style={{ maxHeight: geometry ? `${geometry.maxHeight}px` : undefined }}
           role="menu"
           tabIndex={-1}
           aria-label={`Task options for ${title}`}
@@ -149,12 +162,27 @@ export function TaskActionsMenu({
   );
 }
 
+export interface TaskMenuGeometry {
+  maxHeight: number;
+  placement: 'bottom' | 'top';
+}
+
+export function taskMenuGeometry(
+  trigger: Pick<DOMRect, 'top' | 'bottom'>,
+  viewportHeight: number
+): TaskMenuGeometry {
+  const edgeGap = 12;
+  const maxMenuHeight = 420;
+  const spaceAbove = Math.max(0, trigger.top - edgeGap);
+  const spaceBelow = Math.max(0, viewportHeight - trigger.bottom - edgeGap);
+  const placement = spaceBelow >= Math.min(360, spaceAbove) ? 'bottom' : 'top';
+  const available = placement === 'bottom' ? spaceBelow : spaceAbove;
+  return {
+    placement,
+    maxHeight: Math.max(120, Math.min(maxMenuHeight, available))
+  };
+}
+
 function KebabIcon() {
-  return (
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-      <circle cx="3" cy="8" r="1.4" />
-      <circle cx="8" cy="8" r="1.4" />
-      <circle cx="13" cy="8" r="1.4" />
-    </svg>
-  );
+  return <MoreHorizontal aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

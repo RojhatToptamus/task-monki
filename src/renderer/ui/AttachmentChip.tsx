@@ -1,3 +1,4 @@
+import { FileText, Image, X } from 'lucide-react';
 import type { AttachmentComposerItem } from '../model/taskAttachmentComposer';
 import type { TaskAttachmentRecord } from '../../shared/attachments';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
@@ -90,44 +91,13 @@ export function StoredAttachmentChip({
 }
 
 function CloseIcon() {
-  return (
-    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none">
-      <path
-        d="m7 7 10 10M17 7 7 17"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
+  return <X aria-hidden="true" absoluteStrokeWidth size={15} strokeWidth={1.5} />;
 }
 
 function ImageFileIcon() {
-  return (
-    <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none">
-      <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.6" />
-      <circle cx="9" cy="10" r="1.4" fill="currentColor" />
-      <path
-        d="m6.5 17 4-4 2.5 2 2-2 2.5 4"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <Image aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }
 
 function TextFileIcon() {
-  return (
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none">
-      <path
-        d="M7 3.8h6l4 4V20H7zM13 4v4h4M9.5 12h5M9.5 15h5"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <FileText aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

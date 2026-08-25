@@ -16,6 +16,7 @@ import {
   type RunActivitySection
 } from '../model/runActivity';
 import { RawProviderMessage } from './RawProviderMessage';
+import { DisclosureChevron } from './DisclosureChevron';
 import { PlanList } from './Plan';
 import { StructuredData, humanizeEnum } from './display';
 
@@ -80,8 +81,9 @@ export function ProviderActivityPanel({
     <section className="card provider-activity">
       <details className="provider-activity__details" open={hasLiveRun}>
         <summary className="provider-activity__summary">
-          <span>
-            <strong>Provider activity</strong>
+          <span className="tm-disclosure__label">
+            <DisclosureChevron />
+            <span className="provider-activity__copy"><strong>Provider activity</strong></span>
           </span>
           <span className="count-pill">{runs.length} turns</span>
         </summary>
@@ -156,15 +158,18 @@ function ProviderRunView({
         }
       >
         <summary>
-          <span>
-            <strong>
-              {childLabel ? `${childLabel} · ` : ''}
-              {humanizeEnum(run.mode)} turn
-            </strong>
-            <small>
-              {new Date(run.startedAt).toLocaleString()} ·{' '}
-              {run.providerTurnId ?? '—'}
-            </small>
+          <span className="tm-disclosure__label">
+            <DisclosureChevron />
+            <span className="provider-turn__copy">
+              <strong>
+                {childLabel ? `${childLabel} · ` : ''}
+                {humanizeEnum(run.mode)} turn
+              </strong>
+              <small>
+                {new Date(run.startedAt).toLocaleString()} ·{' '}
+                {run.providerTurnId ?? '—'}
+              </small>
+            </span>
           </span>
           <span className={`provider-status provider-status--${run.status.toLowerCase()}`}>
             {humanizeEnum(run.status)}
@@ -203,12 +208,15 @@ function ProviderRunView({
           {runItems.length > 0 || providerEvents.length > 0 ? (
             <details className="provider-raw-protocol">
               <summary>
-                <span>
-                  <strong>Raw protocol</strong>
-                  <small>
-                    {runItems.length} {runItems.length === 1 ? 'item' : 'items'} ·{' '}
-                    {providerEvents.length} {providerEvents.length === 1 ? 'event' : 'events'}
-                  </small>
+                <span className="tm-disclosure__label">
+                  <DisclosureChevron />
+                  <span className="provider-raw-protocol__copy">
+                    <strong>Raw protocol</strong>
+                    <small>
+                      {runItems.length} {runItems.length === 1 ? 'item' : 'items'} ·{' '}
+                      {providerEvents.length} {providerEvents.length === 1 ? 'event' : 'events'}
+                    </small>
+                  </span>
                 </span>
               </summary>
               <div className="provider-raw-protocol__body">
@@ -255,12 +263,15 @@ function AttachmentSubmissionDetails({
   return (
     <details className="provider-raw-protocol provider-attachment-submissions">
       <summary>
-        <span>
-          <strong>Attachment submissions</strong>
-          <small>
-            {submissions.length} {submissions.length === 1 ? 'file' : 'files'} · recorded after
-            provider start
-          </small>
+        <span className="tm-disclosure__label">
+          <DisclosureChevron />
+          <span className="provider-raw-protocol__copy">
+            <strong>Attachment submissions</strong>
+            <small>
+              {submissions.length} {submissions.length === 1 ? 'file' : 'files'} · recorded after
+              provider start
+            </small>
+          </span>
         </span>
       </summary>
       <div className="provider-raw-protocol__body">
@@ -331,7 +342,10 @@ function ProviderActivityRowView({ row }: { row: RunActivityRow }) {
       {row.grouped && row.children && row.children.length > 0 ? (
         <details className="provider-activity-row__children">
           <summary>
-            {row.children.length} {row.children.length === 1 ? 'detail' : 'details'}
+            <span className="tm-disclosure__label">
+              <DisclosureChevron />
+              {row.children.length} {row.children.length === 1 ? 'detail' : 'details'}
+            </span>
           </summary>
           <div>
             {row.children.map((child) => (
@@ -398,7 +412,7 @@ function PlanHistory({ plans }: { plans: AgentPlanRevisionRecord[] }) {
       <PlanList steps={latest.steps} showCaptions />
       {plans.length > 1 ? (
         <details className="provider-revisions">
-          <summary>{plans.length - 1} earlier revisions</summary>
+          <summary><span className="tm-disclosure__label"><DisclosureChevron />{plans.length - 1} earlier revisions</span></summary>
           {plans.slice(0, -1).reverse().map((plan) => (
             <div key={plan.id}>
               <strong>Revision {plan.revision}</strong>
@@ -482,7 +496,7 @@ function ItemBody({
             <dt>Output</dt>
             <dd>
               <details>
-                <summary>Show provider-reported command output</summary>
+                <summary><span className="tm-disclosure__label"><DisclosureChevron />Show provider-reported command output</span></summary>
                 <pre>{stringValue(payload.aggregatedOutput)}</pre>
               </details>
             </dd>
@@ -500,7 +514,10 @@ function ItemBody({
           return (
             <details key={`${stringValue(value.path)}:${index}`}>
               <summary>
-                {stringValue(value.kind) || 'change'} · {stringValue(value.path) || 'unknown'}
+                <span className="tm-disclosure__label">
+                  <DisclosureChevron />
+                  {stringValue(value.kind) || 'change'} · {stringValue(value.path) || 'unknown'}
+                </span>
               </summary>
               <pre>{stringValue(value.diff) || 'No provider diff.'}</pre>
             </details>

@@ -1,104 +1,82 @@
 import {
-  BookOpen,
   Check,
   ChevronDown,
+  ClipboardCheck,
   Copy,
-  Ellipsis,
   FileText,
-  ListTodo,
+  Folder,
   MessageSquare,
   MessagesSquare,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
+  MoreHorizontal,
+  PanelRight,
   Pin,
   Reply,
-  SlidersHorizontal,
-  StickyNote,
-  UsersRound,
-  X,
-  type LucideIcon
+  Settings2,
+  Users,
+  X
 } from 'lucide-react';
 import type { DiscourseDefaultPolicy } from '../../shared/discourse';
-
-const ICON_PROPS = {
-  'aria-hidden': true,
-  focusable: false,
-  strokeWidth: 1.8
-} as const;
-
-function Icon({ icon: Glyph, size = 16 }: { icon: LucideIcon; size?: number }) {
-  return <Glyph {...ICON_PROPS} size={size} />;
-}
+import { UiLucideIcon } from './UiIcons';
 
 export function DiscoursePinIcon() {
-  return <Icon icon={Pin} size={12} />;
+  return <UiLucideIcon component={Pin} size={12} />;
 }
 
 export function DiscourseTaskIcon() {
-  return <Icon icon={ListTodo} size={13} />;
+  return <UiLucideIcon component={ClipboardCheck} size={13} />;
 }
 
 export function DiscourseRepositoryIcon() {
-  return <Icon icon={BookOpen} size={13} />;
+  return <UiLucideIcon component={Folder} size={13} />;
 }
 
-export function DiscoursePanelLeftIcon({ expanded = false }: { expanded?: boolean }) {
-  return <Icon icon={expanded ? PanelLeftClose : PanelLeftOpen} />;
-}
-
-export function DiscoursePanelRightIcon({ expanded = false }: { expanded?: boolean }) {
-  return <Icon icon={expanded ? PanelRightClose : PanelRightOpen} />;
+export function DiscoursePanelRightIcon(_props: { expanded?: boolean }) {
+  return <UiLucideIcon component={PanelRight} />;
 }
 
 export function DiscourseContextPreviewIcon() {
-  return <Icon icon={FileText} />;
+  return <UiLucideIcon component={FileText} />;
 }
 
 export function DiscourseSlidersIcon() {
-  return <Icon icon={SlidersHorizontal} size={15} />;
+  return <UiLucideIcon component={Settings2} size={15} />;
 }
 
 export function DiscourseReplyIcon() {
-  return <Icon icon={Reply} size={16} />;
+  return <UiLucideIcon component={Reply} />;
 }
 
 export function DiscourseCopyIcon() {
-  return <Icon icon={Copy} size={16} />;
+  return <UiLucideIcon component={Copy} />;
 }
 
 export function DiscourseCheckIcon() {
-  return <Icon icon={Check} size={14} />;
+  return <UiLucideIcon component={Check} size={14} />;
 }
 
 export function DiscourseMoreIcon() {
-  return <Icon icon={Ellipsis} />;
+  return <UiLucideIcon component={MoreHorizontal} />;
 }
 
 export function DiscourseChevronDownIcon() {
-  return <Icon icon={ChevronDown} size={14} />;
+  return <UiLucideIcon component={ChevronDown} size={14} />;
 }
 
 export function DiscourseCloseIcon() {
-  return <Icon icon={X} size={15} />;
+  return <UiLucideIcon component={X} size={15} />;
 }
 
 export function DiscourseRoundtableIcon() {
-  return <Icon icon={MessagesSquare} size={28} />;
+  return <UiLucideIcon component={MessagesSquare} size={28} />;
 }
 
 export function DiscourseNavIcon() {
-  return <Icon icon={MessagesSquare} size={18} />;
+  return <UiLucideIcon component={MessageSquare} />;
 }
 
 export function DiscourseModeIcon({ policy }: { policy: DiscourseDefaultPolicy }) {
-  const icon = policy === 'NONE'
-    ? StickyNote
-    : policy === 'DIRECT'
-      ? MessageSquare
-      : policy === 'PANEL'
-        ? MessagesSquare
-        : UsersRound;
-  return <Icon icon={icon} size={16} />;
+  if (policy === 'NONE') return <UiLucideIcon component={FileText} />;
+  if (policy === 'DIRECT') return <UiLucideIcon component={MessageSquare} />;
+  if (policy === 'PANEL') return <UiLucideIcon component={MessagesSquare} />;
+  return <UiLucideIcon component={Users} />;
 }

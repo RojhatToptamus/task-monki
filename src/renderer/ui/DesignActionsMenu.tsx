@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { MoreHorizontal } from 'lucide-react';
 import {
   focusMenuItem,
   handleMenuBlur,
@@ -177,11 +178,5 @@ function DesignMenu({
 }
 
 function KebabIcon() {
-  return (
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-      <circle cx="3" cy="8" r="1.4" />
-      <circle cx="8" cy="8" r="1.4" />
-      <circle cx="13" cy="8" r="1.4" />
-    </svg>
-  );
+  return <MoreHorizontal aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

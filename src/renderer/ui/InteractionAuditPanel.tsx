@@ -3,6 +3,7 @@ import type {
   InteractionRequestRecord
 } from '../../shared/contracts';
 import { RawProviderMessage } from './RawProviderMessage';
+import { DisclosureChevron } from './DisclosureChevron';
 import { StructuredData, humanizeEnum } from './display';
 
 export function InteractionAuditPanel({
@@ -34,12 +35,15 @@ export function InteractionAuditPanel({
         {historical.map((interaction) => (
           <details key={interaction.id}>
             <summary>
-              <span>
-                <strong>{humanizeEnum(interaction.type)}</strong>
-                <small>
-                  {new Date(interaction.requestedAt).toLocaleString()} · request{' '}
-                  {String(interaction.providerRequestId)}
-                </small>
+              <span className="tm-disclosure__label">
+                <DisclosureChevron />
+                <span className="interaction-audit__summary-copy">
+                  <strong>{humanizeEnum(interaction.type)}</strong>
+                  <small>
+                    {new Date(interaction.requestedAt).toLocaleString()} · request{' '}
+                    {String(interaction.providerRequestId)}
+                  </small>
+                </span>
               </span>
               <span className="provider-status">
                 {humanizeEnum(interaction.status)}

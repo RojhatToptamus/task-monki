@@ -26,6 +26,8 @@ import { useTaskAttachments } from './useTaskAttachments';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { DesignReadyMenu } from './DesignActionsMenu';
+import { DisclosureChevron } from './DisclosureChevron';
+import { UiArrowRightIcon } from './UiIcons';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
@@ -57,6 +59,7 @@ export interface DesignConversationProps {
   ): Promise<void>;
   onRestore(revisionId: string): Promise<void>;
   onDuplicate(revisionId: string): Promise<void>;
+  onOpenReferences(): void;
 }
 
 export function DesignConversation({
@@ -76,7 +79,8 @@ export function DesignConversation({
   onDeleteDraft,
   onRespond,
   onRestore,
-  onDuplicate
+  onDuplicate,
+  onOpenReferences
 }: DesignConversationProps) {
   const [message, setMessage] = useState(draft?.body ?? '');
   const [submitting, setSubmitting] = useState(false);
@@ -276,22 +280,7 @@ export function DesignConversation({
   };
 
   return (
-    <section className="tm-design-conversation" aria-labelledby="design-conversation-title">
-      <header className="tm-design-conversation__head">
-        <div>
-          <h2 id="design-conversation-title">Conversation</h2>
-          <span>
-            Codex
-            {project.task.agentSettings?.model
-              ? ` · ${project.task.agentSettings.model}`
-              : ''}
-            {project.task.agentSettings?.reasoningEffort
-              ? ` · ${project.task.agentSettings.reasoningEffort}`
-              : ''}
-          </span>
-        </div>
-      </header>
-
+    <section className="tm-design-conversation" aria-label="Design conversation">
       <div className="tm-design-conversation__transcript" aria-live="polite">
         {project.origin && project.conversation.length === 0 ? (
           <p className="tm-design-conversation__origin">
@@ -325,7 +314,6 @@ export function DesignConversation({
         ) : null}
         {project.conversation.length === 0 ? (
           <div className="tm-design-conversation__empty">
-            <ConversationGlyph />
             <strong>
               {project.origin && project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION'
                 ? 'This copy could not start'
@@ -380,7 +368,7 @@ export function DesignConversation({
 
         {detailedActivityRows.length > 0 ? (
           <details className="tm-design-technical-details">
-            <summary>Technical details</summary>
+            <summary><DisclosureChevron /><span>Technical details</span></summary>
             <RunActivityTimeline rows={detailedActivityRows} live={false} />
           </details>
         ) : null}
@@ -405,6 +393,8 @@ export function DesignConversation({
           className="tm-design-composer__shell"
           removeDisabled={submitting || submissionOutcomeUnknown}
           addButtonTitle="Add read-only references to this Design message."
+          addButtonLabel="Reference"
+          onAddButtonClick={onOpenReferences}
           hint={
             attachments.isRestoringDraft
               ? 'Loading draft files…'
@@ -503,6 +493,7 @@ export function DesignConversation({
                 : activeWork
                   ? 'Queue'
                   : 'Send'}
+            <UiArrowRightIcon />
           </button>
         </div>
         {error ? <p className="tm-design-composer__error" role="alert">{error}</p> : null}
@@ -532,26 +523,24 @@ function DesignTurnMessages({
   return (
     <article className="tm-design-turn">
       <div className="tm-design-message tm-design-message--user">
-        <header>
-          <strong>You</strong>
+        <p>{entry.userMessage}</p>
+        <footer>
+          {references.length > 0 ? (
+            <small className="tm-design-message__references">
+              {references.join(', ')}
+            </small>
+          ) : null}
           <time dateTime={entry.turn.createdAt}>
             {formatDesignUpdatedAt(entry.turn.createdAt)}
           </time>
-        </header>
-        <p>{entry.userMessage}</p>
-        {references.length > 0 ? (
-          <small className="tm-design-message__references">
-            {references.length === 1 ? 'Reference' : 'References'}: {references.join(', ')}
-          </small>
-        ) : null}
+        </footer>
       </div>
 
       <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
         <header>
           <strong>Codex</strong>
           <div className="tm-design-message__ready-actions">
-            <span className="tm-design-message__turn-status">
-              <i aria-hidden="true" />
+            <span className="tm-design-message__turn-status" data-tone={view.tone}>
               {entry.readyRevision
                 ? `Ready state ${entry.readyRevision.ordinal}`
                 : view.statusLabel}
@@ -580,17 +569,6 @@ function DesignTurnMessages({
         ) : null}
       </div>
     </article>
-  );
-}
-
-function ConversationGlyph() {
-  return (
-    <span className="tm-design-conversation__glyph" aria-hidden="true">
-      <svg viewBox="0 0 28 28" fill="none">
-        <path d="M5 6.5h18v12H12l-5 4v-4H5z" />
-        <path d="M9 11h10M9 14h7" />
-      </svg>
-    </span>
   );
 }
 

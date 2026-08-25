@@ -1,6 +1,7 @@
 import type { Ref } from 'react';
+import { Plus, Search } from 'lucide-react';
 import type { DiscourseConversationSummary } from '../../shared/discourse';
-import { DiscoursePanelLeftIcon } from './DiscourseIcons';
+import { PanelIcon } from './AppNavigation';
 
 interface DiscourseConversationRailProps {
   archived: boolean;
@@ -47,6 +48,7 @@ export function DiscourseConversationRail({
         />
       ) : null}
       <aside
+        id="discourse-history-panel"
         ref={railRef}
         className={`tm-discourse-rail ${modalOpen ? 'tm-discourse-rail--open' : ''}`}
         aria-labelledby="discourse-rail-title"
@@ -77,7 +79,7 @@ export function DiscourseConversationRail({
                 title="Close conversation list"
                 onClick={onClose}
               >
-                <DiscoursePanelLeftIcon expanded />
+                <PanelIcon />
               </button>
             ) : null}
           </div>
@@ -180,21 +182,10 @@ function formatCompactDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
 }
 
-const ICON = {
-  width: 16,
-  height: 16,
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.8,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const
-};
-
 function PlusIcon() {
-  return <svg {...ICON}><path d="M12 5v14M5 12h14" /></svg>;
+  return <Plus aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }
 
 function SearchIcon() {
-  return <svg {...ICON}><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>;
+  return <Search aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

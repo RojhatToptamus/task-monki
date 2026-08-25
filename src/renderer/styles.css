@@ -1,3 +1,4 @@
+@import '../../themes.css';
 @import './styles/foundation.css';
 @import './styles/base-components.css';
 @import './styles/discourse.css';

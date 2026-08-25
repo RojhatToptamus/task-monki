@@ -56,7 +56,8 @@ describe('Preview surfaces', () => {
     expect(html).toContain('Approval required');
     expect(html).toContain('1 application node · 1 setup job · 1 route');
     expect(html).toContain('Review &amp; approve');
-    expect(html).toContain('Details');
+    expect(html).not.toContain('status-pill');
+    expect(html).not.toContain('Details');
     expect(html).not.toContain('Currentness');
     expect(html).not.toContain('No attached route');
     expect(html).not.toContain('Review execution plan');

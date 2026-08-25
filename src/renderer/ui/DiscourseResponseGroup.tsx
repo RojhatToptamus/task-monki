@@ -8,6 +8,8 @@ import {
   discourseTeamCompletionSummary,
   discourseTerminalJobDetail
 } from '../model/discourse';
+import { StatusGlyph } from './StatusBadge';
+import { DisclosureChevron } from './DisclosureChevron';
 
 interface DiscourseResponseGroupProps {
   aggregate: DiscourseConversationAggregateRecord;
@@ -34,6 +36,16 @@ export function DiscourseResponseGroup({
       ).length;
   const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
   const reviews = jobs.filter((job) => job.role === 'CRITIQUE');
+  const reviewGroups = reviews.reduce<Array<{ label: string; names: string[] }>>((groups, review) => {
+    const label = discourseReviewResultLabel(review);
+    const existing = groups.find((group) => group.label === label);
+    if (existing) {
+      existing.names.push(review.assignment.displayNameSnapshot);
+    } else {
+      groups.push({ label, names: [review.assignment.displayNameSnapshot] });
+    }
+    return groups;
+  }, []);
   const concerns = aggregate.concerns.filter((concern) => concern.waveId === wave.id);
   const activeJobs = jobs.filter(
     (job) => !['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)
@@ -102,16 +114,14 @@ export function DiscourseResponseGroup({
 
   return (
     <li
-      className={`tm-discourse-response tm-discourse-response--${tone}`}
+      className={`tm-discourse-response tm-discourse-response--${tone} ${tone !== 'verified' && tone !== 'idle' ? 'tm-discourse-response--marked' : ''}`}
       aria-label="Agent response status"
     >
       <header>
-        <span
-          className={`tm-discourse-response__pulse ${
-            activelyWorking ? 'tm-discourse-response__pulse--active' : ''
-          }`}
-        />
-        <span role="status" aria-live="polite" aria-atomic="true">
+        {tone !== 'verified' && tone !== 'idle' ? (
+          <StatusGlyph kind={tone} animate={Boolean(activelyWorking)} />
+        ) : null}
+        <span className="tm-discourse-response__copy" role="status" aria-live="polite" aria-atomic="true">
           <strong>{label}</strong><small>{detail}</small>
         </span>
         {wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED' ? (
@@ -141,12 +151,12 @@ export function DiscourseResponseGroup({
           ))}
         </div>
       ) : null}
-      {reviews.length > 0 ? (
+      {reviewGroups.length > 0 ? (
         <ul className="tm-discourse-response__reviews" aria-label="Team review results">
-          {reviews.map((review) => (
-            <li key={review.id}>
-              <span>{review.assignment.displayNameSnapshot}</span>
-              <strong>{discourseReviewResultLabel(review)}</strong>
+          {reviewGroups.map((group) => (
+            <li key={group.label}>
+              <span>{group.names.join(' · ')}</span>
+              <strong>{group.label}</strong>
             </li>
           ))}
         </ul>
@@ -156,6 +166,7 @@ export function DiscourseResponseGroup({
           {concerns.map((concern) => (
             <details key={concern.id}>
               <summary>
+                <DisclosureChevron className="tm-discourse-response__chevron" />
                 <span>{capitalize(concern.severity)}</span>
                 {concern.targetClaim}
                 {concern.redundantOfConcernId ? (

@@ -105,6 +105,8 @@ export interface TaskCardOptions {
    * the Review queue where that count is the signal engineers scan for.
    */
   showReviewCount?: boolean;
+  /** Use the lifecycle vocabulary that scans cleanly in the Active runs view. */
+  statusContext?: 'active';
   repositoryName?: string;
 }
 
@@ -151,7 +153,9 @@ export function describeTaskState(task: TaskCardSource): { label: string; tone: 
       isImplementationOutcomeBlocked(task))
   ) {
     return {
-      label: attention.label,
+      label: ['Needs approval', 'Needs input'].includes(attention.label)
+        ? 'Needs you'
+        : attention.label,
       tone: attention.tone === 'error' ? 'error' : 'action'
     };
   }
@@ -231,7 +235,10 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
 
   const run = task.projection.agentRun;
   if (run === 'QUEUED' || run === 'STARTING' || run === 'RUNNING') {
-    return { label: humanizeEnum(run), tone: 'info' };
+    return {
+      label: task.projection.agentReview?.status === 'RUNNING' ? 'Reviewing' : 'Implementing',
+      tone: 'info'
+    };
   }
   if (run === 'INTERRUPTING' || run === 'INTERRUPTED') {
     return { label: humanizeEnum(run), tone: 'action' };
@@ -240,11 +247,15 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
     return { label: attention?.label ?? humanizeEnum(run), tone: 'error' };
   }
 
+  if (task.projection.agentReview?.status === 'STALE') {
+    return { label: 'Re-verify', tone: 'action' };
+  }
+
   if (task.workflowPhase === 'REVIEW' || task.workflowPhase === 'IN_REVIEW') {
-    return { label: 'In review', tone: 'info' };
+    return { label: 'Reviewing', tone: 'neutral' };
   }
   if (task.workflowPhase === 'IN_PROGRESS') {
-    return { label: 'In progress', tone: 'info' };
+    return { label: 'Implementing', tone: 'info' };
   }
 
   return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
@@ -602,7 +613,9 @@ export function buildTaskCardVM(
   options: TaskCardOptions = {}
 ): TaskCardVM {
   const { showRepo = true, columnKey, showReviewCount = false } = options;
-  const state = describeTaskState(task);
+  const state = options.statusContext === 'active'
+    ? describeActiveTaskState(task)
+    : describeTaskState(task);
   const evidence = evidenceLineForTask(task);
   if (showReviewCount) {
     const findingLabel = reviewFindingCountLabel(task);
@@ -625,6 +638,19 @@ export function buildTaskCardVM(
     archived: task.workflowPhase === 'ARCHIVED',
     evidence
   };
+}
+
+function describeActiveTaskState(task: TaskCardSource): { label: string; tone: Tone } {
+  if (task.projection.agentRun === 'AWAITING_APPROVAL' || task.projection.agentRun === 'AWAITING_USER_INPUT') {
+    return { label: 'Needs you', tone: 'action' };
+  }
+  if (task.projection.agentReview?.status === 'RUNNING') {
+    return { label: 'Reviewing', tone: 'info' };
+  }
+  if (['QUEUED', 'STARTING', 'RUNNING', 'INTERRUPTING'].includes(task.projection.agentRun)) {
+    return { label: 'Implementing', tone: 'info' };
+  }
+  return describeTaskState(task);
 }
 
 /**

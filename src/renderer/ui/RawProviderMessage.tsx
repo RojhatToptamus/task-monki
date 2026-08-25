@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { AgentProtocolMessageReference } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
+import { DisclosureChevron } from './DisclosureChevron';
 
 export function RawProviderMessage({
   reference
@@ -38,7 +39,7 @@ export function RawProviderMessage({
       }
     }}>
       <summary>
-        Raw provider event · #{reference.sequence}
+        <DisclosureChevron /><span>Raw provider event · #{reference.sequence}</span>
       </summary>
       {error ? <p className="form-error">{error}</p> : null}
       <pre>{loading ? 'Loading…' : raw ?? 'Open to load the journal entry.'}</pre>

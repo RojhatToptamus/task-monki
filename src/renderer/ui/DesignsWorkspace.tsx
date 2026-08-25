@@ -24,14 +24,15 @@ import {
 import {
   designProjectStatus,
   designStatusView,
-  designWorkspaceIsCompact,
+  designWorkspaceLayout,
   formatDesignUpdatedAt,
-  sortedDesignProjects,
+  visibleDesignProjects,
+  type DesignHistoryFilter,
   type DesignProjectDetail,
   type DesignProjectSummary,
-  type DesignProjectStatus
+  type DesignProjectStatus,
+  type DesignWorkspaceLayoutMode
 } from '../model/designs';
-import { AccessibleTab } from './AccessibleTabs';
 import {
   DesignCanvas,
   type DesignCanvasHideRequest,
@@ -43,11 +44,30 @@ import { DesignFilesDrawer } from './DesignFilesDrawer';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { AgentModelSelector } from './AgentModelSelector';
-import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
+import {
+  resolveReasoningEffort,
+  selectModel
+} from '../model/agentExecutionSettings';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { useTaskAttachments } from './useTaskAttachments';
 import { DesignProjectMenu } from './DesignActionsMenu';
+import { StatusGlyph } from './StatusBadge';
+import { PanelResizeHandle } from './PanelResizeHandle';
+import { PanelIcon } from './AppNavigation';
+import {
+  UiCloseIcon,
+  UiFolderIcon,
+  UiLayoutIcon,
+  UiPlusIcon,
+  UiSearchIcon
+} from './UiIcons';
+import {
+  focusedPanelWidth,
+  persistDesignLayout,
+  persistFocusedPanelWidth,
+  savedDesignLayout
+} from '../model/workspaceLayout';
 
 export type CreateBlankDesignInput = Pick<
   CreateBlankDesignRequest,
@@ -55,6 +75,8 @@ export type CreateBlankDesignInput = Pick<
 >;
 
 export interface DesignsWorkspaceProps {
+  historyCollapsed?: boolean;
+  onHistoryCollapsedChange?(collapsed: boolean): void;
   designs: readonly DesignProjectSummary[];
   selectedDesignId?: string;
   project?: DesignProjectDetail;
@@ -101,6 +123,7 @@ export interface DesignsWorkspaceProps {
   ): Promise<void>;
   onRefreshCanvas(request: DesignCanvasRefreshRequest): Promise<void>;
   onRestartCanvas(designId: string): Promise<void>;
+  onOpenCanvas?(taskId: string, generationId: string, routeId: string): Promise<void>;
   onRestoreRevision(designId: string, revisionId: string): Promise<void>;
   onDuplicateDesign(designId: string, revisionId: string): Promise<void>;
   onRenameDesign(designId: string, title: string): Promise<void>;
@@ -111,9 +134,9 @@ export interface DesignsWorkspaceProps {
   onRetryLoad?(): void;
 }
 
-type CompactPane = 'conversation' | 'canvas';
-
 export function DesignsWorkspace({
+  historyCollapsed = false,
+  onHistoryCollapsedChange,
   designs,
   selectedDesignId,
   project,
@@ -143,6 +166,7 @@ export function DesignsWorkspace({
   onRespondToInteraction,
   onRefreshCanvas,
   onRestartCanvas,
+  onOpenCanvas,
   onRestoreRevision,
   onDuplicateDesign,
   onRenameDesign,
@@ -153,17 +177,41 @@ export function DesignsWorkspace({
   onRetryLoad
 }: DesignsWorkspaceProps) {
   const workspaceRef = useRef<HTMLElement>(null);
+  const historyRailRef = useRef<HTMLElement>(null);
+  const historySearchRef = useRef<HTMLInputElement>(null);
   const [creatingBlank, setCreatingBlank] = useState(false);
-  const [compact, setCompact] = useState(false);
-  const [compactPane, setCompactPane] = useState<CompactPane>('conversation');
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  const [layout, setLayout] = useState<DesignWorkspaceLayoutMode>(() => savedDesignLayout());
+  const [historyWidth, setHistoryWidth] = useState(() =>
+    focusedPanelWidth('design-history', 268, 220, 360)
+  );
+  const [conversationWidth, setConversationWidth] = useState(() =>
+    focusedPanelWidth('design-conversation', 380, 320, 640)
+  );
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [historyFilter, setHistoryFilter] = useState<DesignHistoryFilter>('active');
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
   const referenceDesignId = useRef<string | undefined>(undefined);
   const restoredDraftRevision = useRef<number | undefined>(undefined);
-  const sortedDesigns = sortedDesignProjects(designs);
+  const visibleDesigns = visibleDesignProjects(designs, historyQuery, historyFilter);
   const activeDesignId = project?.design.id ?? selectedDesignId;
+  const layoutView = designWorkspaceLayout(workspaceWidth, historyCollapsed, historyWidth);
+  const renderedLayout = layoutView.availableModes.includes(layout) ? layout : 'chat';
+  const compact = workspaceWidth > 0 && !layoutView.splitAvailable;
+  const maxConversationWidth = Math.max(320, layoutView.mainWidth - 485);
+  const renderedConversationWidth = Math.min(conversationWidth, maxConversationWidth);
+  const historyModalOpen = compact && !historyCollapsed;
+
+  useDialogFocusBoundary({
+    dialogRef: historyRailRef,
+    initialFocusRef: historySearchRef,
+    busy: false,
+    onClose: () => onHistoryCollapsedChange?.(true),
+    active: historyModalOpen
+  });
 
   useEffect(() => {
     if (!project) {
@@ -200,7 +248,7 @@ export function DesignsWorkspace({
     const workspace = workspaceRef.current;
     if (!workspace) return;
     const update = () => {
-      setCompact(designWorkspaceIsCompact(workspace.getBoundingClientRect().width));
+      setWorkspaceWidth(workspace.getBoundingClientRect().width);
     };
     update();
     const observer = new ResizeObserver(update);
@@ -208,36 +256,103 @@ export function DesignsWorkspace({
     return () => observer.disconnect();
   }, []);
 
+  useLayoutEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    workspace.style.setProperty('--design-history-width', `${historyWidth}px`);
+    workspace.style.setProperty('--design-conversation-width', `${renderedConversationWidth}px`);
+  }, [historyWidth, renderedConversationWidth]);
+
   const showCreate =
     creatingBlank || (!loading && !error && designs.length === 0 && !project);
 
   return (
     <main
       ref={workspaceRef}
-      className={`tm-designs ${compact ? 'tm-designs--compact' : ''}`}
+      className={`tm-designs ${compact ? 'tm-designs--compact' : ''} ${
+        historyCollapsed ? 'tm-designs--history-collapsed' : ''
+      }`}
       aria-label="Designs workspace"
     >
-      <aside className="tm-designs-rail" aria-label="Designs">
+      {historyModalOpen ? (
+        <button
+          type="button"
+          className="tm-designs-rail__scrim"
+          aria-label="Dismiss Design history"
+          onClick={() => onHistoryCollapsedChange?.(true)}
+        />
+      ) : null}
+      {!historyCollapsed ? <aside
+        id="design-history-panel"
+        ref={historyRailRef}
+        className={`tm-designs-rail ${historyModalOpen ? 'tm-designs-rail--open' : ''}`}
+        aria-label="Designs"
+        aria-modal={historyModalOpen ? true : undefined}
+        role={historyModalOpen ? 'dialog' : undefined}
+        tabIndex={historyModalOpen ? -1 : undefined}
+      >
         <header className="tm-designs-rail__head">
           <div>
-            <h1>Designs</h1>
+            <h2>Designs</h2>
             <p>Build and refine working previews.</p>
           </div>
-          <button
-            type="button"
-            className="tm-designs-rail__new"
-            onClick={() => setCreatingBlank(true)}
-          >
-            <PlusIcon />
-            <span>New</span>
-          </button>
+          <div className="tm-designs-rail__head-actions">
+            <button
+              type="button"
+              className="tm-designs-rail__new"
+              onClick={() => {
+                setCreatingBlank(true);
+                if (historyModalOpen) onHistoryCollapsedChange?.(true);
+              }}
+            >
+              <UiPlusIcon />
+              <span>New</span>
+            </button>
+            {historyModalOpen ? (
+              <button
+                type="button"
+                className="tm-iconbtn tm-designs-rail__close"
+                aria-label="Close Design history"
+                title="Close Design history"
+                onClick={() => onHistoryCollapsedChange?.(true)}
+              >
+                <PanelIcon />
+              </button>
+            ) : null}
+          </div>
         </header>
 
+        <label className="tm-designs-rail__search">
+          <UiSearchIcon />
+          <span className="tm-visually-hidden">Search Designs</span>
+          <input
+            ref={historySearchRef}
+            type="search"
+            value={historyQuery}
+            placeholder="Search Designs"
+            onChange={(event) => setHistoryQuery(event.target.value)}
+          />
+        </label>
+        <div className="tm-designs-rail__filter" role="group" aria-label="Design status">
+          {(['active', 'all', 'archived'] as const).map((filter) => (
+            <button
+              type="button"
+              key={filter}
+              aria-pressed={historyFilter === filter}
+              onClick={() => setHistoryFilter(filter)}
+            >
+              {filter === 'active' ? 'Recent' : filter === 'all' ? 'All' : 'Archive'}
+            </button>
+          ))}
+        </div>
+
         <nav className="tm-designs-rail__list" aria-label="Recent Designs">
-          {sortedDesigns.length === 0 ? (
-            <p className="tm-designs-rail__empty">No Designs yet</p>
+          {visibleDesigns.length === 0 ? (
+            <p className="tm-designs-rail__empty">
+              {designs.length === 0 ? 'No Designs yet' : 'No Designs match this view'}
+            </p>
           ) : (
-            sortedDesigns.map((design) => {
+            visibleDesigns.map((design) => {
               const displayStatus: DesignProjectStatus =
                 project?.design.id === design.id ? designProjectStatus(project) : design.status;
               const status = designStatusView(displayStatus);
@@ -251,12 +366,12 @@ export function DesignsWorkspace({
                   onClick={() => {
                     setCreatingBlank(false);
                     onSelectDesign(design.id);
+                    if (historyModalOpen) onHistoryCollapsedChange?.(true);
                   }}
                 >
                   <span className="tm-designs-rail__item-title">{design.title}</span>
                   <span className="tm-designs-rail__item-meta">
-                    <i data-tone={status.tone} aria-hidden="true" />
-                    {status.label}
+                    <span data-tone={status.tone}>{status.label}</span>
                     <time dateTime={design.updatedAt}>
                       {formatDesignUpdatedAt(design.updatedAt)}
                     </time>
@@ -266,11 +381,26 @@ export function DesignsWorkspace({
             })
           )}
         </nav>
-      </aside>
+      </aside> : null}
+      {!historyCollapsed && !compact ? (
+        <PanelResizeHandle
+          label="Resize Design history"
+          value={historyWidth}
+          min={220}
+          max={360}
+          defaultValue={268}
+          controls="design-history-panel"
+          onChange={(width) => {
+            setHistoryWidth(width);
+            persistFocusedPanelWidth('design-history', width);
+          }}
+        />
+      ) : null}
 
-      <section className="tm-designs-main">
+      <section className="tm-designs-main" inert={historyModalOpen ? true : undefined}>
         {showCreate ? (
           <BlankDesignForm
+            historyCollapsed={historyCollapsed}
             canCancel={designs.length > 0}
             models={models}
             runtimes={runtimes}
@@ -279,6 +409,7 @@ export function DesignsWorkspace({
             onStageAttachmentBatch={onStageAttachmentBatch}
             onDiscardAttachmentDraft={onDiscardAttachmentDraft}
             onReadClipboardImage={onReadClipboardImage}
+            onHistoryCollapsedChange={onHistoryCollapsedChange}
             onCancel={() => setCreatingBlank(false)}
             onCreate={async (input) => {
               await onCreateBlankDesign(input);
@@ -289,6 +420,8 @@ export function DesignsWorkspace({
           <WorkspaceState
             title="Could not load this Design"
             detail={error}
+            historyCollapsed={historyCollapsed}
+            onHistoryCollapsedChange={onHistoryCollapsedChange}
             action={onRetryLoad ? { label: 'Try again', onClick: onRetryLoad } : undefined}
           />
         ) : loading || !project ? (
@@ -300,12 +433,22 @@ export function DesignsWorkspace({
                 : 'Choose a Design from the list or create a blank Design.'
             }
             busy={loading}
+            historyCollapsed={historyCollapsed}
+            onHistoryCollapsedChange={onHistoryCollapsedChange}
           />
         ) : (
           <>
             <DesignHeader
               project={project}
+              historyCollapsed={historyCollapsed}
+              layout={renderedLayout}
+              availableLayouts={layoutView.availableModes}
               filesOpen={filesOpen}
+              onHistoryCollapsedChange={onHistoryCollapsedChange}
+              onLayoutChange={(nextLayout) => {
+                setLayout(nextLayout);
+                persistDesignLayout(nextLayout);
+              }}
               onToggleFiles={() => setFilesOpen((open) => !open)}
               onDuplicate={() => {
                 const revision = project.revisions.at(-1);
@@ -319,31 +462,13 @@ export function DesignsWorkspace({
               }
               onDelete={() => setDeleteOpen(true)}
             />
-            {compact ? (
-              <div className="tm-designs-tabs tm-tabs" role="tablist" aria-label="Design view">
-                <AccessibleTab
-                  id="design-conversation-tab"
-                  panelId="design-conversation-panel"
-                  label="Conversation"
-                  selected={compactPane === 'conversation'}
-                  onSelect={() => setCompactPane('conversation')}
-                />
-                <AccessibleTab
-                  id="design-canvas-tab"
-                  panelId="design-canvas-panel"
-                  label="Canvas"
-                  selected={compactPane === 'canvas'}
-                  onSelect={() => setCompactPane('canvas')}
-                />
-              </div>
-            ) : null}
-            <div className="tm-designs-split">
-              {!compact || compactPane === 'conversation' ? (
+            <div
+              className={`tm-designs-split tm-designs-split--${renderedLayout}`}
+            >
+              {renderedLayout !== 'canvas' ? (
                 <div
                   className="tm-designs-split__conversation"
                   id="design-conversation-panel"
-                  role={compact ? 'tabpanel' : undefined}
-                  aria-labelledby={compact ? 'design-conversation-tab' : undefined}
                 >
                   <DesignConversation
                     key={project.design.id}
@@ -393,15 +518,28 @@ export function DesignsWorkspace({
                     onDuplicate={(revisionId) =>
                       onDuplicateDesign(project.design.id, revisionId)
                     }
+                    onOpenReferences={() => setFilesOpen(true)}
                   />
                 </div>
               ) : null}
-              {!compact || compactPane === 'canvas' ? (
+              {renderedLayout === 'split' ? (
+                <PanelResizeHandle
+                  label="Resize Design conversation"
+                  value={renderedConversationWidth}
+                  min={320}
+                  max={maxConversationWidth}
+                  defaultValue={380}
+                  controls="design-conversation-panel design-canvas-panel"
+                  onChange={(width) => {
+                    setConversationWidth(width);
+                    persistFocusedPanelWidth('design-conversation', width);
+                  }}
+                />
+              ) : null}
+              {renderedLayout !== 'chat' ? (
                 <div
                   className="tm-designs-split__canvas"
                   id="design-canvas-panel"
-                  role={compact ? 'tabpanel' : undefined}
-                  aria-labelledby={compact ? 'design-canvas-tab' : undefined}
                 >
                   <DesignCanvas
                     project={project}
@@ -411,6 +549,10 @@ export function DesignsWorkspace({
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
                     onRestart={onRestartCanvas}
+                    onRestore={(revisionId) =>
+                      onRestoreRevision(project.design.id, revisionId)
+                    }
+                    onOpen={onOpenCanvas}
                   />
                 </div>
               ) : null}
@@ -470,7 +612,12 @@ export function DesignsWorkspace({
 
 function DesignHeader({
   project,
+  historyCollapsed,
+  layout,
+  availableLayouts,
   filesOpen,
+  onHistoryCollapsedChange,
+  onLayoutChange,
   onToggleFiles,
   onDuplicate,
   onRename,
@@ -478,7 +625,12 @@ function DesignHeader({
   onDelete
 }: {
   project: DesignProjectDetail;
+  historyCollapsed: boolean;
+  layout: DesignWorkspaceLayoutMode;
+  availableLayouts: readonly DesignWorkspaceLayoutMode[];
   filesOpen: boolean;
+  onHistoryCollapsedChange?(collapsed: boolean): void;
+  onLayoutChange(layout: DesignWorkspaceLayoutMode): void;
   onToggleFiles(): void;
   onDuplicate(): void;
   onRename(): void;
@@ -486,17 +638,39 @@ function DesignHeader({
   onDelete(): void;
 }) {
   const status = designStatusView(designProjectStatus(project));
+  const revision = project.revisions.at(-1)?.ordinal;
   return (
     <header className="tm-designs-header">
-      <div className="tm-designs-header__identity">
-        <h1>{project.design.title}</h1>
-        <p>{project.canvas.detail ?? status.detail}</p>
+      <div className="tm-designs-header__leading">
+        <DesignHistoryToggle
+          collapsed={historyCollapsed}
+          onChange={onHistoryCollapsedChange}
+        />
+        <div className="tm-designs-header__identity">
+          <h1>{project.design.title}</h1>
+          <p>
+            <span className="tm-design-status" data-tone={status.tone}>
+              <StatusGlyph kind={status.tone} />
+              {status.label}{revision ? ` · revision ${revision}` : ''}
+            </span>
+          </p>
+        </div>
       </div>
       <div className="tm-designs-header__actions">
-        <span className="tm-design-status" data-tone={status.tone}>
-          <i aria-hidden="true" />
-          {status.label}
-        </span>
+        <div className="tm-design-layout" role="group" aria-label="Design layout">
+          {availableLayouts.map((option) => (
+            <button
+              type="button"
+              key={option}
+              aria-pressed={layout === option}
+              aria-label={layoutLabel(option)}
+              title={layoutLabel(option)}
+              onClick={() => onLayoutChange(option)}
+            >
+              <UiLayoutIcon layout={option} />
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           className="tm-designs-header__files"
@@ -504,8 +678,8 @@ function DesignHeader({
           aria-controls="design-files-drawer"
           onClick={onToggleFiles}
         >
-          <FilesIcon />
-          Files
+          <UiFolderIcon />
+          References
           <span>{project.references.filter((reference) => reference.state === 'ACTIVE').length}</span>
         </button>
         <DesignProjectMenu
@@ -524,6 +698,7 @@ function DesignHeader({
 }
 
 function BlankDesignForm({
+  historyCollapsed,
   canCancel,
   models,
   runtimes,
@@ -532,9 +707,11 @@ function BlankDesignForm({
   onStageAttachmentBatch,
   onDiscardAttachmentDraft,
   onReadClipboardImage,
+  onHistoryCollapsedChange,
   onCancel,
   onCreate
 }: {
+  historyCollapsed: boolean;
   canCancel: boolean;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
@@ -543,6 +720,7 @@ function BlankDesignForm({
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
+  onHistoryCollapsedChange?(collapsed: boolean): void;
   onCancel(): void;
   onCreate(input: CreateBlankDesignInput): Promise<void>;
 }) {
@@ -646,83 +824,106 @@ function BlankDesignForm({
         className="tm-design-create__form"
         onSubmit={(event) => void submit(event)}
       >
-        <div className="tm-design-create__intro">
-          <span className="tm-design-create__mark" aria-hidden="true">
-            <DesignMark />
-          </span>
-          <h1>New blank Design</h1>
-          <p>Describe the page or interface that you want Codex to build.</p>
+        <header className="tm-design-create__intro">
+          <div className="tm-design-create__intro-leading">
+            <DesignHistoryToggle
+              collapsed={historyCollapsed}
+              onChange={onHistoryCollapsedChange}
+            />
+            <div>
+              <h1>New Design</h1>
+              <p>Describe the page or interface the agent should build.</p>
+            </div>
+          </div>
+          {canCancel ? (
+            <button
+              type="button"
+              className="tm-iconbtn"
+              aria-label="Close new Design"
+              title="Close new Design"
+              disabled={submitting}
+              onClick={onCancel}
+            >
+              <UiCloseIcon />
+            </button>
+          ) : null}
+        </header>
+
+        <div className="tm-design-create__body">
+          <div className="tm-design-create__content">
+            <div className="tm-design-create__label-row">
+              <label htmlFor="new-design-brief">Brief</label>
+              <span>Reference images help most</span>
+            </div>
+            <AttachmentComposerShell
+              attachments={attachments}
+              className="tm-design-create__composer"
+              attachmentLabel="Design references"
+              removeDisabled={composerLocked}
+              addButtonTitle={
+                attachmentsEnabled
+                  ? 'Stored locally and shared read-only with the Design agent.'
+                  : 'The selected agent runtime does not support references.'
+              }
+              hint={
+                !attachmentsEnabled
+                  ? 'Unavailable for this runtime'
+                  : attachments.isReadingClipboardImage
+                    ? 'Reading clipboard image…'
+                    : attachments.activeItems.length > 0
+                      ? `${attachments.activeItems.length} ${
+                          attachments.activeItems.length === 1 ? 'file' : 'files'
+                        } · ${formatAttachmentBytes(attachments.byteCount)}`
+                      : 'Paste or drop files'
+              }
+            >
+              <textarea
+                id="new-design-brief"
+                value={brief}
+                rows={7}
+                placeholder="A focused landing page for…"
+                disabled={composerLocked}
+                onChange={(event) => setBrief(event.target.value)}
+                onPaste={attachments.paste}
+              />
+            </AttachmentComposerShell>
+
+            {attachments.overflowError || attachments.modelError ? (
+              <p className="task-attachment-message task-attachment-message--error" role="alert">
+                {attachments.overflowError ?? attachments.modelError}
+              </p>
+            ) : null}
+
+            <div className="tm-design-create__runtime" aria-label="Design agent settings">
+              <AgentModelSelector
+                label="Design"
+                runtimeId={selectedRuntimeId}
+                modelId={selectedModelId}
+                reasoningEffort={selectedReasoningEffort}
+                models={models}
+                runtimes={runtimes}
+                disabled={composerLocked}
+                presentation="compact"
+                selectionUnavailable={!selectedRuntimeId || !selectedModelId}
+                selectionUnavailableMessage="No ready agent supports Design Mode."
+                onDiscoverModels={onDiscoverAgentRuntimeModels}
+                onSelectionChange={(nextRuntimeId, nextModelId) => {
+                  setRuntimeId(nextRuntimeId);
+                  setModelId(nextModelId);
+                  const nextModel = models.find(
+                    (model) =>
+                      model.runtimeId === nextRuntimeId && model.id === nextModelId
+                  );
+                  setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+                }}
+                onReasoningEffortChange={setReasoningEffort}
+              />
+            </div>
+
+            {error ? <p className="tm-design-create__error" role="alert">{error}</p> : null}
+          </div>
         </div>
-
-        <label htmlFor="new-design-brief">Brief</label>
-        <AttachmentComposerShell
-          attachments={attachments}
-          className="tm-design-create__composer"
-          attachmentLabel="Design references"
-          removeDisabled={composerLocked}
-          addButtonTitle={
-            attachmentsEnabled
-              ? 'Stored locally and shared read-only with the Design agent.'
-              : 'The selected agent runtime does not support references.'
-          }
-          hint={
-            !attachmentsEnabled
-              ? 'Unavailable for this runtime'
-              : attachments.isReadingClipboardImage
-                ? 'Reading clipboard image…'
-                : attachments.activeItems.length > 0
-                  ? `${attachments.activeItems.length} ${
-                      attachments.activeItems.length === 1 ? 'file' : 'files'
-                    } · ${formatAttachmentBytes(attachments.byteCount)}`
-                  : 'Paste or drop files'
-          }
-        >
-          <textarea
-            id="new-design-brief"
-            value={brief}
-            rows={7}
-            placeholder="A focused landing page for…"
-            disabled={composerLocked}
-            autoFocus
-            onChange={(event) => setBrief(event.target.value)}
-            onPaste={attachments.paste}
-          />
-        </AttachmentComposerShell>
-
-        {attachments.overflowError || attachments.modelError ? (
-          <p className="task-attachment-message task-attachment-message--error" role="alert">
-            {attachments.overflowError ?? attachments.modelError}
-          </p>
-        ) : null}
-
-        <div className="tm-design-create__runtime" aria-label="Design agent settings">
-          <AgentModelSelector
-            label="Design"
-            runtimeId={selectedRuntimeId}
-            modelId={selectedModelId}
-            reasoningEffort={selectedReasoningEffort}
-            models={models}
-            runtimes={runtimes}
-            disabled={composerLocked}
-            compact
-            selectionUnavailable={!selectedRuntimeId || !selectedModelId}
-            selectionUnavailableMessage="No ready agent supports Design Mode."
-            onDiscoverModels={onDiscoverAgentRuntimeModels}
-            onSelectionChange={(nextRuntimeId, nextModelId) => {
-              setRuntimeId(nextRuntimeId);
-              setModelId(nextModelId);
-              const nextModel = models.find(
-                (model) =>
-                  model.runtimeId === nextRuntimeId && model.id === nextModelId
-              );
-              setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
-            }}
-            onReasoningEffortChange={setReasoningEffort}
-          />
-        </div>
-
-        {error ? <p className="tm-design-create__error" role="alert">{error}</p> : null}
-        <div className="tm-design-create__actions">
+        <footer className="tm-design-create__actions">
           {canCancel ? (
             <button type="button" className="outline-button" disabled={submitting} onClick={onCancel}>
               {creationOutcomeUnknown ? 'Close' : 'Cancel'}
@@ -747,7 +948,7 @@ function BlankDesignForm({
                 ? 'Retry creation'
                 : 'Create Design'}
           </button>
-        </div>
+        </footer>
       </form>
     </div>
   );
@@ -801,17 +1002,19 @@ function RenameDesignDialog({
         disabled={saving}
         onClick={onCancel}
       />
-      <form className="tm-modal__panel tm-design-delete" onSubmit={(event) => void submit(event)}>
+      <form className="tm-modal__panel tm-design-delete tm-design-rename" onSubmit={(event) => void submit(event)}>
         <h3 id="rename-design-title">Rename Design</h3>
-        <label htmlFor="rename-design-input">Name</label>
-        <input
-          ref={inputRef}
-          id="rename-design-input"
-          value={title}
-          maxLength={120}
-          disabled={saving}
-          onChange={(event) => setTitle(event.target.value)}
-        />
+        <label className="tm-modal__field" htmlFor="rename-design-input">
+          <span>Name</span>
+          <input
+            ref={inputRef}
+            id="rename-design-input"
+            value={title}
+            maxLength={120}
+            disabled={saving}
+            onChange={(event) => setTitle(event.target.value)}
+          />
+        </label>
         {error ? <p className="tm-design-delete__error" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={saving} onClick={onCancel}>
@@ -905,19 +1108,27 @@ function WorkspaceState({
   title,
   detail,
   busy = false,
-  action
+  action,
+  historyCollapsed,
+  onHistoryCollapsedChange
 }: {
   title: string;
   detail: string;
   busy?: boolean;
   action?: { label: string; onClick(): void };
+  historyCollapsed: boolean;
+  onHistoryCollapsedChange?(collapsed: boolean): void;
 }) {
   return (
     <div className="tm-designs-state" role={busy ? 'status' : undefined}>
-      <span className={`tm-designs-state__mark ${busy ? 'tm-designs-state__mark--busy' : ''}`} aria-hidden="true">
-        <DesignMark />
-      </span>
-      <strong>{title}</strong>
+      {busy ? <StatusGlyph kind="working" /> : null}
+      <div className="tm-designs-state__title">
+        <DesignHistoryToggle
+          collapsed={historyCollapsed}
+          onChange={onHistoryCollapsedChange}
+        />
+        <strong>{title}</strong>
+      </div>
       <p>{detail}</p>
       {action ? (
         <button type="button" className="outline-button" onClick={action.onClick}>
@@ -928,28 +1139,31 @@ function WorkspaceState({
   );
 }
 
-function PlusIcon() {
+function DesignHistoryToggle({
+  collapsed,
+  onChange
+}: {
+  collapsed: boolean;
+  onChange?(collapsed: boolean): void;
+}) {
+  const label = collapsed ? 'Show Design history' : 'Hide Design history';
   return (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M8 3v10M3 8h10" />
-    </svg>
+    <button
+      type="button"
+      className="tm-iconbtn tm-mode-history-toggle"
+      aria-label={label}
+      aria-expanded={!collapsed}
+      aria-controls="design-history-panel"
+      title={label}
+      onClick={() => onChange?.(!collapsed)}
+    >
+      <PanelIcon />
+    </button>
   );
 }
 
-function FilesIcon() {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M2.5 4.5h4l1.2 1.4h5.8v6.6h-11z" />
-      <path d="M2.5 4.5v-1h4.2l1 1" />
-    </svg>
-  );
-}
-
-function DesignMark() {
-  return (
-    <svg viewBox="0 0 28 28" fill="none">
-      <rect x="4" y="5" width="20" height="18" rx="3" />
-      <path d="M4 10h20M9 5v18M13 14h7M13 18h5" />
-    </svg>
-  );
+function layoutLabel(layout: DesignWorkspaceLayoutMode): string {
+  if (layout === 'chat') return 'Conversation only';
+  if (layout === 'canvas') return 'Canvas only';
+  return 'Split view';
 }
