@@ -18,176 +18,83 @@
 
 ## Why Task Monki
 
-Task Monki started during the Codex Community Build and continued to grow during OpenAI Build Week in Vienna.
+Task Monki is a local desktop app for managing several coding agents from one Kanban board. Each task keeps its agent run, code changes, Preview, review, fixes, and pull request together.
 
-The idea came from a problem I kept running into while working with coding agents. The agents could implement tasks quickly, but managing several of them at the same time was still very manual. I had to open each worktree separately, run the right commands, start local services and containers, check the result, review the changes, and follow the pull request status across different tools.
+Create a task, let an agent work in an isolated branch and worktree, and follow its activity. Then run the implementation locally, request an independent review, send findings back for fixes, and deliver it through GitHub.
 
-I wanted one place where agents could work on multiple tasks in parallel while I could see what each one was doing, preview every result separately, request a review, send issues back for correction, and follow the task all the way to the pull request.
+## Features
 
-## What it is
+- Manage active, blocked, review, and completed tasks from one Kanban board.
+- Run several coding agents on the same repository without mixing their changes.
+- Preview each implementation in a separate local environment.
+- Request an agent review and send findings back for fixes in the same task.
+- Publish branches, open draft pull requests, and follow GitHub checks.
+- Compare independent answers or structured multi-agent discussions in Discourse.
+- Follow plans, messages, approvals, logs, file changes, and reported test output.
+- Keep every task in its own Git branch and worktree.
+- Read Git and GitHub evidence separately from agent reports.
 
-You create a task with a plain-language prompt, refine it based on the request and repository, and choose the runtime, model, and permission mode you want to use.
+## Local Previews
 
-Each task gets its own Git branch and worktree, so several agents can work on the same repository in parallel without affecting one another or the main checkout. Task Monki keeps these tasks together in one Kanban-style workspace, where you can follow plans, progress, tool activity, logs, and file changes.
+Task Monki can prepare dependencies, run jobs, start declared application services, workers, and supported containers, allocate ports, and wait for readiness.
 
-When the implementation is ready, you can run the worktree as its own local preview, request an independent agent review, send findings back for correction, inspect the Git diff and collected evidence, and open a draft pull request without leaving the app.
+When the recipe declares them, it can also run managed PostgreSQL or Redis and supported Docker Compose services. Each task gets a separate route and local environment, so you can compare full-stack changes without preparing every worktree by hand.
 
-Task records, worktrees, and evidence stay on your machine. Agent work is delegated to an installed and authenticated runtime. Codex App Server and OpenCode use their native protocols, while supported ACP agents connect through the Agent Client Protocol.
-
-Task Monki keeps what an agent reports separate from what it verifies locally. Agent plans and completion messages are shown as runtime output, while Git inspection and GitHub synchronization provide the delivery evidence.
-
-## Workflow
-
-1. **Create a task** — select a repository, write the request, and choose the runtime, model, and permissions.
-2. **Prepare the worktree** — Task Monki creates an isolated branch and Git worktree for the task.
-3. **Run the agent** — follow the plan, tool activity, approvals, logs, and file changes while the agent works.
-4. **Inspect and test** — review the Git diff, test results, and collected logs.
-5. **Request a review** — ask another agent to inspect the implementation and report any problems.
-6. **Send back fixes** — return review findings, failed tests, or failed checks to the original agent without creating a new task.
-7. **Preview the result** — launch the worktree in its own local environment and test the actual application.
-8. **Deliver the change** — commit the result, publish the branch, open a draft pull request, and monitor the workflow checks.
-
-## Local previews
-
-Each worktree can run as its own local preview. Task Monki can generate a reviewable `.taskmonki/preview.yaml`, prepare dependencies and services, and launch each implementation in a separate environment.
-
-This lets you test several tasks at the same time without manually opening terminals, assigning ports, or setting up containers for every worktree.
-
-See the [Preview Guide](docs/PREVIEW_GUIDE.md) for setup, examples, and troubleshooting.
+Preview starts only after you review and approve the repository's `.taskmonki/preview.yaml` file. See the [Preview guide](https://www.monki.work/docs/?page=preview) for details.
 
 ## Discourse
 
-Discourse lets you ask questions with repository context in three different ways.
+Direct asks one agent. Panel collects independent answers from two or three agents. Team starts with a Lead answer, then Skeptic and Verifier agents challenge its assumptions and evidence. The Lead can add one correction when their concerns are material.
 
-- **Direct** works like a standard agent chat.
-- **Panel** asks several agents to answer independently, so you can compare different approaches.
-- **Team** starts with an answer from a Lead, while Skeptic and Verifier agents challenge its assumptions and evidence. The Lead can then revise or defend the answer.
+## Design Mode
 
-The original answer, criticism, and correction remain visible in the same conversation.
+Design Mode turns a brief and reference files into a working interface Preview. Each Design has an isolated worktree, conversation, canvas, and version history.
 
-See the [Discourse workflow](docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md) for more details.
+Use Chat, Split, or Canvas view. Test desktop, tablet, and phone widths. Add references or editable assets, then restore or duplicate any version.
 
-## Supported providers
+The interactive canvas currently works in the macOS desktop app.
 
-Task Monki currently supports Codex (recommended), OpenCode, Cursor, Grok, and the Claude ACP bridge (experimental).
+## Supported Runtimes
 
-## Built with Codex
+- Native integrations: Codex App Server and OpenCode server.
+- ACP compatibility integrations: Grok Build, Cursor Agent, and Claude Agent.
 
-Task Monki started during the Codex Community Build with GPT-5.5 and was meaningfully extended during OpenAI Build Week with GPT-5.6.
-
-Between July 13 and July 21, 2026, I used the Codex app and separate Git worktrees to add multi-provider support, local previews, Discourse, major workspace and interaction improvements, repository architecture changes, and additional review and worktree reliability fixes.
-
-I made the main product and technical decisions, while Codex helped me inspect the codebase, implement the features, and verify them across the application.
-
-I used GPT-5.6 Ultra for the multi-provider implementation because it affected a large part of the codebase. I also used Browser Use, Computer Use, and Playwright to test complete workflows in the real application, including the demo recording.
-
-The earlier task board, core Git and GitHub workflow, agent review flow, and follow-up workflow existed before Build Week and served as the foundation for this work.
+Capabilities differ by runtime. The Claude integration uses an experimental ACP bridge.
 
 ## Install
 
-Download the latest desktop build from [GitHub Releases](https://github.com/RojhatToptamus/task-monki/releases).
+Download the latest build from [GitHub Releases](https://github.com/RojhatToptamus/task-monki/releases/latest).
 
-Task Monki is primarily developed and tested on macOS. Experimental builds are also available for Windows and Linux, but they have not yet been tested as extensively.
+- Git is required.
+- One supported, installed, and authenticated coding-agent runtime is required for live work.
+- GitHub CLI is optional for branch publishing, pull requests, and GitHub checks.
+- Docker is optional for Previews that use managed services or Docker Compose.
 
-Task Monki runs locally and requires Git and at least one installed and authenticated agent runtime, such as Codex CLI. GitHub CLI is only needed for branch publishing, pull requests, and GitHub checks. Docker is only needed for previews that use managed services or Docker Compose.
+Task Monki is developed and tested primarily on macOS. Windows and Linux builds are experimental.
 
-### macOS Guide
+Current alpha builds are unsigned. Read the [installation guide](https://www.monki.work/docs/?page=install) before installation.
 
-Task Monki is currently an unsigned alpha release. It is ad-hoc signed for bundle integrity, but it is not yet signed with an Apple Developer ID or notarized. macOS may block it on the first launch.
+## Run from Source
 
-If this happens:
-
-1. Try opening Task Monki once.
-2. Open **System Settings → Privacy & Security**.
-3. Scroll down to the **Security** section.
-4. Click **Open Anyway** next to Task Monki.
-5. Confirm with your password or Touch ID.
-
-If **Open Anyway** does not appear, or the app starts without showing a window, quit Task Monki and run:
+Use Node.js 22.12 or newer, npm, and Git.
 
 ```sh
-xattr -dr com.apple.quarantine "/Applications/Task Monki.app"
-open "/Applications/Task Monki.app"
-```
-
-If Task Monki is installed somewhere else, update the path accordingly.
-
-## Run from source
-
-Source builds require Node.js 22.12 or newer, npm, Git, and at least one installed and authenticated agent runtime for live tasks.
-
-Clone the repository, install the dependencies, and start the desktop app:
-
-```bash
 git clone https://github.com/RojhatToptamus/task-monki.git
 cd task-monki
 npm install
 npm start
 ```
 
-This builds and opens the Electron desktop application.
-
-GitHub CLI is optional. To use branch publishing, pull requests, and GitHub checks, install it and authenticate with:
-
-```bash
-gh auth login
-```
-
-## Inspect the seeded UI
-
-For a quick look at the interface without running live agents, Task Monki includes deterministic seed data with disposable repositories and synthetic tasks covering different workflow states.
-
-Generate the seed:
-
-```sh
-npm run dev:seed
-```
-
-Start the API in the first terminal:
-
-```sh
-source .local/task-monki-dev-seed/dev-api.env
-npm run dev:api
-```
-
-Start the renderer in a second terminal:
-
-```sh
-npm run dev:renderer
-```
-
-Then open:
-
-```text
-http://127.0.0.1:5173
-```
-
-The seed resets only `.local/task-monki-dev-seed` and disables live agent execution.
-
-See the [Development Seed Data guide](docs/DEV_SEEDING.md) for more details.
-
-## Checks
-
-```bash
-npm run typecheck
-npm run test:agent-workflow
-npm test
-npm run build
-npm run check:codex-protocol
-```
-
-Use `npm run test:agent-workflow -- --ui` when an executed workflow also needs
-semantic browser inspection. See the
-[agent testing strategy](docs/testing-strategy/STRATEGY.md) for the testing
-layers, safety contract, and live-provider boundary.
+These commands build and open the desktop app.
 
 ## Status
 
-Task Monki is experimental and focused on one thing: a reliable local review loop with isolated implementation, inspectable evidence, and human-controlled GitHub delivery. It runs real local processes and Git operations, so use it only with repositories you can recover — never with untrusted prompts or repositories. Interfaces and stored data formats may still change.
+Task Monki is an experimental alpha. It runs real local processes and Git operations.
+
+Use only repositories that you can recover. Do not use untrusted prompts or repositories.
+
+Task records, worktrees, and evidence stay on your machine. The installed runtime controls its network use and upstream data handling.
 
 ## License
 
-Task Monki is released under the [MIT License](LICENSE). Third-party software
-and attributions are described in [Third-Party Notices](THIRD_PARTY_NOTICES.md).
-
-Task Monki is an independent open-source project. References to Codex, OpenAI, GitHub, Docker, Electron, React, and other third-party products are used only to identify compatible products and services and do not imply endorsement.
+Task Monki is released under the [MIT License](LICENSE). Third-party software is listed in the [Third-Party Notices](THIRD_PARTY_NOTICES.md).
