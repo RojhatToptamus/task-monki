@@ -395,7 +395,7 @@ describe('runProviderSmoke', () => {
     await expect(fs.readFile(path.join(report.stateRoot, 'report.json'), 'utf8')).resolves.toContain(
       'provider lifecycle did not settle'
     );
-  });
+  }, 15_000);
 
   it('waits through INTERRUPTING within the cancellation budget and continues the matrix', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);

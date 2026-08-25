@@ -32,7 +32,9 @@ describe('FileDesignDraftStore', () => {
       body: 'First draft',
       referenceIds: []
     });
-    expect((await fs.stat(path.join(root, `${designId}.json`))).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(path.join(root, `${designId}.json`))).mode & 0o777).toBe(0o600);
+    }
 
     await expect(
       store.save({

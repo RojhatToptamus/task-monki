@@ -891,7 +891,11 @@ function assertOnlyKeys(
 
 async function assertExecutable(filePath: string): Promise<void> {
   const stat = await fs.lstat(filePath);
-  if (stat.isSymbolicLink() || !stat.isFile() || (stat.mode & 0o111) === 0) {
+  if (
+    stat.isSymbolicLink() ||
+    !stat.isFile() ||
+    (process.platform !== 'win32' && (stat.mode & 0o111) === 0)
+  ) {
     throw new Error(`Design browser executable is invalid: ${filePath}`);
   }
 }

@@ -1027,11 +1027,12 @@ async function managedGit(
   argv: string[],
   options: GitExecutionOptions = {}
 ): Promise<string> {
+  const nullDevice = process.platform === 'win32' ? 'NUL' : os.devNull;
   return git(cwd, argv, {
     ...options,
     env: {
       GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: os.devNull,
+      GIT_CONFIG_GLOBAL: nullDevice,
       ...options.env
     }
   });

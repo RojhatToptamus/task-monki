@@ -183,7 +183,17 @@ export function assertPackagedApplicationEntries(entries) {
 export async function assertPackagedDesignResources(resourceDirectory) {
   for (const relativePath of REQUIRED_DESIGN_RESOURCE_FILES) {
     const filePath = path.join(resourceDirectory, relativePath);
-    const stat = await fs.lstat(filePath);
+    let stat;
+    try {
+      stat = await fs.lstat(filePath);
+    } catch (error) {
+      if (error && typeof error === 'object' && error.code === 'ENOENT') {
+        throw new Error(`Packaged Design resource is invalid: ${relativePath}`, {
+          cause: error
+        });
+      }
+      throw error;
+    }
     if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) {
       throw new Error(`Packaged Design resource is invalid: ${relativePath}`);
     }
