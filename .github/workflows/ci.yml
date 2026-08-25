@@ -39,5 +39,7 @@ jobs:
         run: npm run prepare:design-browser-runtime
       - name: Build unpacked native package
         run: npm exec electron-builder -- --dir
+        env:
+          CSC_FOR_PULL_REQUEST: ${{ runner.os == 'macOS' }}
       - name: Smoke test packaged runtime
         run: npm run verify:packaged-runtime
