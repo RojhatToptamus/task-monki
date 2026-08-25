@@ -1,1 +1,3 @@
 src/core/agent/codex/protocol/generated/** text eol=lf linguist-generated=true
+themes.css text eol=lf linguist-generated=true
+theme-tokens.json text eol=lf linguist-generated=true

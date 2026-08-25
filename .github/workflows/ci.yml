@@ -34,6 +34,9 @@ jobs:
       - run: npm test
       - run: npm run test:renderer:dom
       - run: npm run build
+      - name: Prepare Design browser runtime
+        if: runner.os == 'macOS'
+        run: npm run prepare:design-browser-runtime
       - name: Build unpacked native package
         run: npm exec electron-builder -- --dir
       - name: Smoke test packaged runtime
