@@ -687,6 +687,7 @@ export class DesignSourceService {
   ): Promise<ManagedDesignRepositoryInput> {
     await assertPrivateOwnedDirectory(repositoryPath, await fs.lstat(repositoryPath));
     if (marker.state === 'READY') {
+      await managedGit(repositoryPath, ['config', 'core.autocrlf', 'false']);
       await verifyInitialRepository(repositoryPath, marker);
       return repositoryInput(repositoryPath, marker);
     }
@@ -701,6 +702,7 @@ export class DesignSourceService {
     }
     await managedGit(repositoryPath, ['config', 'user.name', 'Task Monki']);
     await managedGit(repositoryPath, ['config', 'user.email', 'task-monki@localhost']);
+    await managedGit(repositoryPath, ['config', 'core.autocrlf', 'false']);
     await ensureMarkerExcluded(repositoryPath);
     const indexPath = path.join(repositoryPath, 'index.html');
     const existingIndex = await fs.readFile(indexPath, 'utf8').catch(missingAsUndefined);

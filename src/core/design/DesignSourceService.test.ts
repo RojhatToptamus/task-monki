@@ -35,7 +35,12 @@ describe('DesignSourceService', () => {
       branch: 'main'
     });
     expect(path.dirname(created.path)).toBe(repositoryRoot);
-    expect((await fs.stat(created.path)).mode & 0o077).toBe(0);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(created.path)).mode & 0o077).toBe(0);
+    }
+    expect((await git(created.path, ['config', '--local', '--get', 'core.autocrlf'])).trim()).toBe(
+      'false'
+    );
     expect(
       JSON.parse(
         await fs.readFile(path.join(created.path, DESIGN_REPOSITORY_MARKER), 'utf8')
