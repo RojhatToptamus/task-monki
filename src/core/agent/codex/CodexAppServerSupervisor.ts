@@ -12,7 +12,7 @@ import {
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import { spawnOwnedPortable } from '../../process/ownedProcess';
-import type { AgentProtocolRuntimeStore } from '../AgentRuntimeStore';
+import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
   resolveCodexRuntime,
@@ -64,7 +64,6 @@ export interface CodexAppServerSupervisorOptions {
   requestTimeoutMs?: number;
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
-  additionalConfigOverrides?: readonly string[];
   failClosedMcpDiscovery?: boolean;
   runtimeResolver?: typeof resolveCodexRuntime;
   argvResolver?: typeof resolveCodexAppServerArgv;
@@ -72,8 +71,6 @@ export interface CodexAppServerSupervisorOptions {
   shutdownGraceTimeoutMs?: number;
   shutdownKillTimeoutMs?: number;
   closeHandlingTimeoutMs?: number;
-  /** Evaluation and diagnostics may retain selected non-sensitive notifications. */
-  notificationOptOutMethods?: readonly string[];
 }
 
 export interface CodexAppServerLaunchConfig {
@@ -113,7 +110,6 @@ export async function resolveCodexAppServerArgv(input: {
   cwd: string;
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
-  additionalConfigOverrides?: readonly string[];
   launch?: CodexAppServerLaunch;
   failClosedMcpDiscovery?: boolean;
 }): Promise<string[]> {
@@ -122,7 +118,6 @@ export async function resolveCodexAppServerArgv(input: {
     cwd: input.cwd,
     environment: input.environment,
     settings: input.toolSettings,
-    additionalConfigOverrides: input.additionalConfigOverrides,
     failClosedMcpDiscovery: input.failClosedMcpDiscovery
   });
   return codexAppServerArgvWithLaunch(
@@ -152,7 +147,7 @@ export class CodexAppServerSupervisor {
   private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
 
   constructor(
-    private readonly store: AgentProtocolRuntimeStore,
+    private readonly store: FileTaskStore,
     private readonly options: CodexAppServerSupervisorOptions
   ) {}
 
@@ -413,7 +408,6 @@ export class CodexAppServerSupervisor {
         cwd: this.options.cwd,
         environment: this.options.environment,
         toolSettings: this.options.toolSettings,
-        additionalConfigOverrides: this.options.additionalConfigOverrides,
         failClosedMcpDiscovery: this.options.failClosedMcpDiscovery,
         launch: runtime.compatibility.launch
       });
@@ -508,10 +502,7 @@ export class CodexAppServerSupervisor {
         capabilities: {
           experimentalApi: true,
           requestAttestation: false,
-          optOutNotificationMethods: [
-            ...(this.options.notificationOptOutMethods ??
-              CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS)
-          ]
+          optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
         }
       });
       this.assertStartupActive();

@@ -66,16 +66,6 @@ export interface AgentProviderRuntimeStore {
   }>;
 }
 
-/** Minimal provider process/journal seam shared by task and isolated runtimes. */
-export type AgentProtocolRuntimeStore = Pick<
-  AgentProviderRuntimeStore,
-  | 'createAgentServer'
-  | 'getAgentServer'
-  | 'updateAgentServer'
-  | 'appendProtocolMessage'
-  | 'readProtocolMessage'
->;
-
 export interface CreateRuntimeSessionInput
   extends Omit<
     AgentRuntimeSessionRecord,

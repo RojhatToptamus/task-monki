@@ -119,31 +119,6 @@ describe('Codex App Server launch configuration', () => {
     ]);
   });
 
-  it('forwards an explicit MCP disable through the resolved App Server argv', async () => {
-    await expect(
-      resolveCodexAppServerArgv({
-        executable: '/definitely/not/codex',
-        cwd: process.cwd(),
-        toolSettings: {
-          webSearchMode: 'disabled',
-          mcpServers: 'disabled',
-          apps: 'disabled'
-        },
-        additionalConfigOverrides: [SAMPLE_MCP_DISABLE_OVERRIDE],
-        failClosedMcpDiscovery: true
-      })
-    ).resolves.toEqual([
-      'app-server',
-      '--stdio',
-      '-c',
-      'features.apps=false',
-      '-c',
-      'web_search="disabled"',
-      '-c',
-      SAMPLE_MCP_DISABLE_OVERRIDE
-    ]);
-  });
-
   it('projects every external tool config variation into App Server argv', () => {
     for (const webSearchMode of WEB_SEARCH_MODES) {
       for (const mcpServers of MCP_SERVER_MODES) {
@@ -275,7 +250,6 @@ describe('Codex App Server launch configuration', () => {
     const diagnostics: string[] = [];
     let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
     let detached: boolean | undefined;
-    let defaultAdditionalConfigOverrides: readonly string[] | undefined;
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
       appVersion: 'test',
@@ -285,17 +259,14 @@ describe('Codex App Server launch configuration', () => {
         OPENAI_API_KEY: 'codex-environment-secret'
       },
       runtimeResolver: async () => resolvedCodexRuntime(),
-      argvResolver: async (input) => {
-        defaultAdditionalConfigOverrides = input.additionalConfigOverrides;
-        return [
-          'app-server',
-          '--stdio',
-          '--token',
-          'codex-argv-secret',
-          '-c',
-          'mcp_servers.remote={url="https://user:codex-url-secret@example.test/rpc?token=codex-query-secret"}'
-        ];
-      },
+      argvResolver: async () => [
+        'app-server',
+        '--stdio',
+        '--token',
+        'codex-argv-secret',
+        '-c',
+        'mcp_servers.remote={url="https://user:codex-url-secret@example.test/rpc?token=codex-query-secret"}'
+      ],
       spawnProcess: (_executable, _argv, options) => {
         spawnedEnvironment = options.env;
         detached = options.detached;
@@ -317,7 +288,6 @@ describe('Codex App Server launch configuration', () => {
       CODEX_HOME: path.join(directory, 'codex-home')
     });
     expect(detached).toBe(process.platform !== 'win32');
-    expect(defaultAdditionalConfigOverrides).toBeUndefined();
     expect(durable).toContain('[REDACTED]');
     for (const secret of [
       'codex-environment-secret',
