@@ -226,27 +226,72 @@ projection, or provider state inconsistent.
 
 ## Testing Rules
 
+### Permanent Coverage Threshold
+
+- Every permanent test must answer: **What meaningful regression would this
+  catch?** If the answer is weak, do not add the test. Remove, merge, or rewrite
+  existing tests that cannot answer it convincingly.
+- Tests should protect meaningful product behavior, durable contracts, security
+  or authority boundaries, accessibility behavior, realistic failure and
+  recovery modes, or regressions whose cause could plausibly return.
+- Do not add a test merely because a request was implemented, an AI agent made a
+  change, the test count decreased, or coverage moved. Test count and coverage
+  percentage are diagnostic inputs, not product goals.
+- Do not mirror the current implementation. Prefer public results,
+  authoritative domain state, and user-visible behavior over private methods,
+  internal branches, DOM nesting, CSS classes, or incidental copy.
+- Superficial changes do not automatically deserve permanent automation. For
+  example, changing a button to red does not justify a test for its exact color
+  unless that color is a demonstrated product, accessibility, or maintained
+  visual-regression contract.
+- Choose the correct verification method. A behavior may belong in a focused,
+  integration, system, mounted-DOM, seeded-browser, packaged, static, snapshot,
+  or visual check. It may also require no permanent automated test.
+
+### Placement And Ownership
+
+- Keep focused tests beside the production module that owns the behavior. This
+  co-location is intentional: it makes ownership and duplication visible and
+  avoids a parallel top-level `tests/` tree that merely mirrors `src`.
+- Create a separate test area only when an independent package, runtime, or
+  harness genuinely owns it. Do not move tests solely to make production
+  directories look test-free.
+- Put pure domain coverage beside its owner in `src/core`; put renderer-only
+  state matrices and selectors in `src/renderer/model`; keep React semantic
+  presentation tests beside components in `src/renderer/ui`.
+- Name long-running resource-heavy, listener, process-lifecycle, or
+  multi-service suites `*.integration.test.ts`. Name executed workflow wrappers
+  `*.system.test.ts`, mounted renderer suites `*.dom.test.tsx`, and opt-in live
+  runtime checks `*.real.test.ts`.
+- Keep `src/testSupport` limited to shared typed fixtures, builders, and
+  lifecycle-owning harnesses. It is not a dumping ground for unrelated tests or
+  a second application framework.
+- Keep script tests beside the scripts they verify. Name every test file for its
+  behavior or responsibility, not a task number, phase, or implementation
+  request.
+
+### Test Design
+
 - Write tests to discover real issues in the app, not tests shaped only to pass
   the current implementation.
 - Cover realistic workflows, edge cases, failure paths, regressions, and
-  cross-component behavior when a change touches app-level state.
-- A passing test suite is not enough if the tests do not exercise the risky
-  behavior introduced or changed by the feature.
-- Put pure domain logic in `src/core` and cover it with focused Vitest tests.
-- Put renderer-only pure logic in `src/renderer/model` or small testable helpers
-  and cover it with Vitest tests.
-- Add regression tests for workflow transitions, provider-run reconciliation,
-  review lifecycle, stale review handling, cancellation/interrupt behavior,
-  settings persistence, Git/test evidence projection, and request/approval
-  state when those areas change.
-- Regression tests should fail on the old bug. Prefer assertions against
-  user-visible behavior or domain state over brittle implementation details.
-- For React UI behavior, prefer small model/selector seams plus focused
-  component-level or browser/manual verification until a broader UI test target
-  exists.
-- When provider behavior is involved, include tests for stale IDs, ambiguous
-  delivery, missing terminal events, process loss, and local reconciliation when
-  feasible.
+  cross-component behavior when those risks are material.
+- A passing suite is insufficient when it does not exercise the risky behavior
+  introduced or changed by a feature.
+- Before adding a test, check whether an existing test already protects the
+  behavior and whether several narrow examples should become one stronger
+  behavioral scenario.
+- Regression tests should fail on the old bug and explain the invariant in the
+  test name. Preserve workflow transitions, provider reconciliation, review
+  lifecycle, stale-review handling, interruption, settings persistence,
+  Git/test evidence projection, and request/approval coverage when those are the
+  actual risks being changed.
+- For React behavior, prefer model or selector seams for state matrices, focused
+  semantic component coverage, and mounted DOM/browser verification for events,
+  focus, effects, and layout-dependent interactions.
+- For provider behavior, cover stale IDs, ambiguous delivery, missing terminal
+  events, process loss, and local reconciliation when the changed path can
+  realistically encounter them.
 
 ## Completion Report
 
