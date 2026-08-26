@@ -1,17 +1,24 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { git } from '../git/gitCli';
 import { parsePrView } from '../github/GitHubService';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import {
-  createTaskMonkiScenario,
   ScriptedAgentRuntimeAdapter,
+  TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { TaskManagerService } from './TaskManagerService';
+
+const scenarios = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarios.create.bind(scenarios);
+
+afterEach(async () => {
+  await scenarios.dispose();
+});
 
 describe('TaskManagerService crash recovery', () => {
   it('does not publish duplicate worktree or Git evidence when startup observes no change', async () => {

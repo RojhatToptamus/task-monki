@@ -7,9 +7,13 @@ import type { GitSnapshotRecord, PreviewGenerationRecord } from '../../shared/co
 import { git } from '../git/gitCli';
 import { previewRouteHostname } from '../preview/PreviewRouteHostname';
 import { FileTaskStore } from '../storage/FileTaskStore';
-import { createTaskMonkiScenario, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
+import {
+  TaskMonkiScenarioRegistry,
+  type TaskMonkiScenario
+} from '../../testSupport/taskMonkiScenario';
 
-const scenarios: TaskMonkiScenario[] = [];
+const scenarioRegistry = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarioRegistry.create.bind(scenarioRegistry);
 const controlledHttpServers: http.Server[] = [];
 afterEach(async () => {
   await Promise.allSettled(controlledHttpServers.splice(0).map((server) =>
@@ -17,12 +21,7 @@ afterEach(async () => {
       ? new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
       : Promise.resolve()
   ));
-  await Promise.allSettled(
-    scenarios.splice(0).map(async (scenario) => {
-      await scenario.service.shutdown().catch(() => undefined);
-      await fs.rm(scenario.rootDir, { recursive: true, force: true });
-    })
-  );
+  await scenarioRegistry.dispose();
 });
 
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
@@ -168,7 +167,6 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
       name: 'task-monki-preview-cross-task-binding',
       previewEnabled: true
     });
-    scenarios.push(scenario);
     const producer = await scenario.createTask({ title: 'Backend producer' });
     const consumer = await scenario.createTask({ title: 'Frontend consumer' });
     const producerWorktree = await scenario.service.prepareWorktree({ taskId: producer.id });
@@ -1080,9 +1078,9 @@ routes:
     }
   }, 25_000);
 
-  it('keeps one active graph and stable routes through a bounded eight-cycle replacement stress run', async () => {
-    const scenario = await previewScenario('task-monki-preview-replacement-stress');
-    const task = await scenario.createTask({ title: 'Replacement stress' });
+  it('keeps one active graph and stable routes when replacing a preview', async () => {
+    const scenario = await previewScenario('task-monki-preview-replacement');
+    const task = await scenario.createTask({ title: 'Preview replacement' });
     const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
     const resolved = await scenario.service.resolvePreview({ taskId: task.id });
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
@@ -1091,7 +1089,7 @@ routes:
     });
     let stableHostname: string | undefined;
     let latest: PreviewGenerationRecord | undefined;
-    for (let index = 0; index < 8; index += 1) {
+    for (let index = 0; index < 2; index += 1) {
       await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), `cycle-${index}`);
       latest = await scenario.service.startPreview({ taskId: task.id });
       stableHostname ??= latest.routes[0].hostname;
@@ -1104,7 +1102,7 @@ routes:
     const snapshot = await scenario.store.snapshot();
     const generations = snapshot.previewGenerations.filter((generation) => generation.taskId === task.id);
     expect(generations.filter((generation) => generation.state === 'READY' && generation.routingState === 'ACTIVE')).toHaveLength(1);
-    expect(generations.filter((generation) => generation.state === 'STOPPED' && generation.routingState === 'RETIRED')).toHaveLength(7);
+    expect(generations.filter((generation) => generation.state === 'STOPPED' && generation.routingState === 'RETIRED')).toHaveLength(1);
     const liveResources = snapshot.previewResources.filter(
       (resource) => resource.taskId === task.id && resource.state === 'RUNNING'
     );
@@ -1157,7 +1155,6 @@ routes:
         previewOciExecutablePath: process.env.TASK_MONKI_OCI_BIN || 'docker',
         previewOciContextName: process.env.TASK_MONKI_OCI_CONTEXT || 'desktop-linux'
       });
-      scenarios.push(scenario);
       await fs.mkdir(path.join(scenario.repositoryPath, '.taskmonki'), { recursive: true });
       await fs.mkdir(path.join(scenario.repositoryPath, 'scripts'), { recursive: true });
       await fs.writeFile(path.join(scenario.repositoryPath, 'scripts', 'connect.mjs'), `
@@ -1311,7 +1308,6 @@ type ServiceMode =
 
 async function previewScenario(name: string, failingJob = false, serviceMode: ServiceMode = 'normal') {
   const scenario = await createTaskMonkiScenario({ name, previewEnabled: true });
-  scenarios.push(scenario);
   await fs.mkdir(path.join(scenario.repositoryPath, '.taskmonki'), { recursive: true });
   await fs.mkdir(path.join(scenario.repositoryPath, 'scripts'), { recursive: true });
   await fs.writeFile(

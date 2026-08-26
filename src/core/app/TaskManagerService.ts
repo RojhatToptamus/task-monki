@@ -515,7 +515,7 @@ export class TaskManagerService {
       this.assertInitializing();
       if (this.codexAdapter && this.designUpdates) {
         this.codexAdapter.setDesignBrowserToolHandler((input) =>
-          this.designUpdates!.inspectDesign(input)
+          this.inspectDesignForAgent(input)
         );
       }
     }
@@ -1597,6 +1597,15 @@ export class TaskManagerService {
         return this.getDesign(input.designId);
       })
     );
+  }
+
+  private inspectDesignForAgent(
+    input: Parameters<DesignUpdateCoordinator['inspectDesign']>[0]
+  ): ReturnType<DesignUpdateCoordinator['inspectDesign']> {
+    if (!this.designUpdates) {
+      throw new Error('Design Mode is not configured in this Task Monki host.');
+    }
+    return this.designUpdates.inspectDesign(input);
   }
 
   addDesignReferences(

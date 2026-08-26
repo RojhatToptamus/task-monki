@@ -1,14 +1,21 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { RunRecord } from '../../shared/contracts';
 import {
-  createTaskMonkiScenario,
+  TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { createDomainEvent } from '../storage/domainEvent';
+
+const scenarios = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarios.create.bind(scenarios);
+
+afterEach(async () => {
+  await scenarios.dispose();
+});
 
 describe('TaskManagerService review and PR action coordination', () => {
   it('rejects review for a failed implementation and keeps retry recovery in progress', async () => {

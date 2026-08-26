@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  TaskMonkiScenarioRegistry
+} from '../../testSupport/taskMonkiScenario';
+
+const scenarios = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarios.create.bind(scenarios);
+
+afterEach(async () => {
+  await scenarios.dispose();
+});
 
 describe('TaskManagerService prompt composition', () => {
   it('wraps active-turn steering instructions with Task Monki constraints', async () => {

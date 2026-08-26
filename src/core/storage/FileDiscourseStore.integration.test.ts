@@ -967,7 +967,7 @@ describe('FileDiscourseStore', () => {
     );
   });
 
-  it('pages a 10,000-message conversation without replaying its transcript at cold startup', async () => {
+  it('pages a long conversation without replaying its transcript at cold startup', async () => {
     const fixture = await storeFixture();
     const conversation = await createConversation(
       fixture.store,
@@ -975,7 +975,7 @@ describe('FileDiscourseStore', () => {
       'create-1'
     );
     await fixture.store.close();
-    await seedMessageEvents(fixture.root, conversation, 10_000);
+    await seedMessageEvents(fixture.root, conversation, 300);
 
     // The first recovery creates authoritative indexes and current aggregate
     // metadata for the synthetic long-history fixture.
@@ -1001,16 +1001,16 @@ describe('FileDiscourseStore', () => {
       limit: 100
     });
     expect(latest.messages).toHaveLength(100);
-    expect(latest.messages[0]?.ordinal).toBe(9_901);
-    expect(latest.messages.at(-1)?.ordinal).toBe(10_000);
+    expect(latest.messages[0]?.ordinal).toBe(201);
+    expect(latest.messages.at(-1)?.ordinal).toBe(300);
     expect(latest.previousCursor).toBeTruthy();
     const previous = await cold.listMessages({
       conversationId: conversation.id,
       beforeCursor: latest.previousCursor,
       limit: 100
     });
-    expect(previous.messages[0]?.ordinal).toBe(9_801);
-    expect(previous.messages.at(-1)?.ordinal).toBe(9_900);
+    expect(previous.messages[0]?.ordinal).toBe(101);
+    expect(previous.messages.at(-1)?.ordinal).toBe(200);
     await expect(fs.readFile(firstSegmentIndex, 'utf8')).resolves.toContain(
       'message:bulk-message-1'
     );

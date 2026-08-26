@@ -80,7 +80,7 @@ finishing changes that touch storage, workflow, protocol, or renderer behavior.
 - Use stable scenario slugs such as `[seed:delivery-checks-failed]` instead of
   guessing app state or manually clicking through setup.
 - If an important state is missing, extend `src/dev/seedData.ts` and
-  `src/dev/seedData.test.ts`; do not rely on stale static fixtures or
+  `src/dev/seedData.integration.test.ts`; do not rely on stale static fixtures or
   hand-edited store JSON.
 - `scripts/serve-readme-screenshot-data.mjs` is screenshot-only legacy data and
   is not authoritative for workflow testing.

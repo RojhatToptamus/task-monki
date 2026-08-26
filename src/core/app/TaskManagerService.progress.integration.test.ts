@@ -1,8 +1,17 @@
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  TaskMonkiScenarioRegistry
+} from '../../testSupport/taskMonkiScenario';
 import { buildRunProgressViewModel } from '../../renderer/model/runProgress';
 import type { RunRecord } from '../../shared/contracts';
+
+const scenarios = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarios.create.bind(scenarios);
+
+afterEach(async () => {
+  await scenarios.dispose();
+});
 
 describe('TaskManagerService progress harness', () => {
   it('starts a throwaway-repo run with progress guidance and projects useful fallback progress', async () => {
@@ -203,7 +212,7 @@ describe('TaskManagerService progress harness', () => {
         activityOutputSummary: 'show output · 1 line'
       });
     } finally {
-      await scenario.service.shutdown();
+      await scenario.dispose();
     }
   }, 15_000);
 });

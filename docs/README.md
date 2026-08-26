@@ -131,6 +131,9 @@ of:
 ```sh
 npm run typecheck
 npm run check:architecture
+npm run test:focused
+npm run test:integration
+npm run test:system
 npm run test:agent-workflow
 npm test
 npm run test:renderer:dom
@@ -141,6 +144,9 @@ git diff --check
 
 `npm run test:renderer:dom` mounts focused renderer interactions in JSDOM so
 focus, events, effects, and cleanup are verified in addition to static markup.
+`npm run test:focused` is the fast behavior loop. Integration and system tests
+remain part of `npm test`; their separate commands make cost and ownership
+visible without weakening the full gate.
 `npm run verify` runs the repository-wide automated verification sequence.
 
 For a safe real-process inner loop after Git, worktree, workflow, or runtime

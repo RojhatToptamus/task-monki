@@ -67,6 +67,7 @@ export interface TaskMonkiScenario {
   events: AppEventBus;
   agent: ScriptedAgentRuntimeAdapter;
   service: TaskManagerService;
+  dispose(): Promise<void>;
   createTask(input?: CreateScenarioTaskInput): Promise<Task>;
   commitFile(relativePath: string, content: string, message?: string): Promise<string>;
   completeRun(runId: string, finalMessage?: string): Promise<RunRecord>;
@@ -80,6 +81,31 @@ export interface TaskMonkiScenario {
   ): Promise<TaskSnapshot>;
 }
 
+export class TaskMonkiScenarioRegistry {
+  private readonly scenarios = new Set<TaskMonkiScenario>();
+
+  async create(options: ScenarioOptions = {}): Promise<TaskMonkiScenario> {
+    const scenario = await createTaskMonkiScenario(options);
+    this.scenarios.add(scenario);
+    return scenario;
+  }
+
+  async dispose(): Promise<void> {
+    const scenarios = [...this.scenarios];
+    this.scenarios.clear();
+    const results = await Promise.allSettled(
+      scenarios.map((scenario) => scenario.dispose())
+    );
+    const errors = results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    );
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, 'Multiple Task Monki scenarios failed to dispose.');
+    }
+  }
+}
+
 export async function createTaskMonkiScenario(
   options: ScenarioOptions = {}
 ): Promise<TaskMonkiScenario> {
@@ -91,64 +117,82 @@ export async function createTaskMonkiScenario(
   const previewRoot = path.join(rootDir, 'preview-runtime');
   const designRepositoryRoot = path.join(rootDir, 'design-repositories');
   const designWorktreeRoot = path.join(rootDir, 'design-worktrees');
-  await fs.mkdir(repositoryPath, { recursive: true });
-  await initRepository(repositoryPath);
+  try {
+    await fs.mkdir(repositoryPath, { recursive: true });
+    await initRepository(repositoryPath);
+  } catch (error) {
+    return cleanupFailedScenarioCreation(undefined, rootDir, error);
+  }
 
   const store = new FileTaskStore(path.join(rootDir, 'store'));
   const events = new AppEventBus();
   const agent = new ScriptedAgentRuntimeAdapter(store);
-  const service = new TaskManagerService(store, repositoryPath, events, {
-    worktreeRoot,
-    ghPath: options.ghPath,
-    agentRuntimeAdapters: [agent],
-    previewRecipeGenerator: options.previewRecipeGenerator,
-    previewEnabled: options.previewEnabled,
-    previewRoot,
-    previewLauncherPath: path.join(
-      process.cwd(),
-      'src/core/preview/runtime/native-preview-launcher.mjs'
-    ),
-    managedDesignStaticServerPath: path.join(
-      process.cwd(),
-      'src/core/preview/runtime/managed-design-static-server.mjs'
-    ),
-    previewOciExecutablePath: options.previewOciExecutablePath,
-    previewOciContextName: options.previewOciContextName,
-    previewOciEnv: options.previewOciEnv,
-    ...(options.designMode
-      ? {
-          designRepositoryRoot,
-          designWorktreeRoot,
-          designBrowserRuntime: {
-            async attest() {},
-            async recover() {},
-            async openCandidate() {
-              return {
-                snapshot: 'test page',
-                console: '(no output)',
-                errors: '(no output)'
-              };
+  let service: TaskManagerService | undefined;
+  let repository: Awaited<ReturnType<TaskManagerService['addRepository']>> | undefined;
+  try {
+    service = new TaskManagerService(store, repositoryPath, events, {
+      worktreeRoot,
+      ghPath: options.ghPath,
+      agentRuntimeAdapters: [agent],
+      previewRecipeGenerator: options.previewRecipeGenerator,
+      previewEnabled: options.previewEnabled,
+      previewRoot,
+      previewLauncherPath: path.join(
+        process.cwd(),
+        'src/core/preview/runtime/native-preview-launcher.mjs'
+      ),
+      managedDesignStaticServerPath: path.join(
+        process.cwd(),
+        'src/core/preview/runtime/managed-design-static-server.mjs'
+      ),
+      previewOciExecutablePath: options.previewOciExecutablePath,
+      previewOciContextName: options.previewOciContextName,
+      previewOciEnv: options.previewOciEnv,
+      ...(options.designMode
+        ? {
+            designRepositoryRoot,
+            designWorktreeRoot,
+            designBrowserRuntime: {
+              async attest() {},
+              async recover() {},
+              async openCandidate() {
+                return {
+                  snapshot: 'test page',
+                  console: '(no output)',
+                  errors: '(no output)'
+                };
+              },
+              async inspect() {
+                return { text: 'test page' };
+              },
+              abortRun() {},
+              async closeRun() {},
+              async shutdown() {}
             },
-            async inspect() {
-              return { text: 'test page' };
-            },
-            abortRun() {},
-            async closeRun() {},
-            async shutdown() {}
-          },
-          designCanvasFence: {
-            async begin() {
-              return {
-                async commit() {},
-                async rollback() {}
-              };
+            designCanvasFence: {
+              async begin() {
+                return {
+                  async commit() {},
+                  async rollback() {}
+                };
+              }
             }
           }
-        }
-      : {})
-  });
-  await service.init();
-  const repository = await service.addRepository(repositoryPath);
+        : {})
+    });
+    await service.init();
+    repository = await service.addRepository(repositoryPath);
+  } catch (error) {
+    return cleanupFailedScenarioCreation(service, rootDir, error);
+  }
+  if (!service || !repository) {
+    return cleanupFailedScenarioCreation(
+      service,
+      rootDir,
+      new Error('Scenario initialization did not produce a service and repository.')
+    );
+  }
+  let disposeWork: Promise<void> | undefined;
 
   return {
     rootDir,
@@ -160,6 +204,10 @@ export async function createTaskMonkiScenario(
     events,
     agent,
     service,
+    dispose() {
+      disposeWork ??= disposeScenario(service, rootDir);
+      return disposeWork;
+    },
     createTask(input = {}) {
       return service.createTask({
         title: input.title ?? 'Scenario task',
@@ -192,19 +240,7 @@ export async function createTaskMonkiScenario(
             ])).trim().length > 0
           : false;
         if (detail.revisions.length === 0 || sourceChanged) {
-          const designUpdates = (
-            service as unknown as {
-              designUpdates?: {
-                inspectDesign(input: {
-                  runId: string;
-                  operation: { operation: 'open_candidate' };
-                }): Promise<unknown>;
-              };
-            }
-          ).designUpdates;
-          await designUpdates
-            ?.inspectDesign({ runId, operation: { operation: 'open_candidate' } })
-            .catch(() => undefined);
+          await inspectDesignCandidateForScriptedRun(service, runId).catch(() => undefined);
         }
       }
       const artifact = await store.writeFinalArtifact(run.taskId, run.id, finalMessage);
@@ -230,6 +266,70 @@ export async function createTaskMonkiScenario(
       return waitForSnapshot(store, predicate, timeoutMs);
     }
   };
+}
+
+async function disposeScenario(service: TaskManagerService, rootDir: string): Promise<void> {
+  let shutdownError: unknown;
+  try {
+    await service.shutdown();
+  } catch (error) {
+    shutdownError = error;
+  }
+
+  try {
+    await removeScenarioRoot(rootDir);
+  } catch (cleanupError) {
+    if (shutdownError) {
+      throw new AggregateError(
+        [shutdownError, cleanupError],
+        `Scenario shutdown and cleanup failed for ${rootDir}.`
+      );
+    }
+    throw cleanupError;
+  }
+
+  if (shutdownError) throw shutdownError;
+}
+
+async function cleanupFailedScenarioCreation(
+  service: TaskManagerService | undefined,
+  rootDir: string,
+  creationError: unknown
+): Promise<never> {
+  try {
+    if (service) await disposeScenario(service, rootDir);
+    else await removeScenarioRoot(rootDir);
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [creationError, cleanupError],
+      `Scenario creation and cleanup failed for ${rootDir}.`
+    );
+  }
+  throw creationError;
+}
+
+function removeScenarioRoot(rootDir: string): Promise<void> {
+  return fs.rm(rootDir, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 5 : 1,
+    retryDelay: 50
+  });
+}
+
+/** Models the custom tool call that the scripted runtime cannot issue itself. */
+function inspectDesignCandidateForScriptedRun(
+  service: TaskManagerService,
+  runId: string
+): Promise<unknown> {
+  return (
+    service as unknown as {
+      inspectDesignForAgent(input: {
+        runId: string;
+        operation: { operation: 'open_candidate' };
+      }): Promise<unknown>;
+    }
+  ).inspectDesignForAgent({ runId, operation: { operation: 'open_candidate' } });
 }
 
 export function commandLine(...argv: string[]): string {

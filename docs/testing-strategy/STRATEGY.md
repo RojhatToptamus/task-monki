@@ -46,6 +46,17 @@ user store, remote URL, provider credential, or GitHub destination.
 | Packaged/Electron checks | Packaging, startup, preload/IPC/runtime files | Every agent workflow |
 | Opt-in provider smoke | Installed runtime, real account/model, live protocol, attestation, real worktree mutation | Deterministic CI or automatic cleanup |
 
+The Vitest files use explicit cost suffixes:
+
+- ordinary `*.test.ts` files are the focused feedback lane;
+- `*.integration.test.ts` files own long-running resource-heavy, listener,
+  process-lifecycle, and multi-service composition coverage; bounded isolated
+  local-resource checks may remain in the focused lane; and
+- `*.system.test.ts` files wrap an executed product workflow.
+
+Run `npm run test:focused`, `npm run test:integration`, or
+`npm run test:system` while iterating. `npm test` remains the aggregate CI gate.
+
 ## Scenarios implemented now
 
 The deterministic command runs three tasks against separate production

@@ -56,6 +56,12 @@ jobs:
 
       - name: Smoke test packaged runtime
         run: npm run verify:packaged-runtime
+      - name: Verify packaged owned-process launch
+        if: runner.os == 'macOS'
+        run: npm run verify:packaged-owned-process
+      - name: Verify packaged Preview launcher
+        if: runner.os == 'macOS'
+        run: npm run verify:packaged-preview
 
       - name: Generate checksums
         if: runner.os != 'Windows'
