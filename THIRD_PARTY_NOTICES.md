@@ -48,10 +48,10 @@ notices are also available from `chrome://credits` while the browser runs.
 ## Main runtime dependencies
 
 Task Monki's direct open-source runtime dependencies include React and React
-DOM, Lucide React, node-postgres (`pg`), node-redis (`redis`), and `yaml`.
-These packages, and their transitive dependencies, remain licensed by their
-respective authors under the terms shipped with each package or source
-distribution.
+DOM, Lucide React, `electron-updater`, node-postgres (`pg`), node-redis
+(`redis`), and `yaml`. These packages, and their transitive dependencies,
+remain licensed by their respective authors under the terms shipped with each
+package or source distribution.
 
 ## Trademarks and non-endorsement
 

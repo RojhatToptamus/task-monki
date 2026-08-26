@@ -27,6 +27,7 @@ import {
 } from './SettingsView';
 import { FirstLaunchSetup } from './FirstLaunchSetup';
 import type { ThemePreference, ThemePreset } from './theme';
+import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 import {
   BOARD_COLUMNS,
   buildTaskCardVM,
@@ -54,6 +55,10 @@ interface MainColumnProps {
     settings: UpdateAppSettingsRequest,
     successMessage?: string
   ): void | Promise<unknown>;
+  softwareUpdateState: SoftwareUpdateState;
+  onCheckForSoftwareUpdates(): Promise<void>;
+  onDownloadSoftwareUpdate(): Promise<void>;
+  onInstallSoftwareUpdate(): Promise<void>;
   externalToolStatus?: ExternalToolStatusReport;
   agentRuntimesLoading: boolean;
   onRefreshExternalTools(): Promise<void>;
@@ -106,7 +111,7 @@ const VIEW_TITLES: Record<
   },
   settings: {
     title: 'Settings',
-    subtitle: () => 'Agents, models, tools, and appearance'
+    subtitle: () => 'Agents, models, tools, updates, and appearance'
   }
 };
 
@@ -139,6 +144,10 @@ export function MainColumn({
   onPreviewThemePreset,
   appSettings,
   onSetAppSettings,
+  softwareUpdateState,
+  onCheckForSoftwareUpdates,
+  onDownloadSoftwareUpdate,
+  onInstallSoftwareUpdate,
   externalToolStatus,
   agentRuntimesLoading,
   onRefreshExternalTools,
@@ -251,6 +260,10 @@ export function MainColumn({
           onPreviewThemePreset={onPreviewThemePreset}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
+          softwareUpdateState={softwareUpdateState}
+          onCheckForSoftwareUpdates={onCheckForSoftwareUpdates}
+          onDownloadSoftwareUpdate={onDownloadSoftwareUpdate}
+          onInstallSoftwareUpdate={onInstallSoftwareUpdate}
           externalToolStatus={externalToolStatus}
           agentRuntimesLoading={agentRuntimesLoading}
           onRefreshExternalTools={onRefreshExternalTools}

@@ -4,6 +4,7 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  powerMonitor,
   safeStorage,
   session,
   shell,
@@ -12,6 +13,7 @@ import {
   type IpcMainInvokeEvent,
   type OpenDialogOptions
 } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import fs from 'node:fs';
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
@@ -122,6 +124,7 @@ import { createElectronOpenTargetHost } from './openTargetHost';
 import { getMacDockIconPath } from './dockIcon';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
+import { SoftwareUpdateController } from './SoftwareUpdateController';
 import {
   resolveManagedDesignStaticServerPath,
   resolveNativePreviewLauncherPath
@@ -146,6 +149,7 @@ import {
 } from './rendererTrust';
 import {
   IPC_UPDATE_CHANNEL,
+  IPC_SOFTWARE_UPDATE_CHANNEL,
   IPC_WINDOW_CHROME_CHANNEL,
   type IpcInvokeChannel
 } from '../shared/ipcChannels';
@@ -165,10 +169,14 @@ const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
 let designCanvasHost: DesignCanvasHost | undefined;
+let softwareUpdateController: SoftwareUpdateController | undefined;
 let serviceCreated = false;
 let ipcHandlersInstalled = false;
 let quitAfterShutdown = false;
 let shutdownPromise: Promise<void> | undefined;
+let restartToInstallUpdate = false;
+let operatingSystemSessionEnding = false;
+let autoInstallUpdatesOnQuit = true;
 let rendererTrustPolicy: RendererTrustPolicy | undefined;
 const attachmentIpcGate = new AttachmentIpcOperationGate();
 
@@ -260,6 +268,11 @@ function createWindow(): void {
       rendererTrustPolicy = undefined;
     }
   });
+  if (process.platform === 'win32') {
+    window.on('session-end', () => {
+      operatingSystemSessionEnding = true;
+    });
+  }
 
   const createdWindow = mainWindow;
   createdWindow.webContents.on('did-finish-load', () => {
@@ -430,7 +443,23 @@ function installIpcHandlers(): void {
   );
   handleTrustedIpc('settings:get', () => service.getAppSettings());
   handleTrustedIpc('settings:update', async (_, input: UpdateAppSettingsRequest) => {
-    return service.updateAppSettings(input);
+    const settings = await service.updateAppSettings(input);
+    autoInstallUpdatesOnQuit = settings.autoInstallUpdatesOnQuit;
+    return settings;
+  });
+  handleTrustedIpc('softwareUpdate:get', () => requireSoftwareUpdateController().getState());
+  handleTrustedIpc('softwareUpdate:check', () =>
+    requireSoftwareUpdateController().checkForUpdates()
+  );
+  handleTrustedIpc('softwareUpdate:download', () =>
+    requireSoftwareUpdateController().downloadUpdate()
+  );
+  handleTrustedIpc('softwareUpdate:install', async () => {
+    if (!requireSoftwareUpdateController().hasDownloadedUpdate()) {
+      throw new Error('No downloaded update is ready to install.');
+    }
+    restartToInstallUpdate = true;
+    await beginApplicationShutdown();
   });
   handleTrustedIpc('settings:tools:status', () => service.getExternalToolStatus());
   handleTrustedIpc('settings:tools:test', async (_, input: TestExternalToolRequest) => {
@@ -955,6 +984,17 @@ function broadcast(event: AppUpdateEvent): void {
   );
 }
 
+function broadcastSoftwareUpdate(state: import('../shared/softwareUpdate').SoftwareUpdateState): void {
+  mainWindow?.webContents.send(IPC_SOFTWARE_UPDATE_CHANNEL, state);
+}
+
+function requireSoftwareUpdateController(): SoftwareUpdateController {
+  if (!softwareUpdateController) {
+    throw new Error('Software updates are not initialized.');
+  }
+  return softwareUpdateController;
+}
+
 function requireDesignCanvasHost(): DesignCanvasHost {
   if (shutdownPromise) {
     throw new Error('The Design canvas is shutting down.');
@@ -1033,6 +1073,37 @@ async function readBoundedFile(handle: fs.promises.FileHandle, maximumBytes: num
   } finally {
     allocation.fill(0);
   }
+}
+
+function beginApplicationShutdown(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = service
+    .shutdown()
+    .catch((error: unknown) => {
+      console.error('Failed to shut down the agent runtimes cleanly.', error);
+    })
+    .then(() => designCanvasHost?.shutdown())
+    .catch((error: unknown) => {
+      console.error('Failed to shut down the Design canvas cleanly.', error);
+    })
+    .then(() => {
+      quitAfterShutdown = true;
+      softwareUpdateController?.dispose();
+      const installUpdate =
+        softwareUpdateController?.hasDownloadedUpdate() &&
+        !operatingSystemSessionEnding &&
+        (restartToInstallUpdate || autoInstallUpdatesOnQuit);
+      if (installUpdate) {
+        try {
+          softwareUpdateController!.installUpdate(restartToInstallUpdate);
+          return;
+        } catch (error) {
+          console.error('Task Monki could not start the update installer.', error);
+        }
+      }
+      app.quit();
+    });
+  return shutdownPromise;
 }
 
 function configureDesktopCliPath(): void {
@@ -1163,6 +1234,17 @@ void app.whenReady().then(async () => {
   if (shutdownPromise) {
     return;
   }
+  const settings = await service.getAppSettings();
+  autoInstallUpdatesOnQuit = settings.autoInstallUpdatesOnQuit;
+  softwareUpdateController = new SoftwareUpdateController(
+    autoUpdater,
+    app.isPackaged && autoUpdater.isUpdaterActive(),
+    app.getVersion(),
+    broadcastSoftwareUpdate
+  );
+  powerMonitor.on('shutdown', () => {
+    operatingSystemSessionEnding = true;
+  });
   service.events.on((event) => {
     const unavailableGenerationId = previewGenerationUnavailable(event);
     if (unavailableGenerationId) {
@@ -1177,6 +1259,7 @@ void app.whenReady().then(async () => {
   });
   installIpcHandlers();
   createWindow();
+  softwareUpdateController.start();
 }).catch((error: unknown) => {
   console.error('Task Monki failed to initialize its trusted local services.', error);
   app.quit();
@@ -1193,19 +1276,7 @@ app.on('before-quit', (event) => {
     return;
   }
   event.preventDefault();
-  shutdownPromise ??= service
-    .shutdown()
-    .catch((error: unknown) => {
-      console.error('Failed to shut down the Codex App Server cleanly.', error);
-    })
-    .then(() => designCanvasHost?.shutdown())
-    .catch((error: unknown) => {
-      console.error('Failed to shut down the Design canvas cleanly.', error);
-    })
-    .then(() => {
-      quitAfterShutdown = true;
-      app.quit();
-    });
+  void beginApplicationShutdown();
 });
 
 app.on('activate', () => {

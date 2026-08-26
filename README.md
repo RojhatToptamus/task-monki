@@ -72,7 +72,9 @@ Download the latest build from [GitHub Releases](https://github.com/RojhatToptam
 
 Task Monki is developed and tested primarily on macOS. Windows and Linux builds are experimental.
 
-Current alpha builds are unsigned. Read the [installation guide](https://www.monki.work/docs/?page=install) before installation.
+macOS releases are signed and notarized. Windows and Linux releases are
+currently unsigned. Read the [installation guide](https://www.monki.work/docs/?page=install)
+before installation.
 
 ## Run from Source
 
@@ -89,7 +91,7 @@ These commands build and open the desktop app.
 
 ## Status
 
-Task Monki is an experimental alpha. It runs real local processes and Git operations.
+Task Monki is experimental software. It runs real local processes and Git operations.
 
 Use only repositories that you can recover. Do not use untrusted prompts or repositories.
 

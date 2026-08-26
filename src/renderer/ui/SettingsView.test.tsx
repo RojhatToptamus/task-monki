@@ -16,6 +16,23 @@ import {
   selectSettingsModels
 } from './SettingsView';
 import { AgentModelSetting } from './AgentModelSelector';
+import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
+
+const softwareUpdateState: SoftwareUpdateState = {
+  status: 'unavailable',
+  currentVersion: '',
+  availableVersion: null,
+  lastCheckedAt: null,
+  progress: null,
+  errorMessage: null
+};
+
+const softwareUpdateProps = {
+  softwareUpdateState,
+  onCheckForSoftwareUpdates: async () => undefined,
+  onDownloadSoftwareUpdate: async () => undefined,
+  onInstallSoftwareUpdate: async () => undefined
+};
 
 const codexModel: AgentModel = {
   id: 'codex:test-model',
@@ -63,6 +80,7 @@ describe('SettingsView', () => {
     const discoverAgentRuntimeModels = vi.fn(async () => undefined);
     const html = renderToStaticMarkup(
       <SettingsView
+        {...softwareUpdateProps}
         theme="device"
         onSetTheme={() => undefined}
         appSettings={{
@@ -289,6 +307,7 @@ describe('SettingsView', () => {
     const renderCatalogState = (agentRuntimesLoading: boolean) =>
       renderToStaticMarkup(
         <SettingsView
+          {...softwareUpdateProps}
           theme="device"
           onSetTheme={() => undefined}
           appSettings={DEFAULT_TASK_MANAGER_APP_SETTINGS}

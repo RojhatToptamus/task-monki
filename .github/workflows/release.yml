@@ -1,4 +1,4 @@
-name: Trusted macOS release
+name: Trusted desktop release
 
 on:
   workflow_dispatch:
@@ -10,35 +10,36 @@ permissions:
   contents: read
 
 concurrency:
-  group: trusted-macos-${{ github.ref }}
+  group: trusted-desktop-release
   cancel-in-progress: false
 
 jobs:
   validate_source:
-    name: Validate source and version
+    name: Validate source, test, and build
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       numeric_version: ${{ steps.metadata.outputs.numeric-version }}
       bundle_version: ${{ steps.metadata.outputs.bundle-version }}
-      artifact_name: ${{ steps.metadata.outputs.artifact-name }}
       electron_version: ${{ steps.metadata.outputs.electron-version }}
-      prerelease: ${{ steps.metadata.outputs.prerelease }}
       source_sha: ${{ steps.metadata.outputs.source-sha }}
       tag: ${{ steps.metadata.outputs.tag }}
+      mac_dmg: ${{ steps.metadata.outputs.mac-dmg }}
+      mac_zip: ${{ steps.metadata.outputs.mac-zip }}
+      windows_installer: ${{ steps.metadata.outputs.windows-installer }}
+      linux_appimage: ${{ steps.metadata.outputs.linux-appimage }}
     steps:
       - name: Check out the selected source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
-
+          cache: npm
       - name: Validate release metadata
         id: metadata
         shell: bash
@@ -48,25 +49,29 @@ jobs:
           const fs = require('node:fs');
           const manifest = require('./package.json');
           const lock = require('./package-lock.json');
-          const match = /^(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+))?$/u.exec(manifest.version);
+          const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(manifest.version);
           if (!match) throw new Error(`Unsupported package version: ${manifest.version}`);
 
           const event = process.env.GITHUB_EVENT_NAME;
           const ref = process.env.GITHUB_REF;
           const expectedTag = `v${manifest.version}`;
           if (event === 'workflow_dispatch' && ref !== 'refs/heads/main') {
-            throw new Error('Manual trusted release runs must use main.');
+            throw new Error('Manual release dry runs must use main.');
           }
           if (event === 'push' && ref !== `refs/tags/${expectedTag}`) {
             throw new Error(`The release tag must be ${expectedTag}.`);
           }
-          if (event !== 'workflow_dispatch' && event !== 'push') {
+          if (!['workflow_dispatch', 'push'].includes(event)) {
             throw new Error(`Unsupported release event: ${event}`);
           }
 
           const electronVersion = lock.packages?.['node_modules/electron']?.version;
+          const updaterVersion = lock.packages?.['node_modules/electron-updater']?.version;
           if (lock.version !== manifest.version || lock.packages?.['']?.version !== manifest.version) {
             throw new Error('package-lock.json does not match package.json.');
+          }
+          if (manifest.dependencies?.['electron-updater'] !== updaterVersion) {
+            throw new Error('electron-updater must be an exact production dependency.');
           }
           if (!/^\d+\.\d+\.\d+$/u.test(electronVersion ?? '')) {
             throw new Error('The lockfile has no exact Electron version.');
@@ -75,22 +80,24 @@ jobs:
             throw new Error('The workflow run number is not numeric.');
           }
 
+          const prefix = `Task-Monki-${manifest.version}`;
           const values = {
             version: manifest.version,
             'numeric-version': `${match[1]}.${match[2]}.${match[3]}`,
             'bundle-version': process.env.GITHUB_RUN_NUMBER,
-            'artifact-name': `Task-Monki-${manifest.version}-mac-arm64.dmg`,
             'electron-version': electronVersion,
-            prerelease: String(Boolean(match[4])),
             'source-sha': process.env.GITHUB_SHA,
-            tag: event === 'push' ? expectedTag : ''
+            tag: event === 'push' ? expectedTag : '',
+            'mac-dmg': `${prefix}-mac-arm64.dmg`,
+            'mac-zip': `${prefix}-mac-arm64.zip`,
+            'windows-installer': `${prefix}-win-x64.exe`,
+            'linux-appimage': `${prefix}-linux-x86_64.AppImage`
           };
-          const output = Object.entries(values)
-            .map(([name, value]) => `${name}=${value}`)
-            .join('\n');
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `${output}\n`);
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `${Object.entries(values).map(([name, value]) => `${name}=${value}`).join('\n')}\n`
+          );
           NODE
-
       - name: Require a commit on main
         shell: bash
         run: |
@@ -98,7 +105,6 @@ jobs:
           git fetch --no-tags origin main
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-
       - name: Require a new release tag
         if: github.event_name == 'push'
         shell: bash
@@ -110,31 +116,40 @@ jobs:
           error_file="$RUNNER_TEMP/release-lookup-error"
           set +e
           gh api --silent "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>"$error_file"
-          lookup_status=$?
+          status=$?
           set -e
-          if [ "$lookup_status" -eq 0 ]; then
+          if [ "$status" -eq 0 ]; then
             echo "A GitHub Release already exists for $RELEASE_TAG." >&2
             exit 1
           fi
           if ! grep -q 'HTTP 404' "$error_file"; then
             cat "$error_file" >&2
-            exit "$lookup_status"
+            exit "$status"
           fi
           rm -f "$error_file"
+      - name: Install dependencies
+        run: npm ci
+      - name: Run repository quality gates
+        run: npm run verify
 
-  build_sign_notarize:
-    name: Build, sign, and notarize
+  build_macos:
+    name: Build, sign, and notarize macOS
     needs: validate_source
     runs-on: macos-15
-    timeout-minutes: 360
+    timeout-minutes: 330
     environment: release
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
-      sha256: ${{ steps.final_digest.outputs.sha256 }}
+      dmg_sha256: ${{ steps.digests.outputs.dmg-sha256 }}
+      zip_sha256: ${{ steps.digests.outputs.zip-sha256 }}
       submission_id: ${{ steps.notary.outputs.submission-id }}
     env:
-      DMG_PATH: release/${{ needs.validate_source.outputs.artifact_name }}
-      CHECKSUM_PATH: release/${{ needs.validate_source.outputs.artifact_name }}.sha256
+      DMG_PATH: release/${{ needs.validate_source.outputs.mac_dmg }}
+      ZIP_PATH: release/${{ needs.validate_source.outputs.mac_zip }}
+      ZIP_BLOCKMAP_PATH: release/${{ needs.validate_source.outputs.mac_zip }}.blockmap
+      METADATA_PATH: release/latest-mac.yml
+      CHECKSUM_PATH: release/SHA256SUMS-macOS.txt
+      APP_PATH: release/mac-arm64/Task Monki.app
       MACOS_BUNDLE_SHORT_VERSION: ${{ needs.validate_source.outputs.numeric_version }}
       MACOS_BUNDLE_VERSION: ${{ needs.validate_source.outputs.bundle_version }}
       EXPECTED_IDENTITY: "Developer ID Application: rojhat toptamus (ZD35XP4V7D)"
@@ -145,35 +160,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate_source.outputs.source_sha }}
-          fetch-depth: 0
           persist-credentials: false
-
-      - name: Verify the source commit
-        shell: bash
-        env:
-          EXPECTED_SOURCE_SHA: ${{ needs.validate_source.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = "arm64"
-          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$EXPECTED_SOURCE_SHA" origin/main
-
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Verify the repository
-        run: npm run verify
-
-      - name: Prepare the arm64 Design browser runtime
-        run: npm run prepare:design-browser-runtime -- --arch=arm64
-
+      - name: Install dependencies and build
+        run: |
+          npm ci
+          npm run prepare:design-browser-runtime -- --arch=arm64
+          npm run build
       - name: Import the certificate and create the signed DMG
         id: sign
         shell: bash
@@ -191,23 +188,19 @@ jobs:
           export SIGNING_KEYCHAIN KEYCHAIN_LIST_BACKUP CERTIFICATE_PATH CERTIFICATE_PEM
 
           restore_keychains() {
-            local keychain
             local keychains=()
             while IFS= read -r keychain; do
               if [ -n "$keychain" ]; then keychains+=("$keychain"); fi
             done < "$KEYCHAIN_LIST_BACKUP"
             security list-keychains -d user -s "${keychains[@]}"
           }
-
           cleanup() {
             local result=$?
             local cleanup_result=0
             trap - EXIT
             set +e
             rm -f "$CERTIFICATE_PATH" "$CERTIFICATE_PEM" || cleanup_result=1
-            if [ -f "$KEYCHAIN_LIST_BACKUP" ]; then
-              restore_keychains || cleanup_result=1
-            fi
+            if [ -f "$KEYCHAIN_LIST_BACKUP" ]; then restore_keychains || cleanup_result=1; fi
             if [ -f "$SIGNING_KEYCHAIN" ]; then
               security lock-keychain "$SIGNING_KEYCHAIN" || cleanup_result=1
               security delete-keychain "$SIGNING_KEYCHAIN" || cleanup_result=1
@@ -224,7 +217,6 @@ jobs:
           security create-keychain -p "$keychain_password" "$SIGNING_KEYCHAIN"
           security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN"
           security unlock-keychain -p "$keychain_password" "$SIGNING_KEYCHAIN"
-
           printf '%s' "$MACOS_CERTIFICATE_P12" | /usr/bin/base64 -D > "$CERTIFICATE_PATH"
           security import "$CERTIFICATE_PATH" \
             -k "$SIGNING_KEYCHAIN" \
@@ -244,36 +236,23 @@ jobs:
             if [ -n "$keychain" ]; then original_keychains+=("$keychain"); fi
           done < "$KEYCHAIN_LIST_BACKUP"
           security list-keychains -d user -s "$SIGNING_KEYCHAIN" "${original_keychains[@]}"
-
           identity_count="$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" |
             grep -F -c "\"$EXPECTED_IDENTITY\"" || true)"
-          if [ "$identity_count" -ne 1 ]; then
-            echo "The temporary keychain does not contain exactly one required identity." >&2
-            exit 1
-          fi
+          test "$identity_count" -eq 1
           identity_hash="$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" |
             awk -v identity="$EXPECTED_IDENTITY" 'index($0, "\"" identity "\"") { print $2 }')"
-          if [[ ! "$identity_hash" =~ ^[A-Fa-f0-9]{40}$ ]]; then
-            echo "The required signing identity has an invalid hash." >&2
-            exit 1
-          fi
-
+          [[ "$identity_hash" =~ ^[A-Fa-f0-9]{40}$ ]]
           security find-certificate -c "$EXPECTED_IDENTITY" -p "$SIGNING_KEYCHAIN" > "$CERTIFICATE_PEM"
           openssl x509 -in "$CERTIFICATE_PEM" -noout -checkend 0
           certificate_subject="$(openssl x509 -in "$CERTIFICATE_PEM" -noout -subject -nameopt RFC2253)"
-          if [[ "$certificate_subject" != *"CN=$EXPECTED_IDENTITY"* ]] ||
-             [[ "$certificate_subject" != *"OU=$EXPECTED_TEAM_ID"* ]]; then
-            echo "The imported certificate subject or Team ID is invalid." >&2
-            exit 1
-          fi
+          [[ "$certificate_subject" == *"CN=$EXPECTED_IDENTITY"* ]]
+          [[ "$certificate_subject" == *"OU=$EXPECTED_TEAM_ID"* ]]
           rm -f "$CERTIFICATE_PEM"
 
           export CSC_KEYCHAIN="$SIGNING_KEYCHAIN"
           npm run dist:mac:trusted
-          if [ ! -f "$DMG_PATH" ] || [ -L "$DMG_PATH" ]; then
-            echo "The trusted DMG was not created at the expected path." >&2
-            exit 1
-          fi
+          test -f "$DMG_PATH"
+          test ! -L "$DMG_PATH"
           codesign \
             --force \
             --sign "$identity_hash" \
@@ -282,16 +261,12 @@ jobs:
             --identifier "$EXPECTED_DMG_IDENTIFIER" \
             "$DMG_PATH"
           codesign --verify --strict --verbose=2 "$DMG_PATH"
-
-          pre_staple_sha="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
-          echo "pre-staple-sha=$pre_staple_sha" >> "$GITHUB_OUTPUT"
-
+          echo "pre-staple-sha=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
       - name: Exercise the signed packaged runtime
         run: |
           npm run verify:packaged-runtime
           npm run verify:packaged-owned-process
           npm run verify:packaged-preview-safe-storage
-
       - name: Submit to Apple and wait
         id: notary
         shell: bash
@@ -307,13 +282,9 @@ jobs:
           API_KEY_PATH="$RUNNER_TEMP/task-monki-notary-key.p8"
           wait_result="$RUNNER_TEMP/notary-wait.json"
           notary_log="$GITHUB_WORKSPACE/release/notary-log.json"
-
-          cleanup_api_key() {
-            rm -f "$API_KEY_PATH"
-          }
+          cleanup_api_key() { rm -f "$API_KEY_PATH"; }
           trap cleanup_api_key EXIT
           printf '%s' "$APPLE_API_KEY_P8" > "$API_KEY_PATH"
-
           submit_json="$(xcrun notarytool submit "$DMG_PATH" \
             --key "$API_KEY_PATH" \
             --key-id "$APPLE_API_KEY_ID" \
@@ -321,12 +292,8 @@ jobs:
             --no-wait \
             --output-format json)"
           submission_id="$(printf '%s' "$submit_json" | jq -er '.id')"
-          if [[ ! "$submission_id" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
-            echo "Apple returned an invalid notarization submission ID." >&2
-            exit 1
-          fi
+          [[ "$submission_id" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
           echo "submission-id=$submission_id" >> "$GITHUB_OUTPUT"
-          echo "Apple notarization submission: $submission_id"
           echo "Apple notarization submission: $submission_id" >> "$GITHUB_STEP_SUMMARY"
 
           set +e
@@ -344,34 +311,16 @@ jobs:
             --issuer "$APPLE_API_ISSUER_ID"
           log_status=$?
           set -e
-
           cleanup_api_key
           trap - EXIT
           unset APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID
-
-          current_sha="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
-          if [ "$current_sha" != "$PRE_STAPLE_SHA" ]; then
-            echo "The signed DMG changed after Apple submission." >&2
-            exit 1
-          fi
-          if [ "$wait_status" -ne 0 ]; then
-            cat "$wait_result" >&2
-            exit "$wait_status"
-          fi
-          wait_id="$(jq -er '.id' "$wait_result")"
-          if [ "$wait_id" != "$submission_id" ]; then
-            echo "Apple returned a different notarization submission ID." >&2
-            exit 1
-          fi
-          status="$(jq -er '.status' "$wait_result")"
-          if [ "$status" != "Accepted" ]; then
-            echo "Apple returned notarization status: $status" >&2
-            exit 1
-          fi
+          test "$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')" = "$PRE_STAPLE_SHA"
+          if [ "$wait_status" -ne 0 ]; then cat "$wait_result" >&2; exit "$wait_status"; fi
+          test "$(jq -er '.id' "$wait_result")" = "$submission_id"
+          test "$(jq -er '.status' "$wait_result")" = "Accepted"
           if [ "$log_status" -ne 0 ]; then
-            echo "Apple accepted the DMG, but its diagnostic log is unavailable." >&2
+            echo "Apple accepted the submission, but its diagnostic log is unavailable." >&2
           fi
-
       - name: Upload the Apple notarization log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -381,69 +330,67 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
           overwrite: false
-
-      - name: Staple and validate the DMG
+      - name: Staple and package the final update
         shell: bash
         run: |
           set -euo pipefail
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$DMG_PATH"
-
-      - name: Generate the final checksum
-        id: final_digest
-        shell: bash
-        env:
-          EXPECTED_DMG_NAME: ${{ needs.validate_source.outputs.artifact_name }}
-        run: |
-          set -euo pipefail
-          final_sha="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
-          printf '%s  %s\n' "$final_sha" "$EXPECTED_DMG_NAME" > "$CHECKSUM_PATH"
-          echo "sha256=$final_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Verify the stapled DMG
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          npm run dist:mac:trusted-zip
+          test -f "$ZIP_PATH"
+          test -f "$ZIP_BLOCKMAP_PATH"
+          test -f "$METADATA_PATH"
+      - name: Generate checksums and verify the trusted artifacts
+        id: digests
         shell: bash
         env:
           RELEASE_VERSION: ${{ needs.validate_source.outputs.version }}
           BUNDLE_VERSION: ${{ needs.validate_source.outputs.bundle_version }}
           ELECTRON_VERSION: ${{ needs.validate_source.outputs.electron_version }}
-          EXPECTED_SHA256: ${{ steps.final_digest.outputs.sha256 }}
         run: |
           set -euo pipefail
+          dmg_sha="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+          zip_sha="$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')"
+          echo "dmg-sha256=$dmg_sha" >> "$GITHUB_OUTPUT"
+          echo "zip-sha256=$zip_sha" >> "$GITHUB_OUTPUT"
+          (
+            cd release
+            shasum -a 256 "$(basename "$DMG_PATH")" "$(basename "$ZIP_PATH")" \
+              "$(basename "$ZIP_BLOCKMAP_PATH")" "$(basename "$METADATA_PATH")" \
+              > "$(basename "$CHECKSUM_PATH")"
+            shasum -a 256 -c "$(basename "$CHECKSUM_PATH")"
+          )
           node scripts/verify-trusted-mac-release.mjs \
             --dmg="$DMG_PATH" \
+            --zip="$ZIP_PATH" \
+            --zip-blockmap="$ZIP_BLOCKMAP_PATH" \
+            --metadata="$METADATA_PATH" \
             --version="$RELEASE_VERSION" \
             --bundle-version="$BUNDLE_VERSION" \
             --electron-version="$ELECTRON_VERSION" \
-            --sha256="$EXPECTED_SHA256"
-
-      - name: Stage the internal artifact
+            --sha256="$dmg_sha" \
+            --zip-sha256="$zip_sha"
+      - name: Stage macOS artifacts
         shell: bash
         env:
-          INTERNAL_ARTIFACT_DIR: ${{ runner.temp }}/task-monki-internal-artifact
-          EXPECTED_DMG_NAME: ${{ needs.validate_source.outputs.artifact_name }}
+          INTERNAL_DIR: ${{ runner.temp }}/task-monki-macos
         run: |
           set -euo pipefail
-          mkdir -p "$INTERNAL_ARTIFACT_DIR"
-          cp "$DMG_PATH" "$INTERNAL_ARTIFACT_DIR/$EXPECTED_DMG_NAME"
-          cp "$CHECKSUM_PATH" "$INTERNAL_ARTIFACT_DIR/$EXPECTED_DMG_NAME.sha256"
-          entry_count="$(find "$INTERNAL_ARTIFACT_DIR" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
-          file_count="$(find "$INTERNAL_ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')"
-          test "$entry_count" -eq 2
-          test "$file_count" -eq 2
-
-      - name: Upload the trusted internal artifact
+          mkdir -p "$INTERNAL_DIR"
+          cp "$DMG_PATH" "$ZIP_PATH" "$ZIP_BLOCKMAP_PATH" "$METADATA_PATH" "$CHECKSUM_PATH" "$INTERNAL_DIR/"
+          test "$(find "$INTERNAL_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 5
+      - name: Upload macOS artifacts
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: trusted-macos-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/task-monki-internal-artifact/${{ needs.validate_source.outputs.artifact_name }}
-            ${{ runner.temp }}/task-monki-internal-artifact/${{ needs.validate_source.outputs.artifact_name }}.sha256
+          path: ${{ runner.temp }}/task-monki-macos/*
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
           overwrite: false
-
       - name: Final credential cleanup
         if: always()
         shell: bash
@@ -452,10 +399,9 @@ jobs:
           cleanup_failed=0
           SIGNING_KEYCHAIN="$RUNNER_TEMP/task-monki-signing.keychain-db"
           KEYCHAIN_LIST_BACKUP="$RUNNER_TEMP/task-monki-keychain-list.txt"
-          CERTIFICATE_PATH="$RUNNER_TEMP/task-monki-certificate.p12"
-          CERTIFICATE_PEM="$RUNNER_TEMP/task-monki-certificate.pem"
-          API_KEY_PATH="$RUNNER_TEMP/task-monki-notary-key.p8"
-          rm -f "$CERTIFICATE_PATH" "$CERTIFICATE_PEM" "$API_KEY_PATH" || cleanup_failed=1
+          rm -f "$RUNNER_TEMP/task-monki-certificate.p12" \
+            "$RUNNER_TEMP/task-monki-certificate.pem" \
+            "$RUNNER_TEMP/task-monki-notary-key.p8" || cleanup_failed=1
           if [ -f "$KEYCHAIN_LIST_BACKUP" ]; then
             keychains=()
             while IFS= read -r keychain; do
@@ -470,179 +416,361 @@ jobs:
           rm -f "$KEYCHAIN_LIST_BACKUP" || cleanup_failed=1
           exit "$cleanup_failed"
 
-  verify_internal:
-    name: Verify the internal artifact
-    needs: [validate_source, build_sign_notarize]
-    runs-on: macos-15
+  build_windows:
+    name: Build unsigned Windows release
+    needs: validate_source
+    runs-on: windows-2025
     timeout-minutes: 30
-    env:
-      DMG_NAME: ${{ needs.validate_source.outputs.artifact_name }}
-      EXPECTED_SHA256: ${{ needs.build_sign_notarize.outputs.sha256 }}
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out the validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate_source.outputs.source_sha }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+          cache: npm
+      - name: Build the unsigned NSIS installer
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm ci
+          npm run prepare:electron-runtime
+          npm run build
+          npm exec electron-builder -- --win nsis --x64 --publish never
+          node scripts/verify-release-artifacts.mjs --platform=win32 --version=${{ needs.validate_source.outputs.version }}
+      - name: Stage Windows artifacts
+        shell: pwsh
+        env:
+          INSTALLER: ${{ needs.validate_source.outputs.windows_installer }}
+          INTERNAL_DIR: ${{ runner.temp }}/task-monki-windows
+        run: |
+          New-Item -ItemType Directory -Path $env:INTERNAL_DIR | Out-Null
+          $files = @($env:INSTALLER, "$env:INSTALLER.blockmap", "latest.yml")
+          foreach ($file in $files) { Copy-Item "release/$file" "$env:INTERNAL_DIR/$file" }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash "$env:INTERNAL_DIR/$file" -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $file"
+          }
+          [IO.File]::WriteAllText(
+            "$env:INTERNAL_DIR/SHA256SUMS-Windows.txt",
+            (($lines -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+      - name: Upload Windows artifacts
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trusted-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/task-monki-windows/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+
+  build_linux:
+    name: Build Linux AppImage release
+    needs: validate_source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out the validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate_source.outputs.source_sha }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+          cache: npm
+      - name: Build and verify the AppImage
+        run: |
+          npm ci
+          npm run prepare:electron-runtime
+          npm run build
+          npm exec electron-builder -- --linux AppImage --x64 --publish never
+          node scripts/verify-release-artifacts.mjs --platform=linux --version=${{ needs.validate_source.outputs.version }}
+      - name: Stage Linux artifacts
+        env:
+          APPIMAGE: ${{ needs.validate_source.outputs.linux_appimage }}
+          INTERNAL_DIR: ${{ runner.temp }}/task-monki-linux
+        run: |
+          set -euo pipefail
+          mkdir -p "$INTERNAL_DIR"
+          cp "release/$APPIMAGE" release/latest-linux.yml "$INTERNAL_DIR/"
+          (cd "$INTERNAL_DIR" && sha256sum "$APPIMAGE" latest-linux.yml > SHA256SUMS-Linux.txt)
+      - name: Upload Linux artifacts
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trusted-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/task-monki-linux/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+
+  verify_internal:
+    name: Verify internal ${{ matrix.label }} artifacts
+    needs: [validate_source, build_macos, build_windows, build_linux]
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS
+            os: macos-15
+            artifact_id: ${{ needs.build_macos.outputs.artifact_id }}
+          - label: Windows
+            os: windows-2025
+            artifact_id: ${{ needs.build_windows.outputs.artifact_id }}
+          - label: Linux
+            os: ubuntu-24.04
+            artifact_id: ${{ needs.build_linux.outputs.artifact_id }}
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out the verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate_source.outputs.source_sha }}
           persist-credentials: false
-
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
-
+          cache: npm
+      - name: Install verifier dependencies
+        run: npm ci
       - name: Download the exact internal artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ needs.build_sign_notarize.outputs.artifact_id }}
-          path: ${{ runner.temp }}/task-monki-internal-download
+          artifact-ids: ${{ matrix.artifact_id }}
+          path: ${{ runner.temp }}/task-monki-internal
           merge-multiple: true
-
-      - name: Verify the downloaded artifact
-        shell: bash
+      - name: Verify macOS artifacts
+        if: runner.os == 'macOS'
         env:
-          DOWNLOAD_DIR: ${{ runner.temp }}/task-monki-internal-download
           RELEASE_VERSION: ${{ needs.validate_source.outputs.version }}
           BUNDLE_VERSION: ${{ needs.validate_source.outputs.bundle_version }}
           ELECTRON_VERSION: ${{ needs.validate_source.outputs.electron_version }}
+          EXPECTED_DMG_SHA256: ${{ needs.build_macos.outputs.dmg_sha256 }}
+          EXPECTED_ZIP_SHA256: ${{ needs.build_macos.outputs.zip_sha256 }}
+          DMG: ${{ needs.validate_source.outputs.mac_dmg }}
+          ZIP: ${{ needs.validate_source.outputs.mac_zip }}
+          DIR: ${{ runner.temp }}/task-monki-internal
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "arm64"
-          entry_count="$(find "$DOWNLOAD_DIR" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
-          file_count="$(find "$DOWNLOAD_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')"
-          test "$entry_count" -eq 2
-          test "$file_count" -eq 2
-          dmg_path="$DOWNLOAD_DIR/$DMG_NAME"
-          checksum_path="$DOWNLOAD_DIR/$DMG_NAME.sha256"
-          actual_sha="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
-          test "$actual_sha" = "$EXPECTED_SHA256"
-          test "$(cat "$checksum_path")" = "$EXPECTED_SHA256  $DMG_NAME"
+          test "$(find "$DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 5
+          (cd "$DIR" && shasum -a 256 -c SHA256SUMS-macOS.txt)
           node scripts/verify-trusted-mac-release.mjs \
-            --dmg="$dmg_path" \
-            --version="$RELEASE_VERSION" \
-            --bundle-version="$BUNDLE_VERSION" \
-            --electron-version="$ELECTRON_VERSION" \
-            --sha256="$EXPECTED_SHA256"
+            --dmg="$DIR/$DMG" --zip="$DIR/$ZIP" --zip-blockmap="$DIR/$ZIP.blockmap" \
+            --metadata="$DIR/latest-mac.yml" --version="$RELEASE_VERSION" \
+            --bundle-version="$BUNDLE_VERSION" --electron-version="$ELECTRON_VERSION" \
+            --sha256="$EXPECTED_DMG_SHA256" \
+            --zip-sha256="$EXPECTED_ZIP_SHA256"
+      - name: Verify Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate_source.outputs.version }}
+          DIR: ${{ runner.temp }}/task-monki-internal
+        run: |
+          foreach ($line in Get-Content "$env:DIR/SHA256SUMS-Windows.txt") {
+            $parts = $line -split '  ', 2
+            if ($parts.Count -ne 2) { throw "Invalid Windows checksum line." }
+            $actual = (Get-FileHash "$env:DIR/$($parts[1])" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $parts[0]) { throw "Windows artifact checksum mismatch." }
+          }
+          node scripts/verify-release-artifacts.mjs --platform=win32 --release-dir=$env:DIR --version=$env:RELEASE_VERSION --artifacts-only
+      - name: Verify Linux artifacts
+        if: runner.os == 'Linux'
+        env:
+          RELEASE_VERSION: ${{ needs.validate_source.outputs.version }}
+          DIR: ${{ runner.temp }}/task-monki-internal
+        run: |
+          set -euo pipefail
+          (cd "$DIR" && sha256sum -c SHA256SUMS-Linux.txt)
+          chmod +x "$DIR/${{ needs.validate_source.outputs.linux_appimage }}"
+          node scripts/verify-release-artifacts.mjs --platform=linux --release-dir="$DIR" --version="$RELEASE_VERSION" --artifacts-only
 
   publish_release:
     name: Publish the GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [validate_source, build_sign_notarize, verify_internal]
+    needs: [validate_source, build_macos, build_windows, build_linux, verify_internal]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
     env:
-      DMG_NAME: ${{ needs.validate_source.outputs.artifact_name }}
-      EXPECTED_SHA256: ${{ needs.build_sign_notarize.outputs.sha256 }}
       RELEASE_TAG: ${{ needs.validate_source.outputs.tag }}
       SOURCE_SHA: ${{ needs.validate_source.outputs.source_sha }}
-      PRERELEASE: ${{ needs.validate_source.outputs.prerelease }}
+      RELEASE_DIR: ${{ runner.temp }}/task-monki-publish
+      VERIFY_DIR: ${{ runner.temp }}/task-monki-uploaded
     steps:
-      - name: Download the verified internal artifact
+      - name: Download verified macOS artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ needs.build_sign_notarize.outputs.artifact_id }}
-          path: ${{ runner.temp }}/task-monki-publish-download
+          artifact-ids: ${{ needs.build_macos.outputs.artifact_id }}
+          path: ${{ runner.temp }}/task-monki-publish
           merge-multiple: true
-
-      - name: Publish the verified DMG
-        shell: bash
+      - name: Download verified Windows artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build_windows.outputs.artifact_id }}
+          path: ${{ runner.temp }}/task-monki-publish
+          merge-multiple: true
+      - name: Download verified Linux artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build_linux.outputs.artifact_id }}
+          path: ${{ runner.temp }}/task-monki-publish
+          merge-multiple: true
+      - name: Create, verify, and publish the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          DOWNLOAD_DIR: ${{ runner.temp }}/task-monki-publish-download
         run: |
           set -euo pipefail
-          entry_count="$(find "$DOWNLOAD_DIR" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
-          file_count="$(find "$DOWNLOAD_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')"
-          test "$entry_count" -eq 2
-          test "$file_count" -eq 2
-          dmg_path="$DOWNLOAD_DIR/$DMG_NAME"
-          checksum_path="$DOWNLOAD_DIR/$DMG_NAME.sha256"
-          actual_sha="$(sha256sum "$dmg_path" | awk '{print $1}')"
-          test "$actual_sha" = "$EXPECTED_SHA256"
-          test "$(cat "$checksum_path")" = "$EXPECTED_SHA256  $DMG_NAME"
-          tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
-          test "$tag_commit" = "$SOURCE_SHA"
-
-          release_options=(
-            "$RELEASE_TAG"
-            "$dmg_path"
-            --repo "$GITHUB_REPOSITORY"
-            --verify-tag
-            --generate-notes
-            --title "Task Monki $RELEASE_TAG"
+          test "$(find "$RELEASE_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 12
+          (cd "$RELEASE_DIR" && sha256sum -c SHA256SUMS-macOS.txt && sha256sum -c SHA256SUMS-Windows.txt && sha256sum -c SHA256SUMS-Linux.txt)
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$SOURCE_SHA"
+          create_options=(
+            "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft
+            --generate-notes --title "Task Monki $RELEASE_TAG"
           )
-          if [ "$PRERELEASE" = "true" ]; then release_options+=(--prerelease); fi
-          gh release create "${release_options[@]}"
+          gh release create "${create_options[@]}"
+          gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/* --repo "$GITHUB_REPOSITORY"
+
+          mkdir -p "$VERIFY_DIR"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$VERIFY_DIR"
+          test "$(find "$VERIFY_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 12
+          (cd "$VERIFY_DIR" && sha256sum -c SHA256SUMS-macOS.txt && sha256sum -c SHA256SUMS-Windows.txt && sha256sum -c SHA256SUMS-Linux.txt)
+          diff -qr "$RELEASE_DIR" "$VERIFY_DIR"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   verify_public:
-    name: Verify the public artifact
-    needs: [validate_source, build_sign_notarize, publish_release]
-    runs-on: macos-15
-    timeout-minutes: 30
+    name: Verify public ${{ matrix.label }} artifacts
+    needs: [validate_source, build_macos, publish_release]
+    timeout-minutes: 35
     permissions:
       contents: read
       attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS
+            os: macos-15
+          - label: Windows
+            os: windows-2025
+          - label: Linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     env:
-      DMG_NAME: ${{ needs.validate_source.outputs.artifact_name }}
-      EXPECTED_SHA256: ${{ needs.build_sign_notarize.outputs.sha256 }}
       RELEASE_TAG: ${{ needs.validate_source.outputs.tag }}
+      PUBLIC_DIR: ${{ runner.temp }}/task-monki-public
     steps:
       - name: Check out the verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate_source.outputs.source_sha }}
           persist-credentials: false
-
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
-
-      - name: Require one immutable public asset
+          cache: npm
+      - name: Install verifier dependencies
+        run: npm ci
+      - name: Require the complete immutable release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          MAC_DMG: ${{ needs.validate_source.outputs.mac_dmg }}
+          MAC_ZIP: ${{ needs.validate_source.outputs.mac_zip }}
+          WINDOWS_INSTALLER: ${{ needs.validate_source.outputs.windows_installer }}
+          LINUX_APPIMAGE: ${{ needs.validate_source.outputs.linux_appimage }}
         run: |
           set -euo pipefail
           release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
-          asset_count="$(printf '%s' "$release_json" | jq '.assets | length')"
-          asset_name="$(printf '%s' "$release_json" | jq -r '.assets[0].name')"
-          immutable="$(printf '%s' "$release_json" | jq -r '.immutable')"
-          test "$asset_count" -eq 1
-          test "$asset_name" = "$DMG_NAME"
-          test "$immutable" = "true"
-
-      - name: Download the public DMG without authentication
-        shell: bash
+          test "$(printf '%s' "$release_json" | jq -r '.draft')" = "false"
+          test "$(printf '%s' "$release_json" | jq -r '.immutable')" = "true"
+          actual="$(printf '%s' "$release_json" | jq -r '.assets[].name' | sort)"
+          expected="$(printf '%s\n' \
+            "$MAC_DMG" "$MAC_ZIP" "$MAC_ZIP.blockmap" latest-mac.yml SHA256SUMS-macOS.txt \
+            "$WINDOWS_INSTALLER" "$WINDOWS_INSTALLER.blockmap" latest.yml SHA256SUMS-Windows.txt \
+            "$LINUX_APPIMAGE" latest-linux.yml SHA256SUMS-Linux.txt | sort)"
+          test "$actual" = "$expected"
+          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+      - name: Download and verify public macOS artifacts
+        if: runner.os == 'macOS'
         env:
-          PUBLIC_DIR: ${{ runner.temp }}/task-monki-public-download
-        run: |
-          set -euo pipefail
-          mkdir -p "$PUBLIC_DIR"
-          curl --fail --location --proto '=https' --tlsv1.2 \
-            --output "$PUBLIC_DIR/$DMG_NAME" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$DMG_NAME"
-
-      - name: Verify public integrity and trust
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PUBLIC_DIR: ${{ runner.temp }}/task-monki-public-download
+          DMG: ${{ needs.validate_source.outputs.mac_dmg }}
+          ZIP: ${{ needs.validate_source.outputs.mac_zip }}
           RELEASE_VERSION: ${{ needs.validate_source.outputs.version }}
           BUNDLE_VERSION: ${{ needs.validate_source.outputs.bundle_version }}
           ELECTRON_VERSION: ${{ needs.validate_source.outputs.electron_version }}
+          EXPECTED_DMG_SHA256: ${{ needs.build_macos.outputs.dmg_sha256 }}
+          EXPECTED_ZIP_SHA256: ${{ needs.build_macos.outputs.zip_sha256 }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "arm64"
-          dmg_path="$PUBLIC_DIR/$DMG_NAME"
-          actual_sha="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
-          test "$actual_sha" = "$EXPECTED_SHA256"
-          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
-          gh release verify-asset "$RELEASE_TAG" "$dmg_path" --repo "$GITHUB_REPOSITORY"
+          mkdir -p "$PUBLIC_DIR"
+          for file in "$DMG" "$ZIP" "$ZIP.blockmap" latest-mac.yml SHA256SUMS-macOS.txt; do
+            curl --fail --location --proto '=https' --tlsv1.2 --output "$PUBLIC_DIR/$file" \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$file"
+          done
+          (cd "$PUBLIC_DIR" && shasum -a 256 -c SHA256SUMS-macOS.txt)
+          gh release verify-asset "$RELEASE_TAG" "$PUBLIC_DIR/$DMG" --repo "$GITHUB_REPOSITORY"
           node scripts/verify-trusted-mac-release.mjs \
-            --dmg="$dmg_path" \
-            --version="$RELEASE_VERSION" \
-            --bundle-version="$BUNDLE_VERSION" \
+            --dmg="$PUBLIC_DIR/$DMG" --zip="$PUBLIC_DIR/$ZIP" \
+            --zip-blockmap="$PUBLIC_DIR/$ZIP.blockmap" --metadata="$PUBLIC_DIR/latest-mac.yml" \
+            --version="$RELEASE_VERSION" --bundle-version="$BUNDLE_VERSION" \
             --electron-version="$ELECTRON_VERSION" \
-            --sha256="$EXPECTED_SHA256"
+            --sha256="$EXPECTED_DMG_SHA256" \
+            --zip-sha256="$EXPECTED_ZIP_SHA256"
+      - name: Download and verify public Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          INSTALLER: ${{ needs.validate_source.outputs.windows_installer }}
+          RELEASE_VERSION: ${{ needs.validate_source.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path $env:PUBLIC_DIR | Out-Null
+          $files = @($env:INSTALLER, "$env:INSTALLER.blockmap", "latest.yml", "SHA256SUMS-Windows.txt")
+          foreach ($file in $files) {
+            Invoke-WebRequest "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$file" -OutFile "$env:PUBLIC_DIR/$file"
+          }
+          foreach ($line in Get-Content "$env:PUBLIC_DIR/SHA256SUMS-Windows.txt") {
+            $parts = $line -split '  ', 2
+            if ($parts.Count -ne 2) { throw "Invalid Windows checksum line." }
+            $actual = (Get-FileHash "$env:PUBLIC_DIR/$($parts[1])" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $parts[0]) { throw "Windows artifact checksum mismatch." }
+          }
+          gh release verify-asset $env:RELEASE_TAG "$env:PUBLIC_DIR/$env:INSTALLER" --repo $env:GITHUB_REPOSITORY
+          node scripts/verify-release-artifacts.mjs --platform=win32 --release-dir=$env:PUBLIC_DIR --version=$env:RELEASE_VERSION --artifacts-only
+      - name: Download and verify public Linux artifacts
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGE: ${{ needs.validate_source.outputs.linux_appimage }}
+          RELEASE_VERSION: ${{ needs.validate_source.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PUBLIC_DIR"
+          for file in "$APPIMAGE" latest-linux.yml SHA256SUMS-Linux.txt; do
+            curl --fail --location --proto '=https' --tlsv1.2 --output "$PUBLIC_DIR/$file" \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$file"
+          done
+          (cd "$PUBLIC_DIR" && sha256sum -c SHA256SUMS-Linux.txt)
+          chmod +x "$PUBLIC_DIR/$APPIMAGE"
+          gh release verify-asset "$RELEASE_TAG" "$PUBLIC_DIR/$APPIMAGE" --repo "$GITHUB_REPOSITORY"
+          node scripts/verify-release-artifacts.mjs --platform=linux --release-dir="$PUBLIC_DIR" --version="$RELEASE_VERSION" --artifacts-only

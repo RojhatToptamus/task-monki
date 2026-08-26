@@ -1118,6 +1118,7 @@ export interface UpdateAppSettingsRequest {
   themePreset?: import('./agent').TaskManagerThemePreset;
   sidebarCollapsed?: boolean;
   showMascot?: boolean;
+  autoInstallUpdatesOnQuit?: boolean;
   firstLaunchSetupCompleted?: boolean;
   disabledRuntimeIds?: import('./agent').AgentRuntimeId[];
   defaultRuntimeId?: import('./agent').AgentRuntimeId;

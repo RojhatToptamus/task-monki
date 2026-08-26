@@ -26,6 +26,7 @@ describe('AppSettingsStore', () => {
       themePreset: 'umber',
       sidebarCollapsed: false,
       showMascot: true,
+      autoInstallUpdatesOnQuit: true,
       firstLaunchSetupCompleted: false,
       externalExecutables: {
         gitExecutablePath: null,
@@ -80,6 +81,23 @@ describe('AppSettingsStore', () => {
     await expect(store.update({ showMascot: false })).resolves.toMatchObject({
       showMascot: false
     });
+  });
+
+  it('migrates schema 10 settings and enables install-on-quit by default', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-v10-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const legacy = currentSettings() as Record<string, unknown>;
+    legacy.schemaVersion = 10;
+    delete legacy.autoInstallUpdatesOnQuit;
+    await fs.writeFile(settingsPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+
+    await expect(new AppSettingsStore(settingsPath).get()).resolves.toMatchObject({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+      autoInstallUpdatesOnQuit: true
+    });
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toContain(
+      '"autoInstallUpdatesOnQuit": true'
+    );
   });
 
   it('stores repository selection as an ID-only UI preference', async () => {

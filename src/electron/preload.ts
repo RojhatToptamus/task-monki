@@ -91,10 +91,12 @@ import {
   assertAttachmentIpcBatch,
 } from './attachmentIpcSecurity';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
+import type { SoftwareUpdateState } from '../shared/softwareUpdate';
 import type { PreviewPrivateInputApi } from '../shared/preview';
 import type { DesignCanvasApi } from '../shared/designCanvas';
 import {
   IPC_UPDATE_CHANNEL,
+  IPC_SOFTWARE_UPDATE_CHANNEL,
   IPC_WINDOW_CHROME_CHANNEL,
   type IpcInvokeChannel
 } from '../shared/ipcChannels';
@@ -320,7 +322,16 @@ if (process.platform === 'darwin') {
 }
 const shellApi: TaskManagerShellApi = {
   windowChromePlatform: getWindowChromePlatform(),
-  syncWindowChrome: () => ipcRenderer.send(IPC_WINDOW_CHROME_CHANNEL)
+  syncWindowChrome: () => ipcRenderer.send(IPC_WINDOW_CHROME_CHANNEL),
+  getSoftwareUpdateState: () => invokeIpc('softwareUpdate:get'),
+  checkForSoftwareUpdates: () => invokeIpc('softwareUpdate:check'),
+  downloadSoftwareUpdate: () => invokeIpc('softwareUpdate:download'),
+  installSoftwareUpdate: () => invokeIpc('softwareUpdate:install'),
+  onSoftwareUpdateState: (listener: (state: SoftwareUpdateState) => void) => {
+    const wrapped = (_: Electron.IpcRendererEvent, state: SoftwareUpdateState) => listener(state);
+    ipcRenderer.on(IPC_SOFTWARE_UPDATE_CHANNEL, wrapped);
+    return () => ipcRenderer.off(IPC_SOFTWARE_UPDATE_CHANNEL, wrapped);
+  }
 };
 
 contextBridge.exposeInMainWorld('taskManagerShell', shellApi);

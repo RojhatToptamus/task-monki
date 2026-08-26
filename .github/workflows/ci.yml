@@ -62,9 +62,13 @@ jobs:
       - name: Prepare Design browser runtime
         if: runner.os == 'macOS'
         run: npm run prepare:design-browser-runtime
+      - name: Prepare Electron legal resources
+        run: npm run prepare:electron-runtime
       - name: Build unpacked native package
-        run: npm exec electron-builder -- --dir
+        run: npm exec electron-builder -- --dir --publish never
         env:
+          # electron-builder otherwise skips the ad-hoc macOS pass for PRs.
+          # The checked-in mac config and signer both force identity "-".
           CSC_FOR_PULL_REQUEST: ${{ runner.os == 'macOS' }}
       - name: Smoke test packaged runtime
         run: npm run verify:packaged-runtime

@@ -2,11 +2,9 @@
 
 Date: 2026-08-26
 
-Task Monki is distributed through GitHub Releases as a trusted Apple silicon
-macOS DMG. The app and DMG use Developer ID signing. The release is notarized
-by Apple, and the notarization ticket is stapled to the DMG. The app does not
-include an automatic updater. To update, download and install the newer release
-from GitHub.
+Task Monki is distributed through
+[GitHub Releases](https://github.com/RojhatToptamus/task-monki/releases/latest).
+The app supports macOS, Windows, and Linux.
 
 ## Requirements
 
@@ -157,45 +155,78 @@ and the [AWS SDK environment reference](https://docs.aws.amazon.com/sdkref/lates
 
 ## Downloads
 
-Download the latest desktop build from
-[GitHub Releases](https://github.com/RojhatToptamus/task-monki/releases/latest).
+Use the installer for your platform:
 
-The current release workflow publishes one asset:
-
-| Platform | Asset |
+| Platform | File |
 | --- | --- |
 | macOS 14 or newer, Apple silicon | `Task-Monki-<version>-mac-arm64.dmg` |
+| Windows 10 or newer, x64 | `Task-Monki-<version>-win-x64.exe` |
+| x64 Linux with AppImage support | `Task-Monki-<version>-linux-x86_64.AppImage` |
 
-Task Monki does not currently publish trusted Intel, Windows, or Linux builds.
+### macOS
 
-## macOS installation
+The macOS app uses Developer ID signing, Hardened Runtime, Apple notarization,
+and a stapled ticket.
 
-1. Download the DMG from the project's GitHub Releases page.
-2. Open the DMG.
-3. Drag `Task Monki.app` to Applications.
-4. Open Task Monki from Applications.
+1. Open the DMG.
+2. Drag `Task Monki.app` to Applications.
+3. Open Task Monki from Applications.
 
-Do not remove quarantine attributes to bypass a trust failure. If macOS blocks
-the app, delete that copy and download the DMG again from the project's GitHub
-Releases page. Report the release version and the Gatekeeper message.
+Do not remove quarantine attributes to bypass a trust failure. Delete a
+blocked copy and download it again from GitHub Releases. Report the version and
+Gatekeeper message if the new copy is also blocked.
+
+### Windows
+
+The first Windows release is unsigned. Windows can show SmartScreen or
+**Unknown Publisher**. To continue, select **More info**, then **Run anyway**.
+This warning remains until Task Monki adds Authenticode signing.
+
+Run the NSIS installer and select the install directory. Task Monki installs
+for the current user by default.
+
+### Linux
+
+Make the AppImage executable, then launch that file:
+
+```sh
+chmod +x Task-Monki-<version>-linux-x86_64.AppImage
+./Task-Monki-<version>-linux-x86_64.AppImage
+```
+
+Keep the AppImage in a location that your user can write. The updater replaces
+this file after an update download. Task Monki does not publish a DEB package.
 
 ## Updating
 
-Updates are manual:
+Installed desktop builds check GitHub Releases when Task Monki starts. They
+check again every six hours while the app is open. Task Monki does not download
+an update until you select **Download**.
 
-1. Open the latest GitHub Release.
-2. Download the macOS DMG.
-3. Quit Task Monki.
-4. Install or replace the app with the newer artifact.
-5. Launch Task Monki again.
+You can also open **Settings → Updates** and select **Check now**. When a newer
+release exists, the left sidebar shows the update state. Select the notice to
+download the update. Select **Restart to update** when the download completes.
 
-The app has a stable package identity, so manual upgrades should preserve the
-same app data directory across versions on the same platform.
+The **Install on quit** setting is on by default. With this option on, a
+downloaded update installs when Task Monki closes normally. It does not install
+during an operating-system shutdown. Turn the option off if you want to use
+only **Restart to update**.
+
+Windows updates remain unsigned for now. The updater accepts the unsigned NSIS
+package by design. macOS updates still require the app's valid Developer ID
+signature. Every platform update also uses the digest in its GitHub update
+metadata.
+
+If an update fails, select the sidebar notice or the Settings action to retry.
+You can always install a newer release manually from GitHub Releases.
+
+The stable package identity preserves the same app data directory during a
+normal upgrade on one platform.
 
 Task Monki stores durable app preferences, including runtime/model defaults,
-repository selection, Codex tool modes, and configured executable paths, in
-`app-settings.json` under the platform application data directory. Task and
-evidence records are stored separately.
+repository selection, Codex tool modes, configured executable paths, and the
+update-on-quit choice, in `app-settings.json` under the platform application
+data directory. Task and evidence records are stored separately.
 
 Task Monki loads each durable file only when it matches the current task-store,
 agent-runtime, Discourse, attachment, or app-settings schema. If startup reports

@@ -38,13 +38,15 @@ import {
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
 import { UiCheckIcon, UiChevronDownIcon } from './UiIcons';
+import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
-type SettingsSection = 'agents' | 'models' | 'tools' | 'appearance';
+type SettingsSection = 'agents' | 'models' | 'tools' | 'updates' | 'appearance';
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: 'agents', label: 'Agents' },
   { id: 'models', label: 'Models' },
   { id: 'tools', label: 'Tools' },
+  { id: 'updates', label: 'Updates' },
   { id: 'appearance', label: 'Appearance' }
 ];
 
@@ -57,6 +59,10 @@ export interface SettingsViewProps {
     settings: UpdateAppSettingsRequest,
     successMessage?: string
   ): void | Promise<unknown>;
+  softwareUpdateState: SoftwareUpdateState;
+  onCheckForSoftwareUpdates(): Promise<void>;
+  onDownloadSoftwareUpdate(): Promise<void>;
+  onInstallSoftwareUpdate(): Promise<void>;
   externalToolStatus?: ExternalToolStatusReport;
   agentRuntimesLoading: boolean;
   onRefreshExternalTools(): Promise<void>;
@@ -93,6 +99,7 @@ export function SettingsView(props: SettingsViewProps) {
         {section === 'agents' ? <AgentSettings {...props} /> : null}
         {section === 'models' ? <ModelSettings {...props} /> : null}
         {section === 'tools' ? <ToolSettings {...props} /> : null}
+        {section === 'updates' ? <UpdateSettings {...props} /> : null}
         {section === 'appearance' ? <AppearanceSettings {...props} /> : null}
       </div>
     </div>
@@ -579,6 +586,124 @@ function ToolSettings({
       </SettingsSubsection>
     </SettingsPane>
   );
+}
+
+function UpdateSettings({
+  appSettings,
+  onSetAppSettings,
+  softwareUpdateState,
+  onCheckForSoftwareUpdates,
+  onDownloadSoftwareUpdate,
+  onInstallSoftwareUpdate
+}: SettingsViewProps) {
+  const busy = ['checking', 'downloading'].includes(softwareUpdateState.status);
+  const version = softwareUpdateState.availableVersion;
+  const canCheck = !version && softwareUpdateState.status !== 'unavailable';
+  const updateAction =
+    softwareUpdateState.status === 'available' ||
+    (softwareUpdateState.status === 'error' && version)
+      ? {
+          label: softwareUpdateState.status === 'error' ? 'Try again' : 'Download',
+          run: onDownloadSoftwareUpdate
+        }
+      : softwareUpdateState.status === 'downloaded'
+        ? { label: 'Restart to update', run: onInstallSoftwareUpdate }
+        : undefined;
+
+  return (
+    <SettingsPane
+      id="updates"
+      title="Updates"
+      detail="Keep Task Monki current on this device."
+      action={canCheck ? (
+        <button
+          type="button"
+          className="tm-settings__button"
+          disabled={busy}
+          aria-busy={softwareUpdateState.status === 'checking'}
+          onClick={() => void onCheckForSoftwareUpdates()}
+        >
+          {softwareUpdateState.status === 'checking' ? 'Checking…' : 'Check now'}
+        </button>
+      ) : undefined}
+    >
+      <div className="tm-settings__list tm-update-settings" aria-live="polite">
+        <div className="tm-settings__row tm-update-settings__row">
+          <div className="tm-update-settings__label">
+            <span className="tm-settings__k">Installed version</span>
+            <span>{updateStatusText(softwareUpdateState)}</span>
+          </div>
+          <div className="tm-update-settings__value">
+            {softwareUpdateState.currentVersion || 'Development build'}
+          </div>
+        </div>
+        {version && softwareUpdateState.status !== 'up-to-date' ? (
+          <div className="tm-settings__row tm-update-settings__row">
+            <div className="tm-update-settings__label">
+              <span className="tm-settings__k">Version {version}</span>
+              <span>{updateAvailableDetail(softwareUpdateState)}</span>
+            </div>
+            {updateAction ? (
+              <button
+                type="button"
+                className="tm-settings__button tm-settings__button--primary"
+                onClick={() => void updateAction.run()}
+              >
+                {updateAction.label}
+              </button>
+            ) : softwareUpdateState.status === 'downloading' ? (
+              <span className="tm-update-settings__value">
+                {Math.round(softwareUpdateState.progress?.percent ?? 0)}%
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="tm-settings__row tm-update-settings__row">
+          <div className="tm-update-settings__label">
+            <span className="tm-settings__k">Install on quit</span>
+            <span>Install a downloaded update when Task Monki closes normally.</span>
+          </div>
+          <SettingsSwitch
+            label="Automatically install downloaded updates when Task Monki quits"
+            checked={appSettings.autoInstallUpdatesOnQuit}
+            onChange={(autoInstallUpdatesOnQuit) =>
+              void onSetAppSettings({ autoInstallUpdatesOnQuit })
+            }
+          />
+        </div>
+      </div>
+    </SettingsPane>
+  );
+}
+
+function updateStatusText(state: SoftwareUpdateState): string {
+  if (state.status === 'unavailable') {
+    return 'Update checks are available in the installed desktop app.';
+  }
+  if (state.status === 'checking') return 'Checking for a newer release…';
+  if (state.status === 'up-to-date') return checkedAtText(state.lastCheckedAt);
+  if (state.status === 'error' && !state.availableVersion) {
+    return state.errorMessage ?? 'Could not check for updates.';
+  }
+  return checkedAtText(state.lastCheckedAt);
+}
+
+function checkedAtText(value: string | null): string {
+  if (!value) return 'Not checked yet.';
+  const checkedAt = new Date(value);
+  if (!Number.isFinite(checkedAt.getTime())) return 'Last check time is unavailable.';
+  if (Date.now() - checkedAt.getTime() < 60_000) return 'Last checked just now.';
+  return `Last checked ${new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  }).format(checkedAt)}.`;
+}
+
+function updateAvailableDetail(state: SoftwareUpdateState): string {
+  if (state.status === 'downloading') return 'The update is downloading.';
+  if (state.status === 'downloaded') return 'The update is ready to install.';
+  if (state.status === 'error') return state.errorMessage ?? 'The download failed.';
+  return 'A newer Task Monki release is ready to download.';
 }
 
 function AppearanceSettings({
