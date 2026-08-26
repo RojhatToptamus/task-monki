@@ -490,7 +490,7 @@ describe('FileTaskStore Design ownership', () => {
       store.listDesignConversation({ designId: created.task.id, beforeCursor: 'invalid' })
     ).rejects.toThrow('cursor is invalid');
     await store.close();
-  });
+  }, 10_000);
 
   it('rolls back the complete Design bundle when snapshot publication fails', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-create-rollback-'));

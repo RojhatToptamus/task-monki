@@ -58,18 +58,51 @@ kept independent: Codex, ACP, and OpenCode adapters cannot import one another.
 
 ## Test Placement
 
-- Keep focused tests beside the production module they exercise.
+- Keep focused tests beside the production module they exercise. Bounded local
+  filesystem or process use may remain focused when it keeps fast, isolated
+  feedback. Name long-running resource-heavy, listener, process-lifecycle, or
+  multi-service suites `*.integration.test.ts`, and executed end-to-end workflow
+  wrappers `*.system.test.ts`.
 - Use `src/testSupport` for typed fixtures that model shared domain records or a
   complete cross-service scenario. Avoid untyped object literals for durable
   records when a shared builder already exists.
-- Use renderer model tests for state matrices and SSR component tests for stable
-  markup. Use the mounted renderer test target for behavior that depends on
-  state updates, focus, events, or effects.
+- Use renderer model tests for state matrices and small SSR component tests for
+  meaningful presentation seams. Use the mounted renderer test target for
+  behavior that depends on state updates, focus, events, or effects. Use seeded
+  UI and browser inspection for layout, responsive behavior, visual hierarchy,
+  and theme appearance.
 - Static style assertions load the ordered CSS import graph through
   `src/testSupport/rendererStyles.ts`; they must not inspect only the root
   import manifest.
 - Name test files for behavior or responsibility. Historical phase numbers do
   not communicate the invariant being protected.
+
+### Permanent coverage threshold
+
+Every permanent test must identify the meaningful regression it prevents.
+Good reasons include a product workflow, a durable data or API contract, a
+security or authority boundary, accessibility behavior, a realistic failure or
+recovery path, and a bug whose cause could plausibly return.
+
+Do not add a test only because a change was requested or because coverage
+decreased. Exact colors, spacing, widths, glyphs, CSS classes, DOM nesting,
+incidental copy, private method calls, and duplicate projections are not stable
+contracts by default. Cover them only when they carry a demonstrated product,
+accessibility, protocol, or security requirement. Otherwise use visual review,
+an existing generator/static check, or no permanent automated test.
+
+Before adding coverage, ask in order:
+
+1. Which user-visible behavior or system invariant could regress?
+2. Which layer owns that behavior?
+3. Does an existing test already protect it?
+4. Can one broader scenario replace several narrow examples?
+5. Is an automated test the right tool, or is a static, integration, system,
+   seeded-browser, packaged, or manual check more truthful?
+
+Tests should assert the public result or authoritative domain state. A test
+that blocks safe refactoring without detecting a meaningful failure should be
+rewritten, merged, or removed.
 
 ## Verification Commands
 
@@ -77,6 +110,9 @@ Choose the smallest relevant command while iterating, then run the broader
 checks required by the changed boundary:
 
 ```sh
+npm run test:focused
+npm run test:integration
+npm run test:system
 npm run check:architecture
 npm run test:renderer
 npm run test:renderer:dom
@@ -90,6 +126,13 @@ npm run build
 npm run check:codex-protocol
 git diff --check
 ```
+
+- `test:focused` omits resource-backed integration and executed-system files
+  for a fast local feedback loop.
+- `test:integration` runs the slower resource-heavy, listener,
+  process-lifecycle, and service-composition suites.
+- `test:system` runs checked-in executed workflow wrappers.
+- `npm test` remains the aggregate authority and includes all three lanes.
 
 Do not add a heuristic affected-test selector. Explicit domain commands are
 predictable for humans, local agents, and CI, and the full suite remains the

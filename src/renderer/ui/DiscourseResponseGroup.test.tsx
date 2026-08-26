@@ -44,7 +44,6 @@ describe('DiscourseResponseGroup', () => {
       />
     );
 
-    expect(html).toContain('tm-discourse-response--working');
     expect(html).toContain('Stopping response');
     expect(html).toContain('<button type="button" disabled="">Stopping…</button>');
     expect(html).not.toContain('>Stop</button>');

@@ -78,7 +78,9 @@ function draft(
     conversationId,
     recordRevision,
     body: `body-${recordRevision}`,
+    sourceMessageIds: [],
     policy: 'NONE',
+    agentSelections: [],
     tokens: [],
     updatedAt: '2026-07-15T08:00:00.000Z'
   };

@@ -6,10 +6,13 @@ import {
   type Task,
   type WorktreeRecord
 } from '../../shared/contracts';
-import type { FinishEvidenceState, FinishRequirement } from '../model/taskFinish';
+import {
+  markDoneModalCopy,
+  type FinishEvidenceState,
+  type FinishRequirement
+} from '../model/taskFinish';
 import { findingLevel, shortFindingRef } from '../model/findings';
 import { formatShortId } from '../model/selectors';
-import { markDoneModalCopy } from '../model/taskView';
 import { FindingRow } from './Findings';
 import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';

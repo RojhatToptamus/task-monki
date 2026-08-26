@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { RepositorySwitcher } from './RepositorySwitcher';
 
 describe('RepositorySwitcher', () => {
-  it('names the neutral control as the default destination without a status dot', () => {
+  it('names the neutral control as the default task destination', () => {
     const html = renderToStaticMarkup(
       <RepositorySwitcher
         activeRepositoryId="repository-1"
@@ -30,6 +30,5 @@ describe('RepositorySwitcher', () => {
     expect(html).toContain('New task repository');
     expect(html).toContain('aria-label="New task repository: repo-secondary"');
     expect(html).toContain('repo-secondary');
-    expect(html).not.toContain('tm-nav__repo-dot');
   });
 });

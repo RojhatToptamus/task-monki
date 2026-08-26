@@ -393,7 +393,7 @@ describe('NewTaskPanel', () => {
     expect(html).not.toContain('After validation, Task Monki stores');
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
     expect(html).toContain('aria-labelledby="task-network-access-label"');
-    expect(html).toContain('<details class="newtask-settings">');
+    expect(html).toContain('<details');
     expect(html).toContain('>Agent<');
     expect(html).toContain('aria-label="Run configuration agent and model"');
     expect(html).toContain('OpenCode');

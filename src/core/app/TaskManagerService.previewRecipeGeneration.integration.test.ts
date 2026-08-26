@@ -4,19 +4,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
 import { PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION } from '../preview/generation/PreviewRecipeGenerationSupport';
 import {
-  createTaskMonkiScenario,
-  type TaskMonkiScenario
+  TaskMonkiScenarioRegistry
 } from '../../testSupport/taskMonkiScenario';
 
-const scenarios: TaskMonkiScenario[] = [];
+const scenarioRegistry = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarioRegistry.create.bind(scenarioRegistry);
 
 afterEach(async () => {
-  await Promise.allSettled(
-    scenarios.splice(0).map(async (scenario) => {
-      await scenario.service.shutdown().catch(() => undefined);
-      await fs.rm(scenario.rootDir, { recursive: true, force: true });
-    })
-  );
+  await scenarioRegistry.dispose();
 });
 
 describe('TaskManagerService Preview recipe generation', () => {
@@ -51,7 +46,6 @@ routes:
       previewEnabled: true,
       previewRecipeGenerator: generator
     });
-    scenarios.push(scenario);
     await scenario.commitFile(
       'package.json',
       JSON.stringify({ scripts: { dev: 'node server.mjs' } })

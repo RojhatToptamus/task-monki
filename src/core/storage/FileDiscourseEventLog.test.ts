@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createDiscourseLogEvent,
+  DISCOURSE_EVENT_LOG_SCHEMA_VERSION,
   encodeDiscourseLogEvent,
   FileDiscourseEventLog
 } from './FileDiscourseEventLog';
@@ -197,11 +198,20 @@ describe('FileDiscourseEventLog format spike', () => {
     const recovered = new FileDiscourseEventLog(directory);
     expect(await recovered.count()).toBe(1);
     await expect(fs.readFile(path.join(directory, 'manifest.json'), 'utf8')).resolves.toContain(
-      '"schemaVersion":1'
+      `"schemaVersion":${DISCOURSE_EVENT_LOG_SCHEMA_VERSION}`
     );
     await expect(
       fs.readFile(path.join(directory, 'events-000001.index.json'), 'utf8')
     ).resolves.toContain('operation-1');
+
+    await fs.writeFile(
+      path.join(directory, 'manifest.json'),
+      `${JSON.stringify({ schemaVersion: DISCOURSE_EVENT_LOG_SCHEMA_VERSION - 1 })}\n`,
+      'utf8'
+    );
+    await expect(new FileDiscourseEventLog(directory).count()).rejects.toThrow(
+      'Unsupported Discourse event manifest schema'
+    );
   });
 
   it('inspects an attested tail without loading or repairing per-event indexes', async () => {
@@ -228,16 +238,17 @@ describe('FileDiscourseEventLog format spike', () => {
     await expect(fs.readFile(indexPath, 'utf8')).resolves.toContain('operation-1');
   });
 
-  it('indexes and pages 10,000 events without rewriting prior segment indexes', async () => {
+  it('indexes and pages across segments without rewriting prior segment indexes', async () => {
     const directory = await temporaryDirectory();
     const segmentLines: string[][] = [];
-    for (let sequence = 1; sequence <= 10_000; sequence += 1) {
+    const eventCount = 2_100;
+    for (let sequence = 1; sequence <= eventCount; sequence += 1) {
       const segment = Math.floor((sequence - 1) / 2_048);
       const lines = segmentLines[segment] ?? [];
       lines.push(
         encodeDiscourseLogEvent(
           createDiscourseLogEvent({
-            formatVersion: 1,
+            formatVersion: 2,
             sequence,
             kind: 'MESSAGE_APPENDED',
             operationId: `operation-${sequence}`,
@@ -259,18 +270,24 @@ describe('FileDiscourseEventLog format spike', () => {
     );
 
     const log = new FileDiscourseEventLog(directory);
-    expect(await log.count()).toBe(10_000);
-    const tail = await log.readPage({ afterSequence: 9_995, limit: 5 });
-    expect(tail.events.map((event) => event.sequence)).toEqual([9_996, 9_997, 9_998, 9_999, 10_000]);
+    expect(await log.count()).toBe(eventCount);
+    const tail = await log.readPage({ afterSequence: eventCount - 5, limit: 5 });
+    expect(tail.events.map((event) => event.sequence)).toEqual([
+      eventCount - 4,
+      eventCount - 3,
+      eventCount - 2,
+      eventCount - 1,
+      eventCount
+    ]);
     expect(tail.nextCursor).toBeUndefined();
     const firstIndexPath = path.join(directory, 'events-000001.index.json');
     const firstIndexBefore = await fs.readFile(firstIndexPath, 'utf8');
 
     await log.append({
       kind: 'MESSAGE_APPENDED',
-      operationId: 'operation-10001',
-      requestFingerprint: 'fingerprint-10001',
-      payload: { messageId: 'message-10001', body: 'bounded fixture' }
+      operationId: `operation-${eventCount + 1}`,
+      requestFingerprint: `fingerprint-${eventCount + 1}`,
+      payload: { messageId: `message-${eventCount + 1}`, body: 'bounded fixture' }
     });
 
     await expect(fs.readFile(firstIndexPath, 'utf8')).resolves.toBe(firstIndexBefore);

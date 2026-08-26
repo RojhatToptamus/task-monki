@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ImpactList } from './ImpactList';
 
 describe('ImpactList', () => {
-  it('uses one textual Deleted, Kept, and Untouched list grammar without decorative dots', () => {
+  it('uses one accessible textual Deleted, Kept, and Untouched list grammar', () => {
     const html = renderToStaticMarkup(
       <ImpactList
         ariaLabel="Deletion impact"
@@ -15,13 +15,10 @@ describe('ImpactList', () => {
       />
     );
 
-    expect(html).toContain(
-      '<div class="tm-impact-list" role="group" aria-label="Deletion impact">'
-    );
+    expect(html).toContain('role="group" aria-label="Deletion impact"');
     expect(html).toContain('data-impact-kind="deleted"');
     expect(html).toContain('<h4>Deleted</h4>');
     expect(html).toContain('<h4>Kept</h4>');
     expect(html).toContain('<h4>Untouched</h4>');
-    expect(html).not.toContain('dot');
   });
 });

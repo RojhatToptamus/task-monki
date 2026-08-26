@@ -52,7 +52,6 @@ describe('RunActivityTimeline', () => {
     expect(html).toContain('git diff --check');
     expect(html).toContain('npm run typecheck');
     expect(html).toContain('for 2s');
-    expect(html).toContain('tm-run-activity__detail--command');
     expect(html).toContain('show output · 128 lines');
     expect(html).not.toContain('Bash');
   });

@@ -10,15 +10,16 @@ import {
   describeRunFailureBanner,
   describeTaskHeaderState,
   evidenceLineForTask,
-  finishActionsForTask,
-  finishRequirementsForTask,
-  getFinishEvidenceState,
-  markDoneModalCopy,
   reviewFindingCountLabel,
   selectTaskCardRepositoryIdentity,
   shouldShowInboxRepository,
   tasksSpanMultipleRepositories
 } from './taskView';
+import {
+  finishRequirementsForTask,
+  getFinishEvidenceState,
+  markDoneModalCopy
+} from './taskFinish';
 
 const now = '2026-06-24T10:00:00.000Z';
 
@@ -436,6 +437,10 @@ describe('task card view model', () => {
     ).toBe(false);
   });
 
+});
+
+describe('task finish policy', () => {
+
   it('allows clean local completion only when review and Git evidence are healthy', () => {
     const state = getFinishEvidenceState(
       createTask({
@@ -492,99 +497,6 @@ describe('task card view model', () => {
     ]);
   });
 
-  it('keeps Finish actions scoped to local completion', () => {
-    const task = createTask({
-      projection: {
-        ...createInitialProjection(now),
-        worktree: 'PRESENT',
-        git: 'DIRTY',
-        agentReview: { status: 'PASSED' }
-      },
-      workflowPhase: 'REVIEW'
-    });
-
-    expect(
-      finishActionsForTask({
-        task,
-        reviewStatus: 'PASSED',
-        finishEvidence: { mode: 'clean', warnings: [] }
-      }).map((action) => ({
-        id: action.id,
-        label: action.label,
-        kind: action.kind,
-        disabled: action.disabled,
-        withIssues: action.withIssues
-      }))
-    ).toEqual([
-      {
-        id: 'commit',
-        label: 'Commit',
-        kind: 'outline',
-        disabled: false,
-        withIssues: undefined
-      },
-      {
-        id: 'mark-done',
-        label: 'Mark done',
-        kind: 'outline',
-        disabled: false,
-        withIssues: false
-      }
-    ]);
-  });
-
-  it('keeps Commit disabled when Mark done requires an override after a local commit', () => {
-    const task = createTask({
-      projection: {
-        ...createInitialProjection(now),
-        worktree: 'PRESENT',
-        git: 'COMMITTED_UNPUSHED',
-        agentReview: { status: 'STALE', runId: 'review-run' }
-      },
-      workflowPhase: 'REVIEW'
-    });
-
-    const actions = finishActionsForTask({
-      task,
-      reviewStatus: 'STALE',
-      finishEvidence: {
-        mode: 'override',
-        warnings: [
-          {
-            title: 'Review is stale.',
-            detail: 'Run review again before marking done cleanly, or mark done anyway.'
-          }
-        ]
-      }
-    });
-
-    expect(actions.map((action) => action.label)).toEqual(['Commit', 'Mark done anyway']);
-    expect(actions.find((action) => action.id === 'commit')?.disabled).toBe(true);
-  });
-
-  it('does not offer Create draft PR after an open PR exists', () => {
-    const task = createTask({
-      projection: {
-        ...createInitialProjection(now),
-        worktree: 'PRESENT',
-        git: 'PUSHED',
-        githubPullRequest: 'OPEN_READY',
-        githubPullRequestNumber: 82,
-        agentReview: { status: 'PASSED' }
-      },
-      workflowPhase: 'IN_REVIEW'
-    });
-
-    const actions = finishActionsForTask({
-      task,
-      reviewStatus: 'PASSED',
-      finishEvidence: { mode: 'clean', warnings: [] }
-    });
-
-    expect(actions.map((action) => action.id)).toEqual(['commit', 'mark-done']);
-    expect(actions.find((action) => action.id === 'commit')?.disabled).toBe(true);
-  });
-
   it('keeps manually local-acceptance PR evidence as clean local completion', () => {
     const task = createTask({
       projection: {
@@ -604,22 +516,12 @@ describe('task card view model', () => {
 
     const finishEvidence = getFinishEvidenceState(task, 'PASSED', 0, 'MERGEABLE');
     const requirements = finishRequirementsForTask(task, 'PASSED', 0, 'MERGEABLE');
-    const actions = finishActionsForTask({
-      task,
-      reviewStatus: 'PASSED',
-      finishEvidence
-    });
 
     expect(finishEvidence).toEqual({ mode: 'clean', warnings: [] });
     expect(requirements).toEqual([
       { label: 'Review', detail: 'passed', tone: 'success', unresolved: false },
       { label: 'Tree', detail: 'pushed', tone: 'success', unresolved: false }
     ]);
-    expect(actions.find((action) => action.id === 'mark-done')).toMatchObject({
-      label: 'Mark done',
-      disabled: false,
-      withIssues: false
-    });
   });
 
   it('blocks local completion for merged-policy tasks until GitHub reports merged', () => {
@@ -641,11 +543,6 @@ describe('task card view model', () => {
 
     const finishEvidence = getFinishEvidenceState(task, 'PASSED', 0, 'MERGEABLE');
     const requirements = finishRequirementsForTask(task, 'PASSED', 0, 'MERGEABLE');
-    const actions = finishActionsForTask({
-      task,
-      reviewStatus: 'PASSED',
-      finishEvidence
-    });
 
     expect(finishEvidence).toEqual({
       mode: 'blocked',
@@ -661,11 +558,6 @@ describe('task card view model', () => {
       detail: 'ready, not merged',
       tone: 'action',
       unresolved: true
-    });
-    expect(actions.find((action) => action.id === 'mark-done')).toMatchObject({
-      label: 'Mark done',
-      disabled: true,
-      withIssues: false
     });
   });
 
@@ -688,11 +580,6 @@ describe('task card view model', () => {
 
     const finishEvidence = getFinishEvidenceState(task, 'PASSED', 0, 'MERGED');
     const requirements = finishRequirementsForTask(task, 'PASSED', 0, 'MERGED');
-    const actions = finishActionsForTask({
-      task,
-      reviewStatus: 'PASSED',
-      finishEvidence
-    });
 
     expect(finishEvidence).toEqual({ mode: 'clean', warnings: [] });
     expect(requirements).toContainEqual({
@@ -700,11 +587,6 @@ describe('task card view model', () => {
       detail: 'merged',
       tone: 'success',
       unresolved: false
-    });
-    expect(actions.find((action) => action.id === 'mark-done')).toMatchObject({
-      label: 'Mark done',
-      disabled: false,
-      withIssues: false
     });
   });
 
@@ -881,34 +763,6 @@ describe('task card view model', () => {
       tone: 'success',
       unresolved: false
     });
-  });
-
-  it('disables local completion while review is running', () => {
-    const task = createTask({
-      projection: {
-        ...createInitialProjection(now),
-        worktree: 'PRESENT',
-        git: 'DIRTY',
-        agentReview: { status: 'RUNNING', runId: 'review-run' }
-      },
-      workflowPhase: 'REVIEW'
-    });
-
-    expect(
-      finishActionsForTask({
-        task,
-        reviewStatus: 'RUNNING',
-        finishEvidence: { mode: 'override', warnings: [] }
-      })
-    ).toEqual([
-      {
-        id: 'mark-done',
-        label: 'Mark done anyway',
-        kind: 'outline',
-        disabled: true,
-        withIssues: true
-      }
-    ]);
   });
 
   it('uses Mark done language in the confirmation modal copy', () => {

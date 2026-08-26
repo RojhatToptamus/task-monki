@@ -63,19 +63,6 @@ describe('Appearance settings', () => {
     expect(onSetTheme).toHaveBeenCalledWith('dark');
   });
 
-  it('opens Appearance safely when a legacy settings payload has no theme preset', () => {
-    renderSettings({
-      appSettings: {
-        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
-        themePreset: undefined
-      } as unknown as TaskManagerAppSettings
-    });
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
-    expect(screen.getByRole('button', { name: /Umber/u })).toBeTruthy();
-    expect(screen.getByText(/Umber · (?:light|dark)/u)).toBeTruthy();
-  });
-
   it('previews keyboard navigation and restores the persisted theme on Escape', async () => {
     const { onPreviewThemePreset, onSetAppSettings } = renderSettings();
     fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));

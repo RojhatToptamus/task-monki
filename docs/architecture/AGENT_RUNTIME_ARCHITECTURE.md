@@ -108,7 +108,7 @@ packaging understandable.
 
 ## Durable identity and routing
 
-Store schema 13 persists `runtimeId` on tasks, sessions, runs, server
+The task-store schema persists `runtimeId` on tasks, sessions, runs, server
 instances, interactions, settings observations, goals, plans, usage, and
 subagent observations.
 
@@ -124,10 +124,10 @@ Rules:
   run, and session; the current UI default is irrelevant.
 - There is no automatic cross-runtime fallback after session creation.
 
-The durable store accepts only its current schema. Older schemas and retired
-provider-shaped records are rejected instead of carrying compatibility
-migrations into the runtime. Invalid cross-record ownership is rejected on load
-rather than silently reinterpreted.
+The durable store is loaded as one complete versioned schema. Startup requires
+the exact current schema version and validates every ownership relationship
+before publishing the state. Schema conversion and migration metadata are not
+part of the runtime load path.
 
 ## Adapter contract
 

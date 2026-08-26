@@ -3,14 +3,22 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, expect, it, vi } from 'vitest';
-import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  TaskMonkiScenarioRegistry
+} from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 const exec = promisify(execFile);
+const scenarios = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarios.create.bind(scenarios);
+
+afterEach(async () => {
+  await scenarios.dispose();
+});
 
 describe('TaskManagerService task deletion', () => {
   it('serializes deletion against a concurrent run start before materialization', async () => {

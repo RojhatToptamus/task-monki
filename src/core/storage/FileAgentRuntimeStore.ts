@@ -13,7 +13,6 @@ import {
   type AgentOwnerScope,
   type AgentRuntimeArtifactKind,
   type AgentRuntimeArtifactRecord,
-  type AgentRuntimeMigrationRecord,
   type AgentRuntimeEventRecord,
   type AgentRuntimeRunRecord,
   type AgentRuntimeSessionRecord,
@@ -46,7 +45,6 @@ import {
 } from '../filesystem/secureFilesystem';
 
 const RUNTIME_FILE_NAME = 'runtime.json';
-const V1_BACKUP_FILE_NAME = 'runtime.schema-v1.backup.json';
 const ARTIFACT_DIRECTORY = 'artifacts';
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/u;
@@ -275,54 +273,6 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       throw new Error('Protocol journal server instance is not owned by this runtime.');
     }
     return this.protocolJournal.read(reference);
-  }
-
-  async getTaskStoreV11Migration(): Promise<AgentRuntimeMigrationRecord | undefined> {
-    await this.init();
-    return clone(this.state.migrations.find((migration) => migration.source === 'TASK_STORE_V11'));
-  }
-
-  async recordTaskStoreV11Migration(input: {
-    sourceSha256: string;
-    sessionCount: number;
-    runCount: number;
-    operationId: string;
-  }): Promise<AgentRuntimeMigrationRecord> {
-    return this.mutate((draft) => {
-      requireOperationId(input.operationId);
-      if (
-        !HASH.test(input.sourceSha256) ||
-        !Number.isSafeInteger(input.sessionCount) ||
-        input.sessionCount < 0 ||
-        !Number.isSafeInteger(input.runCount) ||
-        input.runCount < 0
-      ) {
-        throw new Error('Task runtime migration metadata is invalid.');
-      }
-      const existing = draft.migrations.find(
-        (migration) => migration.source === 'TASK_STORE_V11'
-      );
-      if (existing) return existing;
-      const migration: AgentRuntimeMigrationRecord = {
-        source: 'TASK_STORE_V11',
-        sourceSha256: input.sourceSha256,
-        importedAt: this.now(),
-        sessionCount: input.sessionCount,
-        runCount: input.runCount
-      };
-      draft.migrations.push(migration);
-      appendEvent(draft, this.createId, migration.importedAt, {
-        type: 'MIGRATION_IMPORTED',
-        operationId: input.operationId,
-        payload: {
-          source: migration.source,
-          sourceSha256: migration.sourceSha256,
-          sessionCount: migration.sessionCount,
-          runCount: migration.runCount
-        }
-      });
-      return migration;
-    });
   }
 
   async createSession(input: CreateRuntimeSessionInput): Promise<AgentRuntimeSessionRecord> {
@@ -1249,11 +1199,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     await cleanupTemporaryFiles(this.rootDir, this.storePath);
     try {
       const raw = await readPrivateStateFile(this.storePath);
-      const decoded = JSON.parse(raw) as unknown;
-      const parsed =
-        runtimeSchemaVersion(decoded) === 1
-          ? await this.migrateSchemaV1(decoded, raw)
-          : (decoded as AgentRuntimeStoreState);
+      const parsed = JSON.parse(raw) as AgentRuntimeStoreState;
       validateState(parsed);
       this.state = parsed;
     } catch (error) {
@@ -1265,21 +1211,6 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       this.state.servers.map((server) => server.id)
     );
     await this.reconcileArtifacts();
-  }
-
-  private async migrateSchemaV1(
-    decoded: unknown,
-    source: string
-  ): Promise<AgentRuntimeStoreState> {
-    const migrated = migrateRuntimeSchemaV1(decoded);
-    validateState(migrated);
-    await writeImmutablePrivateFile(
-      path.join(this.rootDir, V1_BACKUP_FILE_NAME),
-      Buffer.from(source, 'utf8'),
-      this.syncDirectoryHook
-    );
-    await this.persist(migrated);
-    return migrated;
   }
 
   private async reconcileArtifacts(): Promise<void> {
@@ -1487,86 +1418,7 @@ function emptyState(): AgentRuntimeStoreState {
     queueEntries: [],
     artifacts: [],
     telemetryRecords: [],
-    events: [],
-    migrations: []
-  };
-}
-
-function runtimeSchemaVersion(value: unknown): number | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const version = (value as { schemaVersion?: unknown }).schemaVersion;
-  return Number.isSafeInteger(version) ? Number(version) : undefined;
-}
-
-/**
- * Schema v1 predated complete execution-context attestation and generic
- * telemetry. Its records remain useful history, but they are never promoted
- * to trusted reusable access epochs during migration.
- */
-function migrateRuntimeSchemaV1(value: unknown): AgentRuntimeStoreState {
-  if (!value || typeof value !== 'object' || runtimeSchemaVersion(value) !== 1) {
-    throw new Error('Agent runtime schema-v1 migration source is invalid.');
-  }
-  const legacy = clone(value) as Record<string, unknown>;
-  if (!Number.isSafeInteger(legacy.revision) || !Array.isArray(legacy.sessions)) {
-    throw new Error('Agent runtime schema-v1 migration source metadata is invalid.');
-  }
-  const sessions = legacy.sessions.map((candidate) => {
-    if (!candidate || typeof candidate !== 'object') {
-      throw new Error('Agent runtime schema-v1 session is invalid.');
-    }
-    const session = candidate as AgentRuntimeSessionRecord;
-    if (!session.executionContext || typeof session.executionContext !== 'object') {
-      throw new Error('Agent runtime schema-v1 execution context is invalid.');
-    }
-    const executionContext = {
-      ...session.executionContext,
-      attestation: {
-        status: 'LEGACY_UNATTESTED' as const,
-        reason:
-          'Agent runtime schema v1 did not durably attest the complete execution scope. Start a fresh access epoch before reuse.'
-      }
-    };
-    const accessEpoch = createAgentSessionAccessEpoch({
-      owner: session.owner,
-      sessionId: session.id,
-      epoch: session.accessEpoch?.epoch,
-      runtimeId: session.runtimeId,
-      model: executionContext.modelSettings?.model ?? session.accessEpoch?.model,
-      executionContext,
-      createdAt: session.accessEpoch?.createdAt
-    });
-    const migrated: AgentRuntimeSessionRecord = {
-      ...session,
-      accessEpoch,
-      executionContext,
-      requestFingerprint: ''
-    };
-    const {
-      recordRevision: _recordRevision,
-      requestFingerprint: _requestFingerprint,
-      createdAt: _createdAt,
-      updatedAt: _updatedAt,
-      lastAttachedAt: _lastAttachedAt,
-      ...request
-    } = migrated;
-    migrated.requestFingerprint = requestFingerprint(request);
-    return migrated;
-  });
-  return {
-    ...(legacy as unknown as AgentRuntimeStoreState),
-    schemaVersion: AGENT_RUNTIME_STORE_SCHEMA_VERSION,
-    revision: Number(legacy.revision) + 1,
-    sessions,
-    servers: Array.isArray(legacy.servers)
-      ? (legacy.servers as AgentServerInstance[])
-      : [],
-    telemetryRecords: Array.isArray(legacy.telemetryRecords)
-      ? (legacy.telemetryRecords as AgentRuntimeTelemetryRecord[])
-      : [],
-    migrations: Array.isArray(legacy.migrations)
-      ? (legacy.migrations as AgentRuntimeMigrationRecord[])
-      : []
+    events: []
   };
 }
 
@@ -1597,8 +1449,7 @@ function validateState(state: AgentRuntimeStoreState): void {
     !Array.isArray(state.queueEntries) ||
     !Array.isArray(state.artifacts) ||
     !Array.isArray(state.telemetryRecords) ||
-    !Array.isArray(state.events) ||
-    !Array.isArray(state.migrations)
+    !Array.isArray(state.events)
   ) {
     throw new Error('Agent runtime store metadata is invalid.');
   }
@@ -1794,22 +1645,6 @@ function validateState(state: AgentRuntimeStoreState): void {
   }
   if (state.nextQueueOrdinal <= Math.max(0, ...queueOrdinals)) {
     throw new Error('Agent runtime next queue ordinal is invalid.');
-  }
-  const migrationSources = new Set<string>();
-  for (const migration of state.migrations) {
-    if (
-      migration.source !== 'TASK_STORE_V11' ||
-      migrationSources.has(migration.source) ||
-      !HASH.test(migration.sourceSha256) ||
-      !Number.isSafeInteger(migration.sessionCount) ||
-      migration.sessionCount < 0 ||
-      !Number.isSafeInteger(migration.runCount) ||
-      migration.runCount < 0
-    ) {
-      throw new Error('Agent runtime migration metadata is invalid.');
-    }
-    requireTimestamp(migration.importedAt);
-    migrationSources.add(migration.source);
   }
 }
 
@@ -2253,38 +2088,6 @@ async function readPrivateStateFile(filePath: string): Promise<string> {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } finally {
     await handle.close();
-  }
-}
-
-async function writeImmutablePrivateFile(
-  filePath: string,
-  bytes: Buffer,
-  syncDirectory: (directory: string) => Promise<void>
-): Promise<void> {
-  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-  try {
-    handle = await fs.open(
-      filePath,
-      fsConstants.O_WRONLY |
-        fsConstants.O_CREAT |
-        fsConstants.O_EXCL |
-        (fsConstants.O_NOFOLLOW ?? 0),
-      0o600
-    );
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await enforcePosixMode(handle, 0o600);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await syncDirectory(path.dirname(filePath));
-  } catch (error) {
-    await handle?.close().catch(() => undefined);
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const existing = await readPrivateStateFile(filePath);
-    if (!Buffer.from(existing, 'utf8').equals(bytes)) {
-      throw new Error('Agent runtime schema-v1 backup conflicts with the migration source.');
-    }
   }
 }
 

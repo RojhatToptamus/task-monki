@@ -91,11 +91,13 @@ import {
 import {
   canRequestReviewChanges,
   describeRunFailureBanner,
-  describeTaskHeaderState,
+  describeTaskHeaderState
+} from '../model/taskView';
+import {
   finishRequirementsForTask,
   getFinishEvidenceState,
   taskReviewGate
-} from '../model/taskView';
+} from '../model/taskFinish';
 import type { FinishRequirement } from '../model/taskFinish';
 import type { Tone } from '../model/viewTypes';
 import { humanizeEnum } from './display';

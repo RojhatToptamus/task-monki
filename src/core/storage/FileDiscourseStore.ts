@@ -72,9 +72,6 @@ interface DiscourseCreateOperation {
   operationId: string;
   requestFingerprint: string;
   conversationId: string;
-  /** Missing on schema-v1 records written before semantic create fingerprints. */
-  fingerprintVersion?: 1 | 2;
-  semanticRequestFingerprint?: string;
 }
 
 interface DiscourseIndexFile {
@@ -182,21 +179,12 @@ export class FileDiscourseStore implements DiscourseStore {
         throw new Error('Discourse conversation request fingerprint is invalid.');
       }
       const fingerprint = input.requestFingerprint;
-      const semanticRequestFingerprint = createConversationSemanticFingerprint(input);
       const prior = this.index.createOperations.find(
         (operation) => operation.operationId === input.clientOperationId
       );
       if (prior) {
         if (prior.requestFingerprint !== fingerprint) {
-          const loaded = await this.loadConversation(prior.conversationId);
-          const createOperation = loaded.createOperation;
-          if (
-            createOperation?.fingerprintVersion !== 1 ||
-            createOperation.semanticRequestFingerprint !== semanticRequestFingerprint
-          ) {
-            throw new Error('REQUEST_CONFLICT: conversation create operation changed.');
-          }
-          return loaded.aggregate.conversation;
+          throw new Error('REQUEST_CONFLICT: conversation create operation changed.');
         }
         return (await this.loadConversation(prior.conversationId)).aggregate.conversation;
       }
@@ -240,8 +228,7 @@ export class FileDiscourseStore implements DiscourseStore {
         payload: toJsonValue({
           conversation,
           participants,
-          participantRevisions,
-          createFingerprintVersion: 2
+          participantRevisions
         })
       });
       const loaded = applyEvent(emptyLoaded(conversation), event);
@@ -255,9 +242,7 @@ export class FileDiscourseStore implements DiscourseStore {
           {
             operationId: input.clientOperationId,
             requestFingerprint: fingerprint,
-            conversationId: id,
-            fingerprintVersion: 2,
-            semanticRequestFingerprint
+            conversationId: id
           }
         ]
       };
@@ -286,8 +271,6 @@ export class FileDiscourseStore implements DiscourseStore {
     );
     if (!prior) return undefined;
     if (prior.requestFingerprint !== input.requestFingerprint) {
-      const loaded = await this.loadConversation(prior.conversationId);
-      if (loaded.createOperation?.fingerprintVersion === 1) return undefined;
       throw new Error('REQUEST_CONFLICT: conversation create operation changed.');
     }
     return (await this.loadConversation(prior.conversationId)).aggregate.conversation;
@@ -1837,6 +1820,12 @@ export class FileDiscourseStore implements DiscourseStore {
       throw new Error('Discourse draft file failed its integrity check.');
     }
     const storedDraft = record.draft as unknown as DiscourseDraftRecord;
+    if (
+      !Array.isArray(storedDraft.sourceMessageIds) ||
+      !Array.isArray(storedDraft.agentSelections)
+    ) {
+      throw new Error('Discourse draft file failed its integrity check.');
+    }
     const draft: DiscourseDraftRecord = {
       id: storedDraft.id,
       ...(storedDraft.conversationId
@@ -1850,13 +1839,9 @@ export class FileDiscourseStore implements DiscourseStore {
       ...(storedDraft.supersedesMessageId
         ? { supersedesMessageId: storedDraft.supersedesMessageId }
         : {}),
-      sourceMessageIds: Array.isArray(storedDraft.sourceMessageIds)
-        ? storedDraft.sourceMessageIds
-        : [],
+      sourceMessageIds: storedDraft.sourceMessageIds,
       policy: storedDraft.policy,
-      agentSelections: Array.isArray(storedDraft.agentSelections)
-        ? storedDraft.agentSelections
-        : [],
+      agentSelections: storedDraft.agentSelections,
       ...(storedDraft.pendingClientMessageId
         ? { pendingClientMessageId: storedDraft.pendingClientMessageId }
         : {}),
@@ -2035,18 +2020,10 @@ function applyEvent(
       ) as unknown as DiscourseParticipantRevisionRecord[];
       next.aggregate.participants = participants;
       next.aggregate.participantRevisions = participantRevisions;
-      const fingerprintVersion = payload.createFingerprintVersion === 2 ? 2 : 1;
       next.createOperation = {
         operationId: event.operationId,
         requestFingerprint: event.requestFingerprint,
-        conversationId: conversation.id,
-        fingerprintVersion,
-        semanticRequestFingerprint: createConversationSemanticFingerprint({
-          title: conversation.title,
-          defaultPolicy: conversation.defaultPolicy,
-          participants,
-          participantRevisions
-        })
+        conversationId: conversation.id
       };
       break;
     }
@@ -3401,12 +3378,7 @@ async function readCheckedIndex(filePath: string): Promise<DiscourseIndexFile | 
   if (!value) return undefined;
   const record = value as Partial<DiscourseIndexFile>;
   if (record.schemaVersion !== DISCOURSE_STORE_SCHEMA_VERSION) {
-    if (Number(record.schemaVersion) > DISCOURSE_STORE_SCHEMA_VERSION) {
-      throw new Error(
-        `Discourse schema ${String(record.schemaVersion)} is newer than this app supports.`
-      );
-    }
-    return undefined;
+    throw new Error(`Unsupported Discourse store schema ${String(record.schemaVersion)}.`);
   }
   if (
     !Number.isSafeInteger(record.revision) ||
@@ -3428,8 +3400,12 @@ async function readCheckedMetadata(
   const value = await readPrivateJson(filePath, MAX_METADATA_BYTES);
   if (!value) return undefined;
   const record = value as Partial<DiscourseConversationMetadata>;
+  if (record.schemaVersion !== DISCOURSE_STORE_SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported Discourse conversation metadata schema ${String(record.schemaVersion)}.`
+    );
+  }
   if (
-    record.schemaVersion !== DISCOURSE_STORE_SCHEMA_VERSION ||
     record.conversationId !== conversationId ||
     !Number.isSafeInteger(record.lastAppliedEventSequence) ||
     !record.summary ||
@@ -3576,39 +3552,6 @@ function hashRequest(value: unknown): string {
   return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
 }
 
-function createConversationSemanticFingerprint(input: Pick<
-  CreateDiscourseConversationInput,
-  'title' | 'defaultPolicy' | 'participants' | 'participantRevisions'
->): string {
-  const revisions = new Map(
-    input.participantRevisions.map((revision) => [revision.id, revision])
-  );
-  return hashRequest({
-    title: input.title.trim(),
-    defaultPolicy: input.defaultPolicy,
-    participants: input.participants.map((participant) => {
-      const revision = revisions.get(participant.currentRevisionId);
-      if (!revision) {
-        throw new Error('Discourse participant seed is missing its immutable revision.');
-      }
-      return {
-        agentProfileId: participant.agentProfileId,
-        enabled: participant.enabled,
-        profileRevision: revision.profileRevision,
-        displayNameSnapshot: revision.displayNameSnapshot,
-        runtimeId: revision.runtimeId,
-        model: revision.model,
-        modelProvider: revision.modelProvider,
-        reasoningEffort: revision.reasoningEffort,
-        serviceTier: revision.serviceTier,
-        configuredRole: revision.configuredRole,
-        roleContractVersion: revision.roleContractVersion,
-        roleContractHash: revision.roleContractHash
-      };
-    })
-  });
-}
-
 function checksum(value: unknown): string {
   return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
 }
@@ -3673,19 +3616,9 @@ function dedupeCreateOperations(
     ) {
       throw new Error('Discourse create-operation index is contradictory.');
     }
-    byId.set(
-      operation.operationId,
-      existing && createOperationInformationRank(existing) > createOperationInformationRank(operation)
-        ? existing
-        : operation
-    );
+    byId.set(operation.operationId, existing ?? operation);
   }
   return [...byId.values()];
-}
-
-function createOperationInformationRank(operation: DiscourseCreateOperation): number {
-  return (operation.fingerprintVersion ?? 1) * 2 +
-    (operation.semanticRequestFingerprint ? 1 : 0);
 }
 
 function dedupeTombstones(

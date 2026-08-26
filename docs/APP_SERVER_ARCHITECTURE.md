@@ -381,11 +381,10 @@ The executable environment variables
 act as debug overrides ahead of saved settings.
 
 Repository records and boards belong to `FileTaskStore`, not app settings.
-Only the current store and settings schema versions are accepted. Older or
-invalid versions fail closed with an instruction to discard the local data;
-Task Monki does not migrate, reinterpret, or fall back to older shapes. Startup
-reconciliation is limited to current-schema runtime evidence such as an
-interrupted provider turn and does not repair missing schema fields.
+The task store, agent-runtime store, Discourse store, and app settings each load
+one complete current schema version. Startup validates the stored shape before
+performing current-state reconciliation such as resolving an interrupted
+provider turn; schema conversion is not part of reconciliation.
 
 Codex Auto-detect status may display the resolved `codex` path, but that
 auto-discovered path is not passed as an explicit App Server runtime. In Auto
