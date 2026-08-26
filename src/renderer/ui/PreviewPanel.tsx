@@ -7,6 +7,7 @@ import {
   type ReactNode,
   type RefObject
 } from 'react';
+import { ExternalLink, MoreHorizontal, Terminal } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type {
   PreviewApprovalRecord,
@@ -40,7 +41,6 @@ import {
   type PreviewAttachmentBindingDraft,
   type PreviewTaskRouteOption
 } from '../model/previewBindings';
-import { Chip } from './StatusBadge';
 import {
   focusMenuItem,
   handleMenuBlur,
@@ -49,6 +49,7 @@ import {
 } from './menuKeyboard';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { ImpactList } from './ImpactList';
+import { DisclosureChevron } from './DisclosureChevron';
 import type {
   PreviewConfirmation,
   PreviewController,
@@ -75,7 +76,6 @@ export function PreviewOverviewCard(
   }
   const projection = selectPreviewOverviewProjection(controller.view);
   const action = projection.recommendedAction;
-  const secondaryAction = projection.secondaryAction;
   const tone = previewTone(controller.view);
   const hasPrivateInputs = Boolean(controller.view.plan?.executionPlan.inputs?.length);
   const privateInputsNeedCheck = (candidate?: PreviewActionModel) => Boolean(
@@ -106,7 +106,9 @@ export function PreviewOverviewCard(
     <section className="tm-panel tm-preview-card" aria-label="Preview summary">
       <div className="tm-preview-card__head">
         <h3 className="tm-panel__title">Preview</h3>
-        <Chip label={overviewStatus} tone={overviewTone} />
+        <span className="tm-preview-card__status" data-tone={overviewTone}>
+          {overviewStatus}
+        </span>
       </div>
       <p className="tm-preview-card__summary">{overviewSummary}</p>
       {projection.primaryRoute ? (
@@ -146,25 +148,6 @@ export function PreviewOverviewCard(
             View Preview
           </button>
         )}
-        {secondaryAction ? (
-          <button
-            type="button"
-            className="outline-button"
-            disabled={isActionDisabled(controller, secondaryAction.id)}
-            onClick={privateInputsNeedCheck(secondaryAction)
-              ? props.onShowDetails
-              : () => void controller.runAction(secondaryAction.id)}
-          >
-            {controller.busy.has(secondaryAction.id)
-              ? 'Working…'
-              : actionLabel(secondaryAction)}
-          </button>
-        ) : null}
-        {action ? (
-          <button type="button" className="tm-preview-card__details" onClick={props.onShowDetails}>
-            Details
-          </button>
-        ) : null}
       </div>
     </section>
   );
@@ -1084,18 +1067,22 @@ function PreviewTechnicalDetails({
   if (!current) return null;
   return (
     <details className="tm-preview-surface tm-preview-disclosure tm-preview-technical-details">
-      <summary>Technical details</summary>
+      <summary><DisclosureChevron /><span>Technical details</span></summary>
       <div className="tm-preview-technical-details__body">
         <p>Captured {formatDate(current.createdAt)}.</p>
         <dl className="tm-preview-keyvalues">
           <div><dt>Generation</dt><dd><code>{shortId(current.id)}</code></dd></div>
           <div><dt>State</dt><dd>{humanizeEnum(current.state)}</dd></div>
-          <div><dt>Source</dt><dd><code>{shortId(current.sourceHeadSha)}</code></dd></div>
+          <div><dt>Source</dt><dd><code>{shortId(
+            current.source.type === 'WORKTREE_SNAPSHOT'
+              ? current.source.headSha
+              : current.source.commitSha
+          )}</code></dd></div>
           <div><dt>Routing</dt><dd>{humanizeEnum(current.routingState)}</dd></div>
         </dl>
         {currentRuntime.length > 0 ? (
           <details className="tm-preview-disclosure">
-            <summary>Runtime ownership · {currentRuntime.length}</summary>
+            <summary><DisclosureChevron /><span>Runtime ownership · {currentRuntime.length}</span></summary>
             <div className="tm-preview-rows">
               {currentRuntime.map((resource) => (
                 <OperationalRow
@@ -1110,7 +1097,7 @@ function PreviewTechnicalDetails({
         ) : null}
         {history.length > 1 ? (
           <details className="tm-preview-disclosure">
-            <summary>Generation history · {history.length}</summary>
+            <summary><DisclosureChevron /><span>Generation history · {history.length}</span></summary>
             <div className="tm-preview-rows">
               {history.map((generation) => (
                 <OperationalRow
@@ -1688,7 +1675,7 @@ function PreviewPrivateInputEditorModal({
           </p>
         ) : null}
         <details className="tm-preview-disclosure tm-preview-private-editor__import">
-          <summary>Import one .env key</summary>
+          <summary><DisclosureChevron /><span>Import one .env key</span></summary>
           <div className="tm-preview-input__entry">
             <label className="tm-field">
               <span>Selected key</span>
@@ -2009,29 +1996,15 @@ function OperationalRow({
 }
 
 function KebabIcon() {
-  return (
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-      <circle cx="3" cy="8" r="1.4" />
-      <circle cx="8" cy="8" r="1.4" />
-      <circle cx="13" cy="8" r="1.4" />
-    </svg>
-  );
+  return <MoreHorizontal aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }
 
 function OpenIcon() {
-  return (
-    <svg aria-hidden="true" width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-      <path d="M4 10 10 4M5.5 4H10v4.5" />
-    </svg>
-  );
+  return <ExternalLink aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
 }
 
 function TerminalIcon() {
-  return (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-      <path d="m2.5 4.5 3 2.5-3 2.5M7 10.5h4.5" />
-    </svg>
-  );
+  return <Terminal aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />;
 }
 
 function previewTone(view: PreviewViewModel): 'neutral' | 'info' | 'action' | 'success' | 'error' {

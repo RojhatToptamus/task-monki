@@ -6,13 +6,21 @@ export interface PreviewUrlHost {
   openExternal(url: string): Promise<void>;
 }
 
+export interface ResolvedPreviewRoute {
+  taskId: string;
+  generationId: string;
+  routeId: string;
+  url: string;
+  origin: string;
+}
+
 export class PreviewOpenService {
   constructor(
     private readonly store: FileTaskStore,
     private readonly host?: PreviewUrlHost
   ) {}
 
-  async open(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+  async resolve(input: OpenPreviewRequest): Promise<ResolvedPreviewRoute> {
     const generation = await this.store.getPreviewGeneration(input.generationId);
     if (
       !generation ||
@@ -42,6 +50,17 @@ export class PreviewOpenService {
     ) {
       throw new Error('Recorded preview route failed the loopback URL safety check.');
     }
+    return {
+      taskId: generation.taskId,
+      generationId: generation.id,
+      routeId: route.id,
+      url: route.url,
+      origin: parsed.origin
+    };
+  }
+
+  async open(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    const route = await this.resolve(input);
     if (this.host) await this.host.openExternal(route.url);
     return { opened: Boolean(this.host), url: route.url };
   }

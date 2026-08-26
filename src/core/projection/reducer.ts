@@ -24,6 +24,10 @@ export function createEmptyState(): StoreState {
     repositories: [],
     boards: [],
     tasks: [],
+    designTurns: [],
+    designReferences: [],
+    designRevisions: [],
+    designSourceActions: [],
     iterations: [],
     worktrees: [],
     gitSnapshots: [],
@@ -65,6 +69,10 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     repositories: [...state.repositories],
     boards: [...state.boards],
     tasks: [...state.tasks],
+    designTurns: [...state.designTurns],
+    designReferences: [...state.designReferences],
+    designRevisions: [...state.designRevisions],
+    designSourceActions: [...state.designSourceActions],
     iterations: [...state.iterations],
     worktrees: [...state.worktrees],
     gitSnapshots: [...state.gitSnapshots],
@@ -193,6 +201,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
                     ].includes(run.status)
                   ? 'RUNNING'
                   : ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status) &&
+                      getBoolean(event.payload, 'interactionPending') !== true &&
                       (getBoolean(event.payload, 'resumeConfirmed') === true ||
                         isAuthoritativeAgentProgress(eventType))
                     ? 'RUNNING'
@@ -305,6 +314,9 @@ function isAuthoritativeAgentProgress(eventType: string | undefined): boolean {
 }
 
 function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): Task['workflowPhase'] {
+  if (task.kind === 'DESIGN') {
+    return task.workflowPhase;
+  }
   switch (event.type) {
     case 'TRANSITION_REQUESTED':
       if (isReviewRunEvent(task, event, run)) {
@@ -324,7 +336,8 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
     case 'AGENT_RUN_FAILED':
     case 'AGENT_RUN_INTERRUPTED':
       // A stopped implementation is not review-ready. Keep it in the
-      // implementation phase so the next action remains retry or continue.
+      // implementation phase so the next action remains the outcome-appropriate
+      // Continue work or Retry implementation action.
       return task.workflowPhase;
     case 'IMPLEMENTATION_OUTCOME_BLOCKED':
       return run &&

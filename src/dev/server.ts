@@ -43,6 +43,9 @@ const discourseDir =
 const discourseWorkspaceRoot =
   process.env.TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT ??
   path.join(storeDir, 'discourse-workspaces');
+const designRepositoryRoot = process.env.TASK_MANAGER_DESIGN_REPOSITORY_ROOT;
+const designWorktreeRoot = process.env.TASK_MANAGER_DESIGN_WORKTREE_ROOT;
+const designDraftRoot = process.env.TASK_MANAGER_DESIGN_DRAFT_ROOT;
 const agentProviderStartupDisabledReason =
   deterministicDevSeedProviderDisabledReason(process.env);
 const taskStore = new FileTaskStore(storeDir);
@@ -70,6 +73,35 @@ const service = new TaskManagerService(
       discourseDir
     ),
     discourseWorkspaceRoot,
+    designSkillRoot: path.join(process.cwd(), 'resources', 'design-skills'),
+    ...(designRepositoryRoot && designWorktreeRoot && designDraftRoot
+      ? {
+          designRepositoryRoot,
+          designWorktreeRoot,
+          designDraftRoot,
+          designBrowserRuntime: {
+            async attest() {},
+            async recover() {},
+            async openCandidate() {
+              throw new Error('The deterministic Design seed does not start browser automation.');
+            },
+            async inspect() {
+              throw new Error('The deterministic Design seed does not start browser automation.');
+            },
+            abortRun() {},
+            async closeRun() {},
+            async shutdown() {}
+          },
+          designCanvasFence: {
+            async begin() {
+              return {
+                async commit() {},
+                async rollback() {}
+              };
+            }
+          }
+        }
+      : {}),
     previewRoot,
     previewLauncherPath: path.join(
       process.cwd(),

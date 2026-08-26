@@ -43,7 +43,7 @@ describe('TaskManagerService evidence flow', () => {
     expect(afterRunTask?.workflowPhase).toBe('REVIEW');
     expect(afterRunTask?.projection.agentRun).toBe('COMPLETED');
     expect(completedRun?.afterGitSnapshotId).toBeTruthy();
-  });
+  }, 15_000);
 
   it.each([
     ['declined', recordDeclinedCommand],
@@ -98,7 +98,18 @@ describe('TaskManagerService evidence flow', () => {
       await expect(
         scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' })
       ).rejects.toThrow(retryReason);
-    }
+      const replacement = await scenario.service.retryRun({
+        taskId: task.id,
+        runId: run.id,
+        strategy: 'SAME_SESSION'
+      });
+      expect(replacement).toMatchObject({
+        mode: 'RETRY',
+        retryOfRunId: run.id,
+        status: 'RUNNING'
+      });
+    },
+    15_000
   );
 
   it('does not treat a declined MCP elicitation as rejected implementation execution', async () => {

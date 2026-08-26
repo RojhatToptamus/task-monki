@@ -1,14 +1,17 @@
 import type {
   AgentReviewFinding,
   AgentReviewGateProjection,
+  ClientTextExcerpt,
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
+import type { ReactNode } from 'react';
 import type { ReviewActivityViewModel } from '../model/reviewActivity';
 import { FINDING_LEVELS, findingLevel, shortFindingRef } from '../model/findings';
 import { FindingRow } from './Findings';
 import { RunHeader } from './RunHeader';
-import { dotStyle } from './StatusBadge';
+import { StatusGlyph, type StatusGlyphKind } from './StatusBadge';
+import { DisclosureChevron } from './DisclosureChevron';
 import {
   describeGitSnapshot,
   describeReviewedDiff
@@ -28,6 +31,15 @@ export function ReviewPanel({
   reviewActivity,
   actionBusy,
   reviewPending,
+  textExcerpt,
+  loadedReviewOutput,
+  reviewOutputLoading = false,
+  reviewOutputError,
+  onLoadReviewOutput = () => undefined,
+  onReviewAgain,
+  reviewAgainDisabled = false,
+  reviewAgainTitle,
+  action,
   onStopReview
 }: {
   reviewGate: AgentReviewGateProjection;
@@ -36,15 +48,26 @@ export function ReviewPanel({
   reviewActivity?: ReviewActivityViewModel;
   actionBusy: boolean;
   reviewPending: boolean;
+  textExcerpt?: ClientTextExcerpt;
+  loadedReviewOutput?: string;
+  reviewOutputLoading?: boolean;
+  reviewOutputError?: string;
+  onLoadReviewOutput?(): void;
+  onReviewAgain?(): void;
+  reviewAgainDisabled?: boolean;
+  reviewAgainTitle?: string;
+  action?: ReactNode;
   onStopReview(reviewRunId: string): void;
 }) {
   const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
-  const ui = reviewGateUi(effectiveStatus);
+  const ui = reviewGateUi(effectiveStatus, reviewGate);
   const canStopReview = Boolean(reviewRun && effectiveStatus === 'RUNNING' && !reviewPending);
   const currentDiff = describeGitSnapshot(gitSnapshot);
   const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
   const reviewIsRunning = effectiveStatus === 'RUNNING';
   const body = reviewBody(reviewGate, reviewRun);
+  const findings = reviewGate.result?.findings ?? [];
+  const hasRawReviewOutput = Boolean(reviewRun?.finalMessage || loadedReviewOutput);
   const stopReviewDisabledTitle = (): string | undefined => {
     if (actionBusy) {
       return 'Review action is in progress.';
@@ -77,9 +100,11 @@ export function ReviewPanel({
         </div>
       ) : (
         <div className="tm-reviewcard__head">
-          <span className="tm-reviewcard__dot" style={dotStyle(ui.tone)} />
+          {ui.mark !== 'idle' ? (
+            <StatusGlyph className="tm-reviewcard__glyph" kind={ui.mark} />
+          ) : null}
           <div>
-            <h3 className="tm-panel__title" style={{ margin: 0 }}>
+            <h3 className="tm-panel__title tm-panel__title--flush">
               Review
             </h3>
           </div>
@@ -87,6 +112,22 @@ export function ReviewPanel({
           <span className="tm-reviewcard__status">{ui.label}</span>
         </div>
       )}
+
+      {effectiveStatus === 'STALE' ? (
+        <div className="tm-reviewcard__stale">
+          <span>Diff changed since this review.</span>
+          {onReviewAgain ? (
+            <button
+              type="button"
+              disabled={reviewAgainDisabled}
+              title={reviewAgainTitle}
+              onClick={onReviewAgain}
+            >
+              Re-review
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="tm-reviewcard__body">
         {reviewIsRunning ? (
@@ -116,13 +157,20 @@ export function ReviewPanel({
                 <strong>{reviewedDiff}</strong>
               </div>
             )}
-            <ReviewFindingsList findings={reviewGate.result?.findings ?? []} />
-            {reviewRun?.finalMessage ? (
-              <details className="tm-raw tm-reviewcard__raw">
-                <summary>Raw review output</summary>
-                <pre>{reviewRun.finalMessage}</pre>
-              </details>
-            ) : null}
+            {effectiveStatus === 'STALE' ? null : action}
+            <ReviewFindingsList
+              findings={findings}
+              rawOutput={hasRawReviewOutput ? (
+                <RawReviewOutput
+                  textExcerpt={textExcerpt}
+                  loadedReviewOutput={loadedReviewOutput}
+                  fallbackOutput={reviewRun?.finalMessage}
+                  loading={reviewOutputLoading}
+                  error={reviewOutputError}
+                  onLoad={onLoadReviewOutput}
+                />
+              ) : undefined}
+            />
           </div>
         )}
       </div>
@@ -130,18 +178,84 @@ export function ReviewPanel({
   );
 }
 
-function ReviewFindingsList({ findings }: { findings: AgentReviewFinding[] }) {
+function RawReviewOutput({
+  textExcerpt,
+  loadedReviewOutput,
+  fallbackOutput,
+  loading,
+  error,
+  onLoad
+}: {
+  textExcerpt?: ClientTextExcerpt;
+  loadedReviewOutput?: string;
+  fallbackOutput?: string;
+  loading: boolean;
+  error?: string;
+  onLoad(): void;
+}) {
+  return (
+    <details className="tm-raw tm-reviewcard__raw">
+      <summary>
+        <span className="tm-disclosure__label">
+          <DisclosureChevron />
+          {textExcerpt
+            ? loadedReviewOutput === undefined
+              ? 'Raw review output excerpt'
+              : 'Retained review artifact'
+            : 'Raw review output'}
+        </span>
+      </summary>
+      <pre>{loadedReviewOutput ?? fallbackOutput}</pre>
+      {textExcerpt ? (
+        <div>
+          <p>
+            Displayed {textExcerpt.displayedByteCount.toLocaleString()} of{' '}
+            {textExcerpt.originalByteCount.toLocaleString()} bytes.
+          </p>
+          {textExcerpt.availableContent.kind === 'BOUNDED_ARTIFACT' &&
+          loadedReviewOutput === undefined ? (
+            <button
+              type="button"
+              className="outline-button"
+              disabled={loading}
+              onClick={onLoad}
+            >
+              {loading ? 'Loading review artifact…' : 'Load available review artifact'}
+            </button>
+          ) : textExcerpt.availableContent.kind === 'NOT_AVAILABLE' ? (
+            <p>Additional content is not available from retained evidence.</p>
+          ) : null}
+          {error ? <div className="tm-error">{error}</div> : null}
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
+function ReviewFindingsList({
+  findings,
+  rawOutput
+}: {
+  findings: AgentReviewFinding[];
+  rawOutput?: ReactNode;
+}) {
   if (findings.length === 0) {
-    return null;
+    return rawOutput ?? null;
   }
   const sortedFindings = [...findings].sort(
     (a, b) => findingLevel(a.severity).rank - findingLevel(b.severity).rank
   );
   return (
-    <div className="tm-reviewfindings">
-      <SeverityDistribution findings={findings} />
+    <details className="tm-reviewfindings">
+      <summary>
+        <span className="tm-disclosure__label">
+          <DisclosureChevron />
+          Findings
+        </span>
+        <SeverityDistribution findings={findings} hasRawOutput={Boolean(rawOutput)} />
+      </summary>
       <div className="tm-reviewfindings__list">
-        {sortedFindings.map((finding, index) => {
+        {sortedFindings.map((finding) => {
           const level = findingLevel(finding.severity);
           return (
             <FindingRow
@@ -150,7 +264,6 @@ function ReviewFindingsList({ findings }: { findings: AgentReviewFinding[] }) {
               severityLabel={level.label}
               title={finding.title}
               reference={shortFindingRef(finding)}
-              open={index === 0}
               detail={
                 <>
                   <p>{finding.explanation}</p>
@@ -161,11 +274,18 @@ function ReviewFindingsList({ findings }: { findings: AgentReviewFinding[] }) {
           );
         })}
       </div>
-    </div>
+      {rawOutput}
+    </details>
   );
 }
 
-function SeverityDistribution({ findings }: { findings: AgentReviewFinding[] }) {
+function SeverityDistribution({
+  findings,
+  hasRawOutput
+}: {
+  findings: AgentReviewFinding[];
+  hasRawOutput: boolean;
+}) {
   const counts = FINDING_LEVELS.map((level) => ({
     ...level,
     count: findings.filter((finding) => finding.severity === level.severity).length
@@ -174,20 +294,20 @@ function SeverityDistribution({ findings }: { findings: AgentReviewFinding[] }) 
     return null;
   }
   return (
-    <div className="tm-reviewfindings__distribution">
-      <div className="tm-reviewfindings__counts" aria-label="Review finding severity counts">
+    <span className="tm-reviewfindings__distribution">
+      <span className="tm-reviewfindings__counts" aria-label="Review finding severity counts">
         {counts.map((level) => (
           <span
             key={level.severity}
             className={`tm-reviewfindings__count tm-reviewfindings__count--${level.tone}`}
           >
-            <span className="tm-reviewfindings__count-dot" />
             <strong>{level.count}</strong>
             {level.label}
           </span>
         ))}
-      </div>
-    </div>
+        {hasRawOutput ? <span className="tm-reviewfindings__rawref">· raw output</span> : null}
+      </span>
+    </span>
   );
 }
 
@@ -215,27 +335,37 @@ function formatReviewTime(value: string | undefined): string {
   }).format(new Date(timestamp));
 }
 
-function reviewGateUi(status: AgentReviewGateProjection['status']): {
+function reviewGateUi(
+  status: AgentReviewGateProjection['status'],
+  reviewGate: AgentReviewGateProjection
+): {
   label: string;
   tone: Tone;
+  mark: StatusGlyphKind;
 } {
   switch (status) {
     case 'RUNNING':
-      return { label: 'Reviewing...', tone: 'info' };
+      return { label: 'Reviewing', tone: 'info', mark: 'working' };
     case 'PASSED':
-      return { label: 'Passed', tone: 'success' };
+      return { label: 'Passed', tone: 'success', mark: 'idle' };
     case 'NEEDS_CHANGES':
-      return { label: 'Needs changes', tone: 'error' };
+      return { label: 'Needs changes', tone: 'action', mark: 'waiting' };
     case 'INCONCLUSIVE':
-      return { label: 'Inconclusive', tone: 'action' };
+      return { label: 'Inconclusive', tone: 'action', mark: 'waiting' };
     case 'FAILED':
-      return { label: 'Failed', tone: 'error' };
+      return { label: 'Failed', tone: 'error', mark: 'blocked' };
     case 'CANCELED':
-      return { label: 'Stopped', tone: 'action' };
-    case 'STALE':
-      return { label: 'Stale', tone: 'action' };
+      return { label: 'Stopped', tone: 'action', mark: 'idle' };
+    case 'STALE': {
+      switch (reviewGate.result?.verdict) {
+        case 'PASSED': return { label: 'Passed', tone: 'success', mark: 'idle' };
+        case 'NEEDS_CHANGES': return { label: 'Needs changes', tone: 'error', mark: 'idle' };
+        case 'INCONCLUSIVE': return { label: 'Inconclusive', tone: 'action', mark: 'idle' };
+        default: return { label: 'Needs re-review', tone: 'action', mark: 'idle' };
+      }
+    }
     case 'NOT_RUN':
-      return { label: 'Not run', tone: 'neutral' };
+      return { label: 'Not run', tone: 'neutral', mark: 'idle' };
   }
 }
 

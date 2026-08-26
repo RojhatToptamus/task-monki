@@ -374,6 +374,16 @@ messages, parts, status, pending interactions, todos, and usage. An incomplete
 or unpersistable snapshot quarantines that session process; it is never reduced
 to telemetry while execution continues. Interaction-owned waiting states take
 precedence over provider busy/idle telemetry until the interaction is resolved.
+An idle restart snapshot does not make an unfinished assistant or running tool
+terminal. That run remains recovery-required, and an explicit later retry
+fully reinitializes the stopped adapter before it starts a replacement process.
+Native OpenCode questions retain their ordered prompts, option labels and
+descriptions, `multiple` selection rule, and custom-answer allowance. Task
+Monki follows the native schema's `custom` default: custom answers are allowed
+unless the question explicitly sets `custom: false`. It replies through the
+exact `/question/{id}/reply` resource and treats the HTTP acknowledgement as
+authoritative. The `/question` snapshot repairs missed create, reply, reject,
+disconnect, and restart events without replaying an answer.
 
 OpenCode interruption is a bounded control flow, not an unbounded wait for SSE.
 Task Monki sends abort only through the exact session process that owns the run,
@@ -460,6 +470,12 @@ and advertises the official v1.19 boolean config-option client capability. The
 agent remains responsible for its tools; Task Monki does not become a generic
 command-execution host through ACP. Unsupported client requests fail
 explicitly.
+
+Stable ACP v1 has permission requests but no general ad hoc mid-turn
+user-input method. Task Monki therefore does not turn assistant prose into an
+interaction and does not implement draft elicitation proposals as though they
+were stable. A prose question completes through the normal turn lifecycle and
+the user can answer it with Task Monki's explicit follow-up/continue action.
 
 Cursor Agent is the only current ACP profile allowed to surface positive
 provider choices for an execute request that omits command text. The profile
@@ -579,6 +595,24 @@ and unsupported extensions stay in bounded, structurally redacted journals or
 native metadata. UI workflow selectors consume projections and verified
 evidence, not protocol messages.
 
+Renderer reads preserve the same authority boundary. The board endpoint derives
+only card summaries and actionable Inbox projections from the store's published
+state. A task-detail endpoint derives the selected task's runs, sessions, items,
+interactions, prompts, evidence, and referenced runtime/server records plus a
+compact cross-task Preview route catalog. It does not serialize unrelated task
+histories, and the renderer has no full-snapshot endpoint.
+
+All transports use the same compact client event projection. High-volume output
+and routine activity are volume invalidations; terminal, ambiguous,
+recovery-required, interaction, and other authoritative mutations publish state
+invalidations that refresh board truth and matching open detail. App-scoped
+fallback invalidations refresh any open detail too. Because task detail owns
+the compact cross-task Preview route catalog, route availability changes from a
+different task also invalidate the open detail. Browser and Electron therefore
+cannot assign different freshness semantics to the same provider event. Browser
+polling is outage-only: the native EventSource keeps reconnecting and stops the
+poller after the stream reopens.
+
 ### Raw protocol journal
 
 Every runtime writes traffic to the same provider-neutral journal contract.
@@ -667,6 +701,16 @@ handle before exposing the artifact again. Task deletion publishes the durable
 record removal before best-effort file cleanup; startup removes a managed orphan
 left by an interrupted cleanup.
 
+Task-detail run final messages and nested provider item/event payload strings
+are display excerpts, not authoritative inputs. Each excerpted field carries
+original and displayed byte counts plus an explicit availability state:
+`BOUNDED_ARTIFACT` when the retained bounded artifact may be loaded, or
+`NOT_AVAILABLE`. The projection never infers that a complete artifact or
+journal segment exists. Review follow-up prompts use structured findings
+directly; when only unstructured truncated review text is available, the
+renderer must load the explicitly retained artifact before building a prompt
+and must not use omission-marker text.
+
 ## Permissions and interactions
 
 Interaction requests persist their runtime, server, session, run, native
@@ -679,7 +723,11 @@ separate non-actionable interaction-creation path.
 Rules:
 
 - unsafe paths, Task Monki-controlled Git/delivery commands, disallowed network
-  access, and unsupported secret input fail closed;
+  access, unsupported secret input, and malformed or unanswerable structured
+  questions fail closed;
+- credential redaction preserves typed boolean classification fields such as
+  `isSecret`; those flags are policy input, not credential contents. Actual
+  credential values and credential-shaped display text remain redacted;
 - a decision must match the persisted interaction type and allowed actions;
 - a granting response requires both the run and exact owning session to retain
   the interaction's matching awaiting state; decline and cancel remain
@@ -692,7 +740,27 @@ Rules:
   persistence is never described as Task Monki session scope, and Task Monki
   creates no persistent grant;
 - runtime loss makes unanswered interactions stale or aborted; it does not
-  auto-approve or synthesize a response.
+  auto-approve or synthesize a response;
+- a closed interaction retains the server generation and raw protocol
+  reference that actually owned it even when recovery rebinds its run to a
+  later server generation. Only actionable pending/responding interactions
+  must match the run's current server;
+- Codex input remains responding until `serverRequest/resolved`; OpenCode input
+  resolves on the acknowledged question reply. In both cases the awaiting state
+  is released only after the last actionable sibling interaction for the same
+  run, session, and server generation is gone. A provider tool update that
+  belongs to an actionable pending interaction remains telemetry and cannot be
+  treated as proof that the turn resumed;
+- Codex and OpenCode questions preserve choices, free text, allowed custom
+  answers, and native multiplicity where the provider exposes it. Every
+  question must receive a nonblank answer and single-choice questions reject
+  multiple values;
+- stable ACP profiles expose no structured general-input interaction. Normal
+  prose remains output and can be answered only by a deliberate follow-up
+  turn; no text parsing creates workflow state;
+- response APIs require the exact task, run, interaction, runtime, session, and
+  server ownership. A terminal, superseded, already responding, or already
+  resolved request cannot be delivered again.
 
 A provider-completed turn does not override a durable user rejection. After
 post-run Git capture, an implementation with a declined execution interaction
@@ -758,8 +826,28 @@ terminal/recovery UI events or follow-on session state. A provider may prepare
 an idempotent final artifact before that claim, but the artifact is telemetry
 and does not itself make the run terminal.
 
-The user may explicitly retry or continue after Task Monki closes the uncertain
-run. Provider IDs from another runtime are never consulted.
+After Task Monki closes the uncertain run, the user may explicitly continue
+unfinished work or retry the original implementation. Either action first
+inspects current authoritative state and neither blindly resubmits the ambiguous
+mutation. Provider IDs from another runtime are never consulted.
+
+The user may instead abandon a `RECOVERY_REQUIRED` run. Abandoning resolves only
+the ambiguous run record; it does not delete the task, worktree, or independently
+observed Git and external results.
+
+Startup includes runs waiting on an approval or user answer, and it follows
+their server ownership even when a prior server record was already marked
+terminal. A terminal server record does not prove that the owned run or
+interaction was settled. Codex, OpenCode, and ACP use the same active-ownership
+selection rule before applying their provider-specific reconciliation.
+Before selectively initializing eager, selected, or recovery-owning runtimes,
+startup marks every nonterminal server record from the previous application
+process lost. This application-owned sweep also covers idle on-demand runtimes,
+without launching them. Runtime adapters remain responsible for reconciling
+the affected runs, sessions, and interactions against provider-specific truth.
+An active interaction must belong to the run's current server. Once resolved,
+stale, or aborted, it remains historical evidence owned by the server that
+actually carried that request even if recovery later rebinds the run.
 
 Long-running prompt completion is not assigned the bounded control-RPC
 deadline. A submitted prompt stays pending until the provider returns a
@@ -791,6 +879,11 @@ If Task Monki cannot confirm that boundary, the process supervisor publishes a
 distinct termination failure instead of a normal close or spawn error. The
 runtime records the server as lost, moves active work to recovery, and fences
 replacement startup until the application restarts.
+Provider processes are launched behind an IPC-bound owner process. Abrupt loss
+of the app closes that ownership channel, and the owner stops only the exact
+target process group. Provider probes, mutating or remote-inspection Git
+commands, and GitHub CLI children use the same boundary. Persisted PIDs from a
+previous app process are not used as authority to kill processes after restart.
 Windows' `taskkill` interface cannot prove the fate of orphaned descendants
 after their leader has already exited. Task Monki does not claim that guarantee
 on Windows; reliable ownership there requires a native Job Object boundary and

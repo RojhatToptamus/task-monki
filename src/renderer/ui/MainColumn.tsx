@@ -1,10 +1,10 @@
 import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { CircleCheck, GitFork } from 'lucide-react';
 import type {
   AgentInteractionDecision,
   Board,
   InteractionRequestRecord,
-  Repository,
-  Task
+  Repository
 } from '../../shared/contracts';
 import {
   type AgentModel,
@@ -20,13 +20,13 @@ import { shouldShowTaskRepository } from '../model/boards';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import type { RepositorySetupState } from '../model/repositories';
 import { describeTaskAttention } from '../model/taskAttention';
-import { Chip, dotStyle } from './StatusBadge';
+import { Chip } from './StatusBadge';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import {
   SettingsView
 } from './SettingsView';
 import { FirstLaunchSetup } from './FirstLaunchSetup';
-import type { ThemePreference } from './theme';
+import type { ThemePreference, ThemePreset } from './theme';
 import {
   BOARD_COLUMNS,
   buildTaskCardVM,
@@ -36,17 +36,19 @@ import {
   tasksSpanMultipleRepositories,
   shouldShowInboxRepository,
   type NavView,
+  type TaskCardSource,
   type TaskCardVM
 } from '../model/taskView';
 
 interface MainColumnProps {
   view: NavView;
   board?: Board;
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
+  onPreviewThemePreset(themePreset: ThemePreset | null): void;
   appSettings: TaskManagerAppSettings;
   onSetAppSettings(
     settings: UpdateAppSettingsRequest,
@@ -76,7 +78,10 @@ interface MainColumnProps {
   onEditBoard(board: Board): void;
 }
 
-const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): string }> = {
+const VIEW_TITLES: Record<
+  NavView,
+  { title: string; subtitle(tasks: TaskCardSource[]): string }
+> = {
   inbox: {
     title: 'Inbox',
     subtitle: () => 'Decisions and runs waiting on you'
@@ -131,6 +136,7 @@ export function MainColumn({
   interactionRequests,
   theme,
   onSetTheme,
+  onPreviewThemePreset,
   appSettings,
   onSetAppSettings,
   externalToolStatus,
@@ -171,7 +177,7 @@ export function MainColumn({
   return (
     <main className="tm-main">
       <div className="tm-main__head">
-        <div style={{ minWidth: 0 }}>
+        <div className="tm-main__head-copy">
           <h1 className="tm-main__title">
             {showRepositorySetup ? setupHead.title : board?.name ?? head.title}
           </h1>
@@ -242,6 +248,7 @@ export function MainColumn({
         <SettingsView
           theme={theme}
           onSetTheme={onSetTheme}
+          onPreviewThemePreset={onPreviewThemePreset}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
           externalToolStatus={externalToolStatus}
@@ -265,7 +272,7 @@ function BoardKanban({
   onArchive,
   onRequestDelete
 }: {
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   showRepository: boolean;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -320,7 +327,6 @@ function BoardKanban({
         return (
           <section className="tm-col" key={column.key}>
             <div className="tm-col__head">
-              <span className="tm-col__dot" style={dotStyle(column.tone)} />
               <h2 className="tm-col__label">{column.label}</h2>
               <span className="tm-col__count">{cards.length}</span>
             </div>
@@ -373,7 +379,7 @@ function CardGrid({
   onArchive,
   onRequestDelete
 }: {
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   view: NavView;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -397,6 +403,7 @@ function CardGrid({
               vm={buildTaskCardVM(task, {
                 showReviewCount,
                 columnKey: view === 'active' ? 'progress' : view,
+                statusContext: view === 'active' ? 'active' : undefined,
                 ...selectTaskCardRepositoryIdentity(
                   task.repositoryId,
                   repositoriesById,
@@ -475,7 +482,8 @@ export function TaskCard({
         </div>
         {vm.lineage ? (
           <div className="tm-card__lineage">
-            <span aria-hidden="true">↳</span> {vm.lineage}
+            <GitFork aria-hidden="true" absoluteStrokeWidth size={12} strokeWidth={1.5} />
+            <span>{vm.lineage}</span>
           </div>
         ) : null}
         {vm.evidence.length > 0 ? (
@@ -520,7 +528,7 @@ function Inbox({
   onSelect,
   onRespondToInteraction
 }: {
-  tasks: Task[];
+  tasks: TaskCardSource[];
   repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -540,7 +548,9 @@ function Inbox({
       <div className="tm-inbox__inner">
         {decisions.length === 0 ? (
           <div className="tm-inbox__empty">
-            <span className="tm-inbox__empty-mark">✓</span>
+            <span className="tm-inbox__empty-mark">
+              <CircleCheck aria-hidden="true" absoluteStrokeWidth size={18} strokeWidth={1.5} />
+            </span>
             <strong>All clear</strong>
             <span>Nothing needs your decision. The pipeline is running itself.</span>
           </div>
@@ -570,7 +580,7 @@ export function InboxDecisionCard({
   onSelect,
   onRespondToInteraction
 }: {
-  task: Task;
+  task: TaskCardSource;
   repositoryName: string;
   showRepository: boolean;
   interaction?: InteractionRequestRecord;

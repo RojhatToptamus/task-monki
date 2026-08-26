@@ -1,9 +1,9 @@
-# Task Attachment Lifecycle
+# Task Attachment and Design Reference Lifecycle
 
 Date: 2026-07-11
 
-Attachments are immutable task inputs. They are neither provider artifacts nor
-repository files, and they never live in a Git worktree.
+Attachments are immutable task inputs or Design references. They are neither
+provider artifacts nor repository files. They never live in a Git worktree.
 
 ## Supported input
 
@@ -42,9 +42,9 @@ Limits are:
 
 ## Composer and creation
 
-Picked, pasted, and dropped files remain renderer-local while the task is being
-edited. The renderer uses object URLs only for local previews and revokes them
-when a file or the panel is closed.
+Picked, pasted, and dropped files first remain in the renderer. The renderer
+uses object URLs only for local previews. It revokes each URL when the file or
+composer closes.
 
 Pressing Create performs one bounded batch operation. Electron uses guarded IPC
 with aggregate byte accounting. Browser development uses one authenticated JSON
@@ -66,6 +66,38 @@ The renderer uses one task-creation token for retries. A response lost after a
 durable create resolves to the existing task. The staged batch is retained only
 for that unchanged ambiguous retry. Ordinary validation or create failures
 discard it.
+
+Blank Design creation uses the same staging and retry rules. One store
+publication adopts the files and creates the Design, active references, and
+seeded first turn. That first turn selects all initial references.
+
+## Design messages and drafts
+
+The same attachment composer is available for every Design message. This
+includes later refinements, queued messages, and reopened conversations.
+
+An unsent Design draft stores its text, selected existing reference ids, and
+one attachment staging id. File bytes remain in the existing staging store.
+The draft file does not copy attachment metadata or file bytes.
+
+Task Monki keeps only staging that a valid Design draft owns during startup.
+It verifies the retained manifest and each file. It removes all other staging.
+One staging id cannot belong to two Design drafts.
+
+If a durable Design turn already owns the staging id, startup removes the stale
+composer draft and its remaining staging. This covers a stop after turn
+publication but before the renderer clears the sent draft.
+
+A Design send first saves the current draft. One store publication then adopts
+new files, creates active references, and creates the message turn. The turn
+stores the exact existing and new references for that message.
+
+The next message starts with no selected references. It does not inherit old
+references. A user can select an active reference again in the Files drawer.
+
+Each send uses one stable message id and the same staging id for an unchanged
+retry. A confirmed retry returns the stored turn. A failed publication keeps
+the private staging data and does not publish partial message state.
 
 ## Storage
 
@@ -101,15 +133,14 @@ every operation already admitted, closes the attachment store, and only then
 releases the application-wide store lease. A caller cannot begin attachment I/O
 against a closing or closed store.
 
-Task creation verifies the staging directory and atomically renames it to the
-task id, then synchronizes both parent directories before publishing
-`store.json`. A synchronization or store-publication failure renames the
-directory back and synchronizes that rollback before reporting a retry-safe
-failure. If rollback cannot be proven, adoption fails explicitly as ambiguous
-and must not be retried automatically. If the snapshot is visible but final
-manifest cleanup is interrupted, startup verifies the task-owned files and
-removes the stale manifest. An adopted directory with no durable task record is
-an orphan and is removed at startup.
+Task and blank Design creation verify the staging directory. They atomically
+rename it to the task id, then synchronize both parent directories before
+publishing `store.json`. A synchronization or store-publication failure renames
+the directory back. It synchronizes that rollback before reporting a retry-safe
+failure. If rollback cannot be proven, adoption fails explicitly as ambiguous.
+It must not be retried automatically. If final manifest cleanup is interrupted,
+startup verifies the task-owned files and removes the stale manifest. Startup
+also removes an adopted directory that has no durable task record.
 
 The current schema stores only task-owned attachment records. Retired
 content-addressed fields such as `storageKey` are rejected on load; Task Monki
@@ -125,15 +156,25 @@ an orphan left by interrupted cleanup. Deletion is not secure erasure.
 
 ## Run, reload, review, and debugging
 
-Every implementation, follow-up, retry, recovery, and review reuses the same
-immutable task-owned files. Core reopens with no-follow semantics and verifies
-managed-root containment, regular-file and non-symlink status, stable file
-identity, byte count, and SHA-256 immediately before provider delivery. It also
-verifies current-user ownership and the exact private mode on POSIX. Windows
-retains the path, regular-file/non-symlink checks exposed by Node, stable file
-identity, size, and hash checks while relying on the inherited per-user ACL
-boundary described above. No run cache or second physical representation
-exists.
+Normal task runs reuse all immutable task-owned files. Each Design turn uses
+only its stored reference selection. The first turn selects the references
+adopted during Design creation.
+
+A Codex thread cannot replace its active permission-profile identity during
+resume. If a Design turn changes the exact reference selection, Task Monki
+forks the existing provider thread with a new attested profile. The provider
+history continues, but the new thread can read only the current turn's selected
+managed files. The same Task Monki primary session owns the new provider thread.
+Task Monki unsubscribes the replaced thread so the App Server can unload it.
+An unchanged selection resumes the current thread without a fork.
+
+Core reopens files with no-follow semantics immediately before provider
+delivery. It verifies managed-root containment, regular-file and non-symlink
+status, stable file identity, byte count, and SHA-256. It also verifies
+current-user ownership and the exact private mode on POSIX. Windows retains the
+path, regular-file and non-symlink checks exposed by Node, stable file identity,
+size, and hash checks. It relies on the inherited per-user ACL boundary
+described above. No run cache or second physical representation exists.
 
 Delivery is selected by the owning runtime:
 
@@ -164,12 +205,12 @@ submission evidence.
 
 ## Confidentiality boundary
 
-An attachment task requires a runtime-supported restricted execution mode.
-Full access remains available for attachment-free tasks but is rejected when
-attachments are present. Network is forced off. Codex additionally attests a
-complete permission profile containing only the runtime minimum, exact
-worktree, and exact verified files. Other runtimes must enforce and document
-their own native tool/permission boundary truthfully.
+An attached task or Design requires a runtime-supported restricted execution
+mode. Full access remains available for attachment-free tasks. Task Monki
+rejects full access when attachments are present. Network is forced off. Codex
+also attests a complete permission profile. It contains only the runtime
+minimum, exact worktree, and exact verified files. Other runtimes must enforce
+and document their native tool and permission boundaries.
 
 For Codex submission, web search, external MCP servers, and apps must also all
 be disabled. Filesystem read rules do not
@@ -191,13 +232,15 @@ different malicious process already running as the same OS user.
 
 ## Portability and retention
 
-Managed copies make tasks independent of their selected source files. Any
-backup or export must keep `store.json` and `attachments/tasks` together while
-Task Monki is closed. Staging is disposable and is removed on restart. Task
+Managed copies make tasks independent of their selected source files. A backup
+or export must keep `store.json` and `attachments/tasks` together while Task
+Monki is closed. It must also keep Design draft files and their owned staging
+together. Other staging is disposable and is removed on restart. Task
 attachments last for the task lifetime.
 
 Runtime conversation history and Task Monki protocol journals may retain image
 bytes, managed paths, hashes, or derived discussion after local task deletion.
 Journal data remains only until its bounded per-server segment retention prunes
 it; a pruned raw-message reference fails closed. Task Monki must not claim that
-deleting its task directory erases provider history.
+deleting its task directory erases provider history. Task deletion unsubscribes
+the current live Codex thread but does not delete its stored provider history.

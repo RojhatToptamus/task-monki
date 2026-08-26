@@ -1,6 +1,8 @@
+@import '../../themes.css';
 @import './styles/foundation.css';
 @import './styles/base-components.css';
 @import './styles/discourse.css';
+@import './styles/designs.css';
 @import './styles/agent-and-evidence.css';
 @import './styles/new-task.css';
 @import './styles/app-shell.css';

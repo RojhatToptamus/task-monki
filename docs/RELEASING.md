@@ -88,6 +88,16 @@ before generating checksums or uploading artifacts. It proves that each runner
 can execute the packaged runtime; the manual renderer and workflow smoke test
 below still verifies the application UI and end-to-end behavior.
 
+On macOS, also run:
+
+```sh
+npm run verify:packaged-owned-process
+```
+
+This runs the packaged Electron executable in Node mode, loads the packaged
+IPC owner resource, and executes a bounded child through that exact production
+launch path.
+
 Normal pull-request and `main` CI also builds an unpacked native package and
 runs this smoke test on macOS, Windows, and Linux. Keep the full release
 artifact verifier in the tag workflow because normal CI does not build the

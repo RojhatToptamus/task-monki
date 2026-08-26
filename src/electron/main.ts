@@ -5,7 +5,9 @@ import {
   dialog,
   ipcMain,
   safeStorage,
+  session,
   shell,
+  WebContentsView,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
   type OpenDialogOptions
@@ -16,16 +18,21 @@ import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
   AcceptPreviewRecipeDraftRequest,
+  AddDesignReferencesRequest,
   AppUpdateEvent,
   ContinueRunRequest,
+  CreateBlankDesignRequest,
+  CancelDesignTurnRequest,
   CreateBoardRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DeleteDesignDraftRequest,
   DisconnectRepositoryRequest,
   DeletePreviewLocalAttachmentBindingRequest,
   DiscardPreviewRecipeDraftRequest,
@@ -34,6 +41,7 @@ import type {
   ApprovePreviewPlanRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
+  ImportDesignReferenceAssetRequest,
   OpenPreviewRequest,
   ExecuteOpenTargetActionRequest,
   PrepareWorktreeRequest,
@@ -41,11 +49,19 @@ import type {
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   ReadPreviewLogRequest,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
+  RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
+  ListDesignConversationRequest,
   ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
+  RemoveDesignReferenceRequest,
   ReconnectRepositoryRequest,
   StartRunRequest,
   StartPreviewRequest,
@@ -60,6 +76,8 @@ import type {
   UpdateAgentNativeSessionRequest,
   UpdateAppSettingsRequest,
   StopPreviewRequest,
+  SaveDesignDraftRequest,
+  SubmitDesignTurnRequest,
   UpdateBoardRequest,
   ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
@@ -104,8 +122,20 @@ import { createElectronOpenTargetHost } from './openTargetHost';
 import { getMacDockIconPath } from './dockIcon';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
-import { resolveNativePreviewLauncherPath } from '../core/preview/runtime/launcherPath';
+import {
+  resolveManagedDesignStaticServerPath,
+  resolveNativePreviewLauncherPath
+} from '../core/preview/runtime/launcherPath';
+import {
+  configureOwnedProcessLauncher,
+  resolveOwnedProcessLauncherPath
+} from '../core/process/ownedProcess';
 import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
+import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
+import {
+  resolveDesignBrowserRuntimePaths,
+  resolveDesignBrowserSocketRoot
+} from '../core/design/AgentBrowserRuntimePath';
 import { createElectronPreviewUrlHost } from './previewOpenHost';
 import {
   createRendererTrustPolicy,
@@ -119,10 +149,22 @@ import {
   IPC_WINDOW_CHROME_CHANNEL,
   type IpcInvokeChannel
 } from '../shared/ipcChannels';
+import type {
+  DesignCanvasHostEvent,
+  DesignCanvasRuntime
+} from './DesignCanvasHost';
+import { DesignCanvasHost } from './DesignCanvasHost';
+import type {
+  ApproveDesignCanvasExternalRequest,
+  HideDesignCanvasRequest,
+  RefreshDesignCanvasRequest,
+  ShowDesignCanvasRequest
+} from '../shared/designCanvas';
 const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
+let designCanvasHost: DesignCanvasHost | undefined;
 let serviceCreated = false;
 let ipcHandlersInstalled = false;
 let quitAfterShutdown = false;
@@ -131,12 +173,31 @@ let rendererTrustPolicy: RendererTrustPolicy | undefined;
 const attachmentIpcGate = new AttachmentIpcOperationGate();
 
 const appId = 'dev.taskmonki.desktop';
+const safeStorageVerificationName =
+  process.env.TASK_MONKI_SAFE_STORAGE_VERIFICATION_NAME;
+if (safeStorageVerificationName) {
+  const isPackagedVerification =
+    app.isPackaged &&
+    process.argv.some((argument) =>
+      argument.startsWith('--remote-debugging-port=')
+    ) &&
+    /^task-monki-safe-storage-verifier-[0-9a-f-]{36}$/u.test(
+      safeStorageVerificationName
+    );
+  if (!isPackagedVerification) {
+    throw new Error('Invalid packaged safeStorage verification identity.');
+  }
+  app.setName(safeStorageVerificationName);
+}
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!ownsSingleInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    if (shutdownPromise) {
+      return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) {
         mainWindow.restore();
@@ -192,6 +253,7 @@ function createWindow(): void {
   rendererTrustPolicy = trustPolicy;
 
   hardenRendererWindow(window, trustPolicy);
+  designCanvasHost?.attachWindow(window as never);
   window.once('closed', () => {
     if (mainWindow === window) {
       mainWindow = undefined;
@@ -328,7 +390,7 @@ function configureMacDockIcon(): void {
     resourcesPath: process.resourcesPath
   });
   if (fs.existsSync(iconPath)) {
-    app.dock.setIcon(iconPath);
+    app.dock?.setIcon(iconPath);
   }
 }
 
@@ -406,9 +468,111 @@ function installIpcHandlers(): void {
     return service.deleteBoard(boardId);
   });
 
-  handleTrustedIpc('task:list', async () => {
-    return service.listTasks();
+  handleTrustedIpc('task:getBoardSnapshot', async () => {
+    return service.getBoardSnapshot();
   });
+  handleTrustedIpc('task:getDetail', async (_, taskId: string) => {
+    return service.getTaskDetail(taskId);
+  });
+  handleTrustedIpc('design:list', () => service.listDesigns());
+  handleTrustedIpc('design:get', async (_, designId: string) =>
+    service.getDesign(designId)
+  );
+  handleTrustedIpc(
+    'design:conversation:list',
+    async (_, input: ListDesignConversationRequest) =>
+      service.listDesignConversation(input)
+  );
+  handleTrustedIpc('design:draft:get', async (_, designId: string) =>
+    service.getDesignDraft(designId)
+  );
+  handleTrustedIpc(
+    'design:draft:attachment:read',
+    async (_, input: ReadDesignDraftAttachmentRequest) =>
+      service.readDesignDraftAttachment(input)
+  );
+  handleTrustedIpc(
+    'design:draft:save',
+    async (_, input: SaveDesignDraftRequest) => service.saveDesignDraft(input)
+  );
+  handleTrustedIpc(
+    'design:draft:delete',
+    async (_, input: DeleteDesignDraftRequest) => service.deleteDesignDraft(input)
+  );
+  handleTrustedIpc(
+    'design:create',
+    async (_, input: CreateBlankDesignRequest) => service.createBlankDesign(input)
+  );
+  handleTrustedIpc(
+    'design:turn:submit',
+    async (_, input: SubmitDesignTurnRequest) => service.submitDesignTurn(input)
+  );
+  handleTrustedIpc(
+    'design:reference:add',
+    async (_, input: AddDesignReferencesRequest) => service.addDesignReferences(input)
+  );
+  handleTrustedIpc(
+    'design:reference:remove',
+    async (_, input: RemoveDesignReferenceRequest) =>
+      service.removeDesignReference(input)
+  );
+  handleTrustedIpc(
+    'design:reference:import-asset',
+    async (_, input: ImportDesignReferenceAssetRequest) =>
+      service.importDesignReferenceAsset(input)
+  );
+  handleTrustedIpc(
+    'design:turn:cancel',
+    async (_, input: CancelDesignTurnRequest) => service.cancelDesignTurn(input)
+  );
+  handleTrustedIpc(
+    'design:preview:restart',
+    async (_, input: RestartDesignPreviewRequest) =>
+      service.restartDesignPreview(input)
+  );
+  handleTrustedIpc(
+    'design:revision:restore',
+    async (_, input: RestoreDesignRevisionRequest) =>
+      service.restoreDesignRevision(input)
+  );
+  handleTrustedIpc(
+    'design:duplicate',
+    async (_, input: DuplicateDesignRequest) => service.duplicateDesign(input)
+  );
+  handleTrustedIpc(
+    'design:rename',
+    async (_, input: RenameDesignRequest) => service.renameDesign(input)
+  );
+  handleTrustedIpc(
+    'design:archive',
+    async (_, input: ArchiveDesignRequest) => service.archiveDesign(input)
+  );
+  handleTrustedIpc(
+    'design:canvas:show',
+    async (_, input: ShowDesignCanvasRequest) => {
+      if (input.designId !== input.taskId) {
+        throw new Error('The Design canvas task identity does not match the Design.');
+      }
+      return requireDesignCanvasHost().show(input);
+    }
+  );
+  handleTrustedIpc(
+    'design:canvas:hide',
+    async (_, input: HideDesignCanvasRequest) => {
+      if (shutdownPromise) return;
+      requireDesignCanvasHost().hide(input);
+    }
+  );
+  handleTrustedIpc(
+    'design:canvas:refresh',
+    async (_, input: RefreshDesignCanvasRequest) =>
+      requireDesignCanvasHost().refresh(input)
+  );
+  handleTrustedIpc(
+    'design:canvas:approve-external',
+    async (_, input: ApproveDesignCanvasExternalRequest) =>
+      requireDesignCanvasHost().approveExternal(input)
+  );
 
   handleTrustedIpc(
     'discourse:conversations:list',
@@ -785,7 +949,74 @@ function handleTrustedIpc<TArgs extends unknown[], TResult>(
 }
 
 function broadcast(event: AppUpdateEvent): void {
-  mainWindow?.webContents.send(IPC_UPDATE_CHANNEL, event);
+  mainWindow?.webContents.send(
+    IPC_UPDATE_CHANNEL,
+    projectAppUpdateEventForClient(event)
+  );
+}
+
+function requireDesignCanvasHost(): DesignCanvasHost {
+  if (shutdownPromise) {
+    throw new Error('The Design canvas is shutting down.');
+  }
+  if (!designCanvasHost) {
+    throw new Error('The Design canvas is available in the macOS desktop app.');
+  }
+  return designCanvasHost;
+}
+
+function createDesignCanvasRuntime(): DesignCanvasRuntime {
+  return {
+    sessionForPartition: (partition) => session.fromPartition(partition) as never,
+    createView: ({ webPreferences }) => {
+      const { session: targetSession, ...preferences } = webPreferences;
+      return new WebContentsView({
+        webPreferences: {
+          ...preferences,
+          session: targetSession as never
+        }
+      }) as never;
+    },
+    openExternal: async (url) => {
+      await shell.openExternal(url);
+    },
+    wait: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    now: () => Date.now()
+  };
+}
+
+function broadcastDesignCanvasEvent(event: DesignCanvasHostEvent): void {
+  broadcast({
+    type: 'design.updated',
+    scope: { kind: 'DESIGN', designId: event.designId },
+    taskId: event.designId,
+    previewGenerationId:
+      event.type === 'load-failed' ? event.generationId : undefined,
+    payload: { reason: event.type, canvasEvent: event },
+    at: new Date().toISOString()
+  });
+}
+
+function previewGenerationUnavailable(event: AppUpdateEvent): string | undefined {
+  if (
+    event.type !== 'preview.updated' ||
+    !event.previewGenerationId ||
+    !event.payload ||
+    typeof event.payload !== 'object'
+  ) {
+    return;
+  }
+  const state = (event.payload as { state?: unknown }).state;
+  return [
+    'STOPPING',
+    'STOPPED',
+    'FAILED',
+    'RECOVERY_REQUIRED',
+    'CLEANUP_INCOMPLETE'
+  ].includes(String(state))
+    ? event.previewGenerationId
+    : undefined;
 }
 
 async function readBoundedFile(handle: fs.promises.FileHandle, maximumBytes: number): Promise<Buffer> {
@@ -845,6 +1076,29 @@ void app.whenReady().then(async () => {
   const defaultRepositoryPath = resolveDefaultRepositoryPath();
   const userDataDir = app.getPath('userData');
   const taskStoreDir = path.join(userDataDir, 'task-store');
+  configureOwnedProcessLauncher({
+    launcherPath: resolveOwnedProcessLauncherPath({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath()
+    }),
+    launcherExecutable: process.execPath,
+    launcherEnvironment: { ELECTRON_RUN_AS_NODE: '1' }
+  });
+  if (process.platform === 'darwin') {
+    designCanvasHost = new DesignCanvasHost({
+      runtime: createDesignCanvasRuntime(),
+      resolveRoute: (identity) => service.resolveDesignCanvasRoute(identity),
+      emit: broadcastDesignCanvasEvent
+    });
+  }
+  const designBrowserPaths = designCanvasHost
+    ? resolveDesignBrowserRuntimePaths({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      })
+    : undefined;
   service = new TaskManagerService(
     new FileTaskStore(taskStoreDir),
     defaultRepositoryPath,
@@ -864,6 +1118,16 @@ void app.whenReady().then(async () => {
       }),
       previewLauncherExecPath: process.execPath,
       previewLauncherEnv: { ELECTRON_RUN_AS_NODE: '1' },
+      managedDesignStaticServerPath: resolveManagedDesignStaticServerPath({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      }),
+      designSkillRoot: resolveDesignSkillPackRoot({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      }),
       previewSecretProtector: {
         isAvailable: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
         encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
@@ -874,7 +1138,24 @@ void app.whenReady().then(async () => {
         path.join(userDataDir, 'agent-runtime-store')
       ),
       discourseStore: new FileDiscourseStore(path.join(userDataDir, 'discourse-store')),
-      discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces')
+      discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces'),
+      ...(designCanvasHost
+        ? {
+            designRepositoryRoot: path.join(userDataDir, 'design-repositories'),
+            designWorktreeRoot: path.join(userDataDir, 'design-worktrees'),
+            designDraftRoot: path.join(userDataDir, 'design-drafts'),
+            designBrowserExecutablePath: designBrowserPaths!.executablePath,
+            designBrowserChromeExecutablePath:
+              designBrowserPaths!.browserExecutablePath,
+            designBrowserScratchRoot: path.join(
+              userDataDir,
+              'design-browser-runtime'
+            ),
+            designBrowserSocketRoot: resolveDesignBrowserSocketRoot(userDataDir),
+            designBrowserRequireCodeSignature: app.isPackaged,
+            designCanvasFence: designCanvasHost
+          }
+        : {})
     }
   );
   serviceCreated = true;
@@ -883,6 +1164,15 @@ void app.whenReady().then(async () => {
     return;
   }
   service.events.on((event) => {
+    const unavailableGenerationId = previewGenerationUnavailable(event);
+    if (unavailableGenerationId) {
+      designCanvasHost?.handleGenerationUnavailable(unavailableGenerationId);
+    }
+    if (event.type === 'task.deleted' && event.scope.kind === 'DESIGN') {
+      void designCanvasHost?.close(event.scope.designId).catch((error: unknown) => {
+        console.error('Task Monki could not close the deleted Design canvas.', error);
+      });
+    }
     broadcast(event);
   });
   installIpcHandlers();
@@ -908,6 +1198,10 @@ app.on('before-quit', (event) => {
     .catch((error: unknown) => {
       console.error('Failed to shut down the Codex App Server cleanly.', error);
     })
+    .then(() => designCanvasHost?.shutdown())
+    .catch((error: unknown) => {
+      console.error('Failed to shut down the Design canvas cleanly.', error);
+    })
     .then(() => {
       quitAfterShutdown = true;
       app.quit();
@@ -919,7 +1213,8 @@ app.on('activate', () => {
     ownsSingleInstanceLock &&
     shouldCreateWindowOnActivate({
       ipcHandlersInstalled,
-      openWindowCount: BrowserWindow.getAllWindows().length
+      openWindowCount: BrowserWindow.getAllWindows().length,
+      shuttingDown: shutdownPromise !== undefined
     })
   ) {
     createWindow();

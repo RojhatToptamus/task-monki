@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { ActionButtonTitle } from './ActionButtonTitle';
 import type { Tone } from '../model/viewTypes';
+import { StatusGlyph, statusKindForTone } from './StatusBadge';
 
 /**
- * Shared header for long-running agent operations: one load-bearing status dot,
+ * Shared header for long-running agent operations: one semantic status mark,
  * the operation name, optional scope, elapsed time, and an optional stop action.
  */
 export function RunHeader({
@@ -27,17 +28,16 @@ export function RunHeader({
   stopDisabled?: boolean;
   stopTitle?: string;
   trailingLabel?: string;
-  /** Pulse the status dot. Defaults to `running`; pass false to hold it still. */
+  /** Animate the working mark. Defaults to `running`; pass false to hold it still. */
   pulse?: boolean;
 }) {
   const elapsed = useElapsed(startedAt, running);
-  const dotPulses = pulse ?? running;
+  const animate = pulse ?? running;
   return (
     <div className="tm-runheader">
-      <span
-        className={`tm-runheader__dot ${dotPulses ? 'tm-pulse' : ''}`}
-        style={{ background: `var(--${tone})` }}
-        aria-hidden="true"
+      <StatusGlyph
+        kind={statusKindForTone(tone, running)}
+        animate={animate}
       />
       <h3 className="tm-runheader__name">{operationName}</h3>
       {scope ? <span className="tm-runheader__scope">{scope}</span> : null}

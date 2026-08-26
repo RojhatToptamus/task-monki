@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentCommandApprovalRequest,
   AgentFileChangeApprovalRequest,
@@ -12,6 +12,8 @@ import type {
 } from '../../shared/contracts';
 import { availableProviderCommandOptions } from '../model/agentPermissions';
 import { StructuredData } from './display';
+import { StatusGlyph } from './StatusBadge';
+import { DisclosureChevron } from './DisclosureChevron';
 
 interface InteractionPanelProps {
   interactions: InteractionRequestRecord[];
@@ -57,13 +59,13 @@ export function InteractionPanel({
       <header className="interaction-card__header">
         {commandApproval ? (
           <h3>
-            <span className="interaction-card__dot" aria-hidden="true" />
+            <StatusGlyph kind="waiting" />
             {interactionTitle(active)}
           </h3>
         ) : (
           <div>
             <span className="interaction-card__eyebrow">
-              <span className="interaction-card__dot" aria-hidden="true" />
+              <StatusGlyph kind="waiting" />
               Action required
             </span>
             <h3>{interactionTitle(active)}</h3>
@@ -78,6 +80,7 @@ export function InteractionPanel({
         )}
       </header>
       <InteractionBody
+        key={active.id}
         interaction={active}
         sourceSession={sourceSession}
         onRespond={onRespond}
@@ -97,14 +100,14 @@ function InteractionBody({
 }) {
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [formValues, setFormValues] = useState<Record<string, FormValue>>({});
 
-  useEffect(() => {
-    setError(undefined);
-    setFormValues({});
-  }, [interaction.id]);
-
   const respond = async (decision: AgentInteractionDecision) => {
+    if (submittingRef.current || interaction.status !== 'PENDING') {
+      return;
+    }
+    submittingRef.current = true;
     setSubmitting(true);
     setError(undefined);
     try {
@@ -112,6 +115,7 @@ function InteractionBody({
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not submit the decision.');
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -124,7 +128,6 @@ function InteractionBody({
         ? null
         : interaction.policyWarnings.map((warning) => (
             <p className="interaction-card__warning" key={warning}>
-              <span aria-hidden="true" />
               {warning}
             </p>
           ))}
@@ -172,7 +175,10 @@ function InteractionBody({
         />
       )}
       {interaction.status === 'RESPONDING' ? (
-        <p className="muted">Decision sent. Waiting for App Server confirmation…</p>
+        <p className="muted">
+          {interaction.type === 'USER_INPUT' ? 'Answer' : 'Decision'} sent. Waiting for provider
+          confirmation…
+        </p>
       ) : null}
       {error ? <p className="form-error">{error}</p> : null}
     </>
@@ -248,7 +254,6 @@ function CommandRequest({
       ) : null}
       {interaction.policyWarnings.map((warning) => (
         <p className="interaction-card__warning" key={warning}>
-          <span aria-hidden="true" />
           {warning}
         </p>
       ))}
@@ -422,7 +427,10 @@ function FileChangeRequest({
               {request.changes.map((change) => (
                 <details key={`${change.kind}:${change.path}`}>
                   <summary>
-                    {change.kind}: {change.path}
+                    <span className="tm-disclosure__label">
+                      <DisclosureChevron />
+                      {change.kind}: {change.path}
+                    </span>
                   </summary>
                   <pre>{change.diff}</pre>
                 </details>
@@ -611,67 +619,182 @@ function UserInputRequest({
   onRespond
 }: InteractionSectionProps & FormStateProps) {
   const request = interaction.request as AgentUserInputRequest;
+  const answers = Object.fromEntries(
+    request.questions.map((question) => [
+      question.id,
+      userInputAnswers(question, formValues[question.id])
+    ])
+  );
+  const canSubmit = Object.values(answers).every(
+    (values) => values.length > 0 && values.every((value) => value.trim())
+  );
   return (
     <>
       <div className="interaction-form">
         {request.questions.map((question) => (
-          <label className="field" key={question.id}>
-            <span>{question.header}</span>
-            {question.options ? (
-              <select
-                disabled={disabled}
-                value={String(formValues[question.id] ?? '')}
-                onChange={(event) =>
-                  setFormValues((current) => ({
-                    ...current,
-                    [question.id]: event.target.value
-                  }))
-                }
-              >
-                <option value="">Select…</option>
-                {question.options.map((option) => (
-                  <option key={option.label} value={option.label}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                disabled={disabled}
-                value={String(formValues[question.id] ?? '')}
-                onChange={(event) =>
-                  setFormValues((current) => ({
-                    ...current,
-                    [question.id]: event.target.value
-                  }))
-                }
-              />
-            )}
-            <small>{question.question}</small>
-          </label>
+          <UserInputQuestion
+            key={question.id}
+            question={question}
+            value={formValues[question.id]}
+            disabled={disabled}
+            onChange={(value) =>
+              setFormValues((current) => ({
+                ...current,
+                [question.id]: value
+              }))
+            }
+          />
         ))}
       </div>
       {hasAction(interaction, 'ANSWER') ? (
         <div className="interaction-actions">
           <ActionButton
             label="Submit answers"
-            disabled={disabled}
+            disabled={disabled || !canSubmit}
             onClick={() =>
               onRespond({
                 interactionType: 'USER_INPUT',
                 action: 'ANSWER',
-                answers: Object.fromEntries(
-                  request.questions.map((question) => [
-                    question.id,
-                    [String(formValues[question.id] ?? '')]
-                  ])
-                )
+                answers
               })
             }
           />
         </div>
       ) : null}
     </>
+  );
+}
+
+function UserInputQuestion({
+  question,
+  value,
+  disabled,
+  onChange
+}: {
+  question: AgentUserInputRequest['questions'][number];
+  value: FormValue | undefined;
+  disabled: boolean;
+  onChange(value: FormValue): void;
+}) {
+  if (!question.options?.length) {
+    return (
+      <label className="field">
+        <span>{question.header}</span>
+        <small>{question.question}</small>
+        <input
+          disabled={disabled}
+          value={typeof value === 'string' ? value : ''}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </label>
+    );
+  }
+
+  const choice = userInputChoiceValue(value);
+  const inputType = question.allowsMultiple ? 'checkbox' : 'radio';
+  const chooseOption = (label: string, checked: boolean) => {
+    const selected = question.allowsMultiple
+      ? checked
+        ? [...choice.selected, label]
+        : choice.selected.filter((candidate) => candidate !== label)
+      : checked
+        ? [label]
+        : [];
+    onChange({
+      ...choice,
+      selected,
+      customSelected: question.allowsMultiple ? choice.customSelected : false
+    });
+  };
+  const chooseCustom = (checked: boolean) => {
+    onChange({
+      ...choice,
+      selected: question.allowsMultiple ? choice.selected : [],
+      customSelected: checked
+    });
+  };
+
+  return (
+    <fieldset className="interaction-question">
+      <legend>{question.header}</legend>
+      <p className="interaction-question__prompt">{question.question}</p>
+      <div className="interaction-choice-list">
+        {question.options.map((option, index) => (
+          <label className="interaction-choice" key={`${index}:${option.label}`}>
+            <input
+              type={inputType}
+              name={question.id}
+              disabled={disabled}
+              checked={choice.selected.includes(option.label)}
+              onChange={(event) => chooseOption(option.label, event.target.checked)}
+            />
+            <span>
+              <strong>{option.label}</strong>
+              {option.description ? <small>{option.description}</small> : null}
+            </span>
+          </label>
+        ))}
+        {question.isOther ? (
+          <div className="interaction-choice interaction-choice--other">
+            <label>
+              <input
+                type={inputType}
+                name={question.id}
+                disabled={disabled}
+                checked={choice.customSelected}
+                onChange={(event) => chooseCustom(event.target.checked)}
+              />
+              <strong>Other</strong>
+            </label>
+            <input
+              aria-label={`${question.header} other answer`}
+              disabled={disabled}
+              value={choice.custom}
+              onFocus={() => chooseCustom(true)}
+              onChange={(event) =>
+                onChange({
+                  ...choice,
+                  selected: question.allowsMultiple ? choice.selected : [],
+                  customSelected: true,
+                  custom: event.target.value
+                })
+              }
+            />
+          </div>
+        ) : null}
+      </div>
+    </fieldset>
+  );
+}
+
+function userInputAnswers(
+  question: AgentUserInputRequest['questions'][number],
+  value: FormValue | undefined
+): string[] {
+  if (!question.options?.length) {
+    return [typeof value === 'string' ? value : ''];
+  }
+  const choice = userInputChoiceValue(value);
+  return [
+    ...choice.selected,
+    ...(choice.customSelected ? [choice.custom] : [])
+  ];
+}
+
+function userInputChoiceValue(value: FormValue | undefined): UserInputChoiceValue {
+  return isUserInputChoiceValue(value)
+    ? value
+    : { selected: [], customSelected: false, custom: '' };
+}
+
+function isUserInputChoiceValue(value: FormValue | undefined): value is UserInputChoiceValue {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Array.isArray(value.selected) &&
+    typeof value.customSelected === 'boolean' &&
+    typeof value.custom === 'string'
   );
 }
 
@@ -786,6 +909,12 @@ interface FormStateProps {
   >;
 }
 
+interface UserInputChoiceValue {
+  selected: string[];
+  customSelected: boolean;
+  custom: string;
+}
+
 function RejectButtons({
   interaction,
   interactionType,
@@ -895,7 +1024,7 @@ function InteractionTechnicalDetails({
       : undefined;
   return (
     <details className="interaction-technical">
-      <summary>Request details</summary>
+      <summary><DisclosureChevron />Request details</summary>
       <dl className="interaction-details interaction-details--technical">
         <dt>Source</dt>
         <dd>{formatSessionSource(sourceSession, interaction.sessionId)}</dd>
@@ -966,7 +1095,7 @@ function enumValues(schema: { [key: string]: AgentJsonValue }): string[] | undef
   return undefined;
 }
 
-type FormValue = string | boolean | string[];
+type FormValue = string | boolean | string[] | UserInputChoiceValue;
 
 function hasAction(
   interaction: InteractionRequestRecord,

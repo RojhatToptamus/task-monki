@@ -22,10 +22,26 @@ import type {
   ArtifactRecord,
   Board,
   BoardColor,
+  BoardSnapshot,
+  BoardTaskSummary,
   BranchPublicationRecord,
   CiRollupRecord,
   CreateBoardRequest,
+  CreateBlankDesignRequest,
   CreateTaskRequest,
+  DuplicateDesignRequest,
+  DesignConversationEntry,
+  DesignDetailSnapshot,
+  DesignConversationPage,
+  DesignListItem,
+  DesignReference,
+  DesignRevision,
+  DesignSourceAction,
+  DesignTurn,
+  DesignTurnCheckpoint,
+  DesignTurnOutcome,
+  RestoreDesignRevisionRequest,
+  ListDesignConversationRequest,
   DomainEvent,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
@@ -50,6 +66,7 @@ import type {
   RunRecord,
   Task,
   TaskAttachmentRecord,
+  TaskDetailSnapshot,
   AttachmentContent,
   AttachmentDraftSnapshot,
   StageAttachmentBytesInput,
@@ -60,6 +77,7 @@ import type {
   WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
+import { DESIGN_LIMITS } from '../../shared/design';
 import {
   BOARD_COLORS,
   TASK_STORE_SCHEMA_VERSION,
@@ -92,10 +110,13 @@ import {
   AttachmentStoreError,
   validateTaskAttachmentRecords,
   type PreparedAttachmentDraft,
+  type PreparedAttachmentAppend,
+  type StoredAttachmentContent,
   type VerifiedTaskAttachment
 } from './AttachmentFileStore';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
 import {
+  migratePersistedStateToCurrent,
   normalizeLoadedState,
   normalizePersistedStateBeforeValidation
 } from './currentStoreNormalization';
@@ -137,6 +158,80 @@ export interface CreateRunInput {
   continuedFromRunId?: string;
   requestedSettings?: AgentExecutionSettings;
   beforeGitSnapshotId?: string;
+}
+
+export interface ManagedDesignRepositoryInput {
+  id: string;
+  name: string;
+  path: string;
+  headSha: string;
+  branch: string;
+  checkedAt: string;
+}
+
+export interface CreateDesignBundleInput {
+  request: CreateBlankDesignRequest;
+  repository: ManagedDesignRepositoryInput;
+}
+
+export interface CreateDesignBundleResult {
+  task: Task;
+  repository: Repository;
+  turn: DesignTurn;
+  references: DesignReference[];
+}
+
+export interface CreateInlineDesignTurnInput {
+  designId: string;
+  clientMessageId: string;
+  message: string;
+  referenceIds: string[];
+  attachmentDraftId?: string;
+}
+
+export interface UpdateDesignTurnCheckpointInput {
+  designId: string;
+  turnId: string;
+  checkpoint: DesignTurnCheckpoint;
+}
+
+export interface UpdateDesignOpenedCandidateInput {
+  designId: string;
+  turnId: string;
+  candidate: NonNullable<DesignTurn['finalOpenedCandidate']>;
+}
+
+export interface SettleDesignTurnInput {
+  designId: string;
+  turnId: string;
+  outcome: Exclude<DesignTurnOutcome, 'READY'>;
+  failureReason?: string;
+}
+
+export interface DesignPreviewSettlementInput {
+  designId: string;
+  commitSha: string;
+  routeId: string;
+  settlement:
+    | { kind: 'AGENT_TURN'; turnId: string; runId: string }
+    | { kind: 'RESTORE'; actionId: string }
+    | { kind: 'DUPLICATE'; actionId: string };
+}
+
+export interface BeginRestoreDesignActionResult {
+  action?: Extract<DesignSourceAction, { kind: 'RESTORE' }>;
+  revision?: Extract<DesignRevision, { changeSource: 'RESTORE' }>;
+  sourceRevision: DesignRevision;
+}
+
+export interface BeginDuplicateDesignActionResult {
+  action?: Extract<DesignSourceAction, { kind: 'DUPLICATE' }>;
+  task: Task;
+  sourceRevision: DesignRevision;
+}
+
+export interface DeleteTaskStorageResult {
+  removedManagedRepository?: Repository;
 }
 
 export type CreateInteractionRequestInput = Omit<
@@ -345,6 +440,7 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'agent-output': 32 * 1024 * 1024,
   'agent-diagnostics': 16 * 1024 * 1024,
   'agent-final': 8 * 1024 * 1024,
+  'design-message': 1024 * 1024,
   diff: 32 * 1024 * 1024,
   'git-snapshot': 8 * 1024 * 1024,
   'pr-body': 256 * 1024,
@@ -389,7 +485,11 @@ function validateBoardInput(
   }
   const name = input.name.trim();
   if (!name) throw new Error('Board name is required.');
-  const knownRepositoryIds = new Set(repositories.map((repository) => repository.id));
+  const knownRepositoryIds = new Set(
+    repositories
+      .filter((repository) => repository.kind === 'USER_REGISTERED')
+      .map((repository) => repository.id)
+  );
   const repositoryIds = uniqueIds(input.repositoryIds);
   if (repositoryIds.some((repositoryId) => !knownRepositoryIds.has(repositoryId))) {
     throw new Error('Board references an unknown repository.');
@@ -416,6 +516,85 @@ function normalizeCreateTaskCompletionPolicy(
 interface TaskCreationMetadata {
   token: string;
   fingerprint: string;
+}
+
+function designCreationMetadata(
+  input: CreateBlankDesignRequest
+): TaskCreationMetadata {
+  if (!isTaskCreationToken(input.creationToken)) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Design creation retry token is invalid.',
+      400
+    );
+  }
+  const brief = input.brief.trim();
+  const model = normalizedOptionalString(input.model);
+  const reasoningEffort = normalizedOptionalString(input.reasoningEffort);
+  if (
+    !brief ||
+    Buffer.byteLength(brief, 'utf8') > 1024 * 1024 ||
+    (input.model !== undefined && !model) ||
+    (input.reasoningEffort !== undefined && !reasoningEffort)
+  ) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Design creation request is invalid.',
+      400
+    );
+  }
+  const canonicalRequest = stableJsonStringify({
+    kind: 'DESIGN_BLANK',
+    brief,
+    runtimeId: CODEX_RUNTIME_ID,
+    model: model ?? null,
+    reasoningEffort: reasoningEffort ?? null,
+    attachmentDraftId: input.attachmentDraftId ?? null
+  });
+  if (!canonicalRequest) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Design creation request cannot be used for a safe retry.',
+      400
+    );
+  }
+  return {
+    token: input.creationToken,
+    fingerprint: createHash('sha256').update(canonicalRequest).digest('hex')
+  };
+}
+
+function deriveDesignTitle(brief: string): string {
+  const compact = brief.replace(/\s+/gu, ' ').trim();
+  if (compact.length <= 60) return compact;
+  return `${compact.slice(0, 57).trimEnd()}…`;
+}
+
+function validateInlineDesignTurnInput(input: CreateInlineDesignTurnInput): void {
+  if (!isTaskCreationToken(input.clientMessageId)) {
+    throw new Error('Design message id is invalid.');
+  }
+  if (!input.message.trim()) throw new Error('Design message is required.');
+  if (Buffer.byteLength(input.message, 'utf8') > ARTIFACT_BYTE_LIMITS['design-message']) {
+    throw new Error('Design message exceeds its durable byte limit.');
+  }
+  if (
+    !Array.isArray(input.referenceIds) ||
+    new Set(input.referenceIds).size !== input.referenceIds.length
+  ) {
+    throw new Error('Design reference selection is invalid.');
+  }
+  if (
+    input.attachmentDraftId !== undefined &&
+    !isTaskCreationToken(input.attachmentDraftId)
+  ) {
+    throw new Error('Design attachment draft id is invalid.');
+  }
+}
+
+function normalizedOptionalString(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized || undefined;
 }
 
 function taskCreationMetadata(
@@ -587,10 +766,12 @@ export class FileTaskStore {
   private readonly attachmentFiles: AttachmentFileStore;
   private state: StoreState = createEmptyState();
   private publishedState: StoreState = this.state;
+  private publishedSnapshotJson = JSON.stringify(this.state);
   private loaded = false;
   private lifecycle: StoreLifecycle = 'NEW';
   private initialization?: Promise<void>;
   private closePromise?: Promise<void>;
+  private retainedAttachmentDraftIds = new Set<string>();
   private lease?: StoreOwnershipLease;
   private mutationQueue: Promise<unknown> = Promise.resolve();
   private readonly mutationContext = new AsyncLocalStorage<boolean>();
@@ -624,6 +805,16 @@ export class FileTaskStore {
 
   getStoreIdentity(): string {
     return createHash('sha256').update(path.resolve(this.baseDir)).digest('hex');
+  }
+
+  /** Registers durable composer drafts before the first store initialization. */
+  retainAttachmentDrafts(draftIds: readonly string[]): void {
+    if (this.loaded || this.initialization || this.lifecycle !== 'NEW') {
+      throw new Error(
+        'Attachment draft retention must be configured before task-store initialization.'
+      );
+    }
+    this.retainedAttachmentDraftIds = new Set(draftIds);
   }
 
   async init(): Promise<void> {
@@ -686,18 +877,26 @@ export class FileTaskStore {
       }
       if (raw === undefined) {
         this.state = createEmptyState();
-        await this.attachmentFiles.reconcile(this.state.attachments);
+        await this.attachmentFiles.reconcile(
+          this.state.attachments,
+          this.retainedAttachmentDraftIds
+        );
         await this.reconcileArtifacts();
         await this.persist();
       } else {
         const persisted = JSON.parse(raw) as PersistedState;
-        const repaired = normalizePersistedStateBeforeValidation(persisted);
+        const migrated = migratePersistedStateToCurrent(persisted);
+        const repaired = normalizePersistedStateBeforeValidation(migrated.state);
         const normalized = normalizeLoadedState(requireCurrentState(repaired.state));
         this.state = normalized.state;
-        await this.attachmentFiles.reconcile(this.state.attachments);
+        await this.attachmentFiles.reconcile(
+          this.state.attachments,
+          this.retainedAttachmentDraftIds
+        );
         await this.reconcileArtifacts();
         const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
         if (
+          migrated.changed ||
           repaired.changed ||
           normalized.changed ||
           prunedServerIds.length > 0
@@ -708,7 +907,10 @@ export class FileTaskStore {
       await this.protocolJournal.reconcileServers(
         this.state.agentServers.map((server) => server.id)
       );
-      this.publishedState = this.state;
+      if (this.publishedState !== this.state) {
+        this.publishedState = this.state;
+        this.publishedSnapshotJson = JSON.stringify(this.state);
+      }
       this.loaded = true;
     } catch (error) {
       await this.releaseLease().catch(() => undefined);
@@ -852,7 +1054,266 @@ export class FileTaskStore {
 
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
-    return clone(this.state);
+    return JSON.parse(this.publishedSnapshotJson) as TaskSnapshot;
+  }
+
+  async getBoardSnapshot(): Promise<BoardSnapshot> {
+    await this.init();
+    const state = this.publishedState;
+    return clone({
+      schemaVersion: state.schemaVersion,
+      repositories: state.repositories.filter(
+        (repository) => repository.kind === 'USER_REGISTERED'
+      ),
+      boards: state.boards,
+      tasks: state.tasks
+        .filter((task) => task.kind === 'NORMAL')
+        .map(projectBoardTask),
+      interactionRequests: state.interactionRequests.filter(
+        (interaction) =>
+          (interaction.status === 'PENDING' || interaction.status === 'RESPONDING') &&
+          state.tasks.some(
+            (task) => task.id === interaction.taskId && task.kind === 'NORMAL'
+          )
+      )
+    });
+  }
+
+  async listDesigns(): Promise<DesignListItem[]> {
+    await this.init();
+    const state = this.publishedState;
+    return clone(
+      state.tasks
+        .filter((task) => task.kind === 'DESIGN')
+        .map((task) => projectDesignListItem(state, task))
+        .sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            left.title.localeCompare(right.title)
+        )
+    );
+  }
+
+  async getDesignDetail(designId: string): Promise<DesignDetailSnapshot> {
+    await this.init();
+    const state = this.publishedState;
+    const task = state.tasks.find(
+      (candidate) => candidate.id === designId && candidate.kind === 'DESIGN'
+    );
+    if (!task) throw new Error('Design not found.');
+    const repository = state.repositories.find(
+      (candidate) => candidate.id === task.repositoryId
+    );
+    if (!repository) throw new Error('Design repository not found.');
+    const revisions = state.designRevisions
+      .filter((revision) => revision.designId === designId)
+      .sort((left, right) => left.ordinal - right.ordinal);
+    const conversationPage = await projectDesignConversationPage(state, task, {});
+    const visibleTurnIds = new Set(
+      conversationPage.entries.map((entry) => entry.turn.id)
+    );
+    const unsettledEntries = await Promise.all(
+      state.designTurns
+        .filter(
+          (turn) =>
+            turn.designId === designId &&
+            turn.outcome === undefined &&
+            !visibleTurnIds.has(turn.id)
+        )
+        .map((turn) => projectDesignConversationEntry(state, task, turn))
+    );
+    const conversation = [...unsettledEntries, ...conversationPage.entries].sort(
+      (left, right) => left.turn.order - right.turn.order
+    );
+    const turns = conversation.map((entry) => entry.turn);
+    const interactions = state.interactionRequests
+      .filter(
+        (interaction) =>
+          interaction.taskId === designId &&
+          (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
+      )
+      .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+      .slice(-20);
+    const sessionIds = new Set([
+      ...interactions.map((interaction) => interaction.sessionId),
+      ...(task.currentAgentSessionId ? [task.currentAgentSessionId] : [])
+    ]);
+    const sessions = state.agentSessions
+      .filter((session) => sessionIds.has(session.id))
+      .slice(-20);
+    const runIds = new Set(turns.flatMap((turn) => (turn.runId ? [turn.runId] : [])));
+    const items = state.agentItems
+      .filter((item) => item.taskId === designId && runIds.has(item.runId))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .slice(-DESIGN_LIMITS.recentTelemetryItems);
+    const currentPreview = selectCurrentDesignPreview(state, designId, revisions.at(-1));
+    const sourceTask = task.sourceDesignId
+      ? state.tasks.find((candidate) => candidate.id === task.sourceDesignId)
+      : undefined;
+    const sourceRevision = task.sourceDesignRevisionId
+      ? state.designRevisions.find(
+          (candidate) => candidate.id === task.sourceDesignRevisionId
+        )
+      : undefined;
+    return clone({
+      schemaVersion: state.schemaVersion,
+      design: projectDesignListItem(state, task),
+      task,
+      repository,
+      turns,
+      references: state.designReferences.filter(
+        (reference) => reference.designId === designId
+      ),
+      attachments: state.attachments
+        .filter((attachment) => attachment.taskId === designId)
+        .sort((left, right) => left.ordinal - right.ordinal),
+      projectFiles: [],
+      projectFilesTruncated: false,
+      revisions,
+      readyContext: await projectDesignReadyContext(state, task, revisions),
+      conversation,
+      previousConversationCursor: conversationPage.previousCursor,
+      interactions,
+      sessions,
+      items,
+      currentIteration: state.iterations.find(
+        (iteration) => iteration.id === task.currentIterationId
+      ),
+      currentWorktree: state.worktrees.find(
+        (worktree) => worktree.id === task.currentWorktreeId
+      ),
+      currentRun: state.runs.find((run) => run.id === task.currentRunId),
+      currentSession: state.agentSessions.find(
+        (session) => session.id === task.currentAgentSessionId
+      ),
+      origin:
+        task.sourceDesignId && task.sourceDesignRevisionId
+          ? {
+              designId: task.sourceDesignId,
+              revisionId: task.sourceDesignRevisionId,
+              designTitle: sourceTask?.title,
+              revisionOrdinal: sourceRevision?.ordinal
+            }
+          : undefined,
+      currentPreview,
+      canvas: projectDesignCanvas(state, task, revisions.at(-1), currentPreview),
+      actions: projectDesignActions(state, task, revisions.at(-1), currentPreview)
+    });
+  }
+
+  async listDesignConversation(
+    input: ListDesignConversationRequest
+  ): Promise<DesignConversationPage> {
+    await this.init();
+    const state = this.publishedState;
+    const task = state.tasks.find(
+      (candidate) => candidate.id === input.designId && candidate.kind === 'DESIGN'
+    );
+    if (!task) throw new Error('Design not found.');
+    return clone(await projectDesignConversationPage(state, task, input));
+  }
+
+  async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
+    await this.init();
+    const state = this.publishedState;
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) {
+      throw new Error('Task not found.');
+    }
+
+    const runs = state.runs.filter((record) => record.taskId === taskId);
+    const agentItems = state.agentItems.filter((record) => record.taskId === taskId);
+    const agentGoalSnapshots = state.agentGoalSnapshots.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentPlanRevisions = state.agentPlanRevisions.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentUsageSnapshots = state.agentUsageSnapshots.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentSettingsObservations = state.agentSettingsObservations.filter(
+      (record) => record.taskId === taskId
+    );
+    const agentSubagentObservations = state.agentSubagentObservations.filter(
+      (record) => record.taskId === taskId
+    );
+    const interactionRequests = state.interactionRequests.filter(
+      (record) => record.taskId === taskId
+    );
+    const events = state.events.filter((record) => record.taskId === taskId);
+    const serverIds = new Set<string>();
+    const addServerReference = (
+      reference: AgentProtocolMessageReference | undefined
+    ) => {
+      if (reference) serverIds.add(reference.serverInstanceId);
+    };
+    for (const run of runs) {
+      if (run.serverInstanceId) serverIds.add(run.serverInstanceId);
+      addServerReference(run.providerTerminalRawMessage);
+    }
+    for (const item of agentItems) addServerReference(item.rawMessage);
+    for (const goal of agentGoalSnapshots) addServerReference(goal.rawMessage);
+    for (const plan of agentPlanRevisions) addServerReference(plan.rawMessage);
+    for (const usage of agentUsageSnapshots) addServerReference(usage.rawMessage);
+    for (const settings of agentSettingsObservations) {
+      addServerReference(settings.rawMessage);
+    }
+    for (const observation of agentSubagentObservations) {
+      addServerReference(observation.rawMessage);
+    }
+    for (const interaction of interactionRequests) {
+      serverIds.add(interaction.serverInstanceId);
+      addServerReference(interaction.requestRawMessage);
+      addServerReference(interaction.responseRawMessage);
+    }
+    for (const event of events) {
+      if (event.serverInstanceId) serverIds.add(event.serverInstanceId);
+    }
+
+    const taskRecords = <T extends { taskId: string }>(records: readonly T[]): T[] =>
+      records.filter((record) => record.taskId === taskId);
+    return clone({
+      schemaVersion: state.schemaVersion,
+      task,
+      repository: state.repositories.find(
+        (repository) => repository.id === task.repositoryId
+      ),
+      iterations: taskRecords(state.iterations),
+      worktrees: taskRecords(state.worktrees),
+      gitSnapshots: taskRecords(state.gitSnapshots),
+      githubRepositories: taskRecords(state.githubRepositories),
+      branchPublications: taskRecords(state.branchPublications),
+      pullRequests: taskRecords(state.pullRequests),
+      ciRollups: taskRecords(state.ciRollups),
+      reviewRollups: taskRecords(state.reviewRollups),
+      mergeSnapshots: taskRecords(state.mergeSnapshots),
+      runs,
+      agentServers: state.agentServers.filter((server) => serverIds.has(server.id)),
+      agentSessions: taskRecords(state.agentSessions),
+      agentItems,
+      agentGoalSnapshots,
+      agentPlanRevisions,
+      agentUsageSnapshots,
+      agentSettingsObservations,
+      agentSubagentObservations,
+      interactionRequests,
+      previewPlans: taskRecords(state.previewPlans),
+      previewApprovals: taskRecords(state.previewApprovals),
+      previewComposeProjects: taskRecords(state.previewComposeProjects),
+      previewGenerations: taskRecords(state.previewGenerations),
+      previewManagedEnvironments: taskRecords(state.previewManagedEnvironments),
+      previewManagedResources: taskRecords(state.previewManagedResources),
+      previewGenerationAttachments: taskRecords(state.previewGenerationAttachments),
+      previewLocalBindings: taskRecords(state.previewLocalBindings),
+      previewNodeAttempts: taskRecords(state.previewNodeAttempts),
+      previewResources: taskRecords(state.previewResources),
+      events,
+      artifacts: taskRecords(state.artifacts),
+      attachments: taskRecords(state.attachments),
+      previewTaskRoutes: selectPreviewTaskRouteOptions(state, taskId),
+      textExcerpts: []
+    });
   }
 
   async getRepository(repositoryId: string): Promise<Repository | undefined> {
@@ -884,6 +1345,7 @@ export class FileTaskStore {
       const now = new Date().toISOString();
       const repository: Repository = {
         id: randomUUID(),
+        kind: 'USER_REGISTERED',
         name: path.basename(repositoryPath) || repositoryPath,
         path: repositoryPath,
         status: 'AVAILABLE',
@@ -1060,6 +1522,22 @@ export class FileTaskStore {
     );
   }
 
+  async getTurnAttachments(input: {
+    taskId: string;
+    mode: AgentRunMode;
+    generationKey?: string;
+  }): Promise<TaskAttachmentRecord[]> {
+    await this.init();
+    const task = this.state.tasks.find((candidate) => candidate.id === input.taskId);
+    if (!task) throw new Error('Task not found.');
+    if (input.mode !== 'DESIGN') return this.getTaskAttachments(input.taskId);
+    if (task.kind !== 'DESIGN' || !input.generationKey) {
+      throw new Error('DESIGN attachments require a DesignTurn generation key.');
+    }
+    const turn = this.requireDesignTurn(task.id, input.generationKey);
+    return clone(this.attachmentRecordsForDesignTurn(turn));
+  }
+
   verifyTaskAttachments(taskId: string): Promise<VerifiedTaskAttachment[]> {
     return this.withOwnedIo(async () => {
       const records = await this.getTaskAttachments(taskId);
@@ -1074,7 +1552,22 @@ export class FileTaskStore {
   ): Promise<VerifiedTaskAttachment[]> {
     return this.withOwnedIo(async () => {
       const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
-      const attachments = await this.verifyTaskAttachments(taskId);
+      const run = this.state.runs.find(
+        (candidate) => candidate.id === runId && candidate.taskId === taskId
+      );
+      if (!run) throw new Error('Run attachments do not belong to the selected task and run.');
+      const records =
+        run.mode === 'DESIGN'
+          ? this.attachmentRecordsForDesignTurn(
+              this.requireDesignTurn(taskId, run.generationKey ?? '')
+            )
+          : this.state.attachments.filter((attachment) => attachment.taskId === taskId);
+      const attachments =
+        records.length === 0
+          ? []
+          : run.mode === 'DESIGN'
+            ? await this.attachmentFiles.verifyTaskSelection(taskId, records)
+            : await this.attachmentFiles.verifyTask(taskId, records);
       assertAttachmentsOutsideWorktree(attachments, worktreePath);
       return attachments;
     });
@@ -1087,7 +1580,22 @@ export class FileTaskStore {
   ): Promise<VerifiedTaskAttachment[]> {
     return this.withOwnedIo(async () => {
       const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
-      const attachments = await this.verifyTaskAttachments(taskId);
+      const run = this.state.runs.find(
+        (candidate) => candidate.id === runId && candidate.taskId === taskId
+      );
+      if (!run) throw new Error('Run attachments do not belong to the selected task and run.');
+      const records =
+        run.mode === 'DESIGN'
+          ? this.attachmentRecordsForDesignTurn(
+              this.requireDesignTurn(taskId, run.generationKey ?? '')
+            )
+          : this.state.attachments.filter((attachment) => attachment.taskId === taskId);
+      const attachments =
+        records.length === 0
+          ? []
+          : run.mode === 'DESIGN'
+            ? await this.attachmentFiles.verifyTaskSelection(taskId, records)
+            : await this.attachmentFiles.verifyTask(taskId, records);
       assertAttachmentsOutsideWorktree(attachments, worktreePath);
       return attachments;
     });
@@ -1565,7 +2073,12 @@ export class FileTaskStore {
   async cutoverPreviewGenerations(input: {
     candidate: PreviewGenerationRecord;
     replaced?: PreviewGenerationRecord;
-  }): Promise<{ candidate: PreviewGenerationRecord; replaced?: PreviewGenerationRecord }> {
+    designSettlement?: DesignPreviewSettlementInput;
+  }): Promise<{
+    candidate: PreviewGenerationRecord;
+    replaced?: PreviewGenerationRecord;
+    revision?: DesignRevision;
+  }> {
     return this.serializeMutation(async () => {
       await this.init();
       this.assertPreviewGenerationReferences(input.candidate);
@@ -1591,13 +2104,158 @@ export class FileTaskStore {
       ) {
         throw new Error('Preview cutover requires one active candidate and an optional retired generation for the same task.');
       }
+      let candidate = input.candidate;
+      let revision: DesignRevision | undefined;
+      let settledTurn: DesignTurn | undefined;
+      let settledActionId: string | undefined;
+      if (input.designSettlement) {
+        const settlement = input.designSettlement;
+        const design = this.requireDesign(settlement.designId);
+        const selectedRoute = candidate.routes.find(
+          (route) => route.id === settlement.routeId && route.state === 'ATTACHED'
+        );
+        if (
+          candidate.taskId !== design.id ||
+          candidate.source.type !== 'EXACT_COMMIT' ||
+          candidate.source.repositoryId !== design.repositoryId ||
+          candidate.source.commitSha !== settlement.commitSha ||
+          candidate.source.designRevisionId !== undefined ||
+          !isGitObjectId(settlement.commitSha) ||
+          !selectedRoute
+        ) {
+          throw new Error('Design Preview settlement ownership is inconsistent.');
+        }
+        const now = new Date().toISOString();
+        const baseRevision = {
+          id: randomUUID(),
+          designId: design.id,
+          ordinal:
+            Math.max(
+              0,
+              ...this.state.designRevisions
+                .filter((existing) => existing.designId === design.id)
+                .map((existing) => existing.ordinal)
+            ) + 1,
+          commitSha: settlement.commitSha,
+          routeId: selectedRoute.id,
+          createdAt: now
+        };
+        const authority = settlement.settlement;
+        if (authority.kind === 'AGENT_TURN') {
+          const turn = this.requireDesignTurn(
+            design.id,
+            authority.turnId
+          );
+          const run = this.state.runs.find(
+            (candidateRun) =>
+              candidateRun.id === authority.runId &&
+              candidateRun.taskId === design.id &&
+              candidateRun.mode === 'DESIGN' &&
+              candidateRun.generationKey === turn.id
+          );
+          if (
+            !run ||
+            run.status !== 'COMPLETED' ||
+            turn.runId !== run.id ||
+            turn.outcome !== undefined ||
+            turn.checkpoint?.boundary !== 'PREVIEW_CANDIDATE_READY' ||
+            turn.checkpoint.previewGenerationId !== candidate.id ||
+            turn.checkpoint.commitSha !== settlement.commitSha ||
+            this.state.designRevisions.some(
+              (existing) =>
+                existing.designId === design.id &&
+                existing.changeSource === 'AGENT_TURN' &&
+                (existing.turnId === turn.id || existing.runId === run.id)
+            )
+          ) {
+            throw new Error('Design agent Preview settlement ownership is inconsistent.');
+          }
+          revision = {
+            ...baseRevision,
+            changeSource: 'AGENT_TURN',
+            turnId: turn.id,
+            runId: run.id
+          };
+          settledTurn = {
+            ...turn,
+            checkpoint: undefined,
+            finalOpenedCandidate: undefined,
+            outcome: 'READY',
+            settledAt: now
+          };
+        } else {
+          const action = this.state.designSourceActions.find(
+            (candidateAction) =>
+              candidateAction.id === authority.actionId &&
+              candidateAction.kind === authority.kind
+          );
+          if (
+            !action ||
+            action.failureReason ||
+            action.checkpoint.boundary !== 'PREVIEW_CANDIDATE_READY' ||
+            action.checkpoint.previewGenerationId !== candidate.id ||
+            (action.kind === 'RESTORE' &&
+              (action.designId !== design.id ||
+                action.checkpoint.targetCommitSha !== settlement.commitSha)) ||
+            (action.kind === 'DUPLICATE' &&
+              (action.targetDesignId !== design.id ||
+                this.state.designRevisions.find(
+                  (source) => source.id === action.sourceRevisionId
+                )?.commitSha !== settlement.commitSha))
+          ) {
+            throw new Error('Design source Preview settlement ownership is inconsistent.');
+          }
+          revision =
+            action.kind === 'RESTORE'
+              ? {
+                  ...baseRevision,
+                  changeSource: 'RESTORE',
+                  sourceRevisionId: action.sourceRevisionId,
+                  clientActionId: action.clientActionId
+                }
+              : { ...baseRevision, changeSource: 'DUPLICATE' };
+          settledActionId = action.id;
+        }
+        candidate = {
+          ...candidate,
+          source: { ...candidate.source, designRevisionId: revision.id },
+          freshness: 'REVISION'
+        };
+      } else if (
+        input.candidate.source.type === 'EXACT_COMMIT' &&
+        input.candidate.source.designRevisionId === undefined
+      ) {
+        throw new Error('An exact-commit Design cutover requires durable revision settlement.');
+      }
       const updates = new Map(
-        [input.candidate, input.replaced].filter(Boolean).map((generation) => [generation!.id, generation!])
+        [candidate, input.replaced]
+          .filter(Boolean)
+          .map((generation) => [generation!.id, generation!])
       );
       this.state = {
         ...this.state,
+        tasks: revision
+          ? this.state.tasks.map((task) =>
+              task.id === revision!.designId
+                ? { ...task, updatedAt: revision!.createdAt }
+                : task
+            )
+          : this.state.tasks,
+        designTurns: settledTurn
+          ? this.state.designTurns.map((turn) =>
+              turn.id === settledTurn!.id ? settledTurn! : turn
+            )
+          : this.state.designTurns,
+        designRevisions: revision
+          ? [revision, ...this.state.designRevisions]
+          : this.state.designRevisions,
+        designSourceActions: settledActionId
+          ? this.state.designSourceActions.filter(
+              (action) => action.id !== settledActionId
+            )
+          : this.state.designSourceActions,
         previewGenerations: [
-          input.candidate,
+          candidate,
           ...(input.replaced ? [input.replaced] : []),
           ...this.state.previewGenerations.filter((generation) => !updates.has(generation.id))
         ]
@@ -1622,7 +2280,7 @@ export class FileTaskStore {
         );
       }
       await this.persistSnapshot();
-      return clone(input);
+      return clone({ candidate, replaced: input.replaced, revision });
     });
   }
 
@@ -1849,9 +2507,31 @@ export class FileTaskStore {
         `Provider turn ${stored.providerTurnId} is already owned by another ${stored.runtimeId} run.`
       );
     }
+    let designReferences = this.state.designReferences;
+    if (
+      existing.mode === 'DESIGN' &&
+      existing.generationKey &&
+      update.attachmentSubmissions?.length
+    ) {
+      const turn = this.requireDesignTurn(existing.taskId, existing.generationKey);
+      const selectedReferenceIds = new Set(turn.referenceIds);
+      const deliveryTimeByAttachment = new Map(
+        update.attachmentSubmissions.map((submission) => [
+          submission.attachmentId,
+          submission.submittedAt
+        ])
+      );
+      designReferences = this.state.designReferences.map((reference) => {
+        const deliveredAt = deliveryTimeByAttachment.get(reference.attachmentId);
+        return selectedReferenceIds.has(reference.id) && deliveredAt && !reference.firstDeliveredAt
+          ? { ...reference, firstDeliveredAt: deliveredAt }
+          : reference;
+      });
+    }
     this.state = {
       ...this.state,
-      runs: this.state.runs.map((run) => (run.id === runId ? stored : run))
+      runs: this.state.runs.map((run) => (run.id === runId ? stored : run)),
+      designReferences
     };
     await this.persistSnapshot();
     return clone(stored);
@@ -1931,6 +2611,8 @@ export class FileTaskStore {
       'RECOVERY_REQUIRED',
       'RUNNING',
       'STARTING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
       'INTERRUPTING'
     ];
     if (options.includeQueued) statuses.push('QUEUED');
@@ -2001,6 +2683,1075 @@ export class FileTaskStore {
     );
   }
 
+  async createDesignBundle(
+    input: CreateDesignBundleInput
+  ): Promise<CreateDesignBundleResult> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const retry = this.resolveDesignCreationRetryFromState(input.request);
+      if (retry) return clone(retry);
+
+      const metadata = designCreationMetadata(input.request);
+      const brief = input.request.brief.trim();
+      if (!brief) throw new Error('Design brief is required.');
+      const repositoryPath = path.resolve(input.repository.path);
+      if (
+        !UUID_FILE_SEGMENT_PATTERN.test(input.repository.id) ||
+        !input.repository.name.trim() ||
+        !input.repository.branch.trim() ||
+        !isGitObjectId(input.repository.headSha) ||
+        !isCanonicalIsoTimestamp(input.repository.checkedAt)
+      ) {
+        throw new Error('Managed Design repository identity is invalid.');
+      }
+      if (
+        this.state.repositories.some(
+          (repository) =>
+            repository.id === input.repository.id ||
+            sameAbsolutePath(path.resolve(repository.path), repositoryPath)
+        )
+      ) {
+        throw new Error('Managed Design repository identity is already registered.');
+      }
+
+      const now = new Date().toISOString();
+      const repository: Repository = {
+        id: input.repository.id,
+        kind: 'DESIGN_MANAGED',
+        name: input.repository.name.trim(),
+        path: repositoryPath,
+        status: 'AVAILABLE',
+        headSha: input.repository.headSha,
+        branch: input.repository.branch.trim(),
+        remotes: [],
+        createdAt: now,
+        updatedAt: now,
+        checkedAt: input.repository.checkedAt
+      };
+      const task: Task = {
+        id: randomUUID(),
+        kind: 'DESIGN',
+        runtimeId: CODEX_RUNTIME_ID,
+        title: deriveDesignTitle(brief),
+        prompt: brief,
+        repositoryId: repository.id,
+        creationToken: metadata.token,
+        creationRequestFingerprint: metadata.fingerprint,
+        workflowPhase: 'READY',
+        resolution: 'NONE',
+        completionPolicy: 'MANUAL',
+        phaseVersion: 1,
+        forkedAlternativeTaskIds: [],
+        agentSettings: {
+          runtimeId: CODEX_RUNTIME_ID,
+          model: normalizedOptionalString(input.request.model),
+          reasoningEffort: normalizedOptionalString(input.request.reasoningEffort),
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user'
+        },
+        createdAt: now,
+        updatedAt: now,
+        projection: createInitialProjection(now)
+      };
+
+      const previousState = this.state;
+      let preparedDraft: PreparedAttachmentDraft | undefined;
+      let attachmentRecords: TaskAttachmentRecord[] = [];
+      let publishedWithoutDirectorySync = false;
+      try {
+        if (input.request.attachmentDraftId) {
+          preparedDraft = await this.attachmentFiles.prepareDraftForTask(
+            input.request.attachmentDraftId,
+            task.id
+          );
+          attachmentRecords = preparedDraft.records;
+        }
+        const references: DesignReference[] = attachmentRecords.map((attachment) => ({
+          id: randomUUID(),
+          designId: task.id,
+          attachmentId: attachment.id,
+          role: 'REFERENCE',
+          state: 'ACTIVE',
+          sourceDraftId: input.request.attachmentDraftId,
+          createdAt: now
+        }));
+        const turn: DesignTurn = {
+          id: randomUUID(),
+          designId: task.id,
+          clientMessageId: input.request.creationToken,
+          order: 1,
+          messageSource: 'TASK_PROMPT',
+          attachmentDraftId: input.request.attachmentDraftId,
+          referenceIds: references.map((reference) => reference.id),
+          checkpoint: { boundary: 'QUEUED' },
+          createdAt: now
+        };
+        this.state = {
+          ...this.state,
+          repositories: [repository, ...this.state.repositories],
+          tasks: [task, ...this.state.tasks],
+          designTurns: [turn, ...this.state.designTurns],
+          designReferences: [...references, ...this.state.designReferences],
+          attachments: [...attachmentRecords, ...this.state.attachments]
+        };
+        this.state = applyEventToState(
+          this.state,
+          createDomainEvent({
+            type: 'TASK_CREATED',
+            taskId: task.id,
+            source: 'ui',
+            payload: {
+              kind: task.kind,
+              title: task.title,
+              repositoryId: task.repositoryId,
+              attachmentIds: attachmentRecords.map((attachment) => attachment.id),
+              designTurnId: turn.id
+            }
+          })
+        );
+        publishedWithoutDirectorySync = !(await this.persistSnapshot());
+        if (!publishedWithoutDirectorySync && preparedDraft) {
+          await this.attachmentFiles.finalizeDraftForTask(preparedDraft).catch(
+            () => undefined
+          );
+        }
+        return clone({ task, repository, turn, references });
+      } catch (error) {
+        this.state = previousState;
+        if (preparedDraft) {
+          try {
+            await this.attachmentFiles.rollbackDraftForTask(preparedDraft);
+          } catch (rollbackError) {
+            throw new AttachmentAdoptionAmbiguousError(
+              preparedDraft,
+              error,
+              rollbackError
+            );
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  async resolveDesignCreationRetry(
+    request: CreateBlankDesignRequest
+  ): Promise<CreateDesignBundleResult | undefined> {
+    await this.init();
+    return clone(this.resolveDesignCreationRetryFromState(request));
+  }
+
+  async beginRestoreDesignAction(
+    input: RestoreDesignRevisionRequest
+  ): Promise<BeginRestoreDesignActionResult> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      validateDesignSourceActionRequest(input);
+      const design = this.requireDesign(input.designId);
+      const sourceRevision = this.requireDesignRevision(
+        input.designId,
+        input.revisionId
+      );
+      const completed = this.state.designRevisions.find(
+        (revision): revision is Extract<DesignRevision, { changeSource: 'RESTORE' }> =>
+          revision.designId === design.id &&
+          revision.changeSource === 'RESTORE' &&
+          revision.clientActionId === input.clientActionId
+      );
+      if (completed) {
+        if (completed.sourceRevisionId !== sourceRevision.id) {
+          throw new Error('This Design action id was already used for another restore.');
+        }
+        return clone({ sourceRevision, revision: completed });
+      }
+      const existing = this.state.designSourceActions.find(
+        (action) => action.clientActionId === input.clientActionId
+      );
+      if (existing) {
+        if (
+          existing.kind !== 'RESTORE' ||
+          existing.designId !== design.id ||
+          existing.sourceRevisionId !== sourceRevision.id
+        ) {
+          throw new Error('This Design action id was already used for another action.');
+        }
+        if (!existing.failureReason) return clone({ action: existing, sourceRevision });
+        const retried: Extract<DesignSourceAction, { kind: 'RESTORE' }> = {
+          ...existing,
+          failureReason: undefined,
+          updatedAt: new Date().toISOString()
+        };
+        this.state = {
+          ...this.state,
+          designSourceActions: this.state.designSourceActions.map((action) =>
+            action.id === retried.id ? retried : action
+          )
+        };
+        await this.persistSnapshot();
+        return clone({ action: retried, sourceRevision });
+      }
+      this.assertDesignSourceActionCanStart(design.id);
+      const latestRevision = this.latestDesignRevision(design.id);
+      if (!latestRevision) throw new Error('This Design has no ready state to restore.');
+      if (sourceRevision.id === latestRevision.id) {
+        throw new Error('This is already the current ready state.');
+      }
+      const now = new Date().toISOString();
+      const retainedActions = this.state.designSourceActions.filter(
+        (action) =>
+          !(
+            action.kind === 'RESTORE' &&
+            action.designId === design.id &&
+            action.failureReason
+          )
+      );
+      const action: Extract<DesignSourceAction, { kind: 'RESTORE' }> = {
+        id: randomUUID(),
+        designId: design.id,
+        kind: 'RESTORE',
+        clientActionId: input.clientActionId,
+        sourceRevisionId: sourceRevision.id,
+        checkpoint: { boundary: 'RECORDED' },
+        createdAt: now,
+        updatedAt: now
+      };
+      this.state = {
+        ...this.state,
+        designSourceActions: [action, ...retainedActions]
+      };
+      await this.persistSnapshot();
+      return clone({ action, sourceRevision });
+    });
+  }
+
+  async beginDuplicateDesignAction(
+    input: DuplicateDesignRequest
+  ): Promise<BeginDuplicateDesignActionResult> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      validateDesignSourceActionRequest(input);
+      const design = this.requireDesign(input.designId);
+      const sourceRevision = this.requireDesignRevision(
+        input.designId,
+        input.revisionId
+      );
+      const fingerprint = duplicateDesignFingerprint(input);
+      const existing = this.state.designSourceActions.find(
+        (action) => action.clientActionId === input.clientActionId
+      );
+      if (existing) {
+        if (
+          existing.kind !== 'DUPLICATE' ||
+          existing.designId !== design.id ||
+          existing.sourceRevisionId !== sourceRevision.id
+        ) {
+          throw new Error('This Design action id was already used for another action.');
+        }
+        const target = this.requireDesign(existing.targetDesignId);
+        if (!existing.failureReason) {
+          return clone({ action: existing, task: target, sourceRevision });
+        }
+        const retried: Extract<DesignSourceAction, { kind: 'DUPLICATE' }> = {
+          ...existing,
+          failureReason: undefined,
+          updatedAt: new Date().toISOString()
+        };
+        this.state = {
+          ...this.state,
+          designSourceActions: this.state.designSourceActions.map((action) =>
+            action.id === retried.id ? retried : action
+          )
+        };
+        await this.persistSnapshot();
+        return clone({ action: retried, task: target, sourceRevision });
+      }
+      const completed = this.state.tasks.find(
+        (task) => task.creationToken === input.clientActionId
+      );
+      if (completed) {
+        if (
+          completed.kind !== 'DESIGN' ||
+          completed.sourceDesignId !== design.id ||
+          completed.sourceDesignRevisionId !== sourceRevision.id ||
+          completed.creationRequestFingerprint !== fingerprint ||
+          !this.state.designRevisions.some(
+            (revision) =>
+              revision.designId === completed.id &&
+              revision.changeSource === 'DUPLICATE'
+          )
+        ) {
+          throw new Error('This Design action id was already used for another duplicate.');
+        }
+        return clone({ task: completed, sourceRevision });
+      }
+      this.assertDesignSourceActionCanStart(design.id, true);
+      if (
+        this.state.designSourceActions.some(
+          (action) => action.kind === 'DUPLICATE' && action.designId === design.id
+        )
+      ) {
+        throw new Error('Delete the unfinished Design copy before duplicating again.');
+      }
+
+      const now = new Date().toISOString();
+      const targetId = randomUUID();
+      const sourceReferences = this.state.designReferences.filter(
+        (reference) =>
+          reference.designId === design.id &&
+          (reference.state === 'ACTIVE' || reference.role === 'PROJECT_ASSET_SOURCE')
+      );
+      const sourceAttachments = sourceReferences.map((reference) => {
+        const attachment = this.state.attachments.find(
+          (candidate) =>
+            candidate.id === reference.attachmentId && candidate.taskId === design.id
+        );
+        if (!attachment) throw new Error('Design duplicate reference bytes are unavailable.');
+        return attachment;
+      });
+      const previousState = this.state;
+      let attachments: TaskAttachmentRecord[] = [];
+      try {
+        attachments = await this.attachmentFiles.copySelectedTaskAttachments(
+          design.id,
+          targetId,
+          sourceAttachments
+        );
+        const attachmentBySource = new Map(
+          sourceAttachments.map((attachment, index) => [attachment.id, attachments[index]!])
+        );
+        const references = sourceReferences.map<DesignReference>((reference) => ({
+          ...reference,
+          id: randomUUID(),
+          designId: targetId,
+          attachmentId: attachmentBySource.get(reference.attachmentId)!.id,
+          sourceDraftId: undefined,
+          firstDeliveredAt: undefined,
+          createdAt: now,
+          deactivatedAt: reference.state === 'INACTIVE' ? now : undefined
+        }));
+        const task: Task = {
+          ...design,
+          id: targetId,
+          title: duplicateDesignTitle(design.title),
+          creationToken: input.clientActionId,
+          creationRequestFingerprint: fingerprint,
+          sourceDesignId: design.id,
+          sourceDesignRevisionId: sourceRevision.id,
+          currentRunId: undefined,
+          currentAgentSessionId: undefined,
+          currentIterationId: undefined,
+          currentWorktreeId: undefined,
+          forkedAlternativeTaskIds: [],
+          createdAt: now,
+          updatedAt: now,
+          projection: createInitialProjection(now)
+        };
+        const action: Extract<DesignSourceAction, { kind: 'DUPLICATE' }> = {
+          id: randomUUID(),
+          designId: design.id,
+          kind: 'DUPLICATE',
+          clientActionId: input.clientActionId,
+          sourceRevisionId: sourceRevision.id,
+          targetDesignId: task.id,
+          checkpoint: { boundary: 'TARGET_CREATED' },
+          createdAt: now,
+          updatedAt: now
+        };
+        this.state = {
+          ...this.state,
+          tasks: [task, ...this.state.tasks],
+          designReferences: [...references, ...this.state.designReferences],
+          designSourceActions: [action, ...this.state.designSourceActions],
+          attachments: [...attachments, ...this.state.attachments]
+        };
+        await this.persistSnapshot();
+        return clone({ action, task, sourceRevision });
+      } catch (error) {
+        this.state = previousState;
+        if (attachments.length > 0) {
+          await this.attachmentFiles.discardTaskFiles(targetId).catch(() => undefined);
+        }
+        throw error;
+      }
+    });
+  }
+
+  async updateDesignSourceAction(
+    action: DesignSourceAction
+  ): Promise<DesignSourceAction> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const existing = this.state.designSourceActions.find(
+        (candidate) => candidate.id === action.id
+      );
+      if (!existing || existing.kind !== action.kind) {
+        throw new Error('Design source action not found.');
+      }
+      if (sameJsonValue(existing, action)) return clone(existing);
+      assertDesignSourceActionTransition(existing, action, this.state);
+      this.state = {
+        ...this.state,
+        designSourceActions: this.state.designSourceActions.map((candidate) =>
+          candidate.id === action.id ? clone(action) : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(action);
+    });
+  }
+
+  async failDesignSourceAction(actionId: string, reason: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const action = this.state.designSourceActions.find(
+        (candidate) => candidate.id === actionId
+      );
+      if (!action) return;
+      const failureReason = boundedDesignActionReason(reason);
+      if (action.failureReason === failureReason) return;
+      const updated = {
+        ...action,
+        failureReason,
+        updatedAt: new Date().toISOString()
+      } satisfies DesignSourceAction;
+      this.state = {
+        ...this.state,
+        designSourceActions: this.state.designSourceActions.map((candidate) =>
+          candidate.id === action.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+    });
+  }
+
+  async renameDesign(designId: string, titleInput: string): Promise<Task> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(designId);
+      const title = titleInput.replace(/\s+/gu, ' ').trim();
+      if (!title || title.length > 120) {
+        throw new Error('Design name must contain 1 to 120 characters.');
+      }
+      if (design.title === title) return clone(design);
+      const updated = { ...design, title, updatedAt: new Date().toISOString() };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === design.id ? updated : task
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async archiveDesign(designId: string): Promise<Task> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(designId);
+      if (design.workflowPhase === 'ARCHIVED') return clone(design);
+      this.assertDesignSourceActionCanStart(design.id);
+      if (
+        this.state.designSourceActions.some(
+          (action) =>
+            action.designId === design.id ||
+            (action.kind === 'DUPLICATE' && action.targetDesignId === design.id)
+        )
+      ) {
+        throw new Error('Resolve the current Design action before archiving.');
+      }
+      const now = new Date().toISOString();
+      const updated: Task = {
+        ...design,
+        workflowPhase: 'ARCHIVED',
+        phaseVersion: design.phaseVersion + 1,
+        updatedAt: now
+      };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === design.id ? updated : task
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async createInlineDesignTurn(
+    input: CreateInlineDesignTurnInput
+  ): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      validateInlineDesignTurnInput(input);
+      const existing = this.state.designTurns.find(
+        (turn) =>
+          turn.designId === design.id &&
+          turn.clientMessageId === input.clientMessageId
+      );
+      if (existing) {
+        await this.assertInlineDesignTurnRetry(existing, input);
+        return clone(existing);
+      }
+      if (design.workflowPhase !== 'READY') {
+        throw new Error('Archived Designs cannot accept new messages.');
+      }
+      if (
+        this.state.designSourceActions.some(
+          (action) =>
+            action.designId === design.id ||
+            (action.kind === 'DUPLICATE' && action.targetDesignId === design.id)
+        )
+      ) {
+        throw new Error('Resolve the current Design action before sending a message.');
+      }
+      const queuedTurnCount = this.state.designTurns.filter(
+        (turn) =>
+          turn.designId === design.id &&
+          turn.outcome === undefined &&
+          !turn.runId
+      ).length;
+      if (queuedTurnCount >= DESIGN_LIMITS.queuedTurns) {
+        throw new Error('This Design message queue is full.');
+      }
+
+      const now = new Date().toISOString();
+      const selectedReferences = input.referenceIds.map((referenceId) =>
+        this.state.designReferences.find(
+          (reference) =>
+            reference.id === referenceId &&
+            reference.designId === design.id &&
+            reference.state === 'ACTIVE'
+        )
+      );
+      if (selectedReferences.some((reference) => !reference)) {
+        throw new Error('A selected Design reference is not active.');
+      }
+      const referenceIds = [...input.referenceIds];
+      const previousState = this.state;
+      let prepared: PreparedAttachmentAppend | undefined;
+      let artifact: ArtifactRecord | undefined;
+      try {
+        if (input.attachmentDraftId) {
+          const existingRecords = this.state.attachments
+            .filter((attachment) => attachment.taskId === design.id)
+            .sort((left, right) => left.ordinal - right.ordinal);
+          prepared = await this.attachmentFiles.prepareDraftForExistingTask(
+            input.attachmentDraftId,
+            design.id,
+            existingRecords
+          );
+        }
+        const addedReferences = (prepared?.records ?? []).map<DesignReference>(
+          (attachment) => ({
+            id: randomUUID(),
+            designId: design.id,
+            attachmentId: attachment.id,
+            role: 'REFERENCE',
+            state: 'ACTIVE',
+            sourceDraftId: input.attachmentDraftId,
+            createdAt: now
+          })
+        );
+        artifact = await this.createArtifactRecord(design.id, 'design-message');
+        await writeNewArtifactFiles(this.artifactsDir, [
+          { artifact, content: input.message }
+        ]);
+        const order =
+          Math.max(
+            0,
+            ...this.state.designTurns
+              .filter((turn) => turn.designId === design.id)
+              .map((turn) => turn.order)
+          ) + 1;
+        const turn: DesignTurn = {
+          id: randomUUID(),
+          designId: design.id,
+          clientMessageId: input.clientMessageId,
+          order,
+          messageSource: 'INLINE_MESSAGE',
+          messageArtifactId: artifact.id,
+          attachmentDraftId: input.attachmentDraftId,
+          referenceIds: [...referenceIds, ...addedReferences.map((reference) => reference.id)],
+          checkpoint: { boundary: 'QUEUED' },
+          createdAt: now
+        };
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((task) =>
+            task.id === design.id ? { ...task, updatedAt: now } : task
+          ),
+          attachments: [...this.state.attachments, ...(prepared?.records ?? [])],
+          designReferences: [...this.state.designReferences, ...addedReferences],
+          designTurns: [turn, ...this.state.designTurns],
+          artifacts: [artifact, ...this.state.artifacts]
+        };
+        const directorySynced = await this.persistSnapshot();
+        if (directorySynced && prepared) {
+          await this.attachmentFiles
+            .finalizeDraftForExistingTask(prepared)
+            .catch(() => undefined);
+        }
+        return clone(turn);
+      } catch (error) {
+        this.state = previousState;
+        if (artifact) await this.cleanupUnpublishedArtifacts([artifact]);
+        if (prepared) {
+          try {
+            await this.attachmentFiles.rollbackDraftForExistingTask(prepared);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'Design message failed and its prepared reference files could not be removed.'
+            );
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  async resolveInlineDesignTurnRetry(
+    input: CreateInlineDesignTurnInput
+  ): Promise<DesignTurn | undefined> {
+    await this.init();
+    validateInlineDesignTurnInput(input);
+    const existing = this.state.designTurns.find(
+      (turn) =>
+        turn.designId === input.designId &&
+        turn.clientMessageId === input.clientMessageId
+    );
+    if (!existing) return undefined;
+    await this.assertInlineDesignTurnRetry(existing, input);
+    return clone(existing);
+  }
+
+  async addDesignReferences(input: {
+    designId: string;
+    attachmentDraftId: string;
+  }): Promise<DesignReference[]> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const retry = this.state.designReferences.filter(
+        (reference) =>
+          reference.designId === design.id &&
+          reference.sourceDraftId === input.attachmentDraftId
+      );
+      if (retry.length > 0) {
+        await this.attachmentFiles
+          .discardDraft(input.attachmentDraftId)
+          .catch(() => undefined);
+        return clone(retry);
+      }
+
+      const existingRecords = this.state.attachments
+        .filter((attachment) => attachment.taskId === design.id)
+        .sort((left, right) => left.ordinal - right.ordinal);
+      const previousState = this.state;
+      let prepared: PreparedAttachmentAppend | undefined;
+      try {
+        prepared = await this.attachmentFiles.prepareDraftForExistingTask(
+          input.attachmentDraftId,
+          design.id,
+          existingRecords
+        );
+        const now = new Date().toISOString();
+        const references = prepared.records.map<DesignReference>((attachment) => ({
+          id: randomUUID(),
+          designId: design.id,
+          attachmentId: attachment.id,
+          role: 'REFERENCE',
+          state: 'ACTIVE',
+          sourceDraftId: input.attachmentDraftId,
+          createdAt: now
+        }));
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((task) =>
+            task.id === design.id ? { ...task, updatedAt: now } : task
+          ),
+          attachments: [...this.state.attachments, ...prepared.records],
+          designReferences: [...this.state.designReferences, ...references]
+        };
+        const directorySynced = await this.persistSnapshot();
+        if (directorySynced) {
+          await this.attachmentFiles
+            .finalizeDraftForExistingTask(prepared)
+            .catch(() => undefined);
+        }
+        return clone(references);
+      } catch (error) {
+        this.state = previousState;
+        if (prepared) {
+          try {
+            await this.attachmentFiles.rollbackDraftForExistingTask(prepared);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'Reference adoption failed and its prepared files could not be removed.'
+            );
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  async removeDesignReference(input: {
+    designId: string;
+    referenceId: string;
+  }): Promise<DesignReference> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.requireDesign(input.designId);
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === input.referenceId &&
+          candidate.designId === input.designId
+      );
+      if (!reference) throw new Error('Design reference not found.');
+      if (reference.state === 'INACTIVE') return clone(reference);
+      const now = new Date().toISOString();
+      const updated: DesignReference = {
+        ...reference,
+        state: 'INACTIVE',
+        deactivatedAt: now
+      };
+      const previousState = this.state;
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === input.designId ? { ...task, updatedAt: now } : task
+        ),
+        designReferences: this.state.designReferences.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        this.state = previousState;
+        throw error;
+      }
+      return clone(updated);
+    });
+  }
+
+  async readDesignReferenceContent(
+    designId: string,
+    referenceId: string
+  ): Promise<{
+    reference: DesignReference;
+    content: StoredAttachmentContent;
+    sha256: string;
+  }> {
+    return this.withOwnedIo(async () => {
+      await this.init();
+      this.requireDesign(designId);
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === referenceId && candidate.designId === designId
+      );
+      if (!reference || reference.state !== 'ACTIVE') {
+        throw new Error('Active Design reference not found.');
+      }
+      const attachment = this.state.attachments.find(
+        (candidate) =>
+          candidate.id === reference.attachmentId && candidate.taskId === designId
+      );
+      if (!attachment) throw new Error('Design reference attachment not found.');
+      return {
+        reference: clone(reference),
+        content: await this.attachmentFiles.readTask(attachment),
+        sha256: attachment.sha256
+      };
+    });
+  }
+
+  async recordDesignReferenceAsset(input: {
+    designId: string;
+    referenceId: string;
+    projectAssetPath: string;
+  }): Promise<DesignReference> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!isSafeDesignProjectPath(input.projectAssetPath)) {
+        throw new Error('Design project asset path is invalid.');
+      }
+      this.requireDesign(input.designId);
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === input.referenceId &&
+          candidate.designId === input.designId &&
+          candidate.state === 'ACTIVE'
+      );
+      if (!reference) throw new Error('Active Design reference not found.');
+      if (reference.role === 'PROJECT_ASSET_SOURCE') {
+        if (reference.projectAssetPath !== input.projectAssetPath) {
+          throw new Error('Design reference already owns another project asset.');
+        }
+        return clone(reference);
+      }
+      const now = new Date().toISOString();
+      const updated: DesignReference = {
+        ...reference,
+        role: 'PROJECT_ASSET_SOURCE',
+        projectAssetPath: input.projectAssetPath
+      };
+      const previousState = this.state;
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === input.designId ? { ...task, updatedAt: now } : task
+        ),
+        designReferences: this.state.designReferences.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        this.state = previousState;
+        throw error;
+      }
+      return clone(updated);
+    });
+  }
+
+  async getRunByGenerationKey(
+    taskId: string,
+    generationKey: string
+  ): Promise<RunRecord | undefined> {
+    await this.init();
+    return clone(
+      this.publishedState.runs.find(
+        (run) =>
+          run.taskId === taskId &&
+          run.mode === 'DESIGN' &&
+          run.generationKey === generationKey
+      )
+    );
+  }
+
+  async linkDesignTurnRun(input: {
+    designId: string;
+    turnId: string;
+    runId: string;
+  }): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      const run = this.state.runs.find(
+        (candidate) =>
+          candidate.id === input.runId &&
+          candidate.taskId === input.designId &&
+          candidate.mode === 'DESIGN' &&
+          candidate.generationKey === input.turnId
+      );
+      if (!run) throw new Error('Design turn Run ownership is inconsistent.');
+      if (turn.runId && turn.runId !== run.id) {
+        throw new Error('Design turn is already linked to another Run.');
+      }
+      if (turn.runId === run.id) return clone(turn);
+      if (turn.outcome !== undefined || turn.checkpoint?.boundary !== 'QUEUED') {
+        throw new Error('Only a queued unsettled Design turn can link its Run.');
+      }
+      const updated: DesignTurn = {
+        ...turn,
+        runId: run.id,
+        checkpoint: { boundary: 'RUN_LINKED' }
+      };
+      this.state = {
+        ...this.state,
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async updateDesignTurnCheckpoint(
+    input: UpdateDesignTurnCheckpointInput
+  ): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      if (turn.outcome !== undefined) {
+        throw new Error('A settled Design turn cannot change its checkpoint.');
+      }
+      if (sameJsonValue(turn.checkpoint, input.checkpoint)) return clone(turn);
+      const currentCheckpoint = turn.checkpoint;
+      const priorPreviewCandidate =
+        currentCheckpoint?.boundary === 'PREVIEW_CANDIDATE_READY'
+          ? this.state.previewGenerations.find(
+              (generation) => generation.id === currentCheckpoint.previewGenerationId
+            )
+          : undefined;
+      const replacesUnavailablePreviewCandidate =
+        currentCheckpoint?.boundary === 'PREVIEW_CANDIDATE_READY' &&
+        input.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY' &&
+        currentCheckpoint.commitSha === input.checkpoint.commitSha &&
+        (!priorPreviewCandidate ||
+          priorPreviewCandidate.state === 'STOPPED' ||
+          priorPreviewCandidate.state === 'FAILED');
+      if (!replacesUnavailablePreviewCandidate) {
+        assertDesignCheckpointTransition(turn.checkpoint, input.checkpoint);
+      }
+      this.assertDesignCheckpointOwnership(design, turn, input.checkpoint);
+      const updated: DesignTurn = { ...turn, checkpoint: clone(input.checkpoint) };
+      this.state = {
+        ...this.state,
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async updateDesignOpenedCandidate(
+    input: UpdateDesignOpenedCandidateInput
+  ): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      if (turn.outcome !== undefined || !turn.runId) {
+        throw new Error('Only an active Design turn can record an opened candidate.');
+      }
+      if (sameJsonValue(turn.finalOpenedCandidate, input.candidate)) {
+        return clone(turn);
+      }
+      const run = this.state.runs.find(
+        (candidate) =>
+          candidate.id === turn.runId &&
+          candidate.taskId === design.id &&
+          candidate.mode === 'DESIGN' &&
+          candidate.generationKey === turn.id &&
+          [
+            'QUEUED',
+            'STARTING',
+            'RUNNING',
+            'AWAITING_APPROVAL',
+            'AWAITING_USER_INPUT'
+          ].includes(candidate.status)
+      );
+      const source = input.candidate.source;
+      const worktree = this.state.worktrees.find(
+        (candidate) =>
+          candidate.id === source.worktreeId &&
+          candidate.id === design.currentWorktreeId &&
+          candidate.taskId === design.id &&
+          candidate.repositoryId === design.repositoryId &&
+          candidate.branchName === source.branchName
+      );
+      const generation = this.state.previewGenerations.find(
+        (candidate) =>
+          candidate.id === input.candidate.previewGenerationId &&
+          candidate.taskId === design.id &&
+          candidate.state === 'READY' &&
+          candidate.routingState === 'CANDIDATE' &&
+          candidate.source.type === 'EXACT_COMMIT' &&
+          candidate.source.repositoryId === design.repositoryId &&
+          candidate.source.commitSha === source.candidateCommitSha &&
+          candidate.source.designRevisionId === undefined
+      );
+      if (
+        !run ||
+        !worktree ||
+        source.repositoryId !== design.repositoryId ||
+        !isGitObjectId(source.expectedParentCommit) ||
+        !isGitObjectId(source.treeSha) ||
+        !isGitObjectId(source.candidateCommitSha) ||
+        !generation
+      ) {
+        throw new Error('Opened Design candidate ownership is inconsistent.');
+      }
+      const updated: DesignTurn = {
+        ...turn,
+        finalOpenedCandidate: clone(input.candidate)
+      };
+      this.state = {
+        ...this.state,
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
+  async settleDesignTurn(input: SettleDesignTurnInput): Promise<DesignTurn> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const design = this.requireDesign(input.designId);
+      const turn = this.requireDesignTurn(input.designId, input.turnId);
+      const failureReason = normalizedOptionalString(input.failureReason);
+      if (
+        (input.outcome === 'FAILED' || input.outcome === 'NEEDS_ATTENTION') &&
+        !failureReason
+      ) {
+        throw new Error('Failed Design turn settlement requires a reason.');
+      }
+      if (turn.outcome !== undefined) {
+        if (
+          turn.outcome === input.outcome &&
+          turn.failureReason === failureReason
+        ) {
+          return clone(turn);
+        }
+        throw new Error('Design turn is already settled with a different outcome.');
+      }
+      if (input.outcome === 'NO_CHANGE') {
+        const run = turn.runId
+          ? this.state.runs.find((candidate) => candidate.id === turn.runId)
+          : undefined;
+        if (
+          !run ||
+          run.status !== 'COMPLETED' ||
+          turn.checkpoint?.boundary !== 'POST_RUN_EVIDENCE_RECORDED' ||
+          !this.state.designRevisions.some(
+            (revision) => revision.designId === design.id
+          )
+        ) {
+          throw new Error(
+            'No-change settlement requires a completed evidenced Run and an existing ready revision.'
+          );
+        }
+      }
+      const now = new Date().toISOString();
+      const updated: DesignTurn = {
+        ...turn,
+        checkpoint: undefined,
+        finalOpenedCandidate: undefined,
+        outcome: input.outcome,
+        failureReason,
+        settledAt: now
+      };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === design.id ? { ...task, updatedAt: now } : task
+        ),
+        designTurns: this.state.designTurns.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
   async createTask(input: CreateTaskStoreInput): Promise<Task> {
     return this.serializeMutation(() => this.createTaskRecord(input, 'ui'));
   }
@@ -2025,15 +3776,51 @@ export class FileTaskStore {
   }
 
   async deleteTask(taskId: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.deleteTaskInternal(taskId);
+    });
+  }
+
+  async deleteTaskAndReleaseManagedRepository(
+    taskId: string
+  ): Promise<DeleteTaskStorageResult> {
     return this.serializeMutation(() => this.deleteTaskInternal(taskId));
   }
 
-  private async deleteTaskInternal(taskId: string): Promise<void> {
+  private async deleteTaskInternal(taskId: string): Promise<DeleteTaskStorageResult> {
     await this.init();
 
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
+    }
+    if (
+      task.kind === 'DESIGN' &&
+      this.state.designTurns.some(
+        (turn) => turn.designId === taskId && turn.outcome === undefined
+      )
+    ) {
+      throw new Error('Design has an unsettled turn. Settle or cancel it before deletion.');
+    }
+    if (task.kind === 'DESIGN') {
+      const relatedSourceAction = this.state.designSourceActions.find(
+        (action) =>
+          (action.designId === task.id ||
+            (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)) &&
+          !action.failureReason
+      );
+      if (relatedSourceAction) {
+        throw new Error('Design source recovery must finish before deletion.');
+      }
+      const copiedDesignToDeleteFirst = this.state.designSourceActions.find(
+        (action) =>
+          action.kind === 'DUPLICATE' &&
+          action.designId === task.id &&
+          action.targetDesignId !== task.id
+      );
+      if (copiedDesignToDeleteFirst) {
+        throw new Error('Delete the unfinished Design copy before deleting its source.');
+      }
     }
     const activePreviewResource = this.state.previewResources.find(
       (resource) =>
@@ -2090,6 +3877,15 @@ export class FileTaskStore {
     );
     const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
     const now = new Date().toISOString();
+    const removedManagedRepository = this.state.repositories.find(
+      (repository) =>
+        repository.id === task.repositoryId &&
+        repository.kind === 'DESIGN_MANAGED' &&
+        !this.state.tasks.some(
+          (candidate) =>
+            candidate.id !== task.id && candidate.repositoryId === repository.id
+        )
+    );
     const previousState = this.state;
     let publishedWithoutDirectorySync = false;
     let prunedServerIds: string[] = [];
@@ -2097,9 +3893,35 @@ export class FileTaskStore {
     try {
       this.state = {
         ...this.state,
+      repositories: removedManagedRepository
+        ? this.state.repositories.filter(
+            (repository) => repository.id !== removedManagedRepository.id
+          )
+        : this.state.repositories,
+      boards: removedManagedRepository
+        ? this.state.boards.map((board) => ({
+            ...board,
+            repositoryIds: board.repositoryIds.filter(
+              (repositoryId) => repositoryId !== removedManagedRepository.id
+            ),
+            updatedAt: now
+          }))
+        : this.state.boards,
       tasks: this.state.tasks
         .filter((candidate) => candidate.id !== taskId)
         .map((candidate) => removeTaskLink(candidate, taskId, now)),
+      designTurns: this.state.designTurns.filter((turn) => turn.designId !== taskId),
+      designReferences: this.state.designReferences.filter(
+        (reference) => reference.designId !== taskId
+      ),
+      designRevisions: this.state.designRevisions.filter(
+        (revision) => revision.designId !== taskId
+      ),
+      designSourceActions: this.state.designSourceActions.filter(
+        (action) =>
+          action.designId !== taskId &&
+          (action.kind !== 'DUPLICATE' || action.targetDesignId !== taskId)
+      ),
       iterations: this.state.iterations.filter((iteration) => iteration.taskId !== taskId),
       worktrees: this.state.worktrees.filter((worktree) => worktree.taskId !== taskId),
       gitSnapshots: this.state.gitSnapshots.filter((snapshot) => snapshot.taskId !== taskId),
@@ -2209,6 +4031,7 @@ export class FileTaskStore {
         artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path))
       );
     }
+    return clone({ removedManagedRepository });
   }
 
   private async createTaskRecord(
@@ -2246,6 +4069,7 @@ export class FileTaskStore {
     }
     const task: Task = {
       id: randomUUID(),
+      kind: 'NORMAL',
       runtimeId,
       title: input.title.trim(),
       prompt: input.prompt.trim(),
@@ -2276,6 +4100,9 @@ export class FileTaskStore {
     );
     if (!repository) {
       throw new Error('Repository not found.');
+    }
+    if (repository.kind !== 'USER_REGISTERED') {
+      throw new Error('Normal task creation requires a registered repository.');
     }
     if (repository.status !== 'AVAILABLE') {
       throw new Error('Repository is not available.');
@@ -2382,6 +4209,233 @@ export class FileTaskStore {
     return clone(task);
   }
 
+  private requireDesign(designId: string): Task {
+    const design = this.state.tasks.find(
+      (task) => task.id === designId && task.kind === 'DESIGN'
+    );
+    if (!design) throw new Error('Design not found.');
+    return design;
+  }
+
+  private requireDesignRevision(
+    designId: string,
+    revisionId: string
+  ): DesignRevision {
+    const revision = this.state.designRevisions.find(
+      (candidate) =>
+        candidate.id === revisionId && candidate.designId === designId
+    );
+    if (!revision) throw new Error('Design ready state not found.');
+    return revision;
+  }
+
+  private latestDesignRevision(designId: string): DesignRevision | undefined {
+    return this.state.designRevisions
+      .filter((revision) => revision.designId === designId)
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .at(-1);
+  }
+
+  private assertDesignSourceActionCanStart(
+    designId: string,
+    allowArchived = false
+  ): void {
+    const design = this.requireDesign(designId);
+    if (!allowArchived && design.workflowPhase !== 'READY') {
+      throw new Error('Archived Designs cannot change source.');
+    }
+    if (
+      this.state.designTurns.some(
+        (turn) => turn.designId === design.id && turn.outcome === undefined
+      ) ||
+      this.state.designSourceActions.some(
+        (action) => action.designId === design.id && !action.failureReason
+      )
+    ) {
+      throw new Error('Wait for the current Design work to finish.');
+    }
+  }
+
+  private requireDesignTurn(designId: string, turnId: string): DesignTurn {
+    const turn = this.state.designTurns.find(
+      (candidate) => candidate.id === turnId && candidate.designId === designId
+    );
+    if (!turn) throw new Error('Design turn not found.');
+    return turn;
+  }
+
+  private attachmentRecordsForDesignTurn(
+    turn: DesignTurn
+  ): TaskAttachmentRecord[] {
+    return turn.referenceIds.map((referenceId) => {
+      const reference = this.state.designReferences.find(
+        (candidate) =>
+          candidate.id === referenceId && candidate.designId === turn.designId
+      );
+      const attachment = reference
+        ? this.state.attachments.find(
+            (candidate) =>
+              candidate.id === reference.attachmentId &&
+              candidate.taskId === turn.designId
+          )
+        : undefined;
+      if (!reference || !attachment) {
+        throw new Error('Design turn reference attachment is unavailable.');
+      }
+      return attachment;
+    });
+  }
+
+  private async assertInlineDesignTurnRetry(
+    existing: DesignTurn,
+    input: CreateInlineDesignTurnInput
+  ): Promise<void> {
+    const artifact = existing.messageArtifactId
+      ? this.state.artifacts.find(
+          (candidate) => candidate.id === existing.messageArtifactId
+        )
+      : undefined;
+    const storedMessage = artifact
+      ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
+      : undefined;
+    const adoptedReferenceIds = input.attachmentDraftId
+      ? existing.referenceIds.filter((referenceId) =>
+          this.state.designReferences.some(
+            (reference) =>
+              reference.id === referenceId &&
+              reference.designId === input.designId &&
+              reference.sourceDraftId === input.attachmentDraftId
+          )
+        )
+      : [];
+    const expectedReferenceIds = [...input.referenceIds, ...adoptedReferenceIds];
+    if (
+      existing.messageSource !== 'INLINE_MESSAGE' ||
+      storedMessage !== input.message ||
+      existing.attachmentDraftId !== input.attachmentDraftId ||
+      existing.referenceIds.length !== expectedReferenceIds.length ||
+      existing.referenceIds.some(
+        (referenceId, index) => referenceId !== expectedReferenceIds[index]
+      )
+    ) {
+      throw new Error('This Design message id was already used for different content.');
+    }
+  }
+
+  private resolveDesignCreationRetryFromState(
+    request: CreateBlankDesignRequest
+  ): CreateDesignBundleResult | undefined {
+    const metadata = designCreationMetadata(request);
+    const existing = this.state.tasks.find(
+      (task) => task.creationToken === metadata.token
+    );
+    if (!existing) return undefined;
+    if (
+      existing.kind !== 'DESIGN' ||
+      existing.creationRequestFingerprint !== metadata.fingerprint
+    ) {
+      throw new TaskCreationRequestError(
+        'TASK_CREATION_CONFLICT',
+        'This creation retry token was already used for a different request.',
+        409
+      );
+    }
+    const repository = this.state.repositories.find(
+      (candidate) => candidate.id === existing.repositoryId
+    );
+    const turn = this.state.designTurns.find(
+      (candidate) =>
+        candidate.designId === existing.id &&
+        candidate.messageSource === 'TASK_PROMPT' &&
+        candidate.order === 1
+    );
+    if (!repository || !turn) {
+      throw new Error('Stored Design creation bundle is incomplete.');
+    }
+    return {
+      task: existing,
+      repository,
+      turn,
+      references: this.state.designReferences.filter(
+        (reference) => reference.designId === existing.id
+      )
+    };
+  }
+
+  private assertDesignCheckpointOwnership(
+    design: Task,
+    turn: DesignTurn,
+    checkpoint: DesignTurnCheckpoint
+  ): void {
+    if (checkpoint.boundary === 'QUEUED') return;
+    if (checkpoint.boundary === 'RUN_LINKED') {
+      const run = turn.runId
+        ? this.state.runs.find(
+            (candidate) =>
+              candidate.id === turn.runId &&
+              candidate.taskId === design.id &&
+              candidate.mode === 'DESIGN' &&
+              candidate.generationKey === turn.id
+          )
+        : undefined;
+      if (!run) throw new Error('Design checkpoint Run ownership is inconsistent.');
+      return;
+    }
+    if (checkpoint.boundary === 'POST_RUN_EVIDENCE_RECORDED') {
+      const run = turn.runId
+        ? this.state.runs.find((candidate) => candidate.id === turn.runId)
+        : undefined;
+      const snapshot = this.state.gitSnapshots.find(
+        (candidate) =>
+          candidate.id === checkpoint.gitSnapshotId &&
+          candidate.taskId === design.id &&
+          candidate.worktreeId === design.currentWorktreeId &&
+          candidate.id === run?.afterGitSnapshotId
+      );
+      if (!snapshot) {
+        throw new Error('Design checkpoint Git evidence ownership is inconsistent.');
+      }
+      return;
+    }
+    if (checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
+      const generation = this.state.previewGenerations.find(
+        (candidate) =>
+          candidate.id === checkpoint.previewGenerationId &&
+          candidate.taskId === design.id &&
+          candidate.state === 'READY' &&
+          candidate.routingState === 'CANDIDATE' &&
+          candidate.source.type === 'EXACT_COMMIT' &&
+          candidate.source.repositoryId === design.repositoryId &&
+          candidate.source.commitSha === checkpoint.commitSha &&
+          candidate.source.designRevisionId === undefined
+      );
+      if (!generation) {
+        throw new Error('Design checkpoint Preview ownership is inconsistent.');
+      }
+      return;
+    }
+    const source = checkpoint.source;
+    const worktree = this.state.worktrees.find(
+      (candidate) =>
+        candidate.id === source.worktreeId &&
+        candidate.id === design.currentWorktreeId &&
+        candidate.taskId === design.id &&
+        candidate.repositoryId === design.repositoryId &&
+        candidate.branchName === source.branchName
+    );
+    if (
+      source.repositoryId !== design.repositoryId ||
+      !worktree ||
+      !isGitObjectId(source.expectedParentCommit) ||
+      !isGitObjectId(source.treeSha) ||
+      ('candidateCommitSha' in source &&
+        source.candidateCommitSha !== undefined &&
+        !isGitObjectId(source.candidateCommitSha))
+    ) {
+      throw new Error('Design checkpoint source ownership is inconsistent.');
+    }
+  }
+
   private assertPreviewPlanReferences(plan: PreviewPlanRecord): void {
     const task = this.state.tasks.find((candidate) => candidate.id === plan.taskId);
     const iteration = this.state.iterations.find(
@@ -2414,35 +4468,83 @@ export class FileTaskStore {
     const existing = this.state.previewGenerations.find(
       (candidate) => candidate.id === generation.id
     );
+    const authority = generation.executionAuthority;
+    const executionDigest = authority.executionDigest;
     const plan = this.state.previewPlans.find(
       (candidate) =>
         candidate.id === generation.planId &&
         candidate.taskId === generation.taskId &&
         candidate.iterationId === generation.iterationId &&
         candidate.worktreeId === generation.worktreeId &&
-        candidate.executionDigest === generation.executionDigest
+        candidate.executionDigest === executionDigest
     );
-    const approval = this.state.previewApprovals.find(
-      (candidate) =>
-        candidate.id === generation.approvalId &&
-        candidate.taskId === generation.taskId &&
-        candidate.executionDigest === generation.executionDigest &&
-        candidate.scope === 'TASK' &&
-        (!candidate.invalidatedAt || Boolean(existing))
-    );
+    const task = this.state.tasks.find((candidate) => candidate.id === generation.taskId);
+    const approval =
+      authority.type === 'USER_APPROVAL'
+        ? this.state.previewApprovals.find(
+            (candidate) =>
+              candidate.id === authority.approvalId &&
+              candidate.taskId === generation.taskId &&
+              candidate.executionDigest === executionDigest &&
+              candidate.scope === 'TASK' &&
+              (!candidate.invalidatedAt || Boolean(existing))
+          )
+        : undefined;
+    const authorityValid =
+      authority.type === 'USER_APPROVAL'
+        ? Boolean(approval) && plan?.planSource.type === 'REPOSITORY_RECIPE'
+        : authority.adapterVersion === 1 &&
+          plan?.planSource.type === 'MANAGED_DESIGN_STATIC' &&
+          task?.kind === 'DESIGN';
+    const sourceValid = (() => {
+      const source = generation.source;
+      if (source.type === 'WORKTREE_SNAPSHOT') {
+        const snapshot = this.state.gitSnapshots.find(
+          (candidate) =>
+            candidate.id === source.gitSnapshotId &&
+            candidate.taskId === generation.taskId &&
+            candidate.iterationId === generation.iterationId &&
+            candidate.worktreeId === generation.worktreeId
+        );
+        return Boolean(
+          snapshot &&
+            snapshot.headSha === source.headSha &&
+            snapshot.dirtyFingerprint === source.dirtyFingerprint &&
+            plan?.planSource.type === 'REPOSITORY_RECIPE'
+        );
+      }
+      const repository = this.state.repositories.find(
+        (candidate) => candidate.id === source.repositoryId
+      );
+      const revision = source.designRevisionId
+        ? this.state.designRevisions.find(
+            (candidate) => candidate.id === source.designRevisionId
+          )
+        : undefined;
+      return Boolean(
+        task?.kind === 'DESIGN' &&
+          repository?.id === task.repositoryId &&
+          repository.kind === 'DESIGN_MANAGED' &&
+          plan?.planSource.type === 'MANAGED_DESIGN_STATIC' &&
+          (!source.designRevisionId ||
+            (revision?.designId === task.id &&
+              revision.commitSha === source.commitSha))
+      );
+    })();
     const authorityChanged =
       existing &&
       (existing.taskId !== generation.taskId ||
         existing.iterationId !== generation.iterationId ||
         existing.worktreeId !== generation.worktreeId ||
         existing.planId !== generation.planId ||
-        existing.approvalId !== generation.approvalId ||
-        existing.executionDigest !== generation.executionDigest);
+        !sameJsonValue(existing.executionAuthority, generation.executionAuthority) ||
+        !sameJsonValue(existing.source, generation.source));
     if (
       !plan ||
-      !approval ||
+      !authorityValid ||
+      !sourceValid ||
       authorityChanged ||
-      !this.state.tasks.some((task) => task.id === generation.taskId)
+      !task
     ) {
       throw new Error('Preview generation references missing or mismatched task authority.');
     }
@@ -2474,7 +4576,10 @@ export class FileTaskStore {
     if (!existing) {
       return undefined;
     }
-    if (existing.creationRequestFingerprint !== metadata.fingerprint) {
+    if (
+      existing.kind !== 'NORMAL' ||
+      existing.creationRequestFingerprint !== metadata.fingerprint
+    ) {
       throw new TaskCreationRequestError(
         'TASK_CREATION_CONFLICT',
         'This task creation retry token was already used for a different request.',
@@ -3141,6 +5246,38 @@ export class FileTaskStore {
   private async createRunInternal(input: CreateRunInput): Promise<RunRecord> {
     await this.init();
 
+    const persistedTask = this.state.tasks.find(
+      (task) => task.id === input.task.id
+    );
+    if (!persistedTask) throw new Error('Run task does not exist.');
+    if (
+      (persistedTask.kind === 'DESIGN') !== (input.mode === 'DESIGN')
+    ) {
+      throw new Error('DESIGN runs and Design tasks must use each other exclusively.');
+    }
+    if (input.mode === 'DESIGN') {
+      const turn = input.generationKey
+        ? this.state.designTurns.find(
+            (candidate) =>
+              candidate.id === input.generationKey &&
+              candidate.designId === persistedTask.id &&
+              candidate.outcome === undefined
+          )
+        : undefined;
+      if (!turn) {
+        throw new Error('DESIGN run requires an unsettled DesignTurn generation key.');
+      }
+      if (
+        this.state.runs.some(
+          (run) =>
+            run.taskId === persistedTask.id &&
+            run.mode === 'DESIGN' &&
+            run.generationKey === input.generationKey
+        )
+      ) {
+        throw new Error('A DESIGN Run already exists for this DesignTurn generation key.');
+      }
+    }
     const persistedSession = this.state.agentSessions.find(
       (session) => session.id === input.session.id
     );
@@ -3211,7 +5348,8 @@ export class FileTaskStore {
       startedAt: now,
       eventCount: 0
     };
-    const startsWorkflow = input.mode !== 'REVIEW';
+    const bindsCurrentTask = input.mode !== 'REVIEW';
+    const advancesWorkflow = bindsCurrentTask && input.mode !== 'DESIGN';
     const reviewedSnapshot = input.beforeGitSnapshotId
       ? this.state.gitSnapshots.find((snapshot) => snapshot.id === input.beforeGitSnapshotId)
       : undefined;
@@ -3222,18 +5360,18 @@ export class FileTaskStore {
         existing.id === input.task.id
           ? {
               ...existing,
-              workflowPhase: startsWorkflow ? 'IN_PROGRESS' : existing.workflowPhase,
-              currentRunId: startsWorkflow ? run.id : existing.currentRunId,
-              currentAgentSessionId: startsWorkflow
+              workflowPhase: advancesWorkflow ? 'IN_PROGRESS' : existing.workflowPhase,
+              currentRunId: bindsCurrentTask ? run.id : existing.currentRunId,
+              currentAgentSessionId: bindsCurrentTask
                 ? input.session.id
                 : existing.currentAgentSessionId,
-              currentIterationId: startsWorkflow
+              currentIterationId: bindsCurrentTask
                 ? input.session.iterationId
                 : existing.currentIterationId,
-              currentWorktreeId: startsWorkflow
+              currentWorktreeId: bindsCurrentTask
                 ? input.session.worktreeId
                 : existing.currentWorktreeId,
-              phaseVersion: startsWorkflow ? existing.phaseVersion + 1 : existing.phaseVersion,
+              phaseVersion: advancesWorkflow ? existing.phaseVersion + 1 : existing.phaseVersion,
               updatedAt: now
             }
           : existing
@@ -3247,7 +5385,7 @@ export class FileTaskStore {
       ]
     };
 
-    if (startsWorkflow) {
+    if (advancesWorkflow) {
       await this.appendEvent(
         createDomainEvent({
           type: 'TRANSITION_REQUESTED',
@@ -3258,7 +5396,7 @@ export class FileTaskStore {
           agentSessionId: input.session.id,
           serverInstanceId: input.serverInstanceId,
           source: 'ui',
-          payload: { fromPhase: input.task.workflowPhase, toPhase: 'IN_PROGRESS' }
+          payload: { fromPhase: persistedTask.workflowPhase, toPhase: 'IN_PROGRESS' }
         }),
         false
       );
@@ -4037,17 +6175,22 @@ export class FileTaskStore {
     return clone(stored);
   }
 
-  async recordBranchPublishRequested(task: Task, worktree: WorktreeRecord): Promise<void> {
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'BRANCH_PUBLISH_REQUESTED',
-        taskId: task.id,
-        iterationId: worktree.iterationId,
-        worktreeId: worktree.id,
-        source: 'github',
-        payload: { branchName: worktree.branchName }
-      })
-    );
+  async recordBranchPublishRequested(
+    task: Task,
+    worktree: WorktreeRecord,
+    remoteName: string,
+    headSha: string
+  ): Promise<BranchPublicationRecord> {
+    return this.recordBranchPublication({
+      taskId: task.id,
+      iterationId: worktree.iterationId,
+      worktreeId: worktree.id,
+      remoteName,
+      branchName: worktree.branchName,
+      remoteRef: `${remoteName}/${worktree.branchName}`,
+      headSha,
+      status: 'PUSHING'
+    });
   }
 
   async recordBranchPublication(
@@ -4706,7 +6849,8 @@ export class FileTaskStore {
     // entry it references. High-volume unmaterialized input remains batch-synced.
     await this.protocolJournal.flush();
     await fs.mkdir(this.baseDir, { recursive: true });
-    const serialized = `${JSON.stringify(this.state, null, 2)}\n`;
+    const publishedSnapshotJson = JSON.stringify(this.state);
+    const serialized = `${publishedSnapshotJson}\n`;
     if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_FILE_BYTES) {
       throw new Error('Task store snapshot exceeds its durable size limit.');
     }
@@ -4732,6 +6876,7 @@ export class FileTaskStore {
       await fs.rename(tmpPath, this.storePath);
       published = true;
       this.publishedState = this.state;
+      this.publishedSnapshotJson = publishedSnapshotJson;
       await syncDirectoryIfSupported(this.baseDir);
       return true;
     } catch (error) {
@@ -5284,6 +7429,19 @@ function sameAbsolutePath(left: string, right: string): boolean {
   return path.isAbsolute(left) && path.isAbsolute(right) && path.relative(left, right) === '';
 }
 
+function isSafeDesignProjectPath(value: string): boolean {
+  return (
+    value.length > 0 &&
+    Buffer.byteLength(value, 'utf8') <= 1_024 &&
+    value.startsWith('assets/') &&
+    !path.posix.isAbsolute(value) &&
+    !value.includes('\\') &&
+    path.posix.normalize(value) === value &&
+    value !== '..' &&
+    !value.startsWith('../')
+  );
+}
+
 function requireCurrentState(state: PersistedState): StoreState {
   if (state.schemaVersion !== TASK_STORE_SCHEMA_VERSION) {
     throw new Error(
@@ -5295,6 +7453,10 @@ function requireCurrentState(state: PersistedState): StoreState {
     'repositories',
     'boards',
     'tasks',
+    'designTurns',
+    'designReferences',
+    'designRevisions',
+    'designSourceActions',
     'iterations',
     'worktrees',
     'gitSnapshots',
@@ -5336,6 +7498,7 @@ function requireCurrentState(state: PersistedState): StoreState {
   const current = state as StoreState;
   validateCurrentStoreRecords(current);
   validatePersistedRelationships(current);
+  validatePersistedDesignRelationships(current);
   validatePersistedRuntimeIdentity(current);
   validatePersistedRepositoryReferences(current);
   validatePersistedBoards(current);
@@ -5810,7 +7973,8 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       interaction.iterationId !== run.iterationId ||
       interaction.iterationId !== session.iterationId ||
       interaction.sessionId !== run.sessionId ||
-      interaction.serverInstanceId !== run.serverInstanceId ||
+      (['PENDING', 'RESPONDING'].includes(interaction.status) &&
+        interaction.serverInstanceId !== run.serverInstanceId) ||
       interaction.requestRawMessage.serverInstanceId !== interaction.serverInstanceId ||
       (interaction.responseRawMessage !== undefined &&
         interaction.responseRawMessage.serverInstanceId !== interaction.serverInstanceId)
@@ -6026,6 +8190,7 @@ function validatePersistedRepositoryReferences(state: StoreState): void {
       repositoryIds.has(repository.id) ||
       typeof repository.path !== 'string' ||
       !repository.path ||
+      !['USER_REGISTERED', 'DESIGN_MANAGED'].includes(repository.kind) ||
       !['AVAILABLE', 'MISSING', 'INVALID', 'DISCONNECTED'].includes(repository.status)
     ) {
       throw new Error(
@@ -6046,6 +8211,460 @@ function validatePersistedRepositoryReferences(state: StoreState): void {
     throw new Error(
       `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: a task or worktree references an unknown repository.`
     );
+  }
+}
+
+function validatePersistedDesignRelationships(state: StoreState): void {
+  const tasks = new Map(state.tasks.map((task) => [task.id, task]));
+  const repositories = new Map(
+    state.repositories.map((repository) => [repository.id, repository])
+  );
+  const artifacts = indexUniqueRecords(state.artifacts, 'artifacts');
+  const attachments = indexUniqueRecords(state.attachments, 'attachments');
+  const runs = indexUniqueRecords(state.runs, 'runs');
+  const references = indexUniqueRecords(state.designReferences, 'designReferences');
+  const turns = indexUniqueRecords(state.designTurns, 'designTurns');
+  const revisions = indexUniqueRecords(state.designRevisions, 'designRevisions');
+  const sourceActions = indexUniqueRecords(
+    state.designSourceActions,
+    'designSourceActions'
+  );
+  const designRunKeys = new Set<string>();
+
+  for (const task of state.tasks) {
+    const repository = repositories.get(task.repositoryId);
+    const copiedDesign =
+      task.sourceDesignId !== undefined &&
+      task.sourceDesignRevisionId !== undefined;
+    if (
+      task.kind === 'DESIGN' &&
+      (repository?.kind !== 'DESIGN_MANAGED' ||
+        !['READY', 'ARCHIVED'].includes(task.workflowPhase) ||
+        task.completionPolicy !== 'MANUAL' ||
+        task.runtimeId !== CODEX_RUNTIME_ID ||
+        !hasRestrictedDesignRequestedSettings(task.agentSettings) ||
+        ((task.sourceDesignId === undefined) !==
+          (task.sourceDesignRevisionId === undefined)) ||
+        (!state.designTurns.some((turn) => turn.designId === task.id) &&
+          !copiedDesign))
+    ) {
+      invalidPersistedRelationship('Design task ownership');
+    }
+    if (
+      task.kind !== 'DESIGN' &&
+      (task.sourceDesignId !== undefined || task.sourceDesignRevisionId !== undefined)
+    ) {
+      invalidPersistedRelationship('copied Design task ownership');
+    }
+    if (copiedDesign) {
+      const sourceTask = tasks.get(task.sourceDesignId!);
+      const sourceRevision = revisions.get(task.sourceDesignRevisionId!);
+      if (
+        (sourceTask && sourceTask.kind !== 'DESIGN') ||
+        (sourceRevision && sourceRevision.designId !== task.sourceDesignId)
+      ) {
+        invalidPersistedRelationship('copied Design source ownership');
+      }
+    }
+    if (task.kind === 'NORMAL' && repository?.kind !== 'USER_REGISTERED') {
+      invalidPersistedRelationship('normal task repository ownership');
+    }
+  }
+  for (const repository of state.repositories) {
+    if (repository.kind !== 'DESIGN_MANAGED') continue;
+    const owners = state.tasks.filter((task) => task.repositoryId === repository.id);
+    if (owners.length < 1 || owners.some((owner) => owner.kind !== 'DESIGN')) {
+      invalidPersistedRelationship('managed Design repository ownership');
+    }
+  }
+
+  for (const session of state.agentSessions) {
+    const task = tasks.get(session.taskId);
+    if (
+      task?.kind === 'DESIGN' &&
+      (!hasRestrictedDesignRequestedSettings(session.requestedSettings) ||
+        hasContradictoryDesignObservedSettings(session.observedSettings))
+    ) {
+      invalidPersistedRelationship('Design session execution policy');
+    }
+  }
+
+  for (const run of state.runs) {
+    const task = tasks.get(run.taskId);
+    if (!task) continue;
+    if (
+      task.kind === 'DESIGN' &&
+      (!hasRestrictedDesignRequestedSettings(run.requestedSettings) ||
+        hasContradictoryDesignObservedSettings(run.observedSettings))
+    ) {
+      invalidPersistedRelationship('Design Run execution policy');
+    }
+    if (run.mode === 'DESIGN') {
+      const turn = run.generationKey ? turns.get(run.generationKey) : undefined;
+      const key = `${run.taskId}:${run.generationKey ?? ''}`;
+      if (
+        task.kind !== 'DESIGN' ||
+        !turn ||
+        turn.designId !== task.id ||
+        designRunKeys.has(key)
+      ) {
+        invalidPersistedRelationship('Design Run generation ownership');
+      }
+      designRunKeys.add(key);
+    } else if (task.kind === 'DESIGN' && run.origin !== 'PROVIDER_SUBAGENT') {
+      invalidPersistedRelationship('Design Run mode');
+    }
+  }
+
+  const turnsByDesign = new Map<string, DesignTurn[]>();
+  for (const turn of state.designTurns) {
+    const design = tasks.get(turn.designId);
+    if (design?.kind !== 'DESIGN') {
+      invalidPersistedRelationship('Design turn owner');
+    }
+    const hasValidMessageLineage =
+      turn.messageSource === 'TASK_PROMPT'
+        ? design.sourceDesignId === undefined &&
+          turn.order === 1 &&
+          turn.messageArtifactId === undefined &&
+          turn.clientMessageId === design.creationToken
+        : turn.order >= 1 &&
+          turn.messageArtifactId !== undefined &&
+          (design.sourceDesignId !== undefined || turn.order > 1);
+    if (
+      !hasValidMessageLineage ||
+      new Set(turn.referenceIds).size !== turn.referenceIds.length ||
+      (turn.attachmentDraftId !== undefined &&
+        !turn.referenceIds.some(
+          (referenceId) =>
+            references.get(referenceId)?.sourceDraftId === turn.attachmentDraftId
+        ))
+    ) {
+      invalidPersistedRelationship('Design turn lineage');
+    }
+    const ownerTurns = turnsByDesign.get(turn.designId) ?? [];
+    if (
+      ownerTurns.some(
+        (existing) =>
+          existing.clientMessageId === turn.clientMessageId ||
+          existing.order === turn.order
+      )
+    ) {
+      invalidPersistedRelationship('Design turn ordering');
+    }
+    ownerTurns.push(turn);
+    turnsByDesign.set(turn.designId, ownerTurns);
+
+    if (turn.messageArtifactId) {
+      assertTaskArtifact(
+        artifacts,
+        turn.designId,
+        turn.messageArtifactId,
+        'design-message',
+        'Design message artifact ownership'
+      );
+    }
+    if (
+      turn.referenceIds.some((referenceId) => {
+        const reference = references.get(referenceId);
+        return !reference || reference.designId !== turn.designId;
+      })
+    ) {
+      invalidPersistedRelationship('Design turn reference ownership');
+    }
+    if (turn.runId) {
+      const run = runs.get(turn.runId);
+      if (
+        !run ||
+        run.taskId !== turn.designId ||
+        run.mode !== 'DESIGN' ||
+        run.generationKey !== turn.id
+      ) {
+        invalidPersistedRelationship('Design turn Run ownership');
+      }
+    }
+    validatePersistedDesignCheckpoint(state, design, turn, runs.get(turn.runId ?? ''));
+  }
+  for (const ownerTurns of turnsByDesign.values()) {
+    const orders = ownerTurns.map((turn) => turn.order).sort((a, b) => a - b);
+    const unsettled = ownerTurns.filter((turn) => turn.outcome === undefined);
+    if (
+      orders.some((order, index) => order !== index + 1) ||
+      unsettled.filter((turn) => turn.runId !== undefined).length > 1 ||
+      unsettled.filter((turn) => turn.runId === undefined).length >
+        DESIGN_LIMITS.queuedTurns
+    ) {
+      invalidPersistedRelationship('Design turn sequence');
+    }
+  }
+
+  for (const reference of state.designReferences) {
+    const design = tasks.get(reference.designId);
+    const attachment = attachments.get(reference.attachmentId);
+    if (
+      design?.kind !== 'DESIGN' ||
+      !attachment ||
+      attachment.taskId !== design.id ||
+      (reference.projectAssetPath !== undefined &&
+        !isSafeDesignProjectPath(reference.projectAssetPath)) ||
+      (reference.firstDeliveredAt !== undefined &&
+        !state.designTurns.some((turn) => {
+          if (!turn.referenceIds.includes(reference.id) || !turn.runId) return false;
+          const run = runs.get(turn.runId);
+          return run?.attachmentSubmissions?.some(
+            (submission) =>
+              submission.attachmentId === reference.attachmentId &&
+              submission.submittedAt === reference.firstDeliveredAt
+          );
+        }))
+    ) {
+      invalidPersistedRelationship('Design reference ownership');
+    }
+  }
+  for (const attachment of state.attachments) {
+    const task = tasks.get(attachment.taskId);
+    if (task?.kind !== 'DESIGN') continue;
+    if (
+      state.designReferences.filter(
+        (reference) => reference.attachmentId === attachment.id
+      ).length !== 1
+    ) {
+      invalidPersistedRelationship('Design attachment reference ownership');
+    }
+  }
+
+  const revisionsByDesign = new Map<string, DesignRevision[]>();
+  for (const revision of state.designRevisions) {
+    const design = tasks.get(revision.designId);
+    if (design?.kind !== 'DESIGN') {
+      invalidPersistedRelationship('Design revision ownership');
+    }
+    const ownerRevisions = revisionsByDesign.get(revision.designId) ?? [];
+    if (ownerRevisions.some((existing) => existing.ordinal === revision.ordinal)) {
+      invalidPersistedRelationship('Design revision identity');
+    }
+    if (revision.changeSource === 'AGENT_TURN') {
+      const turn = turns.get(revision.turnId);
+      const run = runs.get(revision.runId);
+      if (
+        !turn ||
+        turn.designId !== design.id ||
+        turn.outcome !== 'READY' ||
+        !run ||
+        run.taskId !== design.id ||
+        run.id !== turn.runId ||
+        run.mode !== 'DESIGN' ||
+        ownerRevisions.some(
+          (existing) =>
+            existing.changeSource === 'AGENT_TURN' &&
+            (existing.turnId === revision.turnId || existing.runId === revision.runId)
+        )
+      ) {
+        invalidPersistedRelationship('Design agent revision ownership');
+      }
+    } else if (revision.changeSource === 'RESTORE') {
+      const sourceRevision = revisions.get(revision.sourceRevisionId);
+      if (
+        !sourceRevision ||
+        sourceRevision.designId !== design.id ||
+        sourceRevision.ordinal >= revision.ordinal ||
+        state.designRevisions.some(
+          (candidate) =>
+            candidate.id !== revision.id &&
+            candidate.changeSource === 'RESTORE' &&
+            candidate.designId === revision.designId &&
+            candidate.clientActionId === revision.clientActionId
+        )
+      ) {
+        invalidPersistedRelationship('Design restore revision ownership');
+      }
+    } else if (
+      revision.ordinal !== 1 ||
+      !design.sourceDesignId ||
+      !design.sourceDesignRevisionId
+    ) {
+      invalidPersistedRelationship('Design duplicate revision ownership');
+    }
+    ownerRevisions.push(revision);
+    revisionsByDesign.set(revision.designId, ownerRevisions);
+  }
+
+  const sourceActionClientIds = new Set<string>();
+  for (const action of sourceActions.values()) {
+    const design = tasks.get(action.designId);
+    const sourceRevision = revisions.get(action.sourceRevisionId);
+    if (
+      design?.kind !== 'DESIGN' ||
+      !sourceRevision ||
+      sourceRevision.designId !== design.id ||
+      sourceActionClientIds.has(action.clientActionId)
+    ) {
+      invalidPersistedRelationship('Design source action ownership');
+    }
+    sourceActionClientIds.add(action.clientActionId);
+    if (action.kind === 'DUPLICATE') {
+      const target = tasks.get(action.targetDesignId);
+      if (
+        target?.kind !== 'DESIGN' ||
+        target.sourceDesignId !== design.id ||
+        target.sourceDesignRevisionId !== sourceRevision.id ||
+        target.creationToken !== action.clientActionId
+      ) {
+        invalidPersistedRelationship('Design duplicate action ownership');
+      }
+    }
+  }
+  for (const ownerRevisions of revisionsByDesign.values()) {
+    const ordinals = ownerRevisions
+      .map((revision) => revision.ordinal)
+      .sort((a, b) => a - b);
+    if (ordinals.some((ordinal, index) => ordinal !== index + 1)) {
+      invalidPersistedRelationship('Design revision sequence');
+    }
+  }
+
+  for (const generation of state.previewGenerations) {
+    if (generation.source.type !== 'EXACT_COMMIT') continue;
+    const task = tasks.get(generation.taskId);
+    const repository = repositories.get(generation.source.repositoryId);
+    const revision = generation.source.designRevisionId
+      ? revisions.get(generation.source.designRevisionId)
+      : undefined;
+    if (
+      task?.kind !== 'DESIGN' ||
+      repository?.id !== task.repositoryId ||
+      (generation.routingState === 'ACTIVE' &&
+        generation.state === 'READY' &&
+        !revision) ||
+      (revision &&
+        (revision.designId !== task.id ||
+          revision.commitSha !== generation.source.commitSha))
+    ) {
+      invalidPersistedRelationship('Design Preview source ownership');
+    }
+  }
+}
+
+function hasRestrictedDesignRequestedSettings(
+  settings: AgentExecutionSettings
+): boolean {
+  return (
+    settings.runtimeId === CODEX_RUNTIME_ID &&
+    settings.sandbox === 'WORKSPACE_WRITE' &&
+    settings.networkAccess === false &&
+    settings.approvalPolicy === 'never' &&
+    settings.approvalsReviewer === 'user'
+  );
+}
+
+function hasContradictoryDesignObservedSettings(
+  settings: AgentExecutionSettings | undefined
+): boolean {
+  if (!settings) return false;
+  return (
+    (settings.runtimeId !== undefined && settings.runtimeId !== CODEX_RUNTIME_ID) ||
+    (settings.sandbox !== undefined && settings.sandbox !== 'WORKSPACE_WRITE') ||
+    (settings.networkAccess !== undefined && settings.networkAccess !== false) ||
+    (settings.approvalPolicy !== undefined && settings.approvalPolicy !== 'never') ||
+    (settings.approvalsReviewer !== undefined && settings.approvalsReviewer !== 'user')
+  );
+}
+
+function validatePersistedDesignCheckpoint(
+  state: StoreState,
+  design: Task,
+  turn: DesignTurn,
+  run: RunRecord | undefined
+): void {
+  const checkpoint = turn.checkpoint;
+  if (turn.outcome !== undefined) {
+    if (checkpoint || turn.finalOpenedCandidate) {
+      invalidPersistedRelationship('settled Design turn checkpoint');
+    }
+    return;
+  }
+  if (!checkpoint) invalidPersistedRelationship('unsettled Design turn checkpoint');
+  if (checkpoint.boundary === 'QUEUED') {
+    if (turn.runId) invalidPersistedRelationship('queued Design turn Run link');
+    return;
+  }
+  if (!run) invalidPersistedRelationship('Design checkpoint Run ownership');
+  if (turn.finalOpenedCandidate) {
+    const opened = turn.finalOpenedCandidate;
+    const source = opened.source;
+    const worktree = state.worktrees.find(
+      (candidate) =>
+        candidate.id === source.worktreeId &&
+        candidate.id === design.currentWorktreeId &&
+        candidate.taskId === design.id &&
+        candidate.repositoryId === design.repositoryId &&
+        candidate.branchName === source.branchName
+    );
+    const generation = state.previewGenerations.find(
+      (candidate) => candidate.id === opened.previewGenerationId
+    );
+    if (
+      source.repositoryId !== design.repositoryId ||
+      !worktree ||
+      !generation ||
+      generation.taskId !== design.id ||
+      generation.source.type !== 'EXACT_COMMIT' ||
+      generation.source.repositoryId !== design.repositoryId ||
+      generation.source.commitSha !== source.candidateCommitSha ||
+      generation.source.designRevisionId !== undefined ||
+      !(
+        (generation.state === 'READY' && generation.routingState === 'CANDIDATE') ||
+        generation.state === 'STOPPED' ||
+        generation.state === 'FAILED'
+      )
+    ) {
+      invalidPersistedRelationship('opened Design candidate ownership');
+    }
+  }
+  if (checkpoint.boundary === 'RUN_LINKED') return;
+  if (checkpoint.boundary === 'POST_RUN_EVIDENCE_RECORDED') {
+    const snapshot = state.gitSnapshots.find(
+      (candidate) =>
+        candidate.id === checkpoint.gitSnapshotId &&
+        candidate.taskId === design.id &&
+        candidate.worktreeId === design.currentWorktreeId &&
+        candidate.id === run.afterGitSnapshotId
+    );
+    if (!snapshot) invalidPersistedRelationship('Design checkpoint Git evidence ownership');
+    return;
+  }
+  if (checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
+    const generation = state.previewGenerations.find(
+      (candidate) => candidate.id === checkpoint.previewGenerationId
+    );
+    if (!generation) return;
+    const sourceMatches =
+      generation.taskId === design.id &&
+      generation.source.type === 'EXACT_COMMIT' &&
+      generation.source.repositoryId === design.repositoryId &&
+      generation.source.commitSha === checkpoint.commitSha &&
+      generation.source.designRevisionId === undefined;
+    const readyCandidate =
+      generation.state === 'READY' && generation.routingState === 'CANDIDATE';
+    const unavailableCandidate =
+      generation.state === 'STOPPED' || generation.state === 'FAILED';
+    if (!sourceMatches || (!readyCandidate && !unavailableCandidate)) {
+      invalidPersistedRelationship('Design checkpoint Preview ownership');
+    }
+    return;
+  }
+
+  const source = checkpoint.source;
+  const worktree = state.worktrees.find(
+    (candidate) =>
+      candidate.id === source.worktreeId &&
+      candidate.id === design.currentWorktreeId &&
+      candidate.taskId === design.id &&
+      candidate.repositoryId === design.repositoryId &&
+      candidate.branchName === source.branchName
+  );
+  if (source.repositoryId !== design.repositoryId || !worktree) {
+    invalidPersistedRelationship('Design checkpoint source ownership');
   }
 }
 
@@ -6204,6 +8823,587 @@ function clone<T>(value: T): T {
     return value;
   }
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
+  const turns = state.designTurns
+    .filter((turn) => turn.designId === task.id)
+    .sort((left, right) => left.order - right.order);
+  const latestTurn = turns.at(-1);
+  const latestRevision = state.designRevisions
+    .filter((revision) => revision.designId === task.id)
+    .sort((left, right) => left.ordinal - right.ordinal)
+    .at(-1);
+  const run = latestTurn?.runId
+    ? state.runs.find((candidate) => candidate.id === latestTurn.runId)
+    : undefined;
+  const needsInput = state.interactionRequests.some(
+    (interaction) =>
+      interaction.taskId === task.id &&
+      (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
+  );
+  const activeRun =
+    run &&
+    [
+      'QUEUED',
+      'STARTING',
+      'RUNNING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
+      'INTERRUPTING',
+      'RECOVERY_REQUIRED'
+    ].includes(run.status);
+  const sourceAction = state.designSourceActions.find(
+    (action) =>
+      action.designId === task.id ||
+      (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)
+  );
+  const currentPreview = selectCurrentDesignPreview(state, task.id, latestRevision);
+  const previewNeedsRestart = Boolean(
+    latestRevision &&
+      !(
+        currentPreview?.state === 'READY' &&
+        currentPreview.routingState === 'ACTIVE'
+      )
+  );
+  const status: DesignListItem['status'] = task.workflowPhase === 'ARCHIVED'
+    ? 'ARCHIVED'
+    : sourceAction?.failureReason
+      ? 'NEEDS_ATTENTION'
+      : needsInput
+        ? 'NEEDS_INPUT'
+        : latestTurn?.outcome === 'FAILED' ||
+        latestTurn?.outcome === 'NEEDS_ATTENTION' ||
+        (latestTurn?.outcome === 'CANCELED' && !latestRevision) ||
+        previewNeedsRestart
+      ? 'NEEDS_ATTENTION'
+      : sourceAction || (latestTurn && latestTurn.outcome === undefined) || activeRun
+        ? latestRevision
+          ? 'UPDATING'
+          : 'STARTING'
+        : latestRevision
+          ? 'READY'
+          : 'STARTING';
+  const updatedAt = [
+    task.updatedAt,
+    latestTurn?.settledAt,
+    latestTurn?.createdAt,
+    latestRevision?.createdAt,
+    run?.lastEventAt,
+    run?.endedAt
+  ]
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1)!;
+  return {
+    id: task.id,
+    title: task.title,
+    runtimeId: task.runtimeId,
+    status,
+    latestRevision,
+    updatedAt
+  };
+}
+
+async function projectDesignConversationPage(
+  state: StoreState,
+  task: Task,
+  input: Pick<ListDesignConversationRequest, 'beforeCursor' | 'limit'>
+): Promise<DesignConversationPage> {
+  const limit = input.limit ?? DESIGN_LIMITS.transcriptPageSize;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > DESIGN_LIMITS.transcriptPageSize
+  ) {
+    throw new Error('Design conversation page limit is invalid.');
+  }
+  const beforeOrder = decodeDesignConversationCursor(input.beforeCursor);
+  const allTurns = state.designTurns
+    .filter(
+      (turn) =>
+        turn.designId === task.id &&
+        (beforeOrder === undefined || turn.order < beforeOrder)
+    )
+    .sort((left, right) => left.order - right.order);
+  const turns = allTurns.slice(-limit);
+  const entries = await Promise.all(
+    turns.map((turn) => projectDesignConversationEntry(state, task, turn))
+  );
+  return {
+    entries,
+    ...(allTurns.length > turns.length && turns[0]
+      ? { previousCursor: encodeDesignConversationCursor(turns[0].order) }
+      : {})
+  };
+}
+
+async function projectDesignConversationEntry(
+  state: StoreState,
+  task: Task,
+  turn: DesignTurn
+): Promise<DesignConversationEntry> {
+  const run = turn.runId
+    ? state.runs.find((candidate) => candidate.id === turn.runId)
+    : undefined;
+  const artifact = turn.messageArtifactId
+    ? state.artifacts.find((candidate) => candidate.id === turn.messageArtifactId)
+    : undefined;
+  return {
+    turn,
+    userMessage:
+      turn.messageSource === 'TASK_PROMPT'
+        ? task.prompt
+        : artifact
+          ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
+          : '',
+    assistantMessage: run?.finalMessage,
+    runStatus: run?.status,
+    readyRevision:
+      turn.outcome === 'READY'
+        ? state.designRevisions.find(
+            (revision) =>
+              revision.designId === task.id &&
+              revision.changeSource === 'AGENT_TURN' &&
+              revision.turnId === turn.id
+          )
+        : undefined
+  };
+}
+
+async function projectDesignReadyContext(
+  state: StoreState,
+  task: Task,
+  revisions: readonly DesignRevision[]
+): Promise<DesignDetailSnapshot['readyContext']> {
+  return Promise.all(
+    revisions.slice(-DESIGN_LIMITS.readyContextEntries).map(async (revision) => {
+      const sourceRevision = resolveSourceReadyRevision(state, task, revision);
+      return {
+        revision,
+        userRequest: sourceRevision
+          ? await readDesignRevisionRequest(state, sourceRevision)
+          : undefined,
+        sourceRevisionOrdinal:
+          revision.changeSource === 'RESTORE'
+            ? state.designRevisions.find(
+                (candidate) => candidate.id === revision.sourceRevisionId
+              )?.ordinal
+            : undefined
+      };
+    })
+  );
+}
+
+function resolveSourceReadyRevision(
+  state: StoreState,
+  task: Task,
+  revision: DesignRevision
+): DesignRevision | undefined {
+  let current: DesignRevision | undefined = revision;
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    if (current.changeSource === 'AGENT_TURN') return current;
+    if (current.changeSource === 'RESTORE') {
+      const sourceRevisionId: string = current.sourceRevisionId;
+      current = state.designRevisions.find(
+        (candidate) => candidate.id === sourceRevisionId
+      );
+      continue;
+    }
+    current = task.sourceDesignRevisionId
+      ? state.designRevisions.find(
+          (candidate) => candidate.id === task.sourceDesignRevisionId
+        )
+      : undefined;
+  }
+  return undefined;
+}
+
+async function readDesignRevisionRequest(
+  state: StoreState,
+  revision: DesignRevision
+): Promise<string | undefined> {
+  if (revision.changeSource !== 'AGENT_TURN') return undefined;
+  const turn = state.designTurns.find(
+    (candidate) => candidate.id === revision.turnId
+  );
+  const task = state.tasks.find((candidate) => candidate.id === revision.designId);
+  if (!turn || !task) return undefined;
+  if (turn.messageSource === 'TASK_PROMPT') return task.prompt;
+  const artifact = turn.messageArtifactId
+    ? state.artifacts.find((candidate) => candidate.id === turn.messageArtifactId)
+    : undefined;
+  return artifact
+    ? readPrivateArtifactFile(artifact.path, artifact.byteCount)
+    : undefined;
+}
+
+function encodeDesignConversationCursor(order: number): string {
+  return Buffer.from(`order:${order}`, 'utf8').toString('base64url');
+}
+
+function decodeDesignConversationCursor(cursor: string | undefined): number | undefined {
+  if (!cursor) return undefined;
+  const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+  const match = /^order:(\d+)$/u.exec(decoded);
+  const order = match ? Number(match[1]) : Number.NaN;
+  if (!Number.isSafeInteger(order) || order < 1) {
+    throw new Error('Design conversation cursor is invalid.');
+  }
+  return order;
+}
+
+function selectCurrentDesignPreview(
+  state: StoreState,
+  designId: string,
+  latestRevision: DesignRevision | undefined
+): PreviewGenerationRecord | undefined {
+  if (!latestRevision) return undefined;
+  const matching = state.previewGenerations
+    .filter(
+      (generation) =>
+        generation.taskId === designId &&
+        generation.source.type === 'EXACT_COMMIT' &&
+        generation.source.designRevisionId === latestRevision.id
+    )
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return (
+    matching.find(
+      (generation) =>
+        generation.routingState === 'ACTIVE' && generation.state === 'READY'
+    ) ?? matching[0]
+  );
+}
+
+function projectDesignCanvas(
+  state: StoreState,
+  task: Task,
+  latestRevision: DesignRevision | undefined,
+  currentPreview: PreviewGenerationRecord | undefined
+): DesignDetailSnapshot['canvas'] {
+  const sourceFailure = state.designSourceActions.find(
+    (action) =>
+      (action.designId === task.id ||
+        (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)) &&
+      action.failureReason
+  )?.failureReason;
+  const route =
+    currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY'
+      ? currentPreview.routes.find(
+          (candidate) =>
+            candidate.id === latestRevision?.routeId && candidate.state === 'ATTACHED'
+        )
+      : undefined;
+  if (currentPreview && route) {
+    return {
+      state: 'READY',
+      target: { generationId: currentPreview.id, routeId: route.id },
+      detail: sourceFailure
+    };
+  }
+  if (latestRevision) {
+    return {
+      state: 'RESTART_REQUIRED',
+      detail: 'The last ready revision needs a new Preview process.'
+    };
+  }
+  if (
+    state.designTurns.some(
+      (turn) => turn.designId === task.id && turn.outcome === undefined
+    )
+  ) {
+    return { state: 'UPDATING' };
+  }
+  return { state: 'EMPTY', detail: sourceFailure };
+}
+
+function projectDesignActions(
+  state: StoreState,
+  task: Task,
+  latestRevision: DesignRevision | undefined,
+  currentPreview: PreviewGenerationRecord | undefined
+): DesignDetailSnapshot['actions'] {
+  const unsettledTurns = state.designTurns
+    .filter((turn) => turn.designId === task.id && turn.outcome === undefined)
+    .sort((left, right) => left.order - right.order);
+  const queuedTurnCount = unsettledTurns.filter((turn) => !turn.runId).length;
+  const relatedSourceActions = state.designSourceActions.filter(
+    (action) =>
+      action.designId === task.id ||
+      (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)
+  );
+  const canRefine =
+    task.workflowPhase === 'READY' &&
+    queuedTurnCount < DESIGN_LIMITS.queuedTurns &&
+    relatedSourceActions.length === 0;
+  const previewIsReady =
+    currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY';
+  const currentRun = task.currentRunId
+    ? state.runs.find((run) => run.id === task.currentRunId)
+    : undefined;
+  const activeRun =
+    currentRun &&
+    [
+      'QUEUED',
+      'STARTING',
+      'RUNNING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
+      'INTERRUPTING',
+      'RECOVERY_REQUIRED'
+    ].includes(currentRun.status)
+      ? currentRun
+      : undefined;
+  const stopTurn = activeRun
+    ? unsettledTurns.find((turn) => turn.runId === activeRun.id)
+    : undefined;
+  const canStop = Boolean(stopTurn && activeRun?.status !== 'INTERRUPTING');
+  const hasActiveSourceAction = relatedSourceActions.some(
+    (action) => !action.failureReason
+  );
+  const sourceIdle = unsettledTurns.length === 0 && !activeRun && !hasActiveSourceAction;
+  const sourceActionFree = relatedSourceActions.length === 0;
+  const isFailedDuplicateTarget = relatedSourceActions.some(
+    (action) =>
+      action.kind === 'DUPLICATE' &&
+      action.targetDesignId === task.id &&
+      Boolean(action.failureReason)
+  );
+  const canDelete = sourceIdle && (sourceActionFree || isFailedDuplicateTarget);
+  return {
+    canRefine,
+    refineDisabledReason: canRefine
+      ? undefined
+      : task.workflowPhase !== 'READY'
+        ? 'This Design is archived.'
+        : relatedSourceActions.length > 0
+          ? 'Resolve the unfinished Design action before sending a message.'
+          : 'The Design message queue is full.',
+    queuedTurnCount,
+    canStop,
+    stopTurnId: canStop ? stopTurn?.id : undefined,
+    canRestart: Boolean(latestRevision && !previewIsReady),
+    canRestore: Boolean(
+      latestRevision &&
+        sourceIdle &&
+        task.workflowPhase === 'READY' &&
+        !relatedSourceActions.some((action) => action.kind === 'DUPLICATE')
+    ),
+    canDuplicate: Boolean(latestRevision && sourceIdle && sourceActionFree),
+    canArchive: sourceIdle && sourceActionFree && task.workflowPhase === 'READY',
+    canDelete,
+    deleteDisabledReason: canDelete
+      ? undefined
+      : relatedSourceActions.length > 0
+        ? 'Resolve or remove the unfinished Design action before deletion.'
+        : 'Stop and settle the current Design turn before deletion.'
+  };
+}
+
+function validateDesignSourceActionRequest(input: {
+  designId: string;
+  revisionId: string;
+  clientActionId: string;
+}): void {
+  if (
+    !UUID_FILE_SEGMENT_PATTERN.test(input.designId) ||
+    !UUID_FILE_SEGMENT_PATTERN.test(input.revisionId) ||
+    !isTaskCreationToken(input.clientActionId)
+  ) {
+    throw new Error('Design action request is invalid.');
+  }
+}
+
+function duplicateDesignFingerprint(input: DuplicateDesignRequest): string {
+  return createHash('sha256')
+    .update(
+      stableJsonStringify({
+        kind: 'DESIGN_DUPLICATE',
+        designId: input.designId,
+        revisionId: input.revisionId
+      })!
+    )
+    .digest('hex');
+}
+
+function duplicateDesignTitle(title: string): string {
+  const suffix = ' copy';
+  return title.length + suffix.length <= 120
+    ? `${title}${suffix}`
+    : `${title.slice(0, 120 - suffix.length).trimEnd()}${suffix}`;
+}
+
+function boundedDesignActionReason(reason: string): string {
+  const trimmed = reason.trim() || 'The Design source action did not finish.';
+  return trimmed.length <= 1_000 ? trimmed : `${trimmed.slice(0, 997)}...`;
+}
+
+function assertDesignSourceActionTransition(
+  current: DesignSourceAction,
+  next: DesignSourceAction,
+  state: StoreState
+): void {
+  if (
+    current.kind !== next.kind ||
+    current.id !== next.id ||
+    current.designId !== next.designId ||
+    current.clientActionId !== next.clientActionId ||
+    current.sourceRevisionId !== next.sourceRevisionId ||
+    current.createdAt !== next.createdAt ||
+    current.failureReason !== next.failureReason ||
+    (current.kind === 'DUPLICATE' &&
+      (next.kind !== 'DUPLICATE' || current.targetDesignId !== next.targetDesignId)) ||
+    !isCanonicalIsoTimestamp(next.updatedAt)
+  ) {
+    throw new Error('Design source action ownership cannot change.');
+  }
+  const allowed =
+    current.kind === 'RESTORE'
+      ? {
+          RECORDED: ['SOURCE_CAPTURED'],
+          SOURCE_CAPTURED: ['COMMIT_PUBLISHED'],
+          COMMIT_PUBLISHED: ['WORKTREE_MATERIALIZED'],
+          WORKTREE_MATERIALIZED: ['PREVIEW_CANDIDATE_READY'],
+          PREVIEW_CANDIDATE_READY: ['PREVIEW_CANDIDATE_READY']
+        }
+      : {
+          TARGET_CREATED: ['WORKTREE_CREATED'],
+          WORKTREE_CREATED: ['PREVIEW_CANDIDATE_READY'],
+          PREVIEW_CANDIDATE_READY: ['PREVIEW_CANDIDATE_READY']
+        };
+  const nextBoundary = next.checkpoint.boundary;
+  if (!(allowed[current.checkpoint.boundary] as readonly string[]).includes(nextBoundary)) {
+    throw new Error(
+      `Invalid Design source action transition: ${current.checkpoint.boundary} -> ${nextBoundary}`
+    );
+  }
+  if (
+    current.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY' &&
+    next.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY'
+  ) {
+    const priorGenerationId = current.checkpoint.previewGenerationId;
+    const prior = state.previewGenerations.find(
+      (generation) => generation.id === priorGenerationId
+    );
+    if (prior && !['STOPPED', 'FAILED'].includes(prior.state)) {
+      throw new Error('A live Design source candidate cannot be replaced.');
+    }
+  }
+}
+
+function assertDesignCheckpointTransition(
+  current: DesignTurnCheckpoint | undefined,
+  next: DesignTurnCheckpoint
+): void {
+  const allowed: Record<DesignTurnCheckpoint['boundary'], DesignTurnCheckpoint['boundary'][]> = {
+    QUEUED: ['RUN_LINKED'],
+    RUN_LINKED: ['POST_RUN_EVIDENCE_RECORDED'],
+    POST_RUN_EVIDENCE_RECORDED: ['SOURCE_CAPTURED', 'PREVIEW_CANDIDATE_READY'],
+    SOURCE_CAPTURED: ['REF_UPDATED_INDEX_PENDING'],
+    REF_UPDATED_INDEX_PENDING: ['INDEX_REPAIRED'],
+    INDEX_REPAIRED: ['PREVIEW_CANDIDATE_READY'],
+    PREVIEW_CANDIDATE_READY: []
+  };
+  if (!current || !allowed[current.boundary].includes(next.boundary)) {
+    throw new Error(
+      `Invalid Design turn checkpoint transition: ${current?.boundary ?? 'NONE'} -> ${next.boundary}`
+    );
+  }
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  return stableJsonStringify(left) === stableJsonStringify(right);
+}
+
+function isGitObjectId(value: string): boolean {
+  return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+}
+
+function isCanonicalIsoTimestamp(value: string): boolean {
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+
+function projectBoardTask(task: Task): BoardTaskSummary {
+  const review = task.projection.agentReview;
+  const findingCounts: BoardTaskSummary['projection']['agentReview']['findingCounts'] = {};
+  for (const finding of review?.result?.findings ?? []) {
+    findingCounts[finding.severity] = (findingCounts[finding.severity] ?? 0) + 1;
+  }
+  return {
+    id: task.id,
+    title: task.title,
+    repositoryId: task.repositoryId,
+    workflowPhase: task.workflowPhase,
+    completionPolicy: task.completionPolicy,
+    currentRunId: task.currentRunId,
+    forkedFromTaskId: task.forkedFromTaskId,
+    updatedAt: task.updatedAt,
+    projection: {
+      agentRun: task.projection.agentRun,
+      worktree: task.projection.worktree,
+      git: task.projection.git,
+      githubPullRequest: task.projection.githubPullRequest,
+      githubPullRequestNumber: task.projection.githubPullRequestNumber,
+      ciChecks: task.projection.ciChecks,
+      reviews: task.projection.reviews,
+      merge: task.projection.merge,
+      health: task.projection.health,
+      summary: task.projection.summary,
+      implementationRetry: task.projection.implementationRetry,
+      updatedAt: task.projection.updatedAt,
+      agentReview: {
+        status: review?.status ?? 'NOT_RUN',
+        runId: review?.runId,
+        hasResult: Boolean(review?.result),
+        findingCounts
+      }
+    }
+  };
+}
+
+function selectPreviewTaskRouteOptions(
+  state: StoreState,
+  consumerTaskId: string
+): TaskDetailSnapshot['previewTaskRoutes'] {
+  const options: TaskDetailSnapshot['previewTaskRoutes'] = [];
+  for (const task of state.tasks) {
+    if (task.id === consumerTaskId) continue;
+    const plan = state.previewPlans
+      .filter(
+        (candidate) =>
+          candidate.taskId === task.id &&
+          candidate.iterationId === task.currentIterationId
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    if (!plan) continue;
+    const activeGeneration = state.previewGenerations.find(
+      (candidate) =>
+        candidate.taskId === task.id &&
+        candidate.iterationId === task.currentIterationId &&
+        candidate.routingState === 'ACTIVE' &&
+        candidate.state === 'READY'
+    );
+    for (const route of plan.executionPlan.routes) {
+      options.push({
+        taskId: task.id,
+        taskTitle: task.title,
+        routeId: route.id,
+        available: Boolean(
+          activeGeneration?.routes.some(
+            (candidate) => candidate.id === route.id && candidate.state === 'ATTACHED'
+          )
+        )
+      });
+    }
+  }
+  return options.sort(
+    (left, right) =>
+      left.taskTitle.localeCompare(right.taskTitle) ||
+      left.routeId.localeCompare(right.routeId)
+  );
 }
 
 function exactArrayBuffer(value: Uint8Array): ArrayBuffer {

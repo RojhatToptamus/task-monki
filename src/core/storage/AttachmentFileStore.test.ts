@@ -51,6 +51,77 @@ describe('AttachmentFileStore', () => {
     await expect(store.verifyTask('task-two', prepared.records)).rejects.toBeTruthy();
   });
 
+  it('appends a post-create draft to the same task-owned attachment directory', async () => {
+    const root = await temporaryDirectory();
+    const store = new AttachmentFileStore(root);
+    const firstDraft = await store.createDraft();
+    await store.stageBytes({
+      draftId: firstDraft.id,
+      clientToken: 'client-token-append-0001',
+      displayName: 'brief.txt',
+      bytes: Buffer.from('first')
+    });
+    const initial = await store.prepareDraftForTask(firstDraft.id, 'task-append');
+    await store.finalizeDraftForTask(initial);
+
+    const nextDraft = await store.createDraft();
+    await store.stageBytes({
+      draftId: nextDraft.id,
+      clientToken: 'client-token-append-0002',
+      displayName: 'palette.json',
+      bytes: Buffer.from('{"accent":"green"}')
+    });
+    const appended = await store.prepareDraftForExistingTask(
+      nextDraft.id,
+      'task-append',
+      initial.records
+    );
+
+    await expect(
+      store.verifyTask('task-append', [...initial.records, ...appended.records])
+    ).resolves.toHaveLength(2);
+    await expect(
+      store.verifyTaskSelection('task-append', [appended.records[0]!])
+    ).resolves.toEqual([
+      expect.objectContaining({
+        record: expect.objectContaining({ ordinal: 1, displayName: 'palette.json' })
+      })
+    ]);
+    expect(appended.records[0]).toMatchObject({
+      taskId: 'task-append',
+      ordinal: 1,
+      displayName: 'palette.json'
+    });
+    await store.finalizeDraftForExistingTask(appended);
+    await expect(store.listDraft(nextDraft.id)).rejects.toMatchObject({
+      code: 'ATTACHMENT_DRAFT_NOT_FOUND'
+    });
+  });
+
+  it('rolls back a first post-create append without removing its staged draft', async () => {
+    const root = await temporaryDirectory();
+    const store = new AttachmentFileStore(root);
+    const draft = await store.createDraft();
+    await store.stageBytes({
+      draftId: draft.id,
+      clientToken: 'client-token-append-rollback-0001',
+      displayName: 'reference.md',
+      bytes: Buffer.from('# Reference')
+    });
+    const prepared = await store.prepareDraftForExistingTask(
+      draft.id,
+      'blank-design',
+      []
+    );
+
+    await store.rollbackDraftForExistingTask(prepared);
+
+    await expect(store.listDraft(draft.id)).resolves.toMatchObject({ id: draft.id });
+    await expect(
+      fs.access(path.join(root, 'attachments', 'tasks', 'blank-design'))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('copies task-owned files for a fork instead of sharing references', async () => {
     const root = await temporaryDirectory();
     const store = new AttachmentFileStore(root);
@@ -146,6 +217,36 @@ describe('AttachmentFileStore', () => {
     await expect(store.reconcile([])).resolves.toEqual({ purgedBlobs: 1, purgedDrafts: 1 });
     expect(await fs.readdir(path.join(root, 'attachments', 'staging'))).toEqual([]);
     expect(await fs.readdir(path.join(root, 'attachments', 'tasks'))).toEqual([]);
+  });
+
+  it('retains only staging that belongs to a saved Design draft', async () => {
+    const root = await temporaryDirectory();
+    const store = new AttachmentFileStore(root);
+    const retained = await store.createDraft();
+    await store.stageBytes({
+      draftId: retained.id,
+      clientToken: 'client-token-retained-draft',
+      displayName: 'saved.txt',
+      bytes: Buffer.from('saved draft')
+    });
+    const abandoned = await store.createDraft();
+    await store.stageBytes({
+      draftId: abandoned.id,
+      clientToken: 'client-token-abandoned-draft',
+      displayName: 'abandoned.txt',
+      bytes: Buffer.from('abandoned draft')
+    });
+
+    await expect(store.reconcile([], new Set([retained.id]))).resolves.toEqual({
+      purgedBlobs: 0,
+      purgedDrafts: 1
+    });
+    await expect(store.listDraft(retained.id)).resolves.toMatchObject({
+      attachments: [expect.objectContaining({ displayName: 'saved.txt' })]
+    });
+    await expect(store.listDraft(abandoned.id)).rejects.toMatchObject({
+      code: 'ATTACHMENT_DRAFT_NOT_FOUND'
+    });
   });
 
   it('drains admitted work while rejecting operations after close begins', async () => {

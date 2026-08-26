@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { AgentRuntimeResolutionDiagnostics } from '../../../shared/agent';
 import { redactProcessDiagnostic } from '../../process/ProcessSupervisor';
-import { execFilePortable } from '../../process/portableChildProcess';
+import { execFileOwnedPortable } from '../../process/ownedProcess';
 import { sensitiveEnvironmentValues } from '../ProviderEnvironmentPolicy';
 import type { AcpRuntimeProfile } from './AcpRuntimeProfiles';
 
@@ -89,7 +89,7 @@ export async function resolveAcpRuntime(
 
     let version: string | undefined;
     try {
-      const { stdout, stderr } = await execFilePortable(
+      const { stdout, stderr } = await execFileOwnedPortable(
         candidate.executable,
         [...profile.versionArgv],
         {
@@ -99,8 +99,7 @@ export async function resolveAcpRuntime(
           // an arbitrary candidate executable.
           env: probeEnvironment,
           timeout: ACP_DISCOVERY_PROBE_TIMEOUT_MS,
-          maxBuffer: MAX_VERSION_OUTPUT_BYTES,
-          windowsHide: true
+          maxBuffer: MAX_VERSION_OUTPUT_BYTES
         }
       );
       foundExecutable = true;
@@ -177,12 +176,11 @@ async function proveLaunchContract(
   cwd: string
 ): Promise<string> {
   const proof = profile.launchContractProbe;
-  const { stdout, stderr } = await execFilePortable(executable, [...proof.argv], {
+  const { stdout, stderr } = await execFileOwnedPortable(executable, [...proof.argv], {
     cwd,
     env: probeEnvironment,
     timeout: ACP_DISCOVERY_PROBE_TIMEOUT_MS,
-    maxBuffer: MAX_VERSION_OUTPUT_BYTES,
-    windowsHide: true
+    maxBuffer: MAX_VERSION_OUTPUT_BYTES
   });
   const output = `${stdout}\n${stderr}`;
   const missing = proof.requiredOutput

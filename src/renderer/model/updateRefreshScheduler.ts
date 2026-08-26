@@ -1,6 +1,91 @@
+import type { AppUpdateEvent } from '../../shared/contracts';
+
 export interface UpdateRefreshScheduler {
   request(): void;
+  cancelPending(): void;
   dispose(): void;
+}
+
+export type TaskDataRefreshUrgency = 'NONE' | 'IMMEDIATE' | 'SELECTED_ACTIVITY';
+
+export interface TaskDataRefreshPlan {
+  board: boolean;
+  detail: TaskDataRefreshUrgency;
+}
+
+export function taskDataRefreshPlan(
+  event: AppUpdateEvent,
+  detail: { open: boolean; taskId?: string }
+): TaskDataRefreshPlan {
+  const selectedTaskEvent =
+    detail.open &&
+    Boolean(detail.taskId) &&
+    event.scope.kind === 'TASK' &&
+    event.taskId === detail.taskId;
+  if (event.type === 'run.output') {
+    return { board: false, detail: 'NONE' };
+  }
+  if (event.type === 'run.activity') {
+    return {
+      board: false,
+      detail: selectedTaskEvent ? 'SELECTED_ACTIVITY' : 'NONE'
+    };
+  }
+  if (
+    event.type === 'runtime.updated' ||
+    event.type === 'preview.recipe-generation.updated' ||
+    event.type === 'preview.log.updated' ||
+    event.type.startsWith('discourse.')
+  ) {
+    return { board: false, detail: 'NONE' };
+  }
+  if (
+    event.type === 'agent.goal.updated' ||
+    event.type === 'run.diagnostic' ||
+    event.type === 'prompt.refined'
+  ) {
+    return {
+      board: false,
+      detail: selectedTaskEvent ? 'IMMEDIATE' : 'NONE'
+    };
+  }
+  if (event.type === 'preview.updated') {
+    return {
+      board: false,
+      detail: detail.open ? 'IMMEDIATE' : 'NONE'
+    };
+  }
+  if (event.type === 'projection.updated') {
+    return {
+      board: true,
+      detail: detail.open ? 'IMMEDIATE' : 'NONE'
+    };
+  }
+  if (event.type === 'repository.updated' || event.type === 'task.updated') {
+    return {
+      board: true,
+      detail: detail.open ? 'IMMEDIATE' : 'NONE'
+    };
+  }
+  if (event.type === 'task.deleted') {
+    return {
+      board: true,
+      detail:
+        detail.open && !selectedTaskEvent
+          ? 'IMMEDIATE'
+          : 'NONE'
+    };
+  }
+  if (
+    event.type === 'board.updated' ||
+    event.type === 'board.deleted'
+  ) {
+    return { board: true, detail: 'NONE' };
+  }
+  return {
+    board: true,
+    detail: selectedTaskEvent ? 'IMMEDIATE' : 'NONE'
+  };
 }
 
 export interface UpdateRefreshSchedulerOptions {
@@ -48,6 +133,14 @@ export function createUpdateRefreshScheduler({
       });
   };
 
+  const cancelPending = () => {
+    pending = false;
+    if (timer) {
+      clearTimer(timer);
+      timer = undefined;
+    }
+  };
+
   return {
     request() {
       if (disposed) {
@@ -56,13 +149,10 @@ export function createUpdateRefreshScheduler({
       pending = true;
       schedule();
     },
+    cancelPending,
     dispose() {
       disposed = true;
-      pending = false;
-      if (timer) {
-        clearTimer(timer);
-        timer = undefined;
-      }
+      cancelPending();
     }
   };
 }

@@ -1,14 +1,26 @@
+import { isDeepStrictEqual } from 'node:util';
 import type {
   Board,
+  BoardSnapshot,
   AcceptPreviewRecipeDraftRequest,
   AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
+  CancelDesignTurnRequest,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateBoardRequest,
   CreateTaskRequest,
+  CreateBlankDesignRequest,
+  AddDesignReferencesRequest,
+  RemoveDesignReferenceRequest,
+  ImportDesignReferenceAssetRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DesignDetailSnapshot,
+  DesignConversationPage,
+  DesignDraftRecord,
+  DesignListItem,
+  DeleteDesignDraftRequest,
   DisconnectRepositoryRequest,
   DiscardPreviewRecipeDraftRequest,
   GitSnapshotRecord,
@@ -17,6 +29,7 @@ import type {
   GetPreviewRecipeGenerationRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
+  BranchPublicationRecord,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
   ReadProtocolMessageRequest,
@@ -29,6 +42,7 @@ import type {
   RunRecord,
   StartRunRequest,
   Task,
+  TaskDetailSnapshot,
   TaskSnapshot,
   TransitionTaskRequest,
   WorktreeRecord,
@@ -37,8 +51,16 @@ import type {
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RetryRunRequest,
+  RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
+  ListDesignConversationRequest,
+  SaveDesignDraftRequest,
   StartReviewRequest,
   SteerRunRequest,
+  SubmitDesignTurnRequest,
   SyncAgentGoalRequest,
   AgentExecutionSettings,
   AgentRunMode,
@@ -66,6 +88,7 @@ import type {
   PreviewRecipeValidation,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   RetryPreviewSetupRequest,
   ResolvePreviewRequest,
@@ -89,7 +112,7 @@ import {
   isImplementationRunMode,
   normalizePullRequestTitle,
 } from '../../shared/contracts';
-import type { AgentRuntimeId } from '../../shared/agent';
+import { CODEX_RUNTIME_ID, type AgentRuntimeId } from '../../shared/agent';
 import type {
   AppendHumanDiscourseMessageRequest,
   ConfirmDiscourseWaveContextRequest,
@@ -118,6 +141,7 @@ import {
   buildContinuationPrompt,
   buildForkAlternativeTaskPrompt,
   buildInitialRunPrompt,
+  buildRetryPrompt,
   buildSteerInstruction
 } from '../../shared/promptTemplates';
 import { WorktreeService } from '../worktree/WorktreeService';
@@ -141,8 +165,12 @@ import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
 import { PreviewManager, type PreviewTaskContext } from '../preview/PreviewManager';
 import { createPreviewManager } from '../preview/createPreviewManager';
+import type { DesignCanvasCutoverFence } from '../preview/DesignCanvasCutoverFence';
 import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
-import type { PreviewUrlHost } from '../preview/runtime/PreviewOpenService';
+import type {
+  PreviewUrlHost,
+  ResolvedPreviewRoute
+} from '../preview/runtime/PreviewOpenService';
 import {
   assertAttachmentSandboxSupportsDelivery,
   type AgentTurnAttachment
@@ -156,6 +184,7 @@ import {
 } from '../agent/BrowserDevAgentBoundary';
 import {
   assertContinuable,
+  assertForkable,
   assertRetryable,
   followUpSettings,
   mergeRunSettings,
@@ -168,6 +197,7 @@ import {
   transitionBlocker
 } from './TaskTransitionPolicy';
 import { RuntimeOperationGate } from './RuntimeOperationGate';
+import { projectTaskDetailForClient } from './TaskDetailClientProjection';
 import { DiscourseRuntimeHost } from './DiscourseRuntimeHost';
 import {
   builtInRuntimeExecutableOverrides,
@@ -175,6 +205,13 @@ import {
   createScopedTurnRouter,
   findCodexRuntimeAdapter
 } from './AgentRuntimeComposition';
+import { DesignSourceService } from '../design/DesignSourceService';
+import { DesignUpdateCoordinator } from '../design/DesignUpdateCoordinator';
+import { FileDesignDraftStore } from '../design/FileDesignDraftStore';
+import {
+  AgentBrowserRuntime,
+  type DesignBrowserOwner
+} from '../design/AgentBrowserRuntime';
 
 type TaskManagerLifecycleState =
   | 'NEW'
@@ -196,6 +233,11 @@ export class TaskManagerService {
   private readonly discourseHost?: DiscourseRuntimeHost;
   private readonly codexAdapter?: CodexAppServerAdapter;
   private readonly worktrees: WorktreeService;
+  private readonly designWorktrees?: WorktreeService;
+  private readonly designSource?: DesignSourceService;
+  private readonly designUpdates?: DesignUpdateCoordinator;
+  private readonly designBrowser?: DesignBrowserOwner;
+  private readonly designDrafts?: FileDesignDraftStore;
   private readonly github: GitHubService;
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
@@ -211,6 +253,7 @@ export class TaskManagerService {
   private readonly disposeAgentEventListener: () => void;
   private readonly agentProviderStartupDisabledReason?: string;
   private readonly taskActionLocks = new Map<string, TaskActionWork>();
+  private readonly designCreationLocks = new Map<string, Promise<unknown>>();
   private readonly activeControlActions = new Set<Promise<unknown>>();
   private readonly activeAttachmentDrafts = new Set<string>();
   private lifecycleState: TaskManagerLifecycleState = 'NEW';
@@ -245,6 +288,7 @@ export class TaskManagerService {
       previewLauncherPath?: string;
       previewLauncherExecPath?: string;
       previewLauncherEnv?: NodeJS.ProcessEnv;
+      managedDesignStaticServerPath?: string;
       previewOciExecutablePath?: string;
       previewOciContextName?: string;
       previewOciEnv?: NodeJS.ProcessEnv;
@@ -254,6 +298,17 @@ export class TaskManagerService {
       previewReconcile?: boolean;
       allowAgentNetworkAccess?: boolean;
       agentProviderStartupDisabledReason?: string;
+      designRepositoryRoot?: string;
+      designWorktreeRoot?: string;
+      designCanvasFence?: DesignCanvasCutoverFence;
+      designSkillRoot?: string;
+      designDraftRoot?: string;
+      designBrowserRuntime?: DesignBrowserOwner;
+      designBrowserExecutablePath?: string;
+      designBrowserChromeExecutablePath?: string;
+      designBrowserScratchRoot?: string;
+      designBrowserSocketRoot?: string;
+      designBrowserRequireCodeSignature?: boolean;
     } = {}
   ) {
     if (Boolean(options.agentRuntimeStore) !== Boolean(options.discourseStore)) {
@@ -294,6 +349,7 @@ export class TaskManagerService {
           path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
         launcherExecPath: options.previewLauncherExecPath,
         launcherEnv: options.previewLauncherEnv,
+        managedDesignStaticServerPath: options.managedDesignStaticServerPath,
         ociExecutablePath:
           options.previewOciExecutablePath ?? process.env.TASK_MANAGER_OCI_BIN,
         ociContextName:
@@ -310,7 +366,8 @@ export class TaskManagerService {
         acpExecutablePaths: options.acpExecutablePaths,
         browserDevBoundary: this.browserDevAgentBoundary,
         codexToolSettings: this.appSettings.codexExternalTools,
-        scopedRuntimeStore: options.agentRuntimeStore
+        scopedRuntimeStore: options.agentRuntimeStore,
+        designSkillRoot: options.designSkillRoot
       });
     this.codexAdapter = findCodexRuntimeAdapter(runtimeAdapters);
     this.runtimeRegistry = new AgentRuntimeRegistry(
@@ -351,10 +408,52 @@ export class TaskManagerService {
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
         path.join(os.tmpdir(), 'task-monki-worktrees')
     );
+    if (options.designRepositoryRoot || options.designWorktreeRoot || options.designCanvasFence) {
+      if (
+        !options.designRepositoryRoot ||
+        !options.designWorktreeRoot ||
+        !options.designCanvasFence
+      ) {
+        throw new Error(
+          'Design Mode requires managed repository, worktree, and canvas owners together.'
+        );
+      }
+      this.designWorktrees = new WorktreeService(options.designWorktreeRoot);
+      this.designSource = new DesignSourceService({
+        repositoryRoot: options.designRepositoryRoot,
+        worktreeRoot: options.designWorktreeRoot
+      });
+      this.designDrafts = new FileDesignDraftStore(
+        options.designDraftRoot ??
+          path.join(path.dirname(options.designRepositoryRoot), 'design-drafts')
+      );
+      this.designBrowser =
+        options.designBrowserRuntime ??
+        createDesignBrowserRuntime({
+          executablePath: options.designBrowserExecutablePath,
+          browserExecutablePath: options.designBrowserChromeExecutablePath,
+          scratchRoot: options.designBrowserScratchRoot,
+          socketRoot: options.designBrowserSocketRoot,
+          requireCodeSignature: options.designBrowserRequireCodeSignature
+        });
+      this.designUpdates = new DesignUpdateCoordinator({
+        store,
+        agents: this.agents,
+        previews: this.previews,
+        source: this.designSource,
+        browser: this.designBrowser,
+        fence: options.designCanvasFence,
+        events: this.events,
+        refreshGitEvidence: (designId) => this.refreshDesignGitEvidence(designId),
+        ensurePostRunEvidence: (runId) => this.ensurePostRunEvidence(runId),
+        ensureDesignWorktree: (designId) => this.ensureDesignWorktree(designId)
+      });
+    }
     this.github = new GitHubService(options.ghPath);
     this.disposeAgentEventListener = this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
         this.trackPostRunEvidence(event.runId);
+        void this.designUpdates?.handleRunTerminal(event.runId).catch(() => undefined);
         this.scheduleDeferredCodexRuntimeRestart(event.runId);
       }
     });
@@ -389,8 +488,37 @@ export class TaskManagerService {
   }
 
   private async initializeInternal(): Promise<void> {
+    let designDrafts: DesignDraftRecord[] = [];
+    if (this.designDrafts) {
+      await this.designDrafts.init();
+      designDrafts = await this.designDrafts.list();
+      this.store.retainAttachmentDrafts(
+        designDrafts.flatMap((draft) =>
+          draft.attachmentDraftId ? [draft.attachmentDraftId] : []
+        )
+      );
+    }
     await this.store.init();
+    if (this.designDrafts) {
+      await this.reconcileDesignDrafts(designDrafts);
+    }
     this.assertInitializing();
+    if (this.designSource) {
+      const stored = await this.store.snapshot();
+      await this.designSource.reconcileOrphanedRepositories(stored.repositories);
+      this.assertInitializing();
+    }
+    if (this.designBrowser) {
+      await this.designBrowser.attest();
+      this.assertInitializing();
+      await this.designBrowser.recover();
+      this.assertInitializing();
+      if (this.codexAdapter && this.designUpdates) {
+        this.codexAdapter.setDesignBrowserToolHandler((input) =>
+          this.designUpdates!.inspectDesign(input)
+        );
+      }
+    }
     this.appSettings = await this.loadBoundarySafeAppSettings();
     this.assertInitializing();
     await this.assertRuntimeEnablementValid(this.appSettings);
@@ -414,6 +542,10 @@ export class TaskManagerService {
         });
         this.assertInitializing();
       }
+    }
+    if (!this.agentProviderStartupDisabledReason) {
+      await this.reconcileTaskStateOnStartup();
+      this.assertInitializing();
     }
     await this.agents.initialize(
       [this.appSettings.defaultRuntimeId],
@@ -462,6 +594,219 @@ export class TaskManagerService {
       )
     );
     this.assertInitializing();
+    await this.reconcileDesignWorkspaces();
+    this.assertInitializing();
+    await this.designUpdates?.recoverSourceActions();
+    this.assertInitializing();
+    await this.designUpdates?.recover();
+    this.assertInitializing();
+  }
+
+  private async reconcileTaskStateOnStartup(): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    for (const task of snapshot.tasks) {
+      const worktree = snapshot.worktrees.find(
+        (candidate) => candidate.id === task.currentWorktreeId
+      );
+      if (!worktree || ['REMOVED', 'REMOVING'].includes(worktree.status)) {
+        continue;
+      }
+      const repository = snapshot.repositories.find(
+        (candidate) => candidate.id === worktree.repositoryId
+      );
+      if (!repository || repository.status !== 'AVAILABLE') {
+        if (worktree.status === 'CREATING') {
+          await this.store.updateWorktree(
+            {
+              ...worktree,
+              status: 'ERROR',
+              error:
+                'Task Monki restarted before worktree preparation completed, and the repository is unavailable.',
+              updatedAt: new Date().toISOString()
+            },
+            'WORKTREE_FAILED'
+          );
+        }
+        continue;
+      }
+
+      let storedWorktree: WorktreeRecord;
+      try {
+        const worktreeOwner =
+          task.kind === 'DESIGN' ? this.requireDesignWorktrees() : this.worktrees;
+        const verified = await worktreeOwner.verify(worktree, repository.path);
+        storedWorktree = sameWorktreeObservation(worktree, verified)
+          ? worktree
+          : await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          await this.store.recordRepositoryPreflight(
+            repository.id,
+            await validateRepositoryPath(repository.path)
+          );
+        } catch {
+          // The worktree error remains authoritative for this task even if the
+          // repository observation cannot be published atomically.
+        }
+        await this.store.updateWorktree(
+          {
+            ...worktree,
+            status: 'ERROR',
+            error:
+              worktree.status === 'CREATING'
+                ? `Task Monki could not reconcile interrupted worktree preparation: ${detail}`
+                : `Task Monki could not verify this worktree after restart: ${detail}`,
+            updatedAt: new Date().toISOString()
+          },
+          'WORKTREE_FAILED'
+        );
+        continue;
+      }
+      if (storedWorktree.status !== 'PRESENT') continue;
+
+      try {
+        await this.refreshEvidenceInternal(
+          { taskId: task.id },
+          {
+            persistOnlyIfChanged: true,
+            verifiedWorktree: storedWorktree
+          }
+        );
+      } catch {
+        continue;
+      }
+      await this.reconcilePendingBranchPublication(task, storedWorktree).catch(
+        () => undefined
+      );
+      try {
+        await this.reconcilePendingPullRequest(task, storedWorktree);
+      } catch (error) {
+        await this.store.appendEvent(
+          createDomainEvent({
+            type: 'GITHUB_SYNC_FAILED',
+            taskId: task.id,
+            iterationId: storedWorktree.iterationId,
+            worktreeId: storedWorktree.id,
+            source: 'github',
+            payload: {
+              operation: 'pull-request-recovery',
+              error: error instanceof Error ? error.message : String(error)
+            }
+          })
+        );
+      }
+    }
+  }
+
+  private async reconcilePendingBranchPublication(
+    task: Task,
+    worktree: WorktreeRecord
+  ): Promise<BranchPublicationRecord | undefined> {
+    const snapshot = await this.store.snapshot();
+    const latestPublication = latestForIteration(
+      snapshot.branchPublications,
+      worktree.iterationId,
+      'updatedAt'
+    );
+    const latestRequest = latestEventForIteration(
+      snapshot,
+      task.id,
+      worktree.iterationId,
+      'BRANCH_PUBLISH_REQUESTED'
+    );
+    const hasPendingAttempt =
+      latestPublication?.status === 'PUSHING' ||
+      latestPublication?.status === 'AMBIGUOUS' ||
+      Boolean(
+        latestRequest &&
+          (!latestPublication ||
+            latestRequest.receivedAt > latestPublication.updatedAt)
+      );
+    if (!hasPendingAttempt) return undefined;
+
+    const latestRepository = latestForIteration(
+      snapshot.githubRepositories,
+      worktree.iterationId,
+      'checkedAt'
+    );
+    const observed = await this.github.reconcileBranchPublication({
+      task,
+      worktree,
+      remoteName:
+        latestPublication?.remoteName ??
+        latestRepository?.remoteName ??
+        'origin',
+      expectedHeadSha: latestPublication?.headSha,
+      failureDetail:
+        originalBranchPublishFailure(latestPublication) ??
+        (!latestPublication
+          ? 'The earlier publication request did not persist its attempted head.'
+          : undefined)
+    });
+    if (
+      latestPublication &&
+      sameBranchPublicationObservation(latestPublication, observed)
+    ) {
+      return latestPublication;
+    }
+    const stored = await this.store.recordBranchPublication(observed);
+    this.emitGitHubUpdate(task.id, worktree, stored);
+    return stored;
+  }
+
+  private async reconcilePendingBranchPublicationBeforeMutation(
+    task: Task,
+    worktree: WorktreeRecord
+  ): Promise<BranchPublicationRecord | undefined> {
+    const reconciled = await this.reconcilePendingBranchPublication(
+      task,
+      worktree
+    );
+    if (reconciled?.status === 'AMBIGUOUS') {
+      throw new Error(
+        reconciled.error ??
+          'The prior branch publication is ambiguous. Inspect the remote before retrying.'
+      );
+    }
+    return reconciled;
+  }
+
+  private async reconcilePendingPullRequest(
+    task: Task,
+    worktree: WorktreeRecord
+  ): Promise<PullRequestSnapshotRecord | undefined> {
+    const snapshot = await this.store.snapshot();
+    const request = latestEventForIteration(
+      snapshot,
+      task.id,
+      worktree.iterationId,
+      'PR_CREATE_REQUESTED'
+    );
+    const latest = latestForIteration(
+      snapshot.pullRequests,
+      worktree.iterationId,
+      'observedAt'
+    );
+    if (!request || (latest && latest.observedAt >= request.receivedAt)) {
+      return undefined;
+    }
+    const sync = await this.github.findOpenPullRequest(worktree);
+    if (!sync) return undefined;
+    const pullRequest = await this.store.recordPullRequestSync(sync);
+    this.emitGitHubUpdate(task.id, worktree, pullRequest);
+    const currentTask = await this.requireTask(task.id);
+    if (
+      ['OPEN_DRAFT', 'OPEN_READY'].includes(pullRequest.status) &&
+      ['READY', 'IN_PROGRESS', 'REVIEW'].includes(currentTask.workflowPhase)
+    ) {
+      await this.store.transitionTask(
+        task.id,
+        'IN_REVIEW',
+        'GitHub confirmed a matching open pull request after restart.'
+      );
+    }
+    return pullRequest;
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
@@ -826,8 +1171,17 @@ export class TaskManagerService {
     );
   }
 
-  listTasks(): Promise<TaskSnapshot> {
+  async listTasks(): Promise<TaskSnapshot> {
     return this.store.snapshot();
+  }
+
+  async getBoardSnapshot(): Promise<BoardSnapshot> {
+    return this.store.getBoardSnapshot();
+  }
+
+  async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
+    await this.requireNormalTask(taskId, 'Task details');
+    return projectTaskDetailForClient(await this.store.getTaskDetail(taskId));
   }
 
   listDiscourseConversations(input: ListDiscourseConversationsRequest = {}) {
@@ -1072,6 +1426,362 @@ export class TaskManagerService {
     });
   }
 
+  listDesigns(): Promise<DesignListItem[]> {
+    return this.store.listDesigns();
+  }
+
+  async getDesign(designId: string): Promise<DesignDetailSnapshot> {
+    const detail = await this.store.getDesignDetail(designId);
+    if (!detail.currentWorktree) return detail;
+    const project = await this.requireDesignSource().listProjectFiles({
+      designId,
+      repository: detail.repository,
+      worktree: detail.currentWorktree
+    });
+    return {
+      ...detail,
+      projectFiles: project.files,
+      projectFilesTruncated: project.truncated
+    };
+  }
+
+  listDesignConversation(
+    input: ListDesignConversationRequest
+  ): Promise<DesignConversationPage> {
+    return this.store.listDesignConversation(input);
+  }
+
+  async getDesignDraft(designId: string): Promise<DesignDraftRecord | null> {
+    await this.requireDesignTask(designId, 'Design draft read');
+    const draft = await this.requireDesignDrafts().get(designId);
+    if (!draft) return null;
+    return this.resolveDesignDraftAttachments(draft);
+  }
+
+  async readDesignDraftAttachment(
+    input: ReadDesignDraftAttachmentRequest
+  ): Promise<AttachmentContent> {
+    await this.requireDesignTask(input.designId, 'Design draft attachment read');
+    const draft = await this.requireDesignDrafts().get(input.designId);
+    const attachmentDraft = draft?.attachmentDraftId
+      ? await this.store.listAttachmentDraft(draft.attachmentDraftId)
+      : undefined;
+    const attachment = attachmentDraft?.attachments.find(
+      (candidate) => candidate.id === input.attachmentId
+    );
+    if (!draft?.attachmentDraftId || !attachment) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_NOT_FOUND',
+        'Design draft attachment not found.',
+        404
+      );
+    }
+    return this.store.readDraftAttachment(draft.attachmentDraftId, attachment.id);
+  }
+
+  saveDesignDraft(input: SaveDesignDraftRequest): Promise<DesignDraftRecord> {
+    return this.withTaskAction(input.designId, 'Design draft save', async () => {
+      const task = await this.requireDesignTask(input.designId, 'Design draft save');
+      const save = async () => {
+        await this.validateDesignDraftSelection(input.designId, input.referenceIds);
+        if (input.attachmentDraftId) {
+          await this.validateDesignAttachmentDraft(task, input.attachmentDraftId);
+        }
+        const previous = await this.requireDesignDrafts().get(input.designId);
+        const saved = await this.requireDesignDrafts().save(input);
+        if (
+          previous?.attachmentDraftId &&
+          previous.attachmentDraftId !== saved.attachmentDraftId
+        ) {
+          await this.store
+            .discardAttachmentDraft(previous.attachmentDraftId)
+            .catch(() => undefined);
+        }
+        return this.resolveDesignDraftAttachments(saved);
+      };
+      return input.attachmentDraftId
+        ? this.withAttachmentDraft(input.attachmentDraftId, save)
+        : save();
+    });
+  }
+
+  deleteDesignDraft(input: DeleteDesignDraftRequest): Promise<void> {
+    return this.withTaskAction(input.designId, 'Design draft deletion', async () => {
+      await this.requireDesignTask(input.designId, 'Design draft deletion');
+      const draft = await this.requireDesignDrafts().get(input.designId);
+      await this.requireDesignDrafts().delete(input);
+      if (draft?.attachmentDraftId) {
+        await this.store
+          .discardAttachmentDraft(draft.attachmentDraftId)
+          .catch(() => undefined);
+      }
+    });
+  }
+
+  createBlankDesign(
+    input: CreateBlankDesignRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withRuntimeOperation(() =>
+      this.withDesignCreation(input.creationToken, () =>
+        this.createBlankDesignLocked(input)
+      )
+    );
+  }
+
+  private async createBlankDesignLocked(
+    input: CreateBlankDesignRequest
+  ): Promise<DesignDetailSnapshot> {
+    const acknowledged = await this.store.resolveDesignCreationRetry(input);
+    if (acknowledged) {
+      if (this.designUpdates) {
+        await this.ensureDesignWorktree(acknowledged.task.id).catch(() => undefined);
+        const updates = await this.requireDesignUpdates().catch(() => undefined);
+        await updates?.dispatch(acknowledged.task.id).catch(() => undefined);
+      }
+      return this.getDesign(acknowledged.task.id);
+    }
+
+    const designUpdates = await this.requireDesignUpdates();
+    const source = this.requireDesignSource();
+    const create = async () => {
+      const repositoryInput = await source.prepareBlankRepository({
+        creationToken: input.creationToken
+      });
+      try {
+        return await this.store.createDesignBundle({
+          request: input,
+          repository: repositoryInput
+        });
+      } catch (error) {
+        const stored = await this.store.snapshot();
+        await source
+          .reconcileOrphanedRepositories(stored.repositories)
+          .catch(() => undefined);
+        throw error;
+      }
+    };
+    const bundle = input.attachmentDraftId
+      ? await this.withAttachmentDraft(input.attachmentDraftId, create)
+      : await create();
+    await this.ensureDesignWorktree(bundle.task.id);
+    await designUpdates.dispatch(bundle.task.id).catch(() => undefined);
+    this.emitDesignUpdate(bundle.task.id, { reason: 'created' });
+    return this.getDesign(bundle.task.id);
+  }
+
+  submitDesignTurn(
+    input: SubmitDesignTurnRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design update', () =>
+      this.withRuntimeOperation(async () => {
+        const designUpdates = await this.requireDesignUpdates();
+        const accept = async () => {
+          const retry = await this.store.resolveInlineDesignTurnRetry(input);
+          if (!retry && input.attachmentDraftId) {
+            const task = await this.requireDesignTask(input.designId, 'Design update');
+            const draft = await this.requireDesignDrafts().get(input.designId);
+            if (draft?.attachmentDraftId !== input.attachmentDraftId) {
+              throw new Error('The attached files do not belong to this Design draft.');
+            }
+            await this.validateDesignAttachmentDraft(task, input.attachmentDraftId);
+          }
+          await this.store.createInlineDesignTurn(input);
+        };
+        if (input.attachmentDraftId) {
+          await this.withAttachmentDraft(input.attachmentDraftId, accept);
+        } else {
+          await accept();
+        }
+        await designUpdates.dispatch(input.designId).catch(() => undefined);
+        this.emitDesignUpdate(input.designId, { reason: 'message-accepted' });
+        return this.getDesign(input.designId);
+      })
+    );
+  }
+
+  addDesignReferences(
+    input: AddDesignReferencesRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Reference addition', () =>
+      this.withRuntimeOperation(() =>
+        this.withAttachmentDraft(input.attachmentDraftId, async () => {
+          await this.requireDesignUpdates();
+          const task = await this.requireDesignTask(input.designId, 'Reference addition');
+          const draft = await this.store.listAttachmentDraft(input.attachmentDraftId);
+          const adapter = this.runtimeRegistry.require(task.runtimeId);
+          const settings = await prepareTaskCreationSettings(
+            adapter,
+            task.agentSettings,
+            draft.attachments
+          );
+          if (
+            settings.networkAccess !== false ||
+            settings.sandbox !== 'WORKSPACE_WRITE' ||
+            settings.approvalPolicy !== 'never'
+          ) {
+            throw new Error('Design references require the restricted Design permission profile.');
+          }
+          await this.store.addDesignReferences(input);
+          this.emitDesignUpdate(input.designId, { reason: 'references-added' });
+          return this.getDesign(input.designId);
+        })
+      )
+    );
+  }
+
+  removeDesignReference(
+    input: RemoveDesignReferenceRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Reference removal', async () => {
+      await this.requireDesignTask(input.designId, 'Reference removal');
+      await this.store.removeDesignReference(input);
+      const draft = await this.requireDesignDrafts().get(input.designId);
+      if (draft?.referenceIds.includes(input.referenceId)) {
+        await this.requireDesignDrafts().save({
+          designId: input.designId,
+          expectedRevision: draft.recordRevision,
+          body: draft.body,
+          referenceIds: draft.referenceIds.filter(
+            (referenceId) => referenceId !== input.referenceId
+          ),
+          attachmentDraftId: draft.attachmentDraftId
+        });
+      }
+      this.emitDesignUpdate(input.designId, {
+        reason: 'reference-removed',
+        referenceId: input.referenceId
+      });
+      return this.getDesign(input.designId);
+    });
+  }
+
+  importDesignReferenceAsset(
+    input: ImportDesignReferenceAssetRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Asset import', async () => {
+      const designUpdates = await this.requireDesignUpdates();
+      return designUpdates.withExclusiveAccess(input.designId, async () => {
+        const detail = await this.store.getDesignDetail(input.designId);
+        this.assertNoActiveTaskRun(
+          await this.store.snapshot(),
+          input.designId,
+          'importing a project asset'
+        );
+        if (
+          detail.turns.some(
+            (turn) => turn.outcome === undefined && turn.runId === undefined
+          )
+        ) {
+          throw new Error('Wait for queued Design messages before importing a project asset.');
+        }
+        if (!detail.currentWorktree) {
+          throw new Error('The Design workspace is not ready.');
+        }
+        const stored = await this.store.readDesignReferenceContent(
+          input.designId,
+          input.referenceId
+        );
+        const receipt = await this.requireDesignSource().importProjectAsset({
+          designId: input.designId,
+          repository: detail.repository,
+          worktree: detail.currentWorktree,
+          displayName: stored.content.displayName,
+          bytes: stored.content.bytes,
+          sha256: stored.sha256
+        });
+        try {
+          await this.store.recordDesignReferenceAsset({
+            ...input,
+            projectAssetPath: receipt.relativePath
+          });
+        } catch (error) {
+          try {
+            await this.requireDesignSource().rollbackProjectAsset(receipt);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'The asset link failed and the copied project file could not be removed.'
+            );
+          }
+          throw error;
+        }
+        await this.refreshDesignGitEvidence(input.designId);
+        this.emitDesignUpdate(input.designId, {
+          reason: 'reference-imported',
+          referenceId: input.referenceId
+        });
+        return this.getDesign(input.designId);
+      });
+    });
+  }
+
+  cancelDesignTurn(
+    input: CancelDesignTurnRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design turn cancellation', () =>
+      this.withRuntimeOperation(async () => {
+        const designUpdates = await this.requireDesignUpdates();
+        await designUpdates.cancelTurn(input.designId, input.turnId);
+        return this.getDesign(input.designId);
+      })
+    );
+  }
+
+  restartDesignPreview(
+    input: RestartDesignPreviewRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design Preview restart', () =>
+      this.withRuntimeOperation(async () => {
+        const designUpdates = await this.requireDesignUpdates();
+        await designUpdates.restartLatestReady(input.designId);
+        return this.getDesign(input.designId);
+      })
+    );
+  }
+
+  restoreDesignRevision(
+    input: RestoreDesignRevisionRequest
+  ): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design restore', () =>
+      this.withRuntimeOperation(async () => {
+        await this.requireDesignUpdates().then((updates) =>
+          updates.restoreRevision(input)
+        );
+        return this.getDesign(input.designId);
+      })
+    );
+  }
+
+  duplicateDesign(input: DuplicateDesignRequest): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design duplicate', () =>
+      this.withRuntimeOperation(async () => {
+        const targetDesignId = await this.requireDesignUpdates().then((updates) =>
+          updates.duplicateDesign(input)
+        );
+        return this.getDesign(targetDesignId);
+      })
+    );
+  }
+
+  renameDesign(input: RenameDesignRequest): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design rename', async () => {
+      await this.store.renameDesign(input.designId, input.title);
+      this.emitDesignUpdate(input.designId, { reason: 'renamed' });
+      return this.getDesign(input.designId);
+    });
+  }
+
+  archiveDesign(input: ArchiveDesignRequest): Promise<DesignDetailSnapshot> {
+    return this.withTaskAction(input.designId, 'Design archive', async () => {
+      const updates = await this.requireDesignUpdates();
+      return updates.withExclusiveAccess(input.designId, async () => {
+        await this.store.archiveDesign(input.designId);
+        this.emitDesignUpdate(input.designId, { reason: 'archived' });
+        return this.getDesign(input.designId);
+      });
+    });
+  }
+
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
     return this.withRuntimeOperation(() => this.refinePromptLocked(input));
   }
@@ -1124,7 +1834,9 @@ export class TaskManagerService {
 
   async prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord> {
     return this.withTaskAction(input.taskId, 'Worktree preparation', () =>
-      this.prepareWorktreeUnlocked(input)
+      this.requireNormalTask(input.taskId, 'Manual worktree preparation').then(() =>
+        this.prepareWorktreeUnlocked(input)
+      )
     );
   }
 
@@ -1134,14 +1846,49 @@ export class TaskManagerService {
     const task = await this.requireTask(input.taskId);
     const repository = await this.requireAvailableRepository(task.repositoryId);
     const existing = await this.store.getCurrentWorktree(task.id);
-    if (existing && existing.status !== 'ERROR' && existing.status !== 'MISSING') {
+    if (existing && !['REMOVED', 'REMOVING'].includes(existing.status)) {
       const verified = await this.worktrees.verify(existing, repository.path);
-      return this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+      const stored = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+      if (!['ERROR', 'MISSING'].includes(stored.status)) {
+        return stored;
+      }
+      await this.validateAndRecordRepository(task);
+      return this.resumeWorktreePreparation(task, stored, repository);
     }
 
     const preflight = await this.validateAndRecordRepository(task);
     const spec = this.worktrees.buildSpec(task, preflight);
     return this.createAndPrepareWorktree(task, spec);
+  }
+
+  private async resumeWorktreePreparation(
+    task: Task,
+    worktree: WorktreeRecord,
+    repository: Repository
+  ): Promise<WorktreeRecord> {
+    try {
+      const created = await this.worktrees.create(worktree, repository.path);
+      const stored = await this.store.updateWorktree(created, 'WORKTREE_CREATED');
+      await this.refreshEvidenceInternal({ taskId: task.id });
+      this.events.emit({
+        type: 'worktree.updated',
+        taskId: task.id,
+        iterationId: stored.iterationId,
+        worktreeId: stored.id,
+        payload: stored,
+        at: new Date().toISOString()
+      });
+      return stored;
+    } catch (error) {
+      const failed: WorktreeRecord = {
+        ...worktree,
+        status: 'ERROR',
+        error: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString()
+      };
+      await this.store.updateWorktree(failed, 'WORKTREE_FAILED');
+      throw error;
+    }
   }
 
   private async createAndPrepareWorktree(
@@ -1192,6 +1939,7 @@ export class TaskManagerService {
       this.withRuntimeOperation(async () => {
         await this.assertAgentRuntimeAvailable();
         let task = await this.requireTask(input.taskId);
+        this.assertNormalTask(task, 'Agent work');
         const mode = input.mode ?? 'IMPLEMENTATION';
         if (task.currentRunId) {
           if (isImplementationRunMode(mode)) {
@@ -1271,6 +2019,7 @@ export class TaskManagerService {
   async steerRun(input: SteerRunRequest): Promise<void> {
     return this.withTaskAction(input.taskId, 'Agent steering', () =>
       this.withRuntimeOperation(async () => {
+        await this.requireNormalTask(input.taskId, 'Agent steering');
         const run = await this.requireRunForTask(input.runId, input.taskId);
         const snapshot = await this.store.snapshot();
         const worktree = snapshot.worktrees.find(
@@ -1296,6 +2045,7 @@ export class TaskManagerService {
           input.taskId,
           input.runId
         );
+        this.assertNormalTask(task, 'Agent follow-up');
         this.assertRuntimeEnabled(task.runtimeId);
         const snapshot = await this.store.snapshot();
         assertContinuable(run);
@@ -1308,8 +2058,7 @@ export class TaskManagerService {
           task,
           run,
           gitSnapshot,
-          instruction: input.instruction,
-          kind: 'continuation'
+          instruction: input.instruction
         });
         await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.agents.startTurn({
@@ -1337,13 +2086,14 @@ export class TaskManagerService {
           input.taskId,
           input.runId
         );
+        this.assertNormalTask(task, 'Agent retry');
         this.assertRuntimeEnabled(task.runtimeId);
         const snapshot = await this.store.snapshot();
-        assertRetryable(run);
         this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
           exceptRunId: run.id
         });
         if (input.strategy === 'FORK') {
+          assertForkable(run);
           await this.agents.resolveRecoveryRunForReplacement(run.id);
           return this.startForkedAlternative({
             sourceTaskId: task.id,
@@ -1353,14 +2103,14 @@ export class TaskManagerService {
             settings: input.settings
           });
         }
+        assertRetryable(run, Boolean(getImplementationRetryReason(task)));
         const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
         const settings = followUpSettings(task, run, input.settings, false);
-        const prompt = buildContinuationPrompt({
+        const prompt = buildRetryPrompt({
           task,
           run,
           gitSnapshot,
-          instruction: input.instruction,
-          kind: 'retry'
+          instruction: input.instruction
         });
         await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.agents.startTurn({
@@ -1639,6 +2389,7 @@ export class TaskManagerService {
       this.withRuntimeOperation(async () => {
         await this.assertAgentRuntimeAvailable();
         let task = await this.requireTask(input.taskId);
+        this.assertNormalTask(task, 'Agent review');
         const runId = input.runId ?? task.currentRunId;
         if (!runId) {
           throw new Error('Complete an agent turn before starting a detached review.');
@@ -1671,7 +2422,7 @@ export class TaskManagerService {
           task.workflowPhase !== 'REVIEW'
         ) {
           throw new Error(
-            'A review requires a successfully completed implementation run. Retry or continue this run first.'
+            'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
           );
         }
         const iteration = snapshot.iterations.find(
@@ -1731,6 +2482,7 @@ export class TaskManagerService {
     return this.withRuntimeOperation(async () => {
       await this.assertAgentRuntimeAvailable();
       const task = await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'Goal synchronization');
       this.assertRuntimeEnabled(task.runtimeId);
       return this.agents.syncGoal(task, input.sessionId);
     });
@@ -1784,11 +2536,17 @@ export class TaskManagerService {
       ...pendingRuntimeOperations
     ]);
     await this.discourseHost?.beginShutdown();
-    const [runtimeResult] = await Promise.allSettled([
-      this.shutdownRuntimeOwners()
+    const [designResult] = await Promise.allSettled([
+      this.designUpdates?.beginShutdown()
+    ]);
+    const [agentResult] = await Promise.allSettled([
+      this.shutdownAgentOwners()
     ]);
     const [postRunEvidenceResult] = await Promise.allSettled([
       this.drainPostRunEvidence()
+    ]);
+    const [previewResult] = await Promise.allSettled([
+      this.previewEnabled === false ? Promise.resolve() : this.previews.shutdown()
     ]);
     this.disposeAgentEventListener();
     const [storeCloseResult] = await Promise.allSettled([
@@ -1802,25 +2560,29 @@ export class TaskManagerService {
         if (failed) throw failed.reason;
       })
     ]);
-    if (runtimeResult.status === 'rejected') {
-      throw runtimeResult.reason;
+    if (designResult.status === 'rejected') {
+      throw designResult.reason;
+    }
+    if (agentResult.status === 'rejected') {
+      throw agentResult.reason;
     }
     if (postRunEvidenceResult.status === 'rejected') {
       throw postRunEvidenceResult.reason;
+    }
+    if (previewResult.status === 'rejected') {
+      throw previewResult.reason;
     }
     if (storeCloseResult.status === 'rejected') {
       throw storeCloseResult.reason;
     }
   }
 
-  private async shutdownRuntimeOwners(): Promise<void> {
-    const [agentResult, previewResult, previewRecipeGenerationResult] = await Promise.allSettled([
+  private async shutdownAgentOwners(): Promise<void> {
+    const [agentResult, previewRecipeGenerationResult] = await Promise.allSettled([
       this.agents.shutdown(),
-      this.previewEnabled === false ? Promise.resolve() : this.previews.shutdown(),
       this.previewRecipeGenerator.shutdown()
     ]);
     if (agentResult.status === 'rejected') throw agentResult.reason;
-    if (previewResult.status === 'rejected') throw previewResult.reason;
     if (previewRecipeGenerationResult.status === 'rejected') {
       throw previewRecipeGenerationResult.reason;
     }
@@ -1836,6 +2598,7 @@ export class TaskManagerService {
   async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {
     this.assertPreviewEnabled();
     return this.withTaskAction(input.taskId, 'Preview plan resolution', async () => {
+      await this.requireNormalTask(input.taskId, 'Preview plan resolution');
       const context = await this.requirePreviewContext(input.taskId);
       const result = await this.previews.resolve(context, input.scenarioId);
       this.events.emit({
@@ -1854,7 +2617,7 @@ export class TaskManagerService {
     input: GetPreviewRecipeGenerationRequest
   ): Promise<PreviewRecipeGenerationSnapshot> {
     this.assertPreviewEnabled();
-    await this.requireTask(input.taskId);
+    await this.requireNormalTask(input.taskId, 'Preview recipe generation');
     return this.previewRecipeGenerator.get(input.taskId);
   }
 
@@ -1863,6 +2626,7 @@ export class TaskManagerService {
   ): Promise<PreviewRecipeGenerationSnapshot> {
     this.assertPreviewEnabled();
     this.assertAgentProviderAvailable();
+    await this.requireNormalTask(input.taskId, 'Preview recipe generation');
     const context = await this.withTaskAction(
       input.taskId,
       'Preview recipe generation preparation',
@@ -1883,7 +2647,7 @@ export class TaskManagerService {
     input: ValidatePreviewRecipeDraftRequest
   ): Promise<PreviewRecipeValidation> {
     this.assertPreviewEnabled();
-    await this.requireTask(input.taskId);
+    await this.requireNormalTask(input.taskId, 'Preview recipe validation');
     return this.previewRecipeGenerator.validate(input.taskId, input.draftId, input.yaml);
   }
 
@@ -1892,6 +2656,7 @@ export class TaskManagerService {
   ): Promise<AcceptPreviewRecipeDraftResult> {
     this.assertPreviewEnabled();
     return this.withTaskAction(input.taskId, 'Preview recipe acceptance', async () => {
+      await this.requireNormalTask(input.taskId, 'Preview recipe acceptance');
       const context = await this.requirePreviewContext(input.taskId);
       await this.previewRecipeGenerator.writeAcceptedRecipe({
         taskId: input.taskId,
@@ -1931,6 +2696,7 @@ export class TaskManagerService {
     input: DiscardPreviewRecipeDraftRequest
   ): Promise<PreviewRecipeGenerationSnapshot> {
     this.assertPreviewEnabled();
+    await this.requireNormalTask(input.taskId, 'Preview recipe discard');
     const context = await this.requirePreviewContext(input.taskId);
     return this.withControlAction(() =>
       this.previewRecipeGenerator.discard(input.taskId, (state) =>
@@ -1979,6 +2745,7 @@ export class TaskManagerService {
     input: ApprovePreviewPlanRequest
   ): Promise<PreviewApprovalRecord> {
     this.assertPreviewEnabled();
+    await this.requireNormalTask(input.taskId, 'Preview approval');
     const approval = await this.previews.approve(input);
     this.events.emit({
       type: 'preview.updated',
@@ -2003,6 +2770,7 @@ export class TaskManagerService {
       throw new Error('Native previews are supported on macOS only.');
     }
     return this.withTaskAction(input.taskId, reset ? 'Preview data reset' : 'Preview startup', async () => {
+      await this.requireNormalTask(input.taskId, 'Preview startup');
       const context = await this.requirePreviewContext(input.taskId);
       const currentSnapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(currentSnapshot, input.taskId, 'capturing a preview');
@@ -2044,6 +2812,7 @@ export class TaskManagerService {
     input: StopPreviewRequest
   ): Promise<PreviewGenerationRecord> {
     this.assertPreviewEnabled();
+    await this.requireNormalTask(input.taskId, 'Preview stop');
     const generation = await this.store.getPreviewGeneration(input.generationId);
     if (!generation || generation.taskId !== input.taskId) {
       throw new Error('Preview generation was not found for this task.');
@@ -2079,6 +2848,7 @@ export class TaskManagerService {
   ): Promise<PreviewLocalAttachmentBindingRecord> {
     return this.withTaskAction(input.taskId, 'Preview binding update', async () => {
       this.assertPreviewEnabled();
+      await this.requireNormalTask(input.taskId, 'Preview binding update');
       const context = await this.requirePreviewContext(input.taskId);
       return this.previews.setLocalAttachmentBinding({ ...input, context });
     });
@@ -2089,6 +2859,7 @@ export class TaskManagerService {
   ): Promise<void> {
     return this.withTaskAction(input.taskId, 'Preview binding deletion', async () => {
       this.assertPreviewEnabled();
+      await this.requireNormalTask(input.taskId, 'Preview binding deletion');
       const context = await this.requirePreviewContext(input.taskId);
       await this.previews.deleteLocalAttachmentBinding({ ...input, context });
     });
@@ -2098,9 +2869,22 @@ export class TaskManagerService {
     return this.withControlAction(() => this.openPreviewInternal(input));
   }
 
-  private openPreviewInternal(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+  private async openPreviewInternal(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
     this.assertPreviewEnabled();
+    await this.requireNormalTask(input.taskId, 'Open Preview');
     return this.previews.open(input);
+  }
+
+  /** Main-process-only route resolution for the isolated Design canvas. */
+  async resolveDesignCanvasRoute(
+    input: OpenPreviewRequest
+  ): Promise<ResolvedPreviewRoute> {
+    this.assertPreviewEnabled();
+    const task = await this.requireTask(input.taskId);
+    if (task.kind !== 'DESIGN') {
+      throw new Error('The in-app canvas is available only for Designs.');
+    }
+    return this.previews.resolveOpenRoute(input);
   }
 
   readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {
@@ -2130,18 +2914,42 @@ export class TaskManagerService {
   }
 
   private async refreshEvidenceInternal(
-    input: RefreshEvidenceRequest
+    input: RefreshEvidenceRequest,
+    options: {
+      persistOnlyIfChanged?: boolean;
+      verifiedWorktree?: WorktreeRecord;
+    } = {}
   ): Promise<GitSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
-    const repository = await this.requireAvailableRepository(task.repositoryId);
-    const worktree = await this.requireWorktree(task);
-    const verified = await this.worktrees.verify(worktree, repository.path);
-    const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+    let storedWorktree = options.verifiedWorktree;
+    if (!storedWorktree) {
+      const repository = await this.requireAvailableRepository(task.repositoryId);
+      const worktree = await this.requireWorktree(task);
+      const owner =
+        task.kind === 'DESIGN' ? this.requireDesignWorktrees() : this.worktrees;
+      const verified = await owner.verify(worktree, repository.path);
+      storedWorktree =
+        options.persistOnlyIfChanged &&
+        sameWorktreeObservation(worktree, verified)
+          ? worktree
+          : await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+    }
     if (storedWorktree.status !== 'PRESENT') {
       throw new Error(`Worktree is not ready: ${storedWorktree.status}`);
     }
 
     const snapshot = await inspectGitSnapshot(storedWorktree);
+    if (options.persistOnlyIfChanged) {
+      const state = await this.store.snapshot();
+      const latest = latestForIteration(
+        state.gitSnapshots,
+        storedWorktree.iterationId,
+        'capturedAt'
+      );
+      if (latest && sameGitObservation(latest, snapshot)) {
+        return latest;
+      }
+    }
     const diffEvidence = await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
     await this.previews.observeGitSnapshot(storedSnapshot);
@@ -2166,6 +2974,7 @@ export class TaskManagerService {
     input: CreateDeliveryCommitRequest
   ): Promise<GitSnapshotRecord> {
     const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertNormalTask(task, 'GitHub delivery');
     this.assertImplementationOutcomeReady(task);
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'creating a delivery commit');
@@ -2205,6 +3014,7 @@ export class TaskManagerService {
 
   async preflightGitHub(input: GitHubPreflightRequest) {
     const task = await this.requireTask(input.taskId);
+    this.assertNormalTask(task, 'GitHub preflight');
     const worktree = await this.requireWorktree(task);
     const preflight = await this.github.preflight(task, worktree);
     const stored = await this.store.recordGitHubPreflight(preflight);
@@ -2220,20 +3030,40 @@ export class TaskManagerService {
 
   private async publishBranchUnlocked(input: PublishBranchRequest) {
     const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertNormalTask(task, 'GitHub delivery');
     this.assertImplementationOutcomeReady(task);
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'publishing the branch');
     const worktree = await this.requireWorktree(task);
-    const latestGit = await this.ensureCommittedPublishableGit(task);
+    const reconciled = await this.reconcilePendingBranchPublicationBeforeMutation(
+      task,
+      worktree
+    );
 
+    const latestGit = await this.ensureCommittedPublishableGit(task);
     assertPublishReady(latestGit);
+    if (!latestGit.headSha) {
+      throw new Error('Cannot publish a branch without a verified local HEAD.');
+    }
+    if (
+      reconciled?.status === 'PUSHED' &&
+      reconciled.headSha === latestGit.headSha
+    ) {
+      await this.refreshEvidenceInternal({ taskId: task.id });
+      return reconciled;
+    }
 
     const githubReady = await this.preflightGitHub({ taskId: task.id });
     if (githubReady.status !== 'READY') {
       throw new Error(githubReady.error ?? `GitHub preflight is ${githubReady.status}.`);
     }
 
-    await this.store.recordBranchPublishRequested(task, worktree);
+    await this.store.recordBranchPublishRequested(
+      task,
+      worktree,
+      githubReady.remoteName ?? 'origin',
+      latestGit.headSha
+    );
     const publication = await this.github.publishBranch({
       task,
       worktree,
@@ -2258,10 +3088,12 @@ export class TaskManagerService {
     input: CreatePullRequestRequest
   ): Promise<PullRequestSnapshotRecord> {
     const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertNormalTask(task, 'GitHub delivery');
     this.assertImplementationOutcomeReady(task);
     const activeSnapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(activeSnapshot, task.id, 'opening a pull request');
     const worktree = await this.requireWorktree(task);
+    await this.reconcilePendingBranchPublicationBeforeMutation(task, worktree);
     let latestGit: GitSnapshotRecord | undefined =
       await this.ensureCommittedPublishableGit(task);
     let snapshot = await this.store.snapshot();
@@ -2307,6 +3139,7 @@ export class TaskManagerService {
   async refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined> {
     return this.withTaskAction(input.taskId, 'GitHub refresh', async () => {
       const task = await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'GitHub refresh');
       const worktree = await this.requireWorktree(task);
       const latest = await this.store.getLatestPullRequest(task.id);
       if (!latest?.number && !latest?.url) {
@@ -2342,6 +3175,7 @@ export class TaskManagerService {
       const task = ['REVIEW', 'IN_REVIEW', 'DONE'].includes(input.toPhase)
         ? await this.requireTaskWithPostRunEvidence(input.taskId)
         : await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'Workflow transition');
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'changing this task');
       const latestGit = snapshot.gitSnapshots
@@ -2389,11 +3223,20 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Task deletion', () =>
       this.withRuntimeOperation(async () => {
         const task = await this.requireTask(input.taskId);
+        if (task.kind === 'DESIGN') {
+          const designUpdates = await this.requireDesignUpdates();
+          return designUpdates.withExclusiveAccess(task.id, async () => {
+            const currentTask = await this.requireTask(task.id);
+            const snapshot = await this.store.snapshot();
+            const blockedReason = taskDeletionBlocker(currentTask, snapshot);
+            if (blockedReason) throw new Error(blockedReason);
+            return this.deleteDesignTaskUnlocked(currentTask, snapshot);
+          });
+        }
+
         const snapshot = await this.store.snapshot();
         const blockedReason = taskDeletionBlocker(task, snapshot);
-        if (blockedReason) {
-          throw new Error(blockedReason);
-        }
+        if (blockedReason) throw new Error(blockedReason);
 
         // Preview cleanup is part of deletion authority. The store keeps its
         // resource ledger intact if any process or workspace identity is ambiguous.
@@ -2429,6 +3272,74 @@ export class TaskManagerService {
     );
   }
 
+  private async deleteDesignTaskUnlocked(
+    task: Task,
+    snapshot: TaskSnapshot
+  ): Promise<DeleteTaskResult> {
+    if (
+      snapshot.designTurns.some(
+        (turn) => turn.designId === task.id && turn.outcome === undefined
+      )
+    ) {
+      throw new Error('Wait for the current Design update to settle before deleting it.');
+    }
+    const activeSourceAction = snapshot.designSourceActions.find(
+      (action) =>
+        (action.designId === task.id ||
+          (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)) &&
+        !action.failureReason
+    );
+    if (activeSourceAction) {
+      throw new Error('Wait for the current Design action to finish before deleting it.');
+    }
+    const unfinishedCopy = snapshot.designSourceActions.find(
+      (action) =>
+        action.kind === 'DUPLICATE' &&
+        action.designId === task.id &&
+        action.targetDesignId !== task.id
+    );
+    if (unfinishedCopy) {
+      throw new Error('Delete the unfinished Design copy before deleting its source.');
+    }
+    const worktreeOwner = this.requireDesignWorktrees();
+    const source = this.requireDesignSource();
+
+    await this.previews.stopTask(task.id);
+    await this.previewRecipeGenerator.discard(task.id);
+    await this.agents.deleteTaskProviderHistory(task);
+
+    let removedWorktree = false;
+    for (const worktree of snapshot.worktrees.filter(
+      (candidate) => candidate.taskId === task.id
+    )) {
+      const repository = await this.requireAvailableRepository(worktree.repositoryId);
+      await worktreeOwner.removeOwnedManaged(worktree, repository);
+      removedWorktree = true;
+    }
+
+    const designDraft = await this.designDrafts?.get(task.id).catch(() => null);
+    const released = await this.store.deleteTaskAndReleaseManagedRepository(task.id);
+    await this.designDrafts?.deleteForDesign(task.id).catch(() => undefined);
+    if (designDraft?.attachmentDraftId) {
+      await this.store
+        .discardAttachmentDraft(designDraft.attachmentDraftId)
+        .catch(() => undefined);
+    }
+    await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
+    if (released.removedManagedRepository) {
+      await source.removeManagedRepository(released.removedManagedRepository);
+    }
+    const result = { taskId: task.id, removedWorktree };
+    this.events.emit({
+      type: 'task.deleted',
+      scope: { kind: 'DESIGN', designId: task.id },
+      taskId: task.id,
+      payload: result,
+      at: new Date().toISOString()
+    });
+    return result;
+  }
+
   readArtifact(input: ReadArtifactRequest): Promise<string> {
     return this.store.readArtifact(input.artifactId);
   }
@@ -2460,7 +3371,7 @@ export class TaskManagerService {
     const run = await this.store.getRun(runId);
     if (
       !run ||
-      !['IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW'].includes(run.mode)
+      !['IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW', 'DESIGN'].includes(run.mode)
     ) {
       return;
     }
@@ -2526,7 +3437,7 @@ export class TaskManagerService {
       return;
     }
     const outcome = rejectedExecution.status === 'CANCELED' ? 'canceled' : 'declined';
-    const reason = `A provider execution request was ${outcome} and this run produced no Git change. Retry or continue before review.`;
+    const reason = `A provider execution request was ${outcome} and this run produced no Git change. Retry the implementation or continue unfinished work before review.`;
     await this.store.appendEvent(
       createDomainEvent({
         type: 'IMPLEMENTATION_OUTCOME_BLOCKED',
@@ -2581,7 +3492,11 @@ export class TaskManagerService {
   private async ensurePostRunEvidence(runId: string): Promise<void> {
     await this.awaitPostRunEvidence(runId);
     const run = await this.store.getRun(runId);
-    if (!run || !isImplementationRunMode(run.mode) || run.status !== 'COMPLETED') {
+    if (
+      !run ||
+      (!isImplementationRunMode(run.mode) && run.mode !== 'DESIGN') ||
+      run.status !== 'COMPLETED'
+    ) {
       return;
     }
     let completedRun = run;
@@ -2610,7 +3525,9 @@ export class TaskManagerService {
     if (!after) {
       throw new Error(`Run ${completedRun.id} is missing its post-run Git evidence.`);
     }
-    await this.reconcileImplementationOutcome(completedRun, after);
+    if (isImplementationRunMode(completedRun.mode)) {
+      await this.reconcileImplementationOutcome(completedRun, after);
+    }
   }
 
   private async requireTaskWithPostRunEvidence(taskId: string): Promise<Task> {
@@ -2641,6 +3558,18 @@ export class TaskManagerService {
       throw new Error(`Task not found: ${taskId}`);
     }
     return task;
+  }
+
+  private async requireNormalTask(taskId: string, action: string): Promise<Task> {
+    const task = await this.requireTask(taskId);
+    this.assertNormalTask(task, action);
+    return task;
+  }
+
+  private assertNormalTask(task: Task, action: string): void {
+    if (task.kind === 'DESIGN') {
+      throw new Error(`${action} is not available for a Design.`);
+    }
   }
 
   private async requireAvailableRepository(repositoryId: string): Promise<Repository> {
@@ -2696,6 +3625,342 @@ export class TaskManagerService {
       throw new Error('Create a task worktree before running this action.');
     }
     return worktree;
+  }
+
+  private async reconcileDesignWorkspaces(): Promise<void> {
+    if (!this.designUpdates) return;
+    for (const design of await this.store.listDesigns()) {
+      try {
+        await this.ensureDesignWorktree(design.id);
+      } catch (error) {
+        const detail = await this.store.getDesignDetail(design.id);
+        const unsettled = detail.turns.find((turn) => turn.outcome === undefined);
+        if (unsettled && !unsettled.runId) {
+          await this.store.settleDesignTurn({
+            designId: design.id,
+            turnId: unsettled.id,
+            outcome: 'NEEDS_ATTENTION',
+            failureReason:
+              error instanceof Error
+                ? error.message
+                : 'Task Monki could not restore the Design workspace.'
+          });
+        }
+        this.emitDesignUpdate(design.id, { reason: 'workspace-recovery-failed' });
+      }
+    }
+  }
+
+  private async ensureDesignWorktree(designId: string): Promise<WorktreeRecord> {
+    const owner = this.requireDesignWorktrees();
+    const task = await this.requireTask(designId);
+    if (task.kind !== 'DESIGN') throw new Error('Design workspace owner is invalid.');
+    const repository = await this.requireAvailableRepository(task.repositoryId);
+    if (repository.kind !== 'DESIGN_MANAGED' || !repository.headSha) {
+      throw new Error('Managed Design repository is unavailable.');
+    }
+    let worktree = await this.store.getCurrentWorktree(task.id);
+    if (!worktree || ['REMOVED', 'REMOVING'].includes(worktree.status)) {
+      const snapshot = await this.store.snapshot();
+      const latestOwnRevision = snapshot.designRevisions
+        .filter((revision) => revision.designId === task.id)
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .at(-1);
+      const duplicateBase = latestOwnRevision ?? (task.sourceDesignRevisionId
+        ? snapshot.designRevisions.find(
+            (revision) => revision.id === task.sourceDesignRevisionId
+          )
+        : undefined);
+      if ((task.sourceDesignRevisionId || latestOwnRevision) && !duplicateBase) {
+        throw new Error('The copied Design source revision is unavailable.');
+      }
+      const spec = owner.buildSpecFromBase(task, {
+        baseRef: duplicateBase ? undefined : repository.branch,
+        baseSha: duplicateBase?.commitSha ?? repository.headSha
+      });
+      ({ worktree } = await this.store.createIterationAndWorktree({
+        task,
+        branchName: spec.branchName,
+        worktreePath: spec.worktreePath,
+        baseRef: spec.baseRef,
+        baseSha: spec.baseSha
+      }));
+    }
+    try {
+      const prepared = await owner.create(worktree, repository.path);
+      const stored = await this.store.updateWorktree(prepared, 'WORKTREE_CREATED');
+      if (stored.status !== 'PRESENT') {
+        throw new Error(`Design worktree is not ready: ${stored.status}.`);
+      }
+      await this.refreshEvidenceInternal(
+        { taskId: task.id },
+        { persistOnlyIfChanged: true, verifiedWorktree: stored }
+      );
+      this.events.emit({
+        type: 'worktree.updated',
+        scope: { kind: 'DESIGN', designId: task.id },
+        taskId: task.id,
+        iterationId: stored.iterationId,
+        worktreeId: stored.id,
+        payload: stored,
+        at: new Date().toISOString()
+      });
+      return stored;
+    } catch (error) {
+      await this.store.updateWorktree(
+        {
+          ...worktree,
+          status: 'ERROR',
+          error: error instanceof Error ? error.message : String(error),
+          updatedAt: new Date().toISOString()
+        },
+        'WORKTREE_FAILED'
+      );
+      throw error;
+    }
+  }
+
+  private async requireDesignPreviewContext(
+    designId: string
+  ): Promise<PreviewTaskContext> {
+    const task = await this.requireTask(designId);
+    if (task.kind !== 'DESIGN') throw new Error('Design not found.');
+    const worktree = await this.ensureDesignWorktree(designId);
+    const iteration = await this.store.getCurrentIteration(designId);
+    if (!iteration || iteration.id !== worktree.iterationId) {
+      throw new Error('Design worktree does not match its current iteration.');
+    }
+    return { task: await this.requireTask(designId), iteration, worktree };
+  }
+
+  private async refreshDesignGitEvidence(
+    designId: string
+  ): Promise<GitSnapshotRecord> {
+    const context = await this.requireDesignPreviewContext(designId);
+    return this.refreshEvidenceInternal(
+      { taskId: designId },
+      { verifiedWorktree: context.worktree }
+    );
+  }
+
+  private requireDesignWorktrees(): WorktreeService {
+    if (!this.designWorktrees) {
+      throw new Error('Design workspaces are not configured in this Task Monki host.');
+    }
+    return this.designWorktrees;
+  }
+
+  private requireDesignSource(): DesignSourceService {
+    if (!this.designSource) {
+      throw new Error('Managed Design repositories are not configured in this Task Monki host.');
+    }
+    return this.designSource;
+  }
+
+  private requireDesignDrafts(): FileDesignDraftStore {
+    if (!this.designDrafts) {
+      throw new Error('Design drafts are not configured in this Task Monki host.');
+    }
+    return this.designDrafts;
+  }
+
+  private async resolveDesignDraftAttachments(
+    draft: DesignDraftRecord
+  ): Promise<DesignDraftRecord> {
+    if (!draft.attachmentDraftId) {
+      return { ...draft, attachmentDraft: undefined };
+    }
+    try {
+      return {
+        ...draft,
+        attachmentDraft: await this.store.listAttachmentDraft(draft.attachmentDraftId)
+      };
+    } catch (error) {
+      if (
+        error instanceof AttachmentStoreError &&
+        error.code === 'ATTACHMENT_DRAFT_NOT_FOUND'
+      ) {
+        return {
+          ...draft,
+          attachmentDraftId: undefined,
+          attachmentDraft: undefined
+        };
+      }
+      throw error;
+    }
+  }
+
+  private async validateDesignDraftSelection(
+    designId: string,
+    referenceIds: readonly string[]
+  ): Promise<void> {
+    if (
+      !Array.isArray(referenceIds) ||
+      new Set(referenceIds).size !== referenceIds.length
+    ) {
+      throw new Error('Design draft reference selection is invalid.');
+    }
+    const detail = await this.store.getDesignDetail(designId);
+    const activeReferenceIds = new Set(
+      detail.references
+        .filter((reference) => reference.state === 'ACTIVE')
+        .map((reference) => reference.id)
+    );
+    if (referenceIds.some((referenceId) => !activeReferenceIds.has(referenceId))) {
+      throw new Error('A selected Design draft reference is not active.');
+    }
+  }
+
+  private async validateDesignAttachmentDraft(
+    task: Task,
+    attachmentDraftId: string
+  ): Promise<AttachmentDraftSnapshot> {
+    const [draft, existing] = await Promise.all([
+      this.store.listAttachmentDraft(attachmentDraftId),
+      this.store.getTaskAttachments(task.id)
+    ]);
+    if (existing.length + draft.attachments.length > ATTACHMENT_MAX_COUNT) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_LIMIT_EXCEEDED',
+        `A Design can have at most ${ATTACHMENT_MAX_COUNT} references.`,
+        413
+      );
+    }
+    const totalBytes = [...existing, ...draft.attachments].reduce(
+      (total, attachment) => total + attachment.byteCount,
+      0
+    );
+    if (totalBytes > ATTACHMENT_MAX_TOTAL_BYTES) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_TOTAL_TOO_LARGE',
+        'Design references exceed the total size limit.',
+        413
+      );
+    }
+    const adapter = this.runtimeRegistry.require(task.runtimeId);
+    const settings = await prepareTaskCreationSettings(
+      adapter,
+      task.agentSettings,
+      draft.attachments
+    );
+    if (
+      settings.networkAccess !== false ||
+      settings.sandbox !== 'WORKSPACE_WRITE' ||
+      settings.approvalPolicy !== 'never'
+    ) {
+      throw new Error('Design references require the restricted Design permission profile.');
+    }
+    return draft;
+  }
+
+  private async reconcileDesignDrafts(drafts: readonly DesignDraftRecord[]): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    const designIds = new Set(
+      snapshot.tasks.filter((task) => task.kind === 'DESIGN').map((task) => task.id)
+    );
+    const adoptedAttachmentDrafts = new Set(
+      snapshot.designTurns.flatMap((turn) =>
+        turn.attachmentDraftId
+          ? [`${turn.designId}\u0000${turn.attachmentDraftId}`]
+          : []
+      )
+    );
+    for (const draft of drafts) {
+      if (!designIds.has(draft.designId)) {
+        await this.requireDesignDrafts().deleteForDesign(draft.designId);
+        if (draft.attachmentDraftId) {
+          await this.store
+            .discardAttachmentDraft(draft.attachmentDraftId)
+            .catch(() => undefined);
+        }
+        continue;
+      }
+      if (!draft.attachmentDraftId) continue;
+      if (
+        adoptedAttachmentDrafts.has(
+          `${draft.designId}\u0000${draft.attachmentDraftId}`
+        )
+      ) {
+        // The task snapshot is authoritative once the turn owns this staging id.
+        // A crash can occur before the renderer clears its saved composer draft.
+        await this.requireDesignDrafts().deleteForDesign(draft.designId);
+        await this.store.discardAttachmentDraft(draft.attachmentDraftId);
+        continue;
+      }
+      try {
+        await this.store.listAttachmentDraft(draft.attachmentDraftId);
+      } catch (error) {
+        if (
+          !(error instanceof AttachmentStoreError) ||
+          error.code !== 'ATTACHMENT_DRAFT_NOT_FOUND'
+        ) {
+          throw error;
+        }
+        await this.requireDesignDrafts().save({
+          designId: draft.designId,
+          expectedRevision: draft.recordRevision,
+          body: draft.body,
+          referenceIds: draft.referenceIds
+        });
+      }
+    }
+  }
+
+  private async requireDesignTask(designId: string, action: string): Promise<Task> {
+    const task = await this.requireTask(designId);
+    if (task.kind !== 'DESIGN') throw new Error(`${action} requires a Design.`);
+    return task;
+  }
+
+  private async requireDesignUpdates(): Promise<DesignUpdateCoordinator> {
+    this.assertPreviewEnabled();
+    this.assertAgentProviderAvailable();
+    this.assertRuntimeEnabled(CODEX_RUNTIME_ID);
+    if (!this.designUpdates) {
+      throw new Error('Design Mode is not configured in this Task Monki host.');
+    }
+    const capabilities = await this.runtimeRegistry
+      .require(CODEX_RUNTIME_ID)
+      .capabilities();
+    if (
+      capabilities.extensions['task-monki.design-instructions']?.maturity !==
+        'stable' ||
+      capabilities.extensions['task-monki.design-skill-access']?.maturity !==
+        'stable' ||
+      capabilities.extensions['task-monki.design-browser-verification']?.maturity !==
+        'stable' ||
+      capabilities.attachmentDelivery.maturity !== 'stable' ||
+      capabilities.turnInterruption.maturity !== 'stable'
+    ) {
+      throw new Error(
+        'The configured Codex runtime cannot apply Design instructions and skills safely, verify the rendered result, protect Design references, or support Stop.'
+      );
+    }
+    return this.designUpdates;
+  }
+
+  private emitDesignUpdate(designId: string, payload: unknown): void {
+    this.events.emit({
+      type: 'design.updated',
+      scope: { kind: 'DESIGN', designId },
+      taskId: designId,
+      payload,
+      at: new Date().toISOString()
+    });
+  }
+
+  private withDesignCreation<T>(
+    creationToken: string,
+    action: () => Promise<T>
+  ): Promise<T> {
+    const previous = this.designCreationLocks.get(creationToken) ?? Promise.resolve();
+    const work = previous.catch(() => undefined).then(action);
+    this.designCreationLocks.set(creationToken, work);
+    return work.finally(() => {
+      if (this.designCreationLocks.get(creationToken) === work) {
+        this.designCreationLocks.delete(creationToken);
+      }
+    });
   }
 
   private async requirePreviewContext(taskId: string) {
@@ -2993,4 +4258,110 @@ function latestForIteration<T extends { iterationId: string }>(
   return rows
     .filter((row) => row.iterationId === iterationId)
     .sort((a, b) => String(b[dateKey]).localeCompare(String(a[dateKey])))[0];
+}
+
+function sameWorktreeObservation(
+  stored: WorktreeRecord,
+  observed: WorktreeRecord
+): boolean {
+  return (
+    stored.status === observed.status &&
+    stored.headSha === observed.headSha &&
+    stored.error === observed.error
+  );
+}
+
+function sameGitObservation(
+  stored: GitSnapshotRecord,
+  observed: Omit<
+    GitSnapshotRecord,
+    'id' | 'capturedAt' | 'diffArtifactId'
+  >
+): boolean {
+  const {
+    id: _id,
+    capturedAt: _capturedAt,
+    diffArtifactId: _diffArtifactId,
+    ...storedObservation
+  } = stored;
+  const normalizedObserved = Object.fromEntries(
+    Object.entries(observed).filter(([, value]) => value !== undefined)
+  );
+  return isDeepStrictEqual(storedObservation, normalizedObserved);
+}
+
+function sameBranchPublicationObservation(
+  stored: BranchPublicationRecord,
+  observed: Omit<
+    BranchPublicationRecord,
+    'id' | 'requestedAt' | 'updatedAt'
+  >
+): boolean {
+  const {
+    id: _id,
+    requestedAt: _requestedAt,
+    updatedAt: _updatedAt,
+    ...storedObservation
+  } = stored;
+  const normalizedObserved = Object.fromEntries(
+    Object.entries(observed).filter(([, value]) => value !== undefined)
+  );
+  return isDeepStrictEqual(storedObservation, normalizedObserved);
+}
+
+function originalBranchPublishFailure(
+  publication: BranchPublicationRecord | undefined
+): string | undefined {
+  if (!publication?.error) return undefined;
+  if (publication.status === 'PUSHING') return publication.error;
+  if (publication.status !== 'AMBIGUOUS') return undefined;
+  const marker = ' Original push error: ';
+  const markerIndex = publication.error.indexOf(marker);
+  return markerIndex >= 0
+    ? publication.error.slice(markerIndex + marker.length)
+    : undefined;
+}
+
+function latestEventForIteration(
+  snapshot: TaskSnapshot,
+  taskId: string,
+  iterationId: string,
+  type: TaskSnapshot['events'][number]['type']
+): TaskSnapshot['events'][number] | undefined {
+  return snapshot.events
+    .filter(
+      (event) =>
+        event.taskId === taskId &&
+        event.iterationId === iterationId &&
+        event.type === type
+    )
+    .sort((left, right) =>
+      right.receivedAt.localeCompare(left.receivedAt)
+    )[0];
+}
+
+function createDesignBrowserRuntime(input: {
+  executablePath?: string;
+  browserExecutablePath?: string;
+  scratchRoot?: string;
+  socketRoot?: string;
+  requireCodeSignature?: boolean;
+}): DesignBrowserOwner {
+  if (
+    !input.executablePath ||
+    !input.browserExecutablePath ||
+    !input.scratchRoot ||
+    !input.socketRoot
+  ) {
+    throw new Error(
+      'Design Mode requires the packaged agent-browser, browser executable, scratch root, and socket root.'
+    );
+  }
+  return new AgentBrowserRuntime({
+    executablePath: input.executablePath,
+    browserExecutablePath: input.browserExecutablePath,
+    scratchRoot: input.scratchRoot,
+    socketRoot: input.socketRoot,
+    requireCodeSignature: input.requireCodeSignature
+  });
 }

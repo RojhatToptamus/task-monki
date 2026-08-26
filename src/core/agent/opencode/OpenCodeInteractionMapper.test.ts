@@ -199,13 +199,15 @@ describe('OpenCodeInteractionMapper', () => {
       sessionID: 'ses_1',
       questions: [
         { header: 'A', question: 'First?', options: [], custom: true },
-        { header: 'B', question: 'Second?', options: [] }
+        { header: 'B', question: 'Second?', options: [] },
+        { header: 'C', question: 'Third?', options: [], custom: false }
       ]
     });
     expect(mapped.request).toEqual({
       questions: [
         expect.objectContaining({ id: 'que_1:0', isOther: true }),
-        expect.objectContaining({ id: 'que_1:1', isOther: false })
+        expect.objectContaining({ id: 'que_1:1', isOther: true }),
+        expect.objectContaining({ id: 'que_1:2', isOther: false })
       ]
     });
     expect(
@@ -213,11 +215,67 @@ describe('OpenCodeInteractionMapper', () => {
         {
           interactionType: 'USER_INPUT',
           action: 'ANSWER',
-          answers: { 'que_1:1': ['two'], 'que_1:0': ['one'] }
+          answers: {
+            'que_1:2': ['three'],
+            'que_1:1': ['two'],
+            'que_1:0': ['one']
+          }
         },
         mapped.request
       )
-    ).toEqual({ path: 'question', body: { answers: [['one'], ['two']] } });
+    ).toEqual({
+      path: 'question',
+      body: { answers: [['one'], ['two'], ['three']] }
+    });
+  });
+
+  it('preserves native multiple-choice and custom-answer semantics', () => {
+    const mapped = mapOpenCodeQuestion({
+      id: 'que_multiple',
+      sessionID: 'ses_1',
+      questions: [
+        {
+          header: 'Checks',
+          question: 'Which checks should run?',
+          multiple: true,
+          custom: true,
+          options: [
+            { label: 'Unit', description: 'Run unit tests' },
+            { label: 'Build', description: 'Build the app' }
+          ]
+        }
+      ]
+    });
+
+    expect(mapped.request).toEqual({
+      questions: [
+        {
+          id: 'que_multiple:0',
+          header: 'Checks',
+          question: 'Which checks should run?',
+          isOther: true,
+          isSecret: false,
+          allowsMultiple: true,
+          options: [
+            { label: 'Unit', description: 'Run unit tests' },
+            { label: 'Build', description: 'Build the app' }
+          ]
+        }
+      ]
+    });
+    expect(
+      mapOpenCodeInteractionResponse(
+        {
+          interactionType: 'USER_INPUT',
+          action: 'ANSWER',
+          answers: { 'que_multiple:0': ['Unit', 'A focused smoke test'] }
+        },
+        mapped.request
+      )
+    ).toEqual({
+      path: 'question',
+      body: { answers: [['Unit', 'A focused smoke test']] }
+    });
   });
 
   it('maps only per-request native permission replies', () => {

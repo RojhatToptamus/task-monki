@@ -37,7 +37,7 @@ export function capAttachmentValidationFailures<
   });
 }
 
-export function taskCreationNeedsUnchangedRetry(error: unknown): boolean {
+export function creationRequiresUnchangedRetry(error: unknown): boolean {
   if (!error || typeof error !== 'object') return true;
   const status = (error as { status?: unknown }).status;
   const code = (error as { code?: unknown }).code;

@@ -37,7 +37,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     await expect(
       scenario.service.startReview({ taskId: task.id, runId: run.id })
     ).rejects.toThrow(
-      'A review requires a successfully completed implementation run. Retry or continue this run first.'
+      'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
     );
     expect((await scenario.store.getTask(task.id))?.workflowPhase).toBe('IN_PROGRESS');
     expect(scenario.agent.startedReviews).toHaveLength(0);
@@ -69,7 +69,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     await expect(
       scenario.service.startReview({ taskId: task.id, runId: run.id })
     ).rejects.toThrow(
-      'A review requires a successfully completed implementation run. Retry or continue this run first.'
+      'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
     );
     expect((await scenario.store.getTask(task.id))?.workflowPhase).toBe('IN_PROGRESS');
     expect(scenario.agent.startedReviews).toHaveLength(0);
@@ -113,12 +113,12 @@ describe('TaskManagerService review and PR action coordination', () => {
       await expect(
         scenario.service.startReview({ taskId: task.id, runId: implementation.id })
       ).rejects.toThrow(
-        'A review requires a successfully completed implementation run. Retry or continue this run first.'
+        'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
       );
       await expect(
         scenario.service.startReview({ taskId: task.id, runId: current.id })
       ).rejects.toThrow(
-        'A review requires a successfully completed implementation run. Retry or continue this run first.'
+        'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
       );
       expect(scenario.agent.startedReviews).toHaveLength(1);
     },

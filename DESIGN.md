@@ -1,455 +1,781 @@
-# Task Monki Interface Guide
+# Task Monki — Interface Guide
 
-Guidance for agents doing design or frontend work in this repository. Read this
-file before changing a screen, interaction, or component. It is a decision
-framework, not a substitute for inspecting the product: the rendered app,
-nearby components, the ordered `src/renderer/styles.css` manifest, and its
-`src/renderer/styles/*` sources remain the source of truth.
+The contract for anyone building UI here, human or agent. Read it before writing
+markup and check your work against §10 before you open a PR. It is deliberately
+short: everything in it is load-bearing. If something you need isn't here, it is
+not a licence to invent — see §9.
 
-The goal is a coherent, macOS-native-feeling operational desktop app that
-rewards sustained use. A good Task Monki interface is calm, precise, compact
-without feeling cramped, and clear about what is true and what the user can do
-next. Light and dark themes are equally important expressions of the same
-system.
-
-### Core design principles
-
-1. **Meaning over decoration.** No element exists to fill space or look busy.
-   Every visible element and its position must help the user orient, understand
-   state, decide, or act.
-2. **One restrained type scale.** Use the system's sizes and weights
-   consistently. Hierarchy comes from order, weight, spacing, and position—not
-   giant titles. Do not put oversized hero text inside operational cards.
-3. **Tone lives in one small signal.** For persistent workflow state, start
-   with concise text and add at most one supporting treatment only when it
-   improves scanning. A status dot is one option, never the default. Do not
-   spread the same tone across colored headline text, tinted backgrounds,
-   borders, and badges. Text generally stays neutral; color is rare,
-   intentional, and never the sole carrier of meaning.
-4. **Actions by purpose.** The primary workflow action is prominent and close
-   to the thing it advances. Utility actions such as refresh remain minimal—a
-   quiet text action or familiar icon, whichever is clearest—and never compete
-   with the primary action. Destructive or rare actions appear only when
-   meaningful.
-5. **Progressive disclosure.** Detail such as logs, raw payloads, and history is
-   compact by default and expandable in context, never dumped inline as a wall.
-6. **Say it once.** The same fact must not repeat across a title, status,
-   sentence, badge, and button. State it in the single highest-value place.
-7. **Coherence.** Type roles, spacing rhythm, hairline borders, radii, control
-   behavior, and equivalent interaction states form one consistent grammar
-   across the app. Composition and density may adapt to the job of the surface,
-   but they must still feel like the same product.
-8. **Spatial stability.** Interaction and state changes must not make controls,
-   content, or surrounding layout jump unexpectedly. A control should remain
-   under the pointer while it is being used, and status updates should preserve
-   the user's reading position. Layout should move only when the user explicitly
-   requests a structural change, such as opening a disclosure or navigating to
-   another surface.
-
-### Native desktop quality bar
-
-Task Monki should feel designed for macOS, not like a generic web dashboard
-inside a desktop shell. Native quality comes from predictable behavior,
-platform-appropriate composition, precise alignment, restrained materials,
-excellent keyboard and focus behavior, and polished state transitions—not from
-imitating macOS ornament.
-
-- Prefer familiar desktop structures such as sidebars, toolbars, lists,
-  inspectors, menus, popovers, and focused sheets when they fit the workflow.
-- Use a small number of calm surfaces and clear separators. Do not turn every
-  concept into a floating card.
-- Match established macOS expectations for selection, disclosure, focus,
-  keyboard navigation, contextual actions, and destructive confirmation.
-- Do not add blur, translucency, shadows, or platform decoration merely to look
-  native. Use them only when the existing product system gives them a purpose.
-- The interface must not look generically AI-generated. Reject dashboard card
-  mosaics, pill and badge clutter, gradient decoration, glowing accents,
-  oversized marketing-style copy, excessive rounded containers, ornamental
-  icons, repeated explanatory prose, and a status dot on every row.
+**The test of this document:** a new 28px button added by someone who has never
+seen the app should be indistinguishable from one that shipped a year ago.
 
 ---
 
-## 1. Start with the user's question
+## 0. Source precedence
 
-Design the information order before designing components. A screen should make
-the following clear, in roughly this order:
+When two sources disagree, the higher one wins. Never average them.
 
-1. Where am I, and what object or workflow am I looking at?
-2. What is true now?
-3. What needs attention?
-4. What can I do next?
-5. Where can I inspect supporting evidence or detail?
+1. **The bound design system** — fonts, palette, components, and any existing
+   mock of this product. If it has a component for what you're building, fork it.
+2. **This document** — the rules that keep additions consistent.
+3. **The existing implementation** — match the closest shipped surface for
+   anything the two above leave open. "Closest" means same layout archetype
+   (§7.1), not merely same page.
+4. **Your judgement** — last, and only inside the gate in §9.
 
-Use position, alignment, proximity, whitespace, and semantic headings to create
-this reading order before reaching for larger type, color, icons, or
-containers. The most visually prominent element should answer the most
-important current question.
-
-For a material visual or interaction change, write a short design intent that
-identifies:
-
-- the user's immediate job;
-- the primary object, state, and next action;
-- the nearest existing product patterns to reuse;
-- the states and content extremes that must work;
-- how the result will be verified in the rendered app.
-
-Do not invent product behavior to complete a composition. If the required
-workflow or source of truth is unclear, resolve that first.
-
-Small, token-aligned corrections do not need process boilerplate, but they still
-require inspection of the nearest established pattern and the affected state.
+Two corollaries. Never introduce a pattern whose only justification is that it
+looked good in isolation; and if the existing implementation contradicts §1–§8,
+follow this document and flag the divergence rather than propagating it.
 
 ---
 
-## 2. Reuse the product's visual and interaction grammar
+## 1. Core principles
 
-Global style sources live in `src/renderer/styles/*`, with their intentional
-cascade order declared by `src/renderer/styles.css`. Inspect the real
-variables, classes, components, and nearby compositions before styling
-anything. Never guess a token name; an unresolved `var()` is a bug.
-
-Use this order of preference:
-
-1. Inspect two or three comparable surfaces and identify the established
-   pattern.
-2. Reuse an existing component, class, interaction, or layout rhythm.
-3. Add a semantic variant when the same pattern needs a real product state.
-4. Create or extract a component when it owns meaningful semantics, behavior,
-   accessibility, or lifecycle; share it when that ownership recurs.
-5. Introduce new visual language only when the current system cannot express a
-   concrete requirement.
-
-Reuse is about shared grammar, not identical layouts. Controls, type roles,
-radii, status meaning, and interaction behavior should stay consistent while
-composition and density adapt to the job of the surface.
-
-The stylesheet has established colors and many reusable patterns, but it is not
-a complete token scale for every spacing, type, or radius decision. When no
-token exists, reuse the nearest established value and rhythm from comparable
-UI. Add a named token only when the value repeats or represents a genuine
-system decision. Do not create a parallel design system inside a component.
+1. **Meaning over decoration.** Every element carries information. A card, a
+   divider, a shadow, a hue — each must answer *what does the user learn from
+   this?* If the answer is nothing, delete it.
+2. **One fact, one owner.** A value appears once per surface, in the place with
+   the authority to state it. Repetition reads as two different facts.
+3. **Structure is fill, not outline.** Depth comes from surface steps. Borders
+   are for real boundaries, never for defining a control that already has a fill.
+4. **Quiet by default, loud on purpose.** Colour, weight and motion are a budget.
+   Spend them where the user must act, and nowhere else.
+5. **Dark is not inverted light.** It is a first-class palette. Elevation goes
+   *lighter* on a near-black ground; shadows carry almost nothing.
+6. **Tell the truth about state.** Never show a spinner for something that isn't
+   running, a stale value as if it were fresh, or a disabled control with no
+   reason attached.
+7. **Density with air.** Operators scan long lists. Whitespace organises; it does
+   not pad. An empty-feeling panel is a layout problem, not a content gap.
+8. **Native desktop, not web page.** No hero sections, no marketing gradients, no
+   full-width centred columns, no bouncy easing. The reference points are Linear,
+   Codex and macOS system apps.
 
 ---
 
-## 3. Give each concept one owner and one clear home
+## 2. Colour and tokens
 
-A fact, status, or workflow action should have one canonical owner in the UI.
-Do not repeat renderer-local versions across a page header, card, rail, modal,
-and button. When a local surface owns the current primary action, global actions
-should recede.
+### 2.1 The rule
 
-Product truth about tasks and workflow belongs in domain projections and pure
-renderer selectors or view models. Components may own ephemeral interaction
-state such as an open popover, search text, focus, or disclosure state; they
-must not become a second source of repository, workflow, Git, review, or
-delivery truth.
+**A screen never contains a colour literal.** No hex, no `rgb()`, no named
+colour, no ad-hoc `rgba()` — including in shadows, hairlines and SVG fills. Every
+colour is `var(--token)`. If a value isn't a token, it doesn't exist yet: add it
+to the token layer, in both modes, in the same change.
 
-Place information and actions consistently across states. Loading, error, or
-partial data should not move the same concept to a surprising new location.
+Appendix A is the binding element → token map. Consult it rather than reasoning
+from the role names; if an element isn't listed, use its closest structural
+equivalent there.
 
----
+An undefined custom property does not warn and does not fall back — it computes
+to nothing, so a selected row silently disappears while the markup still looks
+correct. Any file that consumes these components ships the **complete** set,
+never a subset trimmed to what it happened to need.
 
-## 4. Use boundaries to express real structure
+### 2.2 A theme is seven seeds
 
-Add a card, panel, divider, or nested surface only when it communicates a real
-boundary: independent action, selection, scrolling, state, lifecycle, or
-ownership. If headings, spacing, alignment, and a hairline can express the
-relationship, prefer them.
+Themes are authored as seven values per mode — `surface`, `ink`, `accent`,
+`selection`, `added`, `removed`, `skill` — and every other token is **derived**
+from them by fixed ratios (see `theme-tokens.json`). Consequences:
 
-- Keep distinct concepts in distinct surfaces when they have different state,
-  actions, or lifecycle. Visual similarity alone is not a reason to merge them.
-- Avoid nested cards, decorative containers, and dashboard mosaics that turn
-  every fact into a tile.
-- Use intentional empty space to group and separate. Do not fill space merely
-  to make a screen appear designed.
-- Compact by omission, not compression: remove repeated labels, redundant
-  borders, empty rows, and unnecessary controls before shrinking text, hit
-  targets, or useful spacing.
-- Scanning surfaces may be denser than decision, editing, or destructive
-  surfaces. Preserve a shared rhythm rather than forcing identical density.
+- Adding a theme means adding seven values. Never hand-pick a `--card`, a
+  `--hair` or a shadow for one theme.
+- Any new token must be expressible as a function of the seeds, or it belongs in
+  the invariant set (§2.6).
+- Two themes may not differ structurally. If a theme needs a component-level
+  override to look right, the derivation is wrong, not the component.
 
-Every abstraction and every visible boundary must solve a current requirement.
-Repetition is not the only reason to componentize: a meaningful semantic unit,
-focused behavior, accessibility contract, or lifecycle boundary can also
-justify a component. Avoid speculative wrappers and generic frameworks.
+### 2.3 Surfaces — a strict ladder
 
----
+| Token | Role |
+|---|---|
+| `--ground` | window and sidebar rail; the plane everything sits on |
+| `--panel` | secondary rail, inspector, list column |
+| `--surface` | the content sheet |
+| `--field` | inputs, composers, recessed wells |
+| `--card` | a raised unit on the sheet |
+| `--overlay` | menus, popovers, modals |
+| `--well` | code and read-only payload blocks |
 
-## 5. Establish hierarchy with restraint
+Rules: the rail is always `--ground`; the content sheet is always lighter than
+the rail (both modes); a raised or selected thing goes **lighter** than what it
+sits on, never darker; and in light mode nothing is `#fff` — the lightest value
+in the set is `--card`.
 
-- Use the existing type roles and weights. Hierarchy should come mainly from
-  order, weight, spacing, and contrast—not oversized headings.
-- Use monospace for technical values such as identifiers, branches, commands,
-  hashes, paths, and counts. Use the interface typeface for labels, actions,
-  prose, and status words.
-- Give each view or section one dominant purpose. Primary actions should be
-  prominent and close to the object they advance; secondary and utility
-  actions should remain available without competing.
-- Choose an icon, text label, or both according to clarity and available space.
-  Do not prefer an icon merely because it is quieter. Familiarity,
-  discoverability, and an unambiguous accessible name matter more.
-- Say each fact once in the highest-value location. Do not restate it as a
-  heading, badge, sentence, and button.
-- Keep supporting evidence visually subordinate but easy to reach through
-  progressive disclosure.
+### 2.4 Row states
 
-Avoid ornamental gradients, glows, shadows, decorative icons, oversized
-padding, badge walls, tinted card mosaics, and explanatory copy that merely
-narrates the interface. Reserve strong area tint, borders, and warnings for
-states that genuinely require emphasis.
+`--hover` on pointer-over, `--sel` for the selected row or active tab, `--press`
+while held. Inactive is expressed as **ink** — `--muted` text with no fill —
+never as opacity on a full-strength row. Opacity ghosting is reserved for
+`:disabled` (0.45).
 
----
+### 2.5 Ink
 
-## 6. Communicate state explicitly
+`--text` primary · `--text-soft` secondary prose · `--muted` the floor for small
+text and metadata · `--faint` inactive labels, counts, placeholders.
 
-Persistent workflow status, urgency, availability, and progress must be named
-in visible text and exposed programmatic state. Color, dots, icons, tint, and
-motion may reinforce the meaning but must not replace it. Interactive states
-such as selected, checked, and expanded need the correct programmatic state and
-must not rely on color alone; use a conventional control state, shape, icon, or
-text as appropriate.
+Every ink value is **solved per theme** against all nine planes it can land on —
+`--ground`, `--panel`, `--surface`, `--card`, `--overlay`, `--well`, `--field`,
+`--field-hover`, `--sel` — not merely against the sheet. Measured floors:
+`--text` ≥7:1, `--text-soft` and `--muted` ≥4.5:1, every status `-ink` ≥4.5:1,
+`--faint` and `--idle` ≥3:1 (they label, they don't carry prose).
 
-Use the smallest sufficient treatment for the context: concise status text with
-at most one supporting signal such as a dot, icon, or restrained pill. Do not
-repeat the same tone across a unit's border, background, heading, and badge.
-Decorative indicators should be hidden from assistive technology when the text
-already names the state.
+Never set small text below `--muted`. Never put prose on a status hue's base
+value — that's what the `-ink` variant is for. Re-solve whenever any plane or
+either end of the ramp moves; a hand-nudged ink is how a menu becomes unreadable
+in one theme only.
 
-Do not add a dot merely because a row contains state. Use one only where rapid
-scanning materially benefits and where it does not duplicate an equally clear
-label or control state. If text and hierarchy already communicate the state,
-stop there.
+### 2.6 Lines, shadows and focus
 
-The semantic aliases in `src/renderer/styles/foundation.css` answer these
-questions:
+- `--hair` divides content **inside** a surface. `--edge` marks a real structural
+  boundary. Both are alpha over ink, so they stay correct on a warm theme and a
+  cool one.
+- **Elevation:** `--shadow-card` (light mode only; in dark, cards have no shadow
+  at all — the surface step is the depth), `--shadow-panel`, `--shadow-pop` for
+  menus and popovers, `--shadow-modal`. Shadow appears only on things that
+  genuinely leave the plane.
+- **Focus** is the one place a stroke lands on a field: 1px inset `--accent` plus
+  a 3px soft ring at 18–22%. Focus is visible on every interactive element, and
+  geometry does not shift when it appears.
+- The waiting hue is held constant across all themes so "needs you" reads
+  identically everywhere. Radii, spacing, motion and layer indices are likewise
+  theme-independent.
 
-| Token | Meaning |
-| --- | --- |
-| `--state-working` | Work is actively in progress. |
-| `--state-waiting` | The workflow is waiting for the user. |
-| `--state-blocked` | Progress is blocked or a verdict is against the change. |
-| `--state-verified` | The outcome is verified or complete. |
-| `--state-idle` | Work is idle, ready, or not yet started. |
+### 2.7 Accent and status
 
-Use these aliases by meaning, not by preferred hue. Differentiate urgency with
-clear language, hierarchy, and placement rather than inventing another color.
-Status words use the interface typeface; monospace remains reserved for values.
-Status aliases are not selection, navigation, repository identity, or
-decorative colors. Use the established tokens for those purposes unless the
-object itself genuinely carries the status.
+`--primary` is the highest-contrast neutral (near-black on light, near-white on
+dark) and belongs to the single primary action. `--accent` is the interactive hue
+— links, focus, selection, one categorical dot. For text, use `--accent-ink`;
+raw accent fails as link ink in low-chroma themes.
 
-Design the full state model before the happy path alone. Consider default,
-hover, focus, selected, expanded, disabled, loading, busy, empty, success,
-error, stale, missing, unavailable, disconnected, and completed states as
-applicable. Define which state takes precedence when several are true. Preserve
-the user's context and valid actions during async transitions.
+Status hues are `--working`, `--waiting`, `--blocked`, `--verified`, `--idle`,
+each with an `-ink` variant for when the hue sets **text**. Some themes have an
+accent equal to a status hue — never put the accent on a status pill.
 
-When a disabled reason is not self-evident, or the user may reasonably expect
-the action to work, make the reason discoverable in the existing UI style.
-Opacity or a `title` attribute alone is not an explanation. Errors belong near
-the relevant action or field and should state the recovery path when one exists.
+### 2.8 Categorical hues (`--id-1` … `--id-6`)
 
----
+Categorical hues identify a thing (a repo, an agent, a saved view). They carry no
+state and are **derived, not seeded** — the `skill` seed is the only authored
+value behind them:
 
-## 7. Make interactions predictable
+> `--id-N` = `skill` converted to OKLCH, then hue-rotated by `(N − 2) × 60°`, with
+> L and C clamped into the per-mode band — dark `L 0.72–0.80`, `C 0.075–0.135`;
+> light `L 0.46–0.54`, `C 0.085–0.150` — and chroma reduced until the result is
+> in sRGB gamut. `--id-2` keeps the `skill` hue (zero rotation); the same
+> lightness, chroma, and gamut constraints still apply.
 
-- Use native controls and familiar desktop behavior before custom interaction
-  models.
-- When native controls do not fit, implement one recognized composite pattern
-  completely: role, name, state, keyboard model, and focus behavior. Do not mix
-  menu, listbox, checkbox, or dialog semantics into a one-off interaction.
-- Make selection distinct from invoking an action. The selected object and the
-  action that will run on it must both be clear.
-- Menus and popovers support short, contextual choices. Dialogs interrupt for a
-  focused decision. Drawers support longer inspection or editing without
-  losing the parent context. Do not choose an overlay only to save layout work.
-- Disclosures should expand in place when the detail belongs to the current
-  concept. Preserve the trigger and surrounding context.
-- Give actions immediate feedback. For asynchronous work, show what is pending,
-  prevent accidental duplicates, and keep success or failure tied to the
-  initiating action.
-- Keep interactive geometry stable across default, hover, focus, pressed,
-  selected, disabled, loading, success, and error states. Do not change border
-  thickness, padding, font weight, icon allocation, or label width in a way that
-  moves the control or its neighbors. Prefer outlines, inset treatments, and
-  preallocated icon or progress space when feedback would otherwise change the
-  box.
-- Keep status, count, validation, and progress updates inside a stable owned
-  region. When variable content cannot be reserved without creating waste,
-  place it where growth does not push unrelated controls or move the user's
-  current anchor. Do not let routine background updates reorder content under
-  the pointer or change the scroll position.
-- Intentional expansion, collapse, insertion, removal, and navigation may
-  change layout, but the initiating control should remain a stable visual
-  anchor and the resulting movement should be direct, predictable, and local.
-- Destructive or hard-to-reverse actions need appropriate separation and
-  confirmation using existing patterns. Do not make routine actions noisy.
-- Hover may reveal supplemental information but must not be required to operate
-  or understand the interface.
+Six evenly spaced hues at one lightness and one chroma, so they read as one
+family and no single category shouts. Resolved values for all 16 themes are in
+`theme-tokens.json`; no theme hand-picks them.
 
-Effects and local UI state should coordinate genuine external behavior, not
-copy derived product state. Prefer explicit event handling, selectors, and
-state transitions over effect-driven synchronization.
+**These are graphic-only tokens.** They clear 3:1 against every plane they can
+land on (measured floor 3.56:1) — enough for a dot, bar, or 2px marker, not for
+text. A category label is `--text` or `--muted` next to its dot, never the id hue
+itself. Assign by stable hash of the entity id so a repo keeps its colour, and
+never reuse a status hue for a category or an `--id-*` for a state. Where an
+existing product control persists an explicit category slot, as saved-view
+markers do, map its six slots directly to `--id-1` … `--id-6`; do not reinterpret
+the legacy slot names as semantic colour or status names.
 
----
+### 2.9 Completeness and integration
 
-## 8. Treat accessibility as part of the composition
+`tools/build-themes.mjs` is the only place theme colour is authored. It holds the
+seven seeds per theme and derives everything else, emitting two generated files:
+`themes.css` (what the app loads) and `theme-tokens.json` (the same data plus
+seeds, floors and measurements, for tooling). **16 themes × 2 modes × 53 tokens**,
+every set complete.
 
-- Align visual order, DOM reading order, and keyboard order. Give the current
-  view or landmark a clear top-level heading and use a logical heading and
-  landmark hierarchy beneath it.
-- Prefer native semantic elements: buttons for actions, links for navigation,
-  lists for collections, fieldsets and legends for grouped inputs, and native
-  checkboxes, radios, and disclosure elements when they fit.
-- Give controls stable, contextual accessible names. An icon-only action needs
-  a real accessible label; `title` may provide a tooltip but is not a substitute
-  for naming or describing the control.
-- Associate labels, help, validation, and errors with their fields. Use live
-  regions only for important asynchronous changes that would otherwise be
-  missed.
-- Support complete keyboard operation without positive `tabindex`. Focus must
-  be visible, follow a predictable order, move intentionally into modal
-  surfaces, and return to a sensible trigger or next location when they close.
-  Hover-only content must also work on focus.
-- Give pointer targets adequate size and separation: at least 24 by 24 CSS
-  pixels or equivalent spacing where the standard exceptions apply, and larger
-  when the surface's density permits.
-- Normal text must meet a 4.5:1 contrast ratio. Large text and visual information
-  necessary to identify controls or states—including meaningful icons and focus
-  indicators—must meet 3:1 against adjacent colors in every relevant state and
-  theme. Inactive controls are exempt from this threshold but must remain
-  understandable.
-- Do not use placeholder text as the only label or mute essential information
-  until it becomes difficult to read.
+```bash
+node tools/build-themes.mjs           # regenerate both files
+node tools/build-themes.mjs --check   # CI: fails if output is stale or a floor breaks
+```
 
-The interface must remain understandable with reduced color perception,
-keyboard-only input, a screen reader, increased text size, and reduced motion.
+The theme carrier is the **root element**:
+
+```html
+<html data-theme="umber" data-mode="dark">
+```
+
+Theme names lowercase; `data-mode` is `light`, `dark`, or **omitted** to follow
+`prefers-color-scheme`. It must sit on `<html>` — put it on an inner wrapper and
+`body` falls outside the token scope, which forces someone to hardcode a
+background and breaks overscroll, print and browser UI in every light theme.
+
+Rules that follow:
+
+- Read values from the generated CSS. Never compute a derivation at runtime,
+  never hand-pick a value for one theme, never hand-edit the generated files.
+- Adding a theme = adding one seven-value entry to the generator. Adding a token
+  = adding it to the generator so all 32 sets get it in the same change. A token
+  present in 31 sets is a blank surface in the 32nd, and blanks do not warn.
+- Add `--check` to CI. It verifies the committed output is current, every set is
+  complete, and every contrast floor holds — the three things review cannot see.
+
+Measured worst case across all 32 sets: `--text` 10.29:1, `--text-soft` 5.75,
+`--muted` 4.50, status inks 4.52, `--faint`/`--idle` 3.01, `--id-*` 3.56.
 
 ---
 
-## 9. Preserve meaning across widths and content extremes
+## 3. Typography and icons
 
-Responsive behavior should preserve semantic order and the primary task, not
-create a second information architecture.
+### 3.1 Families
 
-- Define what stays, wraps, truncates, moves, collapses, or becomes
-  progressively disclosed as space narrows.
-- Stack or regroup before controls clip or primary workflows require horizontal
-  scrolling.
-- Preserve the primary action and the context it acts on at narrow widths.
-- Prefer wrapping primary identity in focused surfaces. In dense scanning
-  surfaces, primary or supporting values may truncate when enough identity
-  remains to distinguish them and the full value is available through an
-  accessible existing pattern.
-- Keep overlays within the viewport and avoid shifting surrounding layout when
-  they open or when scrollbars appear. Nested scrolling must be intentional.
-- Test long names, identical labels, long paths, large counts, translated or
-  expanded copy, missing values, and large collections—not only seed-default
-  strings.
+Two families, both named in the token layer as `--font-ui` and `--font-mono`.
+A component references those tokens and never a family name. Weights: **400,
+500, 600** only — no 300, no 700, no italic outside quoted prose. `font-feature-settings:
+"tnum"` on every number that sits in a column or updates in place, so digits
+don't jitter. System fallbacks in the token, `font-display: swap`, and nothing
+that depends on a webfont having loaded to be legible.
 
-As current QA checkpoints, inspect narrow, medium, and wide layouts around 400,
-760, and 1280 CSS pixels, plus 200% zoom. If the product's supported window
-sizes change, use those canonical limits instead. The primary workflow must not
-become clipped, overlapping, unreachable, or dependent on page-level horizontal
-scrolling.
+Inter and Inter Tight are out.
 
----
+### 3.2 Scale
 
-## 10. Use motion only to explain change
+Interface type is one sans; machine values are one mono. No third family.
 
-Motion should communicate continuity, causality, or genuinely active work. It
-must not be the only indication of a state.
+| Role | Size / weight |
+|---|---|
+| Page title | 22–24 / 600 · `-0.02em` |
+| Section heading | 15 / 600 |
+| Panel title, control label | 13 / 600 |
+| Body, prose | 13 / 400 |
+| Secondary, helper | 12 / 400 `--text-soft` |
+| Metadata, counts | 11.5 / 400 `--muted` |
+| Group label | 9.5 / 600 caps · `0.10em` `--faint` |
 
-- Prefer brief, consistent transitions using existing motion patterns.
-- Avoid ambient animation, flashing, layout churn, and multiple competing
-  animations.
-- Prefer opacity and transform when animation is justified; avoid animating
-  layout dimensions without a strong reason.
-- Honor `prefers-reduced-motion` and provide a still, equally understandable
-  experience.
-- Give users control over motion or media that continues beyond a brief
-  transition.
+**Mono is for machine values only** — paths, hashes, branches, models, counts,
+times, payloads, token names. It never sets prose, labels or buttons. This split
+is what makes a scan legible: prose is the sentence, mono is the fact.
 
----
+Never use size alone to build hierarchy where weight and colour will do it.
+Never centre a paragraph. `text-wrap: pretty` on prose. Truncate with ellipsis
+and keep the full value in `title`; never wrap a machine value mid-token.
 
-## 11. Write interface copy for utility
+### 3.3 Icons
 
-Use concise, exact labels that describe the object, state, or action in the
-user's language. Prefer clear actions over instructional paragraphs. Keep
-provider and debug terminology out of primary workflow surfaces unless the user
-is explicitly inspecting debug information.
+**One set, outline only.** Never mix an outline set with a filled one, and never
+substitute an emoji, a glyph from the mono font, or a hand-drawn SVG for a missing
+icon — use the nearest icon in the set or a word.
 
-Do not add copy to justify an implementation detail. Add detail only when it
-prevents a consequential mistake, explains why an action is unavailable, or
-provides a concrete recovery path.
+Sizes **13 / 16 / 20**, matched to the row they sit in (13 in compact rows, 16
+everywhere else, 20 only in empty states). Stroke 1.5 at 16px, scaled
+proportionally. `stroke="currentColor"`, `fill="none"` — an icon inherits ink
+from its row so it dims with `--muted` automatically and needs no colour of its
+own. Never a coloured icon where a status word or dot would do.
+
+Icons are decoration next to a label and information when alone: an icon-only
+control carries an `aria-label` and a tooltip. Optically centre against text
+rather than aligning boxes, and keep 8–9px between icon and label.
 
 ---
 
-## 12. Implementation and verification workflow
+## 4. Spacing and geometry
 
-1. Read this guide, the relevant workflow or architecture docs, the global
-   stylesheet, and nearby components.
-2. Trace the source of truth and define the information hierarchy, interaction
-   contract, state matrix, and responsive priorities.
-3. Identify the patterns being reused and the smallest coherent change. Explain
-   why any new abstraction or visual rule is necessary.
-4. Implement domain-derived UI through pure selectors or view models and keep
-   components focused on presentation and interaction.
-5. Add tests for new selector, state, or interaction behavior. Tests do not
-   replace rendered inspection of hierarchy, spacing, overflow, focus, or theme
-   quality.
-6. Inspect the real seeded app. Compare the result with adjacent surfaces and
-   capture rendered evidence when layout or hierarchy materially changes.
-7. Review the focused diff. Remove dead code, duplicate truth, one-off styling,
-   and abstractions without a current requirement.
+4px grid. The whole vocabulary: **4 · 6 · 8 · 10 · 12 · 14 · 16 · 20 · 24 · 32**.
+Lay sibling groups out with flex/grid `gap` — never per-child margins, never
+whitespace between inline elements.
 
-For visible UI changes, verify as applicable:
+| Thing | Padding / gap |
+|---|---|
+| Card | 11–12 pad, 6–8 internal gap |
+| Panel / settings block | 16–18 pad, 15 row rhythm |
+| List row | 8 horizontal, 26–30 tall |
+| Sheet | 14–16 pad |
+| Between cards | 10–12 |
+| Section separation | 24–32 |
 
-- default, hover, focus, selected, expanded, disabled, loading, empty, error,
-  stale, unavailable, disconnected, and completed states;
-- light and dark themes;
-- keyboard-only operation, focus entry and return, and accessible names;
-- contrast, reduced motion, 200% zoom, and semantic reading order;
-- narrow, medium, and wide windows;
-- short, long, missing, duplicated, and high-volume content;
-- alignment, control heights, line length, edge rhythm, intentional empty
-  space, overflow, scrollbar stability, and overlay placement.
+Radii: **6** chips and dots · **8** buttons, rows, small fields · **10–12**
+cards, composers, popovers · **14–16** the shell and full-height sheets. Concentric
+things step inward by 2–3px; never nest equal radii.
 
-Do not claim a visible behavior is complete from static code review alone when
-the rendered state can be exercised.
+Control heights: **34** decision surface · **30** toolbar · **26** compact and
+inline. Never mix two heights in one row. Hit targets never below 28px on
+desktop, 44px on touch.
+
+### 4.1 Fixed geometry
+
+These are settled. Use the value, don't re-derive it.
+
+| | |
+|---|---|
+| Sidebar rail | 56 collapsed · 224 expanded |
+| Secondary list column | 280 min · 360 default |
+| Toolbar / panel header | 44 tall |
+| Page gutter | 24 at minimum width · 32 wide |
+| Reading column (settings, prose) | 880 max; tables and lists go full width |
+| List row | 26 compact · 30 default · 36 two-line |
+| Button | 34/30/26 tall, 12–15 horizontal pad, 64 min width |
+| Icon button | 28 square (26 compact), 16 glyph |
+| Single-line field | 34 tall, 12 horizontal pad |
+| Textarea / composer | 88 min body, 96 min total, 10–12 pad |
+| Popover / menu | 220–280 wide, 6 pad, 30 rows |
+| Modal | 440 confirm · 560 form · 720 payload |
+| Drawer | 380 narrow · 480 default · 640 wide, full height |
+
+Widths are the design intent, not a hard cap: a panel may be resized by the user,
+but it opens at these values and never below the minimum.
 
 ---
 
-## 13. Pre-submit checklist
+## 5. Component contracts
 
-- [ ] The screen's reading order makes location, current truth, attention,
-      primary action, and supporting detail clear.
-- [ ] Each fact, status, and action has one owner and one canonical home.
-- [ ] Components, tokens, values, and interaction patterns were reused from
-      comparable product surfaces before anything new was introduced.
-- [ ] Cards, dividers, and nested surfaces correspond to real boundaries rather
-      than decoration.
-- [ ] The design is compact by omission, with legible type, usable targets, and
-      intentional spacing preserved.
-- [ ] Status is explicit in text and semantics; color, icons, and motion only
-      reinforce it.
-- [ ] Primary, secondary, utility, and destructive actions have appropriate
-      prominence and placement.
-- [ ] Product truth comes from the correct projection or selector; local state
-      is limited to interaction concerns.
-- [ ] Keyboard, focus, naming, contrast, zoom, reduced motion, and semantic
-      structure have been checked.
-- [ ] The layout preserves meaning across themes, widths, states, and content
-      extremes.
-- [ ] Hover, focus, press, loading, validation, and status changes preserve
-      control geometry, reading position, and scroll position unless the user
-      explicitly requested a structural layout change.
-- [ ] The rendered result was compared with nearby surfaces and inspected for
-      visual finish.
-- [ ] The diff is focused, tested in proportion to risk, and contains no
-      speculative abstraction or parallel design language.
+A component is a reusable pattern: if it appears twice, or plausibly will, it is
+one component with props — not two similar blocks. Before adding a new one,
+answer §9.
 
-If a true product invariant cannot be preserved, stop and request direction.
-For reversible visual decisions within the request, use nearby patterns and
-rendered evidence to make the best judgment rather than blocking on preference.
+**Buttons — four families, no fifth.** Primary (`--primary` fill, `--on-primary`
+ink; one per surface), secondary (`--field` fill), ghost (transparent, `--hover`
+on hover), destructive (soft tint, never a filled red block). Primary and
+secondary share geometry so a pair aligns. Icon-only buttons are ghost, 16px
+glyph, and always carry an `aria-label`.
+
+**States must not move geometry.** Size, padding, border width and radius are
+identical across rest, hover, active, focus and disabled — only fill, ink and
+ring change. A disabled control states why, adjacent or in a tooltip.
+
+**Fields.** A filled well (`--field`), no resting border. Hover lifts to
+`--field-hover`; focus per §2.6; placeholder is `--faint`. Label above at 13/600,
+help text below at 12 `--muted`, error text replaces help text and carries
+`--blocked-ink`. Never rely on placeholder as the label.
+
+**Composer — one pattern everywhere** (briefs, messages, follow-ups): context
+chips above the text area, run configuration below it, primary action bottom-right,
+keyboard hint at 11 `--muted`. The composer is a single `--field` surface — not a
+bordered box, not a stack of separately outlined parts.
+
+**Segmented vs menu.** Segmented for 2–4 options whose labels fit on one line at
+the narrowest width the container reaches; a dropdown for anything longer or
+open-ended. A wrapping segmented control is a bug.
+
+**Menus and popovers.** `--overlay` + `--shadow-pop`, r12, 6px pad, 30px rows,
+group labels per §3. Destructive item last, separated by a `--hair`. Escape
+closes, arrow keys move, focus returns to the trigger.
+
+**Settings row.** A setting is a row, not a card: label left, control right,
+optional one-line description under the label. Rows are separated by `--hair`
+inside one panel. Never wrap each setting in its own card.
+
+**Cards — fixed content order.** Machine context and status on the first line
+(context left in mono `--muted`, status pill right), then the title at 12–12.5/600
+over at most two lines, then a `--hair`, then a metadata footer in mono `--faint`.
+Actions live in the footer or a hover-revealed ghost button — never a row of
+buttons in the header. No card inside a card. If the whole card is clickable, the
+whole card carries the hover fill and there is no separate "Open" link.
+
+Use a card when a unit has mixed content types (status + prose + metadata) and
+stands alone. Use a row when items are compared against each other. A list of
+cards is almost always a list of rows wearing costumes.
+
+**Drawers, modals, sheets — pick by interruption cost.** A drawer for detail and
+editing alongside the list (right edge, full height, dismissed by Escape, a click
+outside, or the same control that opened it; the list stays live behind it and
+selection follows). A modal only when the app genuinely cannot proceed —
+confirmation of something destructive, or a short blocking form. A page for
+anything a user might link to, bookmark, or spend minutes in. Never stack two
+modals; never open a drawer from a modal. Drawer anatomy is fixed: 44 header with
+title left and close right, scrolling body, pinned footer holding the primary
+action bottom-right.
+
+**Destructive actions.** Prefer undo over confirm. Confirm only when the action
+is unrecoverable, and then name the object in the button ("Delete branch", not
+"OK") and put the cancel first.
+
+**Button copy.** Sentence case, a verb the object can hear — "Save changes", not
+"Submit". Never a bare "OK", never a gerund as the resting label ("Saving…" is a
+state, not a label). Labels don't change on hover.
+
+**Empty state.** One sentence naming what the surface is waiting for, plus the
+single action that resolves it. No illustration, no second button.
+
+### 5.1 Interaction behaviour
+
+- **Single click selects, Enter or double-click opens.** A click never mutates
+  data; that needs an explicit control.
+- **Hover reveals, it does not relocate.** Actions that appear on hover occupy
+  reserved space at rest so nothing shifts. No hover-only affordance may be the
+  only route to an action — it must also exist in a menu or on the detail surface.
+- **Optimistic where the action is local and reversible** (rename, reorder,
+  toggle), pending where it leaves the app (run, merge, deploy). A pending
+  control shows the pending state on itself, not a global overlay, and stays
+  disabled until it resolves.
+- **Autosave settings, submit forms.** A settings row applies on change with no
+  Save button. A form with interdependent fields submits explicitly.
+- **Selection survives** a refresh, a filter change, and a drawer opening; it is
+  cleared only by the user. Scroll position is restored when returning to a list.
+- **Tooltips are for names and shortcuts**, delayed ~400ms, never for information
+  needed to make the decision in front of you.
+- **One primary action per surface**, and it is the same action the Enter key
+  performs.
+
+---
+
+## 6. Status and progress
+
+- **In a collection, state is a word, not a mark.** A column of coloured dots is
+  unreadable; a column of words is scannable. Marks belong on a detail surface.
+- **One mark per surface.** The status mark is the loudest thing available. If a
+  panel already carries one, the second becomes a word.
+- **One tone per unit, carried by one element.** Never tint the mark, the heading
+  and the border of the same card. A tinted pill is the usual carrier.
+- **Progress is one component at two sizes**, not two designs. Steps read
+  `label … state`, right-aligned state in `--muted` unless it is terminal. An
+  indeterminate phase says what it is waiting for, in words.
+- **Stale is one ribbon**, with the same wording wherever it appears: the evidence
+  shown no longer matches the current diff, and here is the one action that
+  refreshes it. A ribbon or a state word — never both.
+- Failures state what failed, what it means, and the next action. Never a raw
+  error string alone; put the raw output behind a disclosure.
+
+---
+
+## 7. Shell, layout and responsive invariants
+
+### 7.1 Layout archetypes — pick one, don't blend
+
+1. **List + detail** — the default for any collection. Rail, list column, detail
+   pane or drawer. The list keeps its own scroll and selection.
+2. **Single sheet** — one subject, full remaining width, own header. For a task,
+   a run, a document.
+3. **Settings** — 880 reading column of `--hair`-separated rows inside one panel
+   (§5, settings row).
+4. **Workspace** — a persistent working surface with its own toolbar and one
+   focused artefact; side panels are collapsible and their state persists per
+   user. Discourse and design review are this archetype: the conversation or
+   artefact holds the centre at full height, context collapses, and nothing about
+   the shell changes when you enter or leave.
+
+Every page has exactly one header: title at 22–24/600, one line of context under
+it in `--muted`, actions right-aligned on the title line. No breadcrumbs (the
+rail is the location), no duplicate title inside the body, no tab bar that
+repeats what the rail already says.
+
+### 7.2 Shell invariants
+
+- **The rail is permanent** and always `--ground`; because it never leaves,
+  focused modes need no "Exit" control and no breadcrumb.
+- **The sidebar is one surface at two widths** — icons collapsed, icons plus
+  labels expanded. Not two components.
+- Each panel scrolls its own body; headers and footers stay pinned. Overflow is
+  clipped by the panel, never leaked into the shell.
+- Every boundary between two panels is a resize handle: 5px hit area, visible
+  only on hover, with a keyboard-reachable equivalent.
+- **Degrade by dropping, not by shrinking.** As width goes, the secondary column
+  collapses to a toggle and the primary task keeps its size and order. Semantic
+  order never changes across widths. Nothing below the app's minimum width
+  (1024) may hide a primary action.
+- Content extremes are part of the design: test with a 120-character title, a
+  4-digit count, an empty list, and 500 rows.
+- **Layer order** is fixed: content → pinned headers → drawer → popover → modal →
+  toast. Escape closes the topmost only. A popover never survives the scroll of
+  the surface it is anchored to.
+- Panel widths, collapse state and the active theme persist per user and restore
+  on load. Nothing the user arranged is reset by a navigation.
+
+### 7.3 Responsive rules
+
+- **Buttons collapse label-last.** Full label → icon plus label → icon only, in
+  that order, and never past icon-only for the primary action on a surface. A
+  button that has collapsed keeps its tooltip.
+- Toolbars overflow into a trailing "more" menu rather than wrapping. The primary
+  action never enters the overflow.
+- Segmented controls become a dropdown at the width where their labels would
+  wrap (§5).
+- Cards reflow by column count, never by shrinking below their minimum: 3 → 2 →
+  1, and a one-column card is full width.
+- Tables drop the lowest-priority columns first, in a documented order; they do
+  not scroll horizontally inside a panel.
+
+---
+
+## 8. Accessibility
+
+- Visual order, DOM order and tab order agree.
+- Focus is always visible (§2.6) and never removed; a modal traps focus and
+  returns it to the trigger on close.
+- Every icon-only control has an `aria-label`; a tooltip is not a label.
+- Colour is never the only carrier of meaning — pair every hue with a word or a
+  glyph.
+- Contrast: `--text` ≥7:1, `--muted` and any status ink ≥4.5:1 on every plane
+  they can land on, ≥3:1 for control edges and focus rings.
+- Live regions announce state changes that happen without user action (a run
+  finishing, a review arriving).
+- Honour `prefers-reduced-motion`: transitions collapse, nothing loops.
+- Keyboard: Escape closes the topmost layer, Enter activates the default action,
+  arrow keys move within a list or segmented control, and every action reachable
+  by mouse is reachable by keyboard.
+
+---
+
+## 9. Adding something new
+
+Before adding a component, token, hue, or surface, answer all five:
+
+1. Does an existing pattern cover this with a prop? (If yes, use it.)
+2. What does the user learn or do that they couldn't before?
+3. Which token roles does it use — and does it need a new one? A new token must
+   derive from the seven seeds (§2.2) and be added to every mode.
+4. What are its rest, hover, active, focus, disabled, loading, empty, error and
+   overflow states?
+5. How does it behave at the minimum width, with the longest realistic content,
+   and under reduced motion?
+
+If any answer is "unclear", the design isn't finished. Ship the existing pattern
+and raise the gap.
+
+**Motion**: 120ms for state feedback, 180ms for surfaces entering, 240ms for
+layout; ease-out entering, ease-in leaving. Motion communicates continuity,
+causality or genuinely active work — never decoration. Nothing loops unless work
+is actually running.
+
+---
+
+## 10. Verification checklist
+
+Run this before submitting. Measure, don't eyeball — the first three are
+invisible to review and trivial to check in the inspector.
+
+**Measured**
+- [ ] No colour literal anywhere in the diff (grep the diff for `#`, `rgb`,
+      `rgba`, colour names — including SVG and shadows).
+- [ ] Every `var(--x)` used is defined in **both** modes.
+- [ ] `--muted` and every status ink measured ≥4.5:1 against the actual surface
+      behind them, in both modes.
+- [ ] No control shifts size or position between rest, hover, focus and active.
+
+**Both modes**
+- [ ] Light and dark screenshotted; no mode-specific override was needed.
+- [ ] Light mode contains no pure white; dark cards carry no shadow.
+- [ ] Sheet reads lighter than the rail; selected rows read lighter than the
+      track.
+
+**States**
+- [ ] Empty, loading, error, stale, disabled and overflow all rendered once.
+- [ ] One status mark per surface; collections use words.
+- [ ] Every disabled control explains itself.
+
+**Structure**
+- [ ] Spacing values all on the scale; groups laid out with `gap`.
+- [ ] One control height per row; radii step concentrically.
+- [ ] Mono used only for machine values.
+
+**Keyboard and a11y**
+- [ ] Tabbed the whole surface: order matches the layout, focus always visible.
+- [ ] Escape, Enter and arrow keys behave per §8.
+- [ ] Icon-only controls have labels; console is clean.
+
+**Width**
+- [ ] Checked at minimum width and at a wide window; primary task unchanged in
+      order and prominence.
+- [ ] Buttons collapsed label-last; no wrapped toolbar or segmented control.
+
+**Visual**
+- [ ] Screenshotted and actually looked at — not assumed from the markup.
+- [ ] Compared side by side with the nearest existing surface of the same
+      archetype (§7.1); a stranger could not tell which one is new.
+- [ ] Scanned for the four cheap tells: an outline on a filled control, an
+      off-scale gap, two control heights in a row, mono setting prose.
+- [ ] Optical check at 50% zoom: the intended reading order is what stands out,
+      and no single element pulls the eye without earning it.
+
+---
+
+## 11. Anti-patterns — reject on sight
+
+**Colour and surfaces**
+- A hex or `rgba()` in a component.
+- A hand-picked value "just for this theme".
+- Pure white in light mode; a black shadow used as a divider.
+- A darker fill for a selected or raised element in dark mode.
+- Opacity used to express "inactive" on a row.
+
+**Borders**
+- A 1px outline on something that already has its own fill — inputs, selects,
+  cards, menu items, composers. This is the single most common regression here.
+- A decorative left-border accent stripe on a card.
+- Border colour used to signal state instead of fill or ink.
+
+**Status**
+- A column of coloured dots in a list.
+- Two status marks on one surface.
+- A tinted mark plus tinted heading plus tinted border for one state.
+- A spinner for something that is not running; a pill that restates the sentence
+  next to it.
+
+**Type, icons and layout**
+- A third font family; mono setting prose; Inter or Inter Tight; weight 300 or 700.
+- A filled icon in an outline set; an emoji or mono glyph standing in for a
+  missing icon; a coloured icon doing a status word's job.
+- Proportional digits in a column of numbers.
+- Centred paragraphs; a marketing hero; a full-width centred content column.
+- Off-scale spacing (13, 15, 18, 22); margins where `gap` belongs.
+- Two control heights in one row; equal nested radii.
+
+**Structure and behaviour**
+- A new component that duplicates an existing one with different padding.
+- A card wrapping every single setting; a card inside a card; a list of cards
+  where rows would compare better.
+- A modal for something that doesn't need to block; two stacked modals; a drawer
+  opened from a modal; a toast for something the user must act on.
+- A hover-only affordance that is the sole route to an action; hover actions that
+  shift the row when they appear.
+- Breadcrumbs, a duplicate in-body page title, or a tab bar repeating the rail.
+- A single click that mutates data; a confirm dialog where undo would serve.
+- Geometry that moves on hover or focus.
+- Emoji as UI, decorative gradients, looping animation with no running work.
+- A raw error string as the whole error state.
+
+---
+
+## Appendix A — element → token map
+
+The binding reference. Every element in the app appears here; if a surface you
+are building is not listed, use the row for the closest structural equivalent —
+do not choose a colour. Blank means the property is not set at all (which is the
+correct answer far more often than a border is).
+
+### A.1 Shell
+
+| Element | Background | Text | Border / divider | Shadow |
+|---|---|---|---|---|
+| Window / app root | `--ground` | `--text` | — | — |
+| Sidebar rail | `--ground` | — | — | — |
+| Rail app title, logo mark | `--primary` fill, `--on-primary` glyph | `--text` | — | — |
+| Rail nav item, rest | — | `--muted` | — | — |
+| Rail nav item, hover | `--hover` | `--text-soft` | — | — |
+| Rail nav item, selected | `--sel` | `--text` (600) | — | — |
+| Rail group label | — | `--faint` | — | — |
+| Rail count / badge | — | `--faint` | — | — |
+| Rail section divider | — | — | `--hair` | — |
+| Content sheet | `--surface` | `--text` | — | — |
+| Secondary list column / inspector | `--panel` | `--text` | — | — |
+| Panel header / toolbar | inherits parent | `--text` | `--hair` below | — |
+| Panel boundary, structural | — | — | `--edge` | — |
+| Resize handle, hover | `--edge` | — | — | — |
+| Scrollbar thumb | `--edge` | — | — | — |
+
+### A.2 Type roles
+
+| Element | Token |
+|---|---|
+| Page title, section heading, card title | `--text` |
+| Body prose, secondary sentence | `--text-soft` |
+| Helper text, metadata, timestamps, counts | `--muted` |
+| Group labels, placeholders, inactive counts, disabled meta | `--faint` |
+| Link, rest | `--accent-ink` |
+| Link, hover | `--accent` |
+| Machine values (paths, hashes, branches) | `--muted`, or `--faint` when secondary |
+| Text on a primary button | `--on-primary` |
+| Error message under a field | `--blocked-ink` |
+| Text selection highlight | `--sel` |
+
+### A.3 Containers
+
+| Element | Background | Border | Shadow |
+|---|---|---|---|
+| Card | `--card` | — | `--shadow-card` |
+| Card, hover (clickable) | `--field-hover` | — | `--shadow-card` |
+| Card internal divider | — | `--hair` | — |
+| Settings panel | `--surface` | — | `--shadow-panel` |
+| Settings row separator | — | `--hair` | — |
+| Popover, dropdown, context menu | `--overlay` | — | `--shadow-pop` |
+| Menu item, hover | `--hover` | — | — |
+| Menu item, selected | `--sel` | — | — |
+| Menu separator | — | `--hair` | — |
+| Modal | `--overlay` | — | `--shadow-modal` |
+| Modal scrim | `--ground` at 60% | — | — |
+| Drawer | `--surface` | `--edge` on the attached edge | `--shadow-pop` |
+| Drawer footer | `--surface` | `--hair` above | — |
+| Tooltip | `--overlay` | — | `--shadow-pop` |
+| Code / payload block | `--well` | — | — |
+| Empty state container | — | — | — |
+
+### A.4 Controls
+
+| Element | Background | Text / glyph | Ring |
+|---|---|---|---|
+| Primary button, rest | `--primary` | `--on-primary` | — |
+| Primary button, hover | `--primary-hover` | `--on-primary` | — |
+| Secondary button, rest | `--field` | `--text` | — |
+| Secondary button, hover | `--field-hover` | `--text` | — |
+| Ghost / icon button, rest | — | `--muted` | — |
+| Ghost / icon button, hover | `--hover` | `--text` | — |
+| Destructive button, rest | `--error-bg` | `--blocked-ink` | — |
+| Any button, active/pressed | `--press` over its rest fill | unchanged | — |
+| Any button, focus | unchanged | unchanged | `--accent` inset 1px + `--field-focus-ring` 3px |
+| Any button, disabled | rest fill at 45% | rest ink at 45% | — |
+| Input / textarea, rest | `--field` | `--text` | `--field-ring` (optional) |
+| Input, hover | `--field-hover` | `--text` | — |
+| Input, focus | `--field-focus` | `--text` | `--accent` + `--field-focus-ring` |
+| Input, error | `--field` | `--text` | `--blocked` inset 1px |
+| Placeholder | — | `--placeholder` | — |
+| Composer surface | `--field` | `--text` | as input |
+| Composer hint / affordance row | — | `--muted` | — |
+| Segmented track | `--field` | — | — |
+| Segmented item, inactive | — | `--muted` | — |
+| Segmented item, active | `--card` | `--text` (600) | — |
+| Select trigger | `--field` | `--text`, chevron `--muted` | as input |
+| Checkbox / radio, unchecked | `--field` | — | `--edge` inset 1px |
+| Checkbox / radio, checked | `--accent` | `--on-primary` | — |
+| Toggle track, off / on | `--edge` / `--accent` | — | — |
+| Toggle knob | `--card` | — | `--shadow-card` |
+| Slider track / fill / knob | `--field` / `--accent` / `--card` | — | — |
+| Search field | `--field` | `--text`, icon `--faint` | as input |
+| Filter chip, rest / active | `--field` / `--sel` | `--muted` / `--text` | — |
+| Tab, inactive / active | — / `--sel` | `--muted` / `--text` | — |
+| Keyboard hint (⌘↵) | `--field` | `--faint` | — |
+
+### A.5 Rows and tables
+
+| Element | Background | Text |
+|---|---|---|
+| Row, rest | — | `--text` |
+| Row, hover | `--hover` | `--text` |
+| Row, selected | `--sel` | `--text` |
+| Row, pressed | `--press` | `--text` |
+| Row, disabled | — | `--faint` |
+| Row secondary line | — | `--muted` |
+| Row separator | `--hair` | — |
+| Table header | — | `--muted` |
+| Table header separator | `--hair` | — |
+| Zebra striping | never | — |
+
+### A.6 Status, progress and data
+
+A status pill is a `-bg` fill with the matching `-ink` text. A status dot or bar
+uses the base hue. Never the reverse.
+
+| Element | Fill | Ink |
+|---|---|---|
+| Working pill / dot | `--ctx-bg` / `--working` | `--working-ink` |
+| Waiting pill / dot | `--amber-bg` / `--waiting` | `--waiting-ink` |
+| Blocked, error pill / dot | `--error-bg` / `--blocked` | `--blocked-ink` |
+| Verified, merged pill / dot | `--verified` at 12% / `--verified` | `--verified-ink` |
+| Idle, draft pill / dot | `--field` / `--idle` | `--muted` |
+| Neutral count badge | `--field` | `--muted` |
+| Progress track / fill | `--field` / `--accent` | — |
+| Progress step, done / active / pending | `--verified` / `--accent` / `--idle` | `--muted` label |
+| Stale ribbon | `--amber-bg` | `--waiting-ink` |
+| Skeleton / loading placeholder | `--field` | — |
+| Diff added / removed | `--verified` at 10% / `--blocked` at 10% | `--verified-ink` / `--blocked-ink` |
+| Accent-tinted surface (selected filter, active pill, `@`-mention chip) | `--accent-soft` | `--accent-ink` |
+| Categorical dot / bar (repo, agent, saved view) | `--id-1` … `--id-6` (§2.8) | label stays `--text` / `--muted` |
+| Avatar fallback | `--field` | `--muted` |
+| Focus ring, anywhere | — | `--accent` + `--field-focus-ring` |
+
+`--id-*` are derived from the `skill` seed by the rotation in §2.8, carry no
+semantics, and are never used for text — never reuse a status hue for a category,
+or an `--id-*` for a state.
+
+---
+
+## Appendix B — where things live
+
+- **`tools/build-themes.mjs`** — the seven seeds per theme and the whole
+  derivation. The only file where theme colour is authored.
+- **`themes.css`** — generated; what the app loads. 16 themes as
+  `[data-theme][data-mode]` blocks, plus `--font-*` and `--r-*`.
+- **`theme-tokens.json`** — generated; same data plus seeds, contrast floors and
+  measurements, for tooling.
+- **Appendix A** — the binding element → token map. First place to look when
+  building anything.
+- Visual reference: the theme direction board and theme picker in this project.
+  The picker is the reference integration — it sets `data-theme`/`data-mode` on
+  `<html>` and computes no colour of its own.

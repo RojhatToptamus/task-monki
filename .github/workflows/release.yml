@@ -31,10 +31,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
 
       - run: npm ci
+
+      - run: npm run check:themes
 
       - run: npm run check:codex-protocol
 

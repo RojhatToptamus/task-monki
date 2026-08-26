@@ -1,10 +1,12 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode
 } from 'react';
+import { Bot, Check, ChevronDown } from 'lucide-react';
 import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
 import { formatReasoningEffort } from '../model/agentExecutionSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
@@ -26,10 +28,12 @@ interface AgentModelSelectorProps {
   runtimes: AgentRuntimeState[];
   disabled?: boolean;
   compact?: boolean;
+  presentation?: 'full' | 'compact' | 'icon';
   fallbackSummary?: string;
   selectionUnavailable?: boolean;
   showSelectionError?: boolean;
   selectionUnavailableMessage?: string;
+  showRuntimeLabel?: boolean;
   access?: ReactNode;
   onDiscoverModels?(runtimeId: string): Promise<void>;
   onDiscoveryStatusChange?(status: ModelDiscoveryStatus): void;
@@ -57,16 +61,19 @@ export function AgentModelSelector({
   runtimes,
   disabled = false,
   compact = false,
+  presentation,
   fallbackSummary,
   selectionUnavailable = false,
   showSelectionError = true,
   selectionUnavailableMessage = 'Choose an available provider and model.',
+  showRuntimeLabel = true,
   access,
   onDiscoverModels,
   onDiscoveryStatusChange,
   onSelectionChange,
   onReasoningEffortChange
 }: AgentModelSelectorProps) {
+  const effectivePresentation = presentation ?? (compact ? 'compact' : 'full');
   const [open, setOpen] = useState(false);
   const [discovery, setDiscovery] = useState<DiscoveryState>();
   const [menuGeometry, setMenuGeometry] = useState<{
@@ -153,7 +160,7 @@ export function AgentModelSelector({
           bottom: window.innerHeight - 8,
           left: 8
         },
-        constrainWidth: compact && Boolean(boundaryRect)
+        constrainWidth: effectivePresentation !== 'full' && Boolean(boundaryRect)
       }));
     };
 
@@ -164,7 +171,14 @@ export function AgentModelSelector({
       window.removeEventListener('resize', updateMenuGeometry);
       document.removeEventListener('scroll', updateMenuGeometry, true);
     };
-  }, [compact, open]);
+  }, [effectivePresentation, open]);
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu || !menuGeometry) return;
+    menu.style.maxHeight = `${menuGeometry.maxHeight}px`;
+    menu.style.maxWidth = menuGeometry.maxWidth ? `${menuGeometry.maxWidth}px` : '';
+  }, [menuGeometry]);
 
   const clearDiscovery = () => {
     discoveryRevisionRef.current += 1;
@@ -222,9 +236,16 @@ export function AgentModelSelector({
     : fallbackSummary ?? 'No agent available';
 
   return (
-    <div className={`tm-agent-console ${compact ? 'tm-agent-console--compact' : ''}`} ref={rootRef}>
-      <div className="tm-agent-console__row tm-agent-console__row--agent">
-        <span className="tm-agent-console__label">Agent</span>
+    <div
+      className={`tm-agent-console tm-agent-console--${effectivePresentation}`}
+      ref={rootRef}
+    >
+      <div
+        className={`tm-agent-console__row tm-agent-console__row--agent ${
+          showRuntimeLabel ? '' : 'tm-agent-console__row--agent-unlabelled'
+        }`}
+      >
+        {showRuntimeLabel ? <span className="tm-agent-console__label">Agent</span> : null}
         <button
           ref={triggerRef}
           type="button"
@@ -253,7 +274,11 @@ export function AgentModelSelector({
             queueMicrotask(() => focusMenuItem(menuRef.current, target));
           }}
         >
-          <span className="tm-agent-console__summary">{triggerSummary}</span>
+          {effectivePresentation === 'icon' ? (
+            <AgentIcon />
+          ) : (
+            <span className="tm-agent-console__summary">{triggerSummary}</span>
+          )}
           {discovery?.runtimeId === runtimeId && discovery.status === 'loading' ? (
             <SpinnerIcon />
           ) : (
@@ -267,10 +292,6 @@ export function AgentModelSelector({
           className={`tm-agent-console__menu ${
             menuGeometry?.placement === 'top' ? 'tm-agent-console__menu--top' : ''
           }`}
-          style={menuGeometry ? {
-            maxHeight: menuGeometry.maxHeight,
-            ...(menuGeometry.maxWidth ? { maxWidth: menuGeometry.maxWidth } : {})
-          } : undefined}
           role="menu"
           aria-label={`${label} agent and model`}
           hidden={!open}
@@ -332,7 +353,7 @@ export function AgentModelSelector({
                   );
                 })}
                 {candidateModels.length === 0 && !needsDiscovery ? (
-                  compact ? (
+                  effectivePresentation !== 'full' ? (
                     <div className="tm-agent-console__empty">No models available.</div>
                   ) : (
                     <button
@@ -503,6 +524,7 @@ export function AgentModelSetting({
       </div>
       <AgentModelSelector
         label={label}
+        showRuntimeLabel={false}
         runtimeId={runtimeId}
         modelId={modelId}
         reasoningEffort={reasoningEffort}
@@ -525,25 +547,22 @@ function modelCatalogNeedsActivation(runtime: AgentRuntimeState): boolean {
 
 function ChevronIcon({ open }: { open: boolean }) {
   return (
-    <svg
+    <ChevronDown
+      absoluteStrokeWidth
       className={`tm-agent-console__chevron ${open ? 'is-open' : ''}`}
-      width="12"
-      height="12"
-      viewBox="0 0 12 12"
-      fill="none"
       aria-hidden="true"
-    >
-      <path d="M3 4.5 6 7.5l3-3" stroke="currentColor" strokeWidth="1.4" />
-    </svg>
+      size={12}
+      strokeWidth={1.5}
+    />
   );
 }
 
+function AgentIcon() {
+  return <Bot aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+}
+
 function CheckIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-      <path d="m2.5 6.7 2.4 2.4 5.6-5.7" stroke="currentColor" strokeWidth="1.6" />
-    </svg>
-  );
+  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
 }
 
 function SpinnerIcon() {

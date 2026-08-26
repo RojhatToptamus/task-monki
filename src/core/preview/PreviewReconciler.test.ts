@@ -201,7 +201,10 @@ async function runningGeneration() {
   const now = new Date().toISOString();
   const plan = await store.savePreviewPlan({
     id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-    recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+    planSource: {
+      type: 'REPOSITORY_RECIPE', recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1, recipeDigest: 'recipe'
+    },
     executionDigest: 'digest', executionPlan: {
       version: 1, jobs: [], resources: [], services: [], workers: [], routes: [],
       scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
@@ -212,11 +215,23 @@ async function runningGeneration() {
     id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
     scope: 'TASK', approvedAt: now
   });
+  const snapshot = await store.recordGitSnapshot({
+    taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+    worktreePath: repo, repoRoot: repo, gitCommonDir: path.join(repo, '.git'),
+    headSha: head, branch: worktree.branchName, aheadCount: 0, behindCount: 0,
+    stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictedCount: 0,
+    commitsAheadOfBase: 0, committedDiffFileCount: 0, workingDiffFileCount: 0,
+    diffStat: '', dirtyFingerprint: 'dirty', status: 'DIRTY'
+  }, '');
   const routeHostname = previewRouteHostname(task.id, 'app');
   await store.savePreviewGeneration({
     id: generationId, previewKey: 'task-reconcile', taskId: task.id, iterationId: iteration.id,
-    worktreeId: worktree.id, planId: plan.id, approvalId: approval.id, executionDigest: 'digest',
-    sourceGitSnapshotId: 'git', sourceHeadSha: head, sourceDirtyFingerprint: 'dirty',
+    worktreeId: worktree.id, planId: plan.id,
+    executionAuthority: { type: 'USER_APPROVAL', approvalId: approval.id, executionDigest: 'digest' },
+    source: {
+      type: 'WORKTREE_SNAPSHOT', gitSnapshotId: snapshot.id,
+      headSha: snapshot.headSha!, dirtyFingerprint: snapshot.dirtyFingerprint
+    },
     workspacePath: prepared.generationRoot, state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT',
     routes: [{ id: 'app', hostname: routeHostname, url: `http://${routeHostname}:31234/`, gatewayPort: 31234, targetHost: '127.0.0.1', targetPort: 41234, state: 'ATTACHED' }],
     createdAt: now, updatedAt: now

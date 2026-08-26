@@ -1,25 +1,31 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AcceptPreviewRecipeDraftRequest,
+  AddDesignReferencesRequest,
   AppUpdateEvent,
   CancelRunRequest,
+  CancelDesignTurnRequest,
   ContinueRunRequest,
+  CreateBlankDesignRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DeleteDesignDraftRequest,
   DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
   GeneratePreviewRecipeRequest,
   GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
+  ImportDesignReferenceAssetRequest,
   PrepareWorktreeRequest,
   ApprovePreviewPlanRequest,
   OpenPreviewRequest,
   PublishBranchRequest,
   ReadArtifactRequest,
   ReadPreviewLogRequest,
+  ReadDesignDraftAttachmentRequest,
   ResetPreviewDataRequest,
   SetPreviewLocalAttachmentBindingRequest,
   DeletePreviewLocalAttachmentBindingRequest,
@@ -29,11 +35,20 @@ import type {
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
+  RemoveDesignReferenceRequest,
   StartRunRequest,
   StartPreviewRequest,
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
+  RestartDesignPreviewRequest,
+  RestoreDesignRevisionRequest,
+  DuplicateDesignRequest,
+  RenameDesignRequest,
+  ArchiveDesignRequest,
+  ListDesignConversationRequest,
+  SaveDesignDraftRequest,
+  SubmitDesignTurnRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   TestExternalToolRequest,
@@ -77,6 +92,7 @@ import {
 } from './attachmentIpcSecurity';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
 import type { PreviewPrivateInputApi } from '../shared/preview';
+import type { DesignCanvasApi } from '../shared/designCanvas';
 import {
   IPC_UPDATE_CHANNEL,
   IPC_WINDOW_CHROME_CHANNEL,
@@ -129,7 +145,8 @@ const api: TaskManagerApi = {
     invokeIpc('agent:discoverRuntimeModels', runtimeId),
   updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
     invokeIpc('agent:updateNativeSession', input),
-  listTasks: () => invokeIpc('task:list'),
+  getBoardSnapshot: () => invokeIpc('task:getBoardSnapshot'),
+  getTaskDetail: (taskId) => invokeIpc('task:getDetail', taskId),
   listDiscourseConversations: (input?: ListDiscourseConversationsRequest) =>
     invokeIpc('discourse:conversations:list', input),
   getDiscourseConversation: (conversationId: string) =>
@@ -186,11 +203,46 @@ const api: TaskManagerApi = {
     attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
       invokeIpc('attachment:read', input)
     ),
+  readDesignDraftAttachment: (input: ReadDesignDraftAttachmentRequest) =>
+    attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
+      invokeIpc('design:draft:attachment:read', input)
+    ),
   readClipboardImage: () =>
     attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
       invokeIpc('attachment:clipboard:readImage')
     ),
   createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
+  listDesigns: () => invokeIpc('design:list'),
+  getDesign: (designId: string) => invokeIpc('design:get', designId),
+  listDesignConversation: (input: ListDesignConversationRequest) =>
+    invokeIpc('design:conversation:list', input),
+  getDesignDraft: (designId: string) => invokeIpc('design:draft:get', designId),
+  saveDesignDraft: (input: SaveDesignDraftRequest) =>
+    invokeIpc('design:draft:save', input),
+  deleteDesignDraft: (input: DeleteDesignDraftRequest) =>
+    invokeIpc('design:draft:delete', input),
+  createBlankDesign: (input: CreateBlankDesignRequest) =>
+    invokeIpc('design:create', input),
+  submitDesignTurn: (input: SubmitDesignTurnRequest) =>
+    invokeIpc('design:turn:submit', input),
+  addDesignReferences: (input: AddDesignReferencesRequest) =>
+    invokeIpc('design:reference:add', input),
+  removeDesignReference: (input: RemoveDesignReferenceRequest) =>
+    invokeIpc('design:reference:remove', input),
+  importDesignReferenceAsset: (input: ImportDesignReferenceAssetRequest) =>
+    invokeIpc('design:reference:import-asset', input),
+  cancelDesignTurn: (input: CancelDesignTurnRequest) =>
+    invokeIpc('design:turn:cancel', input),
+  restartDesignPreview: (input: RestartDesignPreviewRequest) =>
+    invokeIpc('design:preview:restart', input),
+  restoreDesignRevision: (input: RestoreDesignRevisionRequest) =>
+    invokeIpc('design:revision:restore', input),
+  duplicateDesign: (input: DuplicateDesignRequest) =>
+    invokeIpc('design:duplicate', input),
+  renameDesign: (input: RenameDesignRequest) =>
+    invokeIpc('design:rename', input),
+  archiveDesign: (input: ArchiveDesignRequest) =>
+    invokeIpc('design:archive', input),
   refinePrompt: (input: RefinePromptRequest) => invokeIpc('prompt:refine', input),
   prepareWorktree: (input: PrepareWorktreeRequest) => invokeIpc('worktree:prepare', input),
   startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),
@@ -256,6 +308,16 @@ const privateInputs: PreviewPrivateInputApi = {
   retryCleanup: () => invokeIpc('preview:private:retryCleanup')
 };
 contextBridge.exposeInMainWorld('previewPrivateInputs', privateInputs);
+const designCanvas: DesignCanvasApi = {
+  show: (input) => invokeIpc('design:canvas:show', input),
+  hide: (input) => invokeIpc('design:canvas:hide', input),
+  refresh: (input) => invokeIpc('design:canvas:refresh', input),
+  approveExternal: (input) =>
+    invokeIpc('design:canvas:approve-external', input)
+};
+if (process.platform === 'darwin') {
+  contextBridge.exposeInMainWorld('designCanvas', designCanvas);
+}
 const shellApi: TaskManagerShellApi = {
   windowChromePlatform: getWindowChromePlatform(),
   syncWindowChrome: () => ipcRenderer.send(IPC_WINDOW_CHROME_CHANNEL)

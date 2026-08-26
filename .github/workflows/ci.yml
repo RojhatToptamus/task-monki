@@ -24,16 +24,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
       - run: npm ci
+      - run: npm run check:themes
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:renderer:dom
       - run: npm run build
+      - name: Prepare Design browser runtime
+        if: runner.os == 'macOS'
+        run: npm run prepare:design-browser-runtime
       - name: Build unpacked native package
         run: npm exec electron-builder -- --dir
+        env:
+          CSC_FOR_PULL_REQUEST: ${{ runner.os == 'macOS' }}
       - name: Smoke test packaged runtime
         run: npm run verify:packaged-runtime

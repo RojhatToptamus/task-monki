@@ -305,6 +305,48 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
       'Remote branch has newer commits. Sync the branch before pushing again.'
     );
   }, 15_000);
+
+  it('blocks an interrupted publication when the remote ref differs or cannot be inspected', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-manager-publish-reconcile-')
+    );
+    const remote = path.join(dir, 'remote.git');
+    const repo = path.join(dir, 'repo');
+    await git(dir, ['init', '--bare', remote]);
+    await fs.mkdir(repo);
+    await git(repo, ['init']);
+    await git(repo, ['config', 'user.email', 'test@example.com']);
+    await git(repo, ['config', 'user.name', 'Test User']);
+    await git(repo, ['remote', 'add', 'origin', remote]);
+    await fs.writeFile(path.join(repo, 'README.md'), '# Repo\n', 'utf8');
+    await git(repo, ['add', 'README.md']);
+    await git(repo, ['commit', '-m', 'init']);
+    await git(repo, ['checkout', '-b', 'codex/task-test']);
+    const remoteHead = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    await git(repo, ['push', '--set-upstream', 'origin', 'HEAD']);
+
+    const service = new GitHubService();
+    const mismatched = await service.reconcileBranchPublication({
+      task: taskFixture(repo),
+      worktree: worktreeFixture(repo),
+      remoteName: 'origin',
+      expectedHeadSha: '1111111111111111111111111111111111111111'
+    });
+    expect(mismatched).toMatchObject({
+      status: 'AMBIGUOUS',
+      headSha: '1111111111111111111111111111111111111111'
+    });
+    expect(mismatched.error).toContain(remoteHead.slice(0, 12));
+
+    const unavailable = await service.reconcileBranchPublication({
+      task: taskFixture(repo),
+      worktree: worktreeFixture(repo),
+      remoteName: 'missing',
+      expectedHeadSha: remoteHead
+    });
+    expect(unavailable.status).toBe('AMBIGUOUS');
+    expect(unavailable.error).toMatch(/Could not confirm the remote branch/iu);
+  });
 });
 
 async function writeFakePullRequestGh(
@@ -367,6 +409,7 @@ async function readGhInvocations(logPath: string): Promise<string[][]> {
 function taskFixture(repositoryId: string): Task {
   return {
     id: 'task-1',
+    kind: 'NORMAL',
     runtimeId: 'codex',
     title: 'Test task',
     prompt: 'Do work.',

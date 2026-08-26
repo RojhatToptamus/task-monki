@@ -1,13 +1,14 @@
 # Provider Runtime Smoke Testing
 
-Date: 2026-07-14
+Date: 2026-07-26
 
 `npm run smoke:providers` verifies real provider/model connectivity, selection,
 streaming, tool execution, repository mutation, Git evidence, and terminal
-lifecycle through `TaskManagerService`. It is intentionally separate from
-deterministic seeded UI testing: provider smoke runs use a caller-supplied
-disposable Git repository, real runtime discovery, real Task Monki
-task/worktree/session/run records, and real provider quota or credits.
+lifecycle through `TaskManagerService`. It is intentionally separate from both
+the deterministic agent workflow and seeded UI inspection: provider smoke runs
+use a caller-supplied disposable Git repository, real runtime discovery, real
+Task Monki task/worktree/session/run records, and real provider quota or
+credits.
 
 ## Prepare a throwaway repository
 

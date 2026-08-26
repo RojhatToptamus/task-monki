@@ -62,6 +62,17 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('agent-interrupted', 'agent', 'Interrupted run', 'Agent turn was interrupted.', [
     'agent:INTERRUPTED'
   ]),
+  scenario('agent-failed', 'agent', 'Failed run', 'Agent turn definitively failed.', [
+    'agent:FAILED',
+    'recovery:retry-primary'
+  ]),
+  scenario(
+    'agent-retry-required',
+    'agent',
+    'Implementation needs retry',
+    'Provider completed, but Task Monki verified that the implementation needs another pass.',
+    ['agent:COMPLETED', 'implementation:RETRY_REQUIRED']
+  ),
   scenario('agent-runtime-lost', 'agent', 'Runtime lost', 'Agent runtime was lost and needs recovery.', [
     'agent:RECOVERY_REQUIRED',
     'recovery:runtime-lost'

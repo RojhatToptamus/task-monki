@@ -64,6 +64,41 @@ export function buildInteractionPolicy(input: {
       };
     case 'USER_INPUT': {
       const request = input.request as AgentUserInputRequest;
+      const questionIds = new Set<string>();
+      const hasInvalidQuestion =
+        request.questions.length === 0 ||
+        request.questions.some((question) => {
+          const questionId = question.id.trim();
+          if (
+            !questionId ||
+            !question.header.trim() ||
+            !question.question.trim() ||
+            questionIds.has(questionId)
+          ) {
+            return true;
+          }
+          questionIds.add(questionId);
+          const optionLabels = new Set<string>();
+          return (
+            (question.options !== undefined &&
+              question.options.length === 0 &&
+              !question.isOther) ||
+            question.options?.some((option) => {
+              const label = option.label.trim();
+              if (!label || optionLabels.has(label)) return true;
+              optionLabels.add(label);
+              return false;
+            }) === true
+          );
+        });
+      if (hasInvalidQuestion) {
+        return {
+          allowedActions: [],
+          warnings: [
+            'The provider supplied a malformed or unanswerable user-input request.'
+          ]
+        };
+      }
       if (request.questions.some((question) => question.isSecret)) {
         return {
           allowedActions: [],
@@ -365,6 +400,9 @@ function validateUserInputDecision(
     const answers = decision.answers[question.id];
     if (!answers?.length || answers.some((answer) => !answer.trim())) {
       throw new Error(`An answer is required for ${question.header}.`);
+    }
+    if (!question.allowsMultiple && answers.length !== 1) {
+      throw new Error(`Only one answer is allowed for ${question.header}.`);
     }
     if (
       question.options &&

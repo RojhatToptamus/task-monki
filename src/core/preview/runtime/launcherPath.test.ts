@@ -1,6 +1,9 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolveNativePreviewLauncherPath } from './launcherPath';
+import {
+  resolveManagedDesignStaticServerPath,
+  resolveNativePreviewLauncherPath
+} from './launcherPath';
 
 describe('resolveNativePreviewLauncherPath', () => {
   it('uses the extra resource in packaged builds and source only in development', () => {
@@ -10,5 +13,22 @@ describe('resolveNativePreviewLauncherPath', () => {
     expect(
       resolveNativePreviewLauncherPath({ isPackaged: false, resourcesPath: '/resources', appPath: '/project' })
     ).toBe(path.join('/project', 'src/core/preview/runtime/native-preview-launcher.mjs'));
+  });
+
+  it('uses the managed static server resource in packaged builds and source in development', () => {
+    expect(
+      resolveManagedDesignStaticServerPath({
+        isPackaged: true,
+        resourcesPath: '/app/Contents/Resources',
+        appPath: '/app'
+      })
+    ).toBe(path.join('/app/Contents/Resources', 'managed-design-static-server.mjs'));
+    expect(
+      resolveManagedDesignStaticServerPath({
+        isPackaged: false,
+        resourcesPath: '/resources',
+        appPath: '/project'
+      })
+    ).toBe(path.join('/project', 'src/core/preview/runtime/managed-design-static-server.mjs'));
   });
 });

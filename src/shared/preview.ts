@@ -1,5 +1,12 @@
 export type PreviewNodeKind = 'JOB' | 'SERVICE' | 'WORKER' | 'RESOURCE' | 'ATTACHMENT' | 'PROBE';
 
+export interface PreviewTaskRouteOption {
+  taskId: string;
+  taskTitle: string;
+  routeId: string;
+  available: boolean;
+}
+
 export const PREVIEW_POSIX_INHERITED_ENV_KEYS = [
   'HOME',
   'LANG',
@@ -391,20 +398,45 @@ export interface PreviewExecutionPlan {
   selectedScenarioId: string;
 }
 
+export type PreviewPlanSource =
+  | {
+      type: 'REPOSITORY_RECIPE';
+      recipePath: '.taskmonki/preview.yaml';
+      recipeVersion: 1;
+      recipeDigest: string;
+    }
+  | { type: 'MANAGED_DESIGN_STATIC'; adapterVersion: 1 };
+
 export interface PreviewPlanRecord {
   id: string;
   taskId: string;
   iterationId: string;
   worktreeId: string;
-  recipePath: '.taskmonki/preview.yaml';
-  recipeVersion: 1;
-  recipeDigest: string;
+  planSource: PreviewPlanSource;
   executionDigest: string;
   executionPlan: PreviewExecutionPlan;
   ociCapability?: PreviewOciEngineCapability;
   warnings: string[];
   createdAt: string;
 }
+
+export type PreviewExecutionAuthority =
+  | { type: 'USER_APPROVAL'; approvalId: string; executionDigest: string }
+  | { type: 'MANAGED_STATIC'; adapterVersion: 1; executionDigest: string };
+
+export type PreviewSourceIdentity =
+  | {
+      type: 'WORKTREE_SNAPSHOT';
+      gitSnapshotId: string;
+      headSha: string;
+      dirtyFingerprint: string;
+    }
+  | {
+      type: 'EXACT_COMMIT';
+      repositoryId: string;
+      commitSha: string;
+      designRevisionId?: string;
+    };
 
 export interface PreviewApprovalRecord {
   id: string;
@@ -434,20 +466,17 @@ export interface PreviewGenerationRecord {
   iterationId: string;
   worktreeId: string;
   planId: string;
-  approvalId: string;
-  executionDigest: string;
+  executionAuthority: PreviewExecutionAuthority;
   adapter?: 'NATIVE' | 'COMPOSE';
   composeChange?: PreviewComposeChangeKind;
-  sourceGitSnapshotId: string;
-  sourceHeadSha: string;
-  sourceDirtyFingerprint: string;
+  source: PreviewSourceIdentity;
   sourceManifestArtifactId?: string;
   sourceManifestDigest?: string;
   workspacePath: string;
   state: PreviewGenerationState;
   routingState: 'CANDIDATE' | 'ACTIVE' | 'RETIRED';
   replacesGenerationId?: string;
-  freshness: 'CURRENT' | 'STALE' | 'UNKNOWN';
+  freshness: 'CURRENT' | 'STALE' | 'UNKNOWN' | 'REVISION';
   routes: PreviewRouteRecord[];
   attachmentReadiness?: PreviewAttachmentReadinessEvidence[];
   failureReason?: string;

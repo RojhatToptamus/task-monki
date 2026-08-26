@@ -56,7 +56,8 @@ describe('Preview surfaces', () => {
     expect(html).toContain('Approval required');
     expect(html).toContain('1 application node · 1 setup job · 1 route');
     expect(html).toContain('Review &amp; approve');
-    expect(html).toContain('Details');
+    expect(html).not.toContain('status-pill');
+    expect(html).not.toContain('Details');
     expect(html).not.toContain('Currentness');
     expect(html).not.toContain('No attached route');
     expect(html).not.toContain('Review execution plan');
@@ -579,6 +580,7 @@ function previewProps(options: {
 function taskFixture(): Task {
   return {
     id: 'task-1',
+    kind: 'NORMAL',
     title: 'Preview task',
     prompt: 'Implement a preview.',
     repositoryId: 'repository-1',
@@ -618,9 +620,12 @@ function previewPlan(): PreviewPlanRecord {
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
-    recipePath: '.taskmonki/preview.yaml',
-    recipeVersion: 1,
-    recipeDigest: 'recipe',
+    planSource: {
+      type: 'REPOSITORY_RECIPE',
+      recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1,
+      recipeDigest: 'recipe'
+    },
     executionDigest: 'execution',
     executionPlan: {
       version: 1,
@@ -673,11 +678,17 @@ function activeGeneration(): PreviewGenerationRecord {
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
     planId: 'plan-1',
-    approvalId: 'approval-1',
-    executionDigest: 'execution',
-    sourceGitSnapshotId: 'git-1',
-    sourceHeadSha: 'abcdef1234567890',
-    sourceDirtyFingerprint: 'clean',
+    executionAuthority: {
+      type: 'USER_APPROVAL',
+      approvalId: 'approval-1',
+      executionDigest: 'execution'
+    },
+    source: {
+      type: 'WORKTREE_SNAPSHOT',
+      gitSnapshotId: 'git-1',
+      headSha: 'abcdef1234567890',
+      dirtyFingerprint: 'clean'
+    },
     workspacePath: '/preview/active',
     state: 'READY',
     routingState: 'ACTIVE',

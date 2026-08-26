@@ -5,7 +5,8 @@ import {
   mapAcpStopReason,
   nativeSelectionOptionsValue,
   permissionOutcomeForDecision,
-  requestedNativeConfigValues
+  requestedNativeConfigValues,
+  textFromAcpContent
 } from './AcpEventMapper';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 import { assertAcpExecutionPolicy } from './AcpRuntimeAdapter';
@@ -22,6 +23,15 @@ describe('ACP event mapping', () => {
   it('keeps generic provider search distinct from external fetch activity', () => {
     expect(mapAcpToolKind('search')).toBe('OTHER');
     expect(mapAcpToolKind('fetch')).toBe('WEB_SEARCH');
+  });
+
+  it('keeps an ordinary prose question as agent output', () => {
+    expect(
+      textFromAcpContent({
+        type: 'text',
+        text: 'Which scope should I use?'
+      })
+    ).toBe('Which scope should I use?');
   });
 
   it.each([

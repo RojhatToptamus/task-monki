@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -278,10 +279,7 @@ describeMac('NativeLauncherHost macOS ownership integration', () => {
   }, 10_000);
 
   it('runs the same launcher through the installed Electron binary in Node mode', async () => {
-    const electronExec = path.join(
-      process.cwd(),
-      'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'
-    );
+    const electronExec = resolveInstalledElectronExecutable();
     await fs.access(electronExec);
     const fixture = await createFixture(
       new NativeLauncherHost(launcherPath, electronExec, { ELECTRON_RUN_AS_NODE: '1' })
@@ -296,6 +294,14 @@ describeMac('NativeLauncherHost macOS ownership integration', () => {
     await expect(fs.readFile(fixture.stdoutPath, 'utf8')).resolves.toBe('electron-node-launcher');
   });
 });
+
+function resolveInstalledElectronExecutable(): string {
+  const executable = createRequire(import.meta.url)('electron') as unknown;
+  if (typeof executable !== 'string' || !path.isAbsolute(executable)) {
+    throw new Error('The installed Electron package did not resolve an executable.');
+  }
+  return executable;
+}
 
 async function createFixture(host = new NativeLauncherHost(launcherPath)) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-native-launcher-'));

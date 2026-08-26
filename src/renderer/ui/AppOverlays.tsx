@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
+import { Trash2 } from 'lucide-react';
 import {
   BOARD_COLORS,
   type Board,
@@ -16,6 +17,7 @@ import type { RepositoryOption } from '../model/repositories';
 import { formatShortId } from '../model/selectors';
 import { ImpactList } from './ImpactList';
 import { RepositoryPicker } from './RepositoryPicker';
+import { StatusGlyph } from './StatusBadge';
 import { useDialogFocusBoundary } from './dialogFocus';
 
 export type NotificationTone = 'info' | 'success' | 'error';
@@ -39,12 +41,12 @@ const BOARD_PHASE_OPTIONS: ReadonlyArray<{ value: WorkflowPhase; label: string }
 ];
 
 const BOARD_COLOR_LABELS: Record<BoardColor, string> = {
-  NEUTRAL: 'Neutral',
-  BLUE: 'Blue',
-  AMBER: 'Amber',
-  GREEN: 'Green',
-  ROSE: 'Rose',
-  VIOLET: 'Violet'
+  NEUTRAL: 'Marker 1',
+  BLUE: 'Marker 2',
+  AMBER: 'Marker 3',
+  GREEN: 'Marker 4',
+  ROSE: 'Marker 5',
+  VIOLET: 'Marker 6'
 };
 
 export function BoardEditorModal({
@@ -139,7 +141,7 @@ export function BoardEditorModal({
         </label>
 
         <fieldset className="tm-board-editor__color">
-          <legend>Color</legend>
+          <legend>Marker</legend>
           <div className="tm-board-editor__swatches">
             {BOARD_COLORS.map((option) => (
               <label
@@ -247,10 +249,118 @@ export function GlobalNotifier({ notifications }: { notifications: AppNotificati
           className={`tm-notifier__item tm-notifier__item--${notification.tone}`}
           key={notification.id}
         >
-          <span className="tm-notifier__dot" />
+          <StatusGlyph
+            kind={
+              notification.tone === 'success'
+                ? 'verified'
+                : notification.tone === 'error'
+                  ? 'blocked'
+                  : 'idle'
+            }
+          />
           <strong>{notification.message}</strong>
         </div>
       ))}
+    </div>
+  );
+}
+
+export function DesignExternalLinkModal({
+  destinationHost,
+  onCancel,
+  onConfirm,
+  fallbackReturnFocusRef
+}: {
+  destinationHost: string;
+  onCancel(): void;
+  onConfirm(): Promise<boolean>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const submittingRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [expired, setExpired] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: cancelRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
+
+  const confirm = async () => {
+    if (submittingRef.current || expired) return;
+    submittingRef.current = true;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const opened = await onConfirm();
+      if (opened) {
+        onCancel();
+      } else {
+        submittingRef.current = false;
+        setBusy(false);
+        setExpired(true);
+        setError('This link request expired. Close this dialog and select the link again.');
+      }
+    } catch {
+      submittingRef.current = false;
+      setBusy(false);
+      setError('Task Monki could not open this site. Try again or cancel.');
+    }
+  };
+
+  return (
+    <div
+      className="tm-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="design-external-link-title"
+      aria-describedby="design-external-link-detail"
+    >
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <div
+        ref={panelRef}
+        className="tm-modal__panel tm-design-external"
+        tabIndex={-1}
+      >
+        <h3 id="design-external-link-title">Open external site?</h3>
+        <p id="design-external-link-detail">
+          This Design wants to open an HTTPS site in your default browser.
+        </p>
+        <div className="tm-design-external__destination" aria-label="External destination">
+          <span>HTTPS destination</span>
+          <strong>{destinationHost}</strong>
+        </div>
+        <p>Only open destinations that you trust.</p>
+        {error ? (
+          <p className="tm-design-external__error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        <div className="tm-modal__actions">
+          <button
+            ref={cancelRef}
+            type="button"
+            className="outline-button"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            {expired ? 'Close' : 'Cancel'}
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={busy || expired}
+            onClick={() => void confirm()}
+          >
+            {busy ? 'Opening…' : 'Open site'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -519,21 +629,5 @@ function describeWorktreeRemoval(
 }
 
 function TrashIcon() {
-  return (
-    <svg
-      width={18}
-      height={18}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M4 7h16" />
-      <path d="M10 11v6M14 11v6" />
-      <path d="M5 7l1 13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-13" />
-      <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
-    </svg>
-  );
+  return <Trash2 aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

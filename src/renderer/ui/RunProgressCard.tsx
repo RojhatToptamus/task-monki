@@ -3,7 +3,6 @@ import type { RunProgressStep, RunProgressViewModel } from '../model/runProgress
 import { PlanList, type PlanListMarker, type PlanStepMarker } from './Plan';
 import { RunActivityTimeline } from './RunActivityTimeline';
 import { RunHeader } from './RunHeader';
-import { dotStyle } from './StatusBadge';
 import type { Tone } from '../model/viewTypes';
 
 export function RunProgressCard({
@@ -71,7 +70,6 @@ function ProgressFooter({ footer }: { footer: NonNullable<RunProgressViewModel['
   }
   return (
     <div className={`tm-run-progress__footer tm-run-progress__footer--${footer.tone}`}>
-      <span className="tm-plan__dot" style={dotStyle(footer.tone)} />
       <span className="tm-run-progress__footer-copy">
         <span className="tm-run-progress__footer-title">{footer.title}</span>
         {footer.detail ? (

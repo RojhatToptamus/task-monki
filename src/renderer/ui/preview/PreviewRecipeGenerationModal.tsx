@@ -6,12 +6,14 @@ import {
   type RefObject
 } from 'react';
 import { createPortal } from 'react-dom';
+import { X } from 'lucide-react';
 import type {
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation
 } from '../../../shared/contracts';
 import { humanizeEnum } from '../../model/formatting';
 import { useDialogFocusBoundary } from '../dialogFocus';
+import { StatusGlyph } from '../StatusBadge';
 
 export function PreviewRecipeGenerationModal({
   taskId,
@@ -146,13 +148,13 @@ export function PreviewRecipeGenerationModal({
             aria-label="Close Preview recipe review"
             onClick={onClose}
           >
-            ×
+            <X aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />
           </button>
         </header>
 
         {generating ? (
           <div className="tm-preview-recipe-progress" role="status" aria-live="polite">
-            <span className="tm-preview-recipe-progress__dot" aria-hidden="true" />
+            <StatusGlyph kind="working" />
             <div>
               <strong>{generationStageLabel(state.stage)}</strong>
               <p>{generationStageDetail(state.stage)}</p>

@@ -32,6 +32,7 @@ export function InspectorDrawer({
   });
   const inspector = (
     <aside
+      id="discourse-inspector-panel"
       ref={dialogRef}
       className={`tm-discourse-inspector ${modal ? 'tm-discourse-inspector--overlay' : ''}`}
       role={modal ? 'dialog' : 'complementary'}

@@ -155,6 +155,52 @@ describe('InteractionPanel', () => {
     expect(html).not.toContain('Working directory');
     expect(html).not.toContain('/tmp/task');
   });
+
+  it('renders choices, descriptions, custom input, and free text for agent questions', () => {
+    const interaction = commandInteraction();
+    interaction.type = 'USER_INPUT';
+    interaction.allowedActions = ['ANSWER'];
+    interaction.request = {
+      questions: [
+        {
+          id: 'checks',
+          header: 'Checks',
+          question: 'Which checks should run?',
+          isOther: true,
+          isSecret: false,
+          allowsMultiple: true,
+          options: [
+            { label: 'Unit', description: 'Run focused unit tests.' },
+            { label: 'Build', description: 'Build the application.' }
+          ]
+        },
+        {
+          id: 'detail',
+          header: 'Detail',
+          question: 'What should the agent preserve?',
+          isOther: false,
+          isSecret: false
+        }
+      ]
+    };
+
+    const html = renderToStaticMarkup(
+      <InteractionPanel
+        interactions={[interaction]}
+        sessions={[sessionFixture()]}
+        onRespond={async () => undefined}
+      />
+    );
+
+    expect(html).toContain('Answer agent question');
+    expect(html).toContain('Which checks should run?');
+    expect(html).toContain('Run focused unit tests.');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('Other');
+    expect(html).toContain('Checks other answer');
+    expect(html).toContain('What should the agent preserve?');
+    expect(html).toMatch(/Submit answers<\/button>/);
+  });
 });
 
 function commandInteraction(): InteractionRequestRecord {

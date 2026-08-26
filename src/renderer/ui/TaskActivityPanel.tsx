@@ -7,6 +7,7 @@ import type {
   TaskActivityViewModel
 } from '../model/taskActivity';
 import { summarizeEvent } from '../model/eventSummary';
+import { DisclosureChevron } from './DisclosureChevron';
 
 interface TaskActivityPanelProps {
   view: TaskActivityViewModel;
@@ -47,25 +48,27 @@ function OverviewTaskActivity({
   const earlierCount = view.hiddenCount + view.items.length - 1;
 
   return (
-    <section
-      className="tm-panel tm-taskactivity-panel tm-taskactivity-panel--overview"
-      aria-label="Activity"
-    >
-      <div className="tm-taskactivity__head">
-        <h3 className="tm-panel__title">Activity</h3>
-        {earlierCount > 0 ? (
-          <span className="tm-taskactivity__count">
-            {earlierCount} earlier {earlierCount === 1 ? 'item' : 'items'}
-          </span>
+    <details className="tm-taskactivity-panel tm-taskactivity-panel--overview">
+      <summary className="tm-taskactivity__head">
+        <span className="tm-disclosure__label">
+          <DisclosureChevron />
+          <span>Activity</span>
+        </span>
+        <span className="tm-taskactivity__count">
+          {earlierCount > 0
+            ? `${earlierCount + 1} events · latest ${latest.title}`
+            : `Latest ${latest.title}`}
+        </span>
+      </summary>
+      <div className="tm-taskactivity__overview-body">
+        <TaskActivityList items={[latest]} />
+        {onViewAll && earlierCount > 0 ? (
+          <button type="button" className="tm-taskactivity__viewall" onClick={onViewAll}>
+            View full activity
+          </button>
         ) : null}
       </div>
-      <TaskActivityList items={[latest]} />
-      {onViewAll && earlierCount > 0 ? (
-        <button type="button" className="tm-taskactivity__viewall" onClick={onViewAll}>
-          View full activity
-        </button>
-      ) : null}
-    </section>
+    </details>
   );
 }
 
@@ -119,10 +122,6 @@ function TaskActivityRow({ item }: { item: TaskActivityItem }) {
         <span>{timestamp.date}</span>
         <span>{timestamp.time}</span>
       </time>
-      <span
-        className={`tm-taskactivity__dot tm-taskactivity__dot--${item.tone}`}
-        aria-hidden="true"
-      />
       <div className="tm-taskactivity__body">
         <div className="tm-taskactivity__line">
           <span className="tm-taskactivity__actor">{item.actor}</span>
@@ -141,7 +140,10 @@ function TimelineEvidence({ evidence }: { evidence: TaskActivityEvidence }) {
 
   return (
     <details className="tm-taskactivity__details">
-      <summary>{evidence.summary}</summary>
+      <summary>
+        <DisclosureChevron />
+        <span>{evidence.summary}</span>
+      </summary>
       <div className="tm-taskactivity__evidence-rows">
         {evidence.rows.map((row, index) => (
           <EvidenceRow key={`${row.label}:${index}`} row={row} />
@@ -173,7 +175,7 @@ function RawEventAudit({ events }: { events: DomainEvent[] }) {
     .sort((a, b) => compareTimeAscending(a.event.receivedAt, b.event.receivedAt) || a.index - b.index);
   return (
     <details className="tm-eventaudit">
-      <summary>Full event audit · {events.length} events</summary>
+      <summary><DisclosureChevron /><span>Full event audit · {events.length} events</span></summary>
       <div className="tm-eventaudit__list">
         {sortedEvents.map(({ event }) => {
           const summary = summarizeEvent(event);
@@ -183,7 +185,6 @@ function RawEventAudit({ events }: { events: DomainEvent[] }) {
               <time dateTime={event.receivedAt} title={timestamp.full}>
                 {timestamp.time}
               </time>
-              <span className="tm-eventaudit__dot" aria-hidden="true" />
               <span className="tm-eventaudit__body">
                 <strong>{summary.label}</strong>
                 {summary.detail ? <span>{summary.detail}</span> : null}

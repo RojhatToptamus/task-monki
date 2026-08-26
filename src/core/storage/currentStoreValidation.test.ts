@@ -273,6 +273,36 @@ describe('validateCurrentStoreRecords', () => {
     );
   });
 
+  it('accepts a durable multiple-choice user-input request and rejects malformed multiplicity', () => {
+    const state = createEmptyState();
+    const interaction = validInteraction();
+    interaction.type = 'USER_INPUT';
+    interaction.allowedActions = ['ANSWER'];
+    interaction.request = {
+      questions: [
+        {
+          id: 'checks',
+          header: 'Checks',
+          question: 'Which checks should run?',
+          isOther: true,
+          isSecret: false,
+          allowsMultiple: true,
+          options: [
+            { label: 'Unit', description: 'Run unit tests.' },
+            { label: 'Build', description: 'Build the app.' }
+          ]
+        }
+      ]
+    };
+    state.interactionRequests = [interaction];
+
+    expect(() => validateCurrentStoreRecords(state)).not.toThrow();
+    interaction.request.questions[0]!.allowsMultiple = 'yes' as never;
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+  });
+
   it('rejects malformed provider metadata and command paths', () => {
     const state = createEmptyState();
     const interaction = validInteraction();
@@ -314,6 +344,7 @@ describe('validateCurrentStoreRecords', () => {
 function validTask(): Task {
   return {
     id: randomUUID(),
+    kind: 'NORMAL',
     runtimeId: 'codex',
     title: 'Validate current schema',
     prompt: 'Reject malformed durable control state.',

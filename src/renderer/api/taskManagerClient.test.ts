@@ -5,14 +5,14 @@ import { createBrowserTaskManagerApi, TaskManagerApiError } from './taskManagerC
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
 
-  readonly listeners = new Map<string, Array<(message: MessageEvent) => void>>();
+  readonly listeners = new Map<string, Array<(message: Event) => void>>();
   closed = false;
 
   constructor(readonly url: string) {
     FakeEventSource.instances.push(this);
   }
 
-  addEventListener(type: string, listener: (message: MessageEvent) => void) {
+  addEventListener(type: string, listener: (message: Event) => void) {
     const listeners = this.listeners.get(type) ?? [];
     listeners.push(listener);
     this.listeners.set(type, listeners);
@@ -22,7 +22,7 @@ class FakeEventSource {
     this.closed = true;
   }
 
-  emit(type: string, message: MessageEvent) {
+  emit(type: string, message: Event) {
     for (const listener of this.listeners.get(type) ?? []) {
       listener(message);
     }
@@ -78,6 +78,44 @@ describe('createBrowserTaskManagerApi updates', () => {
 
     unsubscribe();
     expect(FakeEventSource.instances[0]?.closed).toBe(true);
+  });
+
+  it('polls during an SSE outage and returns to the reconnecting stream', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const api = createBrowserTaskManagerApi('');
+    const events: AppUpdateEvent[] = [];
+
+    const unsubscribe = api.onUpdate((event) => events.push(event));
+    const source = FakeEventSource.instances[0]!;
+    source.emit('error', new Event('error'));
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(source.closed).toBe(false);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('projection.updated');
+
+    source.emit('open', new Event('open'));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(events).toHaveLength(1);
+
+    const update: AppUpdateEvent = {
+      type: 'run.terminal',
+      scope: { kind: 'TASK', taskId: 'task-1' },
+      taskId: 'task-1',
+      payload: null,
+      at: '2026-07-26T00:00:00.000Z'
+    };
+    source.emit('update', {
+      data: JSON.stringify(update)
+    } as MessageEvent);
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'projection.updated' }),
+      update
+    ]);
+
+    unsubscribe();
+    expect(source.closed).toBe(true);
   });
 });
 
@@ -330,6 +368,100 @@ describe('createBrowserTaskManagerApi preview contract', () => {
       generationId: 'generation-1',
       routeId: 'app'
     });
+  });
+});
+
+describe('createBrowserTaskManagerApi Design conversation', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses scoped Design conversation and project action endpoints', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => ({}) } as Response;
+      })
+    );
+    const api = createBrowserTaskManagerApi('');
+
+    await api.listDesignConversation({
+      designId: 'design/1',
+      beforeCursor: 'before cursor',
+      limit: 25
+    });
+    await api.getDesignDraft('design/1');
+    await api.saveDesignDraft({
+      designId: 'design/1',
+      expectedRevision: 2,
+      body: 'Unsent change',
+      referenceIds: []
+    });
+    await api.deleteDesignDraft({ designId: 'design/1', expectedRevision: 3 });
+    await api.cancelDesignTurn({ designId: 'design/1', turnId: 'turn/1' });
+    await api.restoreDesignRevision({
+      designId: 'design/1',
+      revisionId: 'revision/1',
+      clientActionId: 'restore-1'
+    });
+    await api.duplicateDesign({
+      designId: 'design/1',
+      revisionId: 'revision/1',
+      clientActionId: 'duplicate-1'
+    });
+    await api.renameDesign({ designId: 'design/1', title: 'New name' });
+    await api.archiveDesign({ designId: 'design/1' });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/api/designs/design%2F1/conversation?beforeCursor=before+cursor&limit=25',
+      '/api/designs/design%2F1/draft',
+      '/api/designs/design%2F1/draft',
+      '/api/designs/design%2F1/draft/delete',
+      '/api/designs/design%2F1/turns/turn%2F1/cancel',
+      '/api/designs/design%2F1/revisions/revision%2F1/restore',
+      '/api/designs/design%2F1/revisions/revision%2F1/duplicate',
+      '/api/designs/design%2F1/rename',
+      '/api/designs/design%2F1/archive'
+    ]);
+    expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+      designId: 'design/1',
+      expectedRevision: 2,
+      body: 'Unsent change',
+      referenceIds: []
+    });
+  });
+
+  it('reads a saved Design draft attachment from its Design-scoped endpoint', async () => {
+    const bytes = new TextEncoder().encode('saved draft file');
+    const fetchMock = vi.fn(async () => new Response(bytes, {
+      status: 200,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'x-task-monki-attachment-id': 'attachment/1',
+        'x-task-monki-attachment-name': encodeURIComponent('saved direction.txt'),
+        'x-task-monki-attachment-kind': 'text',
+        'x-task-monki-attachment-media-type': 'text/plain'
+      }
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const api = createBrowserTaskManagerApi('');
+
+    const content = await api.readDesignDraftAttachment({
+      designId: 'design/1',
+      attachmentId: 'attachment/1'
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/designs/design%2F1/draft/attachments/attachment%2F1'
+    );
+    expect(content).toMatchObject({
+      attachmentId: 'attachment/1',
+      displayName: 'saved direction.txt',
+      kind: 'text',
+      mediaType: 'text/plain',
+      byteCount: bytes.byteLength
+    });
+    expect(new TextDecoder().decode(content.bytes)).toBe('saved draft file');
   });
 });
 

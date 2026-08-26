@@ -2,10 +2,12 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState
 } from 'react';
+import { X } from 'lucide-react';
 import type {
   ConversationContextReferenceSnapshot,
   DiscourseConversationAggregateRecord,
@@ -70,13 +72,12 @@ import { DiscourseResponseGroup } from './DiscourseResponseGroup';
 import {
   DiscourseContextPreviewIcon,
   DiscourseMoreIcon,
-  DiscoursePanelLeftIcon,
   DiscoursePanelRightIcon,
   DiscoursePinIcon as PinIcon,
   DiscourseRepositoryIcon as RepositoryIcon,
-  DiscourseRoundtableIcon,
   DiscourseTaskIcon as TaskIcon
 } from './DiscourseIcons';
+import { PanelIcon } from './AppNavigation';
 import {
   ConfirmDialog,
   ContextPreview,
@@ -84,8 +85,16 @@ import {
   InspectorSection
 } from './DiscourseOverlays';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { PanelResizeHandle } from './PanelResizeHandle';
+import { StatusGlyph } from './StatusBadge';
+import {
+  focusedPanelWidth,
+  persistFocusedPanelWidth
+} from '../model/workspaceLayout';
 
 interface DiscourseWorkspaceProps {
+  historyCollapsed?: boolean;
+  onHistoryCollapsedChange?(collapsed: boolean): void;
   onNotify(message: string, tone?: 'info' | 'success' | 'error'): void;
   onError(error: unknown, fallback: string): void;
 }
@@ -121,7 +130,12 @@ interface PendingNewConversation {
   };
 }
 
-export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProps) {
+export function DiscourseWorkspace({
+  historyCollapsed,
+  onHistoryCollapsedChange,
+  onNotify,
+  onError
+}: DiscourseWorkspaceProps) {
   const [conversations, setConversations] = useState<DiscourseConversationSummary[]>([]);
   const [aggregate, setAggregate] = useState<DiscourseConversationAggregateRecord>();
   const [messages, setMessages] = useState<DiscourseMessageRecord[]>([]);
@@ -156,6 +170,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const [previewLoading, setPreviewLoading] = useState(false);
   const [acceptedSendActionId, setAcceptedSendActionId] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [historyWidth, setHistoryWidth] = useState(() =>
+    focusedPanelWidth('discourse-history', 268, 220, 360)
+  );
+  const [inspectorWidth, setInspectorWidth] = useState(() =>
+    focusedPanelWidth('discourse-inspector', 320, 280, 420)
+  );
   const [railOpen, setRailOpen] = useState(false);
   const [compactLayout, setCompactLayout] = useState(true);
   const [inspectorOverlayLayout, setInspectorOverlayLayout] = useState(true);
@@ -197,7 +217,15 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const eventRefreshTimerRef = useRef<number | undefined>(undefined);
   const eventRefreshConversationIdsRef = useRef(new Set<string>());
 
-  const railModalOpen = railOpen && compactLayout;
+  const effectiveHistoryCollapsed = historyCollapsed ?? (compactLayout ? !railOpen : false);
+  const railModalOpen = compactLayout && !effectiveHistoryCollapsed;
+  const setHistoryVisible = useCallback((visible: boolean) => {
+    if (onHistoryCollapsedChange) {
+      onHistoryCollapsedChange(!visible);
+    } else {
+      setRailOpen(visible);
+    }
+  }, [onHistoryCollapsedChange]);
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -214,16 +242,23 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     return () => observer.disconnect();
   }, [loading, workspaceLoadFailed]);
 
+  useLayoutEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    workspace.style.setProperty('--discourse-history-width', `${historyWidth}px`);
+    workspace.style.setProperty('--discourse-inspector-width', `${inspectorWidth}px`);
+  }, [historyWidth, inspectorWidth]);
+
   useEffect(() => {
-    if (!compactLayout) setRailOpen(false);
-  }, [compactLayout]);
+    if (!compactLayout && !onHistoryCollapsedChange) setRailOpen(false);
+  }, [compactLayout, onHistoryCollapsedChange]);
 
   useDialogFocusBoundary({
     dialogRef: railRef,
     initialFocusRef: railSearchRef,
     fallbackReturnFocusRef: railReturnFocusRef,
     busy: false,
-    onClose: () => setRailOpen(false),
+    onClose: () => setHistoryVisible(false),
     active: railModalOpen
   });
 
@@ -1765,11 +1800,9 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         aria-busy="true"
         aria-label="Loading Discourse"
       >
-        <div className="tm-discourse-loading-rail" aria-hidden="true">
-          <span /><span /><span /><span /><span />
-        </div>
-        <div className="tm-discourse-loading-conversation" aria-hidden="true">
-          <span /><span /><span />
+        <div className="tm-discourse-workspace-loading">
+          <StatusGlyph kind="working" />
+          <strong>Loading Discourse</strong>
         </div>
       </div>
     );
@@ -1781,7 +1814,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         <div className="tm-discourse-workspace-error">
           <strong>Discourse could not be loaded</strong>
           <span>Conversations, agents, and drafts are unavailable until the connection recovers.</span>
-          <button type="button" className="tm-btn tm-btn--soft" onClick={() => void loadWorkspace()}>
+          <button type="button" className="outline-button" onClick={() => void loadWorkspace()}>
             Try again
           </button>
         </div>
@@ -1794,7 +1827,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       ref={workspaceRef}
       className={`tm-discourse ${compactLayout ? 'tm-discourse--compact' : ''} ${
         inspectorOpen && !inspectorOverlayLayout ? 'tm-discourse--inspector-open' : ''
-      }`}
+      } ${effectiveHistoryCollapsed ? 'tm-discourse--history-collapsed' : ''}`}
     >
       <DiscourseConversationRail
         archived={showArchived}
@@ -1807,24 +1840,38 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         selectedConversationId={selectedConversationId}
         sending={sending}
         onArchivedChange={setShowArchived}
-        onClose={() => setRailOpen(false)}
+        onClose={() => setHistoryVisible(false)}
         onNewConversation={startNewConversation}
         onQueryChange={setRailQuery}
         onSelectConversation={selectConversation}
       />
+      {!compactLayout && !effectiveHistoryCollapsed ? (
+        <PanelResizeHandle
+          label="Resize conversation history"
+          value={historyWidth}
+          min={220}
+          max={360}
+          defaultValue={268}
+          controls="discourse-history-panel"
+          onChange={(width) => {
+            setHistoryWidth(width);
+            persistFocusedPanelWidth('discourse-history', width);
+          }}
+        />
+      ) : null}
 
       <section className="tm-discourse-conversation">
         <header className="tm-discourse-header">
           <button
             ref={railReturnFocusRef}
             type="button"
-            className="tm-iconbtn tm-discourse-rail-toggle"
-            aria-label={railModalOpen ? 'Close conversations' : 'Open conversations'}
-            aria-expanded={railModalOpen}
-            title={railModalOpen ? 'Close conversations' : 'Open conversations'}
-            onClick={() => setRailOpen((value) => !value)}
+            className="tm-iconbtn tm-mode-history-toggle tm-discourse-rail-toggle"
+            aria-label={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}
+            aria-expanded={!effectiveHistoryCollapsed}
+            title={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}
+            onClick={() => setHistoryVisible(effectiveHistoryCollapsed)}
           >
-            <DiscoursePanelLeftIcon expanded={railModalOpen} />
+            <PanelIcon />
           </button>
           <div className="tm-discourse-header__title">
             {renameOpen && aggregate ? (
@@ -1993,12 +2040,11 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           ) : null}
           {conversationLoadFailed ? (
             <div className="tm-discourse-empty" role="alert">
-              <span className="tm-discourse-empty__mark"><DiscourseRoundtableIcon /></span>
               <h2>Conversation unavailable</h2>
               <p>{conversationLoadState.detail ?? 'The conversation could not be loaded.'}</p>
               <button
                 type="button"
-                className="tm-btn tm-btn--soft"
+                className="outline-button"
                 onClick={() => selectedConversationId && void loadConversation(selectedConversationId)
                   .catch((error) => reportDiscourseError(error, 'Could not load the conversation.'))}
               >
@@ -2007,13 +2053,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             </div>
           ) : conversationPending ? (
             <div className="tm-discourse-empty tm-discourse-empty--loading" aria-busy="true">
-              <span className="tm-discourse-empty__mark"><DiscourseRoundtableIcon /></span>
+              <StatusGlyph kind="working" />
               <h2>Loading conversation…</h2>
               <p>Restoring messages, participants, and their saved agent configurations.</p>
             </div>
           ) : messages.length === 0 ? (
             <div className="tm-discourse-empty">
-              <span className="tm-discourse-empty__mark"><DiscourseRoundtableIcon /></span>
               <h2>{newConversation ? 'Start a technical conversation' : 'Nothing has been said yet'}</h2>
               <p>Write a note, compare an approach, or attach a task or repository with <kbd>@</kbd>.</p>
             </div>
@@ -2122,7 +2167,6 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               initialText={composer.text}
               initialTokens={composer.tokens}
               showAgentTokens={false}
-              autoFocus={messages.length === 0}
               disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
               label="Message"
               placeholder={conversationUnavailable
@@ -2204,11 +2248,27 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       </section>
 
       {inspectorOpen ? (
-        <InspectorDrawer
-          modal={inspectorOverlayLayout}
-          returnFocus={inspectorReturnFocusRef.current}
-          onClose={() => setInspectorOpen(false)}
-        >
+        <>
+          {!inspectorOverlayLayout ? (
+            <PanelResizeHandle
+              label="Resize conversation details"
+              value={inspectorWidth}
+              min={280}
+              max={420}
+              defaultValue={320}
+              direction={-1}
+              controls="discourse-inspector-panel"
+              onChange={(width) => {
+                setInspectorWidth(width);
+                persistFocusedPanelWidth('discourse-inspector', width);
+              }}
+            />
+          ) : null}
+          <InspectorDrawer
+            modal={inspectorOverlayLayout}
+            returnFocus={inspectorReturnFocusRef.current}
+            onClose={() => setInspectorOpen(false)}
+          >
           <InspectorSection title="Pinned for future responses" count={pinned.length}>
             {pinned.length === 0 ? (
               <p className="tm-discourse-inspector__empty">Nothing is attached automatically. Mention a task or repository, then pin it explicitly.</p>
@@ -2220,7 +2280,9 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                       {reference.entityKind === 'TASK' ? <TaskIcon /> : <RepositoryIcon />}
                     </span>
                     <span><strong>{reference.labelSnapshot}</strong><small>{reference.entityKind === 'TASK' ? 'Task context' : 'Repository context'} · {availabilityLabel(reference.availability)}</small></span>
-                    <button type="button" aria-label={`Unpin ${reference.labelSnapshot}`} onClick={() => void unpinContext(reference)}>×</button>
+                    <button type="button" aria-label={`Unpin ${reference.labelSnapshot}`} onClick={() => void unpinContext(reference)}>
+                      <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -2264,7 +2326,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               <div><dt>Approvals</dt><dd>Never</dd></div>
             </dl>
           </InspectorSection>
-        </InspectorDrawer>
+          </InspectorDrawer>
+        </>
       ) : null}
 
       {confirmAction?.type === 'delete-conversation' ? (
@@ -2297,7 +2360,9 @@ function ComposerTarget({ label, message, onRemove }: { label: string; message: 
   return (
     <div className="tm-discourse-composer-target">
       <span><strong>{label}</strong><small>{compactText(message.body, 120)}</small></span>
-      <button type="button" aria-label="Remove reply target" onClick={onRemove}>×</button>
+      <button type="button" aria-label="Remove reply target" onClick={onRemove}>
+        <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+      </button>
     </div>
   );
 }

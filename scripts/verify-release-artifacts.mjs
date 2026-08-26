@@ -17,6 +17,7 @@ const REQUIRED_PACKAGED_LEGAL_FILES = [
   'legal/LICENSE',
   'legal/THIRD_PARTY_NOTICES.md',
   'legal/third-party/OpenAI-Codex-Apache-2.0.txt',
+  'legal/third-party/Claude-Design-System-MIT.txt',
   'legal/electron/LICENSE',
   'legal/electron/LICENSES.chromium.html'
 ];
@@ -272,11 +273,33 @@ async function assertGzip(filePath) {
 }
 
 async function assertSevenZipArchive(filePath) {
-  await execFileAsync(path7za, ['t', '-bd', filePath], {
+  await execPackagedTool(path7za, ['t', '-bd', filePath], {
     timeout: ARCHIVE_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
     windowsHide: true
   });
+}
+
+export async function execPackagedTool(executable, args, options) {
+  try {
+    return await execFileAsync(executable, args, options);
+  } catch (error) {
+    if (process.platform === 'win32' || error?.code !== 'EACCES') {
+      throw error;
+    }
+  }
+
+  const directory = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'task-monki-packaged-tool-')
+  );
+  const runnable = path.join(directory, path.basename(executable));
+  try {
+    await fs.copyFile(executable, runnable);
+    await fs.chmod(runnable, 0o700);
+    return await execFileAsync(runnable, args, options);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 }
 
 async function verifyNativeLinuxArtifacts(appImagePath, debPath) {

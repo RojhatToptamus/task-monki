@@ -4,10 +4,12 @@ import type {
   PreviewOciEngineIdentity
 } from '../../../shared/contracts';
 import {
-  execFilePortable,
-  spawnPortable,
   terminatePortableProcessTree
 } from '../../process/portableChildProcess';
+import {
+  execFileOwnedPortable,
+  spawnOwnedPortable
+} from '../../process/ownedProcess';
 import { boundedPreviewFailure as boundedError } from '../PreviewFailure';
 
 const MAX_OCI_COMMAND_OUTPUT_BYTES = 1024 * 1024;
@@ -224,7 +226,7 @@ async function executeOciCommand(
     maxOutputBytes: number;
   }
 ): Promise<OciCommandResult> {
-  return execFilePortable(executable, argv, {
+  return execFileOwnedPortable(executable, argv, {
     cwd: options.cwd,
     env: options.env,
     timeout: options.timeoutMs,
@@ -244,12 +246,14 @@ async function executeOciStdinAttach(
   }
 ): Promise<OciStdinAttachment> {
   if (options.signal?.aborted) throw abortError(options.signal);
-  const child = spawnPortable(executable, argv, {
+  const child = spawnOwnedPortable(executable, argv, {
     cwd: options.cwd,
     env: options.env,
     stdio: ['pipe', 'ignore', 'ignore'],
     windowsHide: true
   });
+  child.stdout?.resume();
+  child.stderr?.resume();
   let expectedClose = false;
   let exited = false;
   let rejectFailure!: (error: Error) => void;

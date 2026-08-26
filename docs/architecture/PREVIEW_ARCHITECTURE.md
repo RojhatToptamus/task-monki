@@ -230,7 +230,7 @@ requires those exact identities; a PID or command name alone is insufficient.
 
 Each node attempt owns bounded stdout and stderr artifacts. The renderer reads
 one attempt/stream through range reads while the log dock is open; normal task
-snapshot refresh is not a log transport.
+detail refresh is not a log transport.
 
 ## Readiness, liveness, restart, and overlap
 
@@ -564,6 +564,12 @@ objects, and Compose projects are verified against exact identity and cleaned.
 Nothing is adopted or restarted. Uncertainty becomes `CLEANUP_INCOMPLETE` or
 `RECOVERY_REQUIRED`, preserving the evidence and data needed for a retry.
 
+Docker and Compose CLI children use the application IPC owner boundary. Abrupt
+main-process loss therefore stops the exact CLI process tree; any mutation
+already accepted by the engine is still reconciled from complete Task Monki
+labels and pinned engine identity. Killing a CLI is never treated as proof that
+the daemon-side operation did or did not complete.
+
 ## Failure semantics
 
 - Recipe, plan, approval, private-input, source, or engine preflight failure
@@ -651,6 +657,11 @@ reinterpreted; local data using an older schema must be discarded.
 ## Renderer model and user experience
 
 The renderer consumes stored Task Monki projections, never raw runtime claims.
+The selected-task detail read includes only that task's Preview ownership
+records. A separate compact route catalog supplies cross-task route choices
+without transporting other tasks' runs, items, attempts, resources, or
+artifacts.
+
 The Overview Preview card gives one status, stable primary route, recommended
 action, and a Details entry. The full Preview workspace shows:
 

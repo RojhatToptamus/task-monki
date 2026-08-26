@@ -151,6 +151,7 @@ describe('SettingsView', () => {
 
     expect(withoutEffort).not.toContain('>Reasoning<');
     expect(withEffort).toContain('>Reasoning<');
+    expect(withEffort).not.toContain('tm-agent-console__label">Agent<');
     expect(withEffort).toContain('>High</small>');
     expect(withEffort).toContain('>X-high</small>');
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFilePortable } from '../process/portableChildProcess';
 import { getGitExecutablePath, git } from './gitCli';
 
-export interface ReviewGitMetadata {
+export interface AgentGitMetadata {
   repositoryRoot: string;
   worktreeRoot: string;
   gitDir: string;
@@ -13,11 +13,11 @@ export interface ReviewGitMetadata {
 }
 
 /**
- * Resolves a concrete Git executable for a confined review subprocess. On
+ * Resolves a concrete Git executable for a confined agent subprocess. On
  * macOS, /usr/bin/git is an xcrun shim that writes a cache under TMPDIR, so
  * resolve the developer-tool Git binary before entering the read-only sandbox.
  */
-export async function resolveReviewGitExecutablePath(): Promise<string> {
+export async function resolveAgentGitExecutablePath(): Promise<string> {
   try {
     let executable = await canonicalExecutable(
       await resolveExecutableOnPath(getGitExecutablePath())
@@ -38,7 +38,7 @@ export async function resolveReviewGitExecutablePath(): Promise<string> {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Cannot resolve trusted Git metadata for agent review: ${detail}`
+      `Cannot resolve trusted Git metadata for agent session: ${detail}`
     );
   }
 }
@@ -56,13 +56,13 @@ async function canonicalExecutable(executable: string): Promise<string> {
 }
 
 /**
- * Resolves the exact Git metadata required by a detached review and proves
+ * Resolves the exact Git metadata required by a confined agent and proves
  * that it belongs to the selected repository/worktree relationship.
  */
-export async function resolveReviewGitMetadata(input: {
+export async function resolveAgentGitMetadata(input: {
   repositoryPath: string;
   worktreePath: string;
-}): Promise<ReviewGitMetadata> {
+}): Promise<AgentGitMetadata> {
   try {
     const repositoryPath = await canonicalDirectory(
       input.repositoryPath,
@@ -162,7 +162,7 @@ export async function resolveReviewGitMetadata(input: {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Cannot resolve trusted Git metadata for agent review: ${detail}`
+      `Cannot resolve trusted Git metadata for agent session: ${detail}`
     );
   }
 }

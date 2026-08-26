@@ -14,7 +14,7 @@
     "url": "https://github.com/RojhatToptamus/task-monki/issues"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "main": "dist-electron/electron/main.js",
   "scripts": {
@@ -24,14 +24,18 @@
     "build:preload": "node scripts/build-preload.mjs",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
-    "dist:dir": "npm run build && electron-builder --dir",
-    "dist:mac": "npm run build && electron-builder --mac",
+    "prepare:design-browser-runtime": "node scripts/prepare-design-browser-runtime.mjs",
+    "dist:dir": "npm run prepare:design-browser-runtime && npm run build && electron-builder --dir",
+    "dist:mac": "npm run prepare:design-browser-runtime -- --arch=arm64 --arch=x64 && npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
+    "verify:packaged-owned-process": "node scripts/verify-packaged-owned-process.mjs",
     "verify:packaged-preview": "node scripts/verify-packaged-preview-launcher.mjs",
     "verify:packaged-preview-safe-storage": "node scripts/verify-packaged-preview-safe-storage.mjs",
     "dev:api": "npm run build:tools && node dist-tools/dev/server.js",
     "dev:seed": "npm run build:tools && node dist-tools/dev/seed.js --reset",
+    "test:agent-workflow": "npm run build:tools && node dist-tools/dev/agentTestWorkflow.js",
+    "test:design-agent": "npm run build:tools && node dist-tools/dev/designAgentAcceptance.js",
     "smoke:providers": "npm run build:tools && node dist-tools/dev/providerSmoke.js",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
@@ -44,7 +48,9 @@
     "test:transport": "vitest run src/dev/devHttpServer.test.ts src/electron src/renderer/api",
     "test:watch": "vitest",
     "check:architecture": "node scripts/check-architecture.mjs",
-    "verify": "npm run typecheck && npm run check:architecture && npm test && npm run test:renderer:dom && npm run check:codex-protocol && npm run build",
+    "verify": "npm run check:themes && npm run typecheck && npm run check:architecture && npm test && npm run test:renderer:dom && npm run check:codex-protocol && npm run build",
+    "generate:themes": "node tools/build-themes.mjs",
+    "check:themes": "node tools/build-themes.mjs --check",
     "generate:codex-protocol": "node scripts/generate-codex-protocol.mjs",
     "check:codex-protocol": "node scripts/generate-codex-protocol.mjs --check",
     "test:preview-credential-gate": "sh scripts/preview-managed-credential-gate.sh",
@@ -60,20 +66,21 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@electron/asar": "3.4.1",
+    "@electron/asar": "4.2.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^26.0.0",
     "@types/pg": "^8.20.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^4.7.0",
+    "@vitejs/plugin-react": "^6.0.4",
     "7zip-bin": "5.2.0",
-    "electron": "^31.7.7",
-    "electron-builder": "^24.13.3",
-    "esbuild": "0.21.5",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "0.28.1",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21",
-    "vitest": "^2.1.9"
+    "vite": "^8.1.5",
+    "vite-node": "^6.0.0",
+    "vitest": "^4.1.10"
   }
 }

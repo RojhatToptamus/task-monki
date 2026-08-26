@@ -159,8 +159,9 @@ export function mapOpenCodeQuestion(
         id: questionId(request.id, index),
         header: question.header,
         question: question.question,
-        isOther: question.custom === true,
+        isOther: question.custom !== false,
         isSecret: looksLikeSecretQuestion(question.header, question.question),
+        allowsMultiple: question.multiple === true ? true : undefined,
         options: question.options?.map((option) => ({
           label: option.label,
           description: option.description ?? ''

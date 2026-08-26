@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { FilePlus2 } from 'lucide-react';
 import type {
   ArtifactRecord,
   GitSnapshotRecord,
@@ -12,6 +13,7 @@ import {
   type CompletedChangeSummary
 } from '../model/completedChangeSummary';
 import { parseGitDiffEvidence } from '../model/diffEvidence';
+import { DisclosureChevron } from './DisclosureChevron';
 
 interface CompletedChangeSummaryPanelProps {
   run?: RunRecord;
@@ -107,7 +109,10 @@ export function CompletedChangeSummaryCard({
         ))}
         {summary.hiddenFileCount > 0 ? (
           <details className="tm-change-summary__more">
-            <summary>Show {summary.hiddenFileCount} more {plural(summary.hiddenFileCount, 'file')}</summary>
+            <summary>
+              Show {summary.hiddenFileCount} more {plural(summary.hiddenFileCount, 'file')}
+              <DisclosureChevron className="tm-change-summary__chevron" />
+            </summary>
             <div>
               {summary.hiddenFiles.map((file) => (
                 <ChangeFileRow key={file.path} file={file} />
@@ -147,13 +152,7 @@ function DiffStat({ additions, deletions }: { additions: number; deletions: numb
 }
 
 function ChangeSummaryIcon() {
-  return (
-    <svg viewBox="0 0 16 16" fill="none">
-      <path d="M3.25 2.75h7.25l2.25 2.25v8.25h-9.5z" />
-      <path d="M10.5 2.75V5h2.25" />
-      <path d="M8 6.25v4.5M5.75 8.5h4.5" />
-    </svg>
-  );
+  return <FilePlus2 aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }
 
 function plural(count: number, singular: string): string {

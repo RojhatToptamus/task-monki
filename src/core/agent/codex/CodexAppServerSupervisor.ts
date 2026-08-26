@@ -8,10 +8,10 @@ import type {
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
   isPortableProcessTreeRunning,
-  spawnPortable,
   terminatePortableProcessTree,
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
+import { spawnOwnedPortable } from '../../process/ownedProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
@@ -67,7 +67,7 @@ export interface CodexAppServerSupervisorOptions {
   failClosedMcpDiscovery?: boolean;
   runtimeResolver?: typeof resolveCodexRuntime;
   argvResolver?: typeof resolveCodexAppServerArgv;
-  spawnProcess?: typeof spawnPortable;
+  spawnProcess?: typeof spawnOwnedPortable;
   shutdownGraceTimeoutMs?: number;
   shutdownKillTimeoutMs?: number;
   closeHandlingTimeoutMs?: number;
@@ -227,7 +227,9 @@ export class CodexAppServerSupervisor {
     const failures: unknown[] = [];
     const starting = this.startPromise;
     const childAtShutdown = this.child;
-    this.client?.close('Codex App Server shut down.');
+    // A normal close can make the stdio server exit immediately. Publish the
+    // shutdown intent first so durable lifecycle state does not lag that exit.
+    // Safety-boundary termination deliberately uses the opposite order below.
     if (this.server && ['READY', 'RUNNING', 'DEGRADED'].includes(this.server.status)) {
       try {
         const stored = await this.store.getAgentServer(this.server.id);
@@ -239,6 +241,7 @@ export class CodexAppServerSupervisor {
         failures.push(cause);
       }
     }
+    this.client?.close('Codex App Server shut down.');
     if (childAtShutdown) {
       try {
         await this.ensureProcessTreeExit(
@@ -426,7 +429,7 @@ export class CodexAppServerSupervisor {
       this.server = server;
       this.assertStartupActive();
 
-      child = (this.options.spawnProcess ?? spawnPortable)(executable, argv, {
+      child = (this.options.spawnProcess ?? spawnOwnedPortable)(executable, argv, {
         cwd: this.options.cwd,
         env: sanitizeEnvironment(
           this.options.environment ?? process.env,
@@ -497,7 +500,7 @@ export class CodexAppServerSupervisor {
           version: this.options.appVersion
         },
         capabilities: {
-          experimentalApi: false,
+          experimentalApi: true,
           requestAttestation: false,
           optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
         }
@@ -849,12 +852,27 @@ async function terminateAndConfirm(
   killTimeoutMs: number
 ): Promise<void> {
   if (!isPortableProcessTreeRunning(child)) return;
-  await terminatePortableProcessTree(child, 'SIGTERM');
-  if (await waitForPortableProcessTreeExit(child, gracefulTimeoutMs)) return;
-  await terminatePortableProcessTree(child, 'SIGKILL');
-  if (!(await waitForPortableProcessTreeExit(child, killTimeoutMs))) {
-    throw new Error(`Codex App Server process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`);
+  const signalFailures: unknown[] = [];
+  try {
+    await terminatePortableProcessTree(child, 'SIGTERM');
+  } catch (cause) {
+    signalFailures.push(cause);
   }
+  if (await waitForPortableProcessTreeExit(child, gracefulTimeoutMs)) return;
+  try {
+    await terminatePortableProcessTree(child, 'SIGKILL');
+  } catch (cause) {
+    signalFailures.push(cause);
+  }
+  if (await waitForPortableProcessTreeExit(child, killTimeoutMs)) return;
+  const exitFailure = new Error(
+    `Codex App Server process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`
+  );
+  if (signalFailures.length === 0) throw exitFailure;
+  throw new AggregateError(
+    [...signalFailures, exitFailure],
+    exitFailure.message
+  );
 }
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {

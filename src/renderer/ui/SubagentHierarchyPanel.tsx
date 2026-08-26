@@ -8,6 +8,7 @@ import type {
 } from '../../shared/contracts';
 import { buildRunActivityProjection } from '../model/runActivity';
 import { RawProviderMessage } from './RawProviderMessage';
+import { DisclosureChevron } from './DisclosureChevron';
 import { humanizeEnum } from './display';
 
 interface SubagentHierarchyPanelProps {
@@ -130,12 +131,15 @@ function SubagentNode({
     >
       <details open={status === 'RUNNING' || status === 'PENDING_INIT'}>
         <summary>
-          <span>
-            <strong>{displayName}</strong>
-            <small>
-              {node.session.providerRole ?? '—'} ·{' '}
-              {node.session.providerSessionId ?? '—'}
-            </small>
+          <span className="tm-disclosure__label">
+            <DisclosureChevron />
+            <span className="subagent-node__summary-copy">
+              <strong>{displayName}</strong>
+              <small>
+                {node.session.providerRole ?? '—'} ·{' '}
+                {node.session.providerSessionId ?? '—'}
+              </small>
+            </span>
           </span>
           <span className="subagent-node__badges">
             <span className={`relationship-badge relationship-badge--${node.session.relationshipState.toLowerCase()}`}>
@@ -227,7 +231,8 @@ function SubagentRunSummary({
   return (
     <details className="subagent-run">
       <summary>
-        <span>
+        <span className="tm-disclosure__label">
+          <DisclosureChevron />
           {run.providerTurnId ?? shortId(run.id)} · {humanizeEnum(run.status)}
         </span>
         <small>

@@ -20,7 +20,7 @@ describe('AgentControlPanel', () => {
     expect(html).not.toContain('Stop run');
   });
 
-  it('makes retry the primary recovery action after an implementation failure', () => {
+  it('makes Retry implementation primary after a definitive implementation failure', () => {
     const html = renderToStaticMarkup(
       <AgentControlPanel
         run={runFixture({ status: 'FAILED', terminalReason: 'Provider rejected the turn.' })}
@@ -33,9 +33,11 @@ describe('AgentControlPanel', () => {
     );
 
     expect(html).toContain('Run failed');
-    expect(html).toContain('Retry in this session or continue from the current worktree state.');
-    expect(html).toMatch(/class="primary-button"[^>]*>Retry in session<\/button>/);
-    expect(html.indexOf('Retry in session')).toBeLessThan(html.indexOf('>Continue<'));
+    expect(html).toContain(
+      'Retry the original implementation or continue unfinished work from the current state.'
+    );
+    expect(html).toMatch(/class="primary-button"[^>]*>Retry implementation<\/button>/);
+    expect(html.indexOf('Retry implementation')).toBeLessThan(html.indexOf('>Continue work<'));
     expect(html).not.toContain('Run review');
   });
 
@@ -57,6 +59,8 @@ describe('AgentControlPanel', () => {
 
     expect(html).toContain('Recovery requires action');
     expect(html).not.toContain('Recovery requires review');
+    expect(html).toMatch(/class="primary-button"[^>]*>Continue work<\/button>/);
+    expect(html).toContain('Retry implementation');
     expect(html).not.toContain('Run review');
   });
 
@@ -73,10 +77,27 @@ describe('AgentControlPanel', () => {
       />
     );
 
-    expect(html).toContain('Unfinished work');
-    expect(html).toMatch(/class="primary-button"[^>]*>Retry in session<\/button>/);
+    expect(html).toContain('Implementation needs another pass');
+    expect(html).toMatch(/class="primary-button"[^>]*>Retry implementation<\/button>/);
     expect(html).not.toContain('Follow up');
     expect(html).not.toContain('Run review');
+  });
+
+  it('offers Follow up and Fork alternative, but not Retry, after successful completion', () => {
+    const html = renderToStaticMarkup(
+      <AgentControlPanel
+        run={runFixture({ status: 'COMPLETED' })}
+        interactions={[]}
+        onSteer={async () => {}}
+        onInterrupt={async () => {}}
+        onContinue={async () => {}}
+        onRetry={async () => {}}
+      />
+    );
+
+    expect(html).toContain('Follow up');
+    expect(html).toContain('Fork alternative');
+    expect(html).not.toContain('Retry implementation');
   });
 });
 

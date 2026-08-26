@@ -31,7 +31,8 @@ export interface CodexReadOnlyScopeProfile {
 
 export function codexPermissionProfileId(
   sessionId: string,
-  sandbox: AgentExecutionSettings['sandbox']
+  sandbox: AgentExecutionSettings['sandbox'],
+  attachmentPaths: readonly string[] = []
 ): string {
   if (!SAFE_SESSION_ID.test(sessionId)) {
     throw new Error('Cannot create a Codex permission profile for an invalid session id.');
@@ -39,7 +40,15 @@ export function codexPermissionProfileId(
   if (sandbox === 'DANGER_FULL_ACCESS') {
     return ':danger-full-access';
   }
-  return `${PROFILE_PREFIX}${sessionId}`;
+  if (attachmentPaths.length === 0) {
+    return `${PROFILE_PREFIX}${sessionId}`;
+  }
+  const attachmentScope = crypto
+    .createHash('sha256')
+    .update(stableJson(uniqueSorted(attachmentPaths.map((candidate) => path.resolve(candidate)))))
+    .digest('hex')
+    .slice(0, 16);
+  return `${PROFILE_PREFIX}${sessionId}_${attachmentScope}`;
 }
 
 /** Builds a bounded, order-independent, offline read-only scope for Discourse. */
@@ -160,7 +169,11 @@ export function codexPermissionProfileConfig(input: {
     filesystem[attachmentPath] = 'read';
   }
 
-  const profileId = codexPermissionProfileId(input.sessionId, input.settings.sandbox);
+  const profileId = codexPermissionProfileId(
+    input.sessionId,
+    input.settings.sandbox,
+    attachmentPaths
+  );
   return {
     ...(input.settings.reasoningEffort
       ? { model_reasoning_effort: input.settings.reasoningEffort }
@@ -195,9 +208,11 @@ export function assertCodexPermissionProfileEvidence(input: {
   sessionId: string;
   sandbox: AgentExecutionSettings['sandbox'];
   worktreePath: string;
+  expectedProfileId?: string;
   response: CodexPermissionProfileEvidence;
 }): void {
-  const expectedProfileId = codexPermissionProfileId(input.sessionId, input.sandbox);
+  const expectedProfileId =
+    input.expectedProfileId ?? codexPermissionProfileId(input.sessionId, input.sandbox);
   const active = input.response.activePermissionProfile;
   if (!active || active.id !== expectedProfileId || active.extends != null) {
     throw new Error('Codex did not attest the Task Monki permission profile.');

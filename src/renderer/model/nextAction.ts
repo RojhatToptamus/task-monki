@@ -70,7 +70,7 @@ export function shouldShowOverviewNextAction(
   return reviewPhaseVisible && !awaitingMoveToReview;
 }
 
-const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };
+const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Address findings' };
 const RUN_REVIEW: NextActionChoice = { id: 'run-review', label: 'Run review' };
 const RUN_REVIEW_AGAIN: NextActionChoice = { id: 'run-review-again', label: 'Run review again' };
 const COMMIT: NextActionChoice = { id: 'commit', label: 'Commit' };
@@ -138,7 +138,7 @@ export function isImplementationRetryRequired(
 }
 
 export function isImplementationOutcomeBlocked(
-  task: Pick<Task, 'currentRunId' | 'projection'>
+  task: Parameters<typeof getImplementationRetryReason>[0]
 ): boolean {
   return Boolean(getImplementationRetryReason(task));
 }
@@ -184,10 +184,10 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     return {
       sentence:
         implementationRetryRequired
-          ? 'The implementation needs another pass — retry or continue before starting review.'
+          ? 'The implementation needs another pass — retry it or continue unfinished work before starting review.'
           : implementationRunStatus === 'FAILED'
-            ? 'The run failed — retry in this session or continue from the current worktree.'
-            : 'The run did not complete — retry or continue before starting review.',
+            ? 'The run failed — retry the implementation or continue unfinished work from the current state.'
+            : 'The run did not complete — continue unfinished work or retry the implementation before starting review.',
       secondaries: []
     };
   }

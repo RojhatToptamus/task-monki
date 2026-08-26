@@ -52,7 +52,7 @@ describe('task card view model', () => {
       })
     );
 
-    expect(vm.stateLabel).toBe('Needs approval');
+    expect(vm.stateLabel).toBe('Needs you');
     expect(vm.stateTone).toBe('action');
   });
 
@@ -77,7 +77,7 @@ describe('task card view model', () => {
     expect(describeRunFailureBanner(task)).toEqual({
       status: 'FAILED',
       title: 'The agent run failed',
-      detail: expect.stringMatching(/retry in this session or continue/i)
+      detail: expect.stringMatching(/retry the implementation or continue unfinished work/i)
     });
   });
 
@@ -143,6 +143,26 @@ describe('task card view model', () => {
     expect(columnTasks([task], progressColumn)).toHaveLength(0);
   });
 
+  it('uses lifecycle language for cards in the Active runs view', () => {
+    const implementing = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'RUNNING'
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+    const waiting = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'AWAITING_APPROVAL'
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+
+    expect(buildTaskCardVM(implementing, { statusContext: 'active' }).stateLabel).toBe('Implementing');
+    expect(buildTaskCardVM(waiting, { statusContext: 'active' }).stateLabel).toBe('Needs you');
+  });
+
   it('labels inconclusive review output directly', () => {
     const vm = buildTaskCardVM(
       createTask({
@@ -170,7 +190,7 @@ describe('task card view model', () => {
     });
 
     expect(buildTaskCardVM(task).stateLabel).toBe('Needs changes');
-    expect(describeTaskHeaderState(task)).toEqual({ label: 'In review', tone: 'info' });
+    expect(describeTaskHeaderState(task)).toEqual({ label: 'Reviewing', tone: 'neutral' });
   });
 
   it('drops the No-PR evidence line while keeping bad evidence noticeable', () => {
@@ -919,6 +939,7 @@ describe('task card view model', () => {
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    kind: overrides.kind ?? 'NORMAL',
     runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',

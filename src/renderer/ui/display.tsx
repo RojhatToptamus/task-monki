@@ -2,6 +2,7 @@ import {
   humanizeEnum,
   looksLikeInternalEnum
 } from '../model/formatting';
+import { DisclosureChevron } from './DisclosureChevron';
 
 export {
   formatStatusValue,
@@ -28,7 +29,7 @@ export function StructuredData({
     <div className="structured-data">
       <StructuredValue value={value} depth={0} />
       <details className="structured-data__raw">
-        <summary>{rawLabel}</summary>
+        <summary><span className="tm-disclosure__label"><DisclosureChevron />{rawLabel}</span></summary>
         <pre>{stringifyJson(value)}</pre>
       </details>
     </div>

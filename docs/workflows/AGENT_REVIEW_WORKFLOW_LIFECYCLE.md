@@ -71,8 +71,11 @@ Expected UI:
 - Board column: In Progress while active.
 - Card chip: Running, needs approval, needs input, failed, etc.
 - After successful completion: Review column.
-- After an unsuccessful terminal run: In Progress with Retry in session as the
-  primary recovery action; review is unavailable.
+- After an interrupted, lost, or recovery-required run: In Progress with
+  Continue work as the primary action; review is unavailable.
+- After a definitive failure or a provider-completed run whose locally verified
+  outcome is blocked: In Progress with Retry implementation as the primary
+  action; review is unavailable.
 - Review gate: `NOT_RUN` unless a previous review exists.
 
 ### Starting agent review
@@ -227,8 +230,10 @@ Expected UI:
 - Primary next action: Run review again.
 
 If the follow-up fails, is interrupted, is lost, or requires recovery, it stays
-in `IN_PROGRESS`. Retry or continue the implementation before a fresh review is
-allowed; the previous review remains stale context only.
+in `IN_PROGRESS`. Retry the implementation after a definitive failure, or
+continue unfinished work after interruption, loss, or ambiguous recovery,
+before a fresh review is allowed; the previous review remains stale context
+only.
 
 ## Staleness rules
 
@@ -328,7 +333,9 @@ Use these as invariants:
 - Failed, interrupted, lost, or recovery-required implementation/follow-up/retry:
   - `workflowPhase: IN_PROGRESS`
   - board: In Progress
-  - primary recovery action: Retry in session
+  - primary recovery action:
+    - Retry implementation for a definitive failure
+    - Continue work for interruption, loss, or ambiguous recovery
   - agent review unavailable
   - store initialization repairs a persisted `REVIEW` mismatch back to
     `IN_PROGRESS` when the current implementation-side run has one of these

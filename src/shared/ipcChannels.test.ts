@@ -30,5 +30,6 @@ describe('Electron IPC channel manifest', () => {
     expect(channelsIn(main, 'handleTrustedIpc')).toEqual([
       ...IPC_INVOKE_CHANNELS
     ]);
+    expect(IPC_INVOKE_CHANNELS).toContain('agent:respondToInteraction');
   });
 });

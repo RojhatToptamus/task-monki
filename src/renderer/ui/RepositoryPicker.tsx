@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { Check, Search, X } from 'lucide-react';
 import {
   filterRepositoryOptions,
   type RepositoryOption
 } from '../model/repositories';
+import { UiChevronDownIcon } from './UiIcons';
 
 interface RepositoryPickerProps {
   options: RepositoryOption[];
@@ -108,7 +110,7 @@ export function RepositorySelect({
             </span>
           ) : null}
         </span>
-        <ChevronIcon open={open} />
+        <UiChevronDownIcon open={open} size={14} className="tm-repository-select__chevron" />
       </button>
 
       {open ? (
@@ -207,7 +209,6 @@ export function RepositoryPicker({
                   <span
                     className={`tm-repository-picker__availability tm-repository-picker__availability--${option.status.toLowerCase()}`}
                   >
-                    <span aria-hidden="true" />
                     {formatRepositoryStatus(option.status)}
                   </span>
                 ) : null}
@@ -260,7 +261,7 @@ function RepositorySearch({
           disabled={disabled}
           onClick={() => onQueryChange('')}
         >
-          ×
+          <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
         </button>
       ) : null}
     </div>
@@ -272,58 +273,9 @@ function formatRepositoryStatus(status: RepositoryOption['status']): string {
 }
 
 function SearchIcon() {
-  return (
-    <svg
-      className="tm-filefilter__search-icon"
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      aria-hidden="true"
-    >
-      <circle cx="11" cy="11" r="7" />
-      <path d="M21 21l-4.3-4.3" />
-    </svg>
-  );
-}
-
-function ChevronIcon({ open }: { open: boolean }) {
-  return (
-    <svg
-      className={`tm-repository-select__chevron ${
-        open ? 'tm-repository-select__chevron--open' : ''
-      }`}
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="m6 9 6 6 6-6" />
-    </svg>
-  );
+  return <Search aria-hidden="true" absoluteStrokeWidth className="tm-filefilter__search-icon" size={14} strokeWidth={1.5} />;
 }
 
 function CheckIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="m5 12 4 4L19 6" />
-    </svg>
-  );
+  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
 }

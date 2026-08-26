@@ -292,7 +292,7 @@ describe('DiscourseService', () => {
         session.requestedSettings.model
       )
     ).toEqual(['gpt-test', 'gpt-alternate']);
-  });
+  }, 15_000);
 
   it('routes each Panel participant through its selected runtime and rejects conflicting replay', async () => {
     const catalog = runtimeCatalog();

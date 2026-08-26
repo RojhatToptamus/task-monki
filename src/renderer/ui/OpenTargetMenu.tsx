@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Ref } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   OpenTargetAction,
@@ -62,10 +62,12 @@ export function OpenTargetContextMenu({
     };
   }, [onClose]);
 
-  const style = {
-    left: position.x,
-    top: position.y
-  };
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    root.style.left = `${position.x}px`;
+    root.style.top = `${position.y}px`;
+  }, [position.x, position.y]);
 
   return (
     <div
@@ -73,7 +75,6 @@ export function OpenTargetContextMenu({
       role="menu"
       tabIndex={-1}
       aria-label="Open target"
-      style={style}
       ref={rootRef}
       onKeyDown={(event) =>
         handleMenuKeyDown(event, {

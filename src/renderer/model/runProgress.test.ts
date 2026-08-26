@@ -167,7 +167,7 @@ describe('run progress model', () => {
         status: 'completed'
       }
     ]);
-    expect(view?.activityOutputSummary).toBe('show full output · 3 lines');
+    expect(view?.activityOutputSummary).toBe('show output · 3 lines');
     expect(JSON.stringify(view)).not.toContain('/Users/rojhat/project');
     expect(JSON.stringify(view)).not.toContain('/bin/zsh');
   });
@@ -441,7 +441,7 @@ describe('run progress model', () => {
       ]
     });
 
-    expect(view?.activityOutputSummary).toBe('show full output · 2 lines');
+    expect(view?.activityOutputSummary).toBe('show output · 2 lines');
     expect(JSON.stringify(view)).not.toContain('secret output');
     expect(JSON.stringify(view)).not.toContain('second line');
   });

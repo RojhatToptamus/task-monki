@@ -1,10 +1,23 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
+  assertPackagedDesignResources,
   assertPackagedApplicationEntries,
   resolvePackagedArchive,
   resolvePackagedRuntime
 } from './verify-packaged-runtime.mjs';
+
+const temporaryDirectories = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      fs.rm(directory, { recursive: true, force: true })
+    )
+  );
+});
 
 describe('packaged runtime selection', () => {
   const releaseDir = path.resolve('release-test');
@@ -99,4 +112,50 @@ describe('packaged runtime selection', () => {
       ])
     ).toThrow('development-only content');
   });
+
+  it('accepts the complete packaged Design skill and legal resources', async () => {
+    const resources = await packagedDesignResources();
+
+    await expect(assertPackagedDesignResources(resources)).resolves.toBeUndefined();
+  });
+
+  it('rejects a packaged Design resource that is missing', async () => {
+    const resources = await packagedDesignResources();
+    await fs.rm(path.join(resources, 'design-skills/prototype/SKILL.md'));
+
+    await expect(assertPackagedDesignResources(resources)).rejects.toThrow(
+      'prototype/SKILL.md'
+    );
+  });
 });
+
+async function packagedDesignResources() {
+  const resources = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'task-monki-packaged-design-resources-')
+  );
+  temporaryDirectories.push(resources);
+  await copyDirectory(
+    path.resolve('resources/design-skills'),
+    path.join(resources, 'design-skills')
+  );
+  await fs.mkdir(path.join(resources, 'legal/third-party'), { recursive: true });
+  await fs.copyFile(
+    path.resolve('THIRD_PARTY_NOTICES.md'),
+    path.join(resources, 'legal/THIRD_PARTY_NOTICES.md')
+  );
+  await fs.copyFile(
+    path.resolve('THIRD_PARTY_LICENSES/Claude-Design-System-MIT.txt'),
+    path.join(resources, 'legal/third-party/Claude-Design-System-MIT.txt')
+  );
+  return resources;
+}
+
+async function copyDirectory(source, destination) {
+  await fs.mkdir(destination, { recursive: true });
+  for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+    const sourcePath = path.join(source, entry.name);
+    const destinationPath = path.join(destination, entry.name);
+    if (entry.isDirectory()) await copyDirectory(sourcePath, destinationPath);
+    else await fs.copyFile(sourcePath, destinationPath);
+  }
+}

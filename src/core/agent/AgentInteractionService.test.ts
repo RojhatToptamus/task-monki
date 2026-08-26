@@ -147,7 +147,7 @@ describe('AgentInteractionService permission decisions', () => {
       expect.objectContaining({ type: 'AGENT_MUTATION_AMBIGUOUS', runId: run.id }),
       expect.arrayContaining(['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'])
     );
-    expect(updates).toContain('run.activity');
+    expect(updates).toContain('run.state.updated');
   });
 
   it('preserves a terminal run when it wins an ambiguous interaction response race', async () => {
@@ -269,6 +269,126 @@ describe('AgentInteractionService permission decisions', () => {
     expect(transitionInteractionRequest).not.toHaveBeenCalled();
     expect(adapter.respondToInteraction).not.toHaveBeenCalled();
   });
+
+  it('restores a typed user-input request after a definitive pre-delivery failure', async () => {
+    const run = { ...runFixture(), status: 'AWAITING_USER_INPUT' as const };
+    const session = {
+      ...sessionFixture(),
+      status: 'AWAITING_USER_INPUT' as const
+    };
+    let interaction = userInputInteractionFixture();
+    const store = {
+      getInteractionRequest: vi.fn().mockImplementation(async () => interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest: vi.fn().mockImplementation(async (
+        _id: string,
+        _status: string,
+        update: Partial<InteractionRequestRecord>
+      ) => {
+        interaction = { ...interaction, ...update } as InteractionRequestRecord;
+        return interaction;
+      })
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn().mockRejectedValue(
+        new Error('provider connection closed before write')
+      )
+    } as unknown as AgentRuntimeAdapter;
+    const service = new AgentInteractionService(store, new AppEventBus(), () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: {
+          interactionType: 'USER_INPUT',
+          action: 'ANSWER',
+          answers: { scope: ['Core'] }
+        }
+      })
+    ).rejects.toThrow('closed before write');
+
+    expect(interaction).toMatchObject({
+      status: 'PENDING',
+      decision: undefined,
+      respondedAt: undefined,
+      resolution: {
+        lastResponseError: 'provider connection closed before write'
+      }
+    });
+  });
+
+  it('rejects a typed answer whose selected run does not own the request', async () => {
+    const run = { ...runFixture(), status: 'AWAITING_USER_INPUT' as const };
+    const session = {
+      ...sessionFixture(),
+      status: 'AWAITING_USER_INPUT' as const
+    };
+    const interaction = userInputInteractionFixture();
+    const store = {
+      getInteractionRequest: vi.fn().mockResolvedValue(interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest: vi.fn()
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn()
+    } as unknown as AgentRuntimeAdapter;
+    const service = new AgentInteractionService(store, new AppEventBus(), () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: 'run-two',
+        interactionRequestId: interaction.id,
+        decision: {
+          interactionType: 'USER_INPUT',
+          action: 'ANSWER',
+          answers: { scope: ['Core'] }
+        }
+      })
+    ).rejects.toThrow('ownership');
+    expect(adapter.respondToInteraction).not.toHaveBeenCalled();
+    expect(store.transitionInteractionRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects a typed answer after its run was superseded and terminalized', async () => {
+    const run = { ...runFixture(), status: 'INTERRUPTED' as const };
+    const session = {
+      ...sessionFixture(),
+      status: 'ACTIVE' as const
+    };
+    const interaction = userInputInteractionFixture();
+    const store = {
+      getInteractionRequest: vi.fn().mockResolvedValue(interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest: vi.fn()
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn()
+    } as unknown as AgentRuntimeAdapter;
+    const service = new AgentInteractionService(store, new AppEventBus(), () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: {
+          interactionType: 'USER_INPUT',
+          action: 'ANSWER',
+          answers: { scope: ['Core'] }
+        }
+      })
+    ).rejects.toThrow(
+      'cannot resume run run-one while its run/session awaiting state is INTERRUPTED/ACTIVE'
+    );
+    expect(adapter.respondToInteraction).not.toHaveBeenCalled();
+    expect(store.transitionInteractionRequest).not.toHaveBeenCalled();
+  });
 });
 
 function interactionFixture(deliveryPath: string): InteractionRequestRecord {
@@ -292,6 +412,26 @@ function interactionFixture(deliveryPath: string): InteractionRequestRecord {
     status: 'PENDING',
     requestedAt: '2026-07-10T00:00:00.000Z'
   } as unknown as InteractionRequestRecord;
+}
+
+function userInputInteractionFixture(): InteractionRequestRecord {
+  return {
+    ...interactionFixture('/tmp/worktree/file.txt'),
+    type: 'USER_INPUT',
+    request: {
+      questions: [
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'Choose the scope.',
+          isOther: false,
+          isSecret: false,
+          options: [{ label: 'Core', description: 'Update core behavior.' }]
+        }
+      ]
+    },
+    allowedActions: ['ANSWER']
+  };
 }
 
 function runFixture(): RunRecord {

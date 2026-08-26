@@ -66,7 +66,10 @@ describe('Task Monki development seed data', () => {
     expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
     expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(settings.firstLaunchSetupCompleted).toBe(true);
-    expect(snapshot.repositories).toHaveLength(2);
+    expect(snapshot.repositories).toHaveLength(4);
+    expect(
+      snapshot.repositories.filter((repository) => repository.kind === 'DESIGN_MANAGED')
+    ).toHaveLength(2);
     const primaryRepository = snapshot.repositories.find(
       (repository) => repository.name === path.basename(manifest.repositoryPath)
     );
@@ -88,6 +91,9 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_DISCOURSE_DIR: manifest.discourseDir,
       TASK_MANAGER_AGENT_RUNTIME_DIR: manifest.agentRuntimeDir,
       TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: manifest.discourseWorkspaceRoot,
+      TASK_MANAGER_DESIGN_REPOSITORY_ROOT: manifest.designRepositoryRoot,
+      TASK_MANAGER_DESIGN_WORKTREE_ROOT: manifest.designWorktreeRoot,
+      TASK_MANAGER_DESIGN_DRAFT_ROOT: manifest.designDraftRoot,
       TASK_MANAGER_PREVIEW_RECONCILE: '0',
       TASK_MANAGER_DETERMINISTIC_SEED: '1',
       TASK_MANAGER_DEV_SEED_MODE: '1'
@@ -131,6 +137,40 @@ describe('Task Monki development seed data', () => {
     expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
       taskForScenario(manifest, snapshot, 'board-backlog').id
     ]);
+  });
+
+  it('materializes Design starting and recovery states', async () => {
+    const store = new FileTaskStore(manifest.storeDir);
+    try {
+      const designs = await store.listDesigns();
+      expect(manifest.counts.designs).toBe(2);
+      expect(designs).toHaveLength(2);
+      expect(designs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: expect.stringContaining('[seed:design-starting]'),
+            status: 'STARTING'
+          }),
+          expect.objectContaining({
+            title: expect.stringContaining('[seed:design-needs-attention]'),
+            status: 'NEEDS_ATTENTION'
+          })
+        ])
+      );
+      const starting = designs.find((design) => design.status === 'STARTING');
+      expect(starting).toBeTruthy();
+      const startingDetail = await store.getDesignDetail(starting!.id);
+      expect(startingDetail.currentWorktree).toMatchObject({ status: 'PRESENT' });
+      expect(startingDetail.references).toHaveLength(2);
+      expect(startingDetail.attachments.map((attachment) => attachment.displayName)).toEqual([
+        'release-dashboard.png',
+        'release-notes.txt'
+      ]);
+      await expect(fs.readFile(path.join(startingDetail.currentWorktree!.worktreePath, 'index.html'), 'utf8'))
+        .resolves.toContain('Release dashboard');
+    } finally {
+      await store.close();
+    }
   });
 
   it('materializes discourse running, partial, review, correction, queue, stale, and recovery states', async () => {
@@ -218,6 +258,34 @@ describe('Task Monki development seed data', () => {
         (event) => event.taskId === approvalTask.id && event.type === 'AGENT_INTERACTION_REQUESTED'
       )
     ).toBe(true);
+    const userInputTask = taskForScenario(
+      manifest,
+      snapshot,
+      'agent-awaiting-user-input'
+    );
+    expect(userInputTask.projection.agentRun).toBe('AWAITING_USER_INPUT');
+    expect(
+      snapshot.interactionRequests.find(
+        (request) => request.taskId === userInputTask.id && request.status === 'PENDING'
+      )
+    ).toMatchObject({
+      type: 'USER_INPUT',
+      request: {
+        questions: [
+          {
+            id: 'seed_choice',
+            isOther: true,
+            options: [
+              { label: 'Proceed' },
+              { label: 'Pause' }
+            ]
+          },
+          {
+            id: 'seed_detail'
+          }
+        ]
+      }
+    });
     const approvalRun = snapshot.runs.find((run) => run.id === approvalTask.currentRunId);
     const approvalProgress = buildRunProgressViewModel({
       preferredRun: approvalRun,
@@ -301,7 +369,24 @@ describe('Task Monki development seed data', () => {
         })
       ])
     );
-    expect(runningProgress?.activityOutputSummary).toBe('show full output · 12 lines');
+    expect(runningProgress?.activityOutputSummary).toBe('show output · 12 lines');
+
+    const failedTask = taskForScenario(manifest, snapshot, 'agent-failed');
+    expect(failedTask).toMatchObject({
+      workflowPhase: 'IN_PROGRESS',
+      projection: { agentRun: 'FAILED' }
+    });
+    const retryRequiredTask = taskForScenario(manifest, snapshot, 'agent-retry-required');
+    expect(retryRequiredTask).toMatchObject({
+      workflowPhase: 'IN_PROGRESS',
+      projection: {
+        agentRun: 'COMPLETED',
+        implementationRetry: {
+          runId: retryRequiredTask.currentRunId,
+          reason: expect.stringContaining('needs another pass')
+        }
+      }
+    });
 
     const completedTask = taskForScenario(manifest, snapshot, 'review-not-run');
     const completedRun = snapshot.runs.find((run) => run.id === completedTask.currentRunId);
@@ -469,6 +554,30 @@ describe('Task Monki development seed data', () => {
         models: []
       });
       expect(seedLifecycleSnapshot(after)).toEqual(seedLifecycleSnapshot(before));
+      const excerptTask = taskForScenario(
+        manifest,
+        after,
+        'review-needs-changes'
+      );
+      const excerptDetail = await service.getTaskDetail(excerptTask.id);
+      const excerptRun = excerptDetail.runs.find(
+        (run) => run.mode === 'REVIEW'
+      );
+      const excerptMetadata = excerptDetail.textExcerpts.find(
+        (excerpt) =>
+          excerpt.collection === 'runs' &&
+          excerpt.recordId === excerptRun?.id &&
+          excerpt.fieldPath === 'finalMessage'
+      );
+      expect(excerptRun?.finalMessage).toContain('Task Monki omitted');
+      expect(excerptMetadata).toMatchObject({
+        originalByteCount: expect.any(Number),
+        displayedByteCount: expect.any(Number),
+        availableContent: {
+          kind: 'BOUNDED_ARTIFACT',
+          artifactId: excerptRun?.finalArtifactId
+        }
+      });
       expect({
         tasks: after.tasks.length,
         runs: after.runs.length,

@@ -765,7 +765,7 @@ function commandOutputSummary(items: AgentItemRecord[]): string | undefined {
       return total + outputLineCount(output);
     }, 0);
   return lineCount > 0
-    ? `show full output · ${lineCount} ${plural(lineCount, 'line')}`
+    ? `show output · ${lineCount} ${plural(lineCount, 'line')}`
     : undefined;
 }
 

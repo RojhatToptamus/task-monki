@@ -9,32 +9,29 @@ import {
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import {
   capAttachmentValidationFailures,
+  creationRequiresUnchangedRetry,
   getOrCreateTaskCreationToken,
   imageAttachmentModelError,
   reserveClipboardAttachmentRead,
-  shouldPreventDefaultAttachmentPaste,
-  taskCreationNeedsUnchangedRetry
+  shouldPreventDefaultAttachmentPaste
 } from '../model/taskAttachmentComposer';
 import {
   clampNewTaskPanelWidth,
   dragNewTaskCanvas,
   getNewTaskPanelWidthBounds,
   newTaskCanvasPanPosition,
-  resizeNewTaskPanelFromPointer,
   shouldInterruptNewTaskCanvasPanForWheel
 } from '../model/newTaskPanel';
-import { AttachmentChip, NewTaskPanel } from './NewTaskPanel';
+import { AttachmentChip } from './AttachmentChip';
+import { NewTaskPanel } from './NewTaskPanel';
 
 describe('NewTaskPanel', () => {
   it('keeps the dock resize width within desktop and narrow viewport bounds', () => {
-    expect(getNewTaskPanelWidthBounds(1440)).toEqual({ min: 500, max: 760 });
-    expect(clampNewTaskPanelWidth(420, 1440)).toBe(500);
-    expect(clampNewTaskPanelWidth(820, 1440)).toBe(760);
-    expect(getNewTaskPanelWidthBounds(460)).toEqual({ min: 460, max: 460 });
-    expect(clampNewTaskPanelWidth(660, 460)).toBe(460);
-    expect(resizeNewTaskPanelFromPointer(520, 600, 500, 1440)).toBe(620);
-    expect(resizeNewTaskPanelFromPointer(520, 600, 200, 1440)).toBe(760);
-    expect(resizeNewTaskPanelFromPointer(520, 600, 700, 1440)).toBe(500);
+    expect(getNewTaskPanelWidthBounds(1440)).toEqual({ min: 380, max: 720 });
+    expect(clampNewTaskPanelWidth(320, 1440)).toBe(380);
+    expect(clampNewTaskPanelWidth(820, 1440)).toBe(720);
+    expect(getNewTaskPanelWidthBounds(360)).toEqual({ min: 360, max: 360 });
+    expect(clampNewTaskPanelWidth(660, 360)).toBe(360);
     expect(newTaskCanvasPanPosition(0, 520, 0)).toBe(0);
     expect(newTaskCanvasPanPosition(0, 520, 180)).toBe(260);
     expect(newTaskCanvasPanPosition(0, 520, 360)).toBe(520);
@@ -68,12 +65,12 @@ describe('NewTaskPanel', () => {
   });
 
   it('locks only ambiguous task-creation failures to an unchanged retry', () => {
-    expect(taskCreationNeedsUnchangedRetry(new Error('connection lost'))).toBe(true);
-    expect(taskCreationNeedsUnchangedRetry({ status: 503 })).toBe(true);
+    expect(creationRequiresUnchangedRetry(new Error('connection lost'))).toBe(true);
+    expect(creationRequiresUnchangedRetry({ status: 503 })).toBe(true);
     expect(
-      taskCreationNeedsUnchangedRetry({ status: 409, code: 'TASK_CREATION_CONFLICT' })
+      creationRequiresUnchangedRetry({ status: 409, code: 'TASK_CREATION_CONFLICT' })
     ).toBe(true);
-    expect(taskCreationNeedsUnchangedRetry({ status: 400, code: 'INVALID_REQUEST' })).toBe(
+    expect(creationRequiresUnchangedRetry({ status: 400, code: 'INVALID_REQUEST' })).toBe(
       false
     );
   });
@@ -174,6 +171,7 @@ describe('NewTaskPanel', () => {
         repositories={[
           {
             id: 'repository-1',
+            kind: 'USER_REGISTERED',
             name: 'project',
             path: '/tmp/project',
             status: 'AVAILABLE',
@@ -267,6 +265,7 @@ describe('NewTaskPanel', () => {
     const defaultRepositories: Repository[] = [
       {
         id: 'repository-1',
+        kind: 'USER_REGISTERED',
         name: 'project',
         path: '/tmp/project',
         status: 'AVAILABLE',
@@ -371,10 +370,10 @@ describe('NewTaskPanel', () => {
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('aria-label="New task"');
     expect(html).not.toContain('role="dialog"');
-    expect(html).toContain('Execution policy');
+    expect(html).toContain('Execution policy: Restricted');
     expect(html).toContain('Restricted');
-    expect(html).toMatch(/class="is-selected" aria-pressed="true">Restricted</u);
     expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
     expect(html).toContain('<strong>project</strong>');
     expect(html).toContain('title="/tmp/project"');
@@ -384,11 +383,7 @@ describe('NewTaskPanel', () => {
     expect(html).not.toContain('role="radiogroup"');
     expect(html).toContain('aria-label="Create task in project"');
     expect(html).toContain('aria-keyshortcuts="Meta+Enter Control+Enter"');
-    expect(html).toContain('aria-label="Execution policy"');
-    expect(html).toContain('aria-pressed="true">Restricted</button>');
-    expect(html).toContain('Ask for approval');
-    expect(html).toContain('Approve for me');
-    expect(html).toContain('Full access');
+    expect(html).not.toContain('aria-pressed=');
     expect(html).toContain('Network access');
     expect(html).toContain('Add files');
     expect(html).toContain(
@@ -401,7 +396,6 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('<details class="newtask-settings">');
     expect(html).toContain('>Agent<');
     expect(html).toContain('aria-label="Run configuration agent and model"');
-    expect(html).toContain('aria-label="Execution policy"');
     expect(html).toContain('OpenCode');
     expect(html).toContain('OpenCode-only model');
     expect(html).toContain('role="separator"');
@@ -431,6 +425,7 @@ describe('NewTaskPanel', () => {
       repositories: [
         {
           id: 'repository-disconnected',
+          kind: 'USER_REGISTERED',
           name: 'old-project',
           path: '/tmp/old-project',
           status: 'DISCONNECTED',
@@ -440,6 +435,7 @@ describe('NewTaskPanel', () => {
         },
         {
           id: 'repository-available',
+          kind: 'USER_REGISTERED',
           name: 'available-project',
           path: '/tmp/available-project',
           status: 'AVAILABLE',

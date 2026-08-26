@@ -168,18 +168,21 @@ separately secured extraction or tool boundary.
 For scoped execution, the adapter supplies a complete, collision-resistant
 permission profile through the existing thread-local config layer. It grants
 `:minimal`, the exact worktree, and exact verified task attachment files.
-For a review session, the adapter also resolves and canonicalizes the
+For every restricted implementation or review session, the adapter also
+resolves and canonicalizes the
 worktree's Git directory and common Git directory, proves that the worktree is
 registered to the selected repository and uses that repository's common Git
-directory, and grants only that exact common directory read-only. The review
-cwd and sole runtime workspace root remain the task worktree. Missing,
-symlinked, or unrelated Git metadata fails before `thread/fork` or
-`review/start` is sent. Unrelated prunable worktree registrations are ignored;
-the active worktree must still resolve and match exactly. Review subprocesses
-use the already resolved concrete Git executable in a non-login shell, ignore
-system and user Git configuration, and resolve Git's excludes file to the null
-device. This avoids home-directory and macOS `xcrun` cache access without
-adding writable roots.
+directory, and grants only that exact common directory read-only. The cwd and
+sole runtime workspace root remain the task worktree. Missing, symlinked, or
+unrelated Git metadata fails before provider input. Unrelated prunable
+worktree registrations are ignored; the active worktree must still resolve and
+match exactly. Restricted subprocesses use the already resolved concrete Git
+executable in a non-login shell, ignore system and user Git configuration,
+disable optional Git locks, and resolve Git's excludes file to the null device.
+Review sessions additionally isolate home and XDG configuration inside the
+worktree; implementation sessions retain their ordinary home environment so
+unrelated developer tools keep working. This avoids macOS `xcrun` cache
+failures and out-of-sandbox Git metadata access without adding writable roots.
 Full access instead selects Codex's documented `:danger-full-access` built-in;
 Task Monki does not label a worktree-scoped custom profile as unrestricted.
 Multi-agent V1/V2 and memories are disabled in both configurations. Runtime
@@ -196,6 +199,14 @@ fork-plus-inline review path all require the returned active profile and sole
 runtime workspace root before provider input. Live settings drift terminates
 the provider and fails active runs. Attachment reads therefore need no separate
 permission escalation or path expansion flow.
+
+Codex keeps the active permission-profile identity when it resumes a thread.
+It cannot replace that identity with a different exact attachment scope.
+When a Design turn selects a different reference set, Task Monki uses the
+existing native thread-fork operation. The fork keeps the conversation history
+but starts with a new, attested profile for only that turn's selected files.
+Task Monki then updates the same local primary session to own the forked thread.
+If the reference scope is unchanged, it resumes the current thread as usual.
 
 Full access remains available for attachment-free tasks and requires the
 runtime to attest the exact `:danger-full-access` profile and sole Task Monki
@@ -222,9 +233,14 @@ than inferred from Codex events.
 - `IMPLEMENTATION`
   - First coding run for a task.
 - `FOLLOW_UP`
-  - Continuation with new instructions, including requested review changes.
+  - A new turn in the current task and worktree. This includes ordinary
+    post-success follow-up, requested review changes, and explicit continuation
+    of unfinished work. User-facing activity derives the correct action from
+    the source run outcome rather than presenting every turn as a follow-up.
 - `RETRY`
-  - Another attempt after a previous run.
+  - Another attempt at the authoritative original implementation goal after an
+    unsuccessful outcome. It reuses current state when safe, inspects Git and
+    external outcomes, and does not imply a clean worktree reset.
 - `REVIEW`
   - Detached read-only quality gate. It inspects the current diff and stores
     `projection.agentReview`.
@@ -266,6 +282,12 @@ listeners, and terminates its portable child process tree. Preview shutdown
 independently cancels and joins generation work, watches, sockets, and cleanup.
 Preview events never update `Task.workflowPhase` or the agent projection.
 
+The Codex process is also launched behind the application-wide IPC owner
+boundary. If the Electron process is killed before graceful shutdown runs, the
+owner stops the exact Codex process group. On the next start, the adapter still
+reconciles durable session, turn, interaction, and run evidence; it does not
+infer a provider result from process disappearance or resend ambiguous input.
+
 ## Renderer and development-host trust
 
 The Electron renderer runs with context isolation and sandboxing, without Node
@@ -283,6 +305,42 @@ runs are non-escalatable: network access and external Codex tools are forced
 off, and unsafe persisted settings are refused. Deterministic seed hosts keep
 the provider inert so synthetic provider records cannot start a live Codex
 process.
+
+### Renderer reads and invalidations
+
+The Electron IPC and browser HTTP transports expose the same client read
+boundaries:
+
+- a compact board snapshot containing task-card and actionable Inbox data;
+- a selected-task detail snapshot containing that task's ownership graph plus
+  the compact cross-task Preview route catalog needed by the detail view.
+
+Both reads are derived directly from the store's immutable published state. The
+full durable snapshot remains an internal service, test, and diagnostic
+boundary; it is not a renderer API. Board and detail requests have independent
+generations so an older completion cannot replace newer UI state. Opening or
+deleting a task always reconciles fresh task detail before the UI acts on
+worktree or Git evidence.
+
+Task detail bounds run final messages and nested provider item/event payload
+strings to 128 KiB per field for display. Excerpt metadata identifies the
+original and displayed byte counts and whether a bounded retained artifact is
+available. Arbitrary provider fields do not claim a complete artifact. Durable
+records remain unchanged, and behavior-producing actions use structured
+findings or an explicitly loaded retained artifact rather than excerpt text.
+
+App-update events are compact invalidations shared by Electron and browser
+transports. Output and routine activity are volume signals; authoritative state
+transitions, including ambiguous or recovery-required mutations, use
+`run.state.updated` and promptly invalidate the board plus matching open
+detail. App-scoped fallback invalidations refresh both the board and any open
+detail. An open detail also refreshes when another task changes Preview route
+availability because the detail owns the compact cross-task route catalog.
+The browser uses polling only while its EventSource connection is unavailable;
+native EventSource reconnect remains active, and a reopened stream stops the
+poller.
+Only direct-render events such as Preview recipe progress and Discourse deltas
+retain their bounded payloads in the client event projection.
 
 ## Settings
 
@@ -363,6 +421,18 @@ runtime documents default stdio but not a stdio flag.
 
 Codex protocol detail:
 
+- Task Monki initializes both the compatibility probe and the selected App
+  Server with `experimentalApi: true`. The generated protocol binding marks
+  `item/tool/requestUserInput` as experimental, so this explicit negotiation
+  is required for typed mid-turn questions. Task Monki's runtime capability
+  catalog continues to report user-input requests as experimental; enabling
+  the protocol family does not make unknown experimental requests supported.
+- Runtime compatibility also requires `collaborationMode/list`. Implementation,
+  follow-up, and retry turns select Codex's interactive `plan` collaboration
+  preset because that is the native surface that exposes
+  `request_user_input`, while explicit developer instructions keep the turn in
+  implementation mode with normal file and command work. Review turns retain
+  their dedicated review protocol.
 - `turn/start` has a first-class `effort` field.
 - `thread/start`, `thread/resume`, and `thread/fork` do not; they must pass
   `model_reasoning_effort` through the request `config` object.
@@ -395,6 +465,29 @@ Codex protocol detail:
 - Task Monki starts `review/start` inline on that fork. Requesting a second
   detached review thread can lose the fork cwd and review unrelated local
   changes.
+
+## Mid-turn user input
+
+Codex user input is a typed server-request lifecycle, not an assistant-text
+convention. Task Monki accepts only `item/tool/requestUserInput`, correlates its
+thread, turn, item, and JSON-RPC request ID to the exact active run, and
+durably publishes one `USER_INPUT` interaction. The request may contain
+provider choices, an allowed custom answer, or free text. Secret-marked
+questions remain blocked because Task Monki has no secret-safe response
+channel.
+
+An answer is returned once as the response to that same server request. The
+outbound response is journaled before the stdio write; a definitive pre-write
+failure restores the interaction to pending, while an uncertain write makes
+the run recovery-required and is never retried automatically. The interaction
+remains `RESPONDING` until App Server emits `serverRequest/resolved`. That
+notification also clears a request canceled by turn start, completion, or
+interruption before an answer. After the request is resolved, the exact
+run/session leave `AWAITING_USER_INPUT` only when no sibling interaction for
+the same server ownership remains. Turn completion and interruption retain
+their normal terminal authority.
+
+Ordinary assistant prose is never parsed into an actionable question.
 
 ## Recovery rules
 
@@ -454,6 +547,16 @@ returns. On application startup, active runs and actionable interactions are
 reconciled even when their owning server record already reached `EXITED`,
 `FAILED`, or `LOST`; a terminal process record never makes active ownership
 safe by itself.
+
+An active Codex goal may start a continuation turn when `thread/resume`
+reattaches an interrupted rollout. During startup reconciliation, Task Monki
+therefore gives the exact recovery run temporary ownership of that session,
+adopts a unique provider-reported live continuation, and records the run as
+recovered and running. It does not close the old turn and offer a retry while
+that continuation exists. The correlation is process-local and remains scoped
+to the unresolved recovery until a continuation arrives or provider goal
+evidence becomes terminal; persisted provider turn identity remains the
+durable owner after adoption.
 
 ## Verification
 

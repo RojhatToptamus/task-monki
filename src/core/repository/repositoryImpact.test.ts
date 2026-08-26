@@ -57,6 +57,7 @@ describe('selectRepositoryImpact', () => {
 function taskFixture(): Task {
   return {
     id: 'task-1',
+    kind: 'NORMAL',
     title: 'Task',
     prompt: 'Do it.',
     repositoryId: 'repository-1',

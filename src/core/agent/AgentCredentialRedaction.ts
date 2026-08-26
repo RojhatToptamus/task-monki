@@ -67,11 +67,10 @@ export function shouldRedactCredentialField(
   value: unknown
 ): boolean {
   if (!isSensitiveCredentialFieldName(fieldName)) return false;
-  const normalized = normalizeCredentialFieldName(fieldName);
-  return !(
-    typeof value === 'boolean' &&
-    (normalized.startsWith('has') || normalized.startsWith('supports'))
-  );
+  // Boolean protocol descriptors such as `isSecret` carry classification,
+  // not credential material. Replacing them with a truthy string corrupts the
+  // typed request and can invert a fail-closed policy decision.
+  return typeof value !== 'boolean';
 }
 
 /**

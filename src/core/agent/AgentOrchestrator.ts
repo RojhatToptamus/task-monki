@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AgentExecutionSettings,
+  AgentInstructionProfile,
   AgentRuntimeCatalog,
   AgentRuntimeId,
   AgentRuntimeState,
@@ -36,6 +37,7 @@ import {
   BROWSER_DEV_BOUNDARY_MESSAGE,
   browserDevSettingsViolations
 } from './BrowserDevAgentBoundary';
+import { agentServersOwnedByPreviousApplication } from './AgentRuntimeRecovery';
 
 const MAX_CONCURRENT_TURNS = 2;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
@@ -56,6 +58,7 @@ export interface StartOrchestratedTurn {
   worktree: WorktreeRecord;
   mode: AgentRunMode;
   prompt: string;
+  instructionProfile?: AgentInstructionProfile;
   settings: AgentExecutionSettings;
   generationKey?: string;
   beforeGitSnapshotId?: string;
@@ -100,6 +103,7 @@ export interface StartOrchestratedReview {
 
 export class AgentOrchestrator {
   private startQueue: Promise<void> = Promise.resolve();
+  private persistedServerOwnershipReconciled = false;
   private readonly interactions: AgentInteractionService;
   private readonly runtimes: AgentRuntimeRegistry;
 
@@ -129,6 +133,7 @@ export class AgentOrchestrator {
       await this.store.reconcileRunAttachments();
       return;
     }
+    await this.reconcilePersistedServerOwnership();
     const persisted = await this.store.snapshot();
     const recoveryRuntimeIds = new Set(
       persisted.runs
@@ -200,6 +205,21 @@ export class AgentOrchestrator {
         );
       }
     }
+  }
+
+  private async reconcilePersistedServerOwnership(): Promise<void> {
+    if (this.persistedServerOwnershipReconciled) return;
+    const snapshot = await this.store.snapshot();
+    const lostAt = new Date().toISOString();
+    for (const server of agentServersOwnedByPreviousApplication(snapshot)) {
+      await this.store.updateAgentServer(server.id, {
+        status: 'LOST',
+        disconnectedAt: lostAt,
+        exitedAt: lostAt,
+        exitReason: 'Task Monki restarted without the prior provider process.'
+      });
+    }
+    this.persistedServerOwnershipReconciled = true;
   }
 
   async getRuntimeCatalog(
@@ -283,6 +303,16 @@ export class AgentOrchestrator {
     }
   }
 
+  async deleteTaskProviderHistory(task: Task): Promise<void> {
+    const adapter = this.runtimes.require(task.runtimeId);
+    if (!adapter.deleteTaskProviderHistory) {
+      throw new Error(
+        `${adapter.descriptor.displayName} cannot delete provider history safely.`
+      );
+    }
+    await adapter.deleteTaskProviderHistory(task.id);
+  }
+
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {
     const operation = this.startQueue.then(() => this.startTurnSerially(input));
     this.startQueue = operation.then(
@@ -294,7 +324,11 @@ export class AgentOrchestrator {
 
   private async startTurnSerially(input: StartOrchestratedTurn): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
-    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const taskAttachments = await this.store.getTurnAttachments({
+      taskId: input.task.id,
+      mode: input.mode,
+      generationKey: input.generationKey
+    });
     let session = input.sessionId
       ? await this.requireSession(input.sessionId)
       : await this.store.getPrimaryAgentSession(input.task.id, input.iteration.id);
@@ -780,6 +814,7 @@ export class AgentOrchestrator {
       mode: input.mode,
       prompt: input.prompt,
       authoritativeGoal: input.task.prompt,
+      instructionProfile: input.instructionProfile,
       attachments,
       settings
     });
@@ -1209,7 +1244,7 @@ export class AgentOrchestrator {
     );
     if (!recorded) return;
     this.events.emit({
-      type: 'run.activity',
+      type: 'run.state.updated',
       taskId: current.taskId,
       iterationId: current.iterationId,
       runId: current.id,

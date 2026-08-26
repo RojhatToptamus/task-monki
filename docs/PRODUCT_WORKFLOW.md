@@ -246,9 +246,10 @@ flowchart LR
   Prepare --> Start["Start implementation"]
   Start --> Progress["In Progress"]
   Progress --> Terminal{"Run outcome?"}
-  Terminal -->|Completed| Review["Review phase"]
-  Terminal -->|Failed / interrupted / recovery| Retry["Retry or continue"]
-  Retry --> Progress
+  Terminal -->|Completed and locally ready| Review["Review phase"]
+  Terminal -->|Completed but locally blocked| Recover["Continue or retry"]
+  Terminal -->|Failed / interrupted / recovery| Recover
+  Recover --> Progress
   Review --> Gate["Run agent review"]
   Gate --> Passed["Review passed"]
   Gate --> Changes["Needs changes"]
@@ -299,13 +300,20 @@ In Progress:
   The detailed data flow and invariants are documented in
   `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
 - Allow steering, approval/input responses, and interrupt controls.
-- After a failed, interrupted, lost, or recovery-required implementation run,
-  keep the task in progress and make retry the primary recovery action. Continue
-  and fork alternative remain available; do not offer agent review.
+- A native structured question from Codex or OpenCode puts the exact active run
+  in **Needs input** and shows its choices or free-text fields. Submit one answer
+  to that same run and keep the interaction visible as responding until the
+  native protocol confirms delivery or lifecycle cleanup. A normal prose
+  question is not an interaction; answer it with the ordinary Continue action.
+- After an interrupted, lost, or recovery-required implementation run, keep the
+  task in progress and make Continue work the primary recovery action. After a
+  definitive failure, make Retry implementation primary. Both actions and Fork
+  alternative remain available; do not offer agent review.
 - A provider may finish its turn after the user declines an execution request.
   If Task Monki then observes the same Git HEAD and dirty fingerprint as before
-  that run, keep the task in progress and offer retry or continue. The provider
-  turn remains completed telemetry, but the implementation is not review-ready.
+  that run, keep the task in progress and make Retry implementation primary,
+  with Continue work and Fork alternative also available. The provider turn
+  remains completed telemetry, but the implementation is not review-ready.
   Persist this as a run-scoped implementation retry requirement; ordinary Git,
   GitHub, or workflow updates do not clear it. Starting replacement
   implementation work clears it.
@@ -331,16 +339,29 @@ Post-run implementation controls:
 - Follow up
   - Normal next implementation action after a completed run when the owner wants
     another pass in the same task, worktree, branch, and provider session.
-- Continue
-  - Recovery alternative for failed, interrupted, lost, or recovery-required
-    runs when the owner wants to add guidance. It resumes from the current local
-    state in the same task/worktree.
-- Retry in session
-  - Primary recovery action after an unsuccessful run. It starts a retry in the
-    same task, worktree, branch, and provider session.
+- Continue work
+  - Resumes unfinished work from the current state in the same task and
+    worktree, reusing recoverable provider context. Additional continuation
+    guidance is optional. It is primary after interruption, runtime loss, or
+    ambiguous recovery.
+- Retry implementation
+  - Makes another attempt at the authoritative original implementation goal
+    after a definitive failure or locally blocked outcome. It inspects current
+    Git and external state before acting and must not blindly repeat operations
+    that may already have caused side effects. It may reuse the provider session
+    and worktree internally, but it does not imply a clean reset.
 - Fork alternative
   - Creates a separate task with its own worktree, branch, iteration, run, and
     fresh provider session.
+
+An ordinary successful completion offers Follow up and Fork alternative, not
+Retry implementation. A run proven active after reconnection exposes normal
+running controls, not Continue work or Retry implementation.
+
+A `RECOVERY_REQUIRED` run also offers Abandon recovery. This explicitly closes
+the ambiguous run without resubmitting it; it does not delete the task,
+worktree, or independently verified results. Already terminal interrupted or
+lost runs do not need this separate resolution action.
 
 In Review:
 

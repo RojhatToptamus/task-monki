@@ -1,11 +1,11 @@
-import type { AgentReviewFinding, RunRecord, Task } from '../../shared/contracts';
+import type { AgentReviewFinding, Task } from '../../shared/contracts';
 import { formatFindingLocation } from './findings';
 import { humanizeEnum } from './formatting';
 
 export function buildReviewFollowUpInstruction(
   task: Task,
   reviewGate: NonNullable<Task['projection']['agentReview']>,
-  reviewRun: RunRecord | undefined,
+  reviewOutput: string | undefined,
   selectedFindingIds: string[],
   note = ''
 ): string {
@@ -33,8 +33,8 @@ export function buildReviewFollowUpInstruction(
       );
       if (finding.recommendation) lines.push(`   Recommendation: ${finding.recommendation}`);
     }
-  } else if (reviewRun?.finalMessage) {
-    lines.push('', 'Review output:', reviewRun.finalMessage.trim());
+  } else if (reviewOutput?.trim()) {
+    lines.push('', 'Review output:', reviewOutput.trim());
   }
   if (note.trim()) lines.push('', 'Additional note:', note.trim());
   lines.push(

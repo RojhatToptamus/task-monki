@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
-  execFilePortable,
   isPortableProcessTreeRunning,
-  spawnPortable,
   terminatePortableProcessTree,
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
+import {
+  execFileOwnedPortable,
+  spawnOwnedPortable
+} from '../../process/ownedProcess';
 import {
   compareCodexVersions,
   parseCodexVersionOutput
@@ -28,6 +30,7 @@ export const TASK_MONKI_REQUIRED_CODEX_APP_SERVER_METHODS = [
   'thread/read',
   'thread/goal/get',
   'thread/goal/set',
+  'collaborationMode/list',
   'turn/start',
   'turn/steer',
   'turn/interrupt',
@@ -271,7 +274,7 @@ export async function probeCodexVersion(
   cwd: string,
   environment?: NodeJS.ProcessEnv
 ): Promise<string> {
-  const { stdout } = await execFilePortable(executable, ['--version'], {
+  const { stdout } = await execFileOwnedPortable(executable, ['--version'], {
     cwd,
     env: sanitizeEnvironment(
       environment ?? process.env,
@@ -343,7 +346,7 @@ async function probeJsonRpcCapabilities(
     }
 > {
   const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-probe-'));
-  const child = spawnPortable(executable, launch.argv, {
+  const child = spawnOwnedPortable(executable, launch.argv, {
     cwd: options.cwd,
     env: {
       ...sanitizeEnvironment(
@@ -432,7 +435,7 @@ async function probeJsonRpcCapabilities(
         version: '0.1.0'
       },
       capabilities: {
-        experimentalApi: false
+        experimentalApi: true
       }
     });
     if (initialized.error) {
@@ -548,6 +551,8 @@ function capabilityProbeParams(
         threadId: '__task_monki_capability_probe_missing_thread__',
         objective: 'Task Monki App Server compatibility probe'
       };
+    case 'collaborationMode/list':
+      return {};
     case 'turn/start':
       return {
         threadId: '__task_monki_capability_probe_missing_thread__',
@@ -613,7 +618,7 @@ async function execFileText(
   options: { cwd: string; environment?: NodeJS.ProcessEnv }
 ): Promise<string> {
   try {
-    const { stdout, stderr } = await execFilePortable(executable, argv, {
+    const { stdout, stderr } = await execFileOwnedPortable(executable, argv, {
       cwd: options.cwd,
       env: sanitizeEnvironment(
         options.environment ?? process.env,

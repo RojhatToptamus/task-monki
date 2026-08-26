@@ -187,6 +187,20 @@ describe('AgentProtocolRedaction', () => {
     expect(JSON.stringify(redacted)).not.toContain(opaque);
   });
 
+  it('preserves boolean protocol descriptors with credential-shaped names', () => {
+    expect(
+      redactCredentialValue({
+        isSecret: false,
+        secret: true,
+        password: 'provider-password'
+      })
+    ).toEqual({
+      isSecret: false,
+      secret: true,
+      password: '[REDACTED]'
+    });
+  });
+
   it('redacts credential-shaped values in unstructured diagnostics', () => {
     const diagnostic = redactProtocolText(
       'failed with sk-exampleCredential123, OPENAI_API_KEY=opaque-provider-key, ' +

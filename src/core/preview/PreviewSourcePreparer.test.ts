@@ -149,6 +149,149 @@ describe('PreviewSourcePreparer', () => {
     expect(() => serializePreviewSourceManifest(manifest, 10)).toThrow('manifest exceeds');
     expect(serializePreviewSourceManifest(manifest)).not.toContain('\n  ');
   });
+
+  it('exports the exact commit without reading changed worktree bytes', async () => {
+    const fixture = await createRepositoryFixture();
+    const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await fs.writeFile(path.join(fixture.repo, 'tracked.txt'), 'changed after commit\n');
+    await fs.writeFile(path.join(fixture.repo, 'untracked.txt'), 'not in the commit\n');
+
+    const prepared = await fixture.preparer.prepareExactCommit({
+      repositoryPath: fixture.repo,
+      taskId: 'task-1',
+      generationId: 'exact-1',
+      commitSha,
+      async afterEntryCopied(relativePath) {
+        if (relativePath === '.gitignore') {
+          await fs.writeFile(path.join(fixture.repo, 'staged.txt'), 'changed during export\n');
+        }
+      }
+    });
+
+    expect(prepared.manifest.headSha).toBe(commitSha);
+    await expect(fs.readFile(path.join(prepared.sourcePath, 'tracked.txt'), 'utf8')).resolves.toBe(
+      'tracked\n'
+    );
+    await expect(fs.readFile(path.join(prepared.sourcePath, 'staged.txt'), 'utf8')).resolves.toBe(
+      'original\n'
+    );
+    await expect(fs.access(path.join(prepared.sourcePath, 'untracked.txt'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    });
+  });
+
+  it('requires a full commit SHA and rejects committed symlinks and gitlinks', async () => {
+    const fixture = await createRepositoryFixture();
+    const initialCommit = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await expect(
+      fixture.preparer.prepareExactCommit({
+        repositoryPath: fixture.repo,
+        taskId: 'task-1',
+        generationId: 'exact-short',
+        commitSha: initialCommit.slice(0, 12)
+      })
+    ).rejects.toThrow('full canonical commit SHA');
+
+    await fs.symlink('tracked.txt', path.join(fixture.repo, 'tracked-link'));
+    await git(fixture.repo, ['add', 'tracked-link']);
+    await git(fixture.repo, ['commit', '-m', 'Add a symlink']);
+    const symlinkCommit = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await expect(
+      fixture.preparer.prepareExactCommit({
+        repositoryPath: fixture.repo,
+        taskId: 'task-1',
+        generationId: 'exact-symlink',
+        commitSha: symlinkCommit
+      })
+    ).rejects.toThrow('symlinks are unsupported');
+
+    await fs.rm(path.join(fixture.repo, 'tracked-link'));
+    await git(fixture.repo, ['add', '-u']);
+    await git(fixture.repo, [
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      '160000',
+      initialCommit,
+      'vendor/submodule'
+    ]);
+    await git(fixture.repo, ['commit', '-m', 'Add a gitlink']);
+    const gitlinkCommit = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await expect(
+      fixture.preparer.prepareExactCommit({
+        repositoryPath: fixture.repo,
+        taskId: 'task-1',
+        generationId: 'exact-gitlink',
+        commitSha: gitlinkCommit
+      })
+    ).rejects.toThrow('submodules are unsupported');
+  });
+
+  it('rejects committed unresolved Git LFS pointers and removes the partial capture', async () => {
+    const fixture = await createRepositoryFixture();
+    const pointer = [
+      'version https://git-lfs.github.com/spec/v1',
+      `oid sha256:${'b'.repeat(64)}`,
+      'size 1234',
+      ''
+    ].join('\n');
+    await fs.writeFile(path.join(fixture.repo, 'asset.bin'), pointer);
+    await git(fixture.repo, ['add', 'asset.bin']);
+    await git(fixture.repo, ['commit', '-m', 'Add an unresolved LFS pointer']);
+    const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+
+    await expect(
+      fixture.preparer.prepareExactCommit({
+        repositoryPath: fixture.repo,
+        taskId: 'task-1',
+        generationId: 'exact-lfs',
+        commitSha
+      })
+    ).rejects.toThrow('not materialized');
+    await expect(
+      fs.access(path.join(fixture.previewRoot, 'task-1', 'exact-lfs'))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('enforces exact-export byte limits', async () => {
+    const fixture = await createRepositoryFixture();
+    const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    const limited = new PreviewSourcePreparer(fixture.previewRoot, 'limited-store', {
+      maxEntries: 100,
+      maxPathBytes: 4_096,
+      maxTotalSourceBytes: 1,
+      maxManifestBytes: 1_000_000
+    });
+    await expect(
+      limited.prepareExactCommit({
+        repositoryPath: fixture.repo,
+        taskId: 'task-2',
+        generationId: 'exact-limited',
+        commitSha
+      })
+    ).rejects.toThrow('aggregate limit');
+  });
+
+  it('cleans a canceled exact export', async () => {
+    const fixture = await createRepositoryFixture();
+    const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    const controller = new AbortController();
+    await expect(
+      fixture.preparer.prepareExactCommit({
+        repositoryPath: fixture.repo,
+        taskId: 'task-1',
+        generationId: 'exact-canceled',
+        commitSha,
+        afterEntryCopied() {
+          controller.abort();
+        },
+        signal: controller.signal
+      })
+    ).rejects.toThrow('canceled');
+    await expect(
+      fs.access(path.join(fixture.previewRoot, 'task-1', 'exact-canceled'))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });
 
 async function createRepositoryFixture() {

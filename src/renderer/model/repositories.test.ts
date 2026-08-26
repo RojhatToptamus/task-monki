@@ -104,6 +104,7 @@ function repositoryFixture(
 ): Repository {
   return {
     id,
+    kind: 'USER_REGISTERED',
     name: repositoryPath.split('/').at(-1) ?? id,
     path: repositoryPath,
     status,
@@ -116,6 +117,7 @@ function repositoryFixture(
 function taskFixture(id: string, repositoryId: string): Task {
   return {
     id,
+    kind: 'NORMAL',
     runtimeId: 'codex',
     title: id,
     prompt: 'Do the work.',

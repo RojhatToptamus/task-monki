@@ -1,6 +1,7 @@
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
+  BoardTaskSummary,
   MergeStatus,
   Repository,
   Task,
@@ -69,7 +70,7 @@ export function describeRunFailureBanner(
       title: 'Implementation needs another pass',
       detail:
         getImplementationRetryReason(task) ??
-        'Retry or continue this implementation before review.'
+        'Retry the implementation or continue unfinished work before review.'
     };
   }
   switch (task.projection.agentRun) {
@@ -77,7 +78,7 @@ export function describeRunFailureBanner(
       return {
         status: 'FAILED',
         title: 'The agent run failed',
-        detail: `${task.projection.summary} Retry in this session or continue from the current worktree.`
+        detail: `${task.projection.summary} Retry the implementation or continue unfinished work from the current state.`
       };
     case 'LOST':
     case 'RECOVERY_REQUIRED':
@@ -104,6 +105,8 @@ export interface TaskCardOptions {
    * the Review queue where that count is the signal engineers scan for.
    */
   showReviewCount?: boolean;
+  /** Use the lifecycle vocabulary that scans cleanly in the Active runs view. */
+  statusContext?: 'active';
   repositoryName?: string;
 }
 
@@ -111,6 +114,8 @@ export interface TaskCardRepositoryIdentity {
   showRepo: boolean;
   repositoryName: string;
 }
+
+export type TaskCardSource = Task | BoardTaskSummary;
 
 export interface FinishPanelAction {
   id: 'commit' | 'mark-done';
@@ -133,7 +138,7 @@ export interface MarkDoneModalContext {
 }
 
 /** Human label + tone for a task's most salient run/phase state. */
-export function describeTaskState(task: Task): { label: string; tone: Tone } {
+export function describeTaskState(task: TaskCardSource): { label: string; tone: Tone } {
   if (task.workflowPhase === 'DONE') {
     return { label: 'Done', tone: 'success' };
   }
@@ -148,12 +153,14 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
       isImplementationOutcomeBlocked(task))
   ) {
     return {
-      label: attention.label,
+      label: ['Needs approval', 'Needs input'].includes(attention.label)
+        ? 'Needs you'
+        : attention.label,
       tone: attention.tone === 'error' ? 'error' : 'action'
     };
   }
 
-  const review = taskReviewGate(task);
+  const review = taskCardReview(task);
   if (REVIEW_PHASES.includes(task.workflowPhase) || review.status === 'RUNNING') {
     switch (review.status) {
       case 'RUNNING':
@@ -228,7 +235,10 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
 
   const run = task.projection.agentRun;
   if (run === 'QUEUED' || run === 'STARTING' || run === 'RUNNING') {
-    return { label: humanizeEnum(run), tone: 'info' };
+    return {
+      label: task.projection.agentReview?.status === 'RUNNING' ? 'Reviewing' : 'Implementing',
+      tone: 'info'
+    };
   }
   if (run === 'INTERRUPTING' || run === 'INTERRUPTED') {
     return { label: humanizeEnum(run), tone: 'action' };
@@ -237,11 +247,15 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
     return { label: attention?.label ?? humanizeEnum(run), tone: 'error' };
   }
 
+  if (task.projection.agentReview?.status === 'STALE') {
+    return { label: 'Re-verify', tone: 'action' };
+  }
+
   if (task.workflowPhase === 'REVIEW' || task.workflowPhase === 'IN_REVIEW') {
-    return { label: 'In review', tone: 'info' };
+    return { label: 'Reviewing', tone: 'neutral' };
   }
   if (task.workflowPhase === 'IN_PROGRESS') {
-    return { label: 'In progress', tone: 'info' };
+    return { label: 'Implementing', tone: 'info' };
   }
 
   return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
@@ -383,13 +397,13 @@ const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
   'RUNNING'
 ]);
 
-function isFixingReviewFeedback(task: Task): boolean {
-  const review = taskReviewGate(task);
+function isFixingReviewFeedback(task: TaskCardSource): boolean {
+  const review = taskCardReview(task);
   return (
     task.workflowPhase === 'IN_PROGRESS' &&
     REVIEW_FEEDBACK_RUNS.has(task.projection.agentRun) &&
     review.status === 'STALE' &&
-    Boolean(review.runId || review.result)
+    Boolean(review.runId || reviewHasResult(review))
   );
 }
 
@@ -516,7 +530,7 @@ function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boo
   ].includes(agentRun);
 }
 
-export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
+export function evidenceLineForTask(task: TaskCardSource): CardEvidenceItem[] {
   const { ref, status } = buildBoardDeliveryParts(task);
   // "No PR" is the absence of delivery state, not information — reserve the
   // footer for cards that actually carry a PR/check/merge signal (DESIGN.md §6).
@@ -542,31 +556,31 @@ const FINDING_SEVERITY_LABELS: Array<{
  * findings by severity, e.g. "1 blocker · 2 major" (audit §03 Review queue).
  * Returns undefined when there is no recorded review result with findings.
  */
-export function reviewFindingCountLabel(task: Task): string | undefined {
-  const findings = taskReviewGate(task).result?.findings;
-  if (!findings || findings.length === 0) {
+export function reviewFindingCountLabel(task: TaskCardSource): string | undefined {
+  const counts = reviewFindingCounts(task);
+  if (Object.values(counts).every((count) => !count)) {
     return undefined;
   }
   const parts = FINDING_SEVERITY_LABELS.map(({ severity, singular }) => {
-    const count = findings.filter((finding) => finding.severity === severity).length;
+    const count = counts[severity] ?? 0;
     return count > 0 ? `${count} ${singular}` : undefined;
   }).filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(' · ') : undefined;
 }
 
 /** The most salient severity tone across a task's review findings. */
-export function reviewFindingTone(task: Task): Tone {
-  const findings = taskReviewGate(task).result?.findings ?? [];
-  if (findings.some((finding) => finding.severity === 'BLOCKER')) {
+export function reviewFindingTone(task: TaskCardSource): Tone {
+  const counts = reviewFindingCounts(task);
+  if (counts.BLOCKER) {
     return 'error';
   }
-  if (findings.some((finding) => finding.severity === 'MAJOR')) {
+  if (counts.MAJOR) {
     return 'action';
   }
   return 'info';
 }
 
-function deliveryLineTone(task: Task): Tone {
+function deliveryLineTone(task: TaskCardSource): Tone {
   if (
     task.projection.githubPullRequest === 'CLOSED_UNMERGED' ||
     task.projection.ciChecks === 'FAILING' ||
@@ -594,9 +608,14 @@ function deliveryLineTone(task: Task): Tone {
   return 'neutral';
 }
 
-export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): TaskCardVM {
+export function buildTaskCardVM(
+  task: TaskCardSource,
+  options: TaskCardOptions = {}
+): TaskCardVM {
   const { showRepo = true, columnKey, showReviewCount = false } = options;
-  const state = describeTaskState(task);
+  const state = options.statusContext === 'active'
+    ? describeActiveTaskState(task)
+    : describeTaskState(task);
   const evidence = evidenceLineForTask(task);
   if (showReviewCount) {
     const findingLabel = reviewFindingCountLabel(task);
@@ -621,6 +640,19 @@ export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): Task
   };
 }
 
+function describeActiveTaskState(task: TaskCardSource): { label: string; tone: Tone } {
+  if (task.projection.agentRun === 'AWAITING_APPROVAL' || task.projection.agentRun === 'AWAITING_USER_INPUT') {
+    return { label: 'Needs you', tone: 'action' };
+  }
+  if (task.projection.agentReview?.status === 'RUNNING') {
+    return { label: 'Reviewing', tone: 'info' };
+  }
+  if (['QUEUED', 'STARTING', 'RUNNING', 'INTERRUPTING'].includes(task.projection.agentRun)) {
+    return { label: 'Implementing', tone: 'info' };
+  }
+  return describeTaskState(task);
+}
+
 /**
  * True when a card's state pill merely repeats the column it sits in — e.g.
  * "Ready" inside Backlog / Ready or "Done" inside Done. Pills are kept where
@@ -640,7 +672,7 @@ function stateRestatesColumn(stateLabel: string, columnKey: string | undefined):
 }
 
 /** Whether a set of tasks spans more than one repository. */
-export function tasksSpanMultipleRepositories(tasks: Task[]): boolean {
+export function tasksSpanMultipleRepositories(tasks: TaskCardSource[]): boolean {
   const seen = new Set<string>();
   for (const task of tasks) {
     seen.add(task.repositoryId);
@@ -666,7 +698,7 @@ export function selectTaskCardRepositoryIdentity(
 
 /** Inbox rows need repository identity only when it distinguishes a task or its repository is missing. */
 export function shouldShowInboxRepository(
-  tasks: Task[],
+  tasks: TaskCardSource[],
   repositories: Pick<Repository, 'id' | 'status'>[]
 ): boolean {
   const repositoryStatuses = new Map(
@@ -808,7 +840,7 @@ export interface NavCounts {
   done: number;
 }
 
-export function computeNavCounts(tasks: Task[]): NavCounts {
+export function computeNavCounts(tasks: TaskCardSource[]): NavCounts {
   return {
     inbox: tasks.filter(isAttentionTask).length,
     active: tasks.filter(isInFlightTask).length,
@@ -818,8 +850,11 @@ export function computeNavCounts(tasks: Task[]): NavCounts {
 }
 
 /** Tasks for a card-grid view (active / review / done). */
-export function tasksForView(tasks: Task[], view: NavView): Task[] {
-  const sorted = (list: Task[]) =>
+export function tasksForView(
+  tasks: TaskCardSource[],
+  view: NavView
+): TaskCardSource[] {
+  const sorted = (list: TaskCardSource[]) =>
     [...list].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   switch (view) {
     case 'active':
@@ -848,7 +883,10 @@ export const BOARD_COLUMNS: BoardColumnDef[] = [
   { key: 'done', label: 'Done', tone: 'success', phases: ['DONE', 'CANCELED', 'ARCHIVED'] }
 ];
 
-export function columnTasks(tasks: Task[], column: BoardColumnDef): Task[] {
+export function columnTasks(
+  tasks: TaskCardSource[],
+  column: BoardColumnDef
+): TaskCardSource[] {
   return [...tasks]
     .filter((task) =>
       column.key === 'review'
@@ -860,6 +898,30 @@ export function columnTasks(tasks: Task[], column: BoardColumnDef): Task[] {
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-function isReviewQueueTask(task: Task): boolean {
-  return REVIEW_PHASES.includes(task.workflowPhase) || taskReviewGate(task).status === 'RUNNING';
+function isReviewQueueTask(task: TaskCardSource): boolean {
+  return REVIEW_PHASES.includes(task.workflowPhase) || taskCardReview(task).status === 'RUNNING';
+}
+
+function taskCardReview(task: TaskCardSource) {
+  return task.projection.agentReview ?? {
+    status: 'NOT_RUN' as const,
+    hasResult: false,
+    findingCounts: {}
+  };
+}
+
+function reviewHasResult(review: ReturnType<typeof taskCardReview>): boolean {
+  return 'hasResult' in review ? review.hasResult : Boolean(review.result);
+}
+
+function reviewFindingCounts(
+  task: TaskCardSource
+): Partial<Record<AgentReviewFinding['severity'], number>> {
+  const review = taskCardReview(task);
+  if ('findingCounts' in review) return review.findingCounts;
+  const counts: Partial<Record<AgentReviewFinding['severity'], number>> = {};
+  for (const finding of review.result?.findings ?? []) {
+    counts[finding.severity] = (counts[finding.severity] ?? 0) + 1;
+  }
+  return counts;
 }

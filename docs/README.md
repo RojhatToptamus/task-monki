@@ -1,6 +1,6 @@
 # Task Monki Documentation
 
-Date: 2026-07-14
+Date: 2026-07-26
 
 This folder is the operating context for Task Monki development. It should help
 humans and AI agents understand what is current without reading stale planning
@@ -32,32 +32,41 @@ behavior and architecture, not private roadmap sequencing.
 7. `docs/PROVIDER_SMOKE_TESTING.md`
    - Live provider/model verification through TaskManagerService in a clean,
      remote-free throwaway Git repository.
+8. `docs/testing-strategy/STRATEGY.md`
+   - Post-change agent testing workflow, layer boundaries, safety contract,
+     measured timings, and exact usage.
+9. `docs/testing-strategy/RESEARCH.md`
+   - Repository audit, primary-source comparison, measurements, and evidence
+     behind the selected testing workflow.
 
 ### Architecture
 
-1. `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
+1. `docs/architecture/CRASH_RECOVERY.md`
+   - Application-level startup ordering, authoritative recovery sources,
+     no-replay rules, process ownership, and Git/GitHub adoption.
+2. `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
    - Current multi-runtime registry, durable identity, routing, capability,
      security, recovery, and extension boundaries.
-2. `docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md`
+3. `docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md`
    - Current support tiers, native and ACP runtime matrix, readiness
      conditions, provider-specific limits, and execution security boundaries.
-3. `docs/architecture/PREVIEW_ARCHITECTURE.md`
+4. `docs/architecture/PREVIEW_ARCHITECTURE.md`
    - Canonical Preview authority, lifecycle, native/Compose runtime, security,
      ownership, storage, shutdown, and recovery architecture.
-4. `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
+5. `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
    - Agent-assisted Preview recipe authoring, sanitized repository evidence,
      structured drafts, review UX, validation, and exact acceptance boundary.
-5. `docs/APP_SERVER_ARCHITECTURE.md`
+6. `docs/APP_SERVER_ARCHITECTURE.md`
    - Current Codex App Server integration architecture and responsibility
      boundaries.
-6. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+7. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
-7. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
+8. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
    - Current restricted attachment formats (and explicitly unsupported generic
      files/PDFs), composer normalization, durable storage and retry rules,
      Codex delivery, HTTP/Electron trust boundaries, resource limits,
      portability, cleanup, and deletion semantics.
-8. `docs/architecture/MODULE_BOUNDARIES.md`
+9. `docs/architecture/MODULE_BOUNDARIES.md`
    - Current module ownership, dependency direction, test placement, and
      domain-specific verification commands for maintainers and agents.
 
@@ -122,6 +131,7 @@ of:
 ```sh
 npm run typecheck
 npm run check:architecture
+npm run test:agent-workflow
 npm test
 npm run test:renderer:dom
 npm run build
@@ -132,6 +142,14 @@ git diff --check
 `npm run test:renderer:dom` mounts focused renderer interactions in JSDOM so
 focus, events, effects, and cleanup are verified in addition to static markup.
 `npm run verify` runs the repository-wide automated verification sequence.
+
+For a safe real-process inner loop after Git, worktree, workflow, or runtime
+changes, run `npm run test:agent-workflow`. Add `-- --ui` only when the
+renderer itself needs semantic browser inspection; see
+`docs/testing-strategy/STRATEGY.md`.
+For bounded accumulated-history, concurrent-output, Preview, provider-loss,
+and soak evidence, add `-- --stress`; combine `--stress --ui` for semantic
+inspection of live concurrent output.
 
 For deterministic UI and workflow testing, start from `npm run dev:seed` and the
 generated `.local/task-monki-dev-seed/manifest.json`.

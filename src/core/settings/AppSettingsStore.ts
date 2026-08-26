@@ -2,10 +2,12 @@ import type {
   CodexExternalToolSettings,
   ExternalExecutablePathSettings,
   TaskManagerAppSettings,
-  TaskManagerThemePreference
+  TaskManagerThemePreference,
+  TaskManagerThemePreset
 } from '../../shared/agent';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  isTaskManagerThemePreset,
   TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
 } from '../../shared/agent';
 import type { UpdateAppSettingsRequest } from '../../shared/contracts';
@@ -15,6 +17,7 @@ import {
 } from '../filesystem/secureFilesystem';
 
 const MAX_APP_SETTINGS_FILE_BYTES = 1024 * 1024;
+const PREVIOUS_APP_SETTINGS_SCHEMA_VERSION = 9;
 
 export interface AppSettingsStorage {
   get(): Promise<TaskManagerAppSettings>;
@@ -104,14 +107,15 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
 }
 
 export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
-  if (!isRecord(value) || value.schemaVersion !== TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+  const migrated = migrateAppSettings(value);
+  if (!isRecord(migrated) || migrated.schemaVersion !== TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
     const schemaVersion = isRecord(value) ? value.schemaVersion : undefined;
     throw new Error(
       `Unsupported Task Monki app settings schema ${String(schemaVersion)}. ` +
-        'Delete the local app settings and restart; migrations are intentionally not supported.'
+        'Delete the local app settings and restart.'
     );
   }
-  const record = value;
+  const record = migrated;
   if (!isCurrentAppSettingsRecord(record)) {
     throw new Error(
       `Task Monki app settings schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION} is invalid. ` +
@@ -121,6 +125,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
   return {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: record.theme,
+    themePreset: record.themePreset,
     sidebarCollapsed: record.sidebarCollapsed,
     showMascot: record.showMascot,
     firstLaunchSetupCompleted: record.firstLaunchSetupCompleted,
@@ -151,6 +156,9 @@ export function mergeAppSettings(
   const patch: Partial<TaskManagerAppSettings> = {};
   if (input.theme !== undefined) {
     patch.theme = normalizeTheme(input.theme);
+  }
+  if (input.themePreset !== undefined) {
+    patch.themePreset = normalizeThemePreset(input.themePreset);
   }
   if (input.sidebarCollapsed !== undefined) {
     patch.sidebarCollapsed = requireBoolean(input.sidebarCollapsed, 'sidebarCollapsed');
@@ -251,6 +259,24 @@ function normalizeTheme(value: unknown): TaskManagerThemePreference {
   return value;
 }
 
+function normalizeThemePreset(value: unknown): TaskManagerThemePreset {
+  if (!isTaskManagerThemePreset(value)) {
+    throw new Error('Theme preset is not supported.');
+  }
+  return value;
+}
+
+function migrateAppSettings(value: unknown): unknown {
+  if (!isRecord(value) || value.schemaVersion !== PREVIOUS_APP_SETTINGS_SCHEMA_VERSION) {
+    return value;
+  }
+  return {
+    ...value,
+    schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+    themePreset: DEFAULT_TASK_MANAGER_APP_SETTINGS.themePreset
+  };
+}
+
 function normalizeCodexExternalTools(value: unknown): CodexExternalToolSettings {
   if (!isRecord(value)) {
     throw new Error('Codex external tool settings are invalid.');
@@ -344,6 +370,7 @@ function isCurrentAppSettingsRecord(
   const allowedKeys = new Set([
     'schemaVersion',
     'theme',
+    'themePreset',
     'sidebarCollapsed',
     'showMascot',
     'firstLaunchSetupCompleted',
@@ -384,6 +411,7 @@ function isCurrentAppSettingsRecord(
   return (
     Object.keys(record).every((key) => allowedKeys.has(key)) &&
     (record.theme === 'light' || record.theme === 'dark' || record.theme === 'device') &&
+    isTaskManagerThemePreset(record.themePreset) &&
     typeof record.sidebarCollapsed === 'boolean' &&
     typeof record.showMascot === 'boolean' &&
     typeof record.firstLaunchSetupCompleted === 'boolean' &&

@@ -158,6 +158,7 @@ describe('projection reducer', () => {
   it('does not let an old iteration event overwrite the current task projection', () => {
     const task: Task = {
       id: 'task-1',
+      kind: 'NORMAL',
       runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
@@ -339,6 +340,7 @@ describe('projection reducer', () => {
   it('keeps Codex review runs in Review and records an inconclusive review result', () => {
     const task: Task = {
       id: 'task-1',
+      kind: 'NORMAL',
       runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
@@ -416,6 +418,7 @@ describe('projection reducer', () => {
   it('stores structured Codex review findings and derives needs-changes status', () => {
     const task: Task = {
       id: 'task-1',
+      kind: 'NORMAL',
       runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
@@ -478,6 +481,7 @@ describe('projection reducer', () => {
   it('marks review results stale when the diff changes or follow-up work starts', () => {
     const task: Task = {
       id: 'task-1',
+      kind: 'NORMAL',
       runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
@@ -554,6 +558,7 @@ describe('projection reducer', () => {
   it('keeps a current review result fresh when a delivery commit records the reviewed diff', () => {
     const task: Task = {
       id: 'task-1',
+      kind: 'NORMAL',
       runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
@@ -620,6 +625,7 @@ describe('projection reducer', () => {
   it('does not resurrect a stale review when a delivery commit follows a changed diff', () => {
     const staleTask: Task = {
       id: 'task-1',
+      kind: 'NORMAL',
       runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
@@ -667,6 +673,7 @@ describe('projection reducer', () => {
   it('keeps provider plans, usage, and goals separate from workflow evidence', () => {
     const task: Task = {
       id: 'task-1',
+      kind: 'NORMAL',
       runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
@@ -755,6 +762,13 @@ describe('run reducer', () => {
 
   it('waits for authoritative progress after an interaction resolves', () => {
     const waiting = { ...createRun(), status: 'AWAITING_APPROVAL' as const };
+    const stillPending = reduceRun(
+      waiting,
+      createEvent('AGENT_ACTIVITY_RECEIVED', {
+        eventType: 'item/tool/in_progress',
+        interactionPending: true
+      })
+    );
     const resolved = reduceRun(
       waiting,
       createEvent('AGENT_INTERACTION_RESOLVED', { status: 'RESOLVED' })
@@ -768,6 +782,7 @@ describe('run reducer', () => {
       createEvent('AGENT_ACTIVITY_RECEIVED', { eventType: 'thread/name/updated' })
     );
 
+    expect(stillPending.status).toBe('AWAITING_APPROVAL');
     expect(resolved.status).toBe('AWAITING_APPROVAL');
     expect(resumed.status).toBe('RUNNING');
     expect(unrelated.status).toBe('AWAITING_APPROVAL');
@@ -799,6 +814,7 @@ function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    kind: overrides.kind ?? 'NORMAL',
     title: 'Task',
     prompt: 'Prompt',
     repositoryId: '/tmp/repo',

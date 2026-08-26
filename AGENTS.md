@@ -19,7 +19,10 @@ state, and local acceptance.
   - Codex-specific App Server process, protocol, and recovery rules.
 - `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
   - Runtime registry, identity, provider capability, routing, and recovery
-    rules shared across integrations.
+  rules shared across integrations.
+- `docs/architecture/CRASH_RECOVERY.md`
+  - Required reading before changing startup, shutdown, external reconciliation,
+    delivery recovery, or owned-process behavior.
 - `DESIGN.md`
   - Frontend and design guidance for coherent Task Monki UI changes.
 - `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`
@@ -52,6 +55,7 @@ state, and local acceptance.
 ```sh
 npm run typecheck
 npm run check:architecture
+npm run test:agent-workflow
 npm test
 npm run test:renderer:dom
 npm run build
@@ -62,10 +66,14 @@ git diff --check
 Run targeted tests while iterating, then run the full relevant set before
 finishing changes that touch storage, workflow, protocol, or renderer behavior.
 
-## Seeded UI And Workflow Testing
+## Executed Workflow And Seeded UI Testing
 
-- Before testing UI or workflow states, run `npm run dev:seed` and use the
-  generated `.local/task-monki-dev-seed/manifest.json`.
+- For changes to task workflow, Git/worktree handling, agent orchestration, or
+  provider lifecycle, run `npm run test:agent-workflow`. Add `-- --ui` when
+  the executed state also needs semantic browser inspection.
+- For projected UI states that do not require provider execution, run
+  `npm run dev:seed` and use the generated
+  `.local/task-monki-dev-seed/manifest.json`.
 - Start local development from the generated environment:
   `source .local/task-monki-dev-seed/dev-api.env`, then `npm run dev:api` and
   `npm run dev:renderer`.

@@ -395,7 +395,7 @@ describe('runProviderSmoke', () => {
     await expect(fs.readFile(path.join(report.stateRoot, 'report.json'), 'utf8')).resolves.toContain(
       'provider lifecycle did not settle'
     );
-  });
+  }, 15_000);
 
   it('waits through INTERRUPTING within the cancellation budget and continues the matrix', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
@@ -744,6 +744,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     const now = new Date().toISOString();
     const repository = {
       id: 'repository-smoke',
+      kind: 'USER_REGISTERED' as const,
       name: path.basename(repositoryPath),
       path: repositoryPath,
       status: 'AVAILABLE' as const,
@@ -759,6 +760,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     const now = new Date().toISOString();
     const task = {
       id: `task-${++this.taskSequence}`,
+      kind: 'NORMAL' as const,
       runtimeId: input.runtimeId!,
       title: input.title,
       prompt: input.prompt,

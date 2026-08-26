@@ -5,7 +5,11 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   CiChecksStatus,
+  GitSnapshotRecord,
   MergeStatus,
+  PreviewExecutionAuthority,
+  PreviewPlanSource,
+  PreviewSourceIdentity,
   RunRecord,
   TaskIteration,
   WorktreeRecord
@@ -14,6 +18,10 @@ import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { ArtifactAppendAmbiguousError, FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
+
+const TEST_PREVIEW_RECIPE_DIGEST = 'a'.repeat(64);
+const TEST_PREVIEW_EXECUTION_DIGEST = 'b'.repeat(64);
+const TEST_PREVIEW_HEAD_SHA = 'c'.repeat(40);
 
 describe('FileTaskStore', () => {
   it('allows exactly one live owner for a store root', async () => {
@@ -197,6 +205,247 @@ describe('FileTaskStore', () => {
     }
   });
 
+  it('reuses the published serialization for isolated snapshots and compact persistence', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-snapshot-cache-'));
+    const store = new FileTaskStore(dir);
+    const repository = await addTestRepository(store, dir);
+    const task = await store.createTask({
+      title: 'Published snapshot cache',
+      prompt: 'Avoid serializing the unchanged full store for every reader.',
+      repositoryId: repository.id
+    });
+
+    const persisted = await fs.readFile(path.join(dir, 'store.json'), 'utf8');
+    expect(persisted.endsWith('\n')).toBe(true);
+    expect(persisted).not.toContain('\n  "');
+    expect(JSON.parse(persisted)).toMatchObject({
+      tasks: [expect.objectContaining({ id: task.id })]
+    });
+
+    const stringify = vi.spyOn(JSON, 'stringify');
+    try {
+      const first = await store.snapshot();
+      first.tasks[0]!.title = 'Mutated caller copy';
+      const second = await store.snapshot();
+
+      expect(second.tasks[0]?.title).toBe('Published snapshot cache');
+      expect(first).not.toBe(second);
+      expect(stringify).not.toHaveBeenCalled();
+    } finally {
+      stringify.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('derives compact board and task-owned detail reads from published state', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-client-reads-'));
+    const store = new FileTaskStore(dir);
+    const repository = await addTestRepository(store, dir);
+    const consumer = await store.createTask({
+      title: 'Consumer',
+      prompt: 'consumer prompt that must not reach the board',
+      repositoryId: repository.id
+    });
+    const producer = await store.createTask({
+      title: 'Producer',
+      prompt: 'producer prompt that must not reach the board',
+      repositoryId: repository.id
+    });
+    const consumerOwnership = await store.createIterationAndWorktree({
+      task: consumer,
+      branchName: 'codex/consumer',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const producerOwnership = await store.createIterationAndWorktree({
+      task: producer,
+      branchName: 'codex/producer',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const consumerSession = await store.createAgentSession({
+      task: consumer,
+      ...consumerOwnership,
+      runtimeId: 'codex'
+    });
+    const producerSession = await store.createAgentSession({
+      task: producer,
+      ...producerOwnership,
+      runtimeId: 'codex'
+    });
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const eventOnlyServer = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    await store.appendEvent(
+      createDomainEvent({
+        type: 'PROJECTION_UPDATED',
+        taskId: consumer.id,
+        serverInstanceId: eventOnlyServer.id,
+        source: 'provider',
+        payload: { reason: 'event-only server reference' }
+      })
+    );
+    const rawMessage = await store.appendProtocolMessage(
+      server.id,
+      'INBOUND',
+      '{"method":"seed/update"}',
+      { method: 'seed/update' }
+    );
+    const consumerRun = await store.createRun({
+      task: consumer,
+      session: consumerSession,
+      serverInstanceId: server.id,
+      mode: 'IMPLEMENTATION',
+      prompt: consumer.prompt
+    });
+    const producerRun = await store.createRun({
+      task: producer,
+      session: producerSession,
+      serverInstanceId: server.id,
+      mode: 'IMPLEMENTATION',
+      prompt: producer.prompt
+    });
+    const consumerItem = await store.upsertAgentItem({
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      providerItemId: 'consumer-item',
+      type: 'AGENT_MESSAGE',
+      status: 'COMPLETED',
+      payload: { text: 'current consumer item' },
+      rawMessage
+    });
+    const producerItem = await store.upsertAgentItem({
+      taskId: producer.id,
+      iterationId: producerOwnership.iteration.id,
+      runId: producerRun.id,
+      sessionId: producerSession.id,
+      providerItemId: 'producer-item',
+      type: 'AGENT_MESSAGE',
+      status: 'COMPLETED',
+      payload: { text: 'unrelated producer item' },
+      rawMessage
+    });
+    const consumerPlan = await store.recordAgentPlanRevision({
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      runtimeId: 'codex',
+      explanation: 'Current consumer plan',
+      steps: [{ step: 'Inspect', status: 'IN_PROGRESS' }],
+      rawMessage
+    });
+    const consumerUsage = await store.recordAgentUsageSnapshot({
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      runtimeId: 'codex',
+      total: testUsage(100),
+      last: testUsage(40),
+      modelContextWindow: 200_000,
+      rawMessage
+    });
+    const consumerInteraction = await store.createInteractionRequest({
+      runtimeId: 'codex',
+      serverInstanceId: server.id,
+      providerRequestId: 'consumer-request',
+      taskId: consumer.id,
+      iterationId: consumerOwnership.iteration.id,
+      runId: consumerRun.id,
+      sessionId: consumerSession.id,
+      providerItemId: consumerItem.providerItemId,
+      type: 'COMMAND_APPROVAL',
+      request: { command: 'npm test', startedAtMs: 0 },
+      allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
+      policyWarnings: [],
+      requestRawMessage: rawMessage
+    });
+    const now = '2026-07-26T00:00:00.000Z';
+    await store.savePreviewPlan({
+      id: 'producer-plan',
+      taskId: producer.id,
+      iterationId: producerOwnership.iteration.id,
+      worktreeId: producerOwnership.worktree.id,
+      planSource: repositoryPreviewPlanSource(),
+      executionDigest: TEST_PREVIEW_EXECUTION_DIGEST,
+      executionPlan: {
+        version: 1,
+        jobs: [],
+        resources: [],
+        services: [],
+        workers: [],
+        routes: [{ id: 'api', service: 'web', port: 'http', primary: true }],
+        scenarios: [{ id: 'default', jobs: [], resources: [] }],
+        selectedScenarioId: 'default'
+      },
+      warnings: [],
+      createdAt: now
+    });
+
+    const board = await store.getBoardSnapshot();
+    expect(board.tasks.map((task) => task.id).sort()).toEqual(
+      [consumer.id, producer.id].sort()
+    );
+    expect(board).not.toHaveProperty('runs');
+    expect(board).not.toHaveProperty('events');
+    expect(JSON.stringify(board)).not.toContain(consumer.prompt);
+    expect(JSON.stringify(board)).not.toContain(producer.prompt);
+
+    const detail = await store.getTaskDetail(consumer.id);
+    expect(detail.task.id).toBe(consumer.id);
+    expect(detail.runs.map((run) => run.id)).toEqual([consumerRun.id]);
+    expect(detail.runs).not.toContainEqual(expect.objectContaining({ id: producerRun.id }));
+    expect(detail.agentServers.map((record) => record.id).sort()).toEqual(
+      [server.id, eventOnlyServer.id].sort()
+    );
+    expect(detail.agentItems.map((record) => record.id)).toEqual([consumerItem.id]);
+    expect(detail.agentItems).not.toContainEqual(
+      expect.objectContaining({ id: producerItem.id })
+    );
+    expect(detail.agentPlanRevisions.map((record) => record.id)).toEqual([
+      consumerPlan.id
+    ]);
+    expect(detail.agentUsageSnapshots.map((record) => record.id)).toEqual([
+      consumerUsage.id
+    ]);
+    expect(detail.interactionRequests.map((record) => record.id)).toEqual([
+      consumerInteraction.id
+    ]);
+    expect(detail.iterations).toHaveLength(1);
+    expect(detail.worktrees).toHaveLength(1);
+    expect(detail.previewTaskRoutes).toEqual([
+      {
+        taskId: producer.id,
+        taskTitle: 'Producer',
+        routeId: 'api',
+        available: false
+      }
+    ]);
+
+    await store.close();
+    const restarted = new FileTaskStore(dir);
+    await expect(restarted.getBoardSnapshot()).resolves.toEqual(board);
+    await expect(restarted.getTaskDetail(consumer.id)).resolves.toMatchObject({
+      task: { id: consumer.id },
+      runs: [{ id: consumerRun.id }]
+    });
+    await restarted.close();
+  });
+
   it.runIf(process.platform !== 'win32')(
     'makes canonical lease release durable before removing its owner anchor',
     async () => {
@@ -353,6 +602,12 @@ describe('FileTaskStore', () => {
     ).resolves.toEqual([
       expect.objectContaining({ id: run.id, status: 'QUEUED' })
     ]);
+    for (const status of ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'] as const) {
+      await store.updateRun(run.id, { status });
+      await expect(store.getRunsRequiringRecovery()).resolves.toEqual([
+        expect.objectContaining({ id: run.id, status })
+      ]);
+    }
   });
 
   it('rejects a mutation before publishing a snapshot too large to reload', async () => {
@@ -366,7 +621,7 @@ describe('FileTaskStore', () => {
     const originalByteLength = Buffer.byteLength.bind(Buffer);
     const byteLength = vi.spyOn(Buffer, 'byteLength').mockImplementation(
       (value, encoding) =>
-        typeof value === 'string' && value.includes('"workflowPhase": "BACKLOG"')
+        typeof value === 'string' && value.includes('"workflowPhase":"BACKLOG"')
           ? Number.MAX_SAFE_INTEGER
           : originalByteLength(value, encoding)
     );
@@ -1579,7 +1834,7 @@ describe('FileTaskStore', () => {
       `${JSON.stringify(
         {
           ...persisted,
-          schemaVersion: TASK_STORE_SCHEMA_VERSION - 1
+          schemaVersion: TASK_STORE_SCHEMA_VERSION + 1
         },
         null,
         2
@@ -1589,10 +1844,10 @@ describe('FileTaskStore', () => {
     await store.close();
 
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
-      `Unsupported Task Monki store schema ${TASK_STORE_SCHEMA_VERSION - 1}`
+      `Unsupported Task Monki store schema ${TASK_STORE_SCHEMA_VERSION + 1}`
     );
     const unchanged = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
-    expect(unchanged.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION - 1);
+    expect(unchanged.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION + 1);
   });
 
   it('allows stopped environment history but enforces one live environment per task', async () => {
@@ -1632,21 +1887,26 @@ describe('FileTaskStore', () => {
       baseSha: 'base'
     });
     const now = new Date().toISOString();
+    const sourceSnapshot = await recordTestPreviewSnapshot(
+      store,
+      task.id,
+      iteration,
+      worktree,
+      dir
+    );
     const plan = await store.savePreviewPlan({
       id: 'plan-1',
       taskId: task.id,
       iterationId: iteration.id,
       worktreeId: worktree.id,
-      recipePath: '.taskmonki/preview.yaml',
-      recipeVersion: 1,
-      recipeDigest: 'recipe',
-      executionDigest: 'execution',
+      planSource: repositoryPreviewPlanSource(),
+      executionDigest: TEST_PREVIEW_EXECUTION_DIGEST,
       executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [],
       createdAt: now
     });
     const approval = await store.savePreviewApproval({
-      id: 'approval-1',
+      id: randomUUID(),
       taskId: task.id,
       planId: plan.id,
       executionDigest: plan.executionDigest,
@@ -1660,11 +1920,8 @@ describe('FileTaskStore', () => {
       iterationId: iteration.id,
       worktreeId: worktree.id,
       planId: plan.id,
-      approvalId: approval.id,
-      executionDigest: plan.executionDigest,
-      sourceGitSnapshotId: 'git-1',
-      sourceHeadSha: 'head',
-      sourceDirtyFingerprint: 'dirty',
+      executionAuthority: userPreviewAuthority(approval.id, plan.executionDigest),
+      source: previewSnapshotIdentity(sourceSnapshot),
       workspacePath: path.join(dir, 'preview-runtime', 'generation-1'),
       state: 'CREATED',
       routingState: 'CANDIDATE',
@@ -1676,8 +1933,8 @@ describe('FileTaskStore', () => {
     await store.savePreviewPlan({
       ...plan,
       id: 'plan-2',
-      recipeDigest: 'recipe-2',
-      executionDigest: 'execution-2',
+      planSource: repositoryPreviewPlanSource('c'.repeat(64)),
+      executionDigest: 'd'.repeat(64),
       createdAt: new Date(Date.parse(now) + 1).toISOString()
     });
     await expect(
@@ -1744,14 +2001,21 @@ describe('FileTaskStore', () => {
       task, branchName: 'codex/history', worktreePath: dir, baseSha: 'base'
     });
     const now = Date.now();
+    const sourceSnapshot = await recordTestPreviewSnapshot(
+      store,
+      task.id,
+      iteration,
+      worktree,
+      dir
+    );
     const plan = await store.savePreviewPlan({
       id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      planSource: repositoryPreviewPlanSource(),
+      executionDigest: TEST_PREVIEW_EXECUTION_DIGEST, executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [], createdAt: new Date(now).toISOString()
     });
     const approval = await store.savePreviewApproval({
-      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      id: randomUUID(), taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
       scope: 'TASK', approvedAt: new Date(now).toISOString()
     });
     const engine = {
@@ -1782,9 +2046,9 @@ describe('FileTaskStore', () => {
       const generationId = `generation-${index}`;
       await store.savePreviewGeneration({
         id: generationId, previewKey: 'task-history', taskId: task.id, iterationId: iteration.id,
-        worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
-        executionDigest: plan.executionDigest, sourceGitSnapshotId: `git-${index}`,
-        sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: `/preview/${index}`,
+        worktreeId: worktree.id, planId: plan.id,
+        executionAuthority: userPreviewAuthority(approval.id, plan.executionDigest),
+        source: previewSnapshotIdentity(sourceSnapshot), workspacePath: `/preview/${index}`,
         state: 'STOPPED', routingState: 'RETIRED', freshness: 'CURRENT', routes: [],
         createdAt: timestamp, updatedAt: timestamp, stoppedAt: timestamp
       });
@@ -1827,21 +2091,28 @@ describe('FileTaskStore', () => {
       task, branchName: 'codex/probe-history', worktreePath: dir, baseSha: 'base'
     });
     const now = Date.now();
+    const sourceSnapshot = await recordTestPreviewSnapshot(
+      store,
+      task.id,
+      iteration,
+      worktree,
+      dir
+    );
     const plan = await store.savePreviewPlan({
       id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      planSource: repositoryPreviewPlanSource(),
+      executionDigest: TEST_PREVIEW_EXECUTION_DIGEST, executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [], createdAt: new Date(now).toISOString()
     });
     const approval = await store.savePreviewApproval({
-      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      id: randomUUID(), taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
       scope: 'TASK', approvedAt: new Date(now).toISOString()
     });
     const generation = await store.savePreviewGeneration({
       id: 'generation', previewKey: 'task-probe', taskId: task.id, iterationId: iteration.id,
-      worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
-      executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
-      sourceDirtyFingerprint: 'dirty', workspacePath: '/preview', state: 'READY',
+      worktreeId: worktree.id, planId: plan.id,
+      executionAuthority: userPreviewAuthority(approval.id, plan.executionDigest),
+      source: previewSnapshotIdentity(sourceSnapshot), workspacePath: '/preview', state: 'READY',
       routingState: 'ACTIVE', freshness: 'CURRENT', routes: [],
       createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()
     });
@@ -1887,20 +2158,28 @@ describe('FileTaskStore', () => {
       task, branchName: 'codex/cutover', worktreePath: dir, baseSha: 'base'
     });
     const now = new Date().toISOString();
+    const sourceSnapshot = await recordTestPreviewSnapshot(
+      store,
+      task.id,
+      iteration,
+      worktree,
+      dir
+    );
     const plan = await store.savePreviewPlan({
       id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      planSource: repositoryPreviewPlanSource(),
+      executionDigest: TEST_PREVIEW_EXECUTION_DIGEST, executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [], createdAt: now
     });
     const approval = await store.savePreviewApproval({
-      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      id: randomUUID(), taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
       scope: 'TASK', approvedAt: now
     });
     const authority = {
       previewKey: 'task-cutover', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      planId: plan.id, approvalId: approval.id, executionDigest: plan.executionDigest,
-      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      planId: plan.id,
+      executionAuthority: userPreviewAuthority(approval.id, plan.executionDigest),
+      source: previewSnapshotIdentity(sourceSnapshot),
       freshness: 'CURRENT' as const, routes: [], createdAt: now, updatedAt: now
     };
     const active = await store.savePreviewGeneration({
@@ -3686,6 +3965,68 @@ async function createRunFixture(suffix: string) {
   return { dir, store, task, iteration, worktree, run };
 }
 
+function repositoryPreviewPlanSource(
+  recipeDigest = TEST_PREVIEW_RECIPE_DIGEST
+): PreviewPlanSource {
+  return {
+    type: 'REPOSITORY_RECIPE',
+    recipePath: '.taskmonki/preview.yaml',
+    recipeVersion: 1,
+    recipeDigest
+  };
+}
+
+function userPreviewAuthority(
+  approvalId: string,
+  executionDigest: string
+): PreviewExecutionAuthority {
+  return { type: 'USER_APPROVAL', approvalId, executionDigest };
+}
+
+function previewSnapshotIdentity(snapshot: GitSnapshotRecord): PreviewSourceIdentity {
+  return {
+    type: 'WORKTREE_SNAPSHOT',
+    gitSnapshotId: snapshot.id,
+    headSha: snapshot.headSha!,
+    dirtyFingerprint: snapshot.dirtyFingerprint
+  };
+}
+
+async function recordTestPreviewSnapshot(
+  store: FileTaskStore,
+  taskId: string,
+  iteration: TaskIteration,
+  worktree: WorktreeRecord,
+  repositoryPath: string
+): Promise<GitSnapshotRecord> {
+  return store.recordGitSnapshot(
+    {
+      taskId,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      worktreePath: worktree.worktreePath,
+      repoRoot: repositoryPath,
+      gitCommonDir: path.join(repositoryPath, '.git'),
+      headSha: TEST_PREVIEW_HEAD_SHA,
+      branch: worktree.branchName,
+      baseSha: worktree.baseSha,
+      aheadCount: 0,
+      behindCount: 0,
+      stagedCount: 0,
+      unstagedCount: 0,
+      untrackedCount: 0,
+      conflictedCount: 0,
+      commitsAheadOfBase: 0,
+      committedDiffFileCount: 0,
+      workingDiffFileCount: 0,
+      diffStat: '',
+      dirtyFingerprint: 'clean',
+      status: 'CLEAN'
+    },
+    ''
+  );
+}
+
 async function writeStaleStoreLease(directory: string): Promise<{
   canonicalPath: string;
   ownerPath: string;
@@ -3776,4 +4117,14 @@ async function recordOpenPullRequest(
       status: mergeStatus
     }
   });
+}
+
+function testUsage(totalTokens: number) {
+  return {
+    totalTokens,
+    inputTokens: totalTokens,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0
+  };
 }

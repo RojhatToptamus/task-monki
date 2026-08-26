@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  execPackagedTool,
   verifyPackagedLegalFiles,
   verifyReleaseArtifacts
 } from './verify-release-artifacts.mjs';
@@ -12,6 +13,7 @@ const requiredLegalFiles = [
   'legal/LICENSE',
   'legal/THIRD_PARTY_NOTICES.md',
   'legal/third-party/OpenAI-Codex-Apache-2.0.txt',
+  'legal/third-party/Claude-Design-System-MIT.txt',
   'legal/electron/LICENSE',
   'legal/electron/LICENSES.chromium.html'
 ];
@@ -33,6 +35,26 @@ afterEach(async () => {
 });
 
 describe('release artifact verification', () => {
+  it.skipIf(process.platform === 'win32')(
+    'runs a packaged validator whose published file mode is not executable',
+    async () => {
+      const directory = await temporaryDirectory();
+      const validator = path.join(directory, 'validator');
+      await fs.writeFile(
+        validator,
+        '#!/bin/sh\nprintf \"%s\" \"$1\"\n',
+        { mode: 0o600 }
+      );
+
+      const result = await execPackagedTool(validator, ['validated'], {
+        timeout: 5_000
+      });
+
+      expect(result.stdout).toBe('validated');
+      expect((await fs.stat(validator)).mode & 0o111).toBe(0);
+    }
+  );
+
   it('accepts structurally valid Linux artifacts', async () => {
     const releaseDir = await temporaryDirectory();
     const version = '1.2.3-test';

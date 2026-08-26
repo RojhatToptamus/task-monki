@@ -159,10 +159,9 @@ routes:
       planId: resolved.plan.id,
       executionDigest: resolved.plan.executionDigest
     });
-    const gitSnapshot = {
-      id: 'git', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      status: 'CLEAN', headSha: 'head', dirtyFingerprint: 'dirty', capturedAt: new Date().toISOString()
-    } as GitSnapshotRecord;
+    const gitSnapshot = await storedGitSnapshot(
+      store, task.id, iteration.id, worktree.id, worktreePath, worktree.branchName
+    );
 
     await expect(
       manager.prepare({
@@ -242,10 +241,9 @@ routes:
     await manager.approve({
       taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
     });
-    const gitSnapshot = {
-      id: 'git', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      status: 'CLEAN', headSha: 'head', dirtyFingerprint: 'dirty', capturedAt: new Date().toISOString()
-    } as GitSnapshotRecord;
+    const gitSnapshot = await storedGitSnapshot(
+      store, task.id, iteration.id, worktree.id, worktreePath, worktree.branchName
+    );
     const preparing = manager.prepare({ context, gitSnapshot, async reobserveGit() { return gitSnapshot; } });
     await prepareStarted;
     const generation = (await store.getPreviewGenerations(task.id))[0];
@@ -312,10 +310,9 @@ routes:
       planId: resolved.plan.id,
       executionDigest: resolved.plan.executionDigest
     });
-    const gitSnapshot = {
-      id: 'git', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      status: 'CLEAN', headSha: 'head', dirtyFingerprint: 'dirty', capturedAt: new Date().toISOString()
-    } as GitSnapshotRecord;
+    const gitSnapshot = await storedGitSnapshot(
+      store, task.id, iteration.id, worktree.id, worktreePath, worktree.branchName
+    );
 
     const observedGenerationIds: string[] = [];
     const knownGenerationIds = new Set<string>();
@@ -459,10 +456,9 @@ routes: { app: { service: web, port: http, primary: true } }
     await manager.approve({
       taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
     });
-    const gitSnapshot = {
-      id: 'git', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
-      status: 'CLEAN', headSha: 'head', dirtyFingerprint: 'dirty', capturedAt: new Date().toISOString()
-    } as GitSnapshotRecord;
+    const gitSnapshot = await storedGitSnapshot(
+      store, task.id, iteration.id, worktree.id, worktreePath, worktree.branchName
+    );
     const prepared = await manager.prepare({
       context, gitSnapshot, async reobserveGit() { return gitSnapshot; }
     });
@@ -663,11 +659,25 @@ scenarios:
       taskId: task.id, planId: initial.plan.id, executionDigest: initial.plan.executionDigest
     });
     const now = new Date().toISOString();
+    const sourceSnapshot = await store.recordGitSnapshot({
+      taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      worktreePath, repoRoot: worktreePath, gitCommonDir: path.join(worktreePath, '.git'),
+      headSha: 'head', branch: worktree.branchName, aheadCount: 0, behindCount: 0,
+      stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictedCount: 0,
+      commitsAheadOfBase: 0, committedDiffFileCount: 0, workingDiffFileCount: 0,
+      diffStat: '', dirtyFingerprint: 'dirty', status: 'DIRTY'
+    }, '');
     const generation = await store.savePreviewGeneration({
       id: 'active-generation', previewKey: 'task-reset', taskId: task.id,
       iterationId: iteration.id, worktreeId: worktree.id, planId: initial.plan.id,
-      approvalId: approval.id, executionDigest: initial.plan.executionDigest,
-      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      executionAuthority: {
+        type: 'USER_APPROVAL', approvalId: approval.id,
+        executionDigest: initial.plan.executionDigest
+      },
+      source: {
+        type: 'WORKTREE_SNAPSHOT', gitSnapshotId: sourceSnapshot.id,
+        headSha: sourceSnapshot.headSha!, dirtyFingerprint: sourceSnapshot.dirtyFingerprint
+      },
       workspacePath: '/preview/reset', state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT',
       routes: [], createdAt: now, updatedAt: now
     });
@@ -694,12 +704,18 @@ scenarios:
     ]);
     expect(await store.getPreviewGeneration(generation.id)).toMatchObject({ state: 'STOPPED' });
 
+    const currentApproval = (await store.getMatchingPreviewApproval(
+      task.id,
+      current.plan.executionDigest
+    ))!;
     const preservedActive = await store.savePreviewGeneration({
       ...generation,
       id: 'preserved-active-generation',
       planId: current.plan.id,
-      approvalId: (await store.getMatchingPreviewApproval(task.id, current.plan.executionDigest))!.id,
-      executionDigest: current.plan.executionDigest,
+      executionAuthority: {
+        type: 'USER_APPROVAL', approvalId: currentApproval.id,
+        executionDigest: current.plan.executionDigest
+      },
       state: 'READY',
       routingState: 'ACTIVE',
       stoppedAt: undefined
@@ -708,8 +724,10 @@ scenarios:
       ...generation,
       id: 'failed-setup-generation',
       planId: current.plan.id,
-      approvalId: (await store.getMatchingPreviewApproval(task.id, current.plan.executionDigest))!.id,
-      executionDigest: current.plan.executionDigest,
+      executionAuthority: {
+        type: 'USER_APPROVAL', approvalId: currentApproval.id,
+        executionDigest: current.plan.executionDigest
+      },
       state: 'FAILED',
       routingState: 'CANDIDATE',
       replacesGenerationId: preservedActive.id,
@@ -815,3 +833,23 @@ scenarios:
     expect(await store.getPreviewGeneration(currentActive.id)).toMatchObject({ state: 'READY' });
   });
 });
+
+function storedGitSnapshot(
+  store: FileTaskStore,
+  taskId: string,
+  iterationId: string,
+  worktreeId: string,
+  worktreePath: string,
+  branch: string
+): Promise<GitSnapshotRecord> {
+  return store.recordGitSnapshot({
+    taskId, iterationId, worktreeId, worktreePath,
+    repoRoot: worktreePath,
+    gitCommonDir: path.join(worktreePath, '.git'),
+    headSha: 'head', branch,
+    aheadCount: 0, behindCount: 0,
+    stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictedCount: 0,
+    commitsAheadOfBase: 0, committedDiffFileCount: 0, workingDiffFileCount: 0,
+    diffStat: '', dirtyFingerprint: 'dirty', status: 'CLEAN'
+  }, '');
+}

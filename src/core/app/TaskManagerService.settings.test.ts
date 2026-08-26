@@ -1191,6 +1191,9 @@ rl.on('line', (line) => {
         requiresOpenaiAuth: false
       } });
       break;
+    case 'collaborationMode/list':
+      send({ id: message.id, result: { data: [] } });
+      break;
     case 'model/list':
       send({ id: message.id, result: {
         data: [{

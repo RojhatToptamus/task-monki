@@ -1,17 +1,8 @@
 import type {
-  PreviewGenerationRecord,
   PreviewLocalAttachmentRequirement,
-  PreviewPlanRecord,
-  PreviewResolvedAttachmentTarget,
-  Task
+  PreviewResolvedAttachmentTarget
 } from '../../shared/contracts';
-
-export interface PreviewTaskRouteOption {
-  taskId: string;
-  taskTitle: string;
-  routeId: string;
-  available: boolean;
-}
+export type { PreviewTaskRouteOption } from '../../shared/preview';
 
 export interface PreviewAttachmentBindingDraft {
   mode: 'endpoint' | 'task-preview-route';
@@ -24,48 +15,6 @@ export interface PreviewAttachmentBindingDraft {
   tls: '' | 'disabled' | 'system-verified';
   targetTaskId: string;
   routeId: string;
-}
-
-export function selectPreviewTaskRouteOptions(
-  tasks: readonly Task[],
-  plans: readonly PreviewPlanRecord[],
-  generations: readonly PreviewGenerationRecord[],
-  consumerTaskId: string
-): PreviewTaskRouteOption[] {
-  const options: PreviewTaskRouteOption[] = [];
-  for (const task of tasks) {
-    if (task.id === consumerTaskId) continue;
-    const plan = plans
-      .filter(
-        (candidate) =>
-          candidate.taskId === task.id && candidate.iterationId === task.currentIterationId
-      )
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-    if (!plan) continue;
-    const activeGeneration = generations.find(
-      (candidate) =>
-        candidate.taskId === task.id &&
-        candidate.iterationId === task.currentIterationId &&
-        candidate.routingState === 'ACTIVE' &&
-        candidate.state === 'READY'
-    );
-    for (const route of plan.executionPlan.routes) {
-      options.push({
-        taskId: task.id,
-        taskTitle: task.title,
-        routeId: route.id,
-        available: Boolean(
-          activeGeneration?.routes.some(
-            (candidate) => candidate.id === route.id && candidate.state === 'ATTACHED'
-          )
-        )
-      });
-    }
-  }
-  return options.sort(
-    (left, right) =>
-      left.taskTitle.localeCompare(right.taskTitle) || left.routeId.localeCompare(right.routeId)
-  );
 }
 
 export function createPreviewAttachmentBindingDraft(

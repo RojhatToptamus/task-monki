@@ -19,6 +19,7 @@ import {
   type NativeSessionControls
 } from '../model/providerNativeSession';
 import { RawProviderMessage } from './RawProviderMessage';
+import { DisclosureChevron } from './DisclosureChevron';
 import { humanizeEnum } from './display';
 
 interface ProviderOverviewPanelProps {
@@ -163,7 +164,7 @@ export function ProviderOverviewPanel({
         </dl>
         {runtimeState?.preflight.readiness.diagnostics.length ? (
           <details className="raw-provider-event">
-            <summary>Show runtime diagnostics</summary>
+            <summary><span className="tm-disclosure__label"><DisclosureChevron />Show runtime diagnostics</span></summary>
             {runtimeState.preflight.readiness.diagnostics.map((diagnostic) => (
               <dl
                 className="provider-item-kv"
@@ -176,7 +177,7 @@ export function ProviderOverviewPanel({
                 <dt>Severity</dt>
                 <dd>{humanizeEnum(diagnostic.severity)}</dd>
                 <dt>Message</dt>
-                <dd>
+                <dd className="provider-item-kv__prose">
                   {diagnostic.message}
                   {diagnostic.detail ? <small>{diagnostic.detail}</small> : null}
                 </dd>
@@ -186,7 +187,7 @@ export function ProviderOverviewPanel({
         ) : null}
         {runtimeResolution ? (
           <details className="raw-provider-event">
-            <summary>Show runtime resolution probes</summary>
+            <summary><span className="tm-disclosure__label"><DisclosureChevron />Show runtime resolution probes</span></summary>
             <dl className="provider-item-kv">
               <dt>Selected</dt>
               <dd>
@@ -253,12 +254,12 @@ export function ProviderOverviewPanel({
             </dd>
             <dt>Expected goal</dt>
             <dd>
-              <span>{task.prompt}</span>
+              <span className="provider-kv__prose">{task.prompt}</span>
               <small>Authoritative task goal</small>
             </dd>
             <dt>Provider goal</dt>
             <dd>
-              <span>{goal?.providerObjective ?? '—'}</span>
+              <span className="provider-kv__prose">{goal?.providerObjective ?? '—'}</span>
               <small>
                 {goal?.providerObjective === task.prompt
                   ? 'Matches the Task Monki goal'
@@ -305,7 +306,7 @@ export function ProviderOverviewPanel({
         ) : null}
         {runtimeState?.native !== undefined ? (
           <details className="raw-provider-event">
-            <summary>Show runtime-native metadata</summary>
+            <summary><span className="tm-disclosure__label"><DisclosureChevron />Show runtime-native metadata</span></summary>
             <pre>{JSON.stringify(runtimeState.native, null, 2)}</pre>
           </details>
         ) : null}

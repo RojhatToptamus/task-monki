@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Tone } from '../model/viewTypes';
+import { DisclosureChevron } from './DisclosureChevron';
 export {
   FINDING_LEVELS,
   findingLevel,
@@ -23,7 +24,7 @@ export interface FindingRowProps {
 }
 
 /**
- * One finding, rendered identically everywhere: a severity dot + label, the
+ * One finding, rendered identically everywhere: a severity label, the
  * title and a mono reference, an optional selection checkbox, and a disclosure
  * for the detail. The checkbox slot lets the request-changes drawer mirror the
  * review card exactly instead of maintaining a second layout (audit §06).
@@ -40,7 +41,6 @@ export function FindingRow({
   const head = (
     <>
       <span className="tm-finding__severity">
-        <span className="tm-finding__severity-dot" />
         <span>{severityLabel.toUpperCase()}</span>
       </span>
       <span className="tm-finding__main">
@@ -73,9 +73,7 @@ export function FindingRow({
     <details className={`tm-finding tm-finding--${tone}`} open={open}>
       <summary>
         {head}
-        <span className="tm-finding__chevron" aria-hidden="true">
-          ›
-        </span>
+        <DisclosureChevron className="tm-finding__chevron" />
       </summary>
       {detail ? <div className="tm-finding__detail">{detail}</div> : null}
     </details>

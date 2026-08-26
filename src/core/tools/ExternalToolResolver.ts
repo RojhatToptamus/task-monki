@@ -10,7 +10,7 @@ import type {
   TestExternalToolRequest
 } from '../../shared/contracts';
 import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
-import { execFilePortable } from '../process/portableChildProcess';
+import { execFileOwnedPortable } from '../process/ownedProcess';
 
 const TOOL_DEFINITIONS: Record<
   ExternalToolId,
@@ -111,7 +111,7 @@ export async function probeExecutable(input: {
   let resolvedPath: string | null = null;
   try {
     resolvedPath = await resolveExecutablePath(input.executable, input.env);
-    const { stdout, stderr } = await execFilePortable(
+    const { stdout, stderr } = await execFileOwnedPortable(
       resolvedPath ?? input.executable,
       input.versionArgs,
       {
