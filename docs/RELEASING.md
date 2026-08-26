@@ -92,11 +92,25 @@ On macOS, also run:
 
 ```sh
 npm run verify:packaged-owned-process
+npm run verify:packaged-preview
 ```
 
 This runs the packaged Electron executable in Node mode, loads the packaged
 IPC owner resource, and executes a bounded child through that exact production
-launch path.
+launch path. The Preview verifier exercises the packaged launcher, local static
+server, content-security policy, and owned-process cleanup. Normal CI and the
+release workflow run both deterministic checks on macOS after packaging.
+
+The safe-storage relaunch verifier remains a macOS release-qualification check:
+
+```sh
+npm run verify:packaged-preview-safe-storage
+```
+
+It launches the GUI twice and uses the operating-system credential store. Run
+it before publishing a release that changes Preview credentials, encryption,
+or relaunch recovery; it is not part of pull-request CI until its host-level
+stability is established.
 
 Normal pull-request and `main` CI also builds an unpacked native package and
 runs this smoke test on macOS, Windows, and Linux. Keep the full release

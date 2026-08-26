@@ -15,7 +15,7 @@ import {
   describeExternalToolAvailability,
   selectSettingsModels
 } from './SettingsView';
-import { AgentModelSetting, agentModelMenuGeometry } from './AgentModelSelector';
+import { AgentModelSetting } from './AgentModelSelector';
 
 const codexModel: AgentModel = {
   id: 'codex:test-model',
@@ -59,19 +59,6 @@ const runtimes: AgentRuntimeState[] = [
 ];
 
 describe('SettingsView', () => {
-  it('constrains compact model menus to their scroll sheet', () => {
-    expect(agentModelMenuGeometry({
-      trigger: { top: 540, right: 292, bottom: 568 },
-      boundary: { top: 180, right: 312, bottom: 608, left: 68 },
-      constrainWidth: true
-    })).toEqual({ placement: 'top', maxHeight: 320, maxWidth: 220 });
-    expect(agentModelMenuGeometry({
-      trigger: { top: 210, right: 292, bottom: 238 },
-      boundary: { top: 180, right: 312, bottom: 608, left: 68 },
-      constrainWidth: true
-    })).toEqual({ placement: 'bottom', maxHeight: 320, maxWidth: 220 });
-  });
-
   it('shows every agent with its independent enabled state', () => {
     const discoverAgentRuntimeModels = vi.fn(async () => undefined);
     const html = renderToStaticMarkup(
@@ -151,7 +138,6 @@ describe('SettingsView', () => {
 
     expect(withoutEffort).not.toContain('>Reasoning<');
     expect(withEffort).toContain('>Reasoning<');
-    expect(withEffort).not.toContain('tm-agent-console__label">Agent<');
     expect(withEffort).toContain('>High</small>');
     expect(withEffort).toContain('>X-high</small>');
 

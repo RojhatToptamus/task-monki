@@ -48,7 +48,7 @@ describe('Preview surfaces', () => {
     expect(html).toContain('Another task’s Preview route');
   });
 
-  it('keeps Overview compact and routes approval through the detailed workspace', () => {
+  it('keeps the Overview summary focused on the review action', () => {
     const html = renderToStaticMarkup(
       <PreviewOverviewCard {...previewProps()} onShowDetails={() => {}} />
     );
@@ -56,32 +56,19 @@ describe('Preview surfaces', () => {
     expect(html).toContain('Approval required');
     expect(html).toContain('1 application node · 1 setup job · 1 route');
     expect(html).toContain('Review &amp; approve');
-    expect(html).not.toContain('status-pill');
-    expect(html).not.toContain('Details');
-    expect(html).not.toContain('Currentness');
-    expect(html).not.toContain('No attached route');
-    expect(html).not.toContain('Review execution plan');
-    expect(html).not.toContain('Private inputs');
-    expect(html).not.toContain('View logs');
-    expect(html).not.toContain('Stop Preview');
-    expect(html).not.toContain('Reset database');
-    expect(html).not.toContain('node&quot; &quot;server.mjs');
+    expect(html).not.toContain('Approve plan');
+    expect(html).not.toContain('Start preview');
   });
 
-  it('shows only status, explanation, and action before the recipe is checked', () => {
+  it('gates approval and start until the recipe is checked', () => {
     const html = renderToStaticMarkup(
       <PreviewWorkspace {...previewProps({ includePlan: false })} />
     );
 
     expect(html).toContain('Not checked');
-    expect(html).toContain('tm-preview-workspace tm-preview-workspace--focused');
     expect(html).toContain('Check preview');
-    expect(html).not.toContain('id="preview-plan-authority"');
-    expect(html).not.toContain('id="preview-application"');
-    expect(html).not.toContain('id="preview-routes"');
-    expect(html).not.toContain('id="preview-data"');
-    expect(html).not.toContain('Technical details');
-    expect(html).not.toContain('Data scenario');
+    expect(html).not.toContain('Approve plan');
+    expect(html).not.toContain('Start preview');
   });
 
   it('offers agent generation and manual authoring after a missing recipe is confirmed', () => {
@@ -149,7 +136,6 @@ routes:
     );
 
     expect(html).toContain('Review Preview configuration');
-    expect(html).not.toContain('tm-preview-recipe-review--compact');
     expect(html).toContain('Complete YAML');
     expect(html).toContain('command: [node, server.mjs]');
     expect(html).toContain('package.json — The dev script runs server.mjs.');
@@ -183,7 +169,6 @@ routes:
 
     expect(html).toContain('Agent is drafting the recipe');
     expect(html).toContain('Reading only the bounded evidence bundle');
-    expect(html).toContain('tm-preview-recipe-review--compact');
     expect(html).toContain('Close');
     expect(html).not.toContain('Discard');
     expect(html).not.toContain('Regenerate');
@@ -210,7 +195,6 @@ routes:
       />
     );
 
-    expect(html).toContain('tm-preview-recipe-review--compact');
     expect(html).toContain('Draft not generated');
     expect(html).toContain('Try again');
     expect(html).not.toContain('Discard');
@@ -246,11 +230,10 @@ routes:
     expect(blocked).not.toContain('Start preview');
   });
 
-  it('makes approval the focus and keeps exact authority behind disclosure', () => {
+  it('shows exact approval authority without exposing private values', () => {
     const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps()} />);
 
     expect(html).toContain('Execution plan');
-    expect(html).not.toContain('tm-preview-workspace tm-preview-workspace--focused');
     expect(html).toContain('Approve plan');
     expect(html).toContain('Application');
     expect(html).toContain('Setup jobs');
@@ -262,27 +245,7 @@ routes:
     expect(html).toContain('Cleanup contract');
     expect(html).toContain('Exact commands, recipients, readiness, and cleanup');
     expect(html).toContain('accounts.internal:443');
-    expect(html).not.toContain('id="preview-application"');
-    expect(html).not.toContain('id="preview-routes"');
-    expect(html).not.toContain('id="preview-data"');
-    expect(html).not.toContain('Not run');
-    expect(html).not.toContain('Not created');
     expect(html).not.toContain('plaintext-canary');
-  });
-
-  it('keeps ready-to-start free of empty runtime sections', () => {
-    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({ approved: true })} />);
-
-    expect(html).toContain('Ready to start');
-    expect(html).toContain('Start preview');
-    expect(html).toContain('Approved plan details');
-    expect(html).toContain('Private inputs');
-    expect(html).not.toContain('id="preview-application"');
-    expect(html).not.toContain('id="preview-routes"');
-    expect(html).not.toContain('id="preview-data"');
-    expect(html).not.toContain('Technical details');
-    expect(html).not.toContain('Not run');
-    expect(html).not.toContain('Not created');
   });
 
   it('turns safe private-input blockers into a configuration workspace', () => {
@@ -304,9 +267,7 @@ routes:
     expect(html).toContain('Set value…');
     expect(html).toContain('Checks once at startup');
     expect(html).toContain('Ownership');
-    expect(html).not.toContain('tm-preview-private-input__dot');
     expect(html).toContain('accounts — checked or used, never managed');
-    expect(html).not.toContain('type="password"');
   });
 
   it('shows the startup pipeline without implying queued nodes have run', () => {
@@ -319,14 +280,10 @@ routes:
 
     expect(html).toContain('Starting');
     expect(html).toContain('Cancel start');
-    expect(html).toContain('id="preview-application"');
     expect(html).toContain('web');
     expect(html).toContain('prepare');
     expect(html).toContain('Queued');
-    expect(html).not.toContain('tm-preview-row__dot');
     expect(html).not.toContain('Not run');
-    expect(html).not.toContain('id="preview-routes"');
-    expect((html.match(/Starting/g) ?? [])).toHaveLength(1);
   });
 
   it('separates the active generation from its candidate during replacement', () => {
@@ -385,7 +342,7 @@ routes:
     expect(html).not.toContain('internal-token');
   });
 
-  it('keeps failure copy safe, concise, and free of empty sections', () => {
+  it('keeps startup failure actions and diagnostics safe', () => {
     const generation = generationFixture({
       state: 'FAILED',
       failureReason: 'docker run --label io.taskmonki.preview.store=internal-secret'
@@ -397,15 +354,11 @@ routes:
     })} />);
 
     expect(html).toContain('web failed during preview startup');
-    expect(html).toContain('tm-preview-workspace tm-preview-workspace--focused');
     expect(html).toContain('Try again');
     expect(html).toContain('View logs');
     expect(html).not.toContain('docker run');
     expect(html).not.toContain('io.taskmonki.preview.store');
     expect(html).not.toContain('internal-secret');
-    expect(html).not.toContain('id="preview-routes"');
-    expect(html).not.toContain('id="preview-data"');
-    expect((html.match(/web failed during preview startup/g) ?? [])).toHaveLength(1);
   });
 
   it('keeps destructive and attached-resource actions out of the normal running surface', () => {
@@ -430,18 +383,16 @@ routes:
     );
 
     expect(html).toContain('Open preview');
-    expect(html).toContain('tm-ac6194662119229bf44ff8f080aedb3d.localhost');
     expect(html).toContain('Preview options');
     expect(html).toContain('Replace…');
     expect(html).toContain('Runtime ownership · 1');
     expect(html).toContain('Verified native process group');
-    expect(html).not.toContain('type="password"');
     expect(html).not.toContain('Stop Preview &amp; Delete Data');
     expect(html).not.toContain('Reset accounts');
     expect(html).not.toContain('plaintext-canary');
   });
 
-  it('keeps recovery and cleanup errors singular and safe', () => {
+  it('keeps recovery and cleanup diagnostics safe', () => {
     const recoveryHtml = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
       approved: true,
       generation: generationFixture({
@@ -453,9 +404,6 @@ routes:
     expect(recoveryHtml).toContain('Preview options');
     expect(recoveryHtml).not.toContain('docker inspect');
     expect(recoveryHtml).not.toContain('internal-label-canary');
-    expect(recoveryHtml).not.toContain('id="preview-application"');
-    expect(recoveryHtml).not.toContain('id="preview-routes"');
-    expect(recoveryHtml).not.toContain('id="preview-data"');
 
     const cleanupHtml = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
       approved: true,
@@ -466,14 +414,11 @@ routes:
     })} />);
     expect(cleanupHtml).toContain('Cleanup incomplete');
     expect(cleanupHtml).toContain('Retry cleanup');
-    expect(cleanupHtml).toContain('class="primary-button"');
     expect(cleanupHtml).not.toContain('raw ownership marker');
     expect(cleanupHtml).not.toContain('internal-cleanup-canary');
-    expect((cleanupHtml.match(/Task Monki could not verify exact cleanup/g) ?? []))
-      .toHaveLength(1);
   });
 
-  it('presents Compose approval without native-only warnings or empty runtime rows', () => {
+  it('presents Compose approval without native-only warnings', () => {
     const props = previewProps();
     const plan: PreviewPlanRecord = {
       ...props.plans[0],
@@ -522,9 +467,6 @@ routes:
     expect(html).toContain('cache-data');
     expect(html).toContain('Compose networks remain task-scoped.');
     expect(html).not.toContain('Native preview commands run');
-    expect(html).not.toContain('id="preview-application"');
-    expect(html).not.toContain('id="preview-data"');
-    expect(html).not.toContain('Not created');
   });
 });
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RunRecord } from '../../shared/contracts';
 import type {
   AgentInteractionDecision,
@@ -10,13 +10,20 @@ import type {
 } from '../../shared/agent';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import {
-  createTaskMonkiScenario,
   ScriptedAgentRuntimeAdapter,
+  TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { AppEventBus } from '../runner/AppEventBus';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+
+const scenarios = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarios.create.bind(scenarios);
+
+afterEach(async () => {
+  await scenarios.dispose();
+});
 
 describe('TaskManagerService evidence flow', () => {
   it('observes post-run Git evidence after implementation completes', async () => {

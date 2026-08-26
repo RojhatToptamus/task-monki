@@ -2,7 +2,6 @@ import type {
   AgentOwnerScope,
   AgentRuntimeArtifactKind,
   AgentRuntimeArtifactRecord,
-  AgentRuntimeMigrationRecord,
   AgentRuntimeRunRecord,
   AgentRuntimeSessionRecord,
   AgentRuntimeStoreState,
@@ -102,13 +101,6 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
   init(): Promise<void>;
   close(): Promise<void>;
   snapshot(): Promise<AgentRuntimeStoreState>;
-  getTaskStoreV11Migration(): Promise<AgentRuntimeMigrationRecord | undefined>;
-  recordTaskStoreV11Migration(input: {
-    sourceSha256: string;
-    sessionCount: number;
-    runCount: number;
-    operationId: string;
-  }): Promise<AgentRuntimeMigrationRecord>;
   createSession(input: CreateRuntimeSessionInput): Promise<AgentRuntimeSessionRecord>;
   createRun(input: CreateRuntimeRunInput): Promise<AgentRuntimeRunRecord>;
   createObservedRun(

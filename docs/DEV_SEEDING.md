@@ -100,7 +100,7 @@ instead of manually constructing state in the app:
 
 1. Add a scenario definition in `src/dev/seedScenarios.ts`.
 2. Add a builder path that uses `FileTaskStore` APIs and domain events.
-3. Add or update `src/dev/seedData.test.ts` to assert the resulting selector or
+3. Add or update `src/dev/seedData.integration.test.ts` to assert the resulting selector or
    view-model output.
 4. Regenerate with `npm run dev:seed` and test the UI against the new slug.
 

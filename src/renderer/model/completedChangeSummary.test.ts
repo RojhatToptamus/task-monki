@@ -9,8 +9,8 @@ import {
 describe('completed change summary model', () => {
   it('builds compact totals and a bounded file preview from parsed diff evidence', () => {
     const summary = buildCompletedChangeSummary([
-      diffFile({ path: 'src/core/app/TaskManagerService.progress.test.ts', additions: 6, deletions: 6 }),
-      diffFile({ path: 'src/dev/seedData.test.ts', additions: 4, deletions: 4 }),
+      diffFile({ path: 'src/core/app/TaskManagerService.progress.integration.test.ts', additions: 6, deletions: 6 }),
+      diffFile({ path: 'src/dev/seedData.integration.test.ts', additions: 4, deletions: 4 }),
       diffFile({ path: 'src/renderer/model/overviewRunActivity.test.ts', additions: 228, deletions: 0 }),
       diffFile({ path: 'src/renderer/ui/TaskDetail.tsx', additions: 40, deletions: 2 })
     ]);
@@ -22,13 +22,13 @@ describe('completed change summary model', () => {
       deletions: 12,
       previewFiles: [
         {
-          path: 'src/core/app/TaskManagerService.progress.test.ts',
+          path: 'src/core/app/TaskManagerService.progress.integration.test.ts',
           additions: 6,
           deletions: 6,
           status: 'modified'
         },
         {
-          path: 'src/dev/seedData.test.ts',
+          path: 'src/dev/seedData.integration.test.ts',
           additions: 4,
           deletions: 4,
           status: 'modified'

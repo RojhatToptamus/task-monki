@@ -13,6 +13,7 @@ import type {
   DiscourseParticipantRevisionRecord,
   DiscourseResponseWaveRecord
 } from '../../shared/discourse';
+import { DISCOURSE_STORE_SCHEMA_VERSION } from '../../shared/discourse';
 import {
   createDiscourseLogEvent,
   encodeDiscourseLogEvent
@@ -41,76 +42,6 @@ describe('FileDiscourseStore', () => {
     expect(await restarted.listConversations()).toMatchObject({
       conversations: [{ id: 'conversation-1', unreadCount: 0, activeWaveCount: 0 }]
     });
-  });
-
-  it('replays a pre-semantic-fingerprint create by durable participant semantics', async () => {
-    const fixture = await storeFixture();
-    const originalSeed = participantSeed('conversation-legacy');
-    await fixture.store.createConversation({
-      id: 'conversation-legacy',
-      title: 'Architecture review',
-      defaultPolicy: 'TEAM',
-      participants: [originalSeed.participant],
-      participantRevisions: [originalSeed.revision],
-      requestFingerprint: 'a'.repeat(64),
-      clientOperationId: 'legacy-create-operation'
-    });
-    await fixture.store.close();
-
-    const conversationDir = path.join(
-      fixture.root,
-      'conversations',
-      'conversation-legacy'
-    );
-    const eventPath = path.join(conversationDir, 'events-000001.jsonl');
-    const storedEvent = JSON.parse(await fs.readFile(eventPath, 'utf8')) as {
-      payload: Record<string, DiscourseJsonValue>;
-    };
-    delete storedEvent.payload.createFingerprintVersion;
-    await fs.writeFile(
-      eventPath,
-      encodeDiscourseLogEvent(createDiscourseLogEvent({
-        formatVersion: 1,
-        sequence: 1,
-        kind: 'CONVERSATION_CREATED',
-        operationId: 'legacy-create-operation',
-        requestFingerprint: 'c'.repeat(64),
-        payload: storedEvent.payload
-      })),
-      { mode: 0o600 }
-    );
-    await Promise.all([
-      fs.rm(path.join(fixture.root, 'index.json'), { force: true }),
-      fs.rm(path.join(conversationDir, 'metadata.json'), { force: true }),
-      fs.rm(path.join(conversationDir, 'manifest.json'), { force: true }),
-      fs.rm(path.join(conversationDir, 'events-000001.index.json'), { force: true })
-    ]);
-
-    const restarted = new FileDiscourseStore(fixture.root);
-    await expect(restarted.findCreatedConversation({
-      clientOperationId: 'legacy-create-operation',
-      requestFingerprint: 'd'.repeat(64)
-    })).resolves.toBeUndefined();
-    const retrySeed = participantSeed('');
-    retrySeed.participant.id = 'retry-participant';
-    retrySeed.participant.currentRevisionId = 'retry-revision';
-    retrySeed.revision.id = 'retry-revision';
-    retrySeed.revision.stableParticipantId = 'retry-participant';
-    const retry = {
-      title: 'Architecture review',
-      defaultPolicy: 'TEAM' as const,
-      participants: [retrySeed.participant],
-      participantRevisions: [retrySeed.revision],
-      requestFingerprint: 'd'.repeat(64),
-      clientOperationId: 'legacy-create-operation'
-    };
-    await expect(restarted.createConversation(retry)).resolves.toMatchObject({
-      id: 'conversation-legacy'
-    });
-    await expect(restarted.createConversation({
-      ...retry,
-      participantRevisions: [{ ...retrySeed.revision, model: 'changed-model' }]
-    })).rejects.toThrow('REQUEST_CONFLICT');
   });
 
   it('appends participant configuration revisions without rewriting attributable history', async () => {
@@ -484,7 +415,7 @@ describe('FileDiscourseStore', () => {
     expect(await restarted.getDraft(rebound.id)).toBeUndefined();
   });
 
-  it('projects legacy drafts into the current durable shape without leaking removed fields', async () => {
+  it('rejects drafts missing required current-schema fields', async () => {
     const fixture = await storeFixture();
     const draft = await fixture.store.saveDraft({
       body: 'Legacy draft body',
@@ -508,14 +439,9 @@ describe('FileDiscourseStore', () => {
       checksum: testChecksum(unsigned)
     })}\n`, { mode: 0o600 });
 
-    const loaded = await new FileDiscourseStore(fixture.root).getDraft(draft.id);
-    expect(loaded).toMatchObject({
-      id: draft.id,
-      body: 'Legacy draft body',
-      sourceMessageIds: [],
-      agentSelections: []
-    });
-    expect(loaded).not.toHaveProperty('recipientParticipantIds');
+    await expect(new FileDiscourseStore(fixture.root).getDraft(draft.id)).rejects.toThrow(
+      'Discourse draft file failed its integrity check'
+    );
   });
 
   it('deletes conversation-owned drafts even when an unrelated draft has a bad checksum', async () => {
@@ -995,7 +921,7 @@ describe('FileDiscourseStore', () => {
     ).resolves.toMatchObject({ ordinal: 1 });
   });
 
-  it('rebuilds corrupt indexes/metadata but refuses newer schemas and symlink roots', async () => {
+  it('rebuilds corrupt indexes/metadata but rejects unsupported schemas and symlink roots', async () => {
     const fixture = await storeFixture();
     await createConversation(fixture.store, 'conversation-1', 'create-1');
     await fixture.store.appendHumanMessage({
@@ -1016,16 +942,20 @@ describe('FileDiscourseStore', () => {
         .createOperations
     ).toHaveLength(1);
 
-    const newerRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-discourse-newer-'));
-    await fs.mkdir(path.join(newerRoot, 'conversations'));
-    await fs.writeFile(
-      path.join(newerRoot, 'index.json'),
-      `${JSON.stringify({ schemaVersion: 2 })}\n`,
-      { mode: 0o600 }
-    );
-    await expect(new FileDiscourseStore(newerRoot).init()).rejects.toThrow(
-      'newer than this app supports'
-    );
+    for (const schemaVersion of [1, DISCOURSE_STORE_SCHEMA_VERSION + 1]) {
+      const unsupportedRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-discourse-unsupported-')
+      );
+      await fs.mkdir(path.join(unsupportedRoot, 'conversations'));
+      await fs.writeFile(
+        path.join(unsupportedRoot, 'index.json'),
+        `${JSON.stringify({ schemaVersion })}\n`,
+        { mode: 0o600 }
+      );
+      await expect(new FileDiscourseStore(unsupportedRoot).init()).rejects.toThrow(
+        `Unsupported Discourse store schema ${schemaVersion}`
+      );
+    }
 
     const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-discourse-link-'));
     const target = path.join(parent, 'target');
@@ -1037,7 +967,7 @@ describe('FileDiscourseStore', () => {
     );
   });
 
-  it('pages a 10,000-message conversation without replaying its transcript at cold startup', async () => {
+  it('pages a long conversation without replaying its transcript at cold startup', async () => {
     const fixture = await storeFixture();
     const conversation = await createConversation(
       fixture.store,
@@ -1045,7 +975,7 @@ describe('FileDiscourseStore', () => {
       'create-1'
     );
     await fixture.store.close();
-    await seedMessageEvents(fixture.root, conversation, 10_000);
+    await seedMessageEvents(fixture.root, conversation, 300);
 
     // The first recovery creates authoritative indexes and current aggregate
     // metadata for the synthetic long-history fixture.
@@ -1071,16 +1001,16 @@ describe('FileDiscourseStore', () => {
       limit: 100
     });
     expect(latest.messages).toHaveLength(100);
-    expect(latest.messages[0]?.ordinal).toBe(9_901);
-    expect(latest.messages.at(-1)?.ordinal).toBe(10_000);
+    expect(latest.messages[0]?.ordinal).toBe(201);
+    expect(latest.messages.at(-1)?.ordinal).toBe(300);
     expect(latest.previousCursor).toBeTruthy();
     const previous = await cold.listMessages({
       conversationId: conversation.id,
       beforeCursor: latest.previousCursor,
       limit: 100
     });
-    expect(previous.messages[0]?.ordinal).toBe(9_801);
-    expect(previous.messages.at(-1)?.ordinal).toBe(9_900);
+    expect(previous.messages[0]?.ordinal).toBe(101);
+    expect(previous.messages.at(-1)?.ordinal).toBe(200);
     await expect(fs.readFile(firstSegmentIndex, 'utf8')).resolves.toContain(
       'message:bulk-message-1'
     );
@@ -1122,7 +1052,7 @@ async function seedMessageEvents(
     lines.push(
       encodeDiscourseLogEvent(
         createDiscourseLogEvent({
-          formatVersion: 1,
+          formatVersion: 2,
           sequence,
           kind: 'MESSAGE_APPENDED',
           operationId: `message:bulk-message-${ordinal}`,

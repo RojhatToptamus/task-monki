@@ -116,9 +116,7 @@ import {
 } from './AttachmentFileStore';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
 import {
-  migratePersistedStateToCurrent,
-  normalizeLoadedState,
-  normalizePersistedStateBeforeValidation
+  normalizeLoadedState
 } from './currentStoreNormalization';
 import {
   STORE_OWNERSHIP_LEASE_FILE,
@@ -885,9 +883,7 @@ export class FileTaskStore {
         await this.persist();
       } else {
         const persisted = JSON.parse(raw) as PersistedState;
-        const migrated = migratePersistedStateToCurrent(persisted);
-        const repaired = normalizePersistedStateBeforeValidation(migrated.state);
-        const normalized = normalizeLoadedState(requireCurrentState(repaired.state));
+        const normalized = normalizeLoadedState(requireCurrentState(persisted));
         this.state = normalized.state;
         await this.attachmentFiles.reconcile(
           this.state.attachments,
@@ -896,8 +892,6 @@ export class FileTaskStore {
         await this.reconcileArtifacts();
         const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
         if (
-          migrated.changed ||
-          repaired.changed ||
           normalized.changed ||
           prunedServerIds.length > 0
         ) {

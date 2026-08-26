@@ -1,52 +1,101 @@
 import { describe, expect, it } from 'vitest';
-import type { Task } from '../../shared/contracts';
-import { createInitialProjection } from '../../shared/contracts';
+import { makeTaskRecord } from '../../testSupport/rendererRecords';
 import { describeTaskAttention } from './taskAttention';
 
 describe('describeTaskAttention', () => {
-  it('uses direct recovery copy for ambiguous runtime state', () => {
-    const attention = describeTaskAttention(
-      taskFixture({
-        projection: {
-          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
-          agentRun: 'RECOVERY_REQUIRED'
-        }
-      })
-    );
-
-    expect(attention).toMatchObject({
-      label: 'Recovery required',
-      detail: 'Runtime state is ambiguous; inspect recovery details.'
-    });
-  });
-
-  it('directs failed implementation work to retry instead of review', () => {
-    const attention = describeTaskAttention(
-      taskFixture({
+  it.each([
+    {
+      name: 'approval',
+      task: makeTaskRecord({ projection: { agentRun: 'AWAITING_APPROVAL' } }),
+      expected: { label: 'Needs approval', tone: 'warning' }
+    },
+    {
+      name: 'user input',
+      task: makeTaskRecord({ projection: { agentRun: 'AWAITING_USER_INPUT' } }),
+      expected: { label: 'Needs input', tone: 'warning' }
+    },
+    {
+      name: 'ambiguous recovery',
+      task: makeTaskRecord({ projection: { agentRun: 'RECOVERY_REQUIRED' } }),
+      expected: { label: 'Recovery required', tone: 'error' }
+    },
+    {
+      name: 'lost runtime',
+      task: makeTaskRecord({ projection: { agentRun: 'LOST' } }),
+      expected: { label: 'Runtime lost', tone: 'error' }
+    },
+    {
+      name: 'failed implementation',
+      task: makeTaskRecord({
         workflowPhase: 'IN_PROGRESS',
+        projection: { agentRun: 'FAILED' }
+      }),
+      expected: { label: 'Run failed', tone: 'error' }
+    },
+    {
+      name: 'blocked task',
+      task: makeTaskRecord({
+        workflowPhase: 'BLOCKED',
+        projection: { summary: 'A repository decision is required.' }
+      }),
+      expected: { label: 'Blocked', tone: 'error' }
+    },
+    {
+      name: 'closed pull request',
+      task: makeTaskRecord({
+        projection: { githubPullRequest: 'CLOSED_UNMERGED' }
+      }),
+      expected: { label: 'PR closed without merge', tone: 'error' }
+    },
+    {
+      name: 'failing checks',
+      task: makeTaskRecord({ projection: { ciChecks: 'FAILING' } }),
+      expected: { label: 'Checks failed', tone: 'error' }
+    },
+    {
+      name: 'GitHub changes requested',
+      task: makeTaskRecord({ projection: { reviews: 'CHANGES_REQUESTED' } }),
+      expected: { label: 'Changes requested', tone: 'warning' }
+    },
+    {
+      name: 'blocked merge',
+      task: makeTaskRecord({ projection: { merge: 'BLOCKED' } }),
+      expected: { label: 'Merge blocked', tone: 'error' }
+    },
+    {
+      name: 'manual completion after merge',
+      task: makeTaskRecord({
+        completionPolicy: 'MANUAL',
+        workflowPhase: 'IN_REVIEW',
+        projection: { githubPullRequest: 'MERGED', merge: 'MERGED' }
+      }),
+      expected: { label: 'Waiting for Mark done', tone: 'info' }
+    },
+    {
+      name: 'generic delivery error',
+      task: makeTaskRecord({
         projection: {
-          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
-          agentRun: 'FAILED'
+          githubPullRequest: 'OPEN_READY',
+          merge: 'NOT_MERGED',
+          health: 'ERROR',
+          summary: 'GitHub merge state: NOT_MERGED.'
         }
-      })
-    );
-
-    expect(attention).toMatchObject({
-      label: 'Run failed',
-      detail: 'Retry the implementation or continue unfinished work before review.'
-    });
+      }),
+      expected: { label: 'Delivery needs attention', tone: 'error' }
+    }
+  ])('selects the highest-priority $name state', ({ task, expected }) => {
+    expect(describeTaskAttention(task)).toMatchObject(expected);
   });
 
-  it('surfaces a blocked completed implementation as needing retry', () => {
+  it('keeps a blocked completed implementation ahead of delivery and review state', () => {
     const attention = describeTaskAttention(
-      taskFixture({
+      makeTaskRecord({
         currentRunId: 'run-1',
         workflowPhase: 'IN_PROGRESS',
         projection: {
-          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
           requestedAction: 'FAILED',
           agentRun: 'COMPLETED',
-          summary: 'A later Git refresh completed.',
+          ciChecks: 'FAILING',
           implementationRetry: {
             runId: 'run-1',
             reason: 'The declined execution produced no Git change.'
@@ -62,48 +111,10 @@ describe('describeTaskAttention', () => {
     });
   });
 
-  it('labels failing GitHub checks as delivery attention', () => {
-    const attention = describeTaskAttention(
-      taskFixture({
+  it('sanitizes generic delivery attention and returns nothing for neutral state', () => {
+    const delivery = describeTaskAttention(
+      makeTaskRecord({
         projection: {
-          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
-          ciChecks: 'FAILING'
-        }
-      })
-    );
-
-    expect(attention).toMatchObject({
-      label: 'Checks failed',
-      detail: 'GitHub checks need attention.'
-    });
-  });
-
-  it('uses completion language for a merged task that still requires manual acceptance', () => {
-    const attention = describeTaskAttention(
-      taskFixture({
-        completionPolicy: 'MANUAL',
-        workflowPhase: 'IN_REVIEW',
-        projection: {
-          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
-          githubPullRequest: 'MERGED',
-          merge: 'MERGED',
-          summary: 'GitHub reports the pull request merged.'
-        }
-      })
-    );
-
-    expect(attention).toEqual({
-      label: 'Waiting for Mark done',
-      detail: 'The pull request is merged; this task requires manual completion.',
-      tone: 'info'
-    });
-  });
-
-  it('does not expose raw merge enums in generic delivery attention', () => {
-    const attention = describeTaskAttention(
-      taskFixture({
-        projection: {
-          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
           githubPullRequest: 'OPEN_READY',
           merge: 'NOT_MERGED',
           health: 'ERROR',
@@ -112,33 +123,8 @@ describe('describeTaskAttention', () => {
       })
     );
 
-    expect(attention).toEqual({
-      label: 'Delivery needs attention',
-      detail: 'Open the task to review the current GitHub evidence.',
-      tone: 'error'
-    });
-    expect(`${attention?.label} ${attention?.detail}`).not.toContain('NOT_MERGED');
+    expect(delivery?.detail).toBe('Open the task to review the current GitHub evidence.');
+    expect(JSON.stringify(delivery)).not.toContain('NOT_MERGED');
+    expect(describeTaskAttention(makeTaskRecord())).toBeUndefined();
   });
 });
-
-function taskFixture(overrides: Partial<Task> = {}): Task {
-  const now = '2026-01-01T00:00:00.000Z';
-  return {
-    id: 'task-1',
-    kind: overrides.kind ?? 'NORMAL',
-    runtimeId: 'codex',
-    title: 'Task',
-    prompt: 'Do the work.',
-    repositoryId: '/tmp/repo',
-    workflowPhase: 'REVIEW',
-    resolution: 'NONE',
-    completionPolicy: 'LOCAL_ACCEPTANCE',
-    phaseVersion: 1,
-    forkedAlternativeTaskIds: [],
-    agentSettings: {},
-    createdAt: now,
-    updatedAt: now,
-    projection: createInitialProjection(now),
-    ...overrides
-  };
-}

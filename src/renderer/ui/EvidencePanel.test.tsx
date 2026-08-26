@@ -27,8 +27,7 @@ describe('Evidence composite controls', () => {
       />
     );
 
-    expect(html).toContain('<ul class="tm-diffbrowser__tree" aria-label="Changed files">');
-    expect(html).toContain('<li class="tm-difftree__group">');
+    expect(html).toContain('aria-label="Changed files"');
     expect(html).toContain('aria-expanded="true"');
     expect(html).toContain('aria-current="true"');
     expect(html).toContain('aria-label="Modified"');

@@ -10,8 +10,8 @@ import {
   syncDirectoryIfSupported
 } from '../filesystem/secureFilesystem';
 
-export const DISCOURSE_EVENT_LOG_SCHEMA_VERSION = 1 as const;
-const EVENT_FORMAT_VERSION = 1 as const;
+export const DISCOURSE_EVENT_LOG_SCHEMA_VERSION = 2 as const;
+const EVENT_FORMAT_VERSION = 2 as const;
 const DEFAULT_SEGMENT_MAX_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SEGMENT_MAX_EVENTS = 2_048;
 const DEFAULT_EVENT_MAX_BYTES = 128 * 1024;
@@ -496,12 +496,14 @@ export class FileDiscourseEventLog {
     stat: { size: number; mtimeMs: number; ctimeMs: number }
   ): Promise<DiscourseLogIndexEntry[] | undefined> {
     const parsed = await readBoundedJson(this.segmentIndexPath(segment), 2 * 1024 * 1024);
+    requireCurrentCacheSchema(parsed, 'event index');
     if (!isSegmentIndex(parsed, segment, stat, this.segmentMaxEvents)) return undefined;
     return parsed.entries;
   }
 
   private async readManifest(): Promise<DiscourseLogManifest | undefined> {
     const parsed = await readBoundedJson(path.join(this.directory, MANIFEST_FILE), 256 * 1024);
+    requireCurrentCacheSchema(parsed, 'event manifest');
     return isManifest(parsed) ? parsed : undefined;
   }
 
@@ -688,6 +690,18 @@ function firstEntryAtOrAfter(
     else high = middle;
   }
   return low;
+}
+
+function requireCurrentCacheSchema(value: unknown, label: string): void {
+  if (
+    isRecord(value) &&
+    Number.isSafeInteger(value.schemaVersion) &&
+    value.schemaVersion !== DISCOURSE_EVENT_LOG_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      `Unsupported Discourse ${label} schema ${String(value.schemaVersion)}.`
+    );
+  }
 }
 
 function isSegmentIndex(

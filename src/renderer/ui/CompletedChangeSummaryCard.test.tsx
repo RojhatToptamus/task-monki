@@ -12,8 +12,8 @@ describe('CompletedChangeSummaryCard', () => {
     expect(html).toContain('Edited 4 files');
     expect(html).toContain('+278');
     expect(html).toContain('-12');
-    expect(html).toContain('src/core/app/TaskManagerService.progress.test.ts');
-    expect(html).toContain('src/dev/seedData.test.ts');
+    expect(html).toContain('src/core/app/TaskManagerService.progress.integration.test.ts');
+    expect(html).toContain('src/dev/seedData.integration.test.ts');
     expect(html).toContain('src/renderer/model/overviewRunActivity.test.ts');
     expect(html).toContain('Show 1 more file');
     expect(html).toContain('src/renderer/ui/TaskDetail.tsx');
@@ -57,13 +57,13 @@ function summaryFixture(): CompletedChangeSummary {
     deletions: 12,
     previewFiles: [
       {
-        path: 'src/core/app/TaskManagerService.progress.test.ts',
+        path: 'src/core/app/TaskManagerService.progress.integration.test.ts',
         additions: 6,
         deletions: 6,
         status: 'modified'
       },
       {
-        path: 'src/dev/seedData.test.ts',
+        path: 'src/dev/seedData.integration.test.ts',
         additions: 4,
         deletions: 4,
         status: 'modified'

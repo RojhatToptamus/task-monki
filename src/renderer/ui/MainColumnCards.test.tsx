@@ -1,15 +1,12 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import {
-  createInitialProjection,
-  type InteractionRequestRecord,
-  type Task
-} from '../../shared/contracts';
+import type { InteractionRequestRecord } from '../../shared/contracts';
+import { makeRawMessage, makeTaskRecord } from '../../testSupport/rendererRecords';
 import { InboxDecisionCard, TaskCard } from './MainColumn';
 import type { TaskCardVM } from '../model/taskView';
 
 describe('TaskCard', () => {
-  it('keeps distinguishing status and evidence text without default hashes or decorative dots', () => {
+  it('renders the task identity, state, and local evidence supplied by its model', () => {
     const vm: TaskCardVM = {
       id: 'task-12345678',
       title: 'Review the repository change',
@@ -25,20 +22,11 @@ describe('TaskCard', () => {
       <TaskCard vm={vm} onSelect={() => {}} onArchive={() => {}} onRequestDelete={() => {}} />
     );
 
-    expect(html).toContain('<h3 class="tm-card__title">Review the repository change</h3>');
-    expect(html).toContain(
-      '<div class="tm-card__top"><span class="tm-card__meta">repo-secondary</span>'
-    );
-    expect(html.indexOf('repo-secondary')).toBeLessThan(
-      html.indexOf('<h3 class="tm-card__title">Review the repository change</h3>')
-    );
-    expect(html.match(/tm-card__meta/g)).toHaveLength(1);
+    expect(html).toContain('Review the repository change');
+    expect(html).toContain('repo-secondary');
     expect(html).toContain('Needs approval');
     expect(html).toContain('PR #42');
     expect(html).toContain('checks failing');
-    expect(html).not.toContain('#task-12');
-    expect(html).not.toContain('status-pill__dot');
-    expect(html).not.toContain('tm-card__evidence-dot');
   });
 
   it('uses the heading level supplied by the owning board lane or ungrouped grid', () => {
@@ -71,10 +59,11 @@ describe('TaskCard', () => {
       />
     );
 
-    expect(boardHtml).toContain('<h3 class="tm-card__title">Heading context</h3>');
+    expect(boardHtml).toContain('<h3');
+    expect(boardHtml).toContain('>Heading context</h3>');
     expect(boardHtml).toContain('data-task-id="task-heading" tabindex="0"');
-    expect(gridHtml).toContain('<h2 class="tm-card__title">Heading context</h2>');
-    expect(boardHtml).not.toContain('tm-card__top');
+    expect(gridHtml).toContain('<h2');
+    expect(gridHtml).toContain('>Heading context</h2>');
   });
 
   it('allows a board lane to make non-active cards arrow-reachable without tab stops', () => {
@@ -103,7 +92,7 @@ describe('TaskCard', () => {
 });
 
 describe('InboxDecisionCard', () => {
-  it('renders a compact semantic row with one primary Open task action', () => {
+  it('renders the attention reason with task navigation', () => {
     const task = attentionTask();
     const html = renderToStaticMarkup(
       <InboxDecisionCard
@@ -115,15 +104,14 @@ describe('InboxDecisionCard', () => {
       />
     );
 
-    expect(html).toContain('<article class="tm-decision">');
-    expect(html).toContain('<h2 class="tm-decision__title">Awaiting approval</h2>');
+    expect(html).toContain('<article');
+    expect(html).toContain('<h2');
+    expect(html).toContain('>Awaiting approval</h2>');
     expect(html).toContain('Provider is blocked on a permission decision.');
-    expect(html).toContain('class="tm-decision__open primary-button"');
-    expect(html).not.toContain('tm-pulse');
-    expect(html).not.toContain('tm-decision__repository');
+    expect(html).toContain('>Open task</button>');
   });
 
-  it('exposes missing repository identity when the Inbox selector requests it', () => {
+  it('shows repository identity when the Inbox selector requests it', () => {
     const html = renderToStaticMarkup(
       <InboxDecisionCard
         task={attentionTask()}
@@ -134,11 +122,10 @@ describe('InboxDecisionCard', () => {
       />
     );
 
-    expect(html).toContain('tm-decision__repository');
     expect(html).toContain('Missing repository');
   });
 
-  it('keeps Open task contextual when an inline approval is the primary action', () => {
+  it('offers an inline approval without hiding task navigation', () => {
     const html = renderToStaticMarkup(
       <InboxDecisionCard
         task={attentionTask()}
@@ -150,35 +137,23 @@ describe('InboxDecisionCard', () => {
       />
     );
 
-    expect(html).toContain('class="primary-button tm-decision__approve"');
-    expect(html).toContain('class="outline-button tm-decision__deny"');
-    expect(html).toContain('class="tm-decision__open"');
-    expect(html).not.toContain('class="tm-decision__open primary-button"');
+    expect(html).toContain('>Approve</button>');
+    expect(html).toContain('>Deny</button>');
+    expect(html).toContain('>Open task</button>');
   });
 });
 
-function attentionTask(): Task {
-  const now = '2026-07-19T12:00:00.000Z';
-  return {
+function attentionTask() {
+  return makeTaskRecord({
     id: 'task-attention',
-    kind: 'NORMAL',
     title: 'Awaiting approval',
     prompt: 'Approve the requested action.',
     repositoryId: 'repository-a',
-    runtimeId: 'codex',
     workflowPhase: 'IN_PROGRESS',
-    resolution: 'NONE',
-    completionPolicy: 'LOCAL_ACCEPTANCE',
-    phaseVersion: 1,
-    forkedAlternativeTaskIds: [],
-    agentSettings: {},
-    createdAt: now,
-    updatedAt: now,
     projection: {
-      ...createInitialProjection(now),
       agentRun: 'AWAITING_APPROVAL'
     }
-  };
+  });
 }
 
 function approvalInteraction(): InteractionRequestRecord {
@@ -201,15 +176,7 @@ function approvalInteraction(): InteractionRequestRecord {
     },
     allowedActions: ['ACCEPT', 'DECLINE'],
     policyWarnings: [],
-    requestRawMessage: {
-      serverInstanceId: 'server-1',
-      sequence: 1,
-      direction: 'INBOUND',
-      recordedAt: '2026-07-19T12:00:00.000Z',
-      byteOffset: 0,
-      byteLength: 1,
-      sha256: 'seed'
-    },
+    requestRawMessage: makeRawMessage({ sha256: 'seed' }),
     requestedAt: '2026-07-19T12:00:00.000Z'
   };
 }

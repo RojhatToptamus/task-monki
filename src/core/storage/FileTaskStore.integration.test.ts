@@ -1706,7 +1706,7 @@ describe('FileTaskStore', () => {
     );
   });
 
-  it('repairs blank review decisions written by earlier current-schema builds', async () => {
+  it('rejects blank review decisions in the current schema', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-review-repair-'));
     const store = new FileTaskStore(dir);
     const task = await store.createTask({
@@ -1775,15 +1775,9 @@ describe('FileTaskStore', () => {
       mode: 0o600
     });
 
-    const reloaded = new FileTaskStore(dir);
-    const snapshot = await reloaded.snapshot();
-    expect(snapshot.reviewRollups[0]?.reviewDecision).toBeUndefined();
-    await reloaded.close();
-
-    const repaired = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      reviewRollups: Array<Record<string, unknown>>;
-    };
-    expect(repaired.reviewRollups[0]).not.toHaveProperty('reviewDecision');
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid`
+    );
   });
 
   it('rejects duplicate persisted task-creation retry tokens', async () => {

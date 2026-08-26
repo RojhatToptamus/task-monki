@@ -11,7 +11,7 @@ import type {
   AgentSubagentStatus
 } from './agent';
 
-export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 2 as const;
+export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 3 as const;
 
 export const AGENT_RUNTIME_LIMITS = {
   maxSessions: 20_000,
@@ -90,7 +90,6 @@ export interface AgentManagedAttachmentAccess {
 export interface AgentExecutionContext {
   attestation:
     | { status: 'ATTESTED' }
-    | { status: 'LEGACY_UNATTESTED'; reason: string }
     | {
         status: 'INHERITED_UNATTESTED';
         parentSessionId: string;
@@ -301,8 +300,7 @@ export type AgentRuntimeEventType =
   | 'QUEUE_CANCELED'
   | 'QUEUE_SETTLED'
   | 'SHUTDOWN_LATCHED'
-  | 'SHUTDOWN_CLEARED'
-  | 'MIGRATION_IMPORTED';
+  | 'SHUTDOWN_CLEARED';
 
 export interface AgentRuntimeEventRecord {
   id: string;
@@ -318,14 +316,6 @@ export interface AgentRuntimeEventRecord {
   payload: Record<string, unknown>;
 }
 
-export interface AgentRuntimeMigrationRecord {
-  source: 'TASK_STORE_V11';
-  sourceSha256: string;
-  importedAt: string;
-  sessionCount: number;
-  runCount: number;
-}
-
 export interface AgentRuntimeStoreState {
   schemaVersion: typeof AGENT_RUNTIME_STORE_SCHEMA_VERSION;
   revision: number;
@@ -339,7 +329,6 @@ export interface AgentRuntimeStoreState {
   artifacts: AgentRuntimeArtifactRecord[];
   telemetryRecords: AgentRuntimeTelemetryRecord[];
   events: AgentRuntimeEventRecord[];
-  migrations: AgentRuntimeMigrationRecord[];
 }
 
 export function agentOwnerScopeKey(scope: AgentOwnerScope): string {

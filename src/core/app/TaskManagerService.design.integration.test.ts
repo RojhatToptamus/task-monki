@@ -7,19 +7,15 @@ import type { DesignDetailSnapshot, PreviewGenerationRecord } from '../../shared
 import { codexCapabilities } from '../agent/codex/codexCapabilities';
 import { git } from '../git/gitCli';
 import {
-  createTaskMonkiScenario,
+  TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 
-const scenarios: TaskMonkiScenario[] = [];
+const scenarioRegistry = new TaskMonkiScenarioRegistry();
+const createTaskMonkiScenario = scenarioRegistry.create.bind(scenarioRegistry);
 
 afterEach(async () => {
-  await Promise.allSettled(
-    scenarios.splice(0).map(async (scenario) => {
-      await scenario.service.shutdown().catch(() => undefined);
-      await fs.rm(scenario.rootDir, { recursive: true, force: true });
-    })
-  );
+  await scenarioRegistry.dispose();
 });
 
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
@@ -31,7 +27,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
     vi.spyOn(scenario.agent, 'capabilities').mockResolvedValue(
       codexCapabilities({
         designSkillAccess: { available: false, detail: 'Skill pack is invalid.' }
@@ -53,7 +48,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
     vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
       {
         id: 'codex:openai/scenario-model',
@@ -137,7 +131,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small status page with a clear launch button.',
@@ -232,7 +225,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small editorial page.',
@@ -383,7 +375,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a compact reporting page.',
@@ -497,7 +488,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
 
     let source = await scenario.service.createBlankDesign({
       brief: 'Create a compact product page.',
@@ -625,7 +615,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
 
     const detail = await scenario.service.createBlankDesign({
       brief: 'Create a compact reporting page.',
@@ -690,7 +679,6 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small status page.',

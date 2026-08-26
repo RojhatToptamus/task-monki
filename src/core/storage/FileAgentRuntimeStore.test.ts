@@ -7,6 +7,7 @@ import type {
   AgentOwnerScope,
   AgentRunScope
 } from '../../shared/agentRuntime';
+import { AGENT_RUNTIME_STORE_SCHEMA_VERSION } from '../../shared/agentRuntime';
 import { createAgentSessionAccessEpoch } from '../agent/AgentRuntimeOwnership';
 import type {
   CreateRuntimeRunInput,
@@ -626,55 +627,16 @@ describe('FileAgentRuntimeStore', () => {
     expect((await new FileAgentRuntimeStore(path.join(root, 'after')).snapshot()).sessions).toHaveLength(1);
   });
 
-  it('migrates schema v1 once, quarantines legacy access, and preserves a rollback copy', async () => {
-    const fixture = await storeFixture();
-    await fixture.store.createSession(
-      sessionInput('legacy-session', taskOwner, 'legacy-session-operation')
-    );
-    const current = await fixture.store.snapshot();
-    const legacy = structuredClone(current) as unknown as {
-      schemaVersion: number;
-      revision: number;
-      telemetryRecords?: unknown[];
-      sessions: Array<{
-        executionContext: { attestation?: unknown };
-      }>;
-    };
-    legacy.schemaVersion = 1;
-    delete legacy.telemetryRecords;
-    delete legacy.sessions[0]!.executionContext.attestation;
-    const encodedLegacy = `${JSON.stringify(legacy, null, 2)}\n`;
-    await fs.writeFile(path.join(fixture.root, 'runtime.json'), encodedLegacy, {
-      mode: 0o600
-    });
+  it.each([1, 2])('rejects older agent runtime schema %s without rewriting it', async (schemaVersion) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-runtime-old-'));
+    const storePath = path.join(root, 'runtime.json');
+    const encoded = `${JSON.stringify({ schemaVersion })}\n`;
+    await fs.writeFile(storePath, encoded, { mode: 0o600 });
 
-    const migratedStore = new FileAgentRuntimeStore(fixture.root);
-    const migrated = await migratedStore.snapshot();
-    expect(migrated).toMatchObject({
-      schemaVersion: 2,
-      revision: legacy.revision + 1,
-      telemetryRecords: [],
-      sessions: [
-        {
-          id: 'legacy-session',
-          executionContext: {
-            attestation: {
-              status: 'LEGACY_UNATTESTED',
-              reason: expect.stringContaining('schema v1')
-            }
-          }
-        }
-      ]
-    });
-    expect(
-      await fs.readFile(path.join(fixture.root, 'runtime.schema-v1.backup.json'), 'utf8')
-    ).toBe(encodedLegacy);
-
-    const reloaded = await new FileAgentRuntimeStore(fixture.root).snapshot();
-    expect(reloaded.revision).toBe(migrated.revision);
-    expect(reloaded.sessions[0]?.accessEpoch.executionProfileHash).toBe(
-      migrated.sessions[0]?.accessEpoch.executionProfileHash
+    await expect(new FileAgentRuntimeStore(root).snapshot()).rejects.toThrow(
+      `Unsupported or invalid Agent runtime schema ${schemaVersion}`
     );
+    await expect(fs.readFile(storePath, 'utf8')).resolves.toBe(encoded);
   });
 
   it('fails closed for newer schemas, corrupt ownership, and symlinked roots', async () => {
@@ -683,7 +645,7 @@ describe('FileAgentRuntimeStore', () => {
     await fs.mkdir(newer, { mode: 0o700 });
     await fs.writeFile(
       path.join(newer, 'runtime.json'),
-      `${JSON.stringify({ schemaVersion: 3 })}\n`,
+      `${JSON.stringify({ schemaVersion: AGENT_RUNTIME_STORE_SCHEMA_VERSION + 1 })}\n`,
       { mode: 0o600 }
     );
     await expect(new FileAgentRuntimeStore(newer).snapshot()).rejects.toThrow(

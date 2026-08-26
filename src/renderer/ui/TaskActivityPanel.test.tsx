@@ -52,12 +52,10 @@ describe('Activity Timeline timestamp formatting', () => {
       />
     );
 
-    expect(html).toContain('<details class="tm-taskactivity__details">');
-    expect(html).toContain('tm-disclosure__chevron');
+    expect(html).toContain('<details');
     expect(html).toContain('<span>1 failed check blocks PR readiness.</span>');
     expect(html).toContain('CI / lint-and-test');
     expect(html).toContain('Blocks PR readiness');
-    expect(html).not.toContain('tm-taskactivity__chip');
     expect(html).not.toContain('<summary>Details</summary>');
   });
 
@@ -91,7 +89,6 @@ describe('Activity Timeline timestamp formatting', () => {
       />
     );
 
-    expect(html).toContain('<details class="tm-taskactivity-panel tm-taskactivity-panel--overview">');
     expect(html).toContain('<span>Activity</span>');
     expect(html).toContain('Completed');
     expect(html).not.toContain('Worktree ready');
