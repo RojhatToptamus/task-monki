@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  AgentItemRecord,
-  AgentPlanRevisionRecord,
-  GitSnapshotRecord,
-  RunRecord
-} from '../../shared/contracts';
+import type { AgentPlanRevisionRecord, RunRecord } from '../../shared/contracts';
+import {
+  makeAgentItemRecord as itemFixture,
+  makeGitSnapshotRecord as gitSnapshotFixture,
+  makeRawMessage,
+  makeRunRecord as runFixture
+} from '../../testSupport/rendererRecords';
 import { buildRunProgressViewModel } from './runProgress';
 
 describe('run progress model', () => {
@@ -326,28 +327,6 @@ describe('run progress model', () => {
   });
 });
 
-function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
-  return {
-    id: 'run-1',
-    runtimeId: 'codex',
-    taskId: 'task-1',
-    iterationId: 'iteration-1',
-    worktreeId: 'worktree-1',
-    sessionId: 'session-1',
-    mode: 'IMPLEMENTATION',
-    origin: 'TASK_MONKI',
-    status: 'RUNNING',
-    recoveryState: 'NONE',
-    requestedSettings: {},
-    promptArtifactId: 'prompt-1',
-    outputArtifactId: 'output-1',
-    diagnosticArtifactId: 'diagnostic-1',
-    startedAt: '2026-07-07T10:00:00.000Z',
-    eventCount: 0,
-    ...overrides
-  };
-}
-
 function planFixture(
   overrides: Partial<AgentPlanRevisionRecord> = {}
 ): AgentPlanRevisionRecord {
@@ -361,64 +340,8 @@ function planFixture(
     revision: 1,
     explanation: 'Plan',
     steps: [{ step: 'Implement', status: 'IN_PROGRESS' }],
-    rawMessage: rawMessageFixture(),
+    rawMessage: makeRawMessage(),
     observedAt: '2026-07-07T10:01:00.000Z',
     ...overrides
-  };
-}
-
-function itemFixture(overrides: Partial<AgentItemRecord> = {}): AgentItemRecord {
-  return {
-    id: 'item-1',
-    taskId: 'task-1',
-    iterationId: 'iteration-1',
-    runId: 'run-1',
-    sessionId: 'session-1',
-    providerItemId: 'provider-item-1',
-    type: 'AGENT_MESSAGE',
-    status: 'COMPLETED',
-    payload: { text: 'Progress: Working.' },
-    rawMessage: rawMessageFixture(),
-    createdAt: '2026-07-07T10:00:00.000Z',
-    updatedAt: '2026-07-07T10:00:00.000Z',
-    ...overrides
-  };
-}
-
-function gitSnapshotFixture(overrides: Partial<GitSnapshotRecord> = {}): GitSnapshotRecord {
-  return {
-    id: 'git-1',
-    taskId: 'task-1',
-    iterationId: 'iteration-1',
-    worktreeId: 'worktree-1',
-    worktreePath: '/tmp/worktree',
-    repoRoot: '/tmp/repo',
-    gitCommonDir: '/tmp/repo/.git',
-    aheadCount: 0,
-    behindCount: 0,
-    stagedCount: 0,
-    unstagedCount: 0,
-    untrackedCount: 0,
-    conflictedCount: 0,
-    commitsAheadOfBase: 1,
-    committedDiffFileCount: 0,
-    workingDiffFileCount: 0,
-    diffStat: '',
-    dirtyFingerprint: '',
-    status: 'CLEAN',
-    capturedAt: '2026-07-07T10:10:00.000Z',
-    ...overrides
-  };
-}
-
-function rawMessageFixture() {
-  return {
-    serverInstanceId: 'server-1',
-    sequence: 1,
-    direction: 'INBOUND' as const,
-    recordedAt: '2026-07-07T10:00:00.000Z',
-    byteOffset: 0,
-    byteLength: 1,
-    sha256: 'hash'
   };
 }
