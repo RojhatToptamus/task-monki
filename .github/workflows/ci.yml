@@ -39,8 +39,18 @@ jobs:
       - name: Run focused tests
         run: npm run test:focused
       - name: Run integration tests
-        if: runner.os == 'macOS'
+        if: runner.os == 'Linux'
         run: npm run test:integration
+      - name: Run macOS app integration tests
+        if: runner.os == 'macOS'
+        run: >-
+          npm exec vitest -- run
+          src/core/app/TaskManagerService.design.integration.test.ts
+          src/core/app/TaskManagerService.preview.integration.test.ts
+          src/core/preview/PreviewReconciler.integration.test.ts
+      - name: Run macOS native launcher tests
+        if: runner.os == 'macOS'
+        run: npm exec vitest -- run src/core/preview/runtime/NativeLauncherHost.integration.test.ts
       - name: Run Windows storage integration tests
         if: runner.os == 'Windows'
         run: npm exec vitest -- run src/core/storage/FileTaskStore.integration.test.ts

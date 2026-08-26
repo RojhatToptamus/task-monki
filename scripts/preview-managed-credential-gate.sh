@@ -8,4 +8,4 @@ set -eu
 
 export TASK_MONKI_OCI_INTEGRATION=1
 export TASK_MONKI_OCI_CONTEXT="${TASK_MONKI_OCI_CONTEXT:-desktop-linux}"
-exec npm test -- src/core/preview/runtime/OciResourceRuntime.test.ts
+exec npm exec vitest -- run src/core/preview/runtime/OciResourceRuntime.test.ts

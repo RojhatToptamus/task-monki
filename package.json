@@ -40,7 +40,7 @@
     "smoke:providers": "npm run build:tools && node dist-tools/dev/providerSmoke.js",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"**/NativeLauncherHost.integration.test.ts\" && vitest run src/core/preview/runtime/NativeLauncherHost.integration.test.ts",
     "test:focused": "vitest run --exclude \"**/*.integration.test.{ts,tsx}\" --exclude \"**/*.system.test.{ts,tsx}\"",
     "test:integration": "vitest run .integration.test.",
     "test:system": "vitest run .system.test.",
