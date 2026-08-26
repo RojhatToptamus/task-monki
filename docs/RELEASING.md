@@ -1,251 +1,180 @@
-# Releasing Task Monki
+# Releasing Task Monki for macOS
 
-Date: 2026-07-11
+Date: 2026-08-26
 
-Task Monki's current release channel uses unsigned artifacts attached to draft
-GitHub Releases. It does not use trusted Developer ID code signing,
-notarization, package-manager publishing, or automatic updates. macOS app
-bundles are ad-hoc signed only to preserve bundle integrity before DMG/ZIP
-packaging.
+Task Monki publishes one trusted macOS artifact for Apple silicon:
 
-## Release Artifacts
+`Task-Monki-<version>-mac-arm64.dmg`
 
-The release workflow builds:
+The release workflow signs the app with this Developer ID identity:
 
-- macOS: `dmg` and `zip` for `x64` and `arm64`
-- Windows: NSIS installer `exe` for `x64`
-- Linux: `AppImage` and `deb` for `x64`
-- checksums: `SHA256SUMS-macOS.txt`, `SHA256SUMS-Windows.txt`,
-  `SHA256SUMS-Linux.txt`
+`Developer ID Application: rojhat toptamus (ZD35XP4V7D)`
 
-The stable app identity is `dev.taskmonki.desktop`. Do not change it without a
-data-migration plan, because app identity affects where desktop platforms store
-application data and how manual upgrades relate to previous installs.
+It enables Hardened Runtime, submits the DMG to Apple, staples the ticket, and
+checks the DMG and mounted app with Gatekeeper. The workflow publishes no ZIP,
+Windows, or Linux artifacts. Updates remain manual.
 
-macOS packaging uses `build/icon.icns` for the bundle icon and also copies
-`build/icon.png` to `Contents/Resources/icon.png`. The main process sets the
-Dock tile from that PNG at runtime so macOS shows the original full-canvas logo
-instead of a cached or inset fallback. Do not regenerate or pad these icon
-assets casually; keep the original logo geometry intact.
+## Release controls
 
-## Local Verification Before Tagging
+The `release` environment holds these secrets:
 
-Run the full repository checks:
+- `MACOS_CERTIFICATE_P12`
+- `MACOS_CERTIFICATE_PASSWORD`
+- `APPLE_API_KEY_P8`
+- `APPLE_API_KEY_ID`
+- `APPLE_API_ISSUER_ID`
+
+Do not put these values in repository secrets, workflow inputs, logs, or local
+release files. The workflow writes the certificate and Apple API key only to
+temporary runner files. It deletes those files after use.
+
+The `release` environment must:
+
+- require approval from `@RojhatToptamus`.
+- reject deployments from branches other than `main`.
+- accept release tags that match `v*`.
+- prevent administrator approval bypass.
+
+The repository must prevent updates and deletion of tags that match `v*`.
+GitHub immutable releases must stay enabled.
+Protection for `main` must require code-owner review and dismiss an approval
+when a new commit is pushed.
+After this workflow reaches `main`, allow only GitHub-owned actions. Also
+require every action reference to use a full commit SHA.
+
+## Version rules
+
+`package.json` owns the release version. Supported versions have one of these
+forms:
+
+```text
+1.2.3
+1.2.3-alpha.1
+1.2.3-beta.1
+1.2.3-rc.1
+```
+
+For a production run, the tag must be `v` plus the exact package version. The
+tag commit must be on `main`. The workflow rejects an existing release tag.
+
+The macOS user-visible bundle version contains only the numeric part. For
+example, `0.2.0-alpha.2` becomes `0.2.0`. The GitHub Actions run number becomes
+`CFBundleVersion`.
+
+## Local checks
+
+Before you merge release preparation, run:
 
 ```sh
-npm run check:architecture
-npm run typecheck
-npm test
-npm run test:renderer:dom
-npm run build
-npm run check:codex-protocol
+npm ci
+npm run verify
 git diff --check
 ```
 
-Build an unpacked app for the current platform:
+These checks need no release credentials. Normal local and pull-request builds
+continue to use the development packaging configuration. They do not use the
+Developer ID certificate or contact Apple.
+
+## Complete dry run
+
+Use a manual dry run before the first production release and after a release
+pipeline change:
+
+1. Merge the release code to `main`.
+2. Open the `Trusted macOS release` workflow in GitHub Actions.
+3. Select **Run workflow** on `main`.
+4. Review the pending `release` environment deployment.
+5. Confirm that the source commit is the intended `main` commit.
+6. Approve the deployment.
+
+The dry run executes the production build, signing, runtime probes,
+notarization, stapling, Gatekeeper checks, checksum creation, upload, and a
+fresh-runner download verification. It does not create a tag, commit, branch,
+GitHub Release, or public asset.
+
+Accept the dry run only when:
+
+- all executed jobs finish successfully.
+- the build job reports one Apple submission ID.
+- Apple returns `Accepted`.
+- the internal verifier downloads exactly the DMG and its checksum.
+- the checksum matches after download.
+- the DMG and mounted app pass signature, Hardened Runtime, entitlement,
+  architecture, stapler, and Gatekeeper checks.
+- the signed Electron and Design browser runtime probes pass.
+- the publish and public-verification jobs are skipped.
+
+The internal artifact expires after one day. The Apple notarization log expires
+after seven days.
+
+## Production release
+
+1. Set the next unused version in `package.json` and `package-lock.json`.
+2. Update release notes as needed.
+3. Run the local checks.
+4. Merge the release preparation to `main`.
+5. Confirm that the `main` commit is correct and all required checks pass.
+6. Create the matching tag on that commit.
+7. Push only that tag.
+
+Example:
 
 ```sh
-npm run dist:dir
+git switch main
+git pull --ff-only
+git tag v0.2.0-alpha.2
+git show --no-patch --oneline v0.2.0-alpha.2
+git push origin v0.2.0-alpha.2
 ```
 
-After building the full release targets for the current platform, verify their
-archive signatures, expected architectures/names, update metadata, minimum
-sizes, compressed archive integrity, native package payloads, and required
-legal resources:
+Review the pending `release` environment deployment. Confirm the source commit
+and tag before approval.
+
+The workflow publishes only after the fresh-runner internal verification
+passes. It creates the GitHub Release from the existing tag and uploads only
+the verified DMG. Alpha, beta, and release-candidate versions become GitHub
+pre-releases.
+
+Accept the production release only when:
+
+- the dry-run acceptance checks pass in the tag run.
+- the tag still resolves to the validated source commit.
+- the publishing job creates one immutable GitHub Release.
+- the release contains exactly the expected DMG.
+- the public-verification job downloads the DMG without authentication.
+- the public DMG matches the build job's SHA-256 value.
+- GitHub verifies the release and asset.
+- the public DMG and mounted app pass the full trusted macOS verifier.
+
+## Failure handling
+
+The build job records the Apple submission ID before it waits. If Apple rejects
+the submission or the wait fails, download the `notarization-log-*` workflow
+artifact and inspect its reported issue paths.
+
+Do not replace a notarized internal artifact or a public release asset. Do not
+move or force-push a release tag. Fix the source, choose a new package version,
+and run the release again.
+
+If a transient download or GitHub API error causes the failure, rerun only the
+public-verification job. If the published bytes or trust checks are wrong, use
+a new version.
+
+## Independent public check
+
+Anyone with an Apple silicon Mac can verify a published DMG:
 
 ```sh
-npm run verify:release-artifacts
+version=0.2.0-alpha.2
+dmg="Task-Monki-${version}-mac-arm64.dmg"
+curl --fail --location --proto '=https' --tlsv1.2 \
+  --output "$dmg" \
+  "https://github.com/RojhatToptamus/task-monki/releases/download/v${version}/${dmg}"
+hdiutil verify "$dmg"
+xcrun stapler validate "$dmg"
+spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
 ```
 
-The release workflow runs this structural verifier on each native platform
-before generating checksums or uploading artifacts. This catches truncated or
-malformed installers even when the packaging command itself exits successfully.
-On macOS it asks `hdiutil` to verify each DMG. On Linux it asks `dpkg-deb` to
-inspect the Debian package and extracts the AppImage without FUSE. ZIP and NSIS
-payloads are tested with the pinned 7-Zip binary used by the build toolchain.
-The legal payload is checked under `Contents/Resources/legal` in each macOS app
-bundle and under `resources/legal` in the Windows and Linux unpacked package
-outputs. It includes Task Monki's MIT license and notices, Electron and
-Chromium license files, and the OpenAI Codex Apache-2.0 license at
-`legal/third-party/OpenAI-Codex-Apache-2.0.txt`.
-
-Also execute the unpacked Electron binary for the current operating system and
-CPU architecture:
-
-```sh
-npm run verify:packaged-runtime
-```
-
-The packaged-runtime check also inspects `app.asar`: the Electron main entry
-point must be present, while `dist-tools`, `dist-electron/dev`, and `src/dev`
-must be absent. Development seed, API, and provider-smoke programs compile to
-the ignored `dist-tools/` tree and are never part of a production package.
-
-This runs Electron in its supported Node mode and checks the reported Electron
-version, operating system, and architecture. The release workflow runs the
-same smoke test on native macOS, Windows, and Linux runners after packaging and
-before generating checksums or uploading artifacts. It proves that each runner
-can execute the packaged runtime; the manual renderer and workflow smoke test
-below still verifies the application UI and end-to-end behavior.
-
-On macOS, also run:
-
-```sh
-npm run verify:packaged-owned-process
-```
-
-This runs the packaged Electron executable in Node mode, loads the packaged
-IPC owner resource, and executes a bounded child through that exact production
-launch path.
-
-Normal pull-request and `main` CI also builds an unpacked native package and
-runs this smoke test on macOS, Windows, and Linux. Keep the full release
-artifact verifier in the tag workflow because normal CI does not build the
-installers and archives.
-
-On macOS, verify the unpacked bundle and confirm generic resources do not carry
-detached code-signature extended attributes. Also confirm the root bundle is
-ad-hoc signed without Hardened Runtime:
-
-```sh
-codesign --verify --deep --strict --verbose=4 "release/mac-arm64/Task Monki.app"
-codesign -dvvv "release/mac-arm64/Task Monki.app"
-if xattr -lr "release/mac-arm64/Task Monki.app" | grep -q 'com\.apple\.cs\.Code'; then
-  echo "unexpected detached code-signature xattrs"
-  exit 1
-fi
-```
-
-The `codesign -dvvv` output should show `Signature=adhoc` and flags containing
-`adhoc`, not `runtime`, for this unsigned alpha channel.
-
-`spctl --assess` can still reject ad-hoc signed alpha builds, or report an
-internal Code Signing subsystem error, because they are not Developer ID signed
-or notarized. On current macOS, quarantined GitHub downloads may be blocked
-before Electron starts. That is a trust-policy failure, not a renderer failure.
-For this unsigned channel, the launch check is that the app verifies with
-`codesign`, has no detached `com.apple.cs.*` resource xattrs, and opens a
-renderer window after Gatekeeper is overridden through System Settings or the
-quarantine fallback is removed. If macOS needs normal double-click launch from
-a downloaded artifact, ship a Developer ID signed and notarized build instead
-of this alpha signing path.
-
-The custom ad-hoc signing hook must not sign generic resource blobs such as
-`app.asar`, icons, Chromium `.pak` files, `.dat` files, `.nib` files, or V8
-snapshot `.bin` files. They are sealed by the containing bundle signature, not
-signed as standalone code. The release build intentionally fails if those files
-receive detached `com.apple.cs.*` extended attributes again.
-
-The unsigned alpha macOS configuration also disables Hardened Runtime. Hardened
-Runtime belongs to a Developer ID signed and notarized release configuration;
-combined with ad-hoc signing it can leave macOS-launched Electron builds stuck
-before helper processes start.
-
-Smoke test only against a throwaway local Git repository:
-
-1. Launch the unpacked app.
-2. Confirm the renderer loads.
-3. Open Settings and confirm Git and at least one configured agent runtime are ready.
-4. Confirm the runtime catalog shows unavailable runtimes independently, with
-   resolved versions or actionable probe failures where supported.
-5. Confirm a custom invalid GitHub CLI path reports `gh` as unavailable without
-   blocking Git or agent runtimes, then reset it to Auto-detect.
-6. Add the throwaway repository.
-7. Validate the repository.
-8. Create a smoke task and prepare a worktree.
-9. Do not push branches or create real pull requests during release smoke tests.
-
-## Creating A Draft Release
-
-1. Update `package.json` version.
-2. Update release notes or changelog content as needed.
-3. Commit the release prep.
-4. Confirm `git status` is clean and the current commit is the release-prep
-   commit.
-5. Create and push a tag that matches the release workflow trigger:
-
-```sh
-git tag v0.1.0-alpha.1
-git show --no-patch --oneline v0.1.0-alpha.1
-git push origin v0.1.0-alpha.1
-```
-
-The tag must point at the committed release-prep change. The workflow builds the
-tagged commit, not whatever happens to be on `main` later.
-
-The GitHub Actions release workflow runs on tags matching
-`v[0-9]+.[0-9]+.[0-9]+*`. It creates a draft GitHub Release and uploads the
-unsigned artifacts.
-
-For an alpha, beta, or release-candidate build, mark the GitHub draft as a
-pre-release before publishing it.
-
-## Draft Release Review
-
-Before publishing the draft:
-
-- Confirm every expected platform artifact uploaded.
-- Confirm checksum files uploaded.
-- Download at least the current-platform artifact from GitHub and launch it.
-- Confirm release notes clearly state the artifacts are unsigned; macOS is
-  ad-hoc signed only and is not Developer ID signed or notarized.
-- Confirm macOS release notes use Apple's System Settings -> Privacy & Security
-  Open Anyway flow as the primary workaround, and list the quarantine removal
-  command from `docs/INSTALL.md` only as a fallback for missing Open Anyway
-  buttons or stuck no-window launches.
-- Confirm release notes link to `docs/INSTALL.md`.
-- Confirm manual update instructions are present.
-- Confirm known limitations mention no trusted signing, notarization,
-  package-manager publishing, or automatic updater yet.
-
-Use grouped download sections in the release notes so users do not have to
-interpret GitHub's flat asset list:
-
-```md
-## Downloads
-
-### macOS
-
-- Apple silicon: `Task-Monki-<version>-mac-arm64.dmg`
-- Intel: `Task-Monki-<version>-mac-x64.dmg`
-
-#### macOS unsigned alpha
-
-This alpha is not Apple Developer ID signed or notarized yet. If macOS blocks
-the app, try opening `Task Monki.app` once, then open System Settings -> Privacy
-& Security, scroll to Security, click Open Anyway for Task Monki, and confirm
-with your password or Touch ID. Apple says Open Anyway is available for about an
-hour after the first blocked open attempt. See
-[Apple's guide to opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
-
-If there is no Open Anyway button, or Task Monki starts but no window appears,
-quit the stuck `Task Monki` process and run:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/Task Monki.app"
-open "/Applications/Task Monki.app"
-```
-
-For this unsigned alpha, keep this fallback visible in the release notes. On
-current macOS, Open Anyway can still leave an ad-hoc Electron build stuck at the
-Dock icon with no renderer window until the quarantine attribute is removed.
-
-### Windows
-
-- `Task-Monki-<version>-win-x64.exe`
-
-### Linux
-
-- AppImage: `Task-Monki-<version>-linux-x86_64.AppImage`
-- Debian/Ubuntu: `Task-Monki-<version>-linux-amd64.deb`
-
-### Checksums
-
-- `SHA256SUMS-macOS.txt`
-- `SHA256SUMS-Windows.txt`
-- `SHA256SUMS-Linux.txt`
-```
-
-Keep the platform artifact names clear and leave generated `.blockmap` and
-`latest-*.yml` assets attached for this alpha. They are normal electron-builder
-metadata, but they should not be presented as primary downloads in the notes.
+The automated public-verification job also mounts the DMG. It checks the app's
+Developer ID chain, Team ID, secure timestamps, Hardened Runtime, minimal
+entitlements, arm64-only code, bundle metadata, and Gatekeeper acceptance.

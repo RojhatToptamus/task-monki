@@ -1,6 +1,6 @@
 {
   "name": "task-monki",
-  "version": "0.2.0-alpha.1",
+  "version": "0.2.0-alpha.2",
   "private": true,
   "license": "MIT",
   "description": "Experimental local task board for running AI coding agents in isolated Git worktrees.",
@@ -27,6 +27,7 @@
     "prepare:design-browser-runtime": "node scripts/prepare-design-browser-runtime.mjs",
     "dist:dir": "npm run prepare:design-browser-runtime && npm run build && electron-builder --dir",
     "dist:mac": "npm run prepare:design-browser-runtime -- --arch=arm64 --arch=x64 && npm run build && electron-builder --mac",
+    "dist:mac:trusted": "electron-builder --mac dmg --arm64 --config electron-builder.release-mac.yml --publish never",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
     "verify:packaged-owned-process": "node scripts/verify-packaged-owned-process.mjs",
@@ -55,7 +56,8 @@
     "check:codex-protocol": "node scripts/generate-codex-protocol.mjs --check",
     "test:preview-credential-gate": "sh scripts/preview-managed-credential-gate.sh",
     "verify:release-artifacts": "node scripts/verify-release-artifacts.mjs",
-    "verify:packaged-runtime": "node scripts/verify-packaged-runtime.mjs"
+    "verify:packaged-runtime": "node scripts/verify-packaged-runtime.mjs",
+    "verify:trusted-mac-release": "node scripts/verify-trusted-mac-release.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.25.0",
@@ -67,6 +69,7 @@
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",
+    "@electron/osx-sign": "1.3.3",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^26.0.0",
     "@types/pg": "^8.20.0",

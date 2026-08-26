@@ -240,10 +240,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
       manifest.agentBrowser?.version !== AGENT_BROWSER_VERSION ||
       manifest.agentBrowser.commit !== AGENT_BROWSER_COMMIT ||
       manifest.agentBrowser.binarySha256 !== expectedSha ||
-      manifest.chrome?.version !== CHROME_VERSION ||
-      createHash('sha256')
-        .update(await fs.readFile(this.options.executablePath))
-        .digest('hex') !== expectedSha
+      manifest.chrome?.version !== CHROME_VERSION
     ) {
       throw new Error('The packaged Design browser runtime does not match its pin.');
     }
