@@ -17,7 +17,6 @@ import {
 } from '../filesystem/secureFilesystem';
 
 const MAX_APP_SETTINGS_FILE_BYTES = 1024 * 1024;
-const PREVIOUS_APP_SETTINGS_SCHEMA_VERSION = 9;
 
 export interface AppSettingsStorage {
   get(): Promise<TaskManagerAppSettings>;
@@ -107,15 +106,14 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
 }
 
 export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
-  const migrated = migrateAppSettings(value);
-  if (!isRecord(migrated) || migrated.schemaVersion !== TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+  if (!isRecord(value) || value.schemaVersion !== TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
     const schemaVersion = isRecord(value) ? value.schemaVersion : undefined;
     throw new Error(
       `Unsupported Task Monki app settings schema ${String(schemaVersion)}. ` +
         'Delete the local app settings and restart.'
     );
   }
-  const record = migrated;
+  const record = value;
   if (!isCurrentAppSettingsRecord(record)) {
     throw new Error(
       `Task Monki app settings schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION} is invalid. ` +
@@ -264,17 +262,6 @@ function normalizeThemePreset(value: unknown): TaskManagerThemePreset {
     throw new Error('Theme preset is not supported.');
   }
   return value;
-}
-
-function migrateAppSettings(value: unknown): unknown {
-  if (!isRecord(value) || value.schemaVersion !== PREVIOUS_APP_SETTINGS_SCHEMA_VERSION) {
-    return value;
-  }
-  return {
-    ...value,
-    schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-    themePreset: DEFAULT_TASK_MANAGER_APP_SETTINGS.themePreset
-  };
 }
 
 function normalizeCodexExternalTools(value: unknown): CodexExternalToolSettings {

@@ -140,12 +140,9 @@ function normalizedExecutionDescriptor(input: {
   const context = input.executionContext;
   if (
     context.attestation.status !== 'ATTESTED' &&
-    (context.attestation.status === 'LEGACY_UNATTESTED'
-      ? !context.attestation.reason.trim()
-      : context.attestation.status === 'INHERITED_UNATTESTED'
-        ? !context.attestation.parentSessionId.trim() ||
-          !context.attestation.reason.trim()
-        : true)
+    (context.attestation.status !== 'INHERITED_UNATTESTED' ||
+      !context.attestation.parentSessionId.trim() ||
+      !context.attestation.reason.trim())
   ) {
     throw new Error('Agent execution context attestation metadata is invalid.');
   }

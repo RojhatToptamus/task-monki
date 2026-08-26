@@ -636,7 +636,7 @@ in `preview.yaml`.
 
 ## Durable records and schema
 
-`FileTaskStore` schema 17 contains these Preview collections alongside
+`FileTaskStore` contains these Preview collections alongside
 repository identities and saved views:
 
 - `previewPlans` and `previewApprovals`;
@@ -650,9 +650,9 @@ Logs and source manifests are bounded artifacts, not embedded snapshot text.
 Private ciphertext and revision reachability live in a separate main-only vault
 format, never in the task-store schema.
 
-Only the complete current schema is accepted. Older Preview, attachment, and
-repository/path schemas are unsupported and are neither migrated nor
-reinterpreted; local data using an older schema must be discarded.
+Preview ownership loads as one complete current-schema unit. The required
+collections, discriminators, and cross-record ownership are validated before
+the state is published; load-time schema conversion is outside this path.
 
 ## Renderer model and user experience
 
@@ -692,7 +692,7 @@ is separate from destructive stop and keeps the current active preview.
 | Native/managed/attached runtimes | [`src/core/preview/runtime`](../../src/core/preview/runtime) |
 | Private inputs | [`src/core/preview/private`](../../src/core/preview/private) |
 | Compose adapter | [`src/core/preview/compose`](../../src/core/preview/compose) |
-| Storage and migrations | [`FileTaskStore.ts`](../../src/core/storage/FileTaskStore.ts) |
+| Storage and current-schema validation | [`FileTaskStore.ts`](../../src/core/storage/FileTaskStore.ts) |
 | Service/Electron boundary | [`TaskManagerService.ts`](../../src/core/app/TaskManagerService.ts), [`main.ts`](../../src/electron/main.ts), [`preload.ts`](../../src/electron/preload.ts) |
 | Renderer projection and UI | [`preview.ts`](../../src/renderer/model/preview.ts), [`PreviewPanel.tsx`](../../src/renderer/ui/PreviewPanel.tsx) |
 

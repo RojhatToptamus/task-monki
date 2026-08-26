@@ -581,9 +581,9 @@ export interface DiscourseDraftRecord {
   body: string;
   replyToMessageId?: string;
   supersedesMessageId?: string;
-  sourceMessageIds?: string[];
+  sourceMessageIds: string[];
   policy: DiscourseDefaultPolicy;
-  agentSelections?: DiscourseAgentSelectionInput[];
+  agentSelections: DiscourseAgentSelectionInput[];
   /** Durable identity of an agent send that may already have been accepted. */
   pendingClientMessageId?: string;
   tokens: DiscourseDraftToken[];
@@ -835,7 +835,7 @@ export interface DiscourseAuditEventRecord {
 
 export type DiscourseIdempotencyDecision = 'NEW' | 'REPLAY';
 
-export const DISCOURSE_STORE_SCHEMA_VERSION = 1 as const;
+export const DISCOURSE_STORE_SCHEMA_VERSION = 2 as const;
 
 export interface DiscourseConversationSummary {
   id: string;

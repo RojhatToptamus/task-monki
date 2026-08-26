@@ -93,20 +93,10 @@ describe('AppSettingsStore', () => {
     expect(settings.selectedRepositoryId).toBe('repository-1');
   });
 
-  it('rejects unsupported settings schemas instead of migrating them', () => {
-    expect(() => normalizeAppSettings({ schemaVersion: 3 })).toThrow(
-      'Unsupported Task Monki app settings schema 3'
+  it.each([3, 9])('rejects unsupported settings schema %s', (schemaVersion) => {
+    expect(() => normalizeAppSettings({ schemaVersion })).toThrow(
+      `Unsupported Task Monki app settings schema ${schemaVersion}`
     );
-  });
-
-  it('migrates the previous settings schema to the default palette preset', () => {
-    const previous = currentSettings();
-    const { themePreset: _themePreset, ...withoutPreset } = previous;
-
-    expect(normalizeAppSettings({ ...withoutPreset, schemaVersion: 9 })).toMatchObject({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      themePreset: 'umber'
-    });
   });
 
   it('persists only supported theme presets', async () => {
