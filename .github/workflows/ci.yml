@@ -36,7 +36,12 @@ jobs:
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
       - run: npm run typecheck
-      - run: npm test
+      - name: Run tests
+        if: runner.os != 'Windows'
+        run: npm test
+      - name: Run tests without cross-file parallelism
+        if: runner.os == 'Windows'
+        run: npm test -- --no-file-parallelism
       - run: npm run test:renderer:dom
       - run: npm run build
       - name: Prepare Design browser runtime
