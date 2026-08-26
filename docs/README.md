@@ -76,10 +76,9 @@ behavior and architecture, not private roadmap sequencing.
    - Public Preview workflow, UI actions, recipe reference, native and Compose
      examples, private inputs, attachments, data effects, and troubleshooting.
 2. `docs/INSTALL.md`
-   - User-facing install, prerequisite, unsigned-build, and manual update
-     instructions.
+   - User-facing install, platform trust, and automatic-update instructions.
 3. `docs/RELEASING.md`
-   - Maintainer workflow for unsigned GitHub Releases.
+   - Maintainer workflow for trusted cross-platform GitHub Releases.
 
 ### Interface Design
 

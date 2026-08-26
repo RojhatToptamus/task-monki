@@ -71,7 +71,12 @@ export class AppSettingsStore implements AppSettingsStorage {
     }
 
     const decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw);
-    this.settings = normalizeAppSettings(JSON.parse(decoded) as unknown);
+    const parsed = JSON.parse(decoded) as unknown;
+    const migrated = migrateAppSettings(parsed);
+    this.settings = normalizeAppSettings(migrated);
+    if (migrated !== parsed) {
+      await this.persist();
+    }
 
     this.loaded = true;
   }
@@ -126,6 +131,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     themePreset: record.themePreset,
     sidebarCollapsed: record.sidebarCollapsed,
     showMascot: record.showMascot,
+    autoInstallUpdatesOnQuit: record.autoInstallUpdatesOnQuit,
     firstLaunchSetupCompleted: record.firstLaunchSetupCompleted,
     disabledRuntimeIds: [...record.disabledRuntimeIds],
     defaultRuntimeId: record.defaultRuntimeId,
@@ -163,6 +169,12 @@ export function mergeAppSettings(
   }
   if (input.showMascot !== undefined) {
     patch.showMascot = requireBoolean(input.showMascot, 'showMascot');
+  }
+  if (input.autoInstallUpdatesOnQuit !== undefined) {
+    patch.autoInstallUpdatesOnQuit = requireBoolean(
+      input.autoInstallUpdatesOnQuit,
+      'autoInstallUpdatesOnQuit'
+    );
   }
   if (input.firstLaunchSetupCompleted !== undefined) {
     patch.firstLaunchSetupCompleted = requireBoolean(
@@ -360,6 +372,7 @@ function isCurrentAppSettingsRecord(
     'themePreset',
     'sidebarCollapsed',
     'showMascot',
+    'autoInstallUpdatesOnQuit',
     'firstLaunchSetupCompleted',
     'disabledRuntimeIds',
     'defaultRuntimeId',
@@ -401,6 +414,7 @@ function isCurrentAppSettingsRecord(
     isTaskManagerThemePreset(record.themePreset) &&
     typeof record.sidebarCollapsed === 'boolean' &&
     typeof record.showMascot === 'boolean' &&
+    typeof record.autoInstallUpdatesOnQuit === 'boolean' &&
     typeof record.firstLaunchSetupCompleted === 'boolean' &&
     Array.isArray(record.disabledRuntimeIds) &&
     record.disabledRuntimeIds.every(isCanonicalRequiredString) &&
@@ -430,6 +444,17 @@ function isCurrentAppSettingsRecord(
         Number(previewGateway.port) >= 10_000 &&
         Number(previewGateway.port) <= 65_535))
   );
+}
+
+function migrateAppSettings(value: unknown): unknown {
+  if (!isRecord(value) || value.schemaVersion !== 10) {
+    return value;
+  }
+  return {
+    ...value,
+    schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+    autoInstallUpdatesOnQuit: true
+  };
 }
 
 function isCanonicalRequiredString(value: unknown): boolean {

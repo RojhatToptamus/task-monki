@@ -62,6 +62,8 @@ jobs:
       - name: Prepare Design browser runtime
         if: runner.os == 'macOS'
         run: npm run prepare:design-browser-runtime
+      - name: Prepare Electron legal resources
+        run: npm run prepare:electron-runtime
       - name: Build unpacked native package
         run: npm exec electron-builder -- --dir
         env:

@@ -44,6 +44,7 @@ import type {
   ShowDesignCanvasRequest
 } from '../../shared/designCanvas';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
+import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
@@ -112,6 +113,7 @@ import { DiscourseWorkspace } from './DiscourseWorkspace';
 import { DesignsWorkspace } from './DesignsWorkspace';
 import { PanelResizeHandle } from './PanelResizeHandle';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
+import { SoftwareUpdateNotice } from './SoftwareUpdateNotice';
 import {
   BoardEditorModal,
   DeleteTaskModal,
@@ -142,6 +144,14 @@ const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
 const DESIGN_CANVAS_LOAD_FAILED_NOTICE =
   'The Design preview could not load. Select the Design again to retry.';
+const unavailableSoftwareUpdateState: SoftwareUpdateState = {
+  status: 'unavailable',
+  currentVersion: '',
+  availableVersion: null,
+  lastCheckedAt: null,
+  progress: null,
+  errorMessage: null
+};
 
 const emptyBoardSnapshot: BoardSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -245,6 +255,9 @@ export function App() {
   const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [appSettings, setAppSettings] = useState<TaskManagerAppSettings>(
     DEFAULT_TASK_MANAGER_APP_SETTINGS
+  );
+  const [softwareUpdateState, setSoftwareUpdateState] = useState<SoftwareUpdateState>(
+    unavailableSoftwareUpdateState
   );
   const [previewThemePreset, setPreviewThemePreset] = useState<ThemePreset | null>(null);
   const [appSidebarWidth, setAppSidebarWidth] = useState(() =>
@@ -524,6 +537,33 @@ export function App() {
     },
     [updateAppSettings]
   );
+  const checkForSoftwareUpdates = useCallback(async () => {
+    try {
+      const shell = window.taskManagerShell;
+      if (!shell) throw new Error('Software updates are available in the installed desktop app.');
+      setSoftwareUpdateState(await shell.checkForSoftwareUpdates());
+    } catch (caught) {
+      reportActionError(caught, 'Could not check for updates.');
+    }
+  }, [reportActionError]);
+  const downloadSoftwareUpdate = useCallback(async () => {
+    try {
+      const shell = window.taskManagerShell;
+      if (!shell) throw new Error('Software updates are available in the installed desktop app.');
+      setSoftwareUpdateState(await shell.downloadSoftwareUpdate());
+    } catch (caught) {
+      reportActionError(caught, 'Could not download the update.');
+    }
+  }, [reportActionError]);
+  const installSoftwareUpdate = useCallback(async () => {
+    try {
+      const shell = window.taskManagerShell;
+      if (!shell) throw new Error('Software updates are available in the installed desktop app.');
+      await shell.installSoftwareUpdate();
+    } catch (caught) {
+      reportActionError(caught, 'Could not install the update.');
+    }
+  }, [reportActionError]);
   useEffect(() => {
     const handleFocusedHistoryResize = () => {
       const compact = focusedWorkspaceUsesCompactHistory(window.innerWidth);
@@ -1247,6 +1287,27 @@ export function App() {
       }
     };
   }, [windowChromePlatform]);
+
+  useEffect(() => {
+    const shell = window.taskManagerShell;
+    if (!shell) return;
+    let canceled = false;
+    const unsubscribe = shell.onSoftwareUpdateState((state) => {
+      if (!canceled) setSoftwareUpdateState(state);
+    });
+    void shell
+      .getSoftwareUpdateState()
+      .then((state) => {
+        if (!canceled) setSoftwareUpdateState(state);
+      })
+      .catch((caught: unknown) => {
+        if (!canceled) reportActionError(caught, 'Could not read the update status.');
+      });
+    return () => {
+      canceled = true;
+      unsubscribe();
+    };
+  }, [reportActionError]);
 
   useEffect(() => {
     let canceled = false;
@@ -2810,6 +2871,12 @@ export function App() {
             </div>
           </div>
           <div className="tm-nav__spacer" />
+          <SoftwareUpdateNotice
+            state={softwareUpdateState}
+            collapsed={isSidebarCollapsed}
+            onDownload={() => void downloadSoftwareUpdate()}
+            onInstall={() => void installSoftwareUpdate()}
+          />
           <div className="tm-nav__divider" />
 
           <RepositorySwitcher
@@ -3025,6 +3092,10 @@ export function App() {
             onPreviewThemePreset={setPreviewThemePreset}
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
+            softwareUpdateState={softwareUpdateState}
+            onCheckForSoftwareUpdates={checkForSoftwareUpdates}
+            onDownloadSoftwareUpdate={downloadSoftwareUpdate}
+            onInstallSoftwareUpdate={installSoftwareUpdate}
             externalToolStatus={externalToolStatus}
             agentRuntimesLoading={isLoading && runtimeCatalog === undefined}
             onRefreshExternalTools={refreshExternalToolStatus}

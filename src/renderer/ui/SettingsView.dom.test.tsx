@@ -5,17 +5,35 @@ import {
   type TaskManagerAppSettings
 } from '../../shared/agent';
 import { SettingsView, type SettingsViewProps } from './SettingsView';
+import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
+
+const softwareUpdateState: SoftwareUpdateState = {
+  status: 'idle',
+  currentVersion: '0.2.0',
+  availableVersion: null,
+  lastCheckedAt: null,
+  progress: null,
+  errorMessage: null
+};
 
 function renderSettings({
   appSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS,
   onSetTheme = vi.fn(),
   onSetAppSettings = vi.fn(),
-  onPreviewThemePreset = vi.fn()
+  onPreviewThemePreset = vi.fn(),
+  updateState = softwareUpdateState,
+  onCheckForSoftwareUpdates = vi.fn(async () => undefined),
+  onDownloadSoftwareUpdate = vi.fn(async () => undefined),
+  onInstallSoftwareUpdate = vi.fn(async () => undefined)
 }: {
   appSettings?: TaskManagerAppSettings;
   onSetTheme?: SettingsViewProps['onSetTheme'];
   onSetAppSettings?: SettingsViewProps['onSetAppSettings'];
   onPreviewThemePreset?: NonNullable<SettingsViewProps['onPreviewThemePreset']>;
+  updateState?: SoftwareUpdateState;
+  onCheckForSoftwareUpdates?: SettingsViewProps['onCheckForSoftwareUpdates'];
+  onDownloadSoftwareUpdate?: SettingsViewProps['onDownloadSoftwareUpdate'];
+  onInstallSoftwareUpdate?: SettingsViewProps['onInstallSoftwareUpdate'];
 } = {}) {
   render(
     <SettingsView
@@ -24,6 +42,10 @@ function renderSettings({
       onPreviewThemePreset={onPreviewThemePreset}
       appSettings={appSettings}
       onSetAppSettings={onSetAppSettings}
+      softwareUpdateState={updateState}
+      onCheckForSoftwareUpdates={onCheckForSoftwareUpdates}
+      onDownloadSoftwareUpdate={onDownloadSoftwareUpdate}
+      onInstallSoftwareUpdate={onInstallSoftwareUpdate}
       agentRuntimesLoading={false}
       onRefreshExternalTools={async () => undefined}
       onRefreshAgentRuntimes={async () => undefined}
@@ -35,8 +57,54 @@ function renderSettings({
       runtimes={[]}
     />
   );
-  return { onSetTheme, onSetAppSettings, onPreviewThemePreset };
+  return {
+    onSetTheme,
+    onSetAppSettings,
+    onPreviewThemePreset,
+    onCheckForSoftwareUpdates,
+    onDownloadSoftwareUpdate,
+    onInstallSoftwareUpdate
+  };
 }
+
+describe('Update settings', () => {
+  it('checks for updates when no update is active', () => {
+    const onCheckForSoftwareUpdates = vi.fn(async () => undefined);
+    renderSettings({ onCheckForSoftwareUpdates });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Updates' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+
+    expect(onCheckForSoftwareUpdates).toHaveBeenCalledOnce();
+  });
+
+  it('downloads an available update and persists install-on-quit directly', () => {
+    const onDownloadSoftwareUpdate = vi.fn(async () => undefined);
+    const { onSetAppSettings } = renderSettings({
+      updateState: {
+        ...softwareUpdateState,
+        status: 'available',
+        availableVersion: '0.2.1',
+        lastCheckedAt: '2026-08-26T12:00:00.000Z'
+      },
+      onDownloadSoftwareUpdate
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Updates' }));
+    expect(screen.getByText('0.2.0')).toBeTruthy();
+    expect(screen.getByText('Version 0.2.1')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Check now' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+    fireEvent.click(
+      screen.getByRole('switch', {
+        name: 'Automatically install downloaded updates when Task Monki quits'
+      })
+    );
+
+    expect(onDownloadSoftwareUpdate).toHaveBeenCalledOnce();
+    expect(onSetAppSettings).toHaveBeenCalledWith({ autoInstallUpdatesOnQuit: false });
+  });
+});
 
 describe('Appearance settings', () => {
   it('selects palette and mode independently and previews the active roles', () => {

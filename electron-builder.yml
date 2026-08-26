@@ -48,13 +48,15 @@ generateUpdatesFilesForAllChannels: false
 
 publish:
   provider: github
+  owner: RojhatToptamus
+  repo: task-monki
   releaseType: draft
 
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
-  # Unsigned alpha builds are ad-hoc signed only. Enable Hardened Runtime with
-  # the future Developer ID signed and notarized release path.
+  # Local packages use the existing ad-hoc signer. The release-only config
+  # enables Developer ID signing and Hardened Runtime.
   identity: "-"
   hardenedRuntime: false
   sign: scripts/ad-hoc-mac-sign.cjs
@@ -81,6 +83,9 @@ dmg:
 
 win:
   icon: build/icon.ico
+  # Temporary trade-off: Windows releases are unsigned. electron-updater must
+  # not reject them for a missing Authenticode publisher identity.
+  verifyUpdateCodeSignature: false
   target:
     - target: nsis
       arch:
@@ -95,10 +100,8 @@ linux:
   category: Development
   icon: build/icons
   maintainer: Task Monki contributors
+  syncDesktopName: true
   target:
     - target: AppImage
-      arch:
-        - x64
-    - target: deb
       arch:
         - x64

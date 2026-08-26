@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -59,16 +60,14 @@ describe('release artifact verification', () => {
     const releaseDir = await temporaryDirectory();
     const version = '1.2.3-test';
     const appImage = `Task-Monki-${version}-linux-x86_64.AppImage`;
-    const deb = `Task-Monki-${version}-linux-amd64.deb`;
     await writeLargeFile(
       path.join(releaseDir, appImage),
       elfHeader(0x3e)
     );
     await fs.chmod(path.join(releaseDir, appImage), 0o755);
-    await writeDebianArchive(path.join(releaseDir, deb));
     await fs.writeFile(
       path.join(releaseDir, 'latest-linux.yml'),
-      `version: ${version}\nfiles:\n  - ${appImage}\n  - ${deb}\n`
+      `version: ${version}\nfiles:\n  - url: ${appImage}\n    sha512: ${await digest(path.join(releaseDir, appImage))}\n`
     );
     await writeRequiredLegalFiles(releaseDir, 'linux');
 
@@ -77,20 +76,15 @@ describe('release artifact verification', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('rejects a truncated Debian package even when it has an ar signature', async () => {
+  it('rejects a truncated AppImage', async () => {
     const releaseDir = await temporaryDirectory();
     const version = '1.2.3-test';
     const appImage = `Task-Monki-${version}-linux-x86_64.AppImage`;
-    const deb = `Task-Monki-${version}-linux-amd64.deb`;
-    await writeLargeFile(
-      path.join(releaseDir, appImage),
-      elfHeader(0x3e)
-    );
+    await fs.writeFile(path.join(releaseDir, appImage), elfHeader(0x3e));
     await fs.chmod(path.join(releaseDir, appImage), 0o755);
-    await fs.writeFile(path.join(releaseDir, deb), '!<arch>\n');
     await fs.writeFile(
       path.join(releaseDir, 'latest-linux.yml'),
-      `version: ${version}\nfiles:\n  - ${appImage}\n  - ${deb}\n`
+      `version: ${version}\nfiles:\n  - ${appImage}\n`
     );
 
     await expect(
@@ -145,15 +139,6 @@ async function writeLargeFile(filePath, magic) {
   }
 }
 
-async function writeDebianArchive(filePath) {
-  const members = [
-    arMember('debian-binary/', Buffer.from('2.0\n')),
-    arMember('control.tar.gz/', Buffer.from('control')),
-    arMember('data.tar.xz/', Buffer.alloc(1024 * 1024, 0x61))
-  ];
-  await fs.writeFile(filePath, Buffer.concat([Buffer.from('!<arch>\n'), ...members]));
-}
-
 async function writeRequiredLegalFiles(releaseDir, platform) {
   for (const resourceDirectory of resourceDirectoriesByPlatform[platform]) {
     for (const relativePath of requiredLegalFiles) {
@@ -164,21 +149,8 @@ async function writeRequiredLegalFiles(releaseDir, platform) {
   }
 }
 
-function arMember(name, contents) {
-  const header = [
-    name.padEnd(16, ' '),
-    '0'.padEnd(12, ' '),
-    '0'.padEnd(6, ' '),
-    '0'.padEnd(6, ' '),
-    '100644'.padEnd(8, ' '),
-    String(contents.length).padEnd(10, ' '),
-    '`\n'
-  ].join('');
-  return Buffer.concat([
-    Buffer.from(header, 'ascii'),
-    contents,
-    ...(contents.length % 2 === 1 ? [Buffer.from('\n')] : [])
-  ]);
+async function digest(filePath) {
+  return createHash('sha512').update(await fs.readFile(filePath)).digest('base64');
 }
 
 function elfHeader(machine) {

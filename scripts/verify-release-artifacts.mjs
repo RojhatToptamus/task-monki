@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,11 +8,13 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { gunzip } from 'node:zlib';
+import { extractFile } from '@electron/asar';
 
 const execFileAsync = promisify(execFile);
 const gunzipAsync = promisify(gunzip);
 const require = createRequire(import.meta.url);
 const { path7za } = require('7zip-bin');
+const YAML = require('yaml');
 const MIN_PACKAGE_BYTES = 1024 * 1024;
 const ARCHIVE_TIMEOUT_MS = 120_000;
 const REQUIRED_PACKAGED_LEGAL_FILES = [
@@ -37,7 +41,8 @@ async function main() {
     platform: options.platform ?? process.platform,
     releaseDir,
     version,
-    nativeValidation: true
+    nativeValidation: !options.artifactsOnly,
+    packageContents: !options.artifactsOnly
   });
   console.log(`Verified ${platformLabel(options.platform ?? process.platform)} release artifacts.`);
 }
@@ -46,7 +51,8 @@ export async function verifyReleaseArtifacts({
   platform,
   releaseDir,
   version,
-  nativeValidation = false
+  nativeValidation = false,
+  packageContents = true
 }) {
   if (platform === 'darwin') {
     await verifyMacArtifacts(releaseDir, version, nativeValidation);
@@ -57,7 +63,9 @@ export async function verifyReleaseArtifacts({
   } else {
     throw new Error(`Unsupported release verification platform: ${platform}`);
   }
-  await verifyPackagedLegalFiles({ platform, releaseDir });
+  if (packageContents) {
+    await verifyPackagedLegalFiles({ platform, releaseDir });
+  }
 }
 
 export async function verifyPackagedLegalFiles({ platform, releaseDir }) {
@@ -167,11 +175,8 @@ async function verifyWindowsArtifacts(releaseDir, version) {
   await assertPackageSize(installerPath);
   await assertMagic(installerPath, Buffer.from('MZ'));
   await assertSevenZipArchive(installerPath);
+  await verifyWindowsInstallerContents(installerPath, version);
   await assertGzip(path.join(releaseDir, `${installer}.blockmap`));
-  await assertPeMachine(
-    path.join(releaseDir, 'win-unpacked', 'Task Monki.exe'),
-    0x8664
-  );
   await assertUpdateMetadata(
     path.join(releaseDir, 'latest.yml'),
     version,
@@ -181,24 +186,20 @@ async function verifyWindowsArtifacts(releaseDir, version) {
 
 async function verifyLinuxArtifacts(releaseDir, version, nativeValidation) {
   const appImage = `Task-Monki-${version}-linux-x86_64.AppImage`;
-  const deb = `Task-Monki-${version}-linux-amd64.deb`;
   const appImagePath = path.join(releaseDir, appImage);
-  const debPath = path.join(releaseDir, deb);
   await assertPackageSize(appImagePath);
   await assertElfMachine(appImagePath, 0x3e);
   const appImageStat = await fs.stat(appImagePath);
   if (process.platform !== 'win32' && (appImageStat.mode & 0o111) === 0) {
     throw new Error(`${appImage} is not executable.`);
   }
-  await assertPackageSize(debPath);
-  await assertDebianArchive(debPath);
   await assertUpdateMetadata(
     path.join(releaseDir, 'latest-linux.yml'),
     version,
-    [appImage, deb]
+    [appImage]
   );
   if (nativeValidation && process.platform === 'linux') {
-    await verifyNativeLinuxArtifacts(appImagePath, debPath);
+    await verifyNativeLinuxArtifact(appImagePath, version);
   }
 }
 
@@ -280,6 +281,52 @@ async function assertSevenZipArchive(filePath) {
   });
 }
 
+async function verifyWindowsInstallerContents(installerPath, version) {
+  const directory = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'task-monki-windows-verify-')
+  );
+  try {
+    await execPackagedTool(
+      path7za,
+      [
+        'x',
+        '-bd',
+        '-y',
+        `-o${directory}`,
+        installerPath,
+        'Task Monki.exe',
+        'resources/app-update.yml',
+        'resources/app.asar'
+      ],
+      {
+        timeout: ARCHIVE_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true
+      }
+    );
+    await assertPeMachine(path.join(directory, 'Task Monki.exe'), 0x8664);
+    const updateConfig = YAML.parse(
+      await fs.readFile(path.join(directory, 'resources', 'app-update.yml'), 'utf8')
+    );
+    if (
+      updateConfig?.provider !== 'github' ||
+      updateConfig.owner !== 'RojhatToptamus' ||
+      updateConfig.repo !== 'task-monki'
+    ) {
+      throw new Error('The Windows installer has the wrong update source.');
+    }
+    if (Object.hasOwn(updateConfig, 'publisherName')) {
+      throw new Error('The unsigned Windows installer must not require a publisher signature.');
+    }
+    await assertPackagedApplicationVersion(
+      path.join(directory, 'resources', 'app.asar'),
+      version
+    );
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+}
+
 export async function execPackagedTool(executable, args, options) {
   try {
     return await execFileAsync(executable, args, options);
@@ -302,16 +349,7 @@ export async function execPackagedTool(executable, args, options) {
   }
 }
 
-async function verifyNativeLinuxArtifacts(appImagePath, debPath) {
-  await execFileAsync('dpkg-deb', ['--info', debPath], {
-    timeout: ARCHIVE_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024
-  });
-  await execFileAsync('dpkg-deb', ['--contents', debPath], {
-    timeout: ARCHIVE_TIMEOUT_MS,
-    maxBuffer: 16 * 1024 * 1024
-  });
-
+async function verifyNativeLinuxArtifact(appImagePath, version) {
   const directory = await fs.mkdtemp(
     path.join(os.tmpdir(), 'task-monki-appimage-verify-')
   );
@@ -325,70 +363,74 @@ async function verifyNativeLinuxArtifacts(appImagePath, debPath) {
     if (!appRun.isFile()) {
       throw new Error(`${path.basename(appImagePath)} has no regular AppRun entry.`);
     }
+    await assertPackagedApplicationVersion(
+      path.join(directory, 'squashfs-root', 'resources', 'app.asar'),
+      version
+    );
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
 }
 
-async function assertDebianArchive(filePath) {
-  await assertMagic(filePath, Buffer.from('!<arch>\n'));
-  const members = await readArMemberNames(filePath);
-  if (!members.includes('debian-binary')) {
-    throw new Error(`${path.basename(filePath)} has no debian-binary member.`);
-  }
-  if (!members.some((name) => name.startsWith('control.tar'))) {
-    throw new Error(`${path.basename(filePath)} has no control archive.`);
-  }
-  if (!members.some((name) => name.startsWith('data.tar'))) {
-    throw new Error(`${path.basename(filePath)} has no data archive.`);
-  }
-}
-
-async function readArMemberNames(filePath) {
-  const stat = await fs.stat(filePath);
-  const handle = await fs.open(filePath, 'r');
-  const members = [];
-  let offset = 8;
+async function assertPackagedApplicationVersion(archivePath, version) {
+  let packageJson;
   try {
-    while (offset + 60 <= stat.size) {
-      const header = Buffer.alloc(60);
-      const { bytesRead } = await handle.read(header, 0, header.length, offset);
-      if (bytesRead !== header.length || header.subarray(58, 60).toString() !== '`\n') {
-        throw new Error(`${path.basename(filePath)} has a malformed ar header.`);
-      }
-      const name = header
-        .subarray(0, 16)
-        .toString('ascii')
-        .trim()
-        .replace(/\/$/u, '');
-      const size = Number(header.subarray(48, 58).toString('ascii').trim());
-      if (!Number.isSafeInteger(size) || size < 0) {
-        throw new Error(`${path.basename(filePath)} has an invalid ar member size.`);
-      }
-      members.push(name);
-      offset += 60 + size + (size % 2);
-    }
-    if (offset !== stat.size) {
-      throw new Error(`${path.basename(filePath)} has trailing ar data.`);
-    }
-    return members;
-  } finally {
-    await handle.close();
+    packageJson = JSON.parse(extractFile(archivePath, 'package.json').toString('utf8'));
+  } catch (error) {
+    throw new Error(`Could not read the packaged application version from ${archivePath}.`, {
+      cause: error
+    });
+  }
+  if (packageJson.version !== version) {
+    throw new Error(`The packaged application has version ${packageJson.version}; expected ${version}.`);
   }
 }
 
 async function assertUpdateMetadata(filePath, version, artifacts) {
   const contents = await fs.readFile(filePath, 'utf8');
-  if (!contents.includes(`version: ${version}`)) {
+  const metadata = YAML.parse(contents);
+  if (metadata?.version !== version) {
     throw new Error(`${path.basename(filePath)} has the wrong release version.`);
   }
+  if (!Array.isArray(metadata.files) || metadata.files.length !== artifacts.length) {
+    throw new Error(`${path.basename(filePath)} has the wrong artifact set.`);
+  }
   for (const artifact of artifacts) {
-    if (!contents.includes(artifact)) {
+    const entry = metadata.files.find((candidate) => candidate?.url === artifact);
+    if (!entry) {
       throw new Error(
         `${path.basename(filePath)} does not reference ${artifact}.`
       );
     }
+    const expectedSha512 = await fileDigest(
+      path.join(path.dirname(filePath), artifact),
+      'sha512',
+      'base64'
+    );
+    if (entry.sha512 !== expectedSha512) {
+      throw new Error(`${path.basename(filePath)} has the wrong digest for ${artifact}.`);
+    }
   }
+  if (metadata.path !== undefined) {
+    if (!artifacts.includes(metadata.path)) {
+      throw new Error(`${path.basename(filePath)} has an invalid primary artifact.`);
+    }
+    const primary = metadata.files.find((candidate) => candidate?.url === metadata.path);
+    if (metadata.sha512 !== primary.sha512) {
+      throw new Error(`${path.basename(filePath)} has the wrong primary artifact digest.`);
+    }
+  }
+}
+
+async function fileDigest(filePath, algorithm, encoding) {
+  const digest = createHash(algorithm);
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => digest.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return digest.digest(encoding);
 }
 
 async function readTail(filePath, byteCount) {
@@ -429,6 +471,10 @@ async function readRange(filePath, offset, length) {
 function parseOptions(args) {
   const options = {};
   for (const argument of args) {
+    if (argument === '--artifacts-only') {
+      options.artifactsOnly = true;
+      continue;
+    }
     const [name, value] = argument.split('=', 2);
     if (!value) throw new Error(`Invalid release verifier option: ${argument}`);
     if (name === '--platform') options.platform = value;

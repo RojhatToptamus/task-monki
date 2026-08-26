@@ -108,6 +108,10 @@ export const IPC_INVOKE_CHANNELS = [
   'settings:tools:status',
   'settings:tools:test',
   'settings:update',
+  'softwareUpdate:check',
+  'softwareUpdate:download',
+  'softwareUpdate:get',
+  'softwareUpdate:install',
   'task:create',
   'task:delete',
   'task:getBoardSnapshot',
@@ -119,4 +123,5 @@ export const IPC_INVOKE_CHANNELS = [
 export type IpcInvokeChannel = (typeof IPC_INVOKE_CHANNELS)[number];
 
 export const IPC_UPDATE_CHANNEL = 'app:update' as const;
+export const IPC_SOFTWARE_UPDATE_CHANNEL = 'softwareUpdate:state' as const;
 export const IPC_WINDOW_CHROME_CHANNEL = 'windowChrome:sync' as const;

@@ -147,6 +147,12 @@ async function packagedDesignResources() {
     path.resolve('THIRD_PARTY_LICENSES/Claude-Design-System-MIT.txt'),
     path.join(resources, 'legal/third-party/Claude-Design-System-MIT.txt')
   );
+  await fs.mkdir(path.join(resources, 'legal/electron'), { recursive: true });
+  await fs.writeFile(path.join(resources, 'legal/electron/LICENSE'), 'Electron license\n');
+  await fs.writeFile(
+    path.join(resources, 'legal/electron/LICENSES.chromium.html'),
+    'Chromium notices\n'
+  );
   return resources;
 }
 

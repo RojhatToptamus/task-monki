@@ -244,7 +244,7 @@ export interface PreviewGatewaySettings {
   port: number | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 10 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 11 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -252,6 +252,7 @@ export interface TaskManagerAppSettings {
   themePreset: TaskManagerThemePreset;
   sidebarCollapsed: boolean;
   showMascot: boolean;
+  autoInstallUpdatesOnQuit: boolean;
   firstLaunchSetupCompleted: boolean;
   disabledRuntimeIds: AgentRuntimeId[];
   defaultRuntimeId: AgentRuntimeId;
@@ -293,6 +294,7 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   themePreset: 'umber',
   sidebarCollapsed: false,
   showMascot: true,
+  autoInstallUpdatesOnQuit: true,
   firstLaunchSetupCompleted: false,
   disabledRuntimeIds: [],
   defaultRuntimeId: CODEX_RUNTIME_ID,

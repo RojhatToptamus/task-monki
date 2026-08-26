@@ -6,10 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
+import { gunzip } from 'node:zlib';
 
 const execFileAsync = promisify(execFile);
+const gunzipAsync = promisify(gunzip);
 const require = createRequire(import.meta.url);
 const { isJitCode } = require('./trusted-mac-sign.cjs');
+const YAML = require('yaml');
 
 const AUTHORITY = 'Developer ID Application: rojhat toptamus (ZD35XP4V7D)';
 const TEAM_ID = 'ZD35XP4V7D';
@@ -92,7 +95,78 @@ async function main() {
     }
   }
 
+  if (options.zip) {
+    await verifyUpdateZip(options, {
+      numericVersion,
+      bundleVersion: options.bundleVersion,
+      electronVersion: options.electronVersion
+    });
+  }
+
   console.log(`Verified trusted macOS release ${expectedName}.`);
+}
+
+async function verifyUpdateZip(options, expected) {
+  const expectedZipName = `Task-Monki-${options.version}-mac-arm64.zip`;
+  const zipPath = path.resolve(options.zip);
+  if (path.basename(zipPath) !== expectedZipName) {
+    throw new Error(`Expected ${expectedZipName}, received ${path.basename(zipPath)}.`);
+  }
+  if ((await sha256(zipPath)) !== options.zipSha256.toLowerCase()) {
+    throw new Error('The update ZIP SHA-256 does not match the trusted build.');
+  }
+  const blockmapPath = path.resolve(options.zipBlockmap);
+  if (path.basename(blockmapPath) !== `${expectedZipName}.blockmap`) {
+    throw new Error('The macOS blockmap has the wrong name.');
+  }
+  const blockmap = await gunzipAsync(await fs.readFile(blockmapPath));
+  if (blockmap.byteLength === 0) {
+    throw new Error('The macOS blockmap is empty.');
+  }
+  await assertUpdateMetadata(path.resolve(options.metadata), {
+    version: options.version,
+    artifactName: expectedZipName,
+    artifactPath: zipPath
+  });
+
+  const temporaryDirectory = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'task-monki-update-verify-')
+  );
+  try {
+    await exec('ditto', ['-x', '-k', zipPath, temporaryDirectory], {
+      timeout: 120_000
+    });
+    const appPath = await findApplication(temporaryDirectory);
+    await exec('xcrun', ['stapler', 'validate', appPath]);
+    await verifyApplication(appPath, { ...expected, temporaryDirectory });
+  } finally {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertUpdateMetadata(metadataPath, expected) {
+  if (path.basename(metadataPath) !== 'latest-mac.yml') {
+    throw new Error('The macOS update metadata must be named latest-mac.yml.');
+  }
+  const metadata = YAML.parse(await fs.readFile(metadataPath, 'utf8'));
+  if (metadata?.version !== expected.version) {
+    throw new Error('The macOS update metadata has the wrong version.');
+  }
+  if (
+    !Array.isArray(metadata.files) ||
+    metadata.files.length !== 1 ||
+    metadata.files[0]?.url !== expected.artifactName
+  ) {
+    throw new Error('The macOS update metadata must reference only the trusted ZIP.');
+  }
+  const expectedSha512 = await fileDigest(expected.artifactPath, 'sha512', 'base64');
+  if (
+    metadata.files[0].sha512 !== expectedSha512 ||
+    metadata.path !== expected.artifactName ||
+    metadata.sha512 !== expectedSha512
+  ) {
+    throw new Error('The macOS update metadata has the wrong ZIP digest.');
+  }
 }
 
 async function verifyApplication(appPath, expected) {
@@ -359,15 +433,20 @@ async function assertPlistValue(plistPath, key, expected) {
 }
 
 async function sha256(filePath) {
-  const hash = createHash('sha256');
+  return fileDigest(filePath, 'sha256', 'hex');
+}
+
+async function fileDigest(filePath, algorithm, encoding) {
+  const hash = createHash(algorithm);
   for await (const chunk of createReadStream(filePath)) hash.update(chunk);
-  return hash.digest('hex');
+  return hash.digest(encoding);
 }
 
 function parseNumericVersion(version) {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-(?:alpha|beta|rc)\.\d+)?$/u.exec(version);
-  if (!match) throw new Error(`Unsupported release version: ${version}`);
-  return `${match[1]}.${match[2]}.${match[3]}`;
+  if (!/^\d+\.\d+\.\d+$/u.test(version)) {
+    throw new Error(`Unsupported release version: ${version}`);
+  }
+  return version;
 }
 
 function parseOptions(argumentsList) {
@@ -379,6 +458,10 @@ function parseOptions(argumentsList) {
     const value = argument.slice(separator + 1);
     if (!value) throw new Error(`Missing value for ${name}.`);
     if (name === '--dmg') options.dmg = value;
+    else if (name === '--zip') options.zip = value;
+    else if (name === '--zip-blockmap') options.zipBlockmap = value;
+    else if (name === '--metadata') options.metadata = value;
+    else if (name === '--zip-sha256') options.zipSha256 = value;
     else if (name === '--version') options.version = value;
     else if (name === '--bundle-version') options.bundleVersion = value;
     else if (name === '--electron-version') options.electronVersion = value;
@@ -396,6 +479,15 @@ function parseOptions(argumentsList) {
   }
   if (!/^[a-f0-9]{64}$/iu.test(options.sha256)) {
     throw new Error('The SHA-256 value is invalid.');
+  }
+  const updateOptions = ['zip', 'zipBlockmap', 'metadata', 'zipSha256'];
+  if (updateOptions.some((name) => options[name])) {
+    for (const name of updateOptions) {
+      if (!options[name]) throw new Error(`Missing verifier option: ${name}`);
+    }
+    if (!/^[a-f0-9]{64}$/iu.test(options.zipSha256)) {
+      throw new Error('The ZIP SHA-256 value is invalid.');
+    }
   }
   return options;
 }

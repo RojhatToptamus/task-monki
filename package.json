@@ -1,9 +1,10 @@
 {
   "name": "task-monki",
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "description": "Experimental local task board for running AI coding agents in isolated Git worktrees.",
+  "desktopName": "task-monki.desktop",
   "author": "Task Monki contributors",
   "homepage": "https://github.com/RojhatToptamus/task-monki#readme",
   "repository": {
@@ -25,11 +26,13 @@
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
     "prepare:design-browser-runtime": "node scripts/prepare-design-browser-runtime.mjs",
-    "dist:dir": "npm run prepare:design-browser-runtime && npm run build && electron-builder --dir",
-    "dist:mac": "npm run prepare:design-browser-runtime -- --arch=arm64 --arch=x64 && npm run build && electron-builder --mac",
-    "dist:mac:trusted": "electron-builder --mac dmg --arm64 --config electron-builder.release-mac.yml --publish never",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:linux": "npm run build && electron-builder --linux",
+    "prepare:electron-runtime": "node node_modules/electron/install.js",
+    "dist:dir": "npm run prepare:electron-runtime && npm run prepare:design-browser-runtime && npm run build && electron-builder --dir",
+    "dist:mac": "npm run prepare:electron-runtime && npm run prepare:design-browser-runtime -- --arch=arm64 --arch=x64 && npm run build && electron-builder --mac",
+    "dist:mac:trusted": "npm run prepare:electron-runtime && electron-builder --mac dmg --arm64 --config electron-builder.release-mac.yml --publish never",
+    "dist:mac:trusted-zip": "electron-builder --prepackaged 'release/mac-arm64/Task Monki.app' --mac zip --arm64 --config electron-builder.release-mac.yml --publish never",
+    "dist:win": "npm run prepare:electron-runtime && npm run build && electron-builder --win",
+    "dist:linux": "npm run prepare:electron-runtime && npm run build && electron-builder --linux",
     "verify:packaged-owned-process": "node scripts/verify-packaged-owned-process.mjs",
     "verify:packaged-preview": "node scripts/verify-packaged-preview-launcher.mjs",
     "verify:packaged-preview-safe-storage": "node scripts/verify-packaged-preview-safe-storage.mjs",
@@ -63,6 +66,7 @@
     "verify:trusted-mac-release": "node scripts/verify-trusted-mac-release.mjs"
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "lucide-react": "^1.25.0",
     "pg": "^8.22.0",
     "react": "^19.2.7",

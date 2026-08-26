@@ -368,6 +368,7 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 - first-launch setup completion;
 - default implementation, review, and prompt-refinement models;
 - selected repository ID for the new-task default;
+- automatic installation of a downloaded desktop update on normal quit;
 - Codex external tool modes for web search, MCP servers, and apps;
 - external executable path preferences for Git, Codex CLI, and GitHub CLI;
   other registered runtimes use PATH or their documented environment override;

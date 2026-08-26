@@ -29,7 +29,9 @@ const REQUIRED_DESIGN_RESOURCE_FILES = [
   'design-skills/variations/SKILL.md',
   'design-skills/wireframe/SKILL.md',
   'legal/THIRD_PARTY_NOTICES.md',
-  'legal/third-party/Claude-Design-System-MIT.txt'
+  'legal/third-party/Claude-Design-System-MIT.txt',
+  'legal/electron/LICENSE',
+  'legal/electron/LICENSES.chromium.html'
 ];
 const PROBE_SOURCE = [
   'process.stdout.write(JSON.stringify({',
