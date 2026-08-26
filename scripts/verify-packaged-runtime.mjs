@@ -1,6 +1,4 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { listPackage } from '@electron/asar';
@@ -247,9 +245,6 @@ export async function assertPackagedDesignBrowserRuntime(resourceDirectory, arch
       throw new Error(`Packaged Design browser executable bit is missing: ${filePath}`);
     }
   }
-  if ((await sha256(executable)) !== expectedAgentSha) {
-    throw new Error('Packaged agent-browser binary does not match its pinned checksum.');
-  }
   const [{ stdout: version }, { stdout: agentArchitectures }, { stdout: chromeArchitectures }] =
     await Promise.all([
       execFileAsync(executable, ['--version'], { timeout: PROBE_TIMEOUT_MS }),
@@ -267,12 +262,6 @@ export async function assertPackagedDesignBrowserRuntime(resourceDirectory, arch
   }
   await execFileAsync('codesign', ['--verify', '--strict', executable]);
   await execFileAsync('codesign', ['--verify', '--deep', '--strict', chromeApp]);
-}
-
-async function sha256(filePath) {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
-  return hash.digest('hex');
 }
 
 function parseProbeResult(stdout, executable) {

@@ -1,11 +1,12 @@
 # Installing Task Monki
 
-Date: 2026-07-14
+Date: 2026-08-26
 
-Task Monki is distributed through GitHub Releases as unsigned desktop builds.
-macOS app bundles are ad-hoc signed only to preserve bundle integrity; they are
-not Developer ID signed or notarized yet. The app does not include an automatic
-updater. To update, download and install the newer release from GitHub.
+Task Monki is distributed through GitHub Releases as a trusted Apple silicon
+macOS DMG. The app and DMG use Developer ID signing. The release is notarized
+by Apple, and the notarization ticket is stapled to the DMG. The app does not
+include an automatic updater. To update, download and install the newer release
+from GitHub.
 
 ## Requirements
 
@@ -159,58 +160,31 @@ and the [AWS SDK environment reference](https://docs.aws.amazon.com/sdkref/lates
 Download the latest desktop build from
 [GitHub Releases](https://github.com/RojhatToptamus/task-monki/releases/latest).
 
-Use the asset that matches your platform:
+The current release workflow publishes one asset:
 
 | Platform | Asset |
 | --- | --- |
-| macOS Apple silicon | `Task-Monki-<version>-mac-arm64.dmg` or `.zip` |
-| macOS Intel | `Task-Monki-<version>-mac-x64.dmg` or `.zip` |
-| Windows | `Task-Monki-<version>-win-x64.exe` |
-| Linux universal | `Task-Monki-<version>-linux-x86_64.AppImage` |
-| Debian/Ubuntu | `Task-Monki-<version>-linux-amd64.deb` |
+| macOS 14 or newer, Apple silicon | `Task-Monki-<version>-mac-arm64.dmg` |
 
-## Unsigned Build Warnings
+Task Monki does not currently publish trusted Intel, Windows, or Linux builds.
 
-The current release channel is unsigned:
+## macOS installation
 
-- macOS may show a Gatekeeper warning because the app is not Developer ID
-  signed or notarized yet.
-- Windows may show an unknown-publisher or SmartScreen warning.
-- Linux AppImage users may need to mark the file executable before launching.
+1. Download the DMG from the project's GitHub Releases page.
+2. Open the DMG.
+3. Drag `Task Monki.app` to Applications.
+4. Open Task Monki from Applications.
 
-### macOS unsigned alpha
-
-This alpha is not Apple Developer ID signed or notarized yet.
-
-If macOS blocks the app, use Apple's documented manual override flow:
-
-1. Try opening `Task Monki.app` once.
-2. Open System Settings -> Privacy & Security.
-3. Scroll to Security.
-4. Click Open Anyway for Task Monki.
-5. Confirm with your password or Touch ID.
-
-Apple says the Open Anyway button is available for about an hour after you try
-to open the app. See
-[Apple's guide to opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
-
-If there is no Open Anyway button, or Task Monki starts but stays stuck on the
-Dock with no window, quit the stuck `Task Monki` process and run:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/Task Monki.app"
-open "/Applications/Task Monki.app"
-```
-
-Only install releases from the project's GitHub Releases page. Check
-`SHA256SUMS-*.txt` when you need to verify a downloaded artifact.
+Do not remove quarantine attributes to bypass a trust failure. If macOS blocks
+the app, delete that copy and download the DMG again from the project's GitHub
+Releases page. Report the release version and the Gatekeeper message.
 
 ## Updating
 
 Updates are manual:
 
 1. Open the latest GitHub Release.
-2. Download the artifact for your platform.
+2. Download the macOS DMG.
 3. Quit Task Monki.
 4. Install or replace the app with the newer artifact.
 5. Launch Task Monki again.

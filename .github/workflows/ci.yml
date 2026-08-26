@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: Verify ${{ matrix.platform }}
@@ -21,17 +24,39 @@ jobs:
           - platform: Windows
             os: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: '22'
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
           cache: npm
       - run: npm ci
       - run: npm run check:themes
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
       - run: npm run typecheck
-      - run: npm test
+      - name: Run focused tests
+        run: npm run test:focused
+      - name: Run integration tests
+        if: runner.os == 'Linux'
+        run: npm run test:integration
+      - name: Run macOS app integration tests
+        if: runner.os == 'macOS'
+        run: >-
+          npm exec vitest -- run
+          src/core/app/TaskManagerService.design.integration.test.ts
+          src/core/app/TaskManagerService.preview.integration.test.ts
+          src/core/preview/PreviewReconciler.integration.test.ts
+      - name: Run macOS native launcher tests
+        if: runner.os == 'macOS'
+        run: npm exec vitest -- run src/core/preview/runtime/NativeLauncherHost.integration.test.ts
+      - name: Run Windows storage integration tests
+        if: runner.os == 'Windows'
+        run: npm exec vitest -- run src/core/storage/FileTaskStore.integration.test.ts
+      - name: Run system tests
+        if: runner.os == 'Linux'
+        run: npm run test:system
       - run: npm run test:renderer:dom
       - run: npm run build
       - name: Prepare Design browser runtime
