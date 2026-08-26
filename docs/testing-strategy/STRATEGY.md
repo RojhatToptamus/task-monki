@@ -55,7 +55,10 @@ The Vitest files use explicit cost suffixes:
 - `*.system.test.ts` files wrap an executed product workflow.
 
 Run `npm run test:focused`, `npm run test:integration`, or
-`npm run test:system` while iterating. `npm test` remains the aggregate CI gate.
+`npm run test:system` while iterating. `npm test` remains the local aggregate
+gate. CI runs focused tests and native package checks on every operating system.
+It runs integration tests on macOS, the system lane on Linux, and the
+Windows-specific storage integration coverage on Windows.
 
 ## Scenarios implemented now
 

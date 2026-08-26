@@ -36,12 +36,17 @@ jobs:
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
       - run: npm run typecheck
-      - name: Run tests
-        if: runner.os != 'Windows'
-        run: npm test
-      - name: Run tests without cross-file parallelism
+      - name: Run focused tests
+        run: npm run test:focused
+      - name: Run integration tests
+        if: runner.os == 'macOS'
+        run: npm run test:integration
+      - name: Run Windows storage integration tests
         if: runner.os == 'Windows'
-        run: npm test -- --no-file-parallelism
+        run: npm exec vitest -- run src/core/storage/FileTaskStore.integration.test.ts
+      - name: Run system tests
+        if: runner.os == 'Linux'
+        run: npm run test:system
       - run: npm run test:renderer:dom
       - run: npm run build
       - name: Prepare Design browser runtime
