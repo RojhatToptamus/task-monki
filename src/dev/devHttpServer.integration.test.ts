@@ -361,6 +361,24 @@ describe('development HTTP server', () => {
     expect(discoverAgentRuntimeModels).toHaveBeenCalledWith('cursor-agent-acp');
   });
 
+  it('routes prompt-refinement cancellation and returns a valid JSON response', async () => {
+    const cancelPromptRefinement = vi.fn(async () => undefined);
+    const running = await startServer({ cancelPromptRefinement });
+
+    const response = await fetch(`${running.baseUrl}/api/prompt/refine/cancel`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: 'refinement-1', runtimeId: 'codex' })
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({});
+    expect(cancelPromptRefinement).toHaveBeenCalledWith({
+      requestId: 'refinement-1',
+      runtimeId: 'codex'
+    });
+  });
+
   it('routes one typed user-input answer through the authenticated interaction API', async () => {
     const respondToInteraction = vi.fn(async (input: unknown) => input);
     const running = await startServer({ respondToInteraction });

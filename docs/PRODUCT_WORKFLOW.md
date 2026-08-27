@@ -54,6 +54,24 @@ decision. Closing it preserves title and description text for the current app
 session, while unsubmitted attachment batches are still discarded. A
 successful Create clears the preserved text draft.
 
+Refine is a reversible proposal, not an automatic append or overwrite. One
+ephemeral read-only, network-isolated agent run receives the current title and
+description, the selected downstream model's capabilities, and any staged
+attachments. It first decides whether repository or attachment inspection can
+materially improve the request. Clear, small tasks may use no repository tools;
+ambiguous or cross-cutting tasks start in the likely relevant area and broaden
+only when inspected dependencies justify it. The run returns a standalone
+rewrite plus path-free inspection evidence. Core accepts repository paths and
+attachment observations only when they match files that were actually made
+available to that run. If refinement cannot be validated, the original request
+is returned unchanged with a visible degraded-result warning.
+
+The composer locks refinement inputs while that run is active, cancels the run
+when the panel closes, and accepts a proposal only while its repository, title,
+description, target model, and attachment revision still match. Project and
+Task Monki instructions remain downstream instructions; refinement does not
+copy their generic rules into every task prompt.
+
 ## Runtime and model configuration
 
 First-launch defaults, New Task, and Settings use the same runtime/model
@@ -116,7 +134,11 @@ Provider delivery is runtime-specific and fail-closed. Codex uses a complete
 thread-local permission profile for the exact worktree and verified files.
 Attachment runs force network off, so runtimes such as OpenCode whose network
 is provider-controlled cannot accept them. Full access remains available for
-attachment-free tasks but is rejected when attachments are present.
+attachment-free tasks but is rejected when attachments are present. In the
+packaged app, the user's Codex web search, MCP server, and app choices remain in
+effect for attachment runs; enabling those integrations means trusting them
+with the task content the agent can provide to them. Browser development keeps
+its separate rule that forces those integrations off.
 
 Files stay renderer-local during editing and cross the trusted boundary in one
 bounded batch. A successful task create atomically adopts that batch as one

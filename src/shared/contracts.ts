@@ -1100,17 +1100,37 @@ export interface ProtocolMessageRecord {
 }
 
 export interface RefinePromptRequest {
+  requestId?: string;
   repositoryId: string;
   input: string;
+  title?: string;
+  attachmentDraftId?: string;
   runtimeId?: AgentRuntimeId;
   model?: string;
   modelProvider?: import('./agent').AgentModelProviderId;
+  targetRuntimeId?: AgentRuntimeId;
+  targetModel?: string;
+  targetModelProvider?: import('./agent').AgentModelProviderId;
+}
+
+export interface CancelPromptRefinementRequest {
+  requestId: string;
+  runtimeId?: AgentRuntimeId;
+}
+
+export interface PromptRefinementEvidence {
+  repositoryInspection: 'none' | 'focused' | 'expanded';
+  repositoryFilesInspected: string[];
+  attachmentIdsInspected: string[];
+  attachmentIdsReferenced: string[];
 }
 
 export interface RefinePromptResponse {
   prompt: string;
   titleSuggestion: string;
-  source: 'model' | 'deterministic-fallback';
+  source: 'model' | 'unchanged-fallback';
+  evidence: PromptRefinementEvidence;
+  warning?: string;
 }
 
 export interface UpdateAppSettingsRequest {
@@ -1451,6 +1471,7 @@ export interface TaskManagerApi {
   readClipboardImage(): Promise<ClipboardAttachmentImage | undefined>;
   createTask(input: CreateTaskRequest): Promise<Task>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
+  cancelPromptRefinement(input: CancelPromptRefinementRequest): Promise<void>;
   prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;
   startRun(input: StartRunRequest): Promise<RunRecord>;
   steerRun(input: SteerRunRequest): Promise<void>;

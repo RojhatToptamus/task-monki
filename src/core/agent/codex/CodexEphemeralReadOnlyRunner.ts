@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { CodexExternalToolSettings } from '../../../shared/agent';
 import { ProcessSupervisor, type SupervisedProcess } from '../../process/ProcessSupervisor';
 import {
@@ -33,6 +34,9 @@ export interface CodexEphemeralReadOnlyRunRequest {
   codexExecutable?: string;
   toolSettings?: CodexExternalToolSettings;
   failClosedMcpDiscovery?: boolean;
+  imagePaths?: readonly string[];
+  additionalDirectories?: readonly string[];
+  additionalConfigOverrides?: readonly string[];
 }
 
 export interface CodexEphemeralReadOnlyRun {
@@ -46,11 +50,18 @@ export function buildCodexEphemeralReadOnlyCommand(input: {
   reasoningEffort: string;
   configOverrides?: readonly string[];
   executable?: string;
+  imagePaths?: readonly string[];
+  additionalDirectories?: readonly string[];
 }): { executable: string; argv: string[] } {
   if (!input.cwd.trim()) throw new Error('Working directory is required.');
   if (!input.model.trim()) throw new Error('Model is required.');
   const executable = input.executable ?? 'codex';
   const configOverrides = input.configOverrides ?? codexExternalToolConfigOverrides();
+  const imagePaths = uniqueAbsolutePaths(input.imagePaths ?? [], 'image');
+  const additionalDirectories = uniqueAbsolutePaths(
+    input.additionalDirectories ?? [],
+    'additional directory'
+  );
   return {
     executable,
     argv: [
@@ -64,6 +75,8 @@ export function buildCodexEphemeralReadOnlyCommand(input: {
       'read-only',
       '--cd',
       input.cwd,
+      ...additionalDirectories.flatMap((directory) => ['--add-dir', directory]),
+      ...imagePaths.flatMap((imagePath) => ['--image', imagePath]),
       '--model',
       input.model,
       '-c',
@@ -88,8 +101,10 @@ export async function startCodexEphemeralReadOnlyRun(
     cwd: input.cwd,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
-    configOverrides,
-    executable
+    configOverrides: [...configOverrides, ...(input.additionalConfigOverrides ?? [])],
+    executable,
+    imagePaths: input.imagePaths,
+    additionalDirectories: input.additionalDirectories
   });
   const process = new ProcessSupervisor().start({
     executable: command.executable,
@@ -98,6 +113,16 @@ export async function startCodexEphemeralReadOnlyRun(
     stdin: input.instruction
   });
   return superviseCodexEphemeralProcess(process, input.timeoutMs);
+}
+
+function uniqueAbsolutePaths(values: readonly string[], label: string): string[] {
+  const normalized = values.map((value) => {
+    if (!path.isAbsolute(value) || value.includes('\0')) {
+      throw new Error(`Codex ${label} paths must be absolute.`);
+    }
+    return path.resolve(value);
+  });
+  return [...new Set(normalized)];
 }
 
 export function superviseCodexEphemeralProcess(

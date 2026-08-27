@@ -29,6 +29,7 @@ import type {
   ContinueRunRequest,
   CreateBlankDesignRequest,
   CancelDesignTurnRequest,
+  CancelPromptRefinementRequest,
   CreateBoardRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
@@ -741,6 +742,13 @@ function installIpcHandlers(): void {
   handleTrustedIpc('prompt:refine', async (_, input: RefinePromptRequest) => {
     return service.refinePrompt(input);
   });
+
+  handleTrustedIpc(
+    'prompt:refine:cancel',
+    async (_, input: CancelPromptRefinementRequest) => {
+      return service.cancelPromptRefinement(input);
+    }
+  );
 
   handleTrustedIpc('worktree:prepare', async (_, input: PrepareWorktreeRequest) => {
     return service.prepareWorktree(input);

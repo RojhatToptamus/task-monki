@@ -8,6 +8,32 @@ import {
 } from './AttachmentFileStore';
 
 describe('AttachmentFileStore', () => {
+  it('verifies staged files for bounded pre-create refinement without adopting them', async () => {
+    const root = await temporaryDirectory();
+    const store = new AttachmentFileStore(root);
+    const draft = await store.createDraft();
+    const staged = await store.stageBytes({
+      draftId: draft.id,
+      clientToken: 'client-token-refinement-0001',
+      displayName: 'request-context.txt',
+      bytes: Buffer.from('refinement evidence')
+    });
+
+    const [verified] = await store.verifyDraft(draft.id);
+
+    expect(verified).toMatchObject({
+      record: { id: staged.id, draftId: draft.id, displayName: 'request-context.txt' },
+      absolutePath: path.join(
+        root,
+        'attachments',
+        'staging',
+        draft.id,
+        `${staged.id}.txt`
+      )
+    });
+    await expect(store.listDraft(draft.id)).resolves.toMatchObject({ id: draft.id });
+  });
+
   it('atomically adopts a private draft as task-owned immutable files', async () => {
     const root = await temporaryDirectory();
     const store = new AttachmentFileStore(root);

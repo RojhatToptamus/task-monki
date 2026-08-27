@@ -30,6 +30,7 @@ import {
   type PreviewRecipeGenerationSnapshot,
   type PreviewRecipeValidation,
   type PreviewResolvedAttachmentTarget,
+  type RefinePromptRequest,
   type ResolvePreviewResult,
   type Task,
   type TaskDetailSnapshot,
@@ -1848,7 +1849,7 @@ export function App() {
     }
   };
 
-  const refinePrompt = async (repositoryId: string, input: string) => {
+  const refinePrompt = async (input: RefinePromptRequest) => {
     try {
       const refinementModel = selectModel(
         enabledRuntimeModels,
@@ -1857,8 +1858,7 @@ export function App() {
         appSettings.promptRefinementModelProvider
       );
       const refined = await taskManagerApi.refinePrompt({
-        repositoryId,
-        input,
+        ...input,
         runtimeId:
           refinementModel?.runtimeId ??
           promptRefinementRuntime?.preflight.runtime.id,
@@ -1866,12 +1866,32 @@ export function App() {
         modelProvider:
           refinementModel?.modelProvider ?? appSettings.promptRefinementModelProvider
       });
-      notify('Prompt refined.', 'success');
+      notify(
+        refined.warning ??
+          (refined.source === 'model'
+            ? 'Prompt refined.'
+            : 'The original prompt was kept unchanged.'),
+        refined.source === 'model' && !refined.warning ? 'success' : 'info'
+      );
       return refined;
     } catch (caught) {
       reportActionError(caught, 'Could not refine prompt.');
       throw caught;
     }
+  };
+
+  const cancelPromptRefinement = async (requestId: string) => {
+    const refinementModel = selectModel(
+      enabledRuntimeModels,
+      appSettings.promptRefinementModel,
+      promptRefinementRuntime?.preflight.runtime.id,
+      appSettings.promptRefinementModelProvider
+    );
+    await taskManagerApi.cancelPromptRefinement({
+      requestId,
+      runtimeId:
+        refinementModel?.runtimeId ?? promptRefinementRuntime?.preflight.runtime.id
+    });
   };
 
   const startRun = async (taskId: string) => {
@@ -3149,6 +3169,7 @@ export function App() {
               refineDisabledReason={refineDisabledReason}
               onCreate={createTask}
               onRefinePrompt={refinePrompt}
+              onCancelPromptRefinement={cancelPromptRefinement}
               onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
               onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
               onReadClipboardImage={taskManagerApi.readClipboardImage}

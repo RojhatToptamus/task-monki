@@ -109,9 +109,14 @@ export interface ResolvedAgentExecution {
 }
 
 export interface RefineAgentPrompt {
+  requestId: string;
   repositoryPath: string;
   input: string;
+  title?: string;
   settings: AgentExecutionSettings;
+  refinementModel: AgentModel;
+  targetModel?: AgentModel;
+  attachments: AgentTurnAttachment[];
 }
 
 export class AgentMutationAmbiguousError extends Error {
@@ -156,6 +161,7 @@ export interface AgentRuntimeAdapter {
   }): Promise<void>;
   resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution>;
   refinePrompt?(input: RefineAgentPrompt): Promise<RefinePromptResponse>;
+  cancelPromptRefinement?(requestId: string): Promise<void>;
   createSession(input: CreateAgentSession): Promise<AgentSessionRecord>;
   attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord>;
   /** Release runtime resources without deleting the provider-owned conversation. */

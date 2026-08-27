@@ -863,6 +863,12 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/prompt/refine/cancel') {
+        await options.service.cancelPromptRefinement((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/worktrees/prepare') {
         sendJson(
           response,

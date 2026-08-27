@@ -112,6 +112,7 @@ import {
   type PreparedAttachmentDraft,
   type PreparedAttachmentAppend,
   type StoredAttachmentContent,
+  type VerifiedDraftAttachment,
   type VerifiedTaskAttachment
 } from './AttachmentFileStore';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
@@ -1501,6 +1502,10 @@ export class FileTaskStore {
 
   listAttachmentDraft(draftId: string): Promise<AttachmentDraftSnapshot> {
     return this.withOwnedIo(() => this.attachmentFiles.listDraft(draftId));
+  }
+
+  verifyAttachmentDraft(draftId: string): Promise<VerifiedDraftAttachment[]> {
+    return this.withOwnedIo(() => this.attachmentFiles.verifyDraft(draftId));
   }
 
   discardAttachmentDraft(draftId: string): Promise<void> {
