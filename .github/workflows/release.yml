@@ -20,7 +20,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.metadata.outputs.version }}
-      numeric_version: ${{ steps.metadata.outputs.numeric-version }}
       bundle_version: ${{ steps.metadata.outputs.bundle-version }}
       electron_version: ${{ steps.metadata.outputs.electron-version }}
       source_sha: ${{ steps.metadata.outputs.source-sha }}
@@ -83,7 +82,6 @@ jobs:
           const prefix = `Task-Monki-${manifest.version}`;
           const values = {
             version: manifest.version,
-            'numeric-version': `${match[1]}.${match[2]}.${match[3]}`,
             'bundle-version': process.env.GITHUB_RUN_NUMBER,
             'electron-version': electronVersion,
             'source-sha': process.env.GITHUB_SHA,
@@ -150,7 +148,6 @@ jobs:
       METADATA_PATH: release/latest-mac.yml
       CHECKSUM_PATH: release/SHA256SUMS-macOS.txt
       APP_PATH: release/mac-arm64/Task Monki.app
-      MACOS_BUNDLE_SHORT_VERSION: ${{ needs.validate_source.outputs.numeric_version }}
       MACOS_BUNDLE_VERSION: ${{ needs.validate_source.outputs.bundle_version }}
       EXPECTED_IDENTITY: "Developer ID Application: rojhat toptamus (ZD35XP4V7D)"
       EXPECTED_TEAM_ID: ZD35XP4V7D
@@ -250,7 +247,7 @@ jobs:
           rm -f "$CERTIFICATE_PEM"
 
           export CSC_KEYCHAIN="$SIGNING_KEYCHAIN"
-          npm run dist:mac:trusted
+          npm run dist:mac:trusted -- --config.buildVersion="$MACOS_BUNDLE_VERSION"
           test -f "$DMG_PATH"
           test ! -L "$DMG_PATH"
           codesign \
@@ -338,7 +335,7 @@ jobs:
           xcrun stapler validate "$DMG_PATH"
           xcrun stapler staple "$APP_PATH"
           xcrun stapler validate "$APP_PATH"
-          npm run dist:mac:trusted-zip
+          npm run dist:mac:trusted-zip -- --config.buildVersion="$MACOS_BUNDLE_VERSION"
           test -f "$ZIP_PATH"
           test -f "$ZIP_BLOCKMAP_PATH"
           test -f "$METADATA_PATH"
