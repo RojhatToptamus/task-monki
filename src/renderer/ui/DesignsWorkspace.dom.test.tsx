@@ -1280,6 +1280,64 @@ describe('mounted Design workspace', () => {
       expect(onRestoreRevision).toHaveBeenCalledWith('design-1', 'revision-1')
     );
   });
+
+  it('shows checked candidate progress without enabling the external Ready action', () => {
+    const boundsSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 900,
+      height: 640,
+      top: 0,
+      left: 0,
+      right: 900,
+      bottom: 640,
+      toJSON: () => ({})
+    });
+    const onShowCanvas = vi.fn();
+    const onOpenCanvas = vi.fn(async () => undefined);
+    const project = designProject({
+      design: designListItem({ status: 'UPDATING' }),
+      revisions: [{
+        id: 'revision-1',
+        designId: 'design-1',
+        ordinal: 1,
+        commitSha: 'a'.repeat(40),
+        routeId: 'route-1',
+        createdAt: '2026-08-20T10:00:00.000Z',
+        changeSource: 'AGENT_TURN',
+        turnId: 'turn-1',
+        runId: 'run-1'
+      }],
+      canvas: {
+        state: 'PREVIEWING',
+        target: { generationId: 'candidate-1', routeId: 'route-1' }
+      },
+      actions: {
+        ...designProject().actions,
+        canRestore: false
+      }
+    });
+
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({ project, onShowCanvas, onOpenCanvas })}
+      />
+    );
+
+    expect(onShowCanvas).toHaveBeenCalledWith(expect.objectContaining({
+      generationId: 'candidate-1',
+      routeId: 'route-1'
+    }));
+    expect(screen.getByText('checking v2')).toBeTruthy();
+    expect(screen.getByText('v2').getAttribute('aria-current')).toBe('true');
+    expect(
+      (screen.getByRole('button', { name: 'Open preview in browser' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true);
+    expect(screen.queryByText('v1 ready')).toBeNull();
+    expect(onOpenCanvas).not.toHaveBeenCalled();
+    boundsSpy.mockRestore();
+  });
 });
 
 function workspaceProps(

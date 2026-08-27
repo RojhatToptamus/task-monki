@@ -844,6 +844,7 @@ export class DesignUpdateCoordinator {
         origin: lease.origin,
         lease
       });
+      await this.options.previews.publishManagedDesignCandidateCanvas(generation.id);
       await this.options.store.updateDesignOpenedCandidate({
         designId: run.taskId,
         turnId: turn.id,

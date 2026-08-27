@@ -33,6 +33,35 @@ afterEach(async () => {
 });
 
 describe('DesignUpdateCoordinator', () => {
+  it('publishes a successfully opened candidate as non-Ready canvas progress', async () => {
+    const harness = await createHarness();
+    harness.coordinator.open();
+    await harness.coordinator.dispatch(harness.designId);
+    const current = requireCurrentRun(await harness.store.getDesignDetail(harness.designId));
+    await harness.store.updateRun(current.id, { status: 'RUNNING' });
+
+    await expect(
+      harness.coordinator.inspectDesign({
+        runId: current.id,
+        operation: { operation: 'open_candidate' }
+      })
+    ).resolves.toMatchObject({ text: expect.stringContaining('page') });
+
+    const detail = await harness.store.getDesignDetail(harness.designId);
+    expect(harness.previews.publishManagedDesignCandidateCanvas).toHaveBeenCalledWith(
+      detail.turns[0]?.finalOpenedCandidate?.previewGenerationId
+    );
+    expect(detail.canvas).toEqual({
+      state: 'PREVIEWING',
+      target: {
+        generationId: detail.turns[0]?.finalOpenedCandidate?.previewGenerationId,
+        routeId: 'main'
+      },
+      detail: 'Codex is checking this working preview. It is not Ready yet.'
+    });
+    expect(detail.revisions).toEqual([]);
+  });
+
   it('serializes duplicate dispatches around one durable generation-key Run', async () => {
     const harness = await createHarness();
     harness.coordinator.open();
@@ -439,6 +468,8 @@ interface CoordinatorHarness {
     prepareManagedDesignExactCommit: ReturnType<typeof vi.fn>;
     executeManagedDesign: ReturnType<typeof vi.fn>;
     executeManagedDesignCandidate: ReturnType<typeof vi.fn>;
+    openManagedDesignBrowserLease: ReturnType<typeof vi.fn>;
+    publishManagedDesignCandidateCanvas: ReturnType<typeof vi.fn>;
     cutoverManagedDesignCandidate: ReturnType<typeof vi.fn>;
   };
   ensureDesignWorktree: ReturnType<typeof vi.fn>;
@@ -587,6 +618,12 @@ async function createHarness(
         })
       );
     }),
+    openManagedDesignBrowserLease: vi.fn(async () => ({
+      origin: 'http://design.localhost:41000',
+      proxyUrl: 'http://127.0.0.1:41002',
+      async close() {}
+    })),
+    publishManagedDesignCandidateCanvas: vi.fn(async () => undefined),
     cutoverManagedDesignCandidate: vi.fn(async (input) =>
       cutoverCandidate(store, input)
     ),

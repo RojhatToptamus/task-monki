@@ -4,6 +4,7 @@ import {
   normalizeDesignCanvasBounds,
   type DesignCanvasHostEvent,
   type DesignCanvasResolvedRoute,
+  type DesignCanvasRouteIdentity,
   type DesignCanvasRuntime
 } from './DesignCanvasHost';
 
@@ -200,6 +201,41 @@ describe('DesignCanvasHost', () => {
     expect(fixture.views.at(-1)?.webContents.loaded).toEqual([route('generation-2').url]);
     expect(fixture.views.at(-1)?.bounds).toEqual({ x: 20, y: 40, width: 200, height: 160 });
     expect(fixture.window.added.at(-1)).toBe(fixture.views.at(-1));
+  });
+
+  it('re-resolves one candidate identity when it becomes the stable Ready route', async () => {
+    let ready = false;
+    const fixture = createFixture({}, async (input) => {
+      const origin = ready
+        ? 'http://ready-design.localhost:4000'
+        : 'http://candidate-design.localhost:4000';
+      return { ...input, url: `${origin}/`, origin };
+    });
+    fixture.host.attachWindow(fixture.window);
+    await fixture.host.show({
+      designId: 'design-1',
+      ...identity('generation-2'),
+      requestId: 1,
+      bounds: { x: 0, y: 0, width: 100, height: 100 }
+    });
+    expect(fixture.views[0]?.webContents.loaded).toEqual([
+      'http://candidate-design.localhost:4000/'
+    ]);
+
+    const lease = await fixture.host.begin({
+      designId: 'design-1',
+      candidate: identity('generation-2'),
+      replaced: identity('generation-1')
+    });
+    ready = true;
+    await lease.commit();
+
+    expect(fixture.views.at(-1)?.webContents.loaded).toEqual([
+      'http://ready-design.localhost:4000/'
+    ]);
+    expect(fixture.session.clearedStorage).toContainEqual(
+      expect.objectContaining({ origin: 'http://candidate-design.localhost:4000' })
+    );
   });
 
   it('does not attach a queued canvas after a newer renderer hide request', async () => {
@@ -485,7 +521,10 @@ async function showFirst(fixture: ReturnType<typeof createFixture>): Promise<voi
 }
 
 function createFixture(
-  timing: { workerStopTimeoutMs?: number; workerPollIntervalMs?: number } = {}
+  timing: { workerStopTimeoutMs?: number; workerPollIntervalMs?: number } = {},
+  resolveRoute: (
+    identity: DesignCanvasRouteIdentity
+  ) => Promise<DesignCanvasResolvedRoute> = async (input) => resolvedRoute(input)
 ) {
   const partitions: string[] = [];
   const viewOptions: Array<Record<string, unknown>> = [];
@@ -516,7 +555,7 @@ function createFixture(
   };
   const host = new DesignCanvasHost({
     runtime,
-    async resolveRoute(input) { return resolvedRoute(input); },
+    resolveRoute,
     emit(event) { events.push(event); },
     ...timing
   });

@@ -83,6 +83,27 @@ export class PreviewGateway {
     for (const [hostname, target] of replacements) this.routes.set(hostname, target);
   }
 
+  attachOwnedRoute(
+    generationId: string,
+    hostname: string,
+    target: Omit<PreviewGatewayTarget, 'generationId'>
+  ): void {
+    validateRoute(hostname, target);
+    const normalized = normalizeHostname(hostname);
+    const existing = this.routes.get(normalized);
+    if (existing && existing.generationId !== generationId) {
+      throw new Error('Preview gateway route belongs to another generation.');
+    }
+    this.routes.set(normalized, { ...target, generationId });
+  }
+
+  removeOwnedRoute(generationId: string, hostname: string): void {
+    const normalized = normalizeHostname(hostname);
+    if (this.routes.get(normalized)?.generationId === generationId) {
+      this.routes.delete(normalized);
+    }
+  }
+
   removeOwnedRoutes(generationId: string): void {
     for (const [hostname, target] of this.routes) {
       if (target.generationId === generationId) this.routes.delete(hostname);

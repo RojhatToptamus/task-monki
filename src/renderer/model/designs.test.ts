@@ -146,7 +146,28 @@ describe('Design workspace view model', () => {
 
     expect(presentation).toEqual({
       kind: 'NATIVE',
-      target: { generationId: 'generation-1', routeId: 'route-1' }
+      target: { generationId: 'generation-1', routeId: 'route-1' },
+      progress: false
+    });
+  });
+
+  it('presents an opened candidate as canvas progress without calling it Ready', () => {
+    expect(
+      designCanvasPresentation({
+        project: designProject({
+          design: designListItem({ status: 'UPDATING' }),
+          canvas: {
+            state: 'PREVIEWING',
+            target: { generationId: 'candidate-1', routeId: 'route-1' }
+          }
+        }),
+        desktopAvailable: true,
+        occluded: false
+      })
+    ).toEqual({
+      kind: 'NATIVE',
+      target: { generationId: 'candidate-1', routeId: 'route-1' },
+      progress: true
     });
   });
 

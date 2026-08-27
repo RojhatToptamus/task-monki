@@ -21,6 +21,109 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService Design vertical slice', () => {
+  it('shows a checked candidate while the last Ready route stays available', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-canvas-progress',
+      previewEnabled: true,
+      designMode: true
+    });
+    scenarios.push(scenario);
+
+    let detail = await scenario.service.createBlankDesign({
+      brief: 'Create a small product page.',
+      creationToken: 'design-canvas-progress-create'
+    });
+    const worktreePath = requireWorktreePath(detail);
+    await fs.writeFile(
+      path.join(worktreePath, 'index.html'),
+      '<!doctype html><title>Ready design</title>',
+      'utf8'
+    );
+    await scenario.completeRun(requireRunId(detail), 'The first page is ready.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.canvas.state === 'READY'
+    );
+    const ready = requireActivePreview(detail);
+
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-canvas-progress-refine',
+      message: 'Change the title.',
+      referenceIds: []
+    });
+    await fs.writeFile(
+      path.join(worktreePath, 'index.html'),
+      '<!doctype html><title>Checked working design</title>',
+      'utf8'
+    );
+    const designUpdates = (
+      scenario.service as unknown as {
+        designUpdates: {
+          inspectDesign(input: {
+            runId: string;
+            operation: { operation: 'open_candidate' };
+          }): Promise<unknown>;
+        };
+      }
+    ).designUpdates;
+    await designUpdates.inspectDesign({
+      runId: requireRunId(detail),
+      operation: { operation: 'open_candidate' }
+    });
+
+    detail = await scenario.service.getDesign(detail.design.id);
+    expect(detail.canvas).toMatchObject({ state: 'PREVIEWING' });
+    expect(detail.revisions).toHaveLength(1);
+    expect(detail.currentPreview?.id).toBe(ready.id);
+    const firstProgress = await scenario.service.resolveDesignCanvasRoute({
+      taskId: detail.design.id,
+      generationId: detail.canvas.target!.generationId,
+      routeId: detail.canvas.target!.routeId
+    });
+    expect(await requestResolvedRoute(firstProgress)).toContain('Checked working design');
+    expect(await requestActiveRoute(ready)).toContain('Ready design');
+    await expect(
+      scenario.service.openPreview({
+        taskId: detail.design.id,
+        generationId: detail.canvas.target!.generationId,
+        routeId: detail.canvas.target!.routeId
+      })
+    ).rejects.toThrow('not available for a Design');
+
+    await fs.writeFile(
+      path.join(worktreePath, 'index.html'),
+      '<!doctype html><title>Corrected checked design</title>',
+      'utf8'
+    );
+    await designUpdates.inspectDesign({
+      runId: requireRunId(detail),
+      operation: { operation: 'open_candidate' }
+    });
+    detail = await scenario.service.getDesign(detail.design.id);
+    const finalProgress = await scenario.service.resolveDesignCanvasRoute({
+      taskId: detail.design.id,
+      generationId: detail.canvas.target!.generationId,
+      routeId: detail.canvas.target!.routeId
+    });
+    expect(finalProgress.generationId).not.toBe(firstProgress.generationId);
+    expect(await requestResolvedRoute(finalProgress)).toContain('Corrected checked design');
+    await expect(requestResolvedRoute(firstProgress)).rejects.toThrow('503');
+    expect(await requestActiveRoute(ready)).toContain('Ready design');
+
+    await scenario.completeRun(requireRunId(detail), 'The refinement is ready.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.revisions.length === 2 && candidate.canvas.state === 'READY'
+    );
+    expect(await requestActiveRoute(requireActivePreview(detail))).toContain(
+      'Corrected checked design'
+    );
+    await expect(requestResolvedRoute(finalProgress)).rejects.toThrow('503');
+  }, 45_000);
+
   it('fails before Design creation when scoped skill access is unavailable', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-skills-unavailable',
@@ -829,13 +932,30 @@ async function waitForDesign(
 function requestActiveRoute(generation: PreviewGenerationRecord): Promise<string> {
   const route = generation.routes.find((candidate) => candidate.state === 'ATTACHED');
   if (!route) throw new Error('Active Preview route is missing.');
+  return requestPreviewRoute(route.gatewayPort, route.hostname, '/');
+}
+
+function requestResolvedRoute(route: { url: string }): Promise<string> {
+  const parsed = new URL(route.url);
+  return requestPreviewRoute(
+    Number(parsed.port),
+    parsed.host,
+    `${parsed.pathname}${parsed.search}`
+  );
+}
+
+function requestPreviewRoute(
+  port: number,
+  host: string,
+  requestPath: string
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const request = http.get(
       {
         host: '127.0.0.1',
-        port: route.gatewayPort,
-        path: '/',
-        headers: { host: route.hostname }
+        port,
+        path: requestPath,
+        headers: { host }
       },
       (response) => {
         const chunks: Buffer[] = [];

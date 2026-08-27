@@ -78,6 +78,7 @@ export function DesignCanvas({
   const presentation = designCanvasPresentation({ project, desktopAvailable, occluded });
   const generationId = presentation.kind === 'NATIVE' ? presentation.target.generationId : undefined;
   const routeId = presentation.kind === 'NATIVE' ? presentation.target.routeId : undefined;
+  const previewInProgress = presentation.kind === 'NATIVE' && presentation.progress;
   const latestTurnOutcome = project.turns.at(-1)?.outcome;
   const latestRevision = project.revisions.at(-1);
   const presentedRevisionId =
@@ -217,7 +218,8 @@ export function DesignCanvas({
           {project.revisions.length === 0 ? (
             <span aria-current="true">v1</span>
           ) : project.revisions.map((revision) => {
-            const selected = revision.id === selectedRevision?.id;
+            const selected =
+              !previewInProgress && revision.id === selectedRevision?.id;
             const current = revision.id === latestRevision?.id;
             return (
               <button
@@ -231,7 +233,11 @@ export function DesignCanvas({
                       : `Viewing version ${revision.ordinal}`
                     : `View version ${revision.ordinal}`
                 }
-                disabled={selected || operation !== undefined}
+                disabled={
+                  previewInProgress ||
+                  selected ||
+                  operation !== undefined
+                }
                 onClick={() => void runOperation(
                   'select',
                   () => onSelectRevision(revision.id),
@@ -242,6 +248,11 @@ export function DesignCanvas({
               </button>
             );
           })}
+          {previewInProgress && latestRevision ? (
+            <span aria-current="true" title="Still being checked">
+              v{latestRevision.ordinal + 1}
+            </span>
+          ) : null}
         </nav>
         <div className="tm-design-canvas__tools">
           <div className="tm-design-canvas__devices" role="group" aria-label="Canvas device">
@@ -286,7 +297,13 @@ export function DesignCanvas({
             className="tm-design-canvas__tool"
             aria-label="Open preview in browser"
             title="Open preview in browser"
-            disabled={!generationId || !routeId || !onOpen || operation !== undefined}
+            disabled={
+              !generationId ||
+              !routeId ||
+              previewInProgress ||
+              !onOpen ||
+              operation !== undefined
+            }
             onClick={() => void runOperation(
               'open',
               () => onOpen!(project.task.id, generationId!, routeId!),
@@ -367,6 +384,10 @@ function canvasStatusView(
 ): { label: string; tone: 'idle' | 'working' | 'waiting' | 'verified' | 'blocked' } {
   if (viewedOrdinal !== undefined) {
     return { label: `v${viewedOrdinal} preview`, tone: 'idle' };
+  }
+  if (project.canvas.state === 'PREVIEWING') {
+    const candidateOrdinal = project.revisions.length === 0 ? 1 : ordinal + 1;
+    return { label: `checking v${candidateOrdinal}`, tone: 'working' };
   }
   const status = designProjectStatus(project);
   if (status === 'STARTING' || status === 'RUNNING') {
