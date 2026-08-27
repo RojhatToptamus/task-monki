@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SupervisedProcess } from '../../process/ProcessSupervisor';
 import {
@@ -13,13 +14,15 @@ afterEach(() => {
 
 describe('CodexEphemeralReadOnlyRunner', () => {
   it('adds only explicit attachment directories and native images to the read-only run', () => {
+    const attachmentDirectory = path.resolve('/tmp/staging/draft-1');
+    const imagePath = path.resolve(attachmentDirectory, 'screenshot.png');
     const command = buildCodexEphemeralReadOnlyCommand({
       cwd: '/tmp/repository',
       model: 'gpt-test',
       reasoningEffort: 'low',
       configOverrides: [],
-      additionalDirectories: ['/tmp/staging/draft-1', '/tmp/staging/draft-1'],
-      imagePaths: ['/tmp/staging/draft-1/screenshot.png']
+      additionalDirectories: [attachmentDirectory, attachmentDirectory],
+      imagePaths: [imagePath]
     });
 
     const scopedArguments = command.argv.slice(command.argv.indexOf('--cd'), -1);
@@ -27,9 +30,9 @@ describe('CodexEphemeralReadOnlyRunner', () => {
       '--cd',
       '/tmp/repository',
       '--add-dir',
-      '/tmp/staging/draft-1',
+      attachmentDirectory,
       '--image',
-      '/tmp/staging/draft-1/screenshot.png',
+      imagePath,
       '--model',
       'gpt-test',
       '-c',
