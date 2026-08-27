@@ -26,7 +26,7 @@ export type DesignCanvasHideRequest = HideDesignCanvasRequest;
 export type DesignCanvasRefreshRequest = RefreshDesignCanvasRequest;
 
 type CanvasDevice = 'desktop' | 'tablet' | 'phone';
-type CanvasOperation = 'refresh' | 'restart' | 'restore' | 'open';
+type CanvasOperation = 'refresh' | 'restart' | 'select' | 'restore' | 'open';
 
 const DEVICE_OPTIONS: ReadonlyArray<{
   id: CanvasDevice;
@@ -46,6 +46,7 @@ export interface DesignCanvasProps {
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRefresh(request: DesignCanvasRefreshRequest): Promise<void>;
   onRestart(designId: string): Promise<void>;
+  onSelectRevision(revisionId: string): Promise<void>;
   onRestore(revisionId: string): Promise<void>;
   onOpen?(taskId: string, generationId: string, routeId: string): Promise<void>;
 }
@@ -65,6 +66,7 @@ export function DesignCanvas({
   onHideCanvas,
   onRefresh,
   onRestart,
+  onSelectRevision,
   onRestore,
   onOpen
 }: DesignCanvasProps) {
@@ -78,12 +80,23 @@ export function DesignCanvas({
   const routeId = presentation.kind === 'NATIVE' ? presentation.target.routeId : undefined;
   const latestTurnOutcome = project.turns.at(-1)?.outcome;
   const latestRevision = project.revisions.at(-1);
+  const presentedRevisionId =
+    presentation.kind === 'NATIVE' ? presentation.target.revisionId : undefined;
+  const selectedRevision =
+    project.revisions.find((revision) => revision.id === presentedRevisionId) ?? latestRevision;
+  const viewingEarlierRevision = Boolean(
+    latestRevision && selectedRevision && selectedRevision.id !== latestRevision.id
+  );
   const activeOrdinal = latestRevision?.ordinal ?? 1;
   const selectedDevice = DEVICE_OPTIONS.find((option) => option.id === device)!;
   const sourceFile =
     project.projectFiles.find((file) => file.path.endsWith('/index.html') || file.path === 'index.html') ??
     project.projectFiles[0];
-  const canvasStatus = canvasStatusView(project, activeOrdinal);
+  const canvasStatus = canvasStatusView(
+    project,
+    activeOrdinal,
+    viewingEarlierRevision ? selectedRevision?.ordinal : undefined
+  );
 
   useLayoutEffect(() => {
     if (!generationId || !routeId || !onShowCanvas) {
@@ -168,7 +181,9 @@ export function DesignCanvas({
     <div
       ref={hostRef}
       className="tm-design-canvas__native-host"
-      aria-label={`${project.design.title} preview`}
+      aria-label={`${project.design.title}${
+        viewingEarlierRevision ? ` version ${selectedRevision?.ordinal}` : ''
+      } preview`}
     >
       <span className="tm-visually-hidden">
         The interactive preview is displayed in the isolated desktop canvas.
@@ -202,18 +217,25 @@ export function DesignCanvas({
           {project.revisions.length === 0 ? (
             <span aria-current="true">v1</span>
           ) : project.revisions.map((revision) => {
+            const selected = revision.id === selectedRevision?.id;
             const current = revision.id === latestRevision?.id;
             return (
               <button
                 type="button"
                 key={revision.id}
-                aria-current={current ? 'true' : undefined}
-                aria-label={current ? `Current version ${revision.ordinal}` : `Restore version ${revision.ordinal}`}
-                disabled={current || operation !== undefined}
+                aria-current={selected ? 'true' : undefined}
+                aria-label={
+                  selected
+                    ? current
+                      ? `Current version ${revision.ordinal}`
+                      : `Viewing version ${revision.ordinal}`
+                    : `View version ${revision.ordinal}`
+                }
+                disabled={selected || operation !== undefined}
                 onClick={() => void runOperation(
-                  'restore',
-                  () => onRestore(revision.id),
-                  'Could not restore this version.'
+                  'select',
+                  () => onSelectRevision(revision.id),
+                  'Could not show this version.'
                 )}
               >
                 v{revision.ordinal}
@@ -276,6 +298,39 @@ export function DesignCanvas({
         </div>
       </header>
 
+      {viewingEarlierRevision && selectedRevision && latestRevision ? (
+        <div className="tm-design-canvas__revision-actions" aria-label="Earlier version preview">
+          <span>Viewing v{selectedRevision.ordinal}</span>
+          <div>
+            <button
+              type="button"
+              className="outline-button"
+              disabled={operation !== undefined}
+              onClick={() => void runOperation(
+                'select',
+                () => onSelectRevision(latestRevision.id),
+                'Could not return to the current version.'
+              )}
+            >
+              Back to v{latestRevision.ordinal}
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              aria-label={`Restore version ${selectedRevision.ordinal} as a new version`}
+              disabled={operation !== undefined}
+              onClick={() => void runOperation(
+                'restore',
+                () => onRestore(selectedRevision.id),
+                'Could not restore this version.'
+              )}
+            >
+              {operation === 'restore' ? 'Restoring…' : 'Restore as new'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="tm-design-canvas__stage">
         <div className="tm-design-canvas__viewport" data-device={device}>
           {previewContent}
@@ -287,7 +342,7 @@ export function DesignCanvas({
           <StatusGlyph kind={canvasStatus.tone} />
           {canvasStatus.label}
         </span>
-        {sourceFile ? (
+        {sourceFile && !viewingEarlierRevision ? (
           <>
             <span aria-hidden="true">·</span>
             <span className="tm-design-canvas__source" title={sourceFile.path}>
@@ -296,8 +351,8 @@ export function DesignCanvas({
           </>
         ) : null}
         <span className="tm-design-canvas__footer-spacer" />
-        <time dateTime={project.design.updatedAt}>
-          {formatDesignUpdatedAt(project.design.updatedAt)}
+        <time dateTime={selectedRevision?.createdAt ?? project.design.updatedAt}>
+          {formatDesignUpdatedAt(selectedRevision?.createdAt ?? project.design.updatedAt)}
         </time>
       </footer>
       {error ? <p className="tm-design-canvas__error" role="alert">{error}</p> : null}
@@ -307,8 +362,12 @@ export function DesignCanvas({
 
 function canvasStatusView(
   project: DesignProjectDetail,
-  ordinal: number
+  ordinal: number,
+  viewedOrdinal?: number
 ): { label: string; tone: 'idle' | 'working' | 'waiting' | 'verified' | 'blocked' } {
+  if (viewedOrdinal !== undefined) {
+    return { label: `v${viewedOrdinal} preview`, tone: 'idle' };
+  }
   const status = designProjectStatus(project);
   if (status === 'STARTING' || status === 'RUNNING') {
     return { label: `building v${ordinal}`, tone: 'working' };

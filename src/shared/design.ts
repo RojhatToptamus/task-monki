@@ -244,6 +244,7 @@ export interface DeleteDesignDraftRequest {
 
 export interface RestartDesignPreviewRequest {
   designId: string;
+  revisionId?: string;
 }
 
 export interface RestoreDesignRevisionRequest {
@@ -278,6 +279,7 @@ export type DesignStatus =
 export interface DesignCanvasTarget {
   generationId: string;
   routeId: string;
+  revisionId?: string;
 }
 
 export interface DesignCanvasProjection {

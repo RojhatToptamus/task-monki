@@ -1013,6 +1013,23 @@ export function App() {
     },
     [applyDesignActionDetail, notify, refreshDesignList]
   );
+  const showDesignRevision = useCallback(
+    async (designId: string, revisionId: string) => {
+      try {
+        const detail = await taskManagerApi.restartDesignPreview({
+          designId,
+          revisionId
+        });
+        applyDesignActionDetail(detail, false);
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not show this version.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [applyDesignActionDetail, notify]
+  );
   const restoreDesignRevision = useCallback(
     async (designId: string, revisionId: string) => {
       const key = `restore:${designId}:${revisionId}`;
@@ -3053,6 +3070,7 @@ export function App() {
             onRespondToInteraction={respondToDesignInteraction}
             onRefreshCanvas={refreshDesignCanvas}
             onRestartCanvas={restartDesignCanvas}
+            onSelectRevision={showDesignRevision}
             onOpenCanvas={openPreview}
             onRestoreRevision={restoreDesignRevision}
             onDuplicateDesign={duplicateDesign}

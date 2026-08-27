@@ -50,7 +50,7 @@ Direct asks one agent. Panel collects independent answers from two or three agen
 
 Design Mode turns a brief and reference files into a working interface Preview. Each Design has an isolated worktree, conversation, canvas, and version history.
 
-Use Chat, Split, or Canvas view. Test desktop, tablet, and phone widths. Add references or editable assets, then restore or duplicate any version.
+Use Chat, Split, or Canvas view. Test desktop, tablet, and phone widths. Add references or editable assets. Preview an older version before you restore it as a new current version or duplicate it into a separate Design.
 
 The interactive canvas currently works in the macOS desktop app.
 
