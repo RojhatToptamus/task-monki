@@ -6,7 +6,6 @@ import type {
   CodexWebSearchMode
 } from '../../../shared/agent';
 import {
-  assertCodexAttachmentExternalToolsDisabled,
   codexExternalToolConfigOverrides,
   parseDisabledCodexMcpServerConfigOverrides,
   resolveCodexExternalToolConfigOverrides
@@ -19,24 +18,6 @@ const SAMPLE_MCP_DISABLE_OVERRIDE =
   'mcp_servers.docs={enabled=false, command="docs-mcp", args=["--stdio"]}';
 
 describe('Codex external tool config', () => {
-  it('requires all external tools to be disabled only for attachment runs', () => {
-    const enabled: CodexExternalToolSettings = {
-      webSearchMode: 'live',
-      mcpServers: 'all',
-      apps: 'enabled'
-    };
-    expect(() => assertCodexAttachmentExternalToolsDisabled(enabled, false)).not.toThrow();
-    expect(() => assertCodexAttachmentExternalToolsDisabled(enabled, true)).toThrow(
-      'web search, MCP servers, and apps'
-    );
-    expect(() =>
-      assertCodexAttachmentExternalToolsDisabled(
-        { webSearchMode: 'disabled', mcpServers: 'disabled', apps: 'disabled' },
-        true
-      )
-    ).not.toThrow();
-  });
-
   it('emits exact web search and apps overrides for every supported mode', () => {
     for (const webSearchMode of WEB_SEARCH_MODES) {
       for (const apps of APP_MODES) {

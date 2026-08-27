@@ -211,8 +211,13 @@ If the reference scope is unchanged, it resumes the current thread as usual.
 Full access remains available for attachment-free tasks and requires the
 runtime to attest the exact `:danger-full-access` profile and sole Task Monki
 worktree root. It is rejected when attachments are present. Attachment tasks
-also force network off and require Codex web search, MCP servers, and apps to be
-disabled because filesystem rules do not confine same-user external tools.
+also force network off. In packaged Electron, they do not override the user's
+Codex web search, MCP server, or app settings: enabling an integration is an
+explicit decision to trust it with task content, including attachment content
+the agent supplies to it. Exact file permissions and path checks do not confine
+a same-user integration process or prevent an enabled external tool from
+transmitting content. Browser development retains its independent fail-closed
+rule that forces all three integration modes off.
 
 Codex serializes a submitted `localImage` into an image data URL in its
 model-facing conversation history. Opaque delivery paths can still occur in

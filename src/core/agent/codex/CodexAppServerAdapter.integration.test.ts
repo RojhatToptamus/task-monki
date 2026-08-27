@@ -32,7 +32,7 @@ import {
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
-  it('uses the active auto-detected Codex executable for prompt refinement', async () => {
+  it('uses the active Codex executable and enabled external tools for attachment refinement', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refinement-runtime-'));
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
@@ -40,6 +40,11 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       cwd: dir,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
+      toolSettings: {
+        webSearchMode: 'live',
+        mcpServers: 'all',
+        apps: 'enabled'
+      },
       runtimeResolver: async () => ({
         executable,
         source: 'vscode-extension-bundle',
@@ -87,11 +92,29 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
           approvalsReviewer: 'user'
         },
         refinementModel,
-        attachments: []
+        attachments: [{
+          attachmentId: 'attachment-1',
+          ordinal: 0,
+          displayName: 'context.txt',
+          kind: 'text',
+          mediaType: 'text/plain',
+          byteCount: 7,
+          sha256: 'a'.repeat(64),
+          path: path.join(dir, 'context.txt'),
+          verifiedAt: new Date().toISOString()
+        }]
       });
 
       expect(refine).toHaveBeenCalledWith(
-        expect.objectContaining({ codexExecutable: executable })
+        expect.objectContaining({
+          codexExecutable: executable,
+          toolSettings: {
+            webSearchMode: 'live',
+            mcpServers: 'all',
+            apps: 'enabled'
+          },
+          attachments: [expect.objectContaining({ attachmentId: 'attachment-1' })]
+        })
       );
     } finally {
       await adapter.shutdown();
@@ -1150,7 +1173,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
-  it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
+  it('completes attachment delivery with Codex external tools enabled', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-'));
     const executable = await writeFakeCodexExecutable(dir);
 
@@ -1162,6 +1185,11 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
+      toolSettings: {
+        webSearchMode: 'live',
+        mcpServers: 'all',
+        apps: 'enabled'
+      }
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
     });
@@ -1195,6 +1223,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         })
       ])
     );
+    expect(initializedServer.argv).toEqual(expect.arrayContaining([
+      'features.apps=true',
+      'web_search="live"'
+    ]));
     const initializedJournal = await fs.readFile(
       initializedServer.protocolJournalPath,
       'utf8'

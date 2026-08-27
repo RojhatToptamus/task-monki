@@ -114,10 +114,7 @@ import { isImplementationRunMode } from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
 import type { ThreadSourceKind } from './protocol/generated/v2/ThreadSourceKind';
 import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
-import {
-  assertCodexAttachmentExternalToolsDisabled,
-  normalizeCodexExternalToolSettings
-} from './CodexToolConfig';
+import { normalizeCodexExternalToolSettings } from './CodexToolConfig';
 import {
   resolveAgentGitExecutablePath,
   resolveAgentGitMetadata
@@ -808,10 +805,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }
 
   refinePrompt(input: RefineAgentPrompt) {
-    assertCodexAttachmentExternalToolsDisabled(
-      this.externalToolSettings,
-      input.attachments.length > 0
-    );
     const activeServer = this.supervisor.currentServer;
     const activeExecutable =
       activeServer && ['READY', 'RUNNING', 'DEGRADED'].includes(activeServer.status)
@@ -869,10 +862,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     attachments: readonly AgentTurnAttachment[]
   ): Promise<AgentSessionRecord> {
     assertAttachmentSandboxSupportsDelivery(settings, attachments);
-    assertCodexAttachmentExternalToolsDisabled(
-      this.externalToolSettings,
-      attachments.length > 0
-    );
 
     const client = await this.ensureClient();
     const server = this.supervisor.currentServer;
@@ -1041,7 +1030,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     let session = await this.requireSession(input.session.localSessionId);
     const settings = input.settings ?? session.requestedSettings;
     assertAttachmentSandboxSupportsDelivery(settings, attachments);
-    assertCodexAttachmentExternalToolsDisabled(this.externalToolSettings, attachments.length > 0);
     if (attachments.length > 0 || input.mode === 'DESIGN') {
       const selectedModel =
         this.models.find((candidate) => candidate.model === settings.model) ??
@@ -1676,7 +1664,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     });
     const settings = reviewSession.requestedSettings;
     assertAttachmentSandboxSupportsDelivery(settings, attachments);
-    assertCodexAttachmentExternalToolsDisabled(this.externalToolSettings, attachments.length > 0);
     if (attachments.length > 0) {
       const selectedModel =
         this.models.find((candidate) => candidate.model === settings.model) ??

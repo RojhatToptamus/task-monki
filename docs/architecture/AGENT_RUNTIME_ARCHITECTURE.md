@@ -306,9 +306,11 @@ original prompt is kept unchanged with empty evidence and a degraded warning.
 
 Relevant images are native inputs only when the refinement model reports image
 support. Text-like staged files receive a narrow read-only staging root, while
-selected images are passed only through the native image input, with external
-network tools and installed plugins disabled. Attachment metadata remains part
-of the request even when a modality cannot be inspected.
+selected images are passed only through the native image input. Installed
+plugins remain disabled for this bounded run. In packaged Electron, Codex web
+search, MCP servers, and apps follow the user's settings and do not make an
+attachment ineligible; browser development still forces them off. Attachment
+metadata remains part of the request even when a modality cannot be inspected.
 The renderer generation-fences proposals and cancellation so an obsolete run
 cannot overwrite changed composer input.
 

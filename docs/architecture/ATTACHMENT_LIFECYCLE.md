@@ -222,11 +222,15 @@ also attests a complete permission profile. It contains only the runtime
 minimum, exact worktree, and exact verified files. Other runtimes must enforce
 and document their native tool and permission boundaries.
 
-For Codex submission, web search, external MCP servers, and apps must also all
-be disabled. Filesystem read rules do not
-confine a same-user MCP process and do not prevent an allowed network tool from
-transmitting content. This restriction is fail-closed until Task Monki has a
-stronger external-tool isolation or explicit trust model.
+For Codex submission in packaged Electron, web search, external MCP servers,
+and apps follow the user's app settings and do not make attachments ineligible.
+Enabling one of these integrations is an explicit decision to trust it with
+task content, including attachment content the agent supplies to it. Task
+Monki's exact file permissions, path checks, and network setting still apply to
+the Codex turn, but they do not confine a same-user integration process or
+prevent an enabled external tool from transmitting content. Browser development
+retains its independent fail-closed rule that forces web search, MCP servers,
+and apps off.
 
 The development API remains loopback-only and uses an Origin/Host/Fetch-Metadata
 boundary plus a private rotating token held by the Vite proxy. It has strict

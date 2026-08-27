@@ -134,7 +134,11 @@ Provider delivery is runtime-specific and fail-closed. Codex uses a complete
 thread-local permission profile for the exact worktree and verified files.
 Attachment runs force network off, so runtimes such as OpenCode whose network
 is provider-controlled cannot accept them. Full access remains available for
-attachment-free tasks but is rejected when attachments are present.
+attachment-free tasks but is rejected when attachments are present. In the
+packaged app, the user's Codex web search, MCP server, and app choices remain in
+effect for attachment runs; enabling those integrations means trusting them
+with the task content the agent can provide to them. Browser development keeps
+its separate rule that forces those integrations off.
 
 Files stay renderer-local during editing and cross the trusted boundary in one
 bounded batch. A successful task create atomically adopts that batch as one
