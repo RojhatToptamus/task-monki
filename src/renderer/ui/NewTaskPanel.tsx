@@ -15,6 +15,7 @@ import type {
   AgentModel,
   AgentRuntimeState,
   CreateTaskRequest,
+  RefinePromptRequest,
   RefinePromptResponse,
   Repository
 } from '../../shared/contracts';
@@ -77,7 +78,20 @@ interface NewTaskPanelProps {
   refineDisabledReason?: string;
   attachmentsEnabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
-  onRefinePrompt(repositoryId: string, input: string): Promise<RefinePromptResponse>;
+  onRefinePrompt(
+    input: Pick<
+      RefinePromptRequest,
+      | 'requestId'
+      | 'repositoryId'
+      | 'input'
+      | 'title'
+      | 'attachmentDraftId'
+      | 'targetRuntimeId'
+      | 'targetModel'
+      | 'targetModelProvider'
+    >
+  ): Promise<RefinePromptResponse>;
+  onCancelPromptRefinement(requestId: string): Promise<void>;
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
@@ -208,6 +222,7 @@ export function NewTaskPanel({
   attachmentsEnabled = true,
   onCreate,
   onRefinePrompt,
+  onCancelPromptRefinement,
   onStageAttachmentBatch,
   onDiscardAttachmentDraft,
   onReadClipboardImage,
@@ -260,10 +275,21 @@ export function NewTaskPanel({
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
+  const activeRefinementRef = useRef<
+    { requestId: string; inputFingerprint: string } | undefined
+  >(undefined);
   const taskCreationTokenRef = useRef<string | undefined>(undefined);
   const returnFocusAfterCloseRef = useRef(true);
   // Refinement remains a reversible proposal instead of overwriting user input.
-  const [proposal, setProposal] = useState<{ prompt: string; titleSuggestion: string }>();
+  const [proposal, setProposal] = useState<{
+    prompt: string;
+    titleSuggestion: string;
+    inputFingerprint: string;
+  }>();
+  const [refinementWarning, setRefinementWarning] = useState<{
+    message: string;
+    inputFingerprint: string;
+  }>();
   const [restorable, setRestorable] = useState<string>();
 
   useEffect(() => {
@@ -356,7 +382,8 @@ export function NewTaskPanel({
   const selectedRepository = availableRepositories.find(
     (repository) => repository.id === selectedRepositoryId
   );
-  const composerLocked = Boolean(disabled) || isSubmitting || creationOutcomeUnknown;
+  const composerLocked =
+    Boolean(disabled) || isSubmitting || isRefining || creationOutcomeUnknown;
 
   const updateTitle = (value: string) => {
     setTitle(value);
@@ -424,10 +451,22 @@ export function NewTaskPanel({
 
   const closePanel = useCallback(() => {
     if (panelClosedRef.current || submittingRef.current) return;
-    closeAttachments();
     setIsClosing(true);
+    const activeRefinement = activeRefinementRef.current;
+    activeRefinementRef.current = undefined;
+    if (activeRefinement) {
+      setIsRefining(false);
+      void onCancelPromptRefinement(activeRefinement.requestId)
+        .catch(() => undefined)
+        .finally(() => {
+          closeAttachments();
+          onClose();
+        });
+      return;
+    }
+    closeAttachments();
     onClose();
-  }, [closeAttachments, onClose, panelClosedRef]);
+  }, [closeAttachments, onCancelPromptRefinement, onClose, panelClosedRef]);
 
   useDialogFocusBoundary({
     dialogRef: panelRef,
@@ -526,27 +565,91 @@ export function NewTaskPanel({
     }
     setProposal(undefined);
     setRestorable(undefined);
+    setRefinementWarning(undefined);
+    const inputFingerprint = refinementInputFingerprint({
+      repositoryId: selectedRepositoryId,
+      title,
+      prompt,
+      runtimeId,
+      modelId,
+      attachmentRevision: attachments.contentRevision
+    });
+    const requestId = createPromptRefinementRequestId();
+    activeRefinementRef.current = { requestId, inputFingerprint };
     setIsRefining(true);
     try {
-      const refined = await onRefinePrompt(selectedRepositoryId, prompt);
+      const attachmentDraftId = await attachments.prepareForCreate();
+      if (
+        activeRefinementRef.current?.requestId !== requestId ||
+        panelClosedRef.current
+      ) {
+        await attachments.markCreateFailed(false);
+        return;
+      }
+      const refined = await onRefinePrompt({
+        requestId,
+        repositoryId: selectedRepositoryId,
+        input: prompt,
+        title,
+        attachmentDraftId,
+        targetRuntimeId: runtimeId || undefined,
+        targetModel: selectedModel?.model,
+        targetModelProvider: selectedModel?.modelProvider
+      });
+      if (
+        activeRefinementRef.current?.requestId !== requestId ||
+        panelClosedRef.current
+      ) {
+        return;
+      }
+      if (refined.warning) {
+        setRefinementWarning({ message: refined.warning, inputFingerprint });
+      }
+      if (refined.source === 'unchanged-fallback') {
+        return;
+      }
       // Present as a proposal instead of overwriting the user's input.
-      setProposal({ prompt: refined.prompt, titleSuggestion: refined.titleSuggestion });
+      setProposal({
+        prompt: refined.prompt,
+        titleSuggestion: refined.titleSuggestion,
+        inputFingerprint
+      });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Could not refine prompt.');
+      if (activeRefinementRef.current?.requestId === requestId) {
+        setError(caught instanceof Error ? caught.message : 'Could not refine prompt.');
+      }
     } finally {
-      setIsRefining(false);
+      if (activeRefinementRef.current?.requestId === requestId) {
+        activeRefinementRef.current = undefined;
+        setIsRefining(false);
+      }
     }
   };
 
+  const currentRefinementFingerprint = refinementInputFingerprint({
+    repositoryId: selectedRepositoryId,
+    title,
+    prompt,
+    runtimeId,
+    modelId,
+    attachmentRevision: attachments.contentRevision
+  });
+  const currentProposal =
+    proposal?.inputFingerprint === currentRefinementFingerprint ? proposal : undefined;
+  const currentRefinementWarning =
+    refinementWarning?.inputFingerprint === currentRefinementFingerprint
+      ? refinementWarning.message
+      : undefined;
+
   const acceptProposal = () => {
-    if (!proposal) {
+    if (!currentProposal) {
       return;
     }
     setRestorable(prompt); // keep the pre-refine prompt retrievable
-    const nextTitle = title || proposal.titleSuggestion;
-    setPrompt(proposal.prompt);
+    const nextTitle = title || currentProposal.titleSuggestion;
+    setPrompt(currentProposal.prompt);
     setTitle(nextTitle);
-    onTextDraftChange?.({ title: nextTitle, prompt: proposal.prompt });
+    onTextDraftChange?.({ title: nextTitle, prompt: currentProposal.prompt });
     setProposal(undefined);
   };
 
@@ -679,7 +782,7 @@ export function NewTaskPanel({
                       Boolean(refineDisabledReason) ||
                       !prompt.trim() ||
                       !selectedRepositoryId ||
-                      Boolean(proposal)
+                      Boolean(currentProposal)
                     }
                     aria-busy={isRefining}
                     title={refineDisabledReason}
@@ -763,9 +866,9 @@ export function NewTaskPanel({
                   Remove the attachments or choose a runtime that supports them.
                 </p>
               ) : null}
-              {proposal ? (
+              {currentProposal ? (
                 <RefinementProposal
-                  refined={proposal.prompt}
+                  refined={currentProposal.prompt}
                   onAccept={acceptProposal}
                   onRevert={revertProposal}
                 />
@@ -867,6 +970,9 @@ export function NewTaskPanel({
               {error}
             </p>
           ) : null}
+          {currentRefinementWarning ? (
+            <p className="form-warning">{currentRefinementWarning}</p>
+          ) : null}
           {selectedRuntime && !selectedRuntimeReadiness.canStart ? (
             <p className="form-error">
               {selectedRuntimeReadiness.detail}
@@ -919,6 +1025,24 @@ export function NewTaskPanel({
       </form>
     </div>
   );
+}
+
+export function refinementInputFingerprint(input: {
+  repositoryId: string;
+  title: string;
+  prompt: string;
+  runtimeId: string;
+  modelId: string;
+  attachmentRevision: number;
+}): string {
+  return JSON.stringify(input);
+}
+
+function createPromptRefinementRequestId(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  return `prompt-refine-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function SelectChevronIcon({ open }: { open: boolean }) {

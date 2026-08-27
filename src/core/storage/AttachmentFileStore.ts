@@ -34,6 +34,12 @@ export interface VerifiedTaskAttachment {
   absolutePath: string;
 }
 
+export interface VerifiedDraftAttachment {
+  record: StagedAttachmentRecord;
+  /** Ephemeral core-only path. Never persist or expose this in a snapshot. */
+  absolutePath: string;
+}
+
 export interface StoredAttachmentContent {
   attachmentId: string;
   displayName: string;
@@ -201,6 +207,19 @@ export class AttachmentFileStore {
 
   listDraft(draftId: string): Promise<AttachmentDraftSnapshot> {
     return this.enqueue(async () => publicDraft(await this.readDraftManifest(draftId)));
+  }
+
+  verifyDraft(draftId: string): Promise<VerifiedDraftAttachment[]> {
+    return this.enqueue(async () => {
+      const draft = await this.readDraftManifest(draftId);
+      return Promise.all(
+        draft.attachments.map(async (record) => {
+          const absolutePath = this.draftFile(draft.id, record);
+          await this.readVerified(absolutePath, record);
+          return { record: structuredClone(record), absolutePath };
+        })
+      );
+    });
   }
 
   stageBytes(input: StageAttachmentBytesInput): Promise<StagedAttachmentRecord> {

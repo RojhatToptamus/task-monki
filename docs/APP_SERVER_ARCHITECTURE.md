@@ -394,6 +394,10 @@ runtime resolution can scan all candidates and choose a compatible runtime.
 Saved custom paths, constructor overrides, and `TASK_MONKI_CODEX_BIN` are
 intentional and are passed explicitly.
 
+After App Server startup resolves a compatible runtime, Codex-owned auxiliary
+operations such as prompt refinement use that active server's resolved
+executable. They must not fall back to an unrelated `codex` earlier on `PATH`.
+
 ## Runtime resolution
 
 Task Monki resolves a Codex executable before launching the long-lived App

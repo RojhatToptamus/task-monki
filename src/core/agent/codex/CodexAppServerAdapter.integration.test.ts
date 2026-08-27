@@ -32,6 +32,72 @@ import {
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
+  it('uses the active auto-detected Codex executable for prompt refinement', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refinement-runtime-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      runtimeResolver: async () => ({
+        executable,
+        source: 'vscode-extension-bundle',
+        version: '0.150.0-alpha.8',
+        compatibility: {
+          launch: {
+            argv: ['app-server', '--stdio'],
+            transport: 'STDIO',
+            form: 'stdio-flag'
+          },
+          requiredMethods: []
+        },
+        diagnostics: []
+      })
+    });
+    const refine = vi.fn(async () => ({
+      prompt: 'Refined request.',
+      titleSuggestion: 'Refined request',
+      source: 'model' as const,
+      evidence: {
+        repositoryInspection: 'none' as const,
+        repositoryFilesInspected: [],
+        attachmentIdsInspected: [],
+        attachmentIdsReferenced: []
+      }
+    }));
+    Object.assign(adapter as unknown as { promptRefiner: { refine: typeof refine } }, {
+      promptRefiner: { refine }
+    });
+
+    try {
+      await adapter.initialize();
+      const refinementModel = (await adapter.listModels())[0]!;
+      await adapter.refinePrompt({
+        requestId: 'refinement-runtime-test',
+        repositoryPath: dir,
+        input: 'Refine this request.',
+        settings: {
+          runtimeId: 'codex',
+          model: refinementModel.model,
+          reasoningEffort: 'low',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user'
+        },
+        refinementModel,
+        attachments: []
+      });
+
+      expect(refine).toHaveBeenCalledWith(
+        expect.objectContaining({ codexExecutable: executable })
+      );
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('runs a scoped Discourse turn without fabricating task-owned state', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
     const executable = await writeFakeCodexExecutable(dir, 'scoped');

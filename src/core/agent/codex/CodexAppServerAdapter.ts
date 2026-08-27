@@ -808,14 +808,31 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }
 
   refinePrompt(input: RefineAgentPrompt) {
-    return this.promptRefiner.refine(
-      input.repositoryPath,
-      input.input,
-      input.settings.model,
-      this.promptRefinementExecutable,
+    assertCodexAttachmentExternalToolsDisabled(
       this.externalToolSettings,
-      this.enforceBrowserDevBoundary
+      input.attachments.length > 0
     );
+    const activeServer = this.supervisor.currentServer;
+    const activeExecutable =
+      activeServer && ['READY', 'RUNNING', 'DEGRADED'].includes(activeServer.status)
+        ? activeServer.executable
+        : undefined;
+    return this.promptRefiner.refine({
+      requestId: input.requestId,
+      repositoryPath: input.repositoryPath,
+      input: input.input,
+      title: input.title,
+      refinementModel: input.refinementModel,
+      targetModel: input.targetModel,
+      attachments: input.attachments,
+      codexExecutable: activeExecutable ?? this.promptRefinementExecutable,
+      toolSettings: this.externalToolSettings,
+      failClosedMcpDiscovery: this.enforceBrowserDevBoundary
+    });
+  }
+
+  cancelPromptRefinement(requestId: string) {
+    return this.promptRefiner.cancel(requestId);
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {

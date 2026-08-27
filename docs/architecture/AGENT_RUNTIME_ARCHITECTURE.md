@@ -293,6 +293,25 @@ native review support or stable detached review support. These choices are not
 hard-coded to Codex; an enabled provider appears as soon as its integration can
 truthfully advertise and implement the required operation.
 
+Prompt refinement resolves the refinement model through its owning adapter and
+separately resolves the selected implementation model when that catalog is
+available. One bounded model run performs task understanding, proportionate
+read-only inspection, attachment interpretation, and the rewrite. Repository
+inspection is optional and stops once additional evidence is unlikely to
+improve the prompt. The response carries the relative files and attachment ids
+the model says it used; core validates those references against the exact
+repository and verified staged inputs made available to the run. A response
+with invalid or unavailable evidence is not presented as successful: the
+original prompt is kept unchanged with empty evidence and a degraded warning.
+
+Relevant images are native inputs only when the refinement model reports image
+support. Text-like staged files receive a narrow read-only staging root, while
+selected images are passed only through the native image input, with external
+network tools and installed plugins disabled. Attachment metadata remains part
+of the request even when a modality cannot be inspected.
+The renderer generation-fences proposals and cancellation so an obsolete run
+cannot overwrite changed composer input.
+
 Catalog scope is part of model identity. Application catalogs contain only
 models proven safe for application-wide selection. Worktree-, account-, or
 provider-session-specific catalogs stay with that scope and are revalidated

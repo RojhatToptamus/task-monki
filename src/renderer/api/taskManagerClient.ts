@@ -7,6 +7,7 @@ import type {
   ApprovePreviewPlanRequest,
   CancelRunRequest,
   CancelDesignTurnRequest,
+  CancelPromptRefinementRequest,
   ContinueRunRequest,
   CreateBlankDesignRequest,
   BranchPublicationRecord,
@@ -441,6 +442,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       ),
     refinePrompt: (input: RefinePromptRequest) =>
       post<RefinePromptResponse>(baseUrl, '/api/prompt/refine', input),
+    cancelPromptRefinement: (input: CancelPromptRefinementRequest) =>
+      post<void>(baseUrl, '/api/prompt/refine/cancel', input),
     prepareWorktree: (input: PrepareWorktreeRequest) =>
       post<WorktreeRecord>(baseUrl, '/api/worktrees/prepare', input),
     startRun: (input: StartRunRequest) => post<RunRecord>(baseUrl, '/api/runs/start', input),

@@ -98,6 +98,7 @@ export const IPC_INVOKE_CHANNELS = [
   'preview:start',
   'preview:stop',
   'prompt:refine',
+  'prompt:refine:cancel',
   'repository:add',
   'repository:chooseFolder',
   'repository:disconnect',

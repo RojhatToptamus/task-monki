@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { AgentExecutionSettings, AgentModel } from '../../shared/agent';
 import type {
   AttachmentSubmissionRecord,
+  StagedAttachmentRecord,
   TaskAttachmentRecord
 } from '../../shared/attachments';
 import { posixModeMatches } from '../filesystem/secureFilesystem';
@@ -60,7 +61,7 @@ export class AgentAttachmentDeliveryError extends Error {
 
 export function toAgentTurnAttachments(
   verified: readonly {
-    record: TaskAttachmentRecord;
+    record: TaskAttachmentRecord | StagedAttachmentRecord;
     absolutePath: string;
   }[],
   verifiedAt = new Date().toISOString()

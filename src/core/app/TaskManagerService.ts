@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   Board,
@@ -6,6 +7,7 @@ import type {
   AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
   CancelDesignTurnRequest,
+  CancelPromptRefinementRequest,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateBoardRequest,
@@ -173,6 +175,7 @@ import type {
 } from '../preview/runtime/PreviewOpenService';
 import {
   assertAttachmentSandboxSupportsDelivery,
+  toAgentTurnAttachments,
   type AgentTurnAttachment
 } from '../agent/AgentAttachmentDelivery';
 import { AttachmentStoreError } from '../storage/AttachmentFileStore';
@@ -1813,9 +1816,12 @@ export class TaskManagerService {
         `${adapter.descriptor.displayName} does not expose native prompt refinement.`
       );
     }
-    const refined = await adapter.refinePrompt({
-      repositoryPath: repository.path,
-      input: input.input,
+    const attachments = input.attachmentDraftId
+      ? toAgentTurnAttachments(
+          await this.store.verifyAttachmentDraft(input.attachmentDraftId)
+        )
+      : [];
+    const refinementExecution = await adapter.resolveExecution({
       settings: {
         runtimeId,
         model:
@@ -1826,11 +1832,24 @@ export class TaskManagerService {
           (useConfiguredModel
             ? this.appSettings.promptRefinementModelProvider
             : undefined),
+        reasoningEffort: 'low',
         sandbox: 'READ_ONLY',
         networkAccess: false,
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
-      }
+      },
+      attachments: []
+    });
+    const targetModel = await this.resolvePromptRefinementTargetModel(input);
+    const refined = await adapter.refinePrompt({
+      requestId: input.requestId?.trim() || randomUUID(),
+      repositoryPath: repository.path,
+      input: input.input,
+      title: input.title,
+      settings: refinementExecution.settings,
+      refinementModel: refinementExecution.model,
+      targetModel,
+      attachments
     });
     this.events.emit({
       type: 'prompt.refined',
@@ -1839,6 +1858,42 @@ export class TaskManagerService {
       at: new Date().toISOString()
     });
     return refined;
+  }
+
+  cancelPromptRefinement(input: CancelPromptRefinementRequest): Promise<void> {
+    return this.withRuntimeOperation(async () => {
+      const runtimeId =
+        input.runtimeId ??
+        this.appSettings.promptRefinementRuntimeId ??
+        this.appSettings.defaultRuntimeId;
+      const adapter = this.runtimeRegistry.require(runtimeId);
+      await adapter.cancelPromptRefinement?.(input.requestId);
+    });
+  }
+
+  private async resolvePromptRefinementTargetModel(input: RefinePromptRequest) {
+    const targetRuntimeId = input.targetRuntimeId ?? this.appSettings.defaultRuntimeId;
+    try {
+      this.assertRuntimeEnabled(targetRuntimeId);
+      const targetAdapter = this.runtimeRegistry.require(targetRuntimeId);
+      const resolved = await targetAdapter.resolveExecution({
+        settings: {
+          runtimeId: targetRuntimeId,
+          model: input.targetModel,
+          modelProvider: input.targetModelProvider,
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user'
+        },
+        // This lookup supplies capability context to the refiner. Attachment
+        // compatibility remains enforced when the task actually runs.
+        attachments: []
+      });
+      return resolved.model;
+    } catch {
+      return undefined;
+    }
   }
 
   async prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord> {

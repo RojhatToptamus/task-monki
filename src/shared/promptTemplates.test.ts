@@ -295,12 +295,19 @@ describe('prompt templates', () => {
     expect(prompt).toContain('Do not commit, push, merge');
   });
 
-  it('asks prompt refinement to derive verification from inspected repo commands', () => {
-    const prompt = buildPromptRefinementInstruction('Add sync badges.');
+  it('keeps prompt refinement adaptive, grounded, and proportionate', () => {
+    const prompt = buildPromptRefinementInstruction({
+      userRequest: 'Add sync badges.',
+      refinementModel: { displayName: 'Spark', inputModalities: ['text'] },
+      targetModel: { displayName: 'Sol', inputModalities: ['text', 'image'] }
+    });
 
-    expect(prompt).toContain('Verification must name concrete commands');
-    expect(prompt).toContain('repository docs, package scripts, or nearby test conventions');
-    expect(prompt).toContain('instead of inventing one');
+    expect(prompt).toContain('A clear, simple task may require no repository inspection');
+    expect(prompt).toContain('Inspect the smallest likely relevant area');
+    expect(prompt).toContain('Preserve every explicit requirement');
+    expect(prompt).toContain('Do not copy generic engineering rules');
+    expect(prompt).toContain('Never invent commands');
+    expect(prompt).toContain('Downstream implementation model: Sol');
   });
 
   it('keeps engineering quality guidance focused on source-of-truth fixes and honest verification', () => {

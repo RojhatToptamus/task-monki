@@ -34,6 +34,7 @@ import type {
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RespondToInteractionRequest,
+  CancelPromptRefinementRequest,
   RefinePromptRequest,
   RemoveDesignReferenceRequest,
   StartRunRequest,
@@ -246,6 +247,8 @@ const api: TaskManagerApi = {
   archiveDesign: (input: ArchiveDesignRequest) =>
     invokeIpc('design:archive', input),
   refinePrompt: (input: RefinePromptRequest) => invokeIpc('prompt:refine', input),
+  cancelPromptRefinement: (input: CancelPromptRefinementRequest) =>
+    invokeIpc('prompt:refine:cancel', input),
   prepareWorktree: (input: PrepareWorktreeRequest) => invokeIpc('worktree:prepare', input),
   startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),
   steerRun: (input: SteerRunRequest) => invokeIpc('agent:steerRun', input),

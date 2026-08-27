@@ -211,8 +211,10 @@ describe('NewTaskPanel', () => {
         onRefinePrompt={async () => ({
           titleSuggestion: 'Task',
           prompt: 'Do the task.',
-          source: 'deterministic-fallback'
+          source: 'unchanged-fallback',
+          evidence: emptyRefinementEvidence()
         })}
+        onCancelPromptRefinement={async () => undefined}
         onStageAttachmentBatch={async () => ({
           id: 'draft-1',
           attachments: [],
@@ -350,8 +352,10 @@ describe('NewTaskPanel', () => {
           onRefinePrompt={async () => ({
             titleSuggestion: 'Task',
             prompt: 'Do the task.',
-            source: 'deterministic-fallback'
+            source: 'unchanged-fallback',
+            evidence: emptyRefinementEvidence()
           })}
+          onCancelPromptRefinement={async () => undefined}
           onStageAttachmentBatch={async () => ({
             id: 'draft-1',
             attachments: [],
@@ -456,3 +460,12 @@ describe('NewTaskPanel', () => {
     expect(gatedHtml).toContain('Attachments require file-read isolation between tasks.');
   });
 });
+
+function emptyRefinementEvidence() {
+  return {
+    repositoryInspection: 'none' as const,
+    repositoryFilesInspected: [],
+    attachmentIdsInspected: [],
+    attachmentIdsReferenced: []
+  };
+}

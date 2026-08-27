@@ -44,9 +44,12 @@ Limits are:
 
 Picked, pasted, and dropped files first remain in the renderer. The renderer
 uses object URLs only for local previews. It revokes each URL when the file or
-composer closes.
+composer closes. Pressing Refine stages the same bounded batch used by Create,
+but does not adopt it. If the selection is unchanged, Create reuses that draft
+instead of uploading or validating the bytes a second time.
 
-Pressing Create performs one bounded batch operation. Electron uses guarded IPC
+Pressing Refine or Create performs one bounded batch operation when files have
+not already been staged at the current composer revision. Electron uses guarded IPC
 with aggregate byte accounting. Browser development uses one authenticated JSON
 request with an endpoint-specific limit that includes base64 overhead. Core
 validates the entire batch and removes the staging directory if any member
@@ -55,9 +58,10 @@ fails.
 ```mermaid
 flowchart LR
   Input["Pick, paste, or drop"] --> Local["Renderer-local files"]
-  Local -->|"Create"| Stage["Private staging directory"]
+  Local -->|"Refine or Create"| Stage["Private staging directory"]
   Stage --> Validate["Core admission and hashes"]
-  Validate --> Rename["Atomic rename to task directory"]
+  Validate -->|"Refine"| Inspect["Bounded read-only refinement"]
+  Validate -->|"Create"| Rename["Atomic rename to task directory"]
   Rename --> Store["Atomic task-store snapshot"]
   Store --> Task["Immutable task-owned inputs"]
 ```
@@ -70,6 +74,14 @@ discard it.
 Blank Design creation uses the same staging and retry rules. One store
 publication adopts the files and creates the Design, active references, and
 seeded first turn. That first turn selects all initial references.
+
+Prompt refinement re-verifies the staged manifest and immutable files before
+provider submission. Text-like files are made available by exact managed path.
+Relevant images are supplied as native image inputs only when the selected
+refinement model reports image input support; otherwise the refiner receives
+metadata and must not claim to understand their visual contents. The attachment
+draft remains composer-owned and is still adopted only by successful task
+creation.
 
 ## Design messages and drafts
 
