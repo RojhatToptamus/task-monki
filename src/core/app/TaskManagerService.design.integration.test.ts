@@ -27,16 +27,29 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    scenarios.push(scenario);
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small product page.',
       creationToken: 'design-canvas-progress-create'
     });
     const worktreePath = requireWorktreePath(detail);
+    expect(
+      (await fs.readdir(worktreePath)).sort()
+    ).toEqual(['.git', 'app.js', 'assets', 'index.html', 'styles.css']);
     await fs.writeFile(
       path.join(worktreePath, 'index.html'),
-      '<!doctype html><title>Ready design</title>',
+      '<!doctype html><link rel="stylesheet" href="./styles.css"><title>Ready design</title><main><img src="./assets/mark.svg" alt=""><h1>Ready design</h1></main><script src="./app.js" defer></script>',
+      'utf8'
+    );
+    await fs.writeFile(path.join(worktreePath, 'styles.css'), 'body { color: navy; }\n', 'utf8');
+    await fs.writeFile(
+      path.join(worktreePath, 'app.js'),
+      'document.body.dataset.state = "ready";\n',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(worktreePath, 'assets', 'mark.svg'),
+      '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
       'utf8'
     );
     await scenario.completeRun(requireRunId(detail), 'The first page is ready.');
@@ -46,16 +59,19 @@ describeMac('TaskManagerService Design vertical slice', () => {
       (candidate) => candidate.canvas.state === 'READY'
     );
     const ready = requireActivePreview(detail);
+    expect(await requestActiveRoute(ready, '/styles.css')).toContain('color: navy');
+    expect(await requestActiveRoute(ready, '/app.js')).toContain('state = "ready"');
+    expect(await requestActiveRoute(ready, '/assets/mark.svg')).toContain('<svg');
 
     detail = await scenario.service.submitDesignTurn({
       designId: detail.design.id,
       clientMessageId: 'design-canvas-progress-refine',
-      message: 'Change the title.',
+      message: 'Change only the page color.',
       referenceIds: []
     });
     await fs.writeFile(
-      path.join(worktreePath, 'index.html'),
-      '<!doctype html><title>Checked working design</title>',
+      path.join(worktreePath, 'styles.css'),
+      'body { color: royalblue; }\n',
       'utf8'
     );
     const designUpdates = (
@@ -82,8 +98,9 @@ describeMac('TaskManagerService Design vertical slice', () => {
       generationId: detail.canvas.target!.generationId,
       routeId: detail.canvas.target!.routeId
     });
-    expect(await requestResolvedRoute(firstProgress)).toContain('Checked working design');
-    expect(await requestActiveRoute(ready)).toContain('Ready design');
+    expect(await requestResolvedRoute(firstProgress)).toContain('Ready design');
+    expect(await requestResolvedRoute(firstProgress, '/styles.css')).toContain('royalblue');
+    expect(await requestActiveRoute(ready, '/styles.css')).toContain('color: navy');
     await expect(
       scenario.service.openPreview({
         taskId: detail.design.id,
@@ -93,8 +110,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
     ).rejects.toThrow('not available for a Design');
 
     await fs.writeFile(
-      path.join(worktreePath, 'index.html'),
-      '<!doctype html><title>Corrected checked design</title>',
+      path.join(worktreePath, 'styles.css'),
+      'body { color: cornflowerblue; }\n',
       'utf8'
     );
     await designUpdates.inspectDesign({
@@ -108,20 +125,60 @@ describeMac('TaskManagerService Design vertical slice', () => {
       routeId: detail.canvas.target!.routeId
     });
     expect(finalProgress.generationId).not.toBe(firstProgress.generationId);
-    expect(await requestResolvedRoute(finalProgress)).toContain('Corrected checked design');
+    expect(await requestResolvedRoute(finalProgress, '/styles.css')).toContain(
+      'cornflowerblue'
+    );
     await expect(requestResolvedRoute(firstProgress)).rejects.toThrow('503');
-    expect(await requestActiveRoute(ready)).toContain('Ready design');
+    expect(await requestActiveRoute(ready, '/styles.css')).toContain('color: navy');
 
-    await scenario.completeRun(requireRunId(detail), 'The refinement is ready.');
+    await scenario.completeRun(requireRunId(detail), 'The CSS refinement is ready.');
     detail = await waitForDesign(
       scenario,
       detail.design.id,
       (candidate) => candidate.revisions.length === 2 && candidate.canvas.state === 'READY'
     );
-    expect(await requestActiveRoute(requireActivePreview(detail))).toContain(
-      'Corrected checked design'
+    expect(await requestActiveRoute(requireActivePreview(detail), '/styles.css')).toContain(
+      'cornflowerblue'
     );
     await expect(requestResolvedRoute(finalProgress)).rejects.toThrow('503');
+
+    const cssReady = requireActivePreview(detail);
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-canvas-progress-script-refine',
+      message: 'Change only the page behavior.',
+      referenceIds: []
+    });
+    await fs.writeFile(
+      path.join(worktreePath, 'app.js'),
+      'document.body.dataset.state = "refined";\n',
+      'utf8'
+    );
+    await designUpdates.inspectDesign({
+      runId: requireRunId(detail),
+      operation: { operation: 'open_candidate' }
+    });
+    detail = await scenario.service.getDesign(detail.design.id);
+    const scriptProgress = await scenario.service.resolveDesignCanvasRoute({
+      taskId: detail.design.id,
+      generationId: detail.canvas.target!.generationId,
+      routeId: detail.canvas.target!.routeId
+    });
+    expect(await requestResolvedRoute(scriptProgress, '/app.js')).toContain('state = "refined"');
+    expect(await requestActiveRoute(cssReady, '/app.js')).toContain('state = "ready"');
+
+    await scenario.completeRun(requireRunId(detail), 'The JavaScript refinement is ready.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.revisions.length === 3 && candidate.canvas.state === 'READY'
+    );
+    expect(await requestActiveRoute(requireActivePreview(detail), '/app.js')).toContain(
+      'state = "refined"'
+    );
+    expect(await requestActiveRoute(requireActivePreview(detail), '/styles.css')).toContain(
+      'cornflowerblue'
+    );
   }, 45_000);
 
   it('fails before Design creation when scoped skill access is unavailable', async () => {
@@ -624,7 +681,22 @@ describeMac('TaskManagerService Design vertical slice', () => {
     const sourceWorktreePath = requireWorktreePath(source);
     await fs.writeFile(
       path.join(sourceWorktreePath, 'index.html'),
-      '<!doctype html><title>First direction</title><h1>First direction</h1>',
+      '<!doctype html><link rel="stylesheet" href="./styles.css"><title>First direction</title><h1>First direction</h1><script src="./app.js" defer></script>',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'styles.css'),
+      'body { color: navy; }\n',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'app.js'),
+      'document.body.dataset.direction = "first";\n',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'assets', 'direction.txt'),
+      'first asset\n',
       'utf8'
     );
     await scenario.completeRun(requireRunId(source), 'The first direction is ready.');
@@ -643,7 +715,22 @@ describeMac('TaskManagerService Design vertical slice', () => {
     });
     await fs.writeFile(
       path.join(sourceWorktreePath, 'index.html'),
-      '<!doctype html><title>Second direction</title><h1>Second direction</h1>',
+      '<!doctype html><link rel="stylesheet" href="./styles.css"><title>Second direction</title><h1>Second direction</h1><script src="./app.js" defer></script>',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'styles.css'),
+      'body { color: seagreen; }\n',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'app.js'),
+      'document.body.dataset.direction = "second";\n',
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(sourceWorktreePath, 'assets', 'direction.txt'),
+      'second asset\n',
       'utf8'
     );
     await scenario.completeRun(requireRunId(source), 'The second direction is ready.');
@@ -671,6 +758,18 @@ describeMac('TaskManagerService Design vertical slice', () => {
     );
     expect(await fs.readFile(path.join(sourceWorktreePath, 'index.html'), 'utf8')).toContain(
       'First direction'
+    );
+    await expect(
+      fs.readFile(path.join(sourceWorktreePath, 'styles.css'), 'utf8')
+    ).resolves.toContain('navy');
+    await expect(
+      fs.readFile(path.join(sourceWorktreePath, 'app.js'), 'utf8')
+    ).resolves.toContain('"first"');
+    await expect(
+      fs.readFile(path.join(sourceWorktreePath, 'assets', 'direction.txt'), 'utf8')
+    ).resolves.toBe('first asset\n');
+    expect(await requestActiveRoute(requireActivePreview(source), '/styles.css')).toContain(
+      'navy'
     );
 
     const duplicateActionId = randomUUID();
@@ -708,6 +807,15 @@ describeMac('TaskManagerService Design vertical slice', () => {
     expect(copy.currentWorktree?.branchName).not.toBe(sourceBranch);
     expect(await requestActiveRoute(requireActivePreview(copy))).toContain(
       'Second direction'
+    );
+    expect(await requestActiveRoute(requireActivePreview(copy), '/styles.css')).toContain(
+      'seagreen'
+    );
+    expect(await requestActiveRoute(requireActivePreview(copy), '/app.js')).toContain(
+      '"second"'
+    );
+    expect(await requestActiveRoute(requireActivePreview(copy), '/assets/direction.txt')).toBe(
+      'second asset\n'
     );
 
     copy = await scenario.service.renameDesign({
@@ -929,18 +1037,21 @@ async function waitForDesign(
   return detail;
 }
 
-function requestActiveRoute(generation: PreviewGenerationRecord): Promise<string> {
+function requestActiveRoute(
+  generation: PreviewGenerationRecord,
+  requestPath = '/'
+): Promise<string> {
   const route = generation.routes.find((candidate) => candidate.state === 'ATTACHED');
   if (!route) throw new Error('Active Preview route is missing.');
-  return requestPreviewRoute(route.gatewayPort, route.hostname, '/');
+  return requestPreviewRoute(route.gatewayPort, route.hostname, requestPath);
 }
 
-function requestResolvedRoute(route: { url: string }): Promise<string> {
+function requestResolvedRoute(route: { url: string }, requestPath?: string): Promise<string> {
   const parsed = new URL(route.url);
   return requestPreviewRoute(
     Number(parsed.port),
     parsed.host,
-    `${parsed.pathname}${parsed.search}`
+    requestPath ?? `${parsed.pathname}${parsed.search}`
   );
 }
 

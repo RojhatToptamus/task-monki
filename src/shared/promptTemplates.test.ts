@@ -55,6 +55,24 @@ describe('prompt templates', () => {
       'Do not use public runtime assets, CDN resources, remote fonts, remote scripts, or network services.'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'index.html contains semantic structure and content. Link ./styles.css and load ./app.js with defer.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'styles.css contains all CSS.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'app.js contains all JavaScript.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'assets/ contains local images, SVG files, fonts, and other editable project files.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'Do not add a framework, package manager, package file, build step, or dependency installation'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'do not reorganize it only to match the new layout.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
       'Task Monki owns commits, revisions, Git evidence, Preview processes, and canvas cutover.'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(

@@ -152,8 +152,19 @@ describe('PreviewSourcePreparer', () => {
 
   it('exports the exact commit without reading changed worktree bytes', async () => {
     const fixture = await createRepositoryFixture();
+    await fs.mkdir(path.join(fixture.repo, 'assets'));
+    await fs.writeFile(
+      path.join(fixture.repo, 'index.html'),
+      '<link rel="stylesheet" href="./styles.css"><script src="./app.js" defer></script>\n'
+    );
+    await fs.writeFile(path.join(fixture.repo, 'styles.css'), 'body { color: navy; }\n');
+    await fs.writeFile(path.join(fixture.repo, 'app.js'), 'document.body.dataset.ready = "true";\n');
+    await fs.writeFile(path.join(fixture.repo, 'assets', 'mark.svg'), '<svg></svg>\n');
+    await git(fixture.repo, ['add', '.']);
+    await git(fixture.repo, ['commit', '-m', 'Add complete Design source']);
     const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
     await fs.writeFile(path.join(fixture.repo, 'tracked.txt'), 'changed after commit\n');
+    await fs.writeFile(path.join(fixture.repo, 'styles.css'), 'body { color: red; }\n');
     await fs.writeFile(path.join(fixture.repo, 'untracked.txt'), 'not in the commit\n');
 
     const prepared = await fixture.preparer.prepareExactCommit({
@@ -175,6 +186,15 @@ describe('PreviewSourcePreparer', () => {
     await expect(fs.readFile(path.join(prepared.sourcePath, 'staged.txt'), 'utf8')).resolves.toBe(
       'original\n'
     );
+    await expect(fs.readFile(path.join(prepared.sourcePath, 'styles.css'), 'utf8')).resolves.toBe(
+      'body { color: navy; }\n'
+    );
+    await expect(fs.readFile(path.join(prepared.sourcePath, 'app.js'), 'utf8')).resolves.toBe(
+      'document.body.dataset.ready = "true";\n'
+    );
+    await expect(
+      fs.readFile(path.join(prepared.sourcePath, 'assets', 'mark.svg'), 'utf8')
+    ).resolves.toBe('<svg></svg>\n');
     await expect(fs.access(path.join(prepared.sourcePath, 'untracked.txt'))).rejects.toMatchObject({
       code: 'ENOENT'
     });

@@ -393,13 +393,25 @@ async function seedDesignScenarios(ctx: SeedContext): Promise<void> {
           '<html lang="en">',
           '<meta charset="utf-8">',
           '<title>Calm release dashboard</title>',
+          '<link rel="stylesheet" href="./styles.css">',
           '<main><h1>Release dashboard</h1><p>Seeded Design canvas.</p></main>',
+          '<script src="./app.js" defer></script>',
           '</html>',
           ''
         ].join('\n'),
         'utf8'
       );
-      await git(repository.path, ['add', 'index.html']);
+      await fs.writeFile(
+        path.join(repository.path, 'styles.css'),
+        'body { margin: 0; font-family: system-ui, sans-serif; }\n',
+        'utf8'
+      );
+      await fs.writeFile(
+        path.join(repository.path, 'app.js'),
+        'document.documentElement.dataset.seeded = "true";\n',
+        'utf8'
+      );
+      await git(repository.path, ['add', 'index.html', 'styles.css', 'app.js']);
       await git(repository.path, ['commit', '-m', 'Seed Design canvas']);
       repository = {
         ...repository,

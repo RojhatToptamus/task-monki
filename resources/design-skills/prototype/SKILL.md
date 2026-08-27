@@ -26,6 +26,10 @@ If no visual system exists, use `aesthetic-direction`.
 
 Preserve the current framework, components, tokens, and build tools.
 For a blank managed Design project, use clean local HTML, CSS, JavaScript, and SVG.
+Keep structure and content in `index.html`, styles in `styles.css`, behavior in
+`app.js`, and local editable files in `assets/`.
+Use the scaffold's relative links. Do not add a framework, package manager,
+build step, or dependency.
 Use plausible content from the brief.
 Do not invent material facts.
 

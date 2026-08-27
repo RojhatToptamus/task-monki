@@ -24,7 +24,8 @@ export const DESIGN_REPOSITORY_MARKER = '.task-monki-design-repository.json';
 const MARKER_SCHEMA_VERSION = 1 as const;
 const INITIAL_BRANCH = 'main';
 const INITIAL_COMMIT_MESSAGE = 'Initialize Task Monki Design source';
-const INITIAL_INDEX_HTML = `<!doctype html>
+const EMPTY_ASSET_PATH = 'assets/.gitkeep';
+const LEGACY_INITIAL_INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -39,6 +40,38 @@ const INITIAL_INDEX_HTML = `<!doctype html>
 </body>
 </html>
 `;
+const INITIAL_INDEX_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New Design</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main>
+    <h1>New Design</h1>
+    <p>Replace this minimal shell with the requested experience.</p>
+  </main>
+  <script src="./app.js" defer></script>
+</body>
+</html>
+`;
+const INITIAL_STYLES_CSS = '';
+const INITIAL_APP_JS = '';
+interface InitialSourceFile {
+  path: string;
+  content: string;
+}
+const LEGACY_INITIAL_SOURCE_FILES: readonly InitialSourceFile[] = [
+  { path: 'index.html', content: LEGACY_INITIAL_INDEX_HTML }
+];
+const INITIAL_SOURCE_FILES: readonly InitialSourceFile[] = [
+  { path: 'app.js', content: INITIAL_APP_JS },
+  { path: EMPTY_ASSET_PATH, content: '' },
+  { path: 'index.html', content: INITIAL_INDEX_HTML },
+  { path: 'styles.css', content: INITIAL_STYLES_CSS }
+];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const MAX_MARKER_BYTES = 64 * 1024;
@@ -198,6 +231,7 @@ export class DesignSourceService {
     const paths = output
       .split('\0')
       .filter(Boolean)
+      .filter((relativePath) => relativePath !== EMPTY_ASSET_PATH)
       .sort((left, right) => left.localeCompare(right));
     const files: DesignProjectFile[] = [];
     const realWorktree = await fs.realpath(input.worktree.worktreePath);
@@ -692,11 +726,6 @@ export class DesignSourceService {
       return repositoryInput(repositoryPath, marker);
     }
 
-    const allowed = new Set(['.git', DESIGN_REPOSITORY_MARKER, 'index.html']);
-    const entries = await fs.readdir(repositoryPath);
-    if (entries.some((entry) => !allowed.has(entry))) {
-      throw new Error('Staging Design repository contains unexpected files.');
-    }
     if (!(await exists(path.join(repositoryPath, '.git')))) {
       await managedGit(repositoryPath, ['init', '--initial-branch', INITIAL_BRANCH]);
     }
@@ -704,16 +733,13 @@ export class DesignSourceService {
     await managedGit(repositoryPath, ['config', 'user.email', 'task-monki@localhost']);
     await managedGit(repositoryPath, ['config', 'core.autocrlf', 'false']);
     await ensureMarkerExcluded(repositoryPath);
-    const indexPath = path.join(repositoryPath, 'index.html');
-    const existingIndex = await fs.readFile(indexPath, 'utf8').catch(missingAsUndefined);
-    if (existingIndex !== undefined && existingIndex !== INITIAL_INDEX_HTML) {
-      throw new Error('Staging Design repository initial source changed before registration.');
-    }
-    if (existingIndex === undefined) {
-      await writePrivateFile(indexPath, INITIAL_INDEX_HTML);
-    }
     if (!(await gitReferenceExists(repositoryPath, 'HEAD'))) {
-      await managedGit(repositoryPath, ['add', '--', 'index.html']);
+      const initialSource = await ensureStagingInitialSource(repositoryPath);
+      await managedGit(repositoryPath, [
+        'add',
+        '--',
+        ...initialSource.map((file) => file.path)
+      ]);
       await managedGit(repositoryPath, [
         'commit',
         '--no-gpg-sign',
@@ -1323,30 +1349,128 @@ async function verifyInitialRepository(
   const branch = cleanGitOutput(
     await managedGit(repositoryPath, ['symbolic-ref', '--short', 'HEAD'])
   );
-  const files = await managedGit(repositoryPath, [
-    'ls-tree',
-    '-r',
-    '--name-only',
-    '-z',
-    head
-  ]);
-  const index = await managedGit(repositoryPath, ['show', `${head}:index.html`]);
   const remotes = cleanGitOutput(await managedGit(repositoryPath, ['remote']));
   const status = await managedGit(repositoryPath, [
     'status',
     '--porcelain=v1',
     '--untracked-files=all'
   ]);
+  const supportedInitialSource =
+    (await commitMatchesInitialSource(repositoryPath, head, INITIAL_SOURCE_FILES)) ||
+    (await commitMatchesInitialSource(
+      repositoryPath,
+      head,
+      LEGACY_INITIAL_SOURCE_FILES
+    ));
   if (
     head !== marker.initialCommitSha ||
     branch !== INITIAL_BRANCH ||
-    files !== 'index.html\0' ||
-    index !== INITIAL_INDEX_HTML ||
+    !supportedInitialSource ||
     remotes !== '' ||
     status !== ''
   ) {
     throw new Error('Managed Design repository initial commit failed verification.');
   }
+}
+
+async function ensureStagingInitialSource(
+  repositoryPath: string
+): Promise<readonly InitialSourceFile[]> {
+  const allowedRootEntries = new Set([
+    '.git',
+    DESIGN_REPOSITORY_MARKER,
+    'app.js',
+    'assets',
+    'index.html',
+    'styles.css'
+  ]);
+  const rootEntries = await fs.readdir(repositoryPath);
+  if (rootEntries.some((entry) => !allowedRootEntries.has(entry))) {
+    throw new Error('Staging Design repository contains unexpected files.');
+  }
+
+  const index = await readStagingSourceFile(
+    path.join(repositoryPath, 'index.html')
+  );
+  if (index === LEGACY_INITIAL_INDEX_HTML) {
+    const legacyEntries = rootEntries.filter(
+      (entry) => entry !== '.git' && entry !== DESIGN_REPOSITORY_MARKER
+    );
+    if (legacyEntries.length !== 1 || legacyEntries[0] !== 'index.html') {
+      throw new Error('Staging Design repository mixes legacy and current source.');
+    }
+    return LEGACY_INITIAL_SOURCE_FILES;
+  }
+  if (index !== undefined && index !== INITIAL_INDEX_HTML) {
+    throw new Error('Staging Design repository initial source changed before registration.');
+  }
+
+  const assetsPath = path.join(repositoryPath, 'assets');
+  const assets = await fs.lstat(assetsPath).catch(missingAsUndefined);
+  if (assets) {
+    if (!assets.isDirectory() || assets.isSymbolicLink()) {
+      throw new Error('Staging Design assets path is not a safe directory.');
+    }
+    const assetEntries = await fs.readdir(assetsPath);
+    if (assetEntries.some((entry) => entry !== '.gitkeep')) {
+      throw new Error('Staging Design repository contains unexpected assets.');
+    }
+  }
+
+  for (const file of INITIAL_SOURCE_FILES) {
+    const absolutePath = path.join(repositoryPath, file.path);
+    const existing = await readStagingSourceFile(absolutePath);
+    if (existing !== undefined) {
+      if (existing !== file.content) {
+        throw new Error('Staging Design repository initial source changed before registration.');
+      }
+      continue;
+    }
+    const directory = path.dirname(absolutePath);
+    if (directory !== repositoryPath) {
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      await enforcePosixMode(directory, 0o700);
+      await assertPrivateOwnedDirectory(directory, await fs.lstat(directory));
+    }
+    await writePrivateFile(absolutePath, file.content);
+  }
+  return INITIAL_SOURCE_FILES;
+}
+
+async function readStagingSourceFile(filePath: string): Promise<string | undefined> {
+  const stat = await fs.lstat(filePath).catch(missingAsUndefined);
+  if (!stat) return undefined;
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error('Staging Design repository contains an unsafe source file.');
+  }
+  return fs.readFile(filePath, 'utf8');
+}
+
+async function commitMatchesInitialSource(
+  repositoryPath: string,
+  commitSha: string,
+  sourceFiles: readonly InitialSourceFile[]
+): Promise<boolean> {
+  const files = await managedGit(repositoryPath, [
+    'ls-tree',
+    '-r',
+    '--name-only',
+    '-z',
+    commitSha
+  ]);
+  const expectedFiles = `${sourceFiles.map((file) => file.path).sort().join('\0')}\0`;
+  if (files !== expectedFiles) return false;
+  for (const file of sourceFiles) {
+    if (
+      (await managedGit(repositoryPath, [
+        'show',
+        `${commitSha}:${file.path}`
+      ])) !== file.content
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function repositoryInput(

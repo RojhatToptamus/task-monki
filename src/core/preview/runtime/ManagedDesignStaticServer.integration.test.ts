@@ -22,13 +22,31 @@ describe('managed-design-static-server', () => {
     const fixture = await startFixture();
     const root = await request(fixture.port, '/');
     const script = await request(fixture.port, '/app.js', 'HEAD');
+    const styles = await request(fixture.port, '/styles.css');
+    const asset = await request(fixture.port, '/assets/mark.svg');
 
-    expect(root).toMatchObject({ status: 200, body: '<h1>Design</h1>\n' });
+    expect(root).toMatchObject({
+      status: 200,
+      body: '<link rel="stylesheet" href="./styles.css"><h1>Design</h1><script src="./app.js" defer></script>\n'
+    });
     expect(root.headers['content-security-policy']).toContain("default-src 'self'");
+    expect(root.headers['content-security-policy']).toContain(
+      "script-src 'self' 'unsafe-inline'"
+    );
+    expect(root.headers['content-security-policy']).toContain(
+      "style-src 'self' 'unsafe-inline'"
+    );
     expect(root.headers['cross-origin-resource-policy']).toBe('same-origin');
     expect(root.headers['cache-control']).toBe('no-store, max-age=0');
     expect(script).toMatchObject({ status: 200, body: '' });
     expect(script.headers['content-type']).toBe('text/javascript; charset=utf-8');
+    expect(styles).toMatchObject({ status: 200, body: 'body { color: navy; }\n' });
+    expect(styles.headers['content-type']).toBe('text/css; charset=utf-8');
+    expect(asset).toMatchObject({
+      status: 200,
+      body: '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n'
+    });
+    expect(asset.headers['content-type']).toBe('image/svg+xml');
   });
 
   it('rejects traversal, malformed encoding, symlinks, directories, and unsupported methods', async () => {
@@ -52,9 +70,17 @@ async function startFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-static-server-'));
   roots.push(root);
   const source = path.join(root, 'source');
-  await fs.mkdir(source);
-  await fs.writeFile(path.join(source, 'index.html'), '<h1>Design</h1>\n');
+  await fs.mkdir(path.join(source, 'assets'), { recursive: true });
+  await fs.writeFile(
+    path.join(source, 'index.html'),
+    '<link rel="stylesheet" href="./styles.css"><h1>Design</h1><script src="./app.js" defer></script>\n'
+  );
+  await fs.writeFile(path.join(source, 'styles.css'), 'body { color: navy; }\n');
   await fs.writeFile(path.join(source, 'app.js'), 'console.log("design")\n');
+  await fs.writeFile(
+    path.join(source, 'assets', 'mark.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n'
+  );
   const port = await reservePort();
   const serverPath = path.join(
     process.cwd(),

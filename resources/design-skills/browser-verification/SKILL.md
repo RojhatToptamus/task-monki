@@ -33,6 +33,10 @@ Select the verification depth from the actual change.
 Every source-changing turn needs `open_candidate` before it ends.
 The first Ready result also needs this check, including an unchanged first shell.
 Review the returned snapshot, console output, and uncaught errors.
+The opened candidate contains the complete captured file set.
+Treat missing stylesheets, scripts, images, fonts, and other local resource errors
+as candidate failures. After changing any linked file, open the fresh complete
+candidate again before you finish.
 
 After an existing Ready result, do not use browser verification for a true
 no-change turn.

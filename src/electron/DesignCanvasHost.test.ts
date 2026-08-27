@@ -429,6 +429,20 @@ describe('DesignCanvasHost', () => {
     expect(reopened.added).toEqual([fixture.views.at(-1)]);
   });
 
+  it('detaches after Electron destroys the window', async () => {
+    const fixture = createFixture();
+    fixture.host.attachWindow(fixture.window);
+    await showFirst(fixture);
+    const view = fixture.views[0];
+
+    fixture.window.destroyed = true;
+    fixture.window.throwOnDestroyedWebContentsAccess = true;
+
+    await expect(fixture.host.detachWindow()).resolves.toBeUndefined();
+    expect(view.webContents.closed).toBe(true);
+    expect(fixture.session.closedConnections).toBeGreaterThan(0);
+  });
+
   it('releases a deleted Design session after secure cleanup', async () => {
     const fixture = createFixture();
     fixture.host.attachWindow(fixture.window);
@@ -654,17 +668,24 @@ class FakeWindow {
   readonly removed: FakeView[] = [];
   readonly listeners = new Map<string, () => void>();
   destroyed = false;
+  throwOnDestroyedWebContentsAccess = false;
   contentView = {
     addChildView: (view: FakeView) => { this.added.push(view); },
     removeChildView: (view: FakeView) => { this.removed.push(view); }
   };
-  webContents = {
+  private readonly contents = {
     getZoomFactor: () => 2,
     on: (event: string, listener: () => void) => { this.listeners.set(event, listener); },
     off: (event: string, listener: () => void) => {
       if (this.listeners.get(event) === listener) this.listeners.delete(event);
     }
   };
+  get webContents() {
+    if (this.destroyed && this.throwOnDestroyedWebContentsAccess) {
+      throw new Error('Object has been destroyed');
+    }
+    return this.contents;
+  }
   isDestroyed() { return this.destroyed; }
   getContentBounds() { return { width: 500, height: 400 }; }
   on(event: string, listener: () => void) { this.listeners.set(event, listener); }

@@ -1000,6 +1000,9 @@ describe('mounted Design workspace', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Design options for Quiet portfolio' })
     );
+    expect(
+      (screen.getByRole('menuitem', { name: 'Open in Finder' }) as HTMLButtonElement).disabled
+    ).toBe(true);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete…' }));
     expect(screen.getByRole('dialog', { name: /Delete “Quiet portfolio”/ })).toBeTruthy();
     const confirm = screen.getByRole('button', { name: 'Delete Design' });
@@ -1035,10 +1038,23 @@ describe('mounted Design workspace', () => {
     const onDuplicateDesign = vi.fn(async () => undefined);
     const onRenameDesign = vi.fn(async () => undefined);
     const onArchiveDesign = vi.fn(async () => undefined);
+    const onOpenDesignLocation = vi.fn(async () => undefined);
     render(
       <DesignsWorkspace
         {...workspaceProps({
           project: designProject({
+            currentWorktree: {
+              id: 'worktree-1',
+              taskId: 'design-1',
+              iterationId: 'iteration-1',
+              repositoryId: 'repository-1',
+              worktreePath: '/tmp/design-worktree',
+              branchName: 'task-monki/design-1',
+              baseSha: 'a'.repeat(40),
+              status: 'PRESENT',
+              createdAt: '2026-08-20T10:00:00.000Z',
+              updatedAt: '2026-08-20T10:00:00.000Z'
+            },
             revisions: [firstRevision, secondRevision],
             conversation: [
               {
@@ -1063,7 +1079,8 @@ describe('mounted Design workspace', () => {
           onRestoreRevision,
           onDuplicateDesign,
           onRenameDesign,
-          onArchiveDesign
+          onArchiveDesign,
+          onOpenDesignLocation
         })}
       />
     );
@@ -1082,6 +1099,11 @@ describe('mounted Design workspace', () => {
     const projectMenu = screen.getByRole('button', {
       name: 'Design options for Quiet portfolio'
     });
+    fireEvent.click(projectMenu);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open in Finder' }));
+    await waitFor(() =>
+      expect(onOpenDesignLocation).toHaveBeenCalledWith('design-1', 'worktree-1')
+    );
     fireEvent.click(projectMenu);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Duplicate current' }));
     await waitFor(() =>
@@ -1395,6 +1417,7 @@ function workspaceProps(
     onRefreshCanvas: vi.fn(async () => undefined),
     onRestartCanvas: vi.fn(async () => undefined),
     onSelectRevision: vi.fn(async () => undefined),
+    onOpenDesignLocation: vi.fn(async () => undefined),
     onRestoreRevision: vi.fn(async () => undefined),
     onDuplicateDesign: vi.fn(async () => undefined),
     onRenameDesign: vi.fn(async () => undefined),

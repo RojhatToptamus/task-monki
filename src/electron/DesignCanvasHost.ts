@@ -238,7 +238,7 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
   async detachWindow(): Promise<void> {
     const window = this.window;
     this.window = undefined;
-    if (window) {
+    if (window && !window.isDestroyed()) {
       window.webContents.off('did-start-navigation', this.onRendererReset);
       window.webContents.off('render-process-gone', this.onRendererReset);
       window.off('closed', this.onWindowClosed);
