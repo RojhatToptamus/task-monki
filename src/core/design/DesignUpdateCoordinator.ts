@@ -101,7 +101,7 @@ export class DesignUpdateCoordinator {
           refreshed.revisions.length > 0 &&
           !isActiveReadyGeneration(refreshed.currentPreview)
         ) {
-          await this.restartLatestReadyUnlocked(refreshed).catch(() => undefined);
+          await this.restartReadyRevisionUnlocked(refreshed).catch(() => undefined);
         }
       });
     }
@@ -134,11 +134,11 @@ export class DesignUpdateCoordinator {
     return work.finally(() => this.terminalAdmissions.delete(work));
   }
 
-  restartLatestReady(designId: string): Promise<void> {
+  restartReadyRevision(designId: string, revisionId?: string): Promise<void> {
     this.assertAccepting();
     return this.withDesignLock(designId, async () => {
       const detail = await this.options.store.getDesignDetail(designId);
-      await this.restartLatestReadyUnlocked(detail);
+      await this.restartReadyRevisionUnlocked(detail, revisionId);
       this.emitUpdated(designId, { reason: 'preview-restarted' });
     });
   }
@@ -972,12 +972,19 @@ export class DesignUpdateCoordinator {
     await this.settleRunUnlocked(run.id);
   }
 
-  private async restartLatestReadyUnlocked(
-    detail: DesignDetailSnapshot
+  private async restartReadyRevisionUnlocked(
+    detail: DesignDetailSnapshot,
+    revisionId?: string
   ): Promise<void> {
-    const revision = detail.revisions.at(-1);
+    const revision = revisionId
+      ? detail.revisions.find((candidate) => candidate.id === revisionId)
+      : detail.revisions.at(-1);
     if (!revision) {
-      throw new Error('This Design does not have a ready revision to restart.');
+      throw new Error(
+        revisionId
+          ? 'The selected Design version is unavailable.'
+          : 'This Design does not have a ready revision to restart.'
+      );
     }
     const context = requireReadyContext(detail);
     await this.options.previews.restartManagedDesign({

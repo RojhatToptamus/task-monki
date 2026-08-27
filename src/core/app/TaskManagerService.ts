@@ -1742,7 +1742,7 @@ export class TaskManagerService {
     return this.withTaskAction(input.designId, 'Design Preview restart', () =>
       this.withRuntimeOperation(async () => {
         const designUpdates = await this.requireDesignUpdates();
-        await designUpdates.restartLatestReady(input.designId);
+        await designUpdates.restartReadyRevision(input.designId, input.revisionId);
         return this.getDesign(input.designId);
       })
     );

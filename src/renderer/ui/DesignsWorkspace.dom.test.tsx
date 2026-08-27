@@ -1191,6 +1191,95 @@ describe('mounted Design workspace', () => {
     view.unmount();
     boundsSpy.mockRestore();
   });
+
+  it('previews an earlier version before it offers an explicit restore', async () => {
+    const revisions: DesignProjectDetail['revisions'] = [
+      {
+        id: 'revision-1',
+        designId: 'design-1',
+        ordinal: 1,
+        commitSha: 'a'.repeat(40),
+        routeId: 'route-1',
+        createdAt: '2026-08-20T09:00:00.000Z',
+        changeSource: 'AGENT_TURN',
+        turnId: 'turn-1',
+        runId: 'run-1'
+      },
+      {
+        id: 'revision-2',
+        designId: 'design-1',
+        ordinal: 2,
+        commitSha: 'b'.repeat(40),
+        routeId: 'route-2',
+        createdAt: '2026-08-20T10:00:00.000Z',
+        changeSource: 'AGENT_TURN',
+        turnId: 'turn-2',
+        runId: 'run-2'
+      }
+    ];
+    const onSelectRevision = vi.fn(async () => undefined);
+    const onRestoreRevision = vi.fn(async () => undefined);
+    const currentProject = designProject({
+      revisions,
+      canvas: {
+        state: 'READY',
+        target: {
+          generationId: 'generation-2',
+          routeId: 'route-2',
+          revisionId: 'revision-2'
+        }
+      }
+    });
+    const view = render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          project: currentProject,
+          onSelectRevision,
+          onRestoreRevision
+        })}
+      />
+    );
+
+    expect(screen.queryByLabelText('Earlier version preview')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'View version 1' }));
+    await waitFor(() =>
+      expect(onSelectRevision).toHaveBeenCalledWith('design-1', 'revision-1')
+    );
+    expect(onRestoreRevision).not.toHaveBeenCalled();
+
+    view.rerender(
+      <DesignsWorkspace
+        {...workspaceProps({
+          project: {
+            ...currentProject,
+            canvas: {
+              state: 'READY',
+              target: {
+                generationId: 'generation-1',
+                routeId: 'route-1',
+                revisionId: 'revision-1'
+              }
+            }
+          },
+          onSelectRevision,
+          onRestoreRevision
+        })}
+      />
+    );
+
+    expect(screen.getByLabelText('Earlier version preview')).toBeTruthy();
+    expect(screen.getByText('Viewing v1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to v2' }));
+    await waitFor(() =>
+      expect(onSelectRevision).toHaveBeenLastCalledWith('design-1', 'revision-2')
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Restore version 1 as a new version' })
+    );
+    await waitFor(() =>
+      expect(onRestoreRevision).toHaveBeenCalledWith('design-1', 'revision-1')
+    );
+  });
 });
 
 function workspaceProps(
@@ -1247,6 +1336,7 @@ function workspaceProps(
     onRespondToInteraction: vi.fn(async () => undefined),
     onRefreshCanvas: vi.fn(async () => undefined),
     onRestartCanvas: vi.fn(async () => undefined),
+    onSelectRevision: vi.fn(async () => undefined),
     onRestoreRevision: vi.fn(async () => undefined),
     onDuplicateDesign: vi.fn(async () => undefined),
     onRenameDesign: vi.fn(async () => undefined),

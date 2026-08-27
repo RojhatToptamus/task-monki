@@ -1190,7 +1190,7 @@ export class FileTaskStore {
             }
           : undefined,
       currentPreview,
-      canvas: projectDesignCanvas(state, task, revisions.at(-1), currentPreview),
+      canvas: projectDesignCanvas(state, task, revisions, currentPreview),
       actions: projectDesignActions(state, task, revisions.at(-1), currentPreview)
     });
   }
@@ -9060,23 +9060,35 @@ function selectCurrentDesignPreview(
       (generation) =>
         generation.taskId === designId &&
         generation.source.type === 'EXACT_COMMIT' &&
-        generation.source.designRevisionId === latestRevision.id
+        generation.source.designRevisionId !== undefined
     )
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   return (
     matching.find(
       (generation) =>
         generation.routingState === 'ACTIVE' && generation.state === 'READY'
-    ) ?? matching[0]
+    ) ?? matching.find(
+      (generation) =>
+        generation.source.type === 'EXACT_COMMIT' &&
+        generation.source.designRevisionId === latestRevision.id
+    )
   );
 }
 
 function projectDesignCanvas(
   state: StoreState,
   task: Task,
-  latestRevision: DesignRevision | undefined,
+  revisions: DesignRevision[],
   currentPreview: PreviewGenerationRecord | undefined
 ): DesignDetailSnapshot['canvas'] {
+  const latestRevision = revisions.at(-1);
+  const previewRevisionId =
+    currentPreview?.source.type === 'EXACT_COMMIT'
+      ? currentPreview.source.designRevisionId
+      : undefined;
+  const previewRevision = revisions.find(
+    (revision) => revision.id === previewRevisionId
+  );
   const sourceFailure = state.designSourceActions.find(
     (action) =>
       (action.designId === task.id ||
@@ -9087,13 +9099,22 @@ function projectDesignCanvas(
     currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY'
       ? currentPreview.routes.find(
           (candidate) =>
-            candidate.id === latestRevision?.routeId && candidate.state === 'ATTACHED'
+            candidate.id === previewRevision?.routeId && candidate.state === 'ATTACHED'
+        ) ?? currentPreview.routes.find(
+          (candidate) => candidate.state === 'ATTACHED'
         )
       : undefined;
   if (currentPreview && route) {
     return {
       state: 'READY',
-      target: { generationId: currentPreview.id, routeId: route.id },
+      target: {
+        generationId: currentPreview.id,
+        routeId: route.id,
+        revisionId:
+          currentPreview.source.type === 'EXACT_COMMIT'
+            ? currentPreview.source.designRevisionId
+            : undefined
+      },
       detail: sourceFailure
     };
   }
@@ -9128,10 +9149,16 @@ function projectDesignActions(
       action.designId === task.id ||
       (action.kind === 'DUPLICATE' && action.targetDesignId === task.id)
   );
+  const viewingEarlierRevision = Boolean(
+    latestRevision &&
+      currentPreview?.source.type === 'EXACT_COMMIT' &&
+      currentPreview.source.designRevisionId !== latestRevision.id
+  );
   const canRefine =
     task.workflowPhase === 'READY' &&
     queuedTurnCount < DESIGN_LIMITS.queuedTurns &&
-    relatedSourceActions.length === 0;
+    relatedSourceActions.length === 0 &&
+    !viewingEarlierRevision;
   const previewIsReady =
     currentPreview?.routingState === 'ACTIVE' && currentPreview.state === 'READY';
   const currentRun = task.currentRunId
@@ -9172,6 +9199,8 @@ function projectDesignActions(
       ? undefined
       : task.workflowPhase !== 'READY'
         ? 'This Design is archived.'
+        : viewingEarlierRevision
+          ? 'Return to the current version before you send a change.'
         : relatedSourceActions.length > 0
           ? 'Resolve the unfinished Design action before sending a message.'
           : 'The Design message queue is full.',

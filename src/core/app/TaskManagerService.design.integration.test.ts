@@ -153,6 +153,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     detail = await waitForDesign(scenario, detail.design.id, (candidate) =>
       candidate.revisions.length === 1 && candidate.canvas.state === 'READY'
     );
+    const firstReadyRevisionId = detail.revisions[0]!.id;
     expect(await requestActiveRoute(requireActivePreview(detail))).toContain('First design');
 
     detail = await scenario.service.submitDesignTurn({
@@ -175,6 +176,30 @@ describeMac('TaskManagerService Design vertical slice', () => {
       candidate.revisions.length === 2 && candidate.canvas.state === 'READY'
     );
     const lastReadyRevisionId = detail.revisions.at(-1)!.id;
+    expect(await requestActiveRoute(requireActivePreview(detail))).toContain('Refined design');
+
+    detail = await scenario.service.restartDesignPreview({
+      designId: detail.design.id,
+      revisionId: firstReadyRevisionId
+    });
+    expect(detail.revisions).toHaveLength(2);
+    expect(detail.canvas.target?.revisionId).toBe(firstReadyRevisionId);
+    expect(detail.actions).toMatchObject({
+      canRefine: false,
+      refineDisabledReason: 'Return to the current version before you send a change.'
+    });
+    expect(await requestActiveRoute(requireActivePreview(detail))).toContain('First design');
+    await expect(fs.readFile(path.join(worktreePath, 'index.html'), 'utf8')).resolves.toContain(
+      'Refined design'
+    );
+
+    detail = await scenario.service.restartDesignPreview({
+      designId: detail.design.id,
+      revisionId: lastReadyRevisionId
+    });
+    expect(detail.revisions).toHaveLength(2);
+    expect(detail.canvas.target?.revisionId).toBe(lastReadyRevisionId);
+    expect(detail.actions.canRefine).toBe(true);
     expect(await requestActiveRoute(requireActivePreview(detail))).toContain('Refined design');
 
     detail = await scenario.service.submitDesignTurn({

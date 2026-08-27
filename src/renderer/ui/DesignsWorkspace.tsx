@@ -123,6 +123,7 @@ export interface DesignsWorkspaceProps {
   ): Promise<void>;
   onRefreshCanvas(request: DesignCanvasRefreshRequest): Promise<void>;
   onRestartCanvas(designId: string): Promise<void>;
+  onSelectRevision(designId: string, revisionId: string): Promise<void>;
   onOpenCanvas?(taskId: string, generationId: string, routeId: string): Promise<void>;
   onRestoreRevision(designId: string, revisionId: string): Promise<void>;
   onDuplicateDesign(designId: string, revisionId: string): Promise<void>;
@@ -166,6 +167,7 @@ export function DesignsWorkspace({
   onRespondToInteraction,
   onRefreshCanvas,
   onRestartCanvas,
+  onSelectRevision,
   onOpenCanvas,
   onRestoreRevision,
   onDuplicateDesign,
@@ -549,6 +551,9 @@ export function DesignsWorkspace({
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
                     onRestart={onRestartCanvas}
+                    onSelectRevision={(revisionId) =>
+                      onSelectRevision(project.design.id, revisionId)
+                    }
                     onRestore={(revisionId) =>
                       onRestoreRevision(project.design.id, revisionId)
                     }
