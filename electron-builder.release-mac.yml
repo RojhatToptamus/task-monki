@@ -12,5 +12,3 @@ mac:
   notarize: false
   sign: scripts/trusted-mac-sign.cjs
   minimumSystemVersion: "14.0"
-  bundleShortVersion: "${env.MACOS_BUNDLE_SHORT_VERSION}"
-  bundleVersion: "${env.MACOS_BUNDLE_VERSION}"
