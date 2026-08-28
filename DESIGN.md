@@ -148,7 +148,7 @@ resting separation of the thing it is applied to.
 | focus-visible | Keyboard traversal only: adds the 3px `--focus-ring` halo. This is the one loud state in the system, and a mouse click must never produce it. |
 | active | `--press` over the rest fill. The primary family, whose fill is already ink, uses `--primary-press` — an ink overlay on an ink fill is invisible. |
 | selected | `--sel`, one fixed rung: above the hover step, below `--card`. Identical weight in every theme. |
-| disabled | `--field-disabled` fill and `--text-disabled` ink. **Never an opacity.** |
+| disabled | `--field-disabled` fill and `--text-disabled` ink. **Never use opacity or a weaker boundary.** A disabled control is *inert*, not *absent*. Its `--control-edge` or `--field-edge` stays at full strength. |
 
 Inactive-but-enabled is expressed as **ink** — `--muted` text with no fill — never
 as opacity on a full-strength row.
@@ -208,10 +208,9 @@ planes.
   | `--edge-raised` | the boundary of an **object** resting on its plane | card, panel, response, decision block |
   | `--edge` | a **seam** between structural planes, and **floating** layers | rail↔sheet, drawer edge, menu, popover, modal, tooltip |
 
-  `--control-edge` is the fifth and separate: an opaque 3:1 rim for a compact
-  binary control whose boundary must remain unmistakable (an unchecked
-  checkbox, a radio, or a toggle track in its off or disabled state). It is
-  never a surface fill.
+  `--control-edge` is the fifth and separate: an opaque 3:1 line for a control
+  with no fill at all to be identified by (an unchecked checkbox, a radio, a
+  toggle track in the off position).
 
 - **A line states the ratio it must clear, not its alpha.** Each weight is solved
   per theme and per mode against **both** surfaces it separates — `--hair`
@@ -226,25 +225,13 @@ planes.
   rejects is two lines on one control, or a line drawn **instead of** the fill
   step. An object — something with a boundary that sits above its plane and could
   conceptually be picked up — gets `--edge-raised` instead.
-- **Disabling a binary control changes its fill and ink, never its boundary.**
-  The disabled state must read as inert, not absent, so a toggle keeps its
-  `--control-edge` rim while its track moves to `--field-disabled`.
 - **Polarity is automatic, and it is the whole reason this works in both modes.**
   All three tokens are alpha over `ink`, so the same token is a dark hairline in
   light mode and a light rim in dark mode. That is not a trick, it is the right
   physics: in light mode an object's edge is where it *casts* shade, in dark mode
-  it is where it *catches* light. Light mode pairs the edge with a soft shadow;
-  dark mode pairs the edge with the object's fill step and no cast shadow,
-  because a shadow on near-black is invisible at a 1px scale.
-- **Every object stays legible from two independent cues in every mode.** The
-  cues do not have to be the same: a large panel commonly reads from its fill
-  step, edge and two-layer shadow in light, then from its fill step and edge in
-  dark where `--shadow-panel` is `none`. Never make a mode depend on a cue that
-  the other mode intentionally zeroes out.
-- **A large non-interactive panel on the content sheet uses the card recipe:**
-  `--card`, `--edge-raised` and `--shadow-panel`. It does not take
-  `--card-hover` or `--shadow-card-hover`; those belong only to clickable
-  objects that respond to hover.
+  it is where it *catches* light. Light mode pairs the hairline with a soft
+  shadow. Dark mode uses the hairline alone because a cast shadow is invisible
+  on near-black at a 1px scale.
 - **Where the plane changes, no divider.** The fill already said it. Two lines
   within 14px of each other means one of them is wrong. A hairline over the sheet
   is a larger local step than the card step above it, so an interior line is the
@@ -256,6 +243,12 @@ planes.
   and panels cast nothing, because a shadow on near-black is invisible and the
   attempt produces mud. A hover never crosses shadow tiers: `--shadow-pop` on a
   card that has not left the sheet is the loudest mistake available here.
+- **Neither mode may depend on a cue that the other mode removes.** Dark mode
+  has no cast shadow. Light mode has a compressed fill step near white. Each
+  distinct object uses two cues in each mode, and the cues can differ by mode.
+  Dark mode uses the fill step and `--edge-raised`. Light mode uses
+  `--edge-raised` and the shadow. A container with only `--shadow-panel` is
+  invisible in dark. A container with only a fill step is invisible in light.
 - **Every light-mode shadow is two layers**: a 1–4px contact shadow that sets the
   object *on* the plane, plus a wider ambient one. One blurred layer at the same
   total weight reads as a smudge; two read as a resting object. In dark mode a
@@ -914,8 +907,7 @@ correct answer far more often than a border is).
 | Card | `--card` | `--edge-raised` | `--shadow-card` |
 | Card, hover (clickable) | `--card-hover` | `--edge-raised` | `--shadow-card-hover` |
 | Card internal divider | — | `--hair` | — |
-| Settings panel | `--card` | `--edge-raised` | `--shadow-panel` |
-| Design canvas viewport | `--card` | `--edge-raised` | `--shadow-panel` |
+| Settings panel / large settings group | `--card` | `--edge-raised` | `--shadow-panel` (light only) |
 | Settings row separator | — | `--hair` | — |
 | Popover, dropdown, context menu | `--overlay` | `--edge` | `--shadow-pop` |
 | Menu item, hover | `--hover` | — | — |
@@ -963,16 +955,21 @@ correct answer far more often than a border is).
 | Select trigger | `--field` | `--text`, chevron `--muted` | as input |
 | Checkbox / radio, unchecked | `--field` | — | `--control-edge` inset 1px |
 | Checkbox / radio, checked | `--accent` | `--on-primary` | — |
-| Toggle track, off | `--field` | — | `--control-edge` inset 1px |
-| Toggle track, on | `--accent` | — | — |
-| Toggle track, disabled | `--field-disabled` | — | `--control-edge` inset 1px |
-| Toggle knob, off / disabled | `--overlay` | — | `--edge-raised` inset 1px + `--shadow-card` |
-| Toggle knob, on | `--on-primary` | — | `--edge-raised` inset 1px + `--shadow-card` |
 | Slider track / fill / knob | `--field` / `--accent` / `--card` | — | — |
 | Search field | `--field` | `--text`, icon `--faint` | as input |
 | Filter chip, rest / active | `--field` / `--sel` | `--muted` / `--text` | — |
 | Tab, inactive / active | — / `--sel` | `--muted` / `--text` | — |
 | Keyboard hint (⌘↵) | `--field` | `--faint` | — |
+
+Toggle roles keep fill, rim, and shadow separate:
+
+| Element | Fill | Rim | Shadow |
+|---|---|---|---|
+| Track, off | `--field` | `--control-edge` inset 1px | — |
+| Track, on | `--accent` | — (the fill is unmistakable) | — |
+| Track, disabled | `--field-disabled` | `--control-edge` inset 1px | — |
+| Knob, off / disabled | `--overlay` | `--edge-raised` inset 1px | `--shadow-card` |
+| Knob, on | `--on-primary` | `--edge-raised` inset 1px | `--shadow-card` |
 
 ### A.5 Rows and tables
 
