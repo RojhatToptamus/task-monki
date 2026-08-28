@@ -1,5 +1,9 @@
 # Task Monki — Interface Guide
 
+<!-- Audit revision + colour/edge correction. Deltas vs the audit draft: §2.2 chroma
+     rule, §2.6 four line weights and two-layer light shadows, §3 Fields rim,
+     §11 borders, A.3 input row, checklist. See report/IMPLEMENTATION.md. -->
+
 The contract for anyone building UI here, human or agent. Read it before writing
 markup and check your work against §10 before you open a PR. It is deliberately
 short: everything in it is load-bearing. If something you need isn't here, it is
@@ -82,61 +86,183 @@ from them by fixed ratios (see `theme-tokens.json`). Consequences:
   the invariant set (§2.6).
 - Two themes may not differ structurally. If a theme needs a component-level
   override to look right, the derivation is wrong, not the component.
+- **A derivation may scale lightness. It may only offset chroma.** Chroma moves
+  by an absolute amount, identical in every theme, and not at all when the seed
+  is achromatic (C < 0.002 — below that its hue angle is rounding noise). Never
+  multiply chroma, and never clamp it *upward* toward a target: a floor on chroma
+  is an instruction to invent colour. A rule whose **output** varies per theme is
+  per-theme authorship wearing a formula — scaling plane chroma by the ladder
+  offset over the theme's own ground lightness is invisible on a near-neutral
+  theme and turns a chromatic one into a Solarized variant of itself.
+- Exactly two quantities may legitimately differ per theme: the seven **seeds**,
+  which are authored, and any value **solved against a stated floor** — the inks
+  and the line weights. A floor is a constraint. A preference is not.
 
 ### 2.3 Surfaces — a strict ladder
 
-| Token | Role |
+Eight planes, one order, both modes. Elevation is **fill**; a plane never
+announces itself with a border.
+
+| Token | Role | Position |
+|---|---|---|
+| `--ground` | window and sidebar rail; the plane everything sits on | bottom |
+| `--panel` | secondary rail, inspector, list column | |
+| `--surface` | the content sheet | |
+| `--well` | code and read-only payload blocks | recessed from the sheet |
+| `--field` | inputs, composers | control plane |
+| `--sel` | selected row, active tab | |
+| `--card` | a raised unit on the sheet | |
+| `--overlay` | menus, popovers, modals | top |
+
+Rules, all measured in **CIE L*** — not in mix fractions, which collapse to
+nothing near black:
+
+- Adjacent planes are **1.5–3 L*** apart. Ground → overlay spans ~15 L* in dark
+  and ~6 L* in light; the whole ladder is deliberately narrow.
+- **A control is never less than 2.5 L* from any plane it can sit on.** `--field`
+  is checked against both `--surface` and `--card`, because a composer appears on
+  each.
+- **Every state step is smaller than the smallest structural step.** If hovering a
+  thing moves it further than the thing is separated from its background, the
+  interaction reads as elevation and the structure reads as nothing.
+- Direction is a mode decision: a field is **recessed** in light and **raised** in
+  dark. The distance is not a mode decision.
+- The rail is always `--ground`; the sheet is always lighter than the rail; and
+  in light mode nothing is `#fff` — the lightest value in the set is `--overlay`.
+- Chroma rises slightly with each rung in dark mode, which is what keeps a warm
+  theme warm as it lightens instead of drifting grey.
+
+If a container needs a line to be legible against its host, the wrong plane was
+chosen. Add the line only after the plane has failed.
+
+### 2.4 States
+
+Ranked by weight: **selected > keyboard focus > pointer focus > active > hover.**
+No state changes size, border width or position, and no state may exceed the
+resting separation of the thing it is applied to.
+
+| State | Treatment |
 |---|---|
-| `--ground` | window and sidebar rail; the plane everything sits on |
-| `--panel` | secondary rail, inspector, list column |
-| `--surface` | the content sheet |
-| `--field` | inputs, composers, recessed wells |
-| `--card` | a raised unit on the sheet |
-| `--overlay` | menus, popovers, modals |
-| `--well` | code and read-only payload blocks |
+| hover | One small fill step in the direction the element already sits — `--hover` on a transparent row, `--field-hover` on a control, `--card-hover` on a card. Never on a text surface; never a shadow change; never another role's token. |
+| focus | Text surfaces: `--field-focus` fill plus a 1px inset `--field-focus-line`. Quiet, and it fires however focus arrived — including a plain pointer click. |
+| focus-visible | Keyboard traversal only: adds the 3px `--focus-ring` halo. This is the one loud state in the system, and a mouse click must never produce it. |
+| active | `--press` over the rest fill. The primary family, whose fill is already ink, uses `--primary-press` — an ink overlay on an ink fill is invisible. |
+| selected | `--sel`, one fixed rung: above the hover step, below `--card`. Identical weight in every theme. |
+| disabled | `--field-disabled` fill and `--text-disabled` ink. **Never an opacity.** |
 
-Rules: the rail is always `--ground`; the content sheet is always lighter than
-the rail (both modes); a raised or selected thing goes **lighter** than what it
-sits on, never darker; and in light mode nothing is `#fff` — the lightest value
-in the set is `--card`.
+Inactive-but-enabled is expressed as **ink** — `--muted` text with no fill — never
+as opacity on a full-strength row.
 
-### 2.4 Row states
+**Disabled is a fill and an ink, not a transparency.** Opacity fades the fill, the
+glyph, the ring and the explanatory text in one move: a disabled secondary button
+loses the very fill that identified it as a button, and its reason drops below
+the readability floor. `--text-disabled` is solved to 3.5:1 so the control still
+states why it is disabled.
 
-`--hover` on pointer-over, `--sel` for the selected row or active tab, `--press`
-while held. Inactive is expressed as **ink** — `--muted` text with no fill —
-never as opacity on a full-strength row. Opacity ghosting is reserved for
-`:disabled` (0.45).
+**Hover answers exactly one question: is this clickable.** A surface that is not
+itself the target does not get one. Text areas in particular: nothing happens
+when the pointer arrives, the caret is the confirmation that matters, and
+repainting an 88px composer on pointer-over is pure noise.
 
 ### 2.5 Ink
 
 `--text` primary · `--text-soft` secondary prose · `--muted` the floor for small
-text and metadata · `--faint` inactive labels, counts, placeholders.
+text, metadata and placeholders · `--faint` labels that are never read as
+sentences · `--text-disabled` the ink of a disabled control.
 
-Every ink value is **solved per theme** against all nine planes it can land on —
-`--ground`, `--panel`, `--surface`, `--card`, `--overlay`, `--well`, `--field`,
-`--field-hover`, `--sel` — not merely against the sheet. Measured floors:
-`--text` ≥7:1, `--text-soft` and `--muted` ≥4.5:1, every status `-ink` ≥4.5:1,
-`--faint` and `--idle` ≥3:1 (they label, they don't carry prose).
+Every ink value is **solved per theme** against all twelve planes it can land on —
+`--ground`, `--panel`, `--surface`, `--well`, `--field`, `--field-hover`,
+`--field-focus`, `--field-disabled`, `--sel`, `--card`, `--card-hover`,
+`--overlay` — not merely against the sheet. Measured floors: `--text` ≥7:1,
+`--text-soft` and `--muted` ≥4.5:1, every status `-ink` ≥4.5:1,
+`--text-disabled` ≥3.5:1, `--faint` and `--idle` ≥3:1 (they label, they don't
+carry prose).
+
+A status `-ink` is additionally solved against **its own tint over every host the
+pill can sit on** — `--waiting-ink` on `--waiting-bg` over `--card`, over
+`--overlay`, over `--well`. A pill that is legible on the sheet and muddy in a
+menu is the classic version of this bug.
+
+**`--placeholder` is `--muted`, not `--faint`.** Placeholder text is prose the
+user reads before typing, so it takes a prose floor. Defining it as an alias of
+the label ink is what produced 3.0:1 placeholders and four screens quietly
+substituting their own value.
 
 Never set small text below `--muted`. Never put prose on a status hue's base
 value — that's what the `-ink` variant is for. Re-solve whenever any plane or
 either end of the ramp moves; a hand-nudged ink is how a menu becomes unreadable
 in one theme only.
 
+Dark mode is not a place where the floors relax. Same numbers, same twelve
+planes.
+
 ### 2.6 Lines, shadows and focus
 
-- `--hair` divides content **inside** a surface. `--edge` marks a real structural
-  boundary. Both are alpha over ink, so they stay correct on a warm theme and a
-  cool one.
-- **Elevation:** `--shadow-card` (light mode only; in dark, cards have no shadow
-  at all — the surface step is the depth), `--shadow-panel`, `--shadow-pop` for
-  menus and popovers, `--shadow-modal`. Shadow appears only on things that
-  genuinely leave the plane.
-- **Focus** is the one place a stroke lands on a field: 1px inset `--accent` plus
-  a 3px soft ring at 18–22%. Focus is visible on every interactive element, and
-  geometry does not shift when it appears.
-- The waiting hue is held constant across all themes so "needs you" reads
-  identically everywhere. Radii, spacing, motion and layer indices are likewise
+- **Four line weights, one job each.** Every line in the app is one of these,
+  and which one you need follows from what the thing *is*:
+
+  | Weight | Belongs to | Examples |
+  |---|---|---|
+  | `--hair` | an **interior divider** — content continuing on the same plane | rows in a list, a footer inside a card, a settings separator |
+  | `--field-edge` | the **resting boundary of a filled control** | input, textarea, composer, select trigger, segmented track, secondary button |
+  | `--edge-raised` | the boundary of an **object** resting on its plane | card, panel, response, decision block |
+  | `--edge` | a **seam** between structural planes, and **floating** layers | rail↔sheet, drawer edge, menu, popover, modal, tooltip |
+
+  `--control-edge` is the fifth and separate: an opaque 3:1 line for a control
+  with no fill at all to be identified by (an unchecked checkbox, a radio, a
+  toggle track in the off position).
+
+- **A line states the ratio it must clear, not its alpha.** Each weight is solved
+  per theme and per mode against **both** surfaces it separates — `--hair`
+  1.14:1, `--field-edge` 1.21–1.24:1, `--edge-raised` 1.22–1.30:1, `--edge`
+  1.36–1.40:1. A fixed alpha does not land the same way twice: 0.10 over ink on a
+  near-black ground is a clear rim, and the same 0.10 inside a light menu at
+  L* 22 is nothing.
+- **A filled control carries exactly one line: `--field-edge`.** The fill step is
+  what says *recessed*; the rim is what says *where*. It is an inset 1px
+  box-shadow, never a border, so no geometry moves between rest, hover and focus,
+  and the focus ring **replaces** it rather than stacking with it. What §11 still
+  rejects is two lines on one control, or a line drawn **instead of** the fill
+  step. An object — something with a boundary that sits above its plane and could
+  conceptually be picked up — gets `--edge-raised` instead.
+- **Polarity is automatic, and it is the whole reason this works in both modes.**
+  All three tokens are alpha over `ink`, so the same token is a dark hairline in
+  light mode and a light rim in dark mode. That is not a trick, it is the right
+  physics: in light mode an object's edge is where it *casts* shade, in dark mode
+  it is where it *catches* light. Light mode pairs the hairline with a soft
+  shadow; dark mode uses the hairline alone, because a cast shadow on near-black
+  is invisible at a 1px scale.
+- **Where the plane changes, no divider.** The fill already said it. Two lines
+  within 14px of each other means one of them is wrong. A hairline over the sheet
+  is a larger local step than the card step above it, so an interior line is the
+  more expensive tool, not the cheaper one — reach for the plane first, and let
+  the object's own edge do the boundary work.
+- **Elevation:** `--shadow-card` for things resting on the sheet,
+  `--shadow-card-hover` one step up, `--shadow-panel`, then `--shadow-pop` for
+  menus and popovers and `--shadow-modal`. **Light mode only** — in dark, cards
+  and panels cast nothing, because a shadow on near-black is invisible and the
+  attempt produces mud. A hover never crosses shadow tiers: `--shadow-pop` on a
+  card that has not left the sheet is the loudest mistake available here.
+- **Every light-mode shadow is two layers**: a 1–4px contact shadow that sets the
+  object *on* the plane, plus a wider ambient one. One blurred layer at the same
+  total weight reads as a smudge; two read as a resting object. In dark mode a
+  floating layer instead gets a 1px top rim (folded into `--shadow-pop` and
+  `--shadow-modal`) — the light-from-above read a cast shadow cannot give on
+  near-black.
+- **Focus, two treatments, and the loud one is keyboard-only:**
+  1. Any focus on a text surface, including a pointer click, moves the fill to
+     `--field-focus` and draws a 1px inset `--field-focus-line`. That is the
+     quiet confirmation the caret landed; it is not a ring.
+  2. `:focus-visible` — keyboard traversal — adds the 3px `--focus-ring` halo,
+     where the job is to *find* the caret rather than confirm it.
+
+  Buttons and other non-text controls show nothing from a pointer click and the
+  halo from the keyboard. Geometry never shifts when focus appears. Heavy
+  outlines and large borders during ordinary pointer interaction are a defect,
+  not a safety feature: polished desktop apps do not do it.
+- The waiting hue is held near-constant across all themes so "needs you" reads
+  identically everywhere, and is separated from that theme's accent by **≥24° of
+  hue or ≥8 L***. Radii, spacing, motion and layer indices are likewise
   theme-independent.
 
 ### 2.7 Accent and status
@@ -146,9 +272,16 @@ dark) and belongs to the single primary action. `--accent` is the interactive hu
 — links, focus, selection, one categorical dot. For text, use `--accent-ink`;
 raw accent fails as link ink in low-chroma themes.
 
-Status hues are `--working`, `--waiting`, `--blocked`, `--verified`, `--idle`,
-each with an `-ink` variant for when the hue sets **text**. Some themes have an
-accent equal to a status hue — never put the accent on a status pill.
+Status hues are `--waiting`, `--blocked`, `--verified` and `--idle`, each with an
+`-ink` variant for when the hue sets **text**, and a `-bg` variant for the pill
+fill. "Working" is not a separate hue — running work is the *active* state, so it
+uses `--accent` / `--accent-ink` / `--accent-soft` and says so by name.
+
+Five meanings, five treatments, no sharing: accent is interactive and running,
+waiting is attention, blocked is failure, verified is success, idle is neutral
+and carries no hue at all. Two hues that cannot be told apart are one hue — if a
+proposed token would resolve to the same value as an existing one in every theme,
+it is an alias, and it should be written as an alias or not at all.
 
 ### 2.8 Categorical hues (`--id-1` … `--id-6`)
 
@@ -178,10 +311,16 @@ the legacy slot names as semantic colour or status names.
 ### 2.9 Completeness and integration
 
 `tools/build-themes.mjs` is the only place theme colour is authored. It holds the
-seven seeds per theme and derives everything else, emitting two generated files:
+seven seeds per theme; `tools/theme-derivation.mjs` holds the derivation itself as
+pure functions — the ladder, the ink solver and the measurement pass — so they can
+be read and tested on their own. Together they emit two generated files:
 `themes.css` (what the app loads) and `theme-tokens.json` (the same data plus
-seeds, floors and measurements, for tooling). **16 themes × 2 modes × 53 tokens**,
-every set complete.
+seeds, floors, ladder offsets and measurements, for tooling).
+**16 themes × 2 modes × 68 tokens**, every set complete.
+
+Both files live in the repository. A derivation that exists only on one machine
+makes the committed output the de-facto rule, and the output is the one artefact
+review cannot check.
 
 ```bash
 node tools/build-themes.mjs           # regenerate both files
@@ -206,11 +345,41 @@ Rules that follow:
 - Adding a theme = adding one seven-value entry to the generator. Adding a token
   = adding it to the generator so all 32 sets get it in the same change. A token
   present in 31 sets is a blank surface in the 32nd, and blanks do not warn.
-- Add `--check` to CI. It verifies the committed output is current, every set is
-  complete, and every contrast floor holds — the three things review cannot see.
+- Add `--check` to CI. It fails on: a stale generated file · an incomplete token
+  set · a ladder that is not monotonic in either mode · a `--field` closer than
+  2.5 L* to a host plane · a state step larger than the smallest structural step ·
+  any ink under its floor, including a status ink on its own tint over `--card`,
+  `--well` and `--overlay` · an accent and waiting hue closer than 24° and 8 L*.
+  These are precisely the things review cannot see.
 
-Measured worst case across all 32 sets: `--text` 10.29:1, `--text-soft` 5.75,
-`--muted` 4.50, status inks 4.52, `--faint`/`--idle` 3.01, `--id-*` 3.56.
+Measured worst case across all 32 sets: `--text` 11.40:1, `--text-soft` 6.02,
+`--muted` and `--placeholder` 4.71, status inks 4.63 (including on their own
+tints), `--text-disabled` 3.66, `--faint`/`--idle` 3.13, `--id-*` 3.18.
+
+### 2.10 Necessary distinction vs. noise
+
+Before adding contrast, a border, a shadow or a tint, name the question the user
+is asking at that moment.
+
+| The user is asking | Answered by | Not by |
+|---|---|---|
+| Can I type here? | the field's fill | a border, a hover |
+| Is this clickable? | one hover step | a shadow, a colour change |
+| Where am I? | `--sel` | a stripe, a bold border |
+| Did that work? | one status tone, one carrier | a tint on the mark *and* the heading *and* the border |
+| What is on top? | the plane, plus a shadow in light mode | a shadow in dark mode |
+| What is this thing? | `--id-*` on a dot | a coloured label |
+
+If a treatment answers none of them, it is decoration; remove it. If two
+treatments answer the same one, one of them is noise. Use the lightest treatment
+that works, and exactly one per question.
+
+This cuts both ways, and the second direction is the one that gets missed. Dark
+themes read as a wireframe of near-identical grey boxes when contrast has been
+spent on distinctions nobody asked about — a divider beside a plane change, a
+stripe beside a pill — while the distinctions that were asked about, like *can I
+type here*, went unfunded. The remedy is not more contrast. It is fewer, larger,
+better-aimed steps.
 
 ---
 
@@ -231,15 +400,20 @@ Inter and Inter Tight are out.
 
 Interface type is one sans; machine values are one mono. No third family.
 
-| Role | Size / weight |
-|---|---|
-| Page title | 22–24 / 600 · `-0.02em` |
-| Section heading | 15 / 600 |
-| Panel title, control label | 13 / 600 |
-| Body, prose | 13 / 400 |
-| Secondary, helper | 12 / 400 `--text-soft` |
-| Metadata, counts | 11.5 / 400 `--muted` |
-| Group label | 9.5 / 600 caps · `0.10em` `--faint` |
+| Role | Token | Size / weight |
+|---|---|---|
+| Page title | `--t-title` | 24 / 600 · `-0.02em` |
+| Section heading | `--t-heading` | 15 / 600 |
+| Panel title, control label | `--t-label` | 13 / 600 |
+| Body, prose | `--t-body` | 13 / 400 |
+| Secondary, helper | `--t-help` | 12 / 400 `--text-soft` |
+| Metadata, counts | `--t-meta` | 11.5 / 400 `--muted` |
+| Group label | `--t-group` | 9.5 / 600 caps · `0.10em` `--faint` |
+
+**Seven sizes, and they are tokens.** A component sets `font-size: var(--t-label)`
+and never a literal. A size that is not on this list does not exist: the reason
+to name them is that an unnamed scale is not a scale, and the renderer had
+drifted to 22 distinct sizes against these seven.
 
 **Mono is for machine values only** — paths, hashes, branches, models, counts,
 times, payloads, token names. It never sets prose, labels or buttons. This split
@@ -282,13 +456,18 @@ whitespace between inline elements.
 | Between cards | 10–12 |
 | Section separation | 24–32 |
 
-Radii: **6** chips and dots · **8** buttons, rows, small fields · **10–12**
-cards, composers, popovers · **14–16** the shell and full-height sheets. Concentric
-things step inward by 2–3px; never nest equal radii.
+Radii are tokens, not literals: `--r-xs` 6 chips and dots · `--r-sm` 8 buttons,
+rows, small fields · `--r` 10 and `--r-md` 12 cards, composers, popovers ·
+`--r-lg` 14 and `--r-xl` 16 the shell and full-height sheets · `--r-pill` for
+dots and pills. Concentric things step inward by 2–3px; never nest equal radii.
 
-Control heights: **34** decision surface · **30** toolbar · **26** compact and
-inline. Never mix two heights in one row. Hit targets never below 28px on
-desktop, 44px on touch.
+Control heights are tokens too: `--h-control` 34 decision surface · `--h-toolbar`
+30 toolbar · `--h-compact` 26 compact and inline · `--h-icon` 28 icon button.
+Never mix two heights in one row. Hit targets never below 28px on desktop, 44px
+on touch.
+
+Writing `border-radius: 9px` or `height: 36px` is the same class of error as
+writing a hex colour: it is a value the system already has an answer for.
 
 ### 4.1 Fixed geometry
 
@@ -327,19 +506,37 @@ on hover), destructive (soft tint, never a filled red block). Primary and
 secondary share geometry so a pair aligns. Icon-only buttons are ghost, 16px
 glyph, and always carry an `aria-label`.
 
+Primary and secondary are **one geometry with different fills** — same height,
+same padding, same radius, same minimum width — so a pair aligns to the pixel. A
+transparent border on one of them to "reserve space" is not that: it offsets the
+label by its own width.
+
 **States must not move geometry.** Size, padding, border width and radius are
 identical across rest, hover, active, focus and disabled — only fill, ink and
-ring change. A disabled control states why, adjacent or in a tooltip.
+ring change. A disabled control states why, adjacent or in a tooltip, in
+`--text-disabled`.
 
-**Fields.** A filled well (`--field`), no resting border. Hover lifts to
-`--field-hover`; focus per §2.6; placeholder is `--faint`. Label above at 13/600,
-help text below at 12 `--muted`, error text replaces help text and carries
-`--blocked-ink`. Never rely on placeholder as the label.
+**Fields.** A filled well (`--field`) carrying one line, `--field-edge`, as an
+inset 1px box-shadow — separated from its host by ≥2.5 L* so the fill still
+carries it on both a sheet and a card, with the rim making the boundary
+unambiguous where the two planes are close. Single-line controls are
+`--h-control` tall with `--r-sm`. Hover lifts to `--field-hover`; focus per §2.6
+and the focus line replaces the resting rim rather than stacking; placeholder is
+`--placeholder` (= `--muted`). Label above at `--t-label`/600, help text below at
+`--t-help` `--muted`, error text replaces help text and carries `--blocked-ink`.
+Never rely on placeholder as the label.
+
+**Text areas take no hover fill.** Nothing happens when the pointer arrives and
+the caret is the real confirmation; a multi-line surface repainting under the
+mouse is the noisiest thing a quiet app can do.
 
 **Composer — one pattern everywhere** (briefs, messages, follow-ups): context
 chips above the text area, run configuration below it, primary action bottom-right,
-keyboard hint at 11 `--muted`. The composer is a single `--field` surface — not a
-bordered box, not a stack of separately outlined parts.
+keyboard hint at `--t-meta` `--muted`. The composer is a single `--field` surface
+at `--r-md` with its toolbar inside the same fill divided by a `--hair` — not a
+bordered box, not a stack of separately outlined parts, and not a surface that
+changes colour when the pointer crosses it. Drag-over is a fill step plus a 1px
+accent line, on the same element that will receive the drop.
 
 **Segmented vs menu.** Segmented for 2–4 options whose labels fit on one line at
 the narrowest width the container reaches; a dropdown for anything longer or
@@ -493,8 +690,12 @@ repeats what the rail already says.
 - Every icon-only control has an `aria-label`; a tooltip is not a label.
 - Colour is never the only carrier of meaning — pair every hue with a word or a
   glyph.
-- Contrast: `--text` ≥7:1, `--muted` and any status ink ≥4.5:1 on every plane
-  they can land on, ≥3:1 for control edges and focus rings.
+- Contrast: `--text` ≥7:1, `--muted`, `--placeholder` and any status ink ≥4.5:1
+  on every plane they can land on — and status ink also on its own tint over
+  those planes — `--text-disabled` ≥3.5:1, ≥3:1 for control edges, focus rings
+  and `--faint`. Dark mode uses the same numbers.
+- Focus is never removed and never conditional on input device for **text
+  entry**; the keyboard-only halo is an addition to that, not a replacement.
 - Live regions announce state changes that happen without user action (a run
   finishing, a review arriving).
 - Honour `prefers-reduced-motion`: transitions collapse, nothing loops.
@@ -536,13 +737,23 @@ invisible to review and trivial to check in the inspector.
 - [ ] No colour literal anywhere in the diff (grep the diff for `#`, `rgb`,
       `rgba`, colour names — including SVG and shadows).
 - [ ] Every `var(--x)` used is defined in **both** modes.
-- [ ] `--muted` and every status ink measured ≥4.5:1 against the actual surface
-      behind them, in both modes.
+- [ ] `--muted`, `--placeholder` and every status ink measured ≥4.5:1 against the
+      actual surface behind them, in both modes — pills against their own tint.
 - [ ] No control shifts size or position between rest, hover, focus and active.
+- [ ] No `opacity` expressing a state. Disabled uses `--field-disabled` and
+      `--text-disabled`.
+- [ ] Every state step measured smaller than the resting separation of the thing
+      it applies to.
+- [ ] Clicked into every text field with the mouse: the caret's host is visible,
+      and no halo appeared. Tabbed to it: the halo appeared.
 
 **Both modes**
 - [ ] Light and dark screenshotted; no mode-specific override was needed.
-- [ ] Light mode contains no pure white; dark cards carry no shadow.
+- [ ] Light mode contains no pure white; dark cards carry no shadow but do carry
+      `--edge-raised`.
+- [ ] Every line in the diff is one of `--hair` / `--field-edge` /
+      `--edge-raised` / `--edge`, and matches what the thing is (divider /
+      filled control / object / seam). No control carries two.
 - [ ] Sheet reads lighter than the rail; selected rows read lighter than the
       track.
 
@@ -553,6 +764,8 @@ invisible to review and trivial to check in the inspector.
 
 **Structure**
 - [ ] Spacing values all on the scale; groups laid out with `gap`.
+- [ ] Radii and control heights come from `--r-*` and `--h-*`, not literals;
+      font sizes from `--t-*`.
 - [ ] One control height per row; radii step concentrically.
 - [ ] Mono used only for machine values.
 
@@ -584,11 +797,26 @@ invisible to review and trivial to check in the inspector.
 - A hand-picked value "just for this theme".
 - Pure white in light mode; a black shadow used as a divider.
 - A darker fill for a selected or raised element in dark mode.
-- Opacity used to express "inactive" on a row.
+- Opacity used to express "inactive", or `opacity` used for `:disabled`.
+- A hover fill on a text area or composer.
+- A hover that moves an element further than its resting separation, or onto
+  another role's token (`--field-hover` on a card).
+- A shadow tier change on hover; any shadow at all on a dark card.
+- A focus ring, heavy outline or border-width change from a pointer click.
+- `--field-focus` equal to `--field-hover`: focus must outrank hover.
+- A new token that resolves to an existing one in every theme.
 
 **Borders**
-- A 1px outline on something that already has its own fill — inputs, selects,
-  cards, menu items, composers. This is the single most common regression here.
+- A **second** line on something that already carries one — a border *and* an
+  inset ring on an input, an edge on a card that already has `--edge-raised`, a
+  rim on a `--well`. One boundary per boundary. (A filled control carries
+  `--field-edge` and nothing else; a line drawn **instead of** the fill step is
+  still the regression this rule was written against.)
+- Conversely: an **object** with no edge at all — a card, panel, popover or modal
+  drawn only as a fill step. In dark mode, where the cast shadow is `none`, that
+  leaves nothing whatsoever describing its boundary.
+- A box drawn around a **region** that a single seam line would separate, or a
+  divider sitting immediately beside a plane change.
 - A decorative left-border accent stripe on a card.
 - Border colour used to signal state instead of fill or ink.
 
@@ -670,21 +898,22 @@ correct answer far more often than a border is).
 
 | Element | Background | Border | Shadow |
 |---|---|---|---|
-| Card | `--card` | — | `--shadow-card` |
-| Card, hover (clickable) | `--field-hover` | — | `--shadow-card` |
+| Card | `--card` | `--edge-raised` | `--shadow-card` |
+| Card, hover (clickable) | `--card-hover` | `--edge-raised` | `--shadow-card-hover` |
 | Card internal divider | — | `--hair` | — |
-| Settings panel | `--surface` | — | `--shadow-panel` |
+| Settings panel | `--surface` | `--edge-raised` | `--shadow-panel` |
 | Settings row separator | — | `--hair` | — |
-| Popover, dropdown, context menu | `--overlay` | — | `--shadow-pop` |
+| Popover, dropdown, context menu | `--overlay` | `--edge` | `--shadow-pop` |
 | Menu item, hover | `--hover` | — | — |
 | Menu item, selected | `--sel` | — | — |
 | Menu separator | — | `--hair` | — |
-| Modal | `--overlay` | — | `--shadow-modal` |
-| Modal scrim | `--ground` at 60% | — | — |
+| Modal | `--overlay` | `--edge` | `--shadow-modal` |
+| Modal scrim | `--scrim` | — | — |
 | Drawer | `--surface` | `--edge` on the attached edge | `--shadow-pop` |
 | Drawer footer | `--surface` | `--hair` above | — |
-| Tooltip | `--overlay` | — | `--shadow-pop` |
+| Tooltip | `--overlay` | `--edge` | `--shadow-pop` |
 | Code / payload block | `--well` | — | — |
+| Composer surface | `--field` | — | — |
 | Empty state container | — | — | — |
 
 ### A.4 Controls
@@ -697,24 +926,30 @@ correct answer far more often than a border is).
 | Secondary button, hover | `--field-hover` | `--text` | — |
 | Ghost / icon button, rest | — | `--muted` | — |
 | Ghost / icon button, hover | `--hover` | `--text` | — |
-| Destructive button, rest | `--error-bg` | `--blocked-ink` | — |
-| Any button, active/pressed | `--press` over its rest fill | unchanged | — |
-| Any button, focus | unchanged | unchanged | `--accent` inset 1px + `--field-focus-ring` 3px |
-| Any button, disabled | rest fill at 45% | rest ink at 45% | — |
-| Input / textarea, rest | `--field` | `--text` | `--field-ring` (optional) |
-| Input, hover | `--field-hover` | `--text` | — |
-| Input, focus | `--field-focus` | `--text` | `--accent` + `--field-focus-ring` |
+| Destructive button, rest | `--blocked-bg` | `--blocked-ink` | — |
+| Destructive button, hover | `--blocked-bg-hover` | `--blocked-ink` | — |
+| Primary button, active | `--primary-press` | `--on-primary` | — |
+| Any other button, active | `--press` over its rest fill | unchanged | — |
+| Any button, focus (pointer) | unchanged | unchanged | — |
+| Any button, focus-visible | unchanged | unchanged | `--focus-ring` 3px |
+| Primary button, disabled | `--primary-disabled` | `--text-disabled` | — |
+| Any other button, disabled | `--field-disabled` | `--text-disabled` | — |
+| Input / textarea, rest | `--field` | `--text` | `--field-edge` inset 1px |
+| Input, hover (single-line only) | `--field-hover` | `--text` | — |
+| Input, focus (any) | `--field-focus` | `--text` | `--field-focus-line` inset 1px |
+| Input, focus-visible | `--field-focus` | `--text` | + `--focus-ring` 3px |
 | Input, error | `--field` | `--text` | `--blocked` inset 1px |
+| Input, disabled | `--field-disabled` | `--text-disabled` | — |
 | Placeholder | — | `--placeholder` | — |
-| Composer surface | `--field` | `--text` | as input |
+| Composer surface | `--field` | `--text` | as input, no hover |
 | Composer hint / affordance row | — | `--muted` | — |
 | Segmented track | `--field` | — | — |
 | Segmented item, inactive | — | `--muted` | — |
 | Segmented item, active | `--card` | `--text` (600) | — |
 | Select trigger | `--field` | `--text`, chevron `--muted` | as input |
-| Checkbox / radio, unchecked | `--field` | — | `--edge` inset 1px |
+| Checkbox / radio, unchecked | `--field` | — | `--control-edge` inset 1px |
 | Checkbox / radio, checked | `--accent` | `--on-primary` | — |
-| Toggle track, off / on | `--edge` / `--accent` | — | — |
+| Toggle track, off / on | `--control-edge` / `--accent` | — | — |
 | Toggle knob | `--card` | — | `--shadow-card` |
 | Slider track / fill / knob | `--field` / `--accent` / `--card` | — | — |
 | Search field | `--field` | `--text`, icon `--faint` | as input |
@@ -730,7 +965,7 @@ correct answer far more often than a border is).
 | Row, hover | `--hover` | `--text` |
 | Row, selected | `--sel` | `--text` |
 | Row, pressed | `--press` | `--text` |
-| Row, disabled | — | `--faint` |
+| Row, disabled | — | `--text-disabled` |
 | Row secondary line | — | `--muted` |
 | Row separator | `--hair` | — |
 | Table header | — | `--muted` |
@@ -740,25 +975,28 @@ correct answer far more often than a border is).
 ### A.6 Status, progress and data
 
 A status pill is a `-bg` fill with the matching `-ink` text. A status dot or bar
-uses the base hue. Never the reverse.
+**standing alone** uses the base hue. Never the reverse. A glyph *inside* a pill
+inherits the pill's ink — the pill already carries the tone, and a second tone
+inside it reads as a second fact.
 
 | Element | Fill | Ink |
 |---|---|---|
-| Working pill / dot | `--ctx-bg` / `--working` | `--working-ink` |
-| Waiting pill / dot | `--amber-bg` / `--waiting` | `--waiting-ink` |
-| Blocked, error pill / dot | `--error-bg` / `--blocked` | `--blocked-ink` |
-| Verified, merged pill / dot | `--verified` at 12% / `--verified` | `--verified-ink` |
-| Idle, draft pill / dot | `--field` / `--idle` | `--muted` |
+| Working, running pill / dot | `--accent-soft` / `--accent` | `--accent-ink` |
+| Waiting pill / dot | `--waiting-bg` / `--waiting` | `--waiting-ink` |
+| Blocked, error pill / dot | `--blocked-bg` / `--blocked` | `--blocked-ink` |
+| Verified, merged pill / dot | `--verified-bg` / `--verified` | `--verified-ink` |
+| Idle, draft pill / dot | `--idle-bg` / `--idle` | `--muted` |
 | Neutral count badge | `--field` | `--muted` |
 | Progress track / fill | `--field` / `--accent` | — |
 | Progress step, done / active / pending | `--verified` / `--accent` / `--idle` | `--muted` label |
-| Stale ribbon | `--amber-bg` | `--waiting-ink` |
-| Skeleton / loading placeholder | `--field` | — |
+| Stale ribbon | `--waiting-bg` | `--waiting-ink` |
+| Skeleton / loading placeholder | `--field-disabled` | — |
 | Diff added / removed | `--verified` at 10% / `--blocked` at 10% | `--verified-ink` / `--blocked-ink` |
 | Accent-tinted surface (selected filter, active pill, `@`-mention chip) | `--accent-soft` | `--accent-ink` |
 | Categorical dot / bar (repo, agent, saved view) | `--id-1` … `--id-6` (§2.8) | label stays `--text` / `--muted` |
 | Avatar fallback | `--field` | `--muted` |
-| Focus ring, anywhere | — | `--accent` + `--field-focus-ring` |
+| Focus line, text entry | — | `--field-focus-line` inset 1px |
+| Focus halo, keyboard only | — | `--focus-ring` 3px |
 
 `--id-*` are derived from the `skill` seed by the rotation in §2.8, carry no
 semantics, and are never used for text — never reuse a status hue for a category,
@@ -768,8 +1006,11 @@ or an `--id-*` for a state.
 
 ## Appendix B — where things live
 
-- **`tools/build-themes.mjs`** — the seven seeds per theme and the whole
-  derivation. The only file where theme colour is authored.
+- **`tools/build-themes.mjs`** — the seven seeds per theme, emission, and
+  `--check`. The only file where theme colour is authored.
+- **`tools/theme-derivation.mjs`** — the derivation as pure functions: the surface
+  ladder, the ink solver, the measurement pass. No I/O, so it is unit-testable and
+  readable on its own.
 - **`themes.css`** — generated; what the app loads. 16 themes as
   `[data-theme][data-mode]` blocks, plus `--font-*` and `--r-*`.
 - **`theme-tokens.json`** — generated; same data plus seeds, contrast floors and

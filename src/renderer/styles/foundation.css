@@ -1,4 +1,20 @@
 :root {
+  /* Type — the seven roles in DESIGN.md 3.2. A component never sets a size
+     that is not one of these. */
+  --t-title: 24px;
+  --t-heading: 15px;
+  --t-label: 13px;
+  --t-body: 13px;
+  --t-help: 12px;
+  --t-meta: 11.5px;
+  --t-group: 9.5px;
+
+  /* Control heights — decision surface, toolbar, compact, icon button. */
+  --h-control: 34px;
+  --h-toolbar: 30px;
+  --h-compact: 26px;
+  --h-icon: 28px;
+
   /* Geometry, motion and layers. */
   --motion-fast: 120ms;
   --motion-standard: 180ms;
@@ -126,14 +142,34 @@ button {
   color: inherit;
 }
 
-button:disabled {
+.app-shell :where(button, [role='button'], input, textarea, select):disabled,
+.app-shell :where(button, [role='button'])[aria-disabled='true'] {
   cursor: not-allowed;
-  opacity: 0.45;
+  color: var(--text-disabled);
 }
 
-/* The token overlay preserves each control family's rest fill and geometry. */
+/* Filled families keep their identity while disabled: the fill drops to the
+   disabled plane instead of the whole control fading out. */
+.app-shell :where(.primary-button, .sidebar__new-task):disabled {
+  background: var(--primary-disabled);
+  color: var(--text-disabled);
+}
+
+.app-shell :where(.outline-button, .danger-button, .segmented__btn, .overflow__trigger):disabled {
+  background: var(--field-disabled);
+  color: var(--text-disabled);
+}
+
+/* The token overlay preserves each control family's rest fill and geometry.
+   Ink-filled controls (the primary family) cannot take an ink overlay, so they
+   press with their own derived fill. */
 :where(button, [role='button']):not(:disabled):active {
   background-image: linear-gradient(var(--press), var(--press));
+}
+
+:where(.primary-button, .sidebar__new-task):not(:disabled):active {
+  background-image: none;
+  background-color: var(--primary-press);
 }
 
 .tm-visually-hidden {
@@ -152,14 +188,23 @@ button:disabled {
 .app-shell[data-input-modality='pointer'] :where(
   button,
   a,
-  input,
-  textarea,
   select,
   summary,
   [role='menu'],
   [role='separator']
 ):focus {
   outline: none;
+}
+
+/* Text entry is exempt from modality suppression: a caret with no visible host
+   is the most reported dark-theme complaint in the product. */
+.app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea):focus,
+.app-shell :where(.field__prompt-shell, .tm-discourse-composer, .tm-design-composer__shell):focus-within {
+  outline: 0;
+  background: var(--field-focus);
+  box-shadow:
+    inset 0 0 0 1px var(--accent),
+    0 0 0 3px var(--focus-ring);
 }
 
 .app-shell[data-input-modality='keyboard'] :where(
@@ -208,7 +253,8 @@ button:disabled {
 
 @media (prefers-contrast: more) {
   :root {
-    --hair: var(--edge);
-    --edge: var(--muted);
+    --hair: var(--control-edge);
+    --edge: var(--control-edge);
+    --text-disabled: var(--muted);
   }
 }

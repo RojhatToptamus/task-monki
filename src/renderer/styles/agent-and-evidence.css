@@ -496,7 +496,7 @@
 
 .provider-turn {
   overflow: hidden;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 10px;
   background: var(--card);
   box-shadow: var(--shadow-card);

@@ -230,7 +230,7 @@
 .tm-nextaction {
   display: grid;
   gap: 12px;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 13px;
   background: var(--card);
   box-shadow: var(--shadow-card);
@@ -456,7 +456,7 @@
 /* generic panel card */
 .tm-panel {
   min-width: 0;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 10px;
   background: var(--card);
   box-shadow: var(--shadow-card);
@@ -811,7 +811,7 @@
 .tm-preview-surface {
   min-width: 0;
   padding: 14px 16px;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 13px;
   background: var(--card);
   box-shadow: var(--shadow-card);
@@ -2416,7 +2416,7 @@
 
 /* Agent review gate */
 .tm-reviewcard {
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 10px;
   background: var(--card);
   box-shadow: var(--shadow-card);
@@ -3036,7 +3036,7 @@
   position: relative;
   z-index: var(--layer-sticky);
   width: min(560px, 100%);
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 14px;
   background: var(--overlay);
   padding: 22px;
@@ -3464,7 +3464,7 @@
 
 /* failure card */
 .tm-failure {
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 13px;
   background: var(--card);
   padding: 18px;
@@ -4146,7 +4146,7 @@
 }
 
 .tm-evidence-summary {
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 13px;
   background: var(--card);
   padding: 14px 18px;
@@ -4263,7 +4263,7 @@
   height: var(--tm-diffbrowser-height, clamp(560px, calc(100vh - 250px), 820px));
   min-height: 0;
   overflow: hidden;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 12px;
   background: var(--card);
   box-shadow: var(--shadow-card);
@@ -4548,7 +4548,7 @@
   z-index: var(--layer-menu);
   min-width: 172px;
   padding: 6px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 10px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);

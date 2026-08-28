@@ -57,7 +57,7 @@
     "check:architecture": "node scripts/check-architecture.mjs",
     "verify": "npm run check:themes && npm run typecheck && npm run check:architecture && npm test && npm run test:renderer:dom && npm run check:codex-protocol && npm run build",
     "generate:themes": "node tools/build-themes.mjs",
-    "check:themes": "node tools/build-themes.mjs --check",
+    "check:themes": "node tools/build-themes.mjs --check && node tools/check-theme-control-rims.mjs",
     "generate:codex-protocol": "node scripts/generate-codex-protocol.mjs",
     "check:codex-protocol": "node scripts/generate-codex-protocol.mjs --check",
     "test:preview-credential-gate": "sh scripts/preview-managed-credential-gate.sh",

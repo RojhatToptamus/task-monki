@@ -174,6 +174,7 @@
   border: 0;
   border-radius: 8px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--muted);
 }
 
@@ -203,6 +204,7 @@
   border: 0;
   border-radius: 8px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .tm-discourse-rail__filter button {
@@ -440,7 +442,7 @@
   z-index: var(--layer-menu);
   width: 188px;
   padding: 5px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 9px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -948,7 +950,7 @@
   display: grid;
   width: 190px;
   padding: 5px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 9px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -986,7 +988,7 @@
   transform: translateX(-50%);
   height: 29px;
   padding: 0 11px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 999px;
   background: var(--overlay);
   color: var(--working-ink);
@@ -998,7 +1000,7 @@
 .tm-discourse-response {
   max-width: 700px;
   margin: 6px 0 12px;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 10px;
   background: var(--card);
   box-shadow: var(--shadow-card);
@@ -1246,7 +1248,7 @@
   border: 0;
   border-radius: 12px;
   background: var(--field);
-  box-shadow: none;
+  box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .app-shell[data-input-modality='keyboard'] .tm-discourse-composer:focus-within {
@@ -1559,7 +1561,7 @@
 }
 
 .discourse-mention-input__textarea::placeholder {
-  color: var(--muted);
+  color: var(--placeholder);
 }
 
 .discourse-mention-input__tokens {
@@ -1627,7 +1629,7 @@
   max-height: 320px;
   overflow-y: auto;
   padding: 6px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 11px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -1668,7 +1670,7 @@
 }
 
 .discourse-mention-input__option[aria-disabled='true'] {
-  opacity: 0.56;
+  color: var(--text-disabled);
   cursor: default;
 }
 
@@ -1783,7 +1785,7 @@
   display: grid;
   width: min(510px, calc(100cqw - 24px));
   padding: 6px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 11px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -1922,7 +1924,8 @@
 }
 
 .tm-discourse-send:disabled {
-  opacity: 0.4;
+  background: var(--primary-disabled);
+  color: var(--text-disabled);
 }
 
 .tm-discourse-inspector {
@@ -2142,7 +2145,7 @@
   width: min(520px, calc(100vw - 32px));
   max-height: min(620px, calc(100vh - 100px));
   overflow-y: auto;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 12px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);

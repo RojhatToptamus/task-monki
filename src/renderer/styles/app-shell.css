@@ -66,8 +66,7 @@
 }
 
 .tm-iconbtn:disabled {
-  color: var(--muted);
-  opacity: 0.55;
+  color: var(--text-disabled);
 }
 
 .tm-titlebar__nav {
@@ -563,7 +562,7 @@ button.tm-software-update:hover {
   z-index: var(--layer-tooltip);
   width: min(336px, calc(100vw - 32px));
   overflow: hidden;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 10px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -743,7 +742,7 @@ button.tm-software-update:hover {
 
 .tm-repo-menu__add:disabled {
   cursor: default;
-  opacity: 0.62;
+  color: var(--text-disabled);
 }
 
 /* ---- Sidebar theme toggle ---- */
@@ -1232,13 +1231,13 @@ button.tm-software-update:hover {
   padding: 0;
   border-radius: 13px;
   background: var(--card);
-  border: 0;
+  border: 1px solid var(--edge-raised);
   box-shadow: var(--shadow-card);
   transition: background var(--motion-fast) ease;
 }
 
 .tm-card:hover {
-  background: var(--field-hover);
+  background: var(--card-hover);
 }
 
 .tm-card:has(.tm-taskmenu__menu) {
@@ -1471,7 +1470,7 @@ button.tm-software-update:hover {
   flex-direction: column;
   gap: 1px;
   padding: 4px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 10px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -1523,7 +1522,7 @@ button.tm-software-update:hover {
   flex-direction: column;
   gap: 1px;
   padding: 4px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 10px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -1664,7 +1663,7 @@ button.tm-software-update:hover {
   /* Neutral surface card — the Inbox context already means "waiting on you", so
      the tinted amber box + colored border (DESIGN.md §4 ban) is unnecessary;
      tone lives in the concise status text in the head. */
-  border: 0;
+  border: 1px solid var(--edge-raised);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -2134,6 +2133,7 @@ button.tm-software-update:hover {
   padding: 0 12px;
   border-radius: 10px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   font-size: 12.5px;
   font-weight: 500;
@@ -2181,6 +2181,7 @@ button.tm-software-update:hover {
   padding: 6px;
   border-radius: 12px;
   background: var(--overlay);
+  border: 1px solid var(--edge);
   box-shadow: var(--shadow-pop);
   scrollbar-gutter: stable;
 }
@@ -2511,6 +2512,7 @@ button.tm-software-update:hover {
   border: 0;
   border-radius: 8px;
   background-color: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   font: 600 12px/1 var(--font-ui);
 }
@@ -2561,8 +2563,7 @@ button.tm-software-update:hover {
 }
 
 .tm-settings__button:disabled {
-  color: var(--muted);
-  opacity: 0.62;
+  color: var(--text-disabled);
 }
 
 .tm-settings__button--primary {
@@ -2761,6 +2762,7 @@ button.tm-software-update:hover {
   border: 0;
   border-radius: 8px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   text-align: left;
   transition: border-color 120ms ease, background 120ms ease;
@@ -2817,7 +2819,7 @@ button.tm-software-update:hover {
   z-index: var(--layer-menu);
   max-height: min(320px, calc(100vh - 220px));
   padding: 6px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 12px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -2976,6 +2978,7 @@ button.tm-software-update:hover {
   padding: 2px;
   border-radius: 9px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .tm-agent-console__reasoning::before {
@@ -3135,6 +3138,7 @@ button.tm-software-update:hover {
   border: 0;
   border-radius: 9px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   text-align: left;
 }
@@ -3197,7 +3201,7 @@ button.tm-software-update:hover {
   display: grid;
   gap: 1px;
   padding: 6px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 10px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -3338,6 +3342,7 @@ button.tm-software-update:hover {
   border: 0;
   border-radius: 10px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .tm-segtoggle__btn {
