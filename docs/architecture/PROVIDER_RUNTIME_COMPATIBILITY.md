@@ -1,6 +1,6 @@
 # Provider Runtime Compatibility
 
-Date: 2026-07-14
+Date: 2026-08-28
 
 This document records the provider runtimes that Task Monki currently accepts,
 the integration depth of each runtime, and the operational and security limits
@@ -34,61 +34,71 @@ runtimes use stable ACP plus explicitly captured extensions.
 | --- | --- | --- | --- | --- |
 | Codex App Server | `codex`; a resolver-selected native App Server stdio form | Native first-class | Native account and model discovery, threads, resume and fork, streamed turns, steering, interruption, approvals and typed user input, goals, plans, review, subagent lineage, usage, and managed attachment delivery | Requires a compatible App Server method contract, successful initialization, usable account/model state, and an attested permission profile. Task Monki explicitly negotiates the experimental API family for generated `item/tool/requestUserInput` requests and waits for `serverRequest/resolved` after replying. True pause is unsupported; user input, terminal, and dynamic-tool APIs remain experimental capability entries. |
 | OpenCode server | `opencode`; `opencode serve --hostname 127.0.0.1 --port <allocated-port>` | Native first-class | Connected provider/model registry, model variants, sessions and native history fork, messages and parts, asynchronous prompts and abort, per-request permissions, ordered single/multiple/custom questions, todo plans, accumulated assistant-step usage, tools/plugins/MCP telemetry, reconciliation, and bounded SSE streaming | Supports the validated OpenCode 1.x HTTP/SSE contract (`>=1.4.0` and `<2.0.0`; contract tests cover 1.17.20). Readiness verifies health, an authoritative `connected` provider list, catalog and permission/question queue endpoints, and a first SSE event; a catalog that omits connection state fails closed. Question replies are acknowledged native mutations and the question queue reconciles missed events and restarts without resending answers. Both execution presets report `DANGER_FULL_ACCESS`: `on-request` gates native mutation/external-directory tools and denies native task delegation because child permissions cannot be attested, while `never` permits them. Session-wide permission grants are not offered because the native `always` reply is process-local. Task Monki re-reads and attests the effective native rule suffix before each prompt and after a fork, but neither preset attests process confinement. Active-turn steering, true pause, provider goals, native or detached review, managed attachments, and prompt refinement are unsupported. |
-| Grok Build ACP | `grok-acp`; `grok --no-auto-update --permission-mode default agent stdio` | Registered ACP compatibility | ACP streaming, tool calls and diffs, plans, usage/cost context, permissions, cancellation, provider session state, plus Grok's captured `grok-build-acp/session-models@v1` initialize/session catalog, `_x.ai/models/update` replacement catalog, and exact `session/set_model` selection | The process-scoped default permission mode supports Task Monki's three ACP response policies without rewriting Grok configuration; global allow/deny rules remain provider-owned and Task Monki exposes only the exact request choices Grok sends. Grok's initialize `_meta.modelState`, dynamic model-update notification, session `models`, and model mutation are an experimental provider extension, not stable ACP v1. Task Monki exposes only the provider's latest valid catalog; it does not retain or invent historical Grok Build, Composer, or frontier-model entries. The Grok profile binds advertised effort values to `_meta.reasoningEffort` on `session/set_model`, so exact effort selection is available only when the chosen model advertises that value; a stable session `thought_level` selector remains a separate supported path. Otherwise reasoning selection fails closed. `session/new` remains the initial provider observation, while acknowledged mutations are adapter-resolved unless a later provider settings observation confirms them. Installed/version state is only discovery, and operational readiness still requires successful session creation. Session resume/close and other optional behavior are enabled only when advertised by the installed agent. No managed attachments, active steering, fork, goals, general user-input request, standardized subagents, or attested detached review. |
+| Grok Build ACP | `grok-acp`; `grok --no-auto-update --permission-mode default agent stdio` | Registered ACP compatibility | ACP streaming, tool calls and diffs, plans, usage/cost context, permissions, cancellation, provider session state, plus Grok's captured `grok-build-acp/session-models@v1` initialize/session catalog, `_x.ai/models/update` replacement catalog, and exact `session/set_model` selection | The process-scoped default permission mode supports Task Monki's three ACP response policies without rewriting Grok configuration; global allow/deny rules remain provider-owned and Task Monki exposes only the exact request choices Grok sends. Grok's initialize `_meta.modelState`, dynamic model-update notification, session `models`, and model mutation are an experimental provider extension, not stable ACP v1. Task Monki exposes only the provider's latest valid catalog; it does not retain or invent historical Grok Build, Composer, or frontier-model entries. The Grok profile binds advertised effort values to `_meta.reasoningEffort` on `session/set_model`, so exact effort selection is available only when the chosen model advertises that value; a stable session `thought_level` selector remains a separate supported path. Otherwise reasoning selection fails closed. `session/new` remains the initial provider observation, while acknowledged mutations are adapter-resolved unless a later provider settings observation confirms them. Installed/version state is only discovery, and operational readiness still requires successful session creation. Session resume/close and other optional behavior are enabled only when advertised by the installed agent. No managed attachments, active steering, fork, goals, Task Monki elicitation, standardized subagents, or attested detached review. |
 | Cursor Agent ACP | `cursor-agent-acp`; automatic discovery uses `cursor-agent acp`, while `agent acp` is explicit-configuration only and still requires a Cursor-specific contract probe | Registered ACP compatibility | ACP streaming, tool and diff updates, plans, exact provider permission choices, cancellation, Cursor-owned rules, lazy parameterized model discovery, and advertised native model/configuration selectors | Task Monki never executes a generic PATH `agent` during discovery. An explicit alias is compatibility-checked but its provenance remains the user's responsibility. Selecting Cursor explicitly starts its on-demand ACP process and, when no valid process-scoped catalog is cached, calls the captured `cursor/list_available_models` extension before any session is created. Auto is the exact `default` value; per-model thought-level choices drive reasoning selection. The catalog is not polled or restored from task sessions and is invalidated with the owning process/configuration or an observed auth failure. New sessions still revalidate model and reasoning before prompting. Ask for approval, Auto-accept edits, and Full access answer exact provider requests without changing Cursor's native agent mode. No mode automatically selects `allow_always`; an explicit remembered choice preserves the provider ID and label and remains provider-owned. Optional resume/close and native controls depend on negotiated or session-advertised capabilities. The common ACP feature limits and unconfined process boundary apply. |
 | Claude Agent ACP bridge | `claude-agent-acp`; the separate `claude-agent-acp` bridge executable | Registered ACP compatibility bridge | The bridge retains Claude Agent SDK tool behavior, ACP streaming, tool/diff updates, plans, permissions, cancellation, and advertised Claude modes/configuration/model selectors | This is not a direct native integration with the `claude` CLI. The bridge executable, ACP initialization, authentication, and provider session creation must all succeed. Optional behavior is negotiated; the common ACP feature limits and full-access process boundary apply. |
 
-## Discourse scoped-execution matrix
+## Workflow support
 
-| Runtime family | Discourse | Reason |
-| --- | --- | --- |
-| Codex App Server | Supported | The adapter attests the exact read roots and active read-only permission profile, with network, apps/MCP, dynamic tools, and approval exceptions disabled. |
-| OpenCode server | Unavailable | Native permission rules do not attest OS/process confinement or a disabled-network boundary for the credential-bearing server. |
-| Registered ACP runtimes | Unavailable | The provider process owns filesystem/network execution and current ACP negotiation cannot attest Task Monki's isolated read-only/offline scope. |
+The current and target workflow matrices are in
+`docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`.
+That document separates protocol limits from current adapter gaps and old
+Codex coupling.
 
-Unavailable means fail-closed for Discourse only. It does not disable the
-runtime's documented task execution path, and Task Monki never substitutes a
-different runtime for an immutable participant revision.
+This file records implemented protocol behavior.
+It does not make a runtime unavailable only because it lacks a Codex sandbox.
+Each workflow asks the adapter to qualify one concrete execution request.
 
 ## ACP compatibility boundary
 
 All registered ACP profiles share these implemented rules:
 
-- stable ACP wire protocol version 1 is negotiated at process startup;
+- Task Monki negotiates stable ACP wire protocol version 1 at process startup.
 - `session/new`, `session/prompt`, `session/update`, and `session/cancel` form
-  the baseline; resume, load, and close are used only when advertised;
-- stable modes and non-sensitive configuration selectors are retained with
-  their exact IDs and can be changed from the provider overview only while the
-  session is idle. Provider-specific methods are enabled only by an explicit,
-  versioned profile contract; this applies to Grok session models and Cursor's
-  lazy parameterized model picker;
-- actionable native selectors cross the service boundary only as typed,
+  the baseline. Resume, load, and close are used only when advertised.
+- Task Monki retains stable modes and non-sensitive configuration selectors with
+  their exact IDs. The user can change them from the provider overview only
+  while the session is idle. Provider-specific methods need an explicit,
+  versioned profile contract. This applies to Grok session models and Cursor's
+  lazy parameterized model picker.
+- Actionable native selectors cross the service boundary only as typed,
   semantic-neutral boolean/select controls. Each set includes the exact local
-  and provider session ownership plus an optimistic revision; stale revisions,
+  and provider session ownership plus an optimistic revision. Stale revisions,
   unknown controls, wrong value types, and unadvertised choices fail closed.
-  The renderer does not parse opaque native state to invent controls;
+  The renderer does not parse opaque native state to invent controls.
 - ACP model catalogs are provider-session scoped unless an explicit profile
   contract supplies a pre-session runtime catalog. Stable ACP profiles expose
-  only a profile default; exact live-session choices remain in that session's
+  only a profile default. Exact live-session choices remain in that session's
   control set. Grok's versioned initialize metadata/dynamic replacement and
   Cursor's explicitly selected, process-cached parameterized picker are the
   current exceptions. Every explicit model, mode, config, and reasoning choice
   is revalidated against the target session immediately before a prompt, and
-  only values that differ from observed native state are mutated;
-- the provider agent owns tool execution; Task Monki advertises its ACP
+  only values that differ from observed native state are mutated.
+- The provider agent owns tool execution. Task Monki advertises its ACP
   filesystem and terminal client capabilities as disabled, while advertising
-  the official boolean config-option client capability;
-- permission choices return the exact opaque option ID advertised by the
-  provider after Task Monki applies its command, path, and network policy;
-- only ACP `end_turn` is successful completion. `cancelled` is interrupted;
-  `refusal`, `max_tokens`, and `max_turn_requests` are failed terminal turns;
-- managed Task Monki attachments, active-turn steering, true pause, native
+  the official boolean config-option client capability.
+- Permission choices return the exact opaque option ID advertised by the
+  provider after Task Monki applies its command, path, and network policy.
+- Only ACP `end_turn` is successful completion. `cancelled` is interrupted.
+  `refusal`, `max_tokens`, and `max_turn_requests` are failed terminal turns.
+- Managed Task Monki attachments, active-turn steering, true pause, native
   session fork, provider goals, general user-input requests, and standardized
-  subagent lifecycle are unsupported by the current ACP integration;
-- structured ACP elicitation is not part of the negotiated stable-v1 contract.
-  Task Monki does not parse prose into requests; a prose question ends the
-  current turn and can be answered by an explicit follow-up/continue action;
-- discovery proves only an executable identity and launch contract. `READY`
+  subagent lifecycle are unsupported by the current ACP adapter.
+  Stable ACP can carry image and embedded content when the agent advertises
+  those prompt features. The current adapter does not map them yet.
+- Stable ACP session setup accepts stdio MCP servers. The current adapter sends
+  an empty MCP server list. The provider plan uses this standard field for the
+  narrow app-owned Design tool bridge.
+- Task Monki's pinned v1.19.0 subset does not implement structured elicitation.
+  Current ACP v1 documentation defines capability-gated `elicitation/create`,
+  but Task Monki has not updated its schema, persistence, or renderer for it.
+  Task Monki does not parse prose into requests. A prose question ends the
+  current turn and can be answered by an explicit follow-up action.
+- Task Monki does not expose ACP session list or delete as product operations.
+  The [ACP delete contract](https://agentclientprotocol.com/protocol/v1/session-delete)
+  can remove a session from view without deleting its files. Task Monki cannot
+  use it as provider-history removal without a verified profile contract.
+- Discovery proves only an executable identity and launch contract. `READY`
   requires a connected ACP v1 process and a successful provider session create
   or resume, which is where authentication, account, and model access are
   actually established.
@@ -122,11 +132,13 @@ only when their live initialization and session checks succeed.
   preset denies native task delegation because OpenCode child sessions do not
   inherit a separately attested mutation policy.
 - ACP agent processes own filesystem and network access, and permission events
-  do not prove OS-level confinement. Claude exposes only **Ask for approval**. Cursor
-  and Grok additionally expose **Auto-accept edits** and **Full access** by
-  selecting exact one-time provider options; remembered options always require
-  an explicit user choice. They do not claim a sandbox or silently change
-  provider/repository configuration.
+  do not prove OS-level confinement. Claude exposes only **Ask for approval**.
+  Cursor and Grok additionally expose **Auto-accept edits** and **Full access**
+  by selecting exact one-time provider options. Remembered options always
+  require an explicit user choice. Cursor and Grok now document native sandbox
+  options. Current Task Monki ACP profiles do not configure or attest those
+  sandboxes. They also do not silently change provider or repository
+  configuration.
 - Runtime children inherit only a minimal portable base environment. OpenCode
   and ACP children additionally receive a versioned, exact provider environment
   contract for credentials, cloud configuration, and documented runtime config
@@ -143,6 +155,13 @@ only when their live initialization and session checks succeed.
 - Browser-development agent execution requires an attested filesystem,
   process, and network boundary. OpenCode and the current ACP profiles do not
   satisfy that boundary.
+- Normal provider use is a different trust boundary. The user selected an
+  installed coding agent and its model. Task Monki does not require that agent
+  to reproduce Codex's OS sandbox before it can receive an authorized prompt
+  or selected attachment.
+- Provider-native permission rules can qualify read-only workflows. Task Monki
+  must describe them as native tool policy, not OS confinement. It must also
+  verify repository state after a read-only run.
 - A task and provider session remain owned by their original runtime. Task
   Monki does not migrate a session, silently fall back to another runtime, or
   automatically resend a prompt or interaction after ambiguous delivery.

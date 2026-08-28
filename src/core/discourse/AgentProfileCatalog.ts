@@ -3,6 +3,7 @@ import type {
   AgentRuntimeCatalog,
   AgentRuntimeState
 } from '../../shared/agent';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import type {
   AgentProfileCatalogEntry,
   AgentProfileCatalogSnapshot,
@@ -223,20 +224,11 @@ export function discourseRuntimeUnavailableReason(
   if (!runtime.preflight.readiness.canStart) {
     return 'The selected agent is unavailable. Check its connection in Settings.';
   }
-  const discourseCapability = runtime.preflight.capabilities.extensions['task-monki.discourse'];
-  if (discourseCapability?.maturity !== 'stable') {
-    return 'This agent cannot confirm the read-only, offline access required by Discourse.';
-  }
-  const readOnlyPreset = runtime.preflight.capabilities.executionPolicy.presets.find(
-    (preset) =>
-      preset.sandbox === 'READ_ONLY' &&
-      preset.networkAccess === 'DISABLED' &&
-      preset.approvalPolicy.toLowerCase() === 'never'
+  const support = projectAgentExecutionSupport(
+    runtime.preflight.capabilities,
+    'DISCOURSE'
   );
-  if (!readOnlyPreset) {
-    return 'This agent cannot confirm the read-only, offline access required by Discourse.';
-  }
-  return undefined;
+  return support.supported ? undefined : support.reason;
 }
 
 function orderedRuntimes(

@@ -9,6 +9,7 @@ import type {
 } from '../../shared/agentRuntime';
 import { AGENT_RUNTIME_STORE_SCHEMA_VERSION } from '../../shared/agentRuntime';
 import { createAgentSessionAccessEpoch } from '../agent/AgentRuntimeOwnership';
+import { createDomainEvent } from './domainEvent';
 import type {
   CreateRuntimeRunInput,
   CreateRuntimeSessionInput
@@ -19,6 +20,272 @@ import {
 } from './FileAgentRuntimeStore';
 
 describe('FileAgentRuntimeStore', () => {
+  it('creates and restarts one canonical Task runtime projection with atomic artifacts', async () => {
+    const fixture = await storeFixture();
+    const delivered: string[] = [];
+    const runtime = fixture.store.taskAgentRuntimeAccess(async (event) => {
+      delivered.push(event.id);
+    });
+    const context = executionContext('create-task-session');
+    const session = await runtime.createTaskSession({
+      id: 'task-session-atomic',
+      taskId: 'task-1',
+      iterationId: 'iteration-1',
+      worktreeId: 'worktree-1',
+      worktreePath: context.primaryCwd,
+      runtimeId: 'codex',
+      requestedSettings: {
+        runtimeId: 'codex',
+        model: 'gpt-test',
+        sandbox: 'READ_ONLY',
+        approvalPolicy: 'NEVER',
+        networkAccess: false
+      },
+      executionContext: context,
+      operationId: 'create-task-session'
+    });
+    const run = await runtime.createTaskRun({
+      id: 'task-run-atomic',
+      taskId: 'task-1',
+      iterationId: 'iteration-1',
+      worktreeId: 'worktree-1',
+      sessionId: session.id,
+      mode: 'IMPLEMENTATION',
+      prompt: 'Implement the task.',
+      generationKey: 'task-generation-atomic',
+      beforeGitSnapshotId: 'git-before',
+      operationId: 'create-task-run'
+    });
+    expect(await fixture.store.readArtifact(run.promptArtifactId)).toBe(
+      'Implement the task.'
+    );
+    expect((await runtime.snapshot()).artifacts).toHaveLength(3);
+
+    await runtime.updateRun(
+      run.id,
+      {
+        providerTurnId: 'turn-atomic',
+        status: 'STARTING',
+        lastEventAt: '2026-07-13T00:00:20.000Z'
+      },
+      'send-task-run'
+    );
+    const started = createDomainEvent({
+      type: 'PROCESS_STARTED',
+      taskId: 'task-1',
+      iterationId: 'iteration-1',
+      runId: run.id,
+      source: 'process',
+      payload: {}
+    });
+    await runtime.applyTaskRuntimeEvent(started, 'apply-process-started');
+    await runtime.upsertAgentItem(
+      {
+        taskId: 'task-1',
+        iterationId: 'iteration-1',
+        runId: run.id,
+        sessionId: session.id,
+        providerItemId: 'provider-item-atomic',
+        type: 'AGENT_MESSAGE',
+        status: 'COMPLETED',
+        payload: { text: 'provider output' }
+      },
+      'record-provider-item'
+    );
+    await runtime.recordAgentGoalSnapshot(
+      {
+        taskId: 'task-1',
+        iterationId: 'iteration-1',
+        sessionId: session.id,
+        runtimeId: 'codex',
+        taskGoalHash: 'a'.repeat(64),
+        syncState: 'IN_SYNC',
+        source: 'TASK_MONKI_SYNC'
+      },
+      'record-goal-snapshot'
+    );
+    await runtime.appendArtifact(
+      run.outputArtifactId,
+      'provider output',
+      'append-provider-output'
+    );
+    const final = await runtime.writeFinalArtifact(
+      'task-1',
+      run.id,
+      'final answer',
+      'write-final-answer'
+    );
+    expect(final.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+    );
+    const completed = createDomainEvent({
+      type: 'AGENT_RUN_COMPLETED',
+      taskId: 'task-1',
+      iterationId: 'iteration-1',
+      runId: run.id,
+      source: 'provider',
+      payload: { finalArtifactId: final.id }
+    });
+    await runtime.applyTaskRuntimeEvent(completed, 'apply-run-completed');
+    expect(delivered).toEqual([started.id, completed.id]);
+
+    const restarted = new FileAgentRuntimeStore(fixture.root);
+    const snapshot = await restarted.taskAgentRuntimeAccess().snapshot();
+    expect(snapshot.agentSessions).toEqual([session]);
+    expect(snapshot.runs[0]).toMatchObject({
+      id: run.id,
+      status: 'COMPLETED',
+      beforeGitSnapshotId: 'git-before',
+      finalArtifactId: final.id
+    });
+    expect(snapshot.artifacts.map((artifact) => artifact.kind).sort()).toEqual([
+      'agent-diagnostics',
+      'agent-final',
+      'agent-output',
+      'agent-prompt'
+    ]);
+    expect(snapshot.agentItems).toHaveLength(1);
+    expect(snapshot.agentGoalSnapshots).toHaveLength(1);
+  });
+
+  it('prepares a generic turn as one idempotent durable unit', async () => {
+    const fixture = await storeFixture();
+    const session = sessionInput(
+      'prepared-session',
+      discourseOwner,
+      'prepare-turn:session'
+    );
+    const run = genericRunInput(
+      'prepared-run',
+      session,
+      discourseScope,
+      'prepare-turn:run'
+    );
+    const request = {
+      session,
+      run,
+      prompt: 'Answer the discussion.',
+      priority: 'DISCOURSE_RESPONSE' as const,
+      queueOperationId: 'prepare-turn:enqueue'
+    };
+
+    const prepared = await fixture.store.prepareRuntimeTurn(request);
+    await expect(fixture.store.prepareRuntimeTurn(request)).resolves.toEqual(prepared);
+    await expect(
+      fixture.store.prepareRuntimeTurn({ ...request, prompt: 'Different prompt.' })
+    ).rejects.toThrow('conflicts with its durable artifacts');
+
+    const snapshot = await fixture.store.snapshot();
+    expect(snapshot.sessions).toHaveLength(1);
+    expect(snapshot.runs).toHaveLength(1);
+    expect(snapshot.artifacts).toHaveLength(3);
+    expect(snapshot.queueEntries).toHaveLength(1);
+    await expect(fixture.store.readArtifact(run.promptArtifactId)).resolves.toBe(
+      request.prompt
+    );
+
+    await fixture.store.close();
+    const restarted = new FileAgentRuntimeStore(fixture.root);
+    await expect(restarted.snapshot()).resolves.toMatchObject({
+      sessions: [{ id: session.id }],
+      runs: [{ id: run.id }],
+      queueEntries: [{ runId: run.id }]
+    });
+    await expect(restarted.readArtifact(run.promptArtifactId)).resolves.toBe(
+      request.prompt
+    );
+    await restarted.close();
+  });
+
+  it('does not publish a partial generic turn when preparation fails before commit', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-agent-runtime-prepare-crash-')
+    );
+    let fileSyncs = 0;
+    const store = new FileAgentRuntimeStore(root, {
+      afterFileSync: async () => {
+        fileSyncs += 1;
+        if (fileSyncs === 2) throw new Error('crash before turn publish');
+      }
+    });
+    await store.snapshot();
+    const session = sessionInput(
+      'crashed-prepared-session',
+      discourseOwner,
+      'crashed-prepare:session'
+    );
+    const run = genericRunInput(
+      'crashed-prepared-run',
+      session,
+      discourseScope,
+      'crashed-prepare:run'
+    );
+
+    await expect(
+      store.prepareRuntimeTurn({
+        session,
+        run,
+        prompt: 'Do not leave partial state.',
+        priority: 'DISCOURSE_RESPONSE',
+        queueOperationId: 'crashed-prepare:enqueue'
+      })
+    ).rejects.toThrow('crash before turn publish');
+
+    const restarted = new FileAgentRuntimeStore(root);
+    await expect(restarted.snapshot()).resolves.toMatchObject({
+      sessions: [],
+      runs: [],
+      artifacts: [],
+      queueEntries: []
+    });
+    await restarted.close();
+  });
+
+  it('keeps an ambiguous pre-turn provider mutation out of the prompt delivery record', async () => {
+    const fixture = await storeFixture();
+    const runtime = fixture.store.taskAgentRuntimeAccess();
+    const context = executionContext('create-ambiguous-session');
+    const session = await runtime.createTaskSession({
+      id: 'task-session-ambiguous',
+      taskId: 'task-ambiguous',
+      iterationId: 'iteration-ambiguous',
+      worktreeId: 'worktree-ambiguous',
+      worktreePath: context.primaryCwd,
+      runtimeId: 'codex',
+      requestedSettings: context.modelSettings,
+      executionContext: context,
+      operationId: 'create-ambiguous-session'
+    });
+    const run = await runtime.createTaskRun({
+      id: 'task-run-ambiguous',
+      taskId: 'task-ambiguous',
+      iterationId: 'iteration-ambiguous',
+      worktreeId: 'worktree-ambiguous',
+      sessionId: session.id,
+      mode: 'IMPLEMENTATION',
+      prompt: 'Do not send this prompt twice.',
+      operationId: 'create-ambiguous-run'
+    });
+
+    await runtime.applyTaskRuntimeEvent(
+      createDomainEvent({
+        type: 'AGENT_MUTATION_AMBIGUOUS',
+        taskId: 'task-ambiguous',
+        iterationId: 'iteration-ambiguous',
+        runId: run.id,
+        source: 'provider',
+        payload: { reason: 'The provider response was lost.' }
+      }),
+      'record-ambiguous-delivery'
+    );
+
+    await expect(fixture.store.getRun(run.id)).resolves.toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      delivery: 'NOT_DELIVERED',
+      recoveryState: 'REQUIRES_USER_ACTION'
+    });
+  });
+
   it('owns App Server lifecycle and bounded protocol evidence outside task storage', async () => {
     const fixture = await storeFixture();
     const server = await fixture.store.createAgentServer({
@@ -59,6 +326,150 @@ describe('FileAgentRuntimeStore', () => {
     await expect(
       reloaded.appendProtocolMessage('unknown-server', 'INBOUND', '{}')
     ).rejects.toThrow('not owned');
+  });
+
+  it('drains admitted runtime mutations and protocol writes before closing', async () => {
+    const fixture = await storeFixture();
+    const server = await createServerWithJournal(fixture.store, 'close');
+    const pendingSession = fixture.store.createSession(
+      sessionInput('closing-session', taskOwner, 'closing-session-operation')
+    );
+    const pendingMessage = fixture.store.appendProtocolMessage(
+      server.id,
+      'INBOUND',
+      '{"event":"before-close"}'
+    );
+
+    const closing = fixture.store.close();
+    expect(fixture.store.close()).toBe(closing);
+    const [session, reference] = await Promise.all([
+      pendingSession,
+      pendingMessage
+    ]);
+    await closing;
+
+    await expect(fixture.store.snapshot()).rejects.toThrow('store is closed');
+    await expect(
+      fixture.store.createSession(
+        sessionInput('late-session', taskOwner, 'late-session-operation')
+      )
+    ).rejects.toThrow('store is closed');
+    await expect(
+      fixture.store.appendProtocolMessage(server.id, 'OUTBOUND', '{}')
+    ).rejects.toThrow('store is closed');
+    await expect(fixture.store.readProtocolMessage(reference)).rejects.toThrow(
+      'store is closed'
+    );
+
+    const restarted = new FileAgentRuntimeStore(fixture.root);
+    expect((await restarted.snapshot()).sessions).toEqual([session]);
+    await expect(restarted.readProtocolMessage(reference)).resolves.toEqual({
+      raw: '{"event":"before-close"}'
+    });
+    await expect(
+      restarted.appendProtocolMessage(server.id, 'OUTBOUND', '{"event":"after-restart"}')
+    ).resolves.toMatchObject({ sequence: 3 });
+    await restarted.close();
+  });
+
+  it('retains active and the eight newest unreferenced terminal servers', async () => {
+    const fixture = await storeFixture();
+    const active = await createServerWithJournal(fixture.store, 'active');
+    await fixture.store.updateAgentServer(active.id, { status: 'READY' });
+    const terminalServers = [];
+    for (let index = 0; index < 9; index += 1) {
+      const server = await createServerWithJournal(
+        fixture.store,
+        `terminal-${index}`
+      );
+      await fixture.store.updateAgentServer(server.id, {
+        status: 'EXITED',
+        exitedAt: new Date(Date.UTC(2026, 6, 13, 10, index)).toISOString()
+      });
+      terminalServers.push(server);
+    }
+
+    const retainedIds = new Set(
+      (await fixture.store.listAgentServers()).map((server) => server.id)
+    );
+    expect(retainedIds).toEqual(
+      new Set([active.id, ...terminalServers.slice(1).map((server) => server.id)])
+    );
+    await expect(
+      fs.access(terminalServers[0]!.protocolJournalPath)
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(active.protocolJournalPath)).resolves.toBeUndefined();
+    await expect(
+      fs.access(terminalServers.at(-1)!.protocolJournalPath)
+    ).resolves.toBeUndefined();
+    await fixture.store.close();
+  });
+
+  it('collects a terminal server only after its Task runtime references are purged', async () => {
+    const fixture = await storeFixture();
+    const referenced = await createServerWithJournal(fixture.store, 'referenced');
+    const session = await fixture.store.createSession(
+      sessionInput('referenced-session', taskOwner, 'referenced-session-operation')
+    );
+    const run = await fixture.store.createRun({
+      ...runInput('referenced-run', session, taskScope, 'referenced-run-operation'),
+      serverInstanceId: referenced.id
+    });
+    await fixture.store.updateAgentServer(referenced.id, {
+      status: 'EXITED',
+      exitedAt: '2026-07-13T09:00:00.000Z'
+    });
+    for (let index = 0; index < 8; index += 1) {
+      const server = await createServerWithJournal(fixture.store, `retained-${index}`);
+      await fixture.store.updateAgentServer(server.id, {
+        status: 'FAILED',
+        exitedAt: new Date(Date.UTC(2026, 6, 13, 10, index)).toISOString()
+      });
+    }
+    expect(await fixture.store.getAgentServer(referenced.id)).toBeDefined();
+    await expect(fs.access(referenced.protocolJournalPath)).resolves.toBeUndefined();
+
+    await fixture.store.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTED',
+        delivery: 'NOT_DELIVERED',
+        endedAt: '2026-07-13T12:00:00.000Z'
+      },
+      'settle-referenced-run'
+    );
+    await expect(fixture.store.purgeTask('task-1')).resolves.toMatchObject({
+      sessionCount: 1,
+      runCount: 1
+    });
+
+    expect(await fixture.store.getAgentServer(referenced.id)).toBeUndefined();
+    await expect(fs.access(referenced.protocolJournalPath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    });
+    await fixture.store.close();
+  });
+
+  it('removes safe orphan journal segments during restart reconciliation', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-agent-runtime-orphan-journal-')
+    );
+    const initial = new FileAgentRuntimeStore(root);
+    await initial.snapshot();
+    await initial.close();
+    const journalDirectory = path.join(root, 'protocol-journals');
+    const orphanPath = path.join(journalDirectory, 'orphan-server.2.ndjson');
+    const unrelatedPath = path.join(journalDirectory, 'operator-notes.txt');
+    await fs.writeFile(orphanPath, '{"orphan":true}\n', { mode: 0o600 });
+    await fs.writeFile(unrelatedPath, 'preserve\n', { mode: 0o600 });
+
+    const restarted = new FileAgentRuntimeStore(root);
+    await restarted.snapshot();
+
+    await expect(fs.access(orphanPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readFile(unrelatedPath, 'utf8')).resolves.toBe('preserve\n');
+    await restarted.close();
   });
 
   it('stores bounded owner-neutral telemetry with durable scope and idempotency', async () => {
@@ -234,12 +645,32 @@ describe('FileAgentRuntimeStore', () => {
     const second = await fixture.store.createSession(
       sessionInput('session-2', discourseOwner, 'session-operation-2')
     );
-    const materialized = await fixture.store.updateSession(
+    const owned = await fixture.store.updateSession(
       first.id,
       first.recordRevision,
       {
         providerSessionId: 'provider-session-1',
         status: 'IDLE',
+        materialized: false
+      },
+      'own-provider-session-1'
+    );
+    await expect(
+      fixture.store.updateSession(
+        second.id,
+        second.recordRevision,
+        {
+          providerSessionId: 'provider-session-1',
+          status: 'IDLE',
+          materialized: false
+        },
+        'duplicate-unmaterialized-provider-session'
+      )
+    ).rejects.toThrow('already assigned');
+    const materialized = await fixture.store.updateSession(
+      owned.id,
+      owned.recordRevision,
+      {
         materialized: true,
         lastAttachedAt: '2026-07-13T00:00:10.000Z'
       },
@@ -627,7 +1058,7 @@ describe('FileAgentRuntimeStore', () => {
     expect((await new FileAgentRuntimeStore(path.join(root, 'after')).snapshot()).sessions).toHaveLength(1);
   });
 
-  it.each([1, 2])('rejects older agent runtime schema %s without rewriting it', async (schemaVersion) => {
+  it.each([1, 2, 3])('rejects older agent runtime schema %s without rewriting it', async (schemaVersion) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-runtime-old-'));
     const storePath = path.join(root, 'runtime.json');
     const encoded = `${JSON.stringify({ schemaVersion })}\n`;
@@ -710,6 +1141,25 @@ function discourseScopeFor(jobId: string, attemptId: string): AgentRunScope {
   };
 }
 
+async function createServerWithJournal(
+  store: FileAgentRuntimeStore,
+  label: string
+) {
+  const server = await store.createAgentServer({
+    runtimeId: 'codex',
+    runtimeKind: 'APP_SERVER',
+    transport: 'STDIO',
+    executable: `codex-${label}`,
+    argv: ['app-server', '--stdio']
+  });
+  await store.appendProtocolMessage(
+    server.id,
+    'INBOUND',
+    JSON.stringify({ label })
+  );
+  return server;
+}
+
 async function storeFixture(root?: string) {
   const directory =
     root ?? (await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-runtime-')));
@@ -721,7 +1171,8 @@ async function storeFixture(root?: string) {
   let id = 0;
   const store = new FileAgentRuntimeStore(directory, {
     now: () => times[timeIndex++]!,
-    createId: () => `generated-${++id}`
+    createId: () =>
+      `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`
   });
   await store.snapshot();
   return { root: directory, store };
@@ -757,13 +1208,44 @@ function sessionInput(
       sandbox: 'READ_ONLY',
       approvalPolicy: 'NEVER',
       networkAccess: false
-    }
+    },
+    ...(owner.kind === 'TASK'
+      ? {
+          taskContext: {
+            iterationId: 'iteration-1',
+            worktreeId: 'worktree-1',
+            worktreePath: context.primaryCwd
+          }
+        }
+      : {})
   };
 }
 
 function runInput(
   id: string,
   session: Awaited<ReturnType<FileAgentRuntimeStore['createSession']>>,
+  scope: AgentRunScope,
+  clientOperationId: string
+): CreateRuntimeRunInput {
+  return {
+    id,
+    owner: session.owner,
+    scope,
+    sessionId: session.id,
+    sessionAccessEpoch: session.accessEpoch.epoch,
+    purpose: scope.kind === 'TASK' ? 'TASK_IMPLEMENTATION' : 'DISCOURSE_ANSWER',
+    generationKey: `${scope.kind.toLowerCase()}-generation`,
+    clientOperationId,
+    requestedSettings: session.requestedSettings,
+    promptArtifactId: `${id}-prompt`,
+    outputArtifactId: `${id}-output`,
+    diagnosticArtifactId: `${id}-diagnostics`
+  };
+}
+
+function genericRunInput(
+  id: string,
+  session: CreateRuntimeSessionInput,
   scope: AgentRunScope,
   clientOperationId: string
 ): CreateRuntimeRunInput {

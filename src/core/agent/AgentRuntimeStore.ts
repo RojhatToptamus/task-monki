@@ -1,4 +1,12 @@
 import type {
+  AgentRuntimeGoalSnapshotRecord,
+  AgentExecutionContext,
+  AgentRuntimeInteractionRecord,
+  AgentRuntimeItemRecord,
+  AgentRuntimePlanRevisionRecord,
+  AgentRuntimeSettingsObservationRecord,
+  AgentRuntimeSubagentObservationRecord,
+  AgentRuntimeUsageSnapshotRecord,
   AgentOwnerScope,
   AgentRuntimeArtifactKind,
   AgentRuntimeArtifactRecord,
@@ -11,9 +19,22 @@ import type {
   AgentSchedulerQueueEntry
 } from '../../shared/agentRuntime';
 import type {
+  AgentGoalSnapshotRecord,
+  AgentExecutionSettings,
+  AgentItemRecord,
+  AgentPlanRevisionRecord,
   AgentProtocolMessageReference,
-  AgentServerInstance
+  AgentServerInstance,
+  AgentRunMode,
+  AgentSessionRecord,
+  AgentSettingsObservationRecord,
+  AgentSubagentObservationRecord,
+  AgentSubagentStatus,
+  AgentUsageSnapshotRecord,
+  InteractionRequestRecord,
+  InteractionRequestStatus
 } from '../../shared/agent';
+import type { ArtifactRecord, DomainEvent, RunRecord } from '../../shared/contracts';
 
 export interface CreateAgentRuntimeServerInput {
   runtimeId: AgentServerInstance['runtimeId'];
@@ -26,6 +47,18 @@ export interface CreateAgentRuntimeServerInput {
   schemaHash?: string;
   runtimeResolution?: AgentServerInstance['runtimeResolution'];
 }
+
+export class AgentRuntimeArtifactMutationAmbiguousError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'AgentRuntimeArtifactMutationAmbiguousError';
+  }
+}
+
+export type TaskRuntimeEventSink = (
+  event: DomainEvent,
+  operationId: string
+) => Promise<void>;
 
 export interface AgentProviderRuntimeStore {
   createAgentServer(
@@ -97,6 +130,256 @@ export interface CreateObservedRuntimeRunInput extends CreateRuntimeRunInput {
   startedAt: string;
 }
 
+export interface PrepareRuntimeTurnStoreInput {
+  session: CreateRuntimeSessionInput;
+  run: CreateRuntimeRunInput;
+  prompt: string;
+  priority: AgentSchedulerPriority;
+  queueOperationId: string;
+  notBefore?: string;
+}
+
+export interface PreparedRuntimeTurnRecords {
+  session: AgentRuntimeSessionRecord;
+  run: AgentRuntimeRunRecord;
+  queueEntry: AgentSchedulerQueueEntry;
+}
+
+export type CreateRuntimeItemInput = Omit<
+  AgentRuntimeItemRecord,
+  'id' | 'requestFingerprint' | 'recordRevision' | 'createdAt' | 'updatedAt'
+> & { id?: string };
+
+export type CreateRuntimeInteractionInput = Omit<
+  AgentRuntimeInteractionRecord,
+  | 'id'
+  | 'status'
+  | 'requestFingerprint'
+  | 'recordRevision'
+  | 'requestedAt'
+>;
+
+export type RuntimeInteractionUpdate = Partial<
+  Pick<
+    AgentRuntimeInteractionRecord,
+    | 'status'
+    | 'decision'
+    | 'responseRawMessage'
+    | 'resolution'
+    | 'respondedAt'
+    | 'resolvedAt'
+  >
+>;
+
+export type CreateRuntimeGoalSnapshotInput = Omit<
+  AgentRuntimeGoalSnapshotRecord,
+  'id' | 'requestFingerprint' | 'recordRevision' | 'observedAt'
+>;
+
+export type CreateRuntimePlanRevisionInput = Omit<
+  AgentRuntimePlanRevisionRecord,
+  'id' | 'requestFingerprint' | 'recordRevision' | 'revision' | 'observedAt'
+>;
+
+export type CreateRuntimeUsageSnapshotInput = Omit<
+  AgentRuntimeUsageSnapshotRecord,
+  'id' | 'requestFingerprint' | 'recordRevision' | 'observedAt'
+>;
+
+export type CreateRuntimeSettingsObservationInput = Omit<
+  AgentRuntimeSettingsObservationRecord,
+  'id' | 'requestFingerprint' | 'recordRevision' | 'observedAt'
+>;
+
+export type CreateRuntimeSubagentObservationInput = Omit<
+  AgentRuntimeSubagentObservationRecord,
+  'id' | 'requestFingerprint' | 'recordRevision' | 'observedAt'
+>;
+
+export interface TaskAgentRuntimeSnapshot {
+  runs: RunRecord[];
+  agentServers: AgentServerInstance[];
+  agentSessions: AgentSessionRecord[];
+  agentItems: AgentItemRecord[];
+  agentGoalSnapshots: AgentGoalSnapshotRecord[];
+  agentPlanRevisions: AgentPlanRevisionRecord[];
+  agentUsageSnapshots: AgentUsageSnapshotRecord[];
+  agentSettingsObservations: AgentSettingsObservationRecord[];
+  agentSubagentObservations: AgentSubagentObservationRecord[];
+  interactionRequests: InteractionRequestRecord[];
+  artifacts: ArtifactRecord[];
+}
+
+export interface TaskObserveSubagentInput {
+  parentSessionId: string;
+  parentRunId?: string;
+  providerChildSessionId: string;
+  providerParentSessionId?: string;
+  providerForkedFromSessionId?: string;
+  source: AgentSubagentObservationRecord['source'];
+  status?: AgentSubagentStatus;
+  delegatedPrompt?: string;
+  requestedSettings?: AgentExecutionSettings;
+  providerSessionTreeId?: string;
+  providerNickname?: string;
+  providerRole?: string;
+  agentPath?: string;
+  materialized?: boolean;
+  rawMessage: AgentProtocolMessageReference;
+}
+
+export interface TaskCreateObservedSubagentRunInput {
+  session: AgentSessionRecord;
+  providerTurnId: string;
+  serverInstanceId: string;
+  parentRunId?: string;
+  prompt?: string;
+  requestedSettings?: AgentExecutionSettings;
+}
+
+export interface CreateTaskRuntimeSessionInput {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  worktreePath: string;
+  runtimeId: string;
+  role?: AgentSessionRecord['role'];
+  requestedSettings: AgentExecutionSettings;
+  executionContext: AgentExecutionContext;
+  operationId: string;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+}
+
+export interface CreateTaskRuntimeRunInput {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  sessionId: string;
+  mode: AgentRunMode;
+  prompt: string;
+  generationKey?: string;
+  requestedSettings?: AgentExecutionSettings;
+  beforeGitSnapshotId?: string;
+  retryOfRunId?: string;
+  continuedFromRunId?: string;
+  reviewTarget?: import('../../shared/agent').AgentReviewTarget;
+  instructionProfile?: import('../../shared/agent').AgentInstructionProfile;
+  operationId: string;
+}
+
+/**
+ * Runtime-only Task view used by Task orchestration and provider adapters. It
+ * intentionally has no Task, Git, attachment, or domain-store operations.
+ */
+export interface TaskAgentRuntimeAccess {
+  snapshot(): Promise<TaskAgentRuntimeSnapshot>;
+  createTaskSession(input: CreateTaskRuntimeSessionInput): Promise<AgentSessionRecord>;
+  createTaskRun(input: CreateTaskRuntimeRunInput): Promise<RunRecord>;
+  getAgentSession(sessionId: string): Promise<AgentSessionRecord | undefined>;
+  getAgentSessionByProviderId(
+    runtimeId: string,
+    providerSessionId: string
+  ): Promise<AgentSessionRecord | undefined>;
+  updateAgentSession(
+    sessionId: string,
+    update: Partial<AgentSessionRecord>,
+    operationId: string
+  ): Promise<AgentSessionRecord>;
+  getRun(runId: string): Promise<RunRecord | undefined>;
+  getRunByProviderTurnId(
+    runtimeId: string,
+    providerTurnId: string
+  ): Promise<RunRecord | undefined>;
+  getActiveRunForSession(sessionId: string): Promise<RunRecord | undefined>;
+  getRunsRequiringRecovery(options?: {
+    includeQueued?: boolean;
+    runtimeId?: string;
+  }): Promise<RunRecord[]>;
+  updateRun(
+    runId: string,
+    update: Partial<RunRecord>,
+    operationId: string
+  ): Promise<RunRecord>;
+  getAgentItemsForRun(runId: string): Promise<AgentItemRecord[]>;
+  getAgentItemByProviderId(
+    runId: string,
+    providerItemId: string
+  ): Promise<AgentItemRecord | undefined>;
+  upsertAgentItem(
+    item: Omit<AgentItemRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string },
+    operationId: string
+  ): Promise<AgentItemRecord>;
+  getInteractionRequest(id: string): Promise<InteractionRequestRecord | undefined>;
+  getInteractionRequestByProviderId(
+    serverInstanceId: string,
+    providerRequestId: string | number
+  ): Promise<InteractionRequestRecord | undefined>;
+  createInteractionRequest(
+    input: Omit<InteractionRequestRecord, 'id' | 'status' | 'requestedAt'>,
+    operationId: string
+  ): Promise<InteractionRequestRecord>;
+  transitionInteractionRequest(
+    id: string,
+    expectedStatus: InteractionRequestStatus,
+    update: RuntimeInteractionUpdate,
+    operationId: string
+  ): Promise<InteractionRequestRecord>;
+  getLatestAgentGoalSnapshot(
+    sessionId: string
+  ): Promise<AgentGoalSnapshotRecord | undefined>;
+  recordAgentGoalSnapshot(
+    record: Omit<AgentGoalSnapshotRecord, 'id' | 'observedAt'>,
+    operationId: string
+  ): Promise<AgentGoalSnapshotRecord>;
+  recordAgentPlanRevision(
+    record: Omit<AgentPlanRevisionRecord, 'id' | 'revision' | 'observedAt'>,
+    operationId: string
+  ): Promise<AgentPlanRevisionRecord>;
+  recordAgentUsageSnapshot(
+    record: Omit<AgentUsageSnapshotRecord, 'id' | 'observedAt'>,
+    operationId: string
+  ): Promise<AgentUsageSnapshotRecord>;
+  recordAgentSettingsObservation(
+    record: Omit<AgentSettingsObservationRecord, 'id' | 'observedAt'>,
+    operationId: string
+  ): Promise<AgentSettingsObservationRecord>;
+  recordAgentSubagentObservation(
+    record: Omit<AgentSubagentObservationRecord, 'id' | 'observedAt'>,
+    operationId: string
+  ): Promise<AgentSubagentObservationRecord>;
+  observeSubagent(
+    input: TaskObserveSubagentInput,
+    operationId: string
+  ): Promise<{
+    session: AgentSessionRecord;
+    observation: AgentSubagentObservationRecord;
+  }>;
+  createObservedSubagentRun(
+    input: TaskCreateObservedSubagentRunInput,
+    operationId: string
+  ): Promise<RunRecord>;
+  appendArtifact(
+    artifactId: string,
+    chunk: string,
+    operationId: string
+  ): Promise<AgentRuntimeArtifactRecord>;
+  writeFinalArtifact(
+    taskId: string,
+    runId: string,
+    content: string,
+    operationId: string
+  ): Promise<AgentRuntimeArtifactRecord>;
+  applyTaskRuntimeEvent(event: DomainEvent, operationId: string): Promise<void>;
+  applyTaskRuntimeEventIfRunStatus(
+    event: DomainEvent,
+    statuses: readonly RunRecord['status'][],
+    operationId: string
+  ): Promise<boolean>;
+}
+
 export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
   init(): Promise<void>;
   close(): Promise<void>;
@@ -106,9 +389,13 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
   createObservedRun(
     input: CreateObservedRuntimeRunInput
   ): Promise<AgentRuntimeRunRecord>;
+  prepareRuntimeTurn(
+    input: PrepareRuntimeTurnStoreInput
+  ): Promise<PreparedRuntimeTurnRecords>;
   getSession(sessionId: string): Promise<AgentRuntimeSessionRecord | undefined>;
   getSessionByProviderId(
-    providerSessionId: string
+    providerSessionId: string,
+    runtimeId?: string
   ): Promise<AgentRuntimeSessionRecord | undefined>;
   updateSession(
     sessionId: string,
@@ -118,8 +405,14 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
         AgentRuntimeSessionRecord,
         | 'providerSessionId'
         | 'providerSessionTreeId'
+        | 'parentSessionId'
+        | 'forkedFromSessionId'
+        | 'providerParentSessionId'
+        | 'providerForkedFromSessionId'
+        | 'parentRunId'
         | 'status'
         | 'materialized'
+        | 'requestedSettings'
         | 'observedSettings'
         | 'relationshipState'
         | 'relationshipDetail'
@@ -135,8 +428,15 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
   ): Promise<AgentRuntimeSessionRecord>;
   getRun(runId: string): Promise<AgentRuntimeRunRecord | undefined>;
   getRunByProviderTurnId(
-    providerTurnId: string
+    providerTurnId: string,
+    runtimeId?: string
   ): Promise<AgentRuntimeRunRecord | undefined>;
+  getActiveRunForSession(sessionId: string): Promise<AgentRuntimeRunRecord | undefined>;
+  getRunsRequiringRecovery(options?: {
+    includeQueued?: boolean;
+    runtimeId?: string;
+    owner?: AgentOwnerScope;
+  }): Promise<AgentRuntimeRunRecord[]>;
   listRunsByOwner(owner: AgentOwnerScope): Promise<AgentRuntimeRunRecord[]>;
   createArtifact(input: {
     id: string;
@@ -188,10 +488,66 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
         | 'stopRequestedAt'
         | 'lastEventAt'
         | 'endedAt'
+        | 'attachmentSubmissions'
+        | 'providerTerminalRawMessage'
+        | 'taskDetails'
       >
     >,
     operationId: string
   ): Promise<AgentRuntimeRunRecord>;
+  upsertItem(input: CreateRuntimeItemInput): Promise<AgentRuntimeItemRecord>;
+  listItemsForRun(runId: string): Promise<AgentRuntimeItemRecord[]>;
+  getItemByProviderId(
+    runId: string,
+    providerItemId: string
+  ): Promise<AgentRuntimeItemRecord | undefined>;
+  createInteraction(
+    input: CreateRuntimeInteractionInput
+  ): Promise<AgentRuntimeInteractionRecord>;
+  getInteraction(id: string): Promise<AgentRuntimeInteractionRecord | undefined>;
+  getInteractionByProviderId(
+    serverInstanceId: string,
+    providerRequestId: string | number
+  ): Promise<AgentRuntimeInteractionRecord | undefined>;
+  updateInteraction(
+    id: string,
+    expectedRevision: number,
+    expectedStatus: InteractionRequestStatus,
+    update: RuntimeInteractionUpdate,
+    operationId: string
+  ): Promise<AgentRuntimeInteractionRecord>;
+  listInteractionsByOwner(owner: AgentOwnerScope): Promise<AgentRuntimeInteractionRecord[]>;
+  recordGoalSnapshot(
+    input: CreateRuntimeGoalSnapshotInput
+  ): Promise<AgentRuntimeGoalSnapshotRecord>;
+  getLatestGoalSnapshot(
+    sessionId: string
+  ): Promise<AgentRuntimeGoalSnapshotRecord | undefined>;
+  recordPlanRevision(
+    input: CreateRuntimePlanRevisionInput
+  ): Promise<AgentRuntimePlanRevisionRecord>;
+  recordUsageSnapshot(
+    input: CreateRuntimeUsageSnapshotInput
+  ): Promise<AgentRuntimeUsageSnapshotRecord>;
+  recordSettingsObservation(
+    input: CreateRuntimeSettingsObservationInput
+  ): Promise<AgentRuntimeSettingsObservationRecord>;
+  recordSubagentObservation(
+    input: CreateRuntimeSubagentObservationInput
+  ): Promise<AgentRuntimeSubagentObservationRecord>;
+  appendArtifact(
+    artifactId: string,
+    chunk: string,
+    operationId: string
+  ): Promise<AgentRuntimeArtifactRecord>;
+  writeFinalArtifact(input: {
+    artifactId: string;
+    owner: AgentOwnerScope;
+    runId: string;
+    clientOperationId: string;
+    content: string;
+  }): Promise<AgentRuntimeArtifactRecord>;
+  taskAgentRuntimeAccess(eventSink?: TaskRuntimeEventSink): TaskAgentRuntimeAccess;
   enqueueRun(
     runId: string,
     priority: AgentSchedulerPriority,

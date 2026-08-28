@@ -17,6 +17,10 @@ import type {
 import type { PreviewManager } from '../preview/PreviewManager';
 import { AppEventBus } from '../runner/AppEventBus';
 import { FileTaskStore, type ManagedDesignRepositoryInput } from '../storage/FileTaskStore';
+import {
+  createScriptedAgentRuntimeFixture,
+  type ScriptedAgentRuntimeFixture
+} from '../../testSupport/taskMonkiScenario';
 import type { DesignSourceService } from './DesignSourceService';
 import { DesignUpdateCoordinator } from './DesignUpdateCoordinator';
 
@@ -26,6 +30,7 @@ const harnesses: CoordinatorHarness[] = [];
 afterEach(async () => {
   await Promise.allSettled(
     harnesses.splice(0).map(async (harness) => {
+      await harness.scriptedRuntime.runtimeStore.close();
       await harness.store.close();
       await fs.rm(harness.dir, { recursive: true, force: true });
     })
@@ -38,7 +43,11 @@ describe('DesignUpdateCoordinator', () => {
     harness.coordinator.open();
     await harness.coordinator.dispatch(harness.designId);
     const current = requireCurrentRun(await harness.store.getDesignDetail(harness.designId));
-    await harness.store.updateRun(current.id, { status: 'RUNNING' });
+    await harness.scriptedRuntime.transitionRun(
+      current.id,
+      { status: 'RUNNING' },
+      `design-test-run-running:${current.id}`
+    );
 
     await expect(
       harness.coordinator.inspectDesign({
@@ -108,11 +117,15 @@ describe('DesignUpdateCoordinator', () => {
       message: 'Make the status easier to scan.',
       referenceIds: []
     });
-    await harness.store.updateRun(firstRun.id, {
-      status: 'FAILED',
-      terminalReason: 'Provider stopped unexpectedly.',
-      endedAt: new Date().toISOString()
-    });
+    await harness.scriptedRuntime.transitionRun(
+      firstRun.id,
+      {
+        status: 'FAILED',
+        terminalReason: 'Provider stopped unexpectedly.',
+        endedAt: new Date().toISOString()
+      },
+      `design-test-run-failed:${firstRun.id}`
+    );
 
     await harness.coordinator.handleRunTerminal(firstRun.id);
 
@@ -191,11 +204,15 @@ describe('DesignUpdateCoordinator', () => {
 
     const shutdown = harness.coordinator.beginShutdown();
     await interruptEntered.promise;
-    await harness.store.updateRun(run.id, {
-      status: 'FAILED',
-      terminalReason: 'Interrupted during shutdown.',
-      endedAt: new Date().toISOString()
-    });
+    await harness.scriptedRuntime.transitionRun(
+      run.id,
+      {
+        status: 'FAILED',
+        terminalReason: 'Interrupted during shutdown.',
+        endedAt: new Date().toISOString()
+      },
+      `design-test-shutdown-run-failed:${run.id}`
+    );
     const terminal = harness.coordinator.handleRunTerminal(run.id);
     releaseInterrupt.resolve();
     await Promise.all([shutdown, terminal]);
@@ -451,6 +468,7 @@ describe('DesignUpdateCoordinator', () => {
 interface CoordinatorHarness {
   dir: string;
   store: FileTaskStore;
+  scriptedRuntime: ScriptedAgentRuntimeFixture;
   designId: string;
   coordinator: DesignUpdateCoordinator;
   startTurn: ReturnType<typeof vi.fn<(input: StartOrchestratedTurn) => Promise<RunRecord>>>;
@@ -483,6 +501,7 @@ async function createHarness(
 ): Promise<CoordinatorHarness> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-coordinator-'));
   const store = new FileTaskStore(dir);
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
   const created = await store.createDesignBundle({
     request: {
       brief: 'Create a compact launch page.',
@@ -508,12 +527,12 @@ async function createHarness(
     'WORKTREE_CREATED'
   );
   const task = (await store.getTask(created.task.id))!;
-  const session = await store.createAgentSession({
+  const session = await scriptedRuntime.createSession({
     task,
     iteration,
     worktree: presentWorktree,
     runtimeId: 'codex',
-    requestedSettings: task.agentSettings
+    settings: task.agentSettings
   });
   const before = await recordGitSnapshot(store, {
     taskId: task.id,
@@ -524,13 +543,13 @@ async function createHarness(
     branchName: presentWorktree.branchName
   });
   const startTurn = vi.fn(async (input: StartOrchestratedTurn) =>
-    store.createRun({
+    scriptedRuntime.createRun({
       task: input.task,
       session,
       mode: input.mode,
       prompt: input.prompt,
       generationKey: input.generationKey,
-      requestedSettings: input.settings,
+      settings: input.settings,
       beforeGitSnapshotId: input.beforeGitSnapshotId
     })
   );
@@ -660,6 +679,7 @@ async function createHarness(
   const harness = {
     dir,
     store,
+    scriptedRuntime,
     designId: task.id,
     coordinator,
     startTurn,
@@ -736,12 +756,16 @@ async function startAndCompleteCurrentTurn(
       previewGenerationId: generation.id
     }
   });
-  return harness.store.updateRun(run.id, {
-    status: 'COMPLETED',
-    finalMessage: 'The Design update is ready.',
-    afterGitSnapshotId: run.beforeGitSnapshotId,
-    endedAt: new Date().toISOString()
-  });
+  return harness.scriptedRuntime.transitionRun(
+    run.id,
+    {
+      status: 'COMPLETED',
+      finalMessage: 'The Design update is ready.',
+      afterGitSnapshotId: run.beforeGitSnapshotId,
+      endedAt: new Date().toISOString()
+    },
+    `design-test-run-completed:${run.id}`
+  );
 }
 
 async function settleCurrentTurnReady(

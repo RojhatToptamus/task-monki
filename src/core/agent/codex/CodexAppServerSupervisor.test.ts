@@ -21,7 +21,7 @@ import {
   parseDisabledCodexMcpServerConfigOverrides,
   parseEnabledCodexMcpServerNames
 } from './CodexToolConfig';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 
 const WEB_SEARCH_MODES: CodexWebSearchMode[] = ['disabled', 'cached', 'live'];
 const MCP_SERVER_MODES: CodexMcpServersMode[] = ['disabled', 'all'];
@@ -201,7 +201,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('does not spawn or leave STARTING state when shutdown wins a durable-start race', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-supervisor-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const originalCreate = store.createAgentServer.bind(store);
     let releaseCreate!: () => void;
     const createGate = new Promise<void>((resolve) => {
@@ -234,7 +234,7 @@ describe('Codex App Server launch configuration', () => {
     await expect(starting).rejects.toThrow('canceled');
     await stopping;
     expect(spawnProcess).not.toHaveBeenCalled();
-    expect((await store.snapshot()).agentServers).toEqual([
+    expect((await store.snapshot()).servers).toEqual([
       expect.objectContaining({ status: 'EXITED' })
     ]);
     await expect(supervisor.start()).rejects.toThrow('shut down');
@@ -245,7 +245,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('persists and emits only redacted argv and process diagnostics', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-supervisor-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const diagnostics: string[] = [];
     let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
@@ -281,7 +281,7 @@ describe('Codex App Server launch configuration', () => {
     child.stderr.write('secret Authorization: Bearer codex-bearer-secret\n');
     await supervisor.shutdown();
 
-    const server = (await store.snapshot()).agentServers[0]!;
+    const server = (await store.snapshot()).servers[0]!;
     const durable = JSON.stringify(server);
     expect(spawnedEnvironment).toEqual({
       PATH: process.env.PATH,
@@ -305,7 +305,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('delivers journaled notifications before emitting process exit', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-drain-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -366,7 +366,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('fences replacement startup when inbound delivery cannot be drained', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-drain-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -398,7 +398,7 @@ describe('Codex App Server launch configuration', () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-codex-termination-store-failure-')
     );
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -443,7 +443,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('hard-fences an unresponsive process when TERM and KILL cannot confirm exit', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-stubborn-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeOnKill: false });
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -474,7 +474,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('coalesces safety-fence and close-handler process-tree termination', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-fence-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeBeforeExitConfirmation: true });
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -498,7 +498,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('confirms process-tree absence after a signal-send race during normal shutdown', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-close-race-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeAfterSignalFailure: true });
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -542,7 +542,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('preserves signal failures when process-tree absence cannot be confirmed', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-signal-failure-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeOnKill: false });
     child.kill.mockImplementation((signal: NodeJS.Signals = 'SIGTERM') => {
       throw Object.assign(new Error(`${signal} kill EPERM`), {
@@ -586,7 +586,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('refuses a replacement generation when prior exit cleanup cannot confirm termination', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-prior-tree-'));
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeOnKill: false });
     const spawnProcess = vi.fn(() => {
       queueMicrotask(() => child.emit('spawn'));

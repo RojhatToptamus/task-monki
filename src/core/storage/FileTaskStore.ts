@@ -7,16 +7,11 @@ import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
   AgentItemRecord,
-  AgentItemStatus,
   AgentProtocolMessageReference,
   AgentPlanRevisionRecord,
   AgentRunMode,
   AgentServerInstance,
-  AgentServerStatus,
   AgentSessionRecord,
-  AgentSettingsObservationRecord,
-  AgentSubagentObservationRecord,
-  AgentSubagentStatus,
   AgentUsageSnapshotRecord,
   ArtifactKind,
   ArtifactRecord,
@@ -46,7 +41,6 @@ import type {
   GitSnapshotRecord,
   GitHubRepositoryRecord,
   InteractionRequestRecord,
-  InteractionRequestStatus,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   PreviewApprovalRecord,
@@ -92,10 +86,6 @@ import {
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import {
-  AgentProtocolJournal,
-  DEFAULT_AGENT_PROTOCOL_JOURNAL_LIMITS
-} from '../agent/journal/AgentProtocolJournal';
-import {
   enforcePosixMode,
   hasNoGroupOrOtherPosixAccess,
   isOwnedByCurrentUser,
@@ -126,17 +116,10 @@ import {
   releaseStoreOwnershipLease,
   type StoreOwnershipLease
 } from './StoreOwnershipLease';
-
-export interface CreateAgentSessionInput {
-  task: Task;
-  iteration: TaskIteration;
-  worktree: WorktreeRecord;
-  runtimeId: string;
-  role?: AgentSessionRecord['role'];
-  requestedSettings?: AgentExecutionSettings;
-  parentSessionId?: string;
-  forkedFromSessionId?: string;
-}
+import type {
+  TaskAgentRuntimeAccess,
+  TaskAgentRuntimeSnapshot
+} from '../agent/AgentRuntimeStore';
 
 export interface CreateTaskStoreInput extends CreateTaskRequest {
   /**
@@ -144,19 +127,6 @@ export interface CreateTaskStoreInput extends CreateTaskRequest {
    * resolved settings. It is never copied into the durable task record.
    */
   creationFingerprintInput?: CreateTaskRequest;
-}
-
-export interface CreateRunInput {
-  task: Task;
-  session: AgentSessionRecord;
-  mode: AgentRunMode;
-  prompt: string;
-  serverInstanceId?: string;
-  generationKey?: string;
-  retryOfRunId?: string;
-  continuedFromRunId?: string;
-  requestedSettings?: AgentExecutionSettings;
-  beforeGitSnapshotId?: string;
 }
 
 export interface ManagedDesignRepositoryInput {
@@ -233,60 +203,9 @@ export interface DeleteTaskStorageResult {
   removedManagedRepository?: Repository;
 }
 
-export type CreateInteractionRequestInput = Omit<
-  InteractionRequestRecord,
-  'id' | 'status' | 'requestedAt'
->;
-
 export interface CreateForkedAlternativeTaskInput extends CreateTaskRequest {
   sourceTaskId: string;
   sourceRunId: string;
-}
-
-export interface CreateObservedSubagentRunInput {
-  session: AgentSessionRecord;
-  providerTurnId: string;
-  serverInstanceId: string;
-  parentRunId?: string;
-  prompt?: string;
-  requestedSettings?: AgentExecutionSettings;
-}
-
-export interface ObserveSubagentInput {
-  parentSessionId: string;
-  parentRunId?: string;
-  providerChildSessionId: string;
-  providerParentSessionId?: string;
-  providerForkedFromSessionId?: string;
-  source: AgentSubagentObservationRecord['source'];
-  status?: AgentSubagentStatus;
-  delegatedPrompt?: string;
-  requestedSettings?: AgentExecutionSettings;
-  providerSessionTreeId?: string;
-  providerNickname?: string;
-  providerRole?: string;
-  agentPath?: string;
-  materialized?: boolean;
-  rawMessage: AgentProtocolMessageReference;
-}
-
-export interface CreateAgentServerInput {
-  runtimeId: string;
-  runtimeKind: AgentServerInstance['runtimeKind'];
-  transport: AgentServerInstance['transport'];
-  executable: string;
-  argv: string[];
-  runtimeVersion?: string;
-  schemaVersion?: string;
-  schemaHash?: string;
-  runtimeResolution?: AgentServerInstance['runtimeResolution'];
-}
-
-export const DEFAULT_UNREFERENCED_TERMINAL_AGENT_SERVER_LIMIT = 8;
-
-export interface FileTaskStoreOptions {
-  /** Newest unreferenced terminal server diagnostics retained across runtimes. */
-  maxUnreferencedTerminalAgentServers?: number;
 }
 
 interface PrSyncInput {
@@ -295,81 +214,6 @@ interface PrSyncInput {
   reviews: Omit<ReviewRollupRecord, 'id' | 'observedAt'>;
   merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
 }
-
-type RunUpdate = Partial<
-  Pick<
-    RunRecord,
-    | 'providerTurnId'
-    | 'serverInstanceId'
-    | 'status'
-    | 'observedSettings'
-    | 'recoveryState'
-    | 'afterGitSnapshotId'
-    | 'terminalReason'
-    | 'providerTerminalSource'
-    | 'providerTerminalRawMessage'
-    | 'lastEventAt'
-    | 'endedAt'
-    | 'finalArtifactId'
-    | 'finalMessage'
-    | 'attachmentSubmissions'
-  >
->;
-
-type AgentServerUpdate = Partial<
-  Pick<
-    AgentServerInstance,
-    | 'status'
-    | 'pid'
-    | 'runtimeVersion'
-    | 'schemaVersion'
-    | 'schemaHash'
-    | 'initializedAt'
-    | 'lastHealthAt'
-    | 'disconnectedAt'
-    | 'exitedAt'
-    | 'exitCode'
-    | 'signal'
-    | 'exitReason'
-  >
->;
-
-type AgentSessionUpdate = Partial<
-  Pick<
-    AgentSessionRecord,
-    | 'providerSessionId'
-    | 'providerSessionTreeId'
-    | 'parentSessionId'
-    | 'forkedFromSessionId'
-    | 'providerParentSessionId'
-    | 'providerForkedFromSessionId'
-    | 'parentRunId'
-    | 'relationshipState'
-    | 'relationshipDetail'
-    | 'providerNickname'
-    | 'providerRole'
-    | 'delegatedPrompt'
-    | 'agentPath'
-    | 'subagentStatus'
-    | 'status'
-    | 'materialized'
-    | 'observedSettings'
-    | 'requestedSettings'
-    | 'lastAttachedAt'
-  >
->;
-
-type InteractionRequestUpdate = Partial<
-  Pick<
-    InteractionRequestRecord,
-    | 'status'
-    | 'decision'
-    | 'responseRawMessage'
-    | 'resolution'
-    | 'respondedAt'
-    | 'resolvedAt'
-  >
->;
 
 function completionPolicyAfterPullRequestSync(
   task: Task,
@@ -716,9 +560,21 @@ function isCanonicalStoreTimestamp(value: unknown): value is string {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
-type PersistedState = Omit<Partial<StoreState>, 'schemaVersion'> & {
-  schemaVersion?: unknown;
-};
+const TASK_RUNTIME_PROJECTION_KEYS = [
+  'runs',
+  'agentServers',
+  'agentSessions',
+  'agentItems',
+  'agentGoalSnapshots',
+  'agentPlanRevisions',
+  'agentUsageSnapshots',
+  'agentSettingsObservations',
+  'agentSubagentObservations',
+  'interactionRequests'
+] as const satisfies readonly (keyof StoreState)[];
+
+type TaskRuntimeProjectionKey = (typeof TASK_RUNTIME_PROJECTION_KEYS)[number];
+type PersistedTaskState = Omit<StoreState, TaskRuntimeProjectionKey>;
 
 export type TaskCreationRequestErrorCode =
   | 'TASK_CREATION_INVALID_REQUEST'
@@ -761,7 +617,6 @@ export class FileTaskStore {
   private readonly storePath: string;
   private readonly leasePath: string;
   private readonly artifactsDir: string;
-  private readonly protocolJournal: AgentProtocolJournal;
   private readonly attachmentFiles: AttachmentFileStore;
   private state: StoreState = createEmptyState();
   private publishedState: StoreState = this.state;
@@ -776,34 +631,53 @@ export class FileTaskStore {
   private readonly mutationContext = new AsyncLocalStorage<boolean>();
   private readonly ownedIoContext = new AsyncLocalStorage<boolean>();
   private readonly activeOwnedIo = new Set<Promise<unknown>>();
-  private readonly maxUnreferencedTerminalAgentServers: number;
+  private taskRuntime?: TaskAgentRuntimeAccess;
 
-  constructor(
-    private readonly baseDir: string,
-    options: FileTaskStoreOptions = {}
-  ) {
-    const maxUnreferencedTerminalAgentServers =
-      options.maxUnreferencedTerminalAgentServers ??
-      DEFAULT_UNREFERENCED_TERMINAL_AGENT_SERVER_LIMIT;
-    if (
-      !Number.isSafeInteger(maxUnreferencedTerminalAgentServers) ||
-      maxUnreferencedTerminalAgentServers < 0
-    ) {
-      throw new Error(
-        'Unreferenced terminal agent server retention must be a non-negative integer.'
-      );
-    }
-    this.maxUnreferencedTerminalAgentServers =
-      maxUnreferencedTerminalAgentServers;
+  constructor(private readonly baseDir: string) {
     this.storePath = path.join(baseDir, 'store.json');
     this.leasePath = path.join(baseDir, STORE_OWNERSHIP_LEASE_FILE);
     this.artifactsDir = path.join(baseDir, 'artifacts');
-    this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
     this.attachmentFiles = new AttachmentFileStore(baseDir);
   }
 
   getStoreIdentity(): string {
     return createHash('sha256').update(path.resolve(this.baseDir)).digest('hex');
+  }
+
+  getStorageRoot(): string {
+    return this.baseDir;
+  }
+
+  /**
+   * Binds the canonical runtime owner. Runtime records remain a derived view
+   * and are never written to the Task store file.
+   */
+  bindAgentRuntime(runtime: TaskAgentRuntimeAccess): void {
+    if (this.taskRuntime && this.taskRuntime !== runtime) {
+      throw new Error('The Task store already has an agent runtime owner.');
+    }
+    this.taskRuntime = runtime;
+  }
+
+  refreshAgentRuntimeProjection(): Promise<void> {
+    if (!this.taskRuntime) return Promise.resolve();
+    return this.serializeMutation(() => this.refreshAgentRuntimeProjectionInternal());
+  }
+
+  private async refreshAgentRuntimeProjectionInternal(): Promise<void> {
+    if (!this.taskRuntime) return;
+    const projection = await this.taskRuntime.snapshot();
+    const projected = withTaskRuntimeProjection(this.state, projection);
+    validatePersistedRelationships(projected);
+    validatePersistedDesignRelationships(projected);
+    validatePersistedRuntimeIdentity(projected);
+    this.state = projected;
+    this.publishCurrentState();
+  }
+
+  private publishCurrentState(): void {
+    this.publishedState = this.state;
+    this.publishedSnapshotJson = JSON.stringify(this.state);
   }
 
   /** Registers durable composer drafts before the first store initialization. */
@@ -883,25 +757,17 @@ export class FileTaskStore {
         await this.reconcileArtifacts();
         await this.persist();
       } else {
-        const persisted = JSON.parse(raw) as PersistedState;
-        const normalized = normalizeLoadedState(requireCurrentState(persisted));
+        const normalized = normalizeLoadedState(requireCurrentState(JSON.parse(raw)));
         this.state = normalized.state;
         await this.attachmentFiles.reconcile(
           this.state.attachments,
           this.retainedAttachmentDraftIds
         );
         await this.reconcileArtifacts();
-        const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
-        if (
-          normalized.changed ||
-          prunedServerIds.length > 0
-        ) {
+        if (normalized.changed) {
           await this.persist();
         }
       }
-      await this.protocolJournal.reconcileServers(
-        this.state.agentServers.map((server) => server.id)
-      );
       if (this.publishedState !== this.state) {
         this.publishedState = this.state;
         this.publishedSnapshotJson = JSON.stringify(this.state);
@@ -924,10 +790,7 @@ export class FileTaskStore {
     await this.initialization?.catch(() => undefined);
     await this.mutationQueue.catch(() => undefined);
     await Promise.allSettled([...this.activeOwnedIo]);
-    const closeResults = await Promise.allSettled([
-      this.attachmentFiles.close(),
-      this.protocolJournal.close()
-    ]);
+    const closeResults = await Promise.allSettled([this.attachmentFiles.close()]);
     const failures = closeResults.flatMap((result) =>
       result.status === 'rejected' ? [result.reason] : []
     );
@@ -1049,11 +912,13 @@ export class FileTaskStore {
 
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
+    await this.refreshAgentRuntimeProjection();
     return JSON.parse(this.publishedSnapshotJson) as TaskSnapshot;
   }
 
   async getBoardSnapshot(): Promise<BoardSnapshot> {
     await this.init();
+    await this.refreshAgentRuntimeProjection();
     const state = this.publishedState;
     return clone({
       schemaVersion: state.schemaVersion,
@@ -1076,6 +941,7 @@ export class FileTaskStore {
 
   async listDesigns(): Promise<DesignListItem[]> {
     await this.init();
+    await this.refreshAgentRuntimeProjection();
     const state = this.publishedState;
     return clone(
       state.tasks
@@ -1091,6 +957,7 @@ export class FileTaskStore {
 
   async getDesignDetail(designId: string): Promise<DesignDetailSnapshot> {
     await this.init();
+    await this.refreshAgentRuntimeProjection();
     const state = this.publishedState;
     const task = state.tasks.find(
       (candidate) => candidate.id === designId && candidate.kind === 'DESIGN'
@@ -1200,6 +1067,7 @@ export class FileTaskStore {
     input: ListDesignConversationRequest
   ): Promise<DesignConversationPage> {
     await this.init();
+    await this.refreshAgentRuntimeProjection();
     const state = this.publishedState;
     const task = state.tasks.find(
       (candidate) => candidate.id === input.designId && candidate.kind === 'DESIGN'
@@ -1210,6 +1078,7 @@ export class FileTaskStore {
 
   async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
     await this.init();
+    await this.refreshAgentRuntimeProjection();
     const state = this.publishedState;
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) {
@@ -1681,6 +1550,12 @@ export class FileTaskStore {
     return clone(this.state.tasks.find((task) => task.id === taskId));
   }
 
+  /** Domain-only ids used before the runtime projection is safe to join. */
+  async listTaskIds(): Promise<string[]> {
+    await this.init();
+    return this.state.tasks.map((task) => task.id);
+  }
+
   async getPreviewPlan(planId: string): Promise<PreviewPlanRecord | undefined> {
     await this.init();
     return clone(this.state.previewPlans.find((plan) => plan.id === planId));
@@ -2080,6 +1955,7 @@ export class FileTaskStore {
   }> {
     return this.serializeMutation(async () => {
       await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
       this.assertPreviewGenerationReferences(input.candidate);
       if (input.replaced) this.assertPreviewGenerationReferences(input.replaced);
       const storedCandidate = this.state.previewGenerations.find(
@@ -2435,6 +2311,7 @@ export class FileTaskStore {
 
   async getRun(runId: string): Promise<RunRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) return this.taskRuntime.getRun(runId);
     return clone(this.state.runs.find((run) => run.id === runId));
   }
 
@@ -2443,6 +2320,9 @@ export class FileTaskStore {
     providerTurnId: string
   ): Promise<RunRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) {
+      return this.taskRuntime.getRunByProviderTurnId(runtimeId, providerTurnId);
+    }
     return clone(
       this.state.runs.find(
         (run) => run.runtimeId === runtimeId && run.providerTurnId === providerTurnId
@@ -2452,6 +2332,7 @@ export class FileTaskStore {
 
   async getActiveRunForSession(sessionId: string): Promise<RunRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) return this.taskRuntime.getActiveRunForSession(sessionId);
     return clone(
       this.state.runs.find(
         (run) =>
@@ -2468,74 +2349,6 @@ export class FileTaskStore {
     );
   }
 
-  async updateRun(
-    runId: string,
-    update: RunUpdate
-  ): Promise<RunRecord> {
-    return this.serializeMutation(() => this.updateRunInternal(runId, update));
-  }
-
-  private async updateRunInternal(
-    runId: string,
-    update: RunUpdate
-  ): Promise<RunRecord> {
-    await this.init();
-    const existing = this.state.runs.find((run) => run.id === runId);
-    if (!existing) {
-      throw new Error(`Run not found: ${runId}`);
-    }
-    const stored = { ...existing, ...update };
-    if (stored.serverInstanceId) {
-      assertServerRuntime(
-        this.state,
-        stored.runtimeId,
-        stored.serverInstanceId,
-        'Run'
-      );
-    }
-    if (
-      stored.providerTurnId &&
-      this.state.runs.some(
-        (run) =>
-          run.id !== stored.id &&
-          run.runtimeId === stored.runtimeId &&
-          run.providerTurnId === stored.providerTurnId
-      )
-    ) {
-      throw new Error(
-        `Provider turn ${stored.providerTurnId} is already owned by another ${stored.runtimeId} run.`
-      );
-    }
-    let designReferences = this.state.designReferences;
-    if (
-      existing.mode === 'DESIGN' &&
-      existing.generationKey &&
-      update.attachmentSubmissions?.length
-    ) {
-      const turn = this.requireDesignTurn(existing.taskId, existing.generationKey);
-      const selectedReferenceIds = new Set(turn.referenceIds);
-      const deliveryTimeByAttachment = new Map(
-        update.attachmentSubmissions.map((submission) => [
-          submission.attachmentId,
-          submission.submittedAt
-        ])
-      );
-      designReferences = this.state.designReferences.map((reference) => {
-        const deliveredAt = deliveryTimeByAttachment.get(reference.attachmentId);
-        return selectedReferenceIds.has(reference.id) && deliveredAt && !reference.firstDeliveredAt
-          ? { ...reference, firstDeliveredAt: deliveredAt }
-          : reference;
-      });
-    }
-    this.state = {
-      ...this.state,
-      runs: this.state.runs.map((run) => (run.id === runId ? stored : run)),
-      designReferences
-    };
-    await this.persistSnapshot();
-    return clone(stored);
-  }
-
   async getAgentServer(serverInstanceId: string): Promise<AgentServerInstance | undefined> {
     await this.init();
     return clone(this.state.agentServers.find((server) => server.id === serverInstanceId));
@@ -2543,6 +2356,7 @@ export class FileTaskStore {
 
   async getAgentSession(sessionId: string): Promise<AgentSessionRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) return this.taskRuntime.getAgentSession(sessionId);
     return clone(this.state.agentSessions.find((session) => session.id === sessionId));
   }
 
@@ -2551,6 +2365,9 @@ export class FileTaskStore {
     providerSessionId: string
   ): Promise<AgentSessionRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) {
+      return this.taskRuntime.getAgentSessionByProviderId(runtimeId, providerSessionId);
+    }
     return clone(
       this.state.agentSessions.find(
         (session) =>
@@ -2564,6 +2381,12 @@ export class FileTaskStore {
     providerRequestId: string | number
   ): Promise<InteractionRequestRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) {
+      return this.taskRuntime.getInteractionRequestByProviderId(
+        serverInstanceId,
+        providerRequestId
+      );
+    }
     return clone(
       this.state.interactionRequests.find(
         (request) =>
@@ -2577,6 +2400,9 @@ export class FileTaskStore {
     interactionRequestId: string
   ): Promise<InteractionRequestRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) {
+      return this.taskRuntime.getInteractionRequest(interactionRequestId);
+    }
     return clone(
       this.state.interactionRequests.find(
         (request) => request.id === interactionRequestId
@@ -2586,6 +2412,7 @@ export class FileTaskStore {
 
   async getAgentItemsForRun(runId: string): Promise<AgentItemRecord[]> {
     await this.init();
+    if (this.taskRuntime) return this.taskRuntime.getAgentItemsForRun(runId);
     return clone(this.state.agentItems.filter((item) => item.runId === runId));
   }
 
@@ -2594,6 +2421,9 @@ export class FileTaskStore {
     providerItemId: string
   ): Promise<AgentItemRecord | undefined> {
     await this.init();
+    if (this.taskRuntime) {
+      return this.taskRuntime.getAgentItemByProviderId(runId, providerItemId);
+    }
     return clone(
       this.state.agentItems.find(
         (item) => item.runId === runId && item.providerItemId === providerItemId
@@ -2639,13 +2469,33 @@ export class FileTaskStore {
     iterationId: string
   ): Promise<AgentSessionRecord | undefined> {
     await this.init();
+    await this.refreshAgentRuntimeProjection();
+    const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+    const sessions = this.state.agentSessions.filter(
+      (session) =>
+        session.taskId === taskId &&
+        session.iterationId === iterationId &&
+        session.role === 'PRIMARY'
+    );
+    const currentSessionId =
+      task?.currentIterationId === iterationId
+        ? task.currentAgentSessionId
+        : undefined;
+    const current = currentSessionId
+      ? sessions.find((session) => session.id === currentSessionId)
+      : undefined;
+    if (currentSessionId && !current) {
+      throw new Error('Task current agent session ownership is inconsistent.');
+    }
     return clone(
-      this.state.agentSessions.find(
-        (session) =>
-          session.taskId === taskId &&
-          session.iterationId === iterationId &&
-          session.role === 'PRIMARY'
-      )
+      current ??
+        sessions
+          .sort(
+            (left, right) =>
+              left.createdAt.localeCompare(right.createdAt) ||
+              left.updatedAt.localeCompare(right.updatedAt)
+          )
+          .at(-1)
     );
   }
 
@@ -3526,13 +3376,21 @@ export class FileTaskStore {
     generationKey: string
   ): Promise<RunRecord | undefined> {
     await this.init();
+    const candidates = this.publishedState.runs.filter(
+      (run) =>
+        run.taskId === taskId &&
+        run.mode === 'DESIGN' &&
+        run.generationKey === generationKey
+    );
+    const linkedRunId = this.publishedState.designTurns.find(
+      (turn) => turn.designId === taskId && turn.id === generationKey
+    )?.runId;
+    const retriedRunIds = new Set(
+      candidates.flatMap((run) => (run.retryOfRunId ? [run.retryOfRunId] : []))
+    );
     return clone(
-      this.publishedState.runs.find(
-        (run) =>
-          run.taskId === taskId &&
-          run.mode === 'DESIGN' &&
-          run.generationKey === generationKey
-      )
+      candidates.find((run) => run.id === linkedRunId) ??
+        candidates.find((run) => !retriedRunIds.has(run.id))
     );
   }
 
@@ -3581,6 +3439,7 @@ export class FileTaskStore {
   ): Promise<DesignTurn> {
     return this.serializeMutation(async () => {
       await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
       const design = this.requireDesign(input.designId);
       const turn = this.requireDesignTurn(input.designId, input.turnId);
       if (turn.outcome !== undefined) {
@@ -3622,6 +3481,7 @@ export class FileTaskStore {
   ): Promise<DesignTurn> {
     return this.serializeMutation(async () => {
       await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
       const design = this.requireDesign(input.designId);
       const turn = this.requireDesignTurn(input.designId, input.turnId);
       if (turn.outcome !== undefined || !turn.runId) {
@@ -3693,6 +3553,7 @@ export class FileTaskStore {
   async settleDesignTurn(input: SettleDesignTurnInput): Promise<DesignTurn> {
     return this.serializeMutation(async () => {
       await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
       const design = this.requireDesign(input.designId);
       const turn = this.requireDesignTurn(input.designId, input.turnId);
       const failureReason = normalizedOptionalString(input.failureReason);
@@ -3871,8 +3732,9 @@ export class FileTaskStore {
     );
     const artifactsToDelete = this.state.artifacts.filter(
       (artifact) =>
-        artifact.taskId === taskId ||
-        (artifact.runId ? runIds.has(artifact.runId) : false)
+        !TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind) &&
+        (artifact.taskId === taskId ||
+          (artifact.runId ? runIds.has(artifact.runId) : false))
     );
     const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
     const now = new Date().toISOString();
@@ -3887,7 +3749,6 @@ export class FileTaskStore {
     );
     const previousState = this.state;
     let publishedWithoutDirectorySync = false;
-    let prunedServerIds: string[] = [];
 
     try {
       this.state = {
@@ -4014,8 +3875,6 @@ export class FileTaskStore {
           (attachment) => attachment.taskId !== taskId
         )
       };
-      prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
-
       publishedWithoutDirectorySync = !(await this.persistSnapshot());
     } catch (error) {
       this.state = previousState;
@@ -4025,7 +3884,6 @@ export class FileTaskStore {
       // Files are removed only after the parent-directory sync proves the
       // record deletion durable. Startup retries cleanup after later failures.
       await this.attachmentFiles.discardTaskFiles(taskId).catch(() => undefined);
-      await this.cleanupPrunedServerJournals(prunedServerIds);
       await Promise.allSettled(
         artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path))
       );
@@ -4588,112 +4446,6 @@ export class FileTaskStore {
     return existing;
   }
 
-  async createAgentServer(input: CreateAgentServerInput): Promise<AgentServerInstance> {
-    return this.serializeMutation(() => this.createAgentServerInternal(input));
-  }
-
-  private async createAgentServerInternal(
-    input: CreateAgentServerInput
-  ): Promise<AgentServerInstance> {
-    await this.init();
-    if (!isRuntimeId(input.runtimeId)) {
-      throw new Error('Agent server runtime id is invalid.');
-    }
-
-    const now = new Date().toISOString();
-    const id = randomUUID();
-    const server: AgentServerInstance = {
-      id,
-      runtimeId: input.runtimeId,
-      runtimeKind: input.runtimeKind,
-      transport: input.transport,
-      status: 'STARTING',
-      executable: input.executable,
-      argv: [...input.argv],
-      runtimeVersion: input.runtimeVersion,
-      schemaVersion: input.schemaVersion,
-      schemaHash: input.schemaHash,
-      runtimeResolution: clone(input.runtimeResolution),
-      protocolJournalPath: this.protocolJournal.pathFor(id),
-      startedAt: now
-    };
-
-    this.state = {
-      ...this.state,
-      agentServers: [server, ...this.state.agentServers]
-    };
-    await this.persistSnapshot();
-    return clone(server);
-  }
-
-  async updateAgentServer(
-    serverInstanceId: string,
-    update: AgentServerUpdate
-  ): Promise<AgentServerInstance> {
-    return this.serializeMutation(() =>
-      this.updateAgentServerInternal(serverInstanceId, update)
-    );
-  }
-
-  private async updateAgentServerInternal(
-    serverInstanceId: string,
-    update: AgentServerUpdate
-  ): Promise<AgentServerInstance> {
-    await this.init();
-    const existing = this.state.agentServers.find((server) => server.id === serverInstanceId);
-    if (!existing) {
-      throw new Error(`Agent server instance not found: ${serverInstanceId}`);
-    }
-    validateAgentServerTransition(existing.status, update.status);
-    const stored = { ...existing, ...update };
-    this.state = {
-      ...this.state,
-      agentServers: this.state.agentServers.map((server) =>
-        server.id === serverInstanceId ? stored : server
-      )
-    };
-    const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
-    await this.persistSnapshot();
-    await this.cleanupPrunedServerJournals(prunedServerIds);
-    return clone(stored);
-  }
-
-  appendProtocolMessage(
-    serverInstanceId: string,
-    direction: AgentProtocolMessageReference['direction'],
-    raw: string,
-    metadata?: Record<string, unknown>
-  ): Promise<AgentProtocolMessageReference> {
-    return this.withOwnedIo(() => {
-      if (!this.state.agentServers.some((server) => server.id === serverInstanceId)) {
-        throw new Error('Protocol journal server instance is not owned by this store.');
-      }
-      return this.protocolJournal.append(serverInstanceId, direction, raw, metadata);
-    });
-  }
-
-  readProtocolMessage(reference: AgentProtocolMessageReference) {
-    return this.withOwnedIo(() => {
-      if (
-        !Number.isInteger(reference.sequence) ||
-        reference.sequence <= 0 ||
-        !Number.isInteger(reference.byteOffset) ||
-        reference.byteOffset < 0 ||
-        !Number.isInteger(reference.byteLength) ||
-        reference.byteLength <= 0 ||
-        reference.byteLength > DEFAULT_AGENT_PROTOCOL_JOURNAL_LIMITS.maxEntryBytes ||
-        (reference.segment !== undefined &&
-          (!Number.isSafeInteger(reference.segment) || reference.segment < 0))
-      ) {
-        throw new Error('Protocol journal reference is invalid.');
-      }
-      if (!this.state.agentServers.some((server) => server.id === reference.serverInstanceId)) {
-        throw new Error('Protocol journal server instance is not owned by this store.');
-      }
-      return this.protocolJournal.read(reference);
-    });
-  }
-
   async getLatestAgentGoalSnapshot(
     sessionId: string
   ): Promise<AgentGoalSnapshotRecord | undefined> {
@@ -4705,1167 +4457,224 @@ export class FileTaskStore {
     );
   }
 
-  async recordAgentGoalSnapshot(
-    record: Omit<AgentGoalSnapshotRecord, 'id' | 'observedAt'>
-  ): Promise<AgentGoalSnapshotRecord> {
-    return this.serializeMutation(() => this.recordAgentGoalSnapshotInternal(record));
-  }
-
-  private async recordAgentGoalSnapshotInternal(
-    record: Omit<AgentGoalSnapshotRecord, 'id' | 'observedAt'>
-  ): Promise<AgentGoalSnapshotRecord> {
-    await this.init();
-    assertRuntimeOwnedAgentRecord(this.state, record, 'Agent goal snapshot');
-    const stored: AgentGoalSnapshotRecord = {
-      ...record,
-      id: randomUUID(),
-      observedAt: new Date().toISOString()
-    };
-    this.state = {
-      ...this.state,
-      agentGoalSnapshots: [stored, ...this.state.agentGoalSnapshots]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type:
-          stored.source === 'PROVIDER_CLEARED'
-            ? 'AGENT_GOAL_CLEARED'
-            : stored.source === 'SYNC_ERROR'
-              ? 'AGENT_GOAL_SYNC_FAILED'
-              : 'AGENT_GOAL_UPDATED',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        agentSessionId: stored.sessionId,
-        source: 'provider',
-        payload: {
-          syncState: stored.syncState,
-          providerStatus: stored.providerStatus,
-          source: stored.source
-        }
-      }),
-      false
-    );
-    await this.persistSnapshot();
-    return clone(stored);
-  }
-
-  async recordAgentPlanRevision(
-    record: Omit<AgentPlanRevisionRecord, 'id' | 'revision' | 'observedAt'>
-  ): Promise<AgentPlanRevisionRecord> {
-    return this.serializeMutation(() => this.recordAgentPlanRevisionInternal(record));
-  }
-
-  private async recordAgentPlanRevisionInternal(
-    record: Omit<AgentPlanRevisionRecord, 'id' | 'revision' | 'observedAt'>
-  ): Promise<AgentPlanRevisionRecord> {
-    await this.init();
-    assertRuntimeOwnedAgentRecord(this.state, record, 'Agent plan revision', true);
-    const revision =
-      this.state.agentPlanRevisions.filter((item) => item.runId === record.runId)
-        .length + 1;
-    const stored: AgentPlanRevisionRecord = {
-      ...record,
-      id: randomUUID(),
-      revision,
-      observedAt: new Date().toISOString()
-    };
-    this.state = {
-      ...this.state,
-      agentPlanRevisions: [stored, ...this.state.agentPlanRevisions]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_PLAN_REVISED',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        runId: stored.runId,
-        agentSessionId: stored.sessionId,
-        source: 'provider',
-        payload: { revision: stored.revision, stepCount: stored.steps.length }
-      }),
-      false
-    );
-    await this.persistSnapshot();
-    return clone(stored);
-  }
-
-  async recordAgentUsageSnapshot(
-    record: Omit<AgentUsageSnapshotRecord, 'id' | 'observedAt'>
-  ): Promise<AgentUsageSnapshotRecord> {
-    return this.serializeMutation(() => this.recordAgentUsageSnapshotInternal(record));
-  }
-
-  private async recordAgentUsageSnapshotInternal(
-    record: Omit<AgentUsageSnapshotRecord, 'id' | 'observedAt'>
-  ): Promise<AgentUsageSnapshotRecord> {
-    await this.init();
-    assertRuntimeOwnedAgentRecord(this.state, record, 'Agent usage snapshot');
-    const stored: AgentUsageSnapshotRecord = {
-      ...record,
-      id: randomUUID(),
-      observedAt: new Date().toISOString()
-    };
-    this.state = {
-      ...this.state,
-      agentUsageSnapshots: [stored, ...this.state.agentUsageSnapshots]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_USAGE_UPDATED',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        runId: stored.runId,
-        agentSessionId: stored.sessionId,
-        source: 'provider',
-        payload: {
-          totalTokens: stored.total.totalTokens,
-          modelContextWindow: stored.modelContextWindow
-        }
-      }),
-      false
-    );
-    await this.persistSnapshot();
-    return clone(stored);
-  }
-
-  async recordAgentSettingsObservation(
-    record: Omit<AgentSettingsObservationRecord, 'id' | 'observedAt'>
-  ): Promise<AgentSettingsObservationRecord> {
-    return this.serializeMutation(() =>
-      this.recordAgentSettingsObservationInternal(record)
-    );
-  }
-
-  private async recordAgentSettingsObservationInternal(
-    record: Omit<AgentSettingsObservationRecord, 'id' | 'observedAt'>
-  ): Promise<AgentSettingsObservationRecord> {
-    await this.init();
-    const normalizedRecord = {
-      ...record,
-      settings: { ...record.settings, runtimeId: record.runtimeId }
-    };
-    assertRuntimeOwnedAgentRecord(
-      this.state,
-      normalizedRecord,
-      'Agent settings observation'
-    );
-    const stored: AgentSettingsObservationRecord = {
-      ...normalizedRecord,
-      id: randomUUID(),
-      observedAt: new Date().toISOString()
-    };
-    this.state = {
-      ...this.state,
-      agentSettingsObservations: [
-        stored,
-        ...this.state.agentSettingsObservations
-      ]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_SETTINGS_OBSERVED',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        runId: stored.runId,
-        agentSessionId: stored.sessionId,
-        source: 'provider',
-        payload: { source: stored.source, settings: stored.settings }
-      }),
-      false
-    );
-    await this.persistSnapshot();
-    return clone(stored);
-  }
-
-  async createAgentSession(input: CreateAgentSessionInput): Promise<AgentSessionRecord> {
-    return this.serializeMutation(() => this.createAgentSessionInternal(input));
-  }
-
-  private async createAgentSessionInternal(
-    input: CreateAgentSessionInput
+  /**
+   * Publishes the Task-owned link to a session that already exists in the
+   * canonical agent runtime store. Provider session state is never persisted
+   * by FileTaskStore.
+   */
+  async recordAgentSessionCreated(
+    session: AgentSessionRecord
   ): Promise<AgentSessionRecord> {
-    await this.init();
-    if (input.iteration.taskId !== input.task.id || input.worktree.taskId !== input.task.id) {
-      throw new Error('Agent session task, iteration, and worktree must have the same owner.');
-    }
-    if (input.worktree.iterationId !== input.iteration.id) {
-      throw new Error('Agent session worktree must belong to the selected iteration.');
-    }
-    const role = input.role ?? 'PRIMARY';
-    if (role !== 'REVIEW' && input.runtimeId !== input.task.runtimeId) {
-      throw new Error('Primary task work must use the task runtime.');
-    }
-    const existing =
-      role === 'PRIMARY'
-        ? this.state.agentSessions.find(
-            (session) =>
-              session.taskId === input.task.id &&
-              session.iterationId === input.iteration.id &&
-              session.role === 'PRIMARY'
-          )
-        : undefined;
-    if (existing) {
-      if (existing.runtimeId !== input.runtimeId) {
-        throw new Error('Existing primary session runtime does not match its task.');
-      }
-      return clone(existing);
-    }
-
-    const now = new Date().toISOString();
-    const session: AgentSessionRecord = {
-      id: randomUUID(),
-      taskId: input.task.id,
-      iterationId: input.iteration.id,
-      worktreeId: input.worktree.id,
-      runtimeId: input.runtimeId,
-      role,
-      parentSessionId: input.parentSessionId,
-      forkedFromSessionId: input.forkedFromSessionId,
-      relationshipState:
-        role === 'SUBAGENT'
-          ? input.parentSessionId
-            ? 'RESOLVED'
-            : 'UNRESOLVED'
-          : input.parentSessionId || input.forkedFromSessionId
-            ? 'RESOLVED'
-            : 'ROOT',
-      worktreePath: input.worktree.worktreePath,
-      status: 'NOT_MATERIALIZED',
-      materialized: false,
-      requestedSettings: { ...input.requestedSettings, runtimeId: input.runtimeId },
-      ownership: 'TASK_MONKI',
-      createdAt: now,
-      updatedAt: now
-    };
-
-    this.state = {
-      ...this.state,
-      agentSessions: [session, ...this.state.agentSessions],
-      tasks: this.state.tasks.map((task) =>
-        task.id === input.task.id && role === 'PRIMARY'
-          ? { ...task, currentAgentSessionId: session.id, updatedAt: now }
-          : task
-      )
-    };
-
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_SESSION_CREATED',
-        taskId: input.task.id,
-        iterationId: input.iteration.id,
-        worktreeId: input.worktree.id,
-        agentSessionId: session.id,
-        source: 'provider',
-        payload: {
-          runtimeId: session.runtimeId,
-          role: session.role,
-          worktreePath: session.worktreePath
-        }
-      }),
-      false
-    );
-    await this.persistSnapshot();
-    return clone(session);
-  }
-
-  async updateAgentSession(
-    sessionId: string,
-    update: AgentSessionUpdate
-  ): Promise<AgentSessionRecord> {
-    return this.serializeMutation(() =>
-      this.updateAgentSessionInternal(sessionId, update)
-    );
-  }
-
-  private async updateAgentSessionInternal(
-    sessionId: string,
-    update: AgentSessionUpdate
-  ): Promise<AgentSessionRecord> {
-    await this.init();
-    const existing = this.state.agentSessions.find((session) => session.id === sessionId);
-    if (!existing) {
-      throw new Error(`Agent session not found: ${sessionId}`);
-    }
-    const stored: AgentSessionRecord = {
-      ...existing,
-      ...update,
-      requestedSettings: update.requestedSettings
-        ? { ...update.requestedSettings, runtimeId: existing.runtimeId }
-        : existing.requestedSettings,
-      observedSettings: update.observedSettings
-        ? { ...update.observedSettings, runtimeId: existing.runtimeId }
-        : update.observedSettings === undefined && 'observedSettings' in update
-          ? undefined
-          : existing.observedSettings,
-      updatedAt: new Date().toISOString()
-    };
-    if (
-      stored.providerSessionId &&
-      this.state.agentSessions.some(
-        (session) =>
-          session.id !== stored.id &&
-          session.runtimeId === stored.runtimeId &&
-          session.providerSessionId === stored.providerSessionId
-      )
-    ) {
-      throw new Error(
-        `Provider session ${stored.providerSessionId} is already owned by another ${stored.runtimeId} session.`
+    return this.serializeMutation(async () => {
+      await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
+      const stored = this.state.agentSessions.find(
+        (candidate) => candidate.id === session.id
       );
-    }
-    this.state = {
-      ...this.state,
-      agentSessions: this.state.agentSessions.map((session) =>
-        session.id === sessionId ? stored : session
-      )
-    };
-    await this.persistSnapshot();
-    return clone(stored);
-  }
-
-  async observeSubagent(
-    input: ObserveSubagentInput
-  ): Promise<{
-    session: AgentSessionRecord;
-    observation: AgentSubagentObservationRecord;
-  }> {
-    return this.serializeMutation(() => this.observeSubagentInternal(input));
-  }
-
-  private async observeSubagentInternal(
-    input: ObserveSubagentInput
-  ): Promise<{
-    session: AgentSessionRecord;
-    observation: AgentSubagentObservationRecord;
-  }> {
-    await this.init();
-    const parent = this.state.agentSessions.find(
-      (session) => session.id === input.parentSessionId
-    );
-    if (!parent) {
-      throw new Error(`Parent agent session not found: ${input.parentSessionId}`);
-    }
-    assertProtocolReferenceRuntime(
-      this.state,
-      parent.runtimeId,
-      input.rawMessage,
-      'Subagent observation'
-    );
-    if (input.parentRunId) {
-      const parentRun = this.state.runs.find((run) => run.id === input.parentRunId);
+      if (!stored || JSON.stringify(stored) !== JSON.stringify(session)) {
+        throw new Error(
+          'Agent session must exist in the runtime store before Task ownership is linked.'
+        );
+      }
+      const task = this.state.tasks.find(
+        (candidate) => candidate.id === session.taskId
+      );
+      const iteration = this.state.iterations.find(
+        (candidate) => candidate.id === session.iterationId
+      );
+      const worktree = this.state.worktrees.find(
+        (candidate) => candidate.id === session.worktreeId
+      );
       if (
-        !parentRun ||
-        parentRun.sessionId !== parent.id ||
-        parentRun.runtimeId !== parent.runtimeId
+        !task ||
+        !iteration ||
+        iteration.taskId !== task.id ||
+        !worktree ||
+        worktree.taskId !== task.id ||
+        worktree.iterationId !== iteration.id ||
+        worktree.worktreePath !== session.worktreePath
       ) {
-        throw new Error('Subagent observation parent run ownership is inconsistent.');
+        throw new Error('Agent session Task ownership is inconsistent.');
       }
-    }
-
-    const existing = this.state.agentSessions.find(
-      (session) =>
-        session.runtimeId === parent.runtimeId &&
-        session.providerSessionId === input.providerChildSessionId
-    );
-    if (existing && existing.taskId !== parent.taskId) {
-      throw new Error(
-        `Provider child thread ${input.providerChildSessionId} is already owned by another task.`
+      if (session.role !== 'REVIEW' && session.runtimeId !== task.runtimeId) {
+        throw new Error('Primary Task work must use the Task runtime.');
+      }
+      const alreadyPublished = this.state.events.some(
+        (event) =>
+          event.type === 'AGENT_SESSION_CREATED' &&
+          event.agentSessionId === session.id
       );
-    }
+      if (alreadyPublished) return clone(stored);
 
-    const relationshipProblems = [
-      input.providerChildSessionId === parent.providerSessionId
-        ? 'Provider reported a thread as its own child.'
-        : undefined,
-      input.providerParentSessionId &&
-      parent.providerSessionId &&
-      input.providerParentSessionId !== parent.providerSessionId
-        ? `Supplied parent thread ${input.providerParentSessionId} does not match local parent ${parent.providerSessionId}.`
-        : undefined,
-      existing?.parentSessionId && existing.parentSessionId !== parent.id
-        ? `Child was already linked to local parent ${existing.parentSessionId}.`
-        : undefined,
-      existing?.parentRunId &&
-      input.parentRunId &&
-      existing.parentRunId !== input.parentRunId
-        ? `Child was already linked to parent run ${existing.parentRunId}.`
-        : undefined
-    ].filter((problem): problem is string => Boolean(problem));
-    const relationshipState =
-      relationshipProblems.length > 0 ? 'CONTRADICTORY' : 'RESOLVED';
-    const now = new Date().toISOString();
-    const requestedSettings = {
-      ...parent.requestedSettings,
-      ...(existing?.requestedSettings ?? {}),
-      ...(input.requestedSettings ?? {}),
-      runtimeId: parent.runtimeId
-    };
-    const stored: AgentSessionRecord = existing
-      ? {
-          ...existing,
-          role: 'SUBAGENT',
-          providerSessionTreeId:
-            input.providerSessionTreeId ?? existing.providerSessionTreeId,
-          parentSessionId:
-            relationshipState === 'RESOLVED'
-              ? existing.parentSessionId ?? parent.id
-              : existing.parentSessionId,
-          providerParentSessionId:
-            input.providerParentSessionId ?? existing.providerParentSessionId,
-          providerForkedFromSessionId:
-            input.providerForkedFromSessionId ??
-            existing.providerForkedFromSessionId,
-          parentRunId:
-            relationshipState === 'RESOLVED'
-              ? existing.parentRunId ?? input.parentRunId
-              : existing.parentRunId,
-          relationshipState,
-          relationshipDetail:
-            relationshipProblems.join(' ') || existing.relationshipDetail,
-          providerNickname: input.providerNickname ?? existing.providerNickname,
-          providerRole: input.providerRole ?? existing.providerRole,
-          delegatedPrompt:
-            existing.delegatedPrompt ?? input.delegatedPrompt,
-          agentPath: input.agentPath ?? existing.agentPath,
-          subagentStatus: input.status ?? existing.subagentStatus,
-          status:
-            input.status === 'RUNNING'
-              ? 'ACTIVE'
-              : input.status === 'ERRORED'
-                ? 'SYSTEM_ERROR'
-                : existing.status,
-          materialized: input.materialized ?? existing.materialized,
-          requestedSettings,
-          updatedAt: now
-        }
-      : {
-          id: randomUUID(),
-          taskId: parent.taskId,
-          iterationId: parent.iterationId,
-          worktreeId: parent.worktreeId,
-          runtimeId: parent.runtimeId,
-          role: 'SUBAGENT',
-          providerSessionId: input.providerChildSessionId,
-          providerSessionTreeId: input.providerSessionTreeId,
-          parentSessionId: relationshipState === 'RESOLVED' ? parent.id : undefined,
-          providerParentSessionId: input.providerParentSessionId,
-          providerForkedFromSessionId: input.providerForkedFromSessionId,
-          parentRunId:
-            relationshipState === 'RESOLVED' ? input.parentRunId : undefined,
-          relationshipState,
-          relationshipDetail: relationshipProblems.join(' ') || undefined,
-          providerNickname: input.providerNickname,
-          providerRole: input.providerRole,
-          delegatedPrompt: input.delegatedPrompt,
-          agentPath: input.agentPath,
-          subagentStatus: input.status,
-          worktreePath: parent.worktreePath,
-          status:
-            input.status === 'RUNNING'
-              ? 'ACTIVE'
-              : input.status === 'ERRORED'
-                ? 'SYSTEM_ERROR'
-                : 'UNKNOWN',
-          materialized: input.materialized ?? false,
-          requestedSettings,
-          ownership: 'TASK_MONKI',
-          createdAt: now,
-          updatedAt: now
+      const now = new Date().toISOString();
+      const currentRun = task.currentRunId
+        ? this.state.runs.find((run) => run.id === task.currentRunId)
+        : undefined;
+      // A replacement session becomes current with its run. Until then, keep
+      // the existing session and run pointers as one consistent pair.
+      if (
+        session.role === 'PRIMARY' &&
+        (!task.currentRunId || currentRun?.sessionId === session.id)
+      ) {
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((candidate) =>
+            candidate.id === task.id
+              ? {
+                  ...candidate,
+                  currentAgentSessionId: session.id,
+                  updatedAt: now
+                }
+              : candidate
+          )
         };
-
-    const observation: AgentSubagentObservationRecord = {
-      id: randomUUID(),
-      runtimeId: parent.runtimeId,
-      taskId: stored.taskId,
-      iterationId: stored.iterationId,
-      sessionId: stored.id,
-      parentSessionId: parent.id,
-      parentRunId: input.parentRunId,
-      providerChildSessionId: input.providerChildSessionId,
-      providerParentSessionId: input.providerParentSessionId,
-      providerForkedFromSessionId: input.providerForkedFromSessionId,
-      source: input.source,
-      relationshipState,
-      status: input.status,
-      delegatedPrompt: input.delegatedPrompt,
-      requestedSettings: input.requestedSettings,
-      providerNickname: input.providerNickname,
-      providerRole: input.providerRole,
-      agentPath: input.agentPath,
-      detail: relationshipProblems.join(' ') || undefined,
-      rawMessage: input.rawMessage,
-      observedAt: now
-    };
-
-    this.state = {
-      ...this.state,
-      agentSessions: existing
-        ? this.state.agentSessions.map((session) =>
-            session.id === existing.id ? stored : session
-          )
-        : [stored, ...this.state.agentSessions],
-      agentSubagentObservations: [
-        observation,
-        ...this.state.agentSubagentObservations
-      ]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type:
-          relationshipState === 'CONTRADICTORY'
-            ? 'AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED'
-            : existing
-              ? 'AGENT_SUBAGENT_UPDATED'
-              : 'AGENT_SUBAGENT_DISCOVERED',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        runId: input.parentRunId,
-        worktreeId: stored.worktreeId,
-        agentSessionId: stored.id,
-        source: 'provider',
-        payload: {
-          parentSessionId: parent.id,
-          providerChildSessionId: input.providerChildSessionId,
-          providerParentSessionId: input.providerParentSessionId,
-          source: input.source,
-          relationshipState,
-          status: input.status,
-          detail: observation.detail
-        }
-      }),
-      false
-    );
-    await this.persistSnapshot();
-    return { session: clone(stored), observation: clone(observation) };
-  }
-
-  async createRun(input: CreateRunInput): Promise<RunRecord> {
-    return this.serializeMutation(() => this.createRunInternal(input));
-  }
-
-  private async createRunInternal(input: CreateRunInput): Promise<RunRecord> {
-    await this.init();
-
-    const persistedTask = this.state.tasks.find(
-      (task) => task.id === input.task.id
-    );
-    if (!persistedTask) throw new Error('Run task does not exist.');
-    if (
-      (persistedTask.kind === 'DESIGN') !== (input.mode === 'DESIGN')
-    ) {
-      throw new Error('DESIGN runs and Design tasks must use each other exclusively.');
-    }
-    if (input.mode === 'DESIGN') {
-      const turn = input.generationKey
-        ? this.state.designTurns.find(
-            (candidate) =>
-              candidate.id === input.generationKey &&
-              candidate.designId === persistedTask.id &&
-              candidate.outcome === undefined
-          )
-        : undefined;
-      if (!turn) {
-        throw new Error('DESIGN run requires an unsettled DesignTurn generation key.');
       }
-      if (
-        this.state.runs.some(
-          (run) =>
-            run.taskId === persistedTask.id &&
-            run.mode === 'DESIGN' &&
-            run.generationKey === input.generationKey
-        )
-      ) {
-        throw new Error('A DESIGN Run already exists for this DesignTurn generation key.');
-      }
-    }
-    const persistedSession = this.state.agentSessions.find(
-      (session) => session.id === input.session.id
-    );
-    if (
-      !persistedSession ||
-      persistedSession.taskId !== input.session.taskId ||
-      persistedSession.iterationId !== input.session.iterationId ||
-      persistedSession.worktreeId !== input.session.worktreeId ||
-      persistedSession.runtimeId !== input.session.runtimeId ||
-      persistedSession.role !== input.session.role
-    ) {
-      throw new Error('Run session does not match its durable ownership record.');
-    }
-    if (input.session.taskId !== input.task.id) {
-      throw new Error('Run session must belong to the task.');
-    }
-    if (
-      input.session.runtimeId !== input.task.runtimeId &&
-      !(input.mode === 'REVIEW' && input.session.role === 'REVIEW')
-    ) {
-      throw new Error('Only detached review runs may use a runtime other than the task runtime.');
-    }
-    if (input.serverInstanceId) {
-      assertServerRuntime(
-        this.state,
-        input.session.runtimeId,
-        input.serverInstanceId,
-        'Run'
-      );
-    }
-
-    const now = new Date().toISOString();
-    const runId = randomUUID();
-    const promptArtifact = await this.createArtifactRecord(input.task.id, 'agent-prompt', { runId });
-    const outputArtifact = await this.createArtifactRecord(input.task.id, 'agent-output', { runId });
-    const diagnosticArtifact = await this.createArtifactRecord(input.task.id, 'agent-diagnostics', {
-      runId
-    });
-    await writeNewArtifactFiles(this.artifactsDir, [
-      { artifact: promptArtifact, content: input.prompt },
-      { artifact: outputArtifact, content: '' },
-      { artifact: diagnosticArtifact, content: '' }
-    ]);
-
-    const run: RunRecord = {
-      id: runId,
-      runtimeId: input.session.runtimeId,
-      taskId: input.task.id,
-      iterationId: input.session.iterationId,
-      worktreeId: input.session.worktreeId,
-      sessionId: input.session.id,
-      serverInstanceId: input.serverInstanceId,
-      mode: input.mode,
-      origin: 'TASK_MONKI',
-      generationKey: input.generationKey,
-      retryOfRunId: input.retryOfRunId,
-      continuedFromRunId: input.continuedFromRunId,
-      status: 'QUEUED',
-      recoveryState: 'NONE',
-      requestedSettings: {
-        ...(input.requestedSettings ?? input.session.requestedSettings),
-        runtimeId: input.session.runtimeId
-      },
-      promptArtifactId: promptArtifact.id,
-      outputArtifactId: outputArtifact.id,
-      diagnosticArtifactId: diagnosticArtifact.id,
-      beforeGitSnapshotId: input.beforeGitSnapshotId,
-      startedAt: now,
-      eventCount: 0
-    };
-    const bindsCurrentTask = input.mode !== 'REVIEW';
-    const advancesWorkflow = bindsCurrentTask && input.mode !== 'DESIGN';
-    const reviewedSnapshot = input.beforeGitSnapshotId
-      ? this.state.gitSnapshots.find((snapshot) => snapshot.id === input.beforeGitSnapshotId)
-      : undefined;
-
-    this.state = {
-      ...this.state,
-      tasks: this.state.tasks.map((existing) =>
-        existing.id === input.task.id
-          ? {
-              ...existing,
-              workflowPhase: advancesWorkflow ? 'IN_PROGRESS' : existing.workflowPhase,
-              currentRunId: bindsCurrentTask ? run.id : existing.currentRunId,
-              currentAgentSessionId: bindsCurrentTask
-                ? input.session.id
-                : existing.currentAgentSessionId,
-              currentIterationId: bindsCurrentTask
-                ? input.session.iterationId
-                : existing.currentIterationId,
-              currentWorktreeId: bindsCurrentTask
-                ? input.session.worktreeId
-                : existing.currentWorktreeId,
-              phaseVersion: advancesWorkflow ? existing.phaseVersion + 1 : existing.phaseVersion,
-              updatedAt: now
-            }
-          : existing
-      ),
-      runs: [run, ...this.state.runs],
-      artifacts: [
-        promptArtifact,
-        outputArtifact,
-        diagnosticArtifact,
-        ...this.state.artifacts
-      ]
-    };
-
-    if (advancesWorkflow) {
-      await this.appendEvent(
+      await this.appendEventInternal(
         createDomainEvent({
-          type: 'TRANSITION_REQUESTED',
-          taskId: input.task.id,
-          iterationId: input.session.iterationId,
-          runId: run.id,
-          worktreeId: input.session.worktreeId,
-          agentSessionId: input.session.id,
-          serverInstanceId: input.serverInstanceId,
-          source: 'ui',
-          payload: { fromPhase: persistedTask.workflowPhase, toPhase: 'IN_PROGRESS' }
+          type: 'AGENT_SESSION_CREATED',
+          taskId: task.id,
+          iterationId: iteration.id,
+          worktreeId: worktree.id,
+          agentSessionId: session.id,
+          source: 'provider',
+          payload: {
+            runtimeId: session.runtimeId,
+            role: session.role,
+            worktreePath: session.worktreePath
+          }
         }),
         false
       );
-    }
-
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_RUN_STARTED',
-        taskId: input.task.id,
-        iterationId: input.session.iterationId,
-        runId: run.id,
-        worktreeId: input.session.worktreeId,
-        agentSessionId: input.session.id,
-        serverInstanceId: input.serverInstanceId,
-        source: 'provider',
-        payload: {
-          mode: run.mode,
-          generationKey: run.generationKey,
-          requestedSettings: run.requestedSettings,
-          beforeGitSnapshotId: run.beforeGitSnapshotId,
-          reviewedHeadSha: reviewedSnapshot?.headSha,
-          reviewedDirtyFingerprint: reviewedSnapshot?.dirtyFingerprint
-        }
-      }),
-      false
-    );
-
-    try {
       await this.persistSnapshot();
-    } catch (error) {
-      await this.cleanupUnpublishedArtifacts([
-        promptArtifact,
-        outputArtifact,
-        diagnosticArtifact
-      ]);
-      throw error;
-    }
-    return clone(run);
-  }
-
-  async createObservedSubagentRun(
-    input: CreateObservedSubagentRunInput
-  ): Promise<RunRecord> {
-    return this.serializeMutation(() => this.createObservedSubagentRunInternal(input));
-  }
-
-  private async createObservedSubagentRunInternal(
-    input: CreateObservedSubagentRunInput
-  ): Promise<RunRecord> {
-    await this.init();
-    const existing = this.state.runs.find(
-      (run) =>
-        run.runtimeId === input.session.runtimeId &&
-        run.providerTurnId === input.providerTurnId
-    );
-    if (existing) {
-      if (existing.sessionId !== input.session.id) {
-        throw new Error(
-          `Provider turn ${input.providerTurnId} is already owned by another ${input.session.runtimeId} session.`
-        );
-      }
-      return clone(existing);
-    }
-    if (input.session.role !== 'SUBAGENT') {
-      throw new Error('Only observed subagent sessions may create observed child runs.');
-    }
-    const persistedSession = this.state.agentSessions.find(
-      (session) => session.id === input.session.id
-    );
-    if (
-      !persistedSession ||
-      persistedSession.runtimeId !== input.session.runtimeId ||
-      persistedSession.taskId !== input.session.taskId
-    ) {
-      throw new Error('Observed subagent run session ownership is inconsistent.');
-    }
-    assertServerRuntime(
-      this.state,
-      input.session.runtimeId,
-      input.serverInstanceId,
-      'Observed subagent run'
-    );
-
-    const now = new Date().toISOString();
-    const runId = randomUUID();
-    const prompt =
-      input.prompt ??
-      input.session.delegatedPrompt ??
-      'Provider-observed subagent turn.';
-    const promptArtifact = await this.createArtifactRecord(
-      input.session.taskId,
-      'agent-prompt',
-      { runId }
-    );
-    const outputArtifact = await this.createArtifactRecord(
-      input.session.taskId,
-      'agent-output',
-      { runId }
-    );
-    const diagnosticArtifact = await this.createArtifactRecord(
-      input.session.taskId,
-      'agent-diagnostics',
-      { runId }
-    );
-    await writeNewArtifactFiles(this.artifactsDir, [
-      { artifact: promptArtifact, content: prompt },
-      { artifact: outputArtifact, content: '' },
-      { artifact: diagnosticArtifact, content: '' }
-    ]);
-
-    const run: RunRecord = {
-      id: runId,
-      runtimeId: input.session.runtimeId,
-      taskId: input.session.taskId,
-      iterationId: input.session.iterationId,
-      worktreeId: input.session.worktreeId,
-      sessionId: input.session.id,
-      serverInstanceId: input.serverInstanceId,
-      providerTurnId: input.providerTurnId,
-      mode: 'SUBAGENT',
-      origin: 'PROVIDER_SUBAGENT',
-      parentRunId: input.parentRunId ?? input.session.parentRunId,
-      status: 'RUNNING',
-      recoveryState: 'NONE',
-      requestedSettings:
-        {
-          ...(input.requestedSettings ?? input.session.requestedSettings),
-          runtimeId: input.session.runtimeId
-        },
-      promptArtifactId: promptArtifact.id,
-      outputArtifactId: outputArtifact.id,
-      diagnosticArtifactId: diagnosticArtifact.id,
-      startedAt: now,
-      lastEventAt: now,
-      eventCount: 0
-    };
-    this.state = {
-      ...this.state,
-      runs: [run, ...this.state.runs],
-      artifacts: [
-        promptArtifact,
-        outputArtifact,
-        diagnosticArtifact,
-        ...this.state.artifacts
-      ]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_RUN_STARTED',
-        taskId: run.taskId,
-        iterationId: run.iterationId,
-        runId: run.id,
-        worktreeId: run.worktreeId,
-        agentSessionId: run.sessionId,
-        serverInstanceId: run.serverInstanceId,
-        source: 'provider',
-        payload: {
-          mode: run.mode,
-          origin: run.origin,
-          parentRunId: run.parentRunId,
-          providerTurnId: run.providerTurnId,
-          observedSubagent: true,
-          requestedSettings: run.requestedSettings
-        }
-      }),
-      false
-    );
-    try {
-      await this.persistSnapshot();
-    } catch (error) {
-      await this.cleanupUnpublishedArtifacts([
-        promptArtifact,
-        outputArtifact,
-        diagnosticArtifact
-      ]);
-      throw error;
-    }
-    return clone(run);
-  }
-
-  async upsertAgentItem(
-    item: Omit<AgentItemRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
-  ): Promise<AgentItemRecord> {
-    return this.serializeMutation(() => this.upsertAgentItemInternal(item));
-  }
-
-  private async upsertAgentItemInternal(
-    item: Omit<AgentItemRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
-  ): Promise<AgentItemRecord> {
-    await this.init();
-    const run = this.state.runs.find((candidate) => candidate.id === item.runId);
-    if (
-      !run ||
-      run.taskId !== item.taskId ||
-      run.iterationId !== item.iterationId ||
-      run.sessionId !== item.sessionId
-    ) {
-      throw new Error('Agent item ownership does not match its run.');
-    }
-    if (item.rawMessage) {
-      assertProtocolReferenceRuntime(
-        this.state,
-        run.runtimeId,
-        item.rawMessage,
-        'Agent item'
-      );
-    }
-    if (item.outputArtifactId) {
-      const outputArtifact = this.state.artifacts.find(
-        (artifact) => artifact.id === item.outputArtifactId
-      );
-      if (
-        !outputArtifact ||
-        outputArtifact.taskId !== item.taskId ||
-        outputArtifact.runId !== item.runId
-      ) {
-        throw new Error('Agent item output artifact ownership does not match its run.');
-      }
-    }
-
-    const existing = this.state.agentItems.find(
-      (candidate) =>
-        candidate.runId === item.runId &&
-        candidate.providerItemId === item.providerItemId
-    );
-    if (existing) {
-      validateAgentItemTransition(existing.status, item.status);
-    }
-    const now = new Date().toISOString();
-    const stored: AgentItemRecord = existing
-      ? {
-          ...existing,
-          ...item,
-          id: existing.id,
-          createdAt: existing.createdAt,
-          updatedAt: now
-        }
-      : {
-          ...item,
-          id: item.id ?? randomUUID(),
-          createdAt: now,
-          updatedAt: now
-        };
-
-    this.state = {
-      ...this.state,
-      agentItems: existing
-        ? this.state.agentItems.map((candidate) =>
-            candidate.id === existing.id ? stored : candidate
-          )
-        : [stored, ...this.state.agentItems]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_ITEM_UPDATED',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        runId: stored.runId,
-        worktreeId: run.worktreeId,
-        agentSessionId: stored.sessionId,
-        agentItemId: stored.id,
-        source: 'provider',
-        payload: {
-          providerItemId: stored.providerItemId,
-          type: stored.type,
-          status: stored.status
-        }
-      }),
-      false
-    );
-    await this.persistSnapshot();
-    return clone(stored);
+      return clone(stored);
+    });
   }
 
   /**
-   * Publishes the actionable interaction, matching run projection/event, and
-   * exact owning session awaiting state as one durable store boundary.
+   * Publishes Task workflow state for a run that the canonical runtime store
+   * has already created. The run and its artifacts remain runtime-owned.
    */
-  async createInteractionRequest(
-    input: CreateInteractionRequestInput
-  ): Promise<InteractionRequestRecord> {
-    return this.serializeMutation(() => this.createInteractionRequestInternal(input));
-  }
-
-  private async createInteractionRequestInternal(
-    input: CreateInteractionRequestInput
-  ): Promise<InteractionRequestRecord> {
-    await this.init();
-    const run = this.state.runs.find((candidate) => candidate.id === input.runId);
-    const session = this.state.agentSessions.find(
-      (candidate) => candidate.id === input.sessionId
-    );
-    if (
-      !run ||
-      !session ||
-      run.taskId !== input.taskId ||
-      run.iterationId !== input.iterationId ||
-      run.sessionId !== input.sessionId ||
-      run.serverInstanceId !== input.serverInstanceId ||
-      run.runtimeId !== input.runtimeId ||
-      session.taskId !== input.taskId ||
-      session.iterationId !== input.iterationId ||
-      session.worktreeId !== run.worktreeId ||
-      session.runtimeId !== input.runtimeId
-    ) {
-      throw new Error('Interaction request ownership does not match its run.');
-    }
-    assertServerRuntime(
-      this.state,
-      input.runtimeId,
-      input.serverInstanceId,
-      'Interaction request'
-    );
-    assertProtocolReferenceRuntime(
-      this.state,
-      input.runtimeId,
-      input.requestRawMessage,
-      'Interaction request'
-    );
-    if (
-      input.requestRawMessage.serverInstanceId !== input.serverInstanceId ||
-      input.requestRawMessage.direction !== 'INBOUND'
-    ) {
-      throw new Error('Interaction request raw message does not match its server.');
-    }
-    const priorOccurrences = this.state.interactionRequests.filter(
-      (request) =>
-        request.serverInstanceId === input.serverInstanceId &&
-        request.providerRequestId === input.providerRequestId
-    );
-    const sameOccurrence = priorOccurrences.find(
-      (request) => request.requestRawMessage.sequence === input.requestRawMessage.sequence
-    );
-    if (sameOccurrence) {
-      if (!sameInteractionOccurrenceInput(sameOccurrence, input)) {
+  async recordAgentRunStarted(run: RunRecord): Promise<RunRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
+      const stored = this.state.runs.find((candidate) => candidate.id === run.id);
+      if (!stored || JSON.stringify(stored) !== JSON.stringify(run)) {
         throw new Error(
-          'Duplicate interaction request does not match its original immutable fields.'
+          'Agent run must exist in the runtime store before Task workflow is linked.'
         );
       }
-      return clone(sameOccurrence);
-    }
-    if (
-      priorOccurrences.some(
-        (request) => request.status === 'PENDING' || request.status === 'RESPONDING'
-      )
-    ) {
-      throw new Error(
-        'Provider reused an interaction request id while its previous occurrence is still active.'
+      const task = this.state.tasks.find((candidate) => candidate.id === run.taskId);
+      const session = this.state.agentSessions.find(
+        (candidate) => candidate.id === run.sessionId
       );
-    }
-
-    const stored: InteractionRequestRecord = {
-      ...input,
-      id: randomUUID(),
-      status: 'PENDING',
-      requestedAt: new Date().toISOString()
-    };
-    const requestedEvent = createDomainEvent({
-      type: 'AGENT_INTERACTION_REQUESTED',
-      taskId: stored.taskId,
-      iterationId: stored.iterationId,
-      runId: stored.runId,
-      worktreeId: run.worktreeId,
-      agentSessionId: stored.sessionId,
-      serverInstanceId: stored.serverInstanceId,
-      interactionRequestId: stored.id,
-      source: 'provider',
-      payload: { type: stored.type, providerRequestId: stored.providerRequestId }
-    });
-    let nextState = applyEventToState(
-      {
-        ...this.state,
-        interactionRequests: [stored, ...this.state.interactionRequests]
-      },
-      requestedEvent
-    );
-    const awaitingStatus =
-      stored.type === 'USER_INPUT' ? 'AWAITING_USER_INPUT' : 'AWAITING_APPROVAL';
-    const updatedSession: AgentSessionRecord = {
-      ...session,
-      status: awaitingStatus,
-      updatedAt: stored.requestedAt
-    };
-    nextState = {
-      ...nextState,
-      agentSessions: nextState.agentSessions.map((candidate) =>
-        candidate.id === updatedSession.id ? updatedSession : candidate
-      )
-    };
-    this.state = nextState;
-    await this.persistSnapshot();
-    return clone(stored);
-  }
-
-  async transitionInteractionRequest(
-    interactionRequestId: string,
-    expectedStatus: InteractionRequestStatus,
-    update: InteractionRequestUpdate
-  ): Promise<InteractionRequestRecord> {
-    return this.serializeMutation(() =>
-      this.transitionInteractionRequestInternal(
-        interactionRequestId,
-        expectedStatus,
-        update
-      )
-    );
-  }
-
-  private async transitionInteractionRequestInternal(
-    interactionRequestId: string,
-    expectedStatus: InteractionRequestStatus,
-    update: InteractionRequestUpdate
-  ): Promise<InteractionRequestRecord> {
-    await this.init();
-    const existing = this.state.interactionRequests.find(
-      (request) => request.id === interactionRequestId
-    );
-    if (!existing) {
-      throw new Error(`Interaction request not found: ${interactionRequestId}`);
-    }
-    if (existing.status !== expectedStatus) {
-      throw new Error(
-        `Interaction request ${interactionRequestId} is ${existing.status}; expected ${expectedStatus}.`
-      );
-    }
-    const nextStatus = update.status ?? existing.status;
-    validateInteractionTransition(existing.status, nextStatus);
-    if (update.responseRawMessage) {
-      assertProtocolReferenceRuntime(
-        this.state,
-        existing.runtimeId,
-        update.responseRawMessage,
-        'Interaction response'
-      );
-      if (
-        update.responseRawMessage.serverInstanceId !==
-        existing.serverInstanceId
-      ) {
-        throw new Error('Interaction response raw message does not match its server.');
+      if (!task || !session) {
+        throw new Error('Agent run Task ownership is inconsistent.');
       }
-    }
-    const stored: InteractionRequestRecord = { ...existing, ...update, status: nextStatus };
-    this.state = {
-      ...this.state,
-      interactionRequests: this.state.interactionRequests.map((request) =>
-        request.id === interactionRequestId ? stored : request
-      )
-    };
+      if (
+        session.taskId !== task.id ||
+        session.iterationId !== run.iterationId ||
+        session.worktreeId !== run.worktreeId ||
+        session.runtimeId !== run.runtimeId
+      ) {
+        throw new Error('Agent run session ownership is inconsistent.');
+      }
+      if ((task.kind === 'DESIGN') !== (run.mode === 'DESIGN')) {
+        throw new Error('DESIGN runs and Design tasks must use each other exclusively.');
+      }
+      if (run.mode === 'DESIGN') {
+        const turn = run.generationKey
+          ? this.state.designTurns.find(
+              (candidate) =>
+                candidate.id === run.generationKey &&
+                candidate.designId === task.id &&
+                candidate.outcome === undefined
+            )
+          : undefined;
+        if (!turn) {
+          throw new Error('DESIGN run requires an unsettled DesignTurn generation key.');
+        }
+      }
+      const alreadyPublished = this.state.events.some(
+        (event) => event.type === 'AGENT_RUN_STARTED' && event.runId === run.id
+      );
+      if (alreadyPublished) return clone(stored);
 
-    if (isInteractionTerminal(nextStatus)) {
-      const run = this.state.runs.find((candidate) => candidate.id === stored.runId);
-      await this.appendEvent(
+      const bindsCurrentTask = run.mode !== 'REVIEW';
+      const advancesWorkflow = bindsCurrentTask && run.mode !== 'DESIGN';
+      const now = new Date().toISOString();
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((candidate) =>
+          candidate.id === task.id
+            ? {
+                ...candidate,
+                workflowPhase: advancesWorkflow
+                  ? 'IN_PROGRESS'
+                  : candidate.workflowPhase,
+                currentRunId: bindsCurrentTask ? run.id : candidate.currentRunId,
+                currentAgentSessionId: bindsCurrentTask
+                  ? run.sessionId
+                  : candidate.currentAgentSessionId,
+                currentIterationId: bindsCurrentTask
+                  ? run.iterationId
+                  : candidate.currentIterationId,
+                currentWorktreeId: bindsCurrentTask
+                  ? run.worktreeId
+                  : candidate.currentWorktreeId,
+                phaseVersion: advancesWorkflow
+                  ? candidate.phaseVersion + 1
+                  : candidate.phaseVersion,
+                updatedAt: now
+              }
+            : candidate
+        )
+      };
+      if (advancesWorkflow) {
+        await this.appendEventInternal(
+          createDomainEvent({
+            type: 'TRANSITION_REQUESTED',
+            taskId: task.id,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            agentSessionId: run.sessionId,
+            serverInstanceId: run.serverInstanceId,
+            source: 'ui',
+            payload: { fromPhase: task.workflowPhase, toPhase: 'IN_PROGRESS' }
+          }),
+          false
+        );
+      }
+      const reviewedSnapshot = run.beforeGitSnapshotId
+        ? this.state.gitSnapshots.find(
+            (snapshot) => snapshot.id === run.beforeGitSnapshotId
+          )
+        : undefined;
+      await this.appendEventInternal(
         createDomainEvent({
-          type: 'AGENT_INTERACTION_RESOLVED',
-          taskId: stored.taskId,
-          iterationId: stored.iterationId,
-          runId: stored.runId,
-          worktreeId: run?.worktreeId,
-          agentSessionId: stored.sessionId,
-          serverInstanceId: stored.serverInstanceId,
-          interactionRequestId: stored.id,
+          type: 'AGENT_RUN_STARTED',
+          taskId: task.id,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
           source: 'provider',
-          payload: { type: stored.type, status: stored.status }
+          payload: {
+            mode: run.mode,
+            generationKey: run.generationKey,
+            requestedSettings: run.requestedSettings,
+            beforeGitSnapshotId: run.beforeGitSnapshotId,
+            reviewedHeadSha: reviewedSnapshot?.headSha,
+            reviewedDirtyFingerprint: reviewedSnapshot?.dirtyFingerprint
+          }
         }),
         false
       );
-    }
-
-    await this.persistSnapshot();
-    return clone(stored);
+      await this.persistSnapshot();
+      return clone(stored);
+    });
   }
 
   async createIterationAndWorktree(input: {
@@ -6403,42 +5212,49 @@ export class FileTaskStore {
     return this.serializeMutation(() => this.appendEventInternal(event, persist));
   }
 
+  /**
+   * Persists the Task projection of a normalized provider event after the
+   * runtime store has accepted the same idempotent operation.
+   */
+  async recordAgentRuntimeEvent(
+    event: DomainEvent,
+    operationId: string
+  ): Promise<void> {
+    if (!operationId.trim()) {
+      throw new Error('Agent runtime event operation id is required.');
+    }
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (
+        this.state.events.some(
+          (candidate) =>
+            candidate.payload &&
+            (candidate.payload as { runtimeOperationId?: unknown })
+              .runtimeOperationId === operationId
+        )
+      ) {
+        return;
+      }
+      await this.refreshAgentRuntimeProjectionInternal();
+      await this.appendEventInternal(
+        {
+          ...event,
+          payload: {
+            ...(event.payload ?? {}),
+            runtimeOperationId: operationId
+          }
+        },
+        true
+      );
+    });
+  }
+
   private async appendEventInternal(event: DomainEvent, persist: boolean): Promise<void> {
     await this.init();
     this.state = applyEventToState(this.state, event);
     if (persist) {
       await this.persistSnapshot();
     }
-  }
-
-  /**
-   * Atomically checks the current run projection and appends an event without
-   * yielding between the status guard and projection update.
-   */
-  async appendRunEventIfStatus(
-    event: DomainEvent,
-    allowedStatuses: readonly RunRecord['status'][]
-  ): Promise<boolean> {
-    return this.serializeMutation(() =>
-      this.appendRunEventIfStatusInternal(event, allowedStatuses)
-    );
-  }
-
-  private async appendRunEventIfStatusInternal(
-    event: DomainEvent,
-    allowedStatuses: readonly RunRecord['status'][]
-  ): Promise<boolean> {
-    await this.init();
-    if (!event.runId) {
-      throw new Error('A conditional run event requires a run id.');
-    }
-    const run = this.state.runs.find((candidate) => candidate.id === event.runId);
-    if (!run || !allowedStatuses.includes(run.status)) {
-      return false;
-    }
-    this.state = applyEventToState(this.state, event);
-    await this.persistSnapshot();
-    return true;
   }
 
   async appendArtifact(artifactId: string, chunk: string): Promise<void> {
@@ -6451,6 +5267,9 @@ export class FileTaskStore {
     const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
     if (!artifact) {
       throw new Error(`Artifact not found: ${artifactId}`);
+    }
+    if (TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)) {
+      throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
     }
 
     const byteCount = await appendBoundedArtifactFile(artifact, chunk);
@@ -6517,6 +5336,9 @@ export class FileTaskStore {
       if (!artifact) {
         throw new Error(`Artifact not found: ${artifactId}`);
       }
+      if (TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)) {
+        throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
+      }
       const limit = Math.min(maxBytes, ARTIFACT_BYTE_LIMITS[artifact.kind]);
       if (!Number.isSafeInteger(limit) || limit < 0) {
         throw new Error('Artifact byte limit must be a non-negative safe integer.');
@@ -6566,6 +5388,9 @@ export class FileTaskStore {
       await this.init();
       const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
       if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
+      if (TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)) {
+        throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
+      }
       const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY).catch((error) => {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
         throw error;
@@ -6591,65 +5416,6 @@ export class FileTaskStore {
     });
   }
 
-  async writeFinalArtifact(taskId: string, runId: string, content: string): Promise<ArtifactRecord> {
-    return this.serializeMutation(() =>
-      this.writeFinalArtifactInternal(taskId, runId, content)
-    );
-  }
-
-  private async writeFinalArtifactInternal(
-    taskId: string,
-    runId: string,
-    content: string
-  ): Promise<ArtifactRecord> {
-    await this.init();
-
-    const run = this.state.runs.find((candidate) => candidate.id === runId);
-    if (!run || run.taskId !== taskId) {
-      throw new Error(`Run ${runId} does not belong to task ${taskId}.`);
-    }
-    const existing = this.state.artifacts.find(
-      (artifact) => artifact.runId === runId && artifact.kind === 'agent-final'
-    );
-    if (existing) return clone(existing);
-
-    const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
-    await writeNewArtifactFiles(this.artifactsDir, [{ artifact, content }]);
-
-    const storedContent = await readPrivateArtifactFile(
-      artifact.path,
-      artifact.byteCount
-    );
-    const hash = createHash('sha256').update(storedContent).digest('hex');
-    const stored: ArtifactRecord = {
-      ...artifact,
-      updatedAt: new Date().toISOString()
-    };
-
-    const stateWithArtifact = {
-      ...this.state,
-      artifacts: [stored, ...this.state.artifacts]
-    };
-    this.state = applyEventToState(
-      stateWithArtifact,
-      createDomainEvent({
-        type: 'ARTIFACT_CREATED',
-        taskId,
-        runId,
-        source: 'storage',
-        payload: { artifactId: stored.id, kind: stored.kind, hash }
-      })
-    );
-
-    try {
-      await this.persistSnapshot();
-    } catch (error) {
-      await this.cleanupUnpublishedArtifacts([stored]);
-      throw error;
-    }
-    return clone(stored);
-  }
-
   async writeTextArtifact(taskId: string, kind: ArtifactKind, content: string): Promise<ArtifactRecord> {
     return this.serializeMutation(() =>
       this.writeTextArtifactInternal(taskId, kind, content)
@@ -6662,6 +5428,9 @@ export class FileTaskStore {
     content: string
   ): Promise<ArtifactRecord> {
     await this.init();
+    if (TASK_RUNTIME_ARTIFACT_KINDS.has(kind)) {
+      throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
+    }
 
     const stored = await this.createTextArtifact(taskId, kind, content);
     try {
@@ -6704,38 +5473,6 @@ export class FileTaskStore {
       }
       return readPrivateArtifactFile(artifact.path, artifact.byteCount);
     });
-  }
-
-  private pruneUnreferencedTerminalAgentServers(): string[] {
-    const referencedServerIds = collectReferencedAgentServerIds(this.state);
-    const unreferencedTerminalServers = this.state.agentServers
-      .filter(
-        (server) =>
-          isTerminalAgentServerStatus(server.status) &&
-          !referencedServerIds.has(server.id)
-      )
-      .sort(compareAgentServerDiagnosticsNewestFirst);
-    const prunedServerIds = unreferencedTerminalServers
-      .slice(this.maxUnreferencedTerminalAgentServers)
-      .map((server) => server.id);
-    if (prunedServerIds.length === 0) return [];
-    const pruned = new Set(prunedServerIds);
-    this.state = {
-      ...this.state,
-      agentServers: this.state.agentServers.filter((server) => !pruned.has(server.id))
-    };
-    return prunedServerIds;
-  }
-
-  private async cleanupPrunedServerJournals(serverInstanceIds: string[]): Promise<void> {
-    // The record removal was already published. Cleanup failure leaves an
-    // orphan that startup reconciliation can retry without risking a dangling
-    // durable reference.
-    await Promise.allSettled(
-      serverInstanceIds.map((serverInstanceId) =>
-        this.protocolJournal.removeServer(serverInstanceId)
-      )
-    );
   }
 
   private async cleanupUnpublishedArtifacts(
@@ -6844,12 +5581,9 @@ export class FileTaskStore {
       throw new Error('Task store persistence requires an active ownership lease.');
     }
     await assertStoreOwnershipLease(this.leasePath, lease);
-    // A durable store record must never be published ahead of the raw protocol
-    // entry it references. High-volume unmaterialized input remains batch-synced.
-    await this.protocolJournal.flush();
     await fs.mkdir(this.baseDir, { recursive: true });
     const publishedSnapshotJson = JSON.stringify(this.state);
-    const serialized = `${publishedSnapshotJson}\n`;
+    const serialized = `${JSON.stringify(withoutTaskRuntimeProjection(this.state))}\n`;
     if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_FILE_BYTES) {
       throw new Error('Task store snapshot exceeds its durable size limit.');
     }
@@ -6885,6 +5619,136 @@ export class FileTaskStore {
       throw error;
     }
   }
+}
+
+const TASK_RUNTIME_ARTIFACT_KINDS = new Set<ArtifactKind>([
+  'agent-prompt',
+  'agent-output',
+  'agent-diagnostics',
+  'agent-final'
+]);
+
+function withTaskRuntimeProjection(
+  state: StoreState,
+  runtime: TaskAgentRuntimeSnapshot
+): StoreState {
+  const taskIds = new Set(state.tasks.map((task) => task.id));
+  const runs = runtime.runs.filter((run) => taskIds.has(run.taskId));
+  const agentSessions = runtime.agentSessions.filter((session) =>
+    taskIds.has(session.taskId)
+  );
+  const agentItems = runtime.agentItems.filter((item) => taskIds.has(item.taskId));
+  const agentGoalSnapshots = runtime.agentGoalSnapshots.filter((goal) =>
+    taskIds.has(goal.taskId)
+  );
+  const agentPlanRevisions = runtime.agentPlanRevisions.filter((plan) =>
+    taskIds.has(plan.taskId)
+  );
+  const agentUsageSnapshots = runtime.agentUsageSnapshots.filter((usage) =>
+    taskIds.has(usage.taskId)
+  );
+  const agentSettingsObservations = runtime.agentSettingsObservations.filter(
+    (observation) => taskIds.has(observation.taskId)
+  );
+  const agentSubagentObservations = runtime.agentSubagentObservations.filter(
+    (observation) => taskIds.has(observation.taskId)
+  );
+  const interactionRequests = runtime.interactionRequests.filter((interaction) =>
+    taskIds.has(interaction.taskId)
+  );
+  const runtimeArtifacts = runtime.artifacts.filter((artifact) =>
+    taskIds.has(artifact.taskId)
+  );
+  const referencesById = new Map(
+    state.designReferences.map((reference) => [reference.id, reference])
+  );
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  const deliveredAtByReferenceId = new Map<string, string>();
+  for (const turn of state.designTurns) {
+    if (!turn.runId) continue;
+    const run = runsById.get(turn.runId);
+    if (
+      run?.mode !== 'DESIGN' ||
+      run.taskId !== turn.designId ||
+      run.generationKey !== turn.id
+    ) {
+      continue;
+    }
+    for (const referenceId of turn.referenceIds) {
+      const reference = referencesById.get(referenceId);
+      if (!reference || reference.firstDeliveredAt) continue;
+      const submittedAt = run.attachmentSubmissions?.find(
+        (submission) => submission.attachmentId === reference.attachmentId
+      )?.submittedAt;
+      const current = deliveredAtByReferenceId.get(referenceId);
+      if (submittedAt && (!current || submittedAt < current)) {
+        deliveredAtByReferenceId.set(referenceId, submittedAt);
+      }
+    }
+  }
+
+  return {
+    ...state,
+    designReferences: state.designReferences.map((reference) => {
+      const firstDeliveredAt = deliveredAtByReferenceId.get(reference.id);
+      return firstDeliveredAt
+        ? { ...reference, firstDeliveredAt }
+        : reference;
+    }),
+    runs,
+    agentServers: runtime.agentServers,
+    agentSessions,
+    agentItems,
+    agentGoalSnapshots,
+    agentPlanRevisions,
+    agentUsageSnapshots,
+    agentSettingsObservations,
+    agentSubagentObservations,
+    interactionRequests,
+    artifacts: [
+      ...state.artifacts.filter(
+        (artifact) => !TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)
+      ),
+      ...runtimeArtifacts
+    ]
+  };
+}
+
+function withoutTaskRuntimeProjection(state: StoreState): PersistedTaskState {
+  return {
+    schemaVersion: state.schemaVersion,
+    repositories: state.repositories,
+    boards: state.boards,
+    tasks: state.tasks,
+    designTurns: state.designTurns,
+    designReferences: state.designReferences,
+    designRevisions: state.designRevisions,
+    designSourceActions: state.designSourceActions,
+    iterations: state.iterations,
+    worktrees: state.worktrees,
+    gitSnapshots: state.gitSnapshots,
+    githubRepositories: state.githubRepositories,
+    branchPublications: state.branchPublications,
+    pullRequests: state.pullRequests,
+    ciRollups: state.ciRollups,
+    reviewRollups: state.reviewRollups,
+    mergeSnapshots: state.mergeSnapshots,
+    previewPlans: state.previewPlans,
+    previewApprovals: state.previewApprovals,
+    previewComposeProjects: state.previewComposeProjects,
+    previewGenerations: state.previewGenerations,
+    previewManagedEnvironments: state.previewManagedEnvironments,
+    previewManagedResources: state.previewManagedResources,
+    previewGenerationAttachments: state.previewGenerationAttachments,
+    previewLocalBindings: state.previewLocalBindings,
+    previewNodeAttempts: state.previewNodeAttempts,
+    previewResources: state.previewResources,
+    events: state.events,
+    artifacts: state.artifacts.filter(
+      (artifact) => !TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)
+    ),
+    attachments: state.attachments
+  };
 }
 
 async function readPrivateStoreFile(storePath: string): Promise<string> {
@@ -7441,14 +6305,44 @@ function isSafeDesignProjectPath(value: string): boolean {
   );
 }
 
-function requireCurrentState(state: PersistedState): StoreState {
+function requireCurrentState(value: unknown): StoreState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid.`
+    );
+  }
+  const state = value as Record<string, unknown>;
   if (state.schemaVersion !== TASK_STORE_SCHEMA_VERSION) {
     throw new Error(
       `Unsupported Task Monki store schema ${String(state.schemaVersion)}. ` +
         `This build accepts only schema ${TASK_STORE_SCHEMA_VERSION}.`
     );
   }
-  const requiredCollections: Array<keyof StoreState> = [
+  for (const key of TASK_RUNTIME_PROJECTION_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(state, key)) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} belongs to the agent runtime store.`
+      );
+    }
+  }
+  if (
+    Array.isArray(state.artifacts) &&
+    state.artifacts.some((artifact) => {
+      if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
+        return false;
+      }
+      const kind = (artifact as Record<string, unknown>).kind;
+      return (
+        typeof kind === 'string' &&
+        TASK_RUNTIME_ARTIFACT_KINDS.has(kind as ArtifactKind)
+      );
+    })
+  ) {
+    throw new Error(
+      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: agent artifacts belong to the agent runtime store.`
+    );
+  }
+  const requiredCollections: Array<Exclude<keyof PersistedTaskState, 'schemaVersion'>> = [
     'repositories',
     'boards',
     'tasks',
@@ -7465,16 +6359,6 @@ function requireCurrentState(state: PersistedState): StoreState {
     'ciRollups',
     'reviewRollups',
     'mergeSnapshots',
-    'runs',
-    'agentServers',
-    'agentSessions',
-    'agentItems',
-    'agentGoalSnapshots',
-    'agentPlanRevisions',
-    'agentUsageSnapshots',
-    'agentSettingsObservations',
-    'agentSubagentObservations',
-    'interactionRequests',
     'previewPlans',
     'previewApprovals',
     'previewComposeProjects',
@@ -7494,7 +6378,19 @@ function requireCurrentState(state: PersistedState): StoreState {
       throw new Error(`Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} is missing.`);
     }
   }
-  const current = state as StoreState;
+  const current: StoreState = {
+    ...(state as PersistedTaskState),
+    runs: [],
+    agentServers: [],
+    agentSessions: [],
+    agentItems: [],
+    agentGoalSnapshots: [],
+    agentPlanRevisions: [],
+    agentUsageSnapshots: [],
+    agentSettingsObservations: [],
+    agentSubagentObservations: [],
+    interactionRequests: []
+  };
   validateCurrentStoreRecords(current);
   validatePersistedRelationships(current);
   validatePersistedDesignRelationships(current);
@@ -7527,6 +6423,10 @@ function validatePersistedRelationships(state: StoreState): void {
   const reviewRollups = indexUniqueRecords(state.reviewRollups, 'reviewRollups');
   const mergeSnapshots = indexUniqueRecords(state.mergeSnapshots, 'mergeSnapshots');
   indexUniqueRecords(state.interactionRequests, 'interactionRequests');
+  const hasRuntimeProjection =
+    state.runs.length > 0 ||
+    state.agentSessions.length > 0 ||
+    state.interactionRequests.length > 0;
 
   for (const iteration of state.iterations) {
     const worktree = iteration.worktreeId
@@ -7611,7 +6511,9 @@ function validatePersistedRelationships(state: StoreState): void {
     const run = artifact.runId ? runs.get(artifact.runId) : undefined;
     if (
       !tasks.has(artifact.taskId) ||
-      (artifact.runId && (!run || run.taskId !== artifact.taskId))
+      (hasRuntimeProjection &&
+        artifact.runId &&
+        (!run || run.taskId !== artifact.taskId))
     ) {
       invalidPersistedRelationship('artifact ownership');
     }
@@ -7687,19 +6589,21 @@ function validatePersistedRelationships(state: StoreState): void {
       ? sessions.get(task.currentAgentSessionId)
       : undefined;
     const run = task.currentRunId ? runs.get(task.currentRunId) : undefined;
-    assertAgentReviewOwnership(runs, artifacts, gitSnapshots, task);
+    if (hasRuntimeProjection) {
+      assertAgentReviewOwnership(runs, artifacts, gitSnapshots, task);
+    }
     if (
       (task.currentIterationId && (!iteration || iteration.taskId !== task.id)) ||
       (task.currentWorktreeId &&
         (!worktree ||
           worktree.taskId !== task.id ||
           (iteration && worktree.iterationId !== iteration.id))) ||
-      (task.currentAgentSessionId &&
+      (hasRuntimeProjection && task.currentAgentSessionId &&
         (!session ||
           session.taskId !== task.id ||
           (iteration && session.iterationId !== iteration.id) ||
           (worktree && session.worktreeId !== worktree.id))) ||
-      (task.currentRunId &&
+      (hasRuntimeProjection && task.currentRunId &&
         (!run ||
           run.taskId !== task.id ||
           (iteration && run.iterationId !== iteration.id) ||
@@ -8228,7 +7132,11 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     state.designSourceActions,
     'designSourceActions'
   );
-  const designRunKeys = new Set<string>();
+  const designRunsByGeneration = new Map<string, RunRecord[]>();
+  const hasRuntimeProjection =
+    state.runs.length > 0 ||
+    state.agentSessions.length > 0 ||
+    state.interactionRequests.length > 0;
 
   for (const task of state.tasks) {
     const repository = repositories.get(task.repositoryId);
@@ -8304,14 +7212,55 @@ function validatePersistedDesignRelationships(state: StoreState): void {
       if (
         task.kind !== 'DESIGN' ||
         !turn ||
-        turn.designId !== task.id ||
-        designRunKeys.has(key)
+        turn.designId !== task.id
       ) {
         invalidPersistedRelationship('Design Run generation ownership');
       }
-      designRunKeys.add(key);
+      const generationRuns = designRunsByGeneration.get(key) ?? [];
+      generationRuns.push(run);
+      designRunsByGeneration.set(key, generationRuns);
     } else if (task.kind === 'DESIGN' && run.origin !== 'PROVIDER_SUBAGENT') {
       invalidPersistedRelationship('Design Run mode');
+    }
+  }
+  for (const generationRuns of designRunsByGeneration.values()) {
+    if (generationRuns.length === 1) continue;
+    const generationRunIds = new Map(
+      generationRuns.map((run) => [run.id, run])
+    );
+    const roots = generationRuns.filter((run) => !run.retryOfRunId);
+    const childByParentRunId = new Map<string, RunRecord>();
+    if (roots.length !== 1) {
+      invalidPersistedRelationship('Design Run generation ownership');
+    }
+    for (const run of generationRuns) {
+      if (!run.retryOfRunId) continue;
+      const retried = generationRunIds.get(run.retryOfRunId);
+      if (
+        !retried ||
+        retried.status !== 'FAILED' ||
+        retried.providerTurnId !== undefined ||
+        retried.sessionId === run.sessionId ||
+        childByParentRunId.has(retried.id)
+      ) {
+        invalidPersistedRelationship('Design Run generation ownership');
+      }
+      childByParentRunId.set(retried.id, run);
+    }
+    const visited = new Set<string>();
+    let current = roots[0]!;
+    while (!visited.has(current.id)) {
+      visited.add(current.id);
+      const child = childByParentRunId.get(current.id);
+      if (!child) break;
+      current = child;
+    }
+    const turn = turns.get(current.generationKey ?? '');
+    if (
+      visited.size !== generationRuns.length ||
+      (turn?.runId !== undefined && turn.runId !== current.id)
+    ) {
+      invalidPersistedRelationship('Design Run generation ownership');
     }
   }
 
@@ -8371,7 +7320,7 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     ) {
       invalidPersistedRelationship('Design turn reference ownership');
     }
-    if (turn.runId) {
+    if (hasRuntimeProjection && turn.runId) {
       const run = runs.get(turn.runId);
       if (
         !run ||
@@ -8382,7 +7331,9 @@ function validatePersistedDesignRelationships(state: StoreState): void {
         invalidPersistedRelationship('Design turn Run ownership');
       }
     }
-    validatePersistedDesignCheckpoint(state, design, turn, runs.get(turn.runId ?? ''));
+    if (hasRuntimeProjection) {
+      validatePersistedDesignCheckpoint(state, design, turn, runs.get(turn.runId ?? ''));
+    }
   }
   for (const ownerTurns of turnsByDesign.values()) {
     const orders = ownerTurns.map((turn) => turn.order).sort((a, b) => a - b);
@@ -8406,7 +7357,8 @@ function validatePersistedDesignRelationships(state: StoreState): void {
       attachment.taskId !== design.id ||
       (reference.projectAssetPath !== undefined &&
         !isSafeDesignProjectPath(reference.projectAssetPath)) ||
-      (reference.firstDeliveredAt !== undefined &&
+      (hasRuntimeProjection &&
+        reference.firstDeliveredAt !== undefined &&
         !state.designTurns.some((turn) => {
           if (!turn.referenceIds.includes(reference.id) || !turn.runId) return false;
           const run = runs.get(turn.runId);
@@ -8449,10 +7401,11 @@ function validatePersistedDesignRelationships(state: StoreState): void {
         !turn ||
         turn.designId !== design.id ||
         turn.outcome !== 'READY' ||
-        !run ||
-        run.taskId !== design.id ||
-        run.id !== turn.runId ||
-        run.mode !== 'DESIGN' ||
+        (hasRuntimeProjection &&
+          (!run ||
+            run.taskId !== design.id ||
+            run.id !== turn.runId ||
+            run.mode !== 'DESIGN')) ||
         ownerRevisions.some(
           (existing) =>
             existing.changeSource === 'AGENT_TURN' &&
@@ -9484,84 +8437,6 @@ function uniqueIds(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function validateAgentServerTransition(
-  current: AgentServerStatus,
-  next: AgentServerStatus | undefined
-): void {
-  if (!next || next === current) {
-    return;
-  }
-  const allowed: Record<AgentServerStatus, AgentServerStatus[]> = {
-    STARTING: ['READY', 'RUNNING', 'FAILED', 'EXITED', 'LOST'],
-    READY: ['RUNNING', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
-    RUNNING: ['READY', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
-    DEGRADED: ['READY', 'RUNNING', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
-    STOPPING: ['EXITED', 'FAILED', 'LOST'],
-    EXITED: [],
-    FAILED: [],
-    LOST: []
-  };
-  if (!allowed[current].includes(next)) {
-    throw new Error(`Invalid agent server transition: ${current} -> ${next}`);
-  }
-}
-
-function isTerminalAgentServerStatus(status: AgentServerStatus): boolean {
-  return status === 'EXITED' || status === 'FAILED' || status === 'LOST';
-}
-
-function collectReferencedAgentServerIds(state: StoreState): Set<string> {
-  const knownServerIds = new Set(state.agentServers.map((server) => server.id));
-  const referencedServerIds = new Set<string>();
-  const visited = new WeakSet<object>();
-  const visit = (value: unknown): void => {
-    if (typeof value === 'string') {
-      if (knownServerIds.has(value)) referencedServerIds.add(value);
-      return;
-    }
-    if (!value || typeof value !== 'object' || visited.has(value)) return;
-    visited.add(value);
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
-    }
-    for (const item of Object.values(value)) visit(item);
-  };
-
-  for (const [collection, value] of Object.entries(state)) {
-    if (collection !== 'agentServers') visit(value);
-  }
-  for (const server of state.agentServers) {
-    const { id: _selfIdentity, ...serverMetadata } = server;
-    visit(serverMetadata);
-  }
-  return referencedServerIds;
-}
-
-function compareAgentServerDiagnosticsNewestFirst(
-  left: AgentServerInstance,
-  right: AgentServerInstance
-): number {
-  const timestampDifference =
-    agentServerDiagnosticTimestamp(right) - agentServerDiagnosticTimestamp(left);
-  return timestampDifference || right.id.localeCompare(left.id);
-}
-
-function agentServerDiagnosticTimestamp(server: AgentServerInstance): number {
-  for (const value of [
-    server.exitedAt,
-    server.disconnectedAt,
-    server.lastHealthAt,
-    server.initializedAt,
-    server.startedAt
-  ]) {
-    if (!value) continue;
-    const timestamp = Date.parse(value);
-    if (Number.isFinite(timestamp)) return timestamp;
-  }
-  return 0;
-}
-
 function branchPublicationEventType(
   status: BranchPublicationRecord['status']
 ): Extract<
@@ -9577,54 +8452,6 @@ function branchPublicationEventType(
   return 'BRANCH_PUBLISH_FAILED';
 }
 
-function sameInteractionOccurrenceInput(
-  existing: InteractionRequestRecord,
-  input: CreateInteractionRequestInput
-): boolean {
-  let sameRequest: boolean;
-  try {
-    sameRequest = stableJsonStringify(existing.request) === stableJsonStringify(input.request);
-  } catch {
-    return false;
-  }
-  return (
-    existing.runtimeId === input.runtimeId &&
-    existing.serverInstanceId === input.serverInstanceId &&
-    existing.providerRequestId === input.providerRequestId &&
-    existing.taskId === input.taskId &&
-    existing.iterationId === input.iterationId &&
-    existing.runId === input.runId &&
-    existing.sessionId === input.sessionId &&
-    existing.providerTurnId === input.providerTurnId &&
-    existing.providerItemId === input.providerItemId &&
-    existing.type === input.type &&
-    sameRequest &&
-    sameStringArray(existing.allowedActions, input.allowedActions) &&
-    sameStringArray(existing.policyWarnings, input.policyWarnings) &&
-    sameProtocolReference(existing.requestRawMessage, input.requestRawMessage)
-  );
-}
-
-function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function sameProtocolReference(
-  left: AgentProtocolMessageReference,
-  right: AgentProtocolMessageReference
-): boolean {
-  return (
-    left.serverInstanceId === right.serverInstanceId &&
-    left.segment === right.segment &&
-    left.sequence === right.sequence &&
-    left.direction === right.direction &&
-    left.recordedAt === right.recordedAt &&
-    left.byteOffset === right.byteOffset &&
-    left.byteLength === right.byteLength &&
-    left.sha256 === right.sha256
-  );
-}
-
 function interactionOccurrenceIdentity(
   interaction: Pick<
     InteractionRequestRecord,
@@ -9637,62 +8464,6 @@ function interactionOccurrenceIdentity(
     interaction.providerRequestId,
     interaction.requestRawMessage.sequence
   ]);
-}
-
-function validateInteractionTransition(
-  current: InteractionRequestStatus,
-  next: InteractionRequestStatus
-): void {
-  if (current === next) {
-    return;
-  }
-  const allowed: Record<InteractionRequestStatus, InteractionRequestStatus[]> = {
-    PENDING: [
-      'RESPONDING',
-      'DECLINED',
-      'CANCELED',
-      'ABORTED_SERVER_LOST',
-      'STALE'
-    ],
-    RESPONDING: [
-      'PENDING',
-      'RESOLVED',
-      'DECLINED',
-      'CANCELED',
-      'ABORTED_SERVER_LOST',
-      'STALE'
-    ],
-    RESOLVED: [],
-    DECLINED: [],
-    CANCELED: [],
-    ABORTED_SERVER_LOST: [],
-    STALE: []
-  };
-  if (!allowed[current].includes(next)) {
-    throw new Error(`Invalid interaction transition: ${current} -> ${next}`);
-  }
-}
-
-function validateAgentItemTransition(current: AgentItemStatus, next: AgentItemStatus): void {
-  if (current === next) {
-    return;
-  }
-  const allowed: Record<AgentItemStatus, AgentItemStatus[]> = {
-    STARTED: ['IN_PROGRESS', 'COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED', 'UNKNOWN'],
-    IN_PROGRESS: ['COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED', 'UNKNOWN'],
-    COMPLETED: [],
-    FAILED: [],
-    DECLINED: [],
-    INTERRUPTED: [],
-    UNKNOWN: ['STARTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED']
-  };
-  if (!allowed[current].includes(next)) {
-    throw new Error(`Invalid agent item transition: ${current} -> ${next}`);
-  }
-}
-
-function isInteractionTerminal(status: InteractionRequestStatus): boolean {
-  return !['PENDING', 'RESPONDING'].includes(status);
 }
 
 function assertAttachmentsOutsideWorktree(

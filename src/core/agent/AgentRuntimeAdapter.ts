@@ -19,6 +19,15 @@ import type {
 } from '../../shared/agent';
 import type { RefinePromptResponse } from '../../shared/contracts';
 import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
+import type {
+  AgentExecutionContext,
+  AgentRuntimeRunRecord,
+  AgentRuntimeSessionRecord
+} from '../../shared/agentRuntime';
+import type {
+  AgentRuntimeTurnEvent,
+  BuildAgentRuntimeExecutionContextInput
+} from './AgentRuntimeCoordinator';
 
 export interface CreateAgentSession {
   runtimeId: AgentRuntimeId;
@@ -72,6 +81,7 @@ export interface ForkAgentSession {
   sourceSession: AgentSessionRef;
   localSessionId: string;
   settings: AgentExecutionSettings;
+  attachments?: AgentTurnAttachment[];
 }
 
 export interface StartAgentReview {
@@ -139,6 +149,32 @@ export class AgentProviderSessionMissingError extends Error {
   }
 }
 
+export class AgentRuntimeDeliveryError extends Error {
+  constructor(
+    readonly delivery: 'NOT_DELIVERED' | 'AMBIGUOUS',
+    message: string,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+    this.name = 'AgentRuntimeDeliveryError';
+  }
+}
+
+export interface StartAgentRuntimeTurn {
+  session: AgentRuntimeSessionRecord;
+  run: AgentRuntimeRunRecord;
+  executionContext: AgentExecutionContext;
+  prompt: string;
+}
+
+export interface StartedAgentRuntimeTurn {
+  serverInstanceId: string;
+  providerSessionId: string;
+  providerSessionTreeId?: string;
+  providerTurnId: string;
+  startedAt: string;
+}
+
 export interface AgentRuntimeAdapter {
   readonly descriptor: AgentRuntimeDescriptor;
   initialize(): Promise<void>;
@@ -160,6 +196,20 @@ export interface AgentRuntimeAdapter {
     restart: boolean;
   }): Promise<void>;
   resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution>;
+  /** Owner-neutral lifecycle used by workflows with an attested execution context. */
+  buildExecutionContext?(
+    input: BuildAgentRuntimeExecutionContextInput
+  ): Promise<AgentExecutionContext>;
+  startRuntimeTurn?(
+    input: StartAgentRuntimeTurn
+  ): Promise<StartedAgentRuntimeTurn>;
+  interruptRuntimeTurn?(input: {
+    session: AgentRuntimeSessionRecord;
+    run: AgentRuntimeRunRecord;
+  }): Promise<void>;
+  onRuntimeTurnEvent?(
+    listener: (event: AgentRuntimeTurnEvent) => void
+  ): () => void;
   refinePrompt?(input: RefineAgentPrompt): Promise<RefinePromptResponse>;
   cancelPromptRefinement?(requestId: string): Promise<void>;
   createSession(input: CreateAgentSession): Promise<AgentSessionRecord>;

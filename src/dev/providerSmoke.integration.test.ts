@@ -339,6 +339,23 @@ describe('runProviderSmoke', () => {
     });
   });
 
+  it('accepts one exact sentinel line without requiring a trailing newline', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('opencode:opencode/no-trailing-newline');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      omitTrailingNewline: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      receivedSentinel: true,
+      worktreeChangeVerified: true
+    });
+  });
+
   it('uses the exact explicit post-run Git snapshot', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model('codex:openai/git-evidence');
@@ -689,6 +706,7 @@ interface FakeProviderBehavior {
   gitStatus?: 'CLEAN' | 'DIRTY';
   committedTaskChange?: boolean;
   wrongWorktreeChange?: boolean;
+  omitTrailingNewline?: boolean;
   retainDifferentStoredGitSnapshot?: boolean;
   hangStart?: boolean;
   timedOutRunCount?: number;
@@ -957,7 +975,9 @@ class FakeProviderSmokeService implements ProviderSmokeService {
         : 'task-monki-provider-smoke.txt';
       await fs.writeFile(
         path.join(worktreePath, fileName),
-        'TASK_MONKI_PROVIDER_SMOKE_OK\n'
+        this.behavior.omitTrailingNewline
+          ? 'TASK_MONKI_PROVIDER_SMOKE_OK'
+          : 'TASK_MONKI_PROVIDER_SMOKE_OK\n'
       );
     }
     if (committed) {

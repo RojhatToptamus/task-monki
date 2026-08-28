@@ -115,6 +115,7 @@ import {
   normalizePullRequestTitle,
 } from '../../shared/contracts';
 import { CODEX_RUNTIME_ID, type AgentRuntimeId } from '../../shared/agent';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import type {
   AppendHumanDiscourseMessageRequest,
   ConfirmDiscourseWaveContextRequest,
@@ -152,11 +153,14 @@ import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
-import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
-import type { AgentScopedRuntimeBinding } from '../agent/AgentScopedTurnProvider';
+import type {
+  AgentRuntimeStore,
+  TaskAgentRuntimeAccess
+} from '../agent/AgentRuntimeStore';
 import type { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 import {
   mergeAppSettings,
@@ -205,7 +209,6 @@ import { DiscourseRuntimeHost } from './DiscourseRuntimeHost';
 import {
   builtInRuntimeExecutableOverrides,
   createBuiltInAgentRuntimes,
-  createScopedTurnRouter,
   findCodexRuntimeAdapter
 } from './AgentRuntimeComposition';
 import { DesignSourceService } from '../design/DesignSourceService';
@@ -232,7 +235,8 @@ export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
   private readonly runtimeRegistry: AgentRuntimeRegistry;
-  private readonly agentRuntimeStore?: AgentRuntimeStore;
+  private readonly agentRuntimeStore: AgentRuntimeStore;
+  private readonly taskRuntime: TaskAgentRuntimeAccess;
   private readonly discourseHost?: DiscourseRuntimeHost;
   private readonly codexAdapter?: CodexAppServerAdapter;
   private readonly worktrees: WorktreeService;
@@ -280,9 +284,9 @@ export class TaskManagerService {
       appSettingsStore?: AppSettingsStorage;
       agentRuntimeAdapters?: readonly AgentRuntimeAdapter[];
       agentRuntimeStore?: AgentRuntimeStore;
+      taskRuntimeAccess?: TaskAgentRuntimeAccess;
       discourseStore?: DiscourseStore;
       discourseWorkspaceRoot?: string;
-      agentScopedRuntimeBindings?: readonly AgentScopedRuntimeBinding[];
       defaultAgentRuntimeId?: string;
       openTargetHost?: OpenTargetHost;
       previewManager?: PreviewManager;
@@ -314,9 +318,6 @@ export class TaskManagerService {
       designBrowserRequireCodeSignature?: boolean;
     } = {}
   ) {
-    if (Boolean(options.agentRuntimeStore) !== Boolean(options.discourseStore)) {
-      throw new Error('The agent runtime and discourse stores must be configured together.');
-    }
     agentCwd = options.agentCwd ?? (agentCwd || process.cwd());
     this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
     this.agentProviderStartupDisabledReason =
@@ -361,15 +362,27 @@ export class TaskManagerService {
         openHost: options.previewOpenHost,
         secretProtector: options.previewSecretProtector
       });
+    this.agentRuntimeStore =
+      options.agentRuntimeStore ??
+      new FileAgentRuntimeStore(path.join(store.getStorageRoot(), 'agent-runtime'));
+    if (options.taskRuntimeAccess && !options.agentRuntimeStore) {
+      throw new Error('A Task runtime access override requires its runtime store.');
+    }
+    const taskRuntime =
+      options.taskRuntimeAccess ??
+      this.agentRuntimeStore.taskAgentRuntimeAccess((event, operationId) =>
+        store.recordAgentRuntimeEvent(event, operationId)
+      );
+    this.taskRuntime = taskRuntime;
+    store.bindAgentRuntime(taskRuntime);
     const runtimeAdapters = options.agentRuntimeAdapters ??
-      createBuiltInAgentRuntimes(store, events, {
+      createBuiltInAgentRuntimes(store, taskRuntime, this.agentRuntimeStore, events, {
         cwd: agentCwd,
         codexExecutable: options.codexPath,
         openCodeExecutable: options.openCodePath,
         acpExecutablePaths: options.acpExecutablePaths,
         browserDevBoundary: this.browserDevAgentBoundary,
         codexToolSettings: this.appSettings.codexExternalTools,
-        scopedRuntimeStore: options.agentRuntimeStore,
         designSkillRoot: options.designSkillRoot
       });
     this.codexAdapter = findCodexRuntimeAdapter(runtimeAdapters);
@@ -377,18 +390,22 @@ export class TaskManagerService {
       runtimeAdapters,
       options.defaultAgentRuntimeId ?? runtimeAdapters[0].descriptor.id
     );
-    this.agentRuntimeStore = options.agentRuntimeStore;
-    const scopedTurnRouter = createScopedTurnRouter(
-      runtimeAdapters,
-      options.agentRuntimeStore,
-      options.agentScopedRuntimeBindings
+    this.agents = new AgentOrchestrator(
+      store,
+      this.agentRuntimeStore,
+      events,
+      this.runtimeRegistry,
+      {
+        allowNetworkAccess: options.allowAgentNetworkAccess,
+        providerStartupDisabledReason: options.agentProviderStartupDisabledReason
+      }
     );
-    if (this.agentRuntimeStore && options.discourseStore) {
+    if (options.discourseStore) {
       this.discourseHost = new DiscourseRuntimeHost({
         taskStore: this.store,
         runtimeStore: this.agentRuntimeStore,
         discourseStore: options.discourseStore,
-        scopedTurnRouter,
+        agents: this.agents,
         events: this.events,
         runtimeOperations: this.runtimeOperations,
         workspaceRoot: options.discourseWorkspaceRoot,
@@ -397,15 +414,6 @@ export class TaskManagerService {
         getAppSettings: () => this.appSettings
       });
     }
-    this.agents = new AgentOrchestrator(
-      store,
-      events,
-      this.runtimeRegistry,
-      {
-        allowNetworkAccess: options.allowAgentNetworkAccess,
-        providerStartupDisabledReason: options.agentProviderStartupDisabledReason
-      }
-    );
     this.worktrees = new WorktreeService(
       options.worktreeRoot ??
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
@@ -501,7 +509,12 @@ export class TaskManagerService {
         )
       );
     }
+    await this.agentRuntimeStore.init();
+    this.assertInitializing();
     await this.store.init();
+    this.assertInitializing();
+    await this.reconcileOrphanedTaskRuntime();
+    this.assertInitializing();
     if (this.designDrafts) {
       await this.reconcileDesignDrafts(designDrafts);
     }
@@ -603,6 +616,23 @@ export class TaskManagerService {
     this.assertInitializing();
     await this.designUpdates?.recover();
     this.assertInitializing();
+  }
+
+  private async reconcileOrphanedTaskRuntime(): Promise<void> {
+    const [storedTaskIds, runtimeState] = await Promise.all([
+      this.store.listTaskIds(),
+      this.agentRuntimeStore.snapshot()
+    ]);
+    const taskIds = new Set(storedTaskIds);
+    const orphanedTaskIds = new Set<string>();
+    for (const record of [...runtimeState.sessions, ...runtimeState.runs]) {
+      if (record.owner.kind === 'TASK' && !taskIds.has(record.owner.taskId)) {
+        orphanedTaskIds.add(record.owner.taskId);
+      }
+    }
+    for (const taskId of orphanedTaskIds) {
+      await this.agentRuntimeStore.purgeTask(taskId);
+    }
   }
 
   private async reconcileTaskStateOnStartup(): Promise<void> {
@@ -853,23 +883,17 @@ export class TaskManagerService {
     if (input.promptRefinementRuntimeId) {
       const adapter = this.runtimeRegistry.require(input.promptRefinementRuntimeId);
       const capabilities = await adapter.capabilities();
-      if (capabilities.promptRefinement.maturity === 'unsupported') {
-        throw new Error(
-          `${adapter.descriptor.displayName} does not support prompt refinement.`
-        );
-      }
+      const support = projectAgentExecutionSupport(
+        capabilities,
+        'PROMPT_REFINEMENT'
+      );
+      if (!support.supported) throw new Error(support.reason);
     }
     if (input.reviewRuntimeId) {
       const adapter = this.runtimeRegistry.require(input.reviewRuntimeId);
       const capabilities = await adapter.capabilities();
-      const supportsReview =
-        capabilities.review.maturity !== 'unsupported' ||
-        capabilities.detachedReview.maturity === 'stable';
-      if (!supportsReview) {
-        throw new Error(
-          `${adapter.descriptor.displayName} does not support an isolated review workflow.`
-        );
-      }
+      const support = projectAgentExecutionSupport(capabilities, 'REVIEW');
+      if (!support.supported) throw new Error(support.reason);
     }
     if (
       this.browserDevAgentBoundary &&
@@ -1103,7 +1127,7 @@ export class TaskManagerService {
     }
     return this.withTaskAction(input.taskId, 'Provider session update', () =>
       this.withRuntimeOperation(async () => {
-        const session = await this.store.getAgentSession(input.sessionId);
+        const session = await this.taskRuntime.getAgentSession(input.sessionId);
         if (!session || session.taskId !== input.taskId) {
           throw new Error('Agent session ownership does not match the selected task.');
         }
@@ -1112,7 +1136,7 @@ export class TaskManagerService {
             `Agent session ${session.id} belongs to ${session.runtimeId}, not ${input.runtimeId}.`
           );
         }
-        const snapshot = await this.store.snapshot();
+        const snapshot = await this.taskRuntime.snapshot();
         if (
           snapshot.runs.some(
             (run) =>
@@ -1811,6 +1835,11 @@ export class TaskManagerService {
     const useConfiguredModel = runtimeId === configuredRuntimeId;
     const adapter = this.runtimeRegistry.require(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    const refinementSupport = projectAgentExecutionSupport(
+      await adapter.capabilities(),
+      'PROMPT_REFINEMENT'
+    );
+    if (!refinementSupport.supported) throw new Error(refinementSupport.reason);
     if (!adapter.refinePrompt) {
       throw new Error(
         `${adapter.descriptor.displayName} does not expose native prompt refinement.`
@@ -2072,10 +2101,21 @@ export class TaskManagerService {
     return this.withRuntimeOperation(async () => {
       const run = await this.store.getRun(input.runId);
       if (!run) return;
-      return this.withTaskAction(run.taskId, 'Agent cancellation', async () => {
+      const cancelCurrentRun = async () => {
         const current = await this.store.getRun(input.runId);
         if (!current || current.taskId !== run.taskId) return;
         await this.agents.interruptRun(current.id);
+      };
+      const activeTaskAction = this.taskActionLocks.get(run.taskId);
+      if (
+        activeTaskAction &&
+        (run.status === 'QUEUED' || run.status === 'STARTING')
+      ) {
+        await cancelCurrentRun();
+        return;
+      }
+      return this.withTaskAction(run.taskId, 'Agent cancellation', async () => {
+        await cancelCurrentRun();
       });
     });
   }
@@ -2386,20 +2426,19 @@ export class TaskManagerService {
       )
     );
     if (newlyDisabled.size === 0) return;
-    const activeRun = (await this.store.snapshot()).runs.find(
-      (run) => newlyDisabled.has(run.runtimeId) && ACTIVE_AGENT_RUN_STATUSES.has(run.status)
+    const runtimeSnapshot = await this.agentRuntimeStore.snapshot();
+    const sessionRuntime = new Map(
+      runtimeSnapshot.sessions.map((session) => [session.id, session.runtimeId] as const)
     );
+    const activeRun = runtimeSnapshot.runs.find((run) => {
+      const runtimeId = sessionRuntime.get(run.sessionId);
+      return runtimeId && newlyDisabled.has(runtimeId) && ACTIVE_RUNTIME_RUN_STATUSES.has(run.status);
+    });
     if (activeRun) {
-      const runtime = this.runtimeRegistry.require(activeRun.runtimeId).descriptor.displayName;
+      const runtimeId = sessionRuntime.get(activeRun.sessionId)!;
+      const runtime = this.runtimeRegistry.require(runtimeId).descriptor.displayName;
       throw new Error(
         `${runtime} cannot be disabled while run ${activeRun.id} is active or requires recovery.`
-      );
-    }
-    const scopedRuntime = await this.activeDiscourseRuntime(newlyDisabled);
-    if (scopedRuntime) {
-      const runtime = this.runtimeRegistry.require(scopedRuntime.runtimeId).descriptor.displayName;
-      throw new Error(
-        `${runtime} cannot be disabled while Discourse response ${scopedRuntime.runId} is active or requires recovery.`
       );
     }
   }
@@ -2411,41 +2450,19 @@ export class TaskManagerService {
   }
 
   private async activeAgentRuntimeIds(): Promise<Set<AgentRuntimeId>> {
-    const snapshot = await this.store.snapshot();
-    const runtimeIds = new Set<AgentRuntimeId>(
-      snapshot.runs
-        .filter((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status))
-        .map((run) => run.runtimeId)
-    );
-    if (!this.agentRuntimeStore) return runtimeIds;
-    const scoped = await this.agentRuntimeStore.snapshot();
-    const sessionRuntime = new Map(
-      scoped.sessions.map((session) => [session.id, session.runtimeId] as const)
-    );
-    for (const run of scoped.runs) {
-      if (!ACTIVE_SCOPED_AGENT_RUN_STATUSES.has(run.status)) continue;
-      const runtimeId = sessionRuntime.get(run.sessionId);
-      if (runtimeId) runtimeIds.add(runtimeId);
-    }
-    return runtimeIds;
-  }
-
-  private async activeDiscourseRuntime(
-    runtimeIds: ReadonlySet<AgentRuntimeId>
-  ): Promise<{ runId: string; runtimeId: AgentRuntimeId } | undefined> {
-    if (!this.agentRuntimeStore) return undefined;
     const snapshot = await this.agentRuntimeStore.snapshot();
     const sessionRuntime = new Map(
       snapshot.sessions.map((session) => [session.id, session.runtimeId] as const)
     );
-    for (const run of snapshot.runs) {
-      if (run.scope.kind !== 'DISCOURSE' || !ACTIVE_SCOPED_AGENT_RUN_STATUSES.has(run.status)) {
-        continue;
-      }
-      const runtimeId = sessionRuntime.get(run.sessionId);
-      if (runtimeId && runtimeIds.has(runtimeId)) return { runId: run.id, runtimeId };
-    }
-    return undefined;
+    const runtimeIds = new Set<AgentRuntimeId>(
+      snapshot.runs
+        .filter((run) => ACTIVE_RUNTIME_RUN_STATUSES.has(run.status))
+        .flatMap((run) => {
+          const runtimeId = sessionRuntime.get(run.sessionId);
+          return runtimeId ? [runtimeId] : [];
+        })
+    );
+    return runtimeIds;
   }
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
@@ -2503,7 +2520,13 @@ export class TaskManagerService {
           this.appSettings.reviewRuntimeId ?? task.runtimeId;
         const reviewRuntimeId = input.settings?.runtimeId ?? configuredReviewRuntimeId;
         this.assertRuntimeEnabled(reviewRuntimeId);
-        this.runtimeRegistry.require(reviewRuntimeId);
+        const reviewAdapter = this.runtimeRegistry.require(reviewRuntimeId);
+        const reviewSupport = projectAgentExecutionSupport(
+          await reviewAdapter.capabilities(),
+          'REVIEW',
+          { sourceRuntimeId: run.runtimeId }
+        );
+        if (!reviewSupport.supported) throw new Error(reviewSupport.reason);
         const useConfiguredReviewModel = reviewRuntimeId === configuredReviewRuntimeId;
         const configuredReviewSettings: AgentExecutionSettings = {
           ...(useConfiguredReviewModel && this.appSettings.reviewModel
@@ -2616,6 +2639,7 @@ export class TaskManagerService {
     const [storeCloseResult] = await Promise.allSettled([
       Promise.allSettled([
         this.discourseHost?.closeStores(),
+        this.agentRuntimeStore.close(),
         this.store.close()
       ]).then((results) => {
         const failed = results.find(
@@ -3337,6 +3361,7 @@ export class TaskManagerService {
         }
 
         await this.store.deleteTask(task.id);
+        await this.agentRuntimeStore.purgeTask(task.id).catch(() => undefined);
         await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
         const result = { taskId: task.id, removedWorktree };
         this.events.emit({
@@ -3397,6 +3422,7 @@ export class TaskManagerService {
 
     const designDraft = await this.designDrafts?.get(task.id).catch(() => null);
     const released = await this.store.deleteTaskAndReleaseManagedRepository(task.id);
+    await this.agentRuntimeStore.purgeTask(task.id).catch(() => undefined);
     await this.designDrafts?.deleteForDesign(task.id).catch(() => undefined);
     if (designDraft?.attachmentDraftId) {
       await this.store
@@ -3418,12 +3444,15 @@ export class TaskManagerService {
     return result;
   }
 
-  readArtifact(input: ReadArtifactRequest): Promise<string> {
+  async readArtifact(input: ReadArtifactRequest): Promise<string> {
+    if (await this.agentRuntimeStore.getArtifact(input.artifactId)) {
+      return this.agentRuntimeStore.readArtifact(input.artifactId);
+    }
     return this.store.readArtifact(input.artifactId);
   }
 
   readProtocolMessage(input: ReadProtocolMessageRequest) {
-    return this.store.readProtocolMessage(input.reference);
+    return this.agentRuntimeStore.readProtocolMessage(input.reference);
   }
 
   private async validateAndRecordRepository(task: Task): Promise<RepositoryPreflight> {
@@ -3454,7 +3483,11 @@ export class TaskManagerService {
       return;
     }
     const snapshot = await this.refreshEvidenceInternal({ taskId: run.taskId });
-    await this.store.updateRun(run.id, { afterGitSnapshotId: snapshot.id });
+    await this.taskRuntime.updateRun(
+      run.id,
+      { afterGitSnapshotId: snapshot.id },
+      `post-run-git-snapshot:${run.id}:${snapshot.id}`
+    );
     if (isImplementationRunMode(run.mode) && run.status === 'COMPLETED') {
       await this.reconcileImplementationOutcome(run, snapshot);
     }
@@ -3997,23 +4030,11 @@ export class TaskManagerService {
     if (!this.designUpdates) {
       throw new Error('Design Mode is not configured in this Task Monki host.');
     }
-    const capabilities = await this.runtimeRegistry
-      .require(CODEX_RUNTIME_ID)
-      .capabilities();
-    if (
-      capabilities.extensions['task-monki.design-instructions']?.maturity !==
-        'stable' ||
-      capabilities.extensions['task-monki.design-skill-access']?.maturity !==
-        'stable' ||
-      capabilities.extensions['task-monki.design-browser-verification']?.maturity !==
-        'stable' ||
-      capabilities.attachmentDelivery.maturity !== 'stable' ||
-      capabilities.turnInterruption.maturity !== 'stable'
-    ) {
-      throw new Error(
-        'The configured Codex runtime cannot apply Design instructions and skills safely, verify the rendered result, protect Design references, or support Stop.'
-      );
-    }
+    const support = projectAgentExecutionSupport(
+      await this.runtimeRegistry.require(CODEX_RUNTIME_ID).capabilities(),
+      'DESIGN'
+    );
+    if (!support.supported) throw new Error(support.reason);
     return this.designUpdates;
   }
 
@@ -4294,7 +4315,7 @@ function codexExternalToolsAreDisabled(
   );
 }
 
-const ACTIVE_SCOPED_AGENT_RUN_STATUSES: ReadonlySet<
+const ACTIVE_RUNTIME_RUN_STATUSES: ReadonlySet<
   import('../../shared/agentRuntime').AgentRuntimeRunRecord['status']
 > = new Set([
   'QUEUED',

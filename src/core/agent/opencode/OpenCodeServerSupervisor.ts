@@ -8,7 +8,7 @@ import {
   type ProcessTerminationUnconfirmed,
   type SupervisedProcess
 } from '../../process/ProcessSupervisor';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AgentProviderRuntimeStore } from '../AgentRuntimeStore';
 import { OpenCodeHttpClient, type OpenCodeClientTransport } from './OpenCodeHttpClient';
 import {
   normalizeOpenCodeEvent,
@@ -79,7 +79,7 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
   private readonly startingProcesses = new WeakSet<SupervisedProcess>();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProviderRuntimeStore,
     private readonly options: OpenCodeServerSupervisorOptions
   ) {}
 
@@ -619,7 +619,7 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
 
   private async updateServerById(
     serverId: string,
-    update: Parameters<FileTaskStore['updateAgentServer']>[1]
+    update: Parameters<AgentProviderRuntimeStore['updateAgentServer']>[1]
   ): Promise<void> {
     const updated = await this.store.updateAgentServer(serverId, update);
     if (this.server?.id === serverId) this.server = updated;

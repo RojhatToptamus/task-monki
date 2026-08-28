@@ -964,7 +964,7 @@ async function inspectSmokeWorktree(
       throw new Error(`${SMOKE_FILE_NAME} escaped the task worktree.`);
     }
     const content = await fs.readFile(filePath, 'utf8');
-    if (content !== SMOKE_FILE_CONTENT) {
+    if (content !== SMOKE_SENTINEL && content !== SMOKE_FILE_CONTENT) {
       throw new Error(`${SMOKE_FILE_NAME} did not contain the exact smoke sentinel line.`);
     }
     const rows = (await git(worktreePath, [

@@ -11,7 +11,7 @@ import {
   waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import { spawnOwnedPortable } from '../../process/ownedProcess';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AgentProviderRuntimeStore } from '../AgentRuntimeStore';
 import { sensitiveEnvironmentValues } from '../ProviderEnvironmentPolicy';
 import {
   ACP_CLIENT_CAPABILITIES,
@@ -104,7 +104,7 @@ export class AcpStdioSupervisor {
   private shuttingDown = false;
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProviderRuntimeStore,
     private readonly options: AcpStdioSupervisorOptions
   ) {}
 
@@ -177,10 +177,24 @@ export class AcpStdioSupervisor {
 
   async markRunning(): Promise<void> {
     if (this.server && ['READY', 'DEGRADED'].includes(this.server.status)) {
-      this.server = await this.store.updateAgentServer(this.server.id, {
-        status: 'RUNNING',
-        lastHealthAt: new Date().toISOString()
-      });
+      const serverId = this.server.id;
+      try {
+        this.server = await this.store.updateAgentServer(serverId, {
+          status: 'RUNNING',
+          lastHealthAt: new Date().toISOString()
+        });
+      } catch (cause) {
+        // Process exit or quarantine can settle the durable server while the
+        // prompt acknowledgement is being recorded. That terminal or stopping
+        // state is authoritative; do not turn the health-marker race into an
+        // ambiguous prompt-delivery failure.
+        const latest = await this.store.getAgentServer(serverId);
+        if (latest && !['READY', 'DEGRADED'].includes(latest.status)) {
+          if (this.server?.id === serverId) this.server = latest;
+          return;
+        }
+        throw cause;
+      }
     }
   }
 

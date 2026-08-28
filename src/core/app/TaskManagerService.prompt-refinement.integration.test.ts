@@ -8,7 +8,7 @@ import type {
   AgentRuntimeDescriptor
 } from '../../shared/agent';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import { createScriptedAgentRuntimeFixture } from '../../testSupport/taskMonkiScenario';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
@@ -40,7 +40,8 @@ describe('TaskManagerService prompt refinement', () => {
     };
     const refinementModel = model(runtimeId, 'refiner-model', ['text', 'image']);
     const targetModel = model(runtimeId, 'target-model', ['text', 'image']);
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', { value: descriptor });
     vi.spyOn(adapter, 'capabilities').mockResolvedValue(capabilities);
     vi.spyOn(adapter, 'preflight').mockResolvedValue({
@@ -79,6 +80,7 @@ describe('TaskManagerService prompt refinement', () => {
       cancelPromptRefinement: { value: cancelPromptRefinement }
     });
     const service = new TaskManagerService(store, root, undefined, {
+      ...scriptedRuntime.serviceOptions,
       agentRuntimeAdapters: [adapter],
       appSettingsStore: new MemoryAppSettingsStore({
         defaultRuntimeId: runtimeId,

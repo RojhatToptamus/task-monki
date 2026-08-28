@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { createScriptedAgentRuntimeFixture } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
@@ -85,13 +86,13 @@ describe('TaskManagerService repository lifecycle', () => {
       worktreePath: path.join(harness.rootDir, 'pending-worktree'),
       baseSha: 'base'
     });
-    const session = await harness.store.createAgentSession({
+    const session = await harness.scriptedRuntime.createSession({
       task,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    await harness.store.createRun({
+    await harness.scriptedRuntime.createRun({
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -119,11 +120,13 @@ async function createHarness(name: string) {
   await git(repositoryPath, ['add', 'README.md']);
   await git(repositoryPath, ['commit', '-m', 'Initial commit']);
   const store = new FileTaskStore(path.join(rootDir, 'store'));
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
   const service = new TaskManagerService(store, repositoryPath, undefined, {
+    ...scriptedRuntime.serviceOptions,
     worktreeRoot: path.join(rootDir, 'worktrees'),
     codexPath: 'codex-not-used'
   });
-  return { rootDir, repositoryPath, store, service };
+  return { rootDir, repositoryPath, store, scriptedRuntime, service };
 }
 
 async function git(cwd: string, argv: string[]): Promise<void> {

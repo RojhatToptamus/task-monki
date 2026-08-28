@@ -1459,7 +1459,12 @@ async function createAgentTestEnvironment(
     });
     const events = new AppEventBus();
     const profile = deterministicAcpProfile(providerScriptPath);
-    const adapter = new AcpRuntimeAdapter(store, events, profile, {
+    const runtimeStore = new FileAgentRuntimeStore(path.join(rootDir, 'agent-runtime'));
+    const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+      store.recordAgentRuntimeEvent(event, operationId)
+    );
+    store.bindAgentRuntime(taskRuntime);
+    const adapter = new AcpRuntimeAdapter(taskRuntime, runtimeStore, events, profile, {
       cwd: rootDir,
       environment: {
         PATH: process.env.PATH,
@@ -1489,7 +1494,8 @@ async function createAgentTestEnvironment(
       worktreeRoot,
       appSettingsStore,
       agentRuntimeAdapters: [adapter],
-      agentRuntimeStore: new FileAgentRuntimeStore(path.join(rootDir, 'agent-runtime')),
+      agentRuntimeStore: runtimeStore,
+      taskRuntimeAccess: taskRuntime,
       discourseStore: new FileDiscourseStore(path.join(rootDir, 'discourse')),
       discourseWorkspaceRoot: path.join(rootDir, 'discourse-workspaces'),
       defaultAgentRuntimeId: RUNTIME_ID,

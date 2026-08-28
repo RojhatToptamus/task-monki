@@ -6,9 +6,9 @@ import type {
 } from '../../shared/agent';
 import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
 import {
-  AgentScopedTurnRouter,
-  type AgentScopedTurnEvent
-} from '../agent/AgentScopedTurnProvider';
+  type AgentRuntimeCoordinator,
+  type AgentRuntimeTurnEvent
+} from '../agent/AgentRuntimeCoordinator';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
 import {
   appendDiscourseDelta,
@@ -30,7 +30,7 @@ export interface DiscourseRuntimeHostOptions {
   taskStore: FileTaskStore;
   runtimeStore: AgentRuntimeStore;
   discourseStore: DiscourseStore;
-  scopedTurnRouter?: AgentScopedTurnRouter;
+  agents: AgentRuntimeCoordinator;
   events: AppEventBus;
   runtimeOperations: RuntimeOperationGate;
   workspaceRoot?: string;
@@ -49,16 +49,17 @@ export class DiscourseRuntimeHost {
   private readonly scheduler: AgentTurnScheduler;
   private readonly deltaStates = new Map<string, DiscourseDeltaAccumulatorState>();
   private readonly deltaTimers = new Map<string, NodeJS.Timeout>();
-  private readonly disposeScopedTurnEvents?: () => void;
+  private readonly disposeRuntimeTurnEvents?: () => void;
   private schedulerWork?: Promise<void>;
   private schedulerRetryTimer?: NodeJS.Timeout;
   private schedulerRetryAttempt = 0;
-  private scopedTurnEventTail: Promise<void> = Promise.resolve();
+  private runtimeTurnEventTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: DiscourseRuntimeHostOptions) {
     this.coordinator = new DiscourseRuntimeCoordinator(
       options.discourseStore,
-      options.runtimeStore
+      options.runtimeStore,
+      options.agents
     );
     this.scheduler = new AgentTurnScheduler(options.runtimeStore);
     const resolver = new DiscourseContextResolver(options.taskStore);
@@ -69,10 +70,7 @@ export class DiscourseRuntimeHost {
           path.join(os.tmpdir(), 'task-monki-discourse-workspaces')
       ),
       async (input) => {
-        if (!options.scopedTurnRouter) {
-          throw new Error('No agent runtime is configured for Discourse.');
-        }
-        return options.scopedTurnRouter.buildExecutionContext(input.runtimeId, input);
+        return options.agents.buildExecutionContext(input.runtimeId, input);
       }
     );
     this.service = new DiscourseService(
@@ -82,38 +80,29 @@ export class DiscourseRuntimeHost {
       {
         getRuntimeCatalog: () => this.getRuntimeCatalog(),
         getAppSettings: () => structuredClone(options.getAppSettings()),
-        ...(options.scopedTurnRouter
-          ? {
-              runtime: {
-                coordinator: this.coordinator,
-                contextSnapshots: this.contextSnapshots,
-                provider: options.scopedTurnRouter,
-                notifySchedulerWorkAvailable: () =>
-                  this.notifySchedulerWorkAvailable()
-              }
-            }
-          : {})
+        runtime: {
+          coordinator: this.coordinator,
+          contextSnapshots: this.contextSnapshots,
+          notifySchedulerWorkAvailable: () => this.notifySchedulerWorkAvailable()
+        }
       }
     );
-    this.disposeScopedTurnEvents = options.scopedTurnRouter?.subscribe((event) => {
+    this.disposeRuntimeTurnEvents = options.agents.subscribe((event) => {
       if (options.runtimeOperations.isClosing) return;
-      const previousEvent = this.scopedTurnEventTail;
-      this.scopedTurnEventTail = options.runtimeOperations.runOperation(async () => {
+      const previousEvent = this.runtimeTurnEventTail;
+      this.runtimeTurnEventTail = options.runtimeOperations.runOperation(async () => {
         await previousEvent;
         try {
-          await this.ingestScopedTurnEvent(event);
+          await this.ingestRuntimeTurnEvent(event);
         } catch {
-          await this.recoverAfterScopedTurnIngestionFailure(event);
+          await this.recoverAfterRuntimeTurnIngestionFailure(event);
         }
       });
     });
   }
 
   async initialize(): Promise<void> {
-    await Promise.all([
-      this.options.runtimeStore.init(),
-      this.options.discourseStore.init()
-    ]);
+    await this.options.discourseStore.init();
     const conversationIds = new Set<string>();
     let cursor: string | undefined;
     do {
@@ -150,23 +139,16 @@ export class DiscourseRuntimeHost {
       clearTimeout(this.schedulerRetryTimer);
       this.schedulerRetryTimer = undefined;
     }
-    this.disposeScopedTurnEvents?.();
-    await Promise.allSettled([this.scopedTurnEventTail]);
+    this.disposeRuntimeTurnEvents?.();
+    await Promise.allSettled([this.runtimeTurnEventTail]);
     for (const timer of this.deltaTimers.values()) clearTimeout(timer);
     this.deltaTimers.clear();
     this.deltaStates.clear();
+    await this.scheduler.latchShutdown(`service-shutdown:${Date.now()}`);
   }
 
   async closeStores(): Promise<void> {
-    const results = await Promise.allSettled([
-      this.scheduler.latchShutdown(`service-shutdown:${Date.now()}`),
-      this.options.discourseStore.close(),
-      this.options.runtimeStore.close()
-    ]);
-    const failed = results.find(
-      (result): result is PromiseRejectedResult => result.status === 'rejected'
-    );
-    if (failed) throw failed.reason;
+    await this.options.discourseStore.close();
   }
 
   private async getRuntimeCatalog(): Promise<AgentRuntimeCatalog> {
@@ -175,7 +157,11 @@ export class DiscourseRuntimeHost {
       ...catalog,
       runtimes: catalog.runtimes.map((runtime) => {
         const runtimeId = runtime.preflight.runtime.id;
-        const configured = this.options.scopedTurnRouter?.has(runtimeId) === true;
+        const declared =
+          runtime.preflight.capabilities.extensions['task-monki.discourse'];
+        const configured =
+          declared?.maturity === 'stable' &&
+          this.options.agents.hasRuntime(runtimeId);
         return {
           ...runtime,
           preflight: {
@@ -185,14 +171,10 @@ export class DiscourseRuntimeHost {
               extensions: {
                 ...runtime.preflight.capabilities.extensions,
                 'task-monki.discourse': configured
-                  ? {
-                      maturity: 'stable' as const,
-                      detail:
-                        'A scoped runtime binding attests read-only, offline Discourse execution.'
-                    }
+                  ? declared!
                   : {
                       maturity: 'unsupported' as const,
-                      detail: `${runtime.preflight.runtime.displayName} is not configured for scoped Discourse turns.`
+                      detail: `${runtime.preflight.runtime.displayName} is not configured for Discourse turns.`
                     }
               }
             }
@@ -206,8 +188,7 @@ export class DiscourseRuntimeHost {
     if (
       this.options.runtimeOperations.isClosing ||
       this.options.providerStartupDisabledReason ||
-      this.schedulerWork ||
-      !this.options.scopedTurnRouter
+      this.schedulerWork
     ) {
       return;
     }
@@ -248,8 +229,6 @@ export class DiscourseRuntimeHost {
   }
 
   private async pumpScheduler(): Promise<void> {
-    const router = this.options.scopedTurnRouter;
-    if (!router) return;
     const recoveredRuntime = await this.options.runtimeStore.snapshot();
     if (
       recoveredRuntime.shutdownLatched &&
@@ -291,7 +270,6 @@ export class DiscourseRuntimeHost {
           }
           const run = await this.coordinator.dispatchLeasedJob(
             entry.id,
-            router,
             `discourse-dispatch:${entry.id}:${entry.recordRevision}`
           );
           this.emitJobUpdate(scope, run.id, {
@@ -352,7 +330,7 @@ export class DiscourseRuntimeHost {
     });
   }
 
-  private async ingestScopedTurnEvent(event: AgentScopedTurnEvent): Promise<void> {
+  private async ingestRuntimeTurnEvent(event: AgentRuntimeTurnEvent): Promise<void> {
     if (event.type === 'DELTA') {
       const run = await this.options.runtimeStore.getRun(event.runId);
       if (run?.scope.kind !== 'DISCOURSE') return;
@@ -368,7 +346,10 @@ export class DiscourseRuntimeHost {
       if (appended.accepted && !this.deltaTimers.has(run.id)) {
         const timer = setTimeout(() => {
           this.deltaTimers.delete(run.id);
-          void this.flushDeltas(run.id, event.observedAt).catch(() => undefined);
+          if (this.options.runtimeOperations.isClosing) return;
+          void this.options.runtimeOperations
+            .runOperation(() => this.flushDeltas(run.id, event.observedAt))
+            .catch(() => undefined);
         }, 75);
         timer.unref?.();
         this.deltaTimers.set(run.id, timer);
@@ -416,9 +397,7 @@ export class DiscourseRuntimeHost {
     const snapshot = aggregate.contextSnapshots.find(
       (candidate) => candidate.id === scope.contextSnapshotId
     );
-    const body =
-      event.finalMessage ??
-      (await this.options.runtimeStore.readArtifact(run.outputArtifactId));
+    const body = await this.options.runtimeStore.readArtifact(run.outputArtifactId);
     const freshness = snapshot
       ? await this.contextSnapshots.freshness(snapshot)
       : (run.contextFreshnessAtCompletion ?? 'UNKNOWN');
@@ -480,8 +459,8 @@ export class DiscourseRuntimeHost {
     this.notifySchedulerWorkAvailable();
   }
 
-  private async recoverAfterScopedTurnIngestionFailure(
-    event: AgentScopedTurnEvent
+  private async recoverAfterRuntimeTurnIngestionFailure(
+    event: AgentRuntimeTurnEvent
   ): Promise<void> {
     const run = await this.options.runtimeStore
       .getRun(event.runId)

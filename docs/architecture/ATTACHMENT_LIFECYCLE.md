@@ -5,6 +5,11 @@ Date: 2026-07-11
 Attachments are immutable task inputs or Design references. They are neither
 provider artifacts nor repository files. They never live in a Git worktree.
 
+This document describes current implemented behavior.
+The provider-neutral delivery change is planned in
+`docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`.
+Until that change ships, the Codex-only delivery restrictions below remain in force.
+
 ## Supported input
 
 Task Monki accepts:
@@ -174,8 +179,10 @@ A Codex thread cannot replace its active permission-profile identity during
 resume. If a Design turn changes the exact reference selection, Task Monki
 forks the existing provider thread with a new attested profile. The provider
 history continues, but the new thread can read only the current turn's selected
-managed files. The same Task Monki primary session owns the new provider thread.
-Task Monki unsubscribes the replaced thread so the App Server can unload it.
+managed files. A new Task Monki primary session owns that provider thread.
+The prior local session keeps its immutable provider identity and remains in the
+same Task conversation lineage. Task Monki unsubscribes the replaced thread so
+the App Server can unload it.
 An unchanged selection resumes the current thread without a fork.
 
 Core reopens files with no-follow semantics immediately before provider

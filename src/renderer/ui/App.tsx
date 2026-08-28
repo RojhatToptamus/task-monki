@@ -46,6 +46,7 @@ import type {
 } from '../../shared/designCanvas';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
@@ -1757,7 +1758,10 @@ export function App() {
   const readyPromptRefinementRuntimes = enabledRuntimes.filter(
     (runtime) =>
       runtime.preflight.readiness.canStart &&
-      runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
+      projectAgentExecutionSupport(
+        runtime.preflight.capabilities,
+        'PROMPT_REFINEMENT'
+      ).supported
   );
   const configuredPromptRefinementRuntimeId =
     appSettings.promptRefinementRuntimeId ?? appSettings.defaultRuntimeId;
@@ -1769,8 +1773,11 @@ export function App() {
   const readyReviewRuntimes = enabledRuntimes.filter(
     (runtime) =>
       runtime.preflight.readiness.canStart &&
-      (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-        runtime.preflight.capabilities.detachedReview.maturity === 'stable')
+      projectAgentExecutionSupport(
+        runtime.preflight.capabilities,
+        'REVIEW',
+        { sourceRuntimeId: selectedTask?.runtimeId }
+      ).supported
   );
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
@@ -1785,6 +1792,9 @@ export function App() {
   const refineDisabledReason = promptRefinementRuntime
     ? undefined
     : 'No ready agent runtime supports isolated prompt refinement.';
+  const reviewDisabledReason = selectedTask && !reviewRuntime
+    ? 'No ready agent runtime supports review for this task.'
+    : undefined;
   const selectedTaskRuntimeState = selectedTask
     ? runtimeCatalog?.runtimes.find(
         (runtime) => runtime.preflight.runtime.id === selectedTask.runtimeId
@@ -2990,6 +3000,7 @@ export function App() {
             settingsObservations={selectedSettings}
             subagentObservations={selectedSubagentObservations}
             runtimeState={selectedTaskRuntimeState}
+            reviewDisabledReason={reviewDisabledReason}
             server={taskDetail.agentServers.find(
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}

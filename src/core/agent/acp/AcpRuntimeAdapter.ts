@@ -3,6 +3,7 @@ import type {
   AgentCommandApprovalDecision,
   AgentExecutionSettings,
   AgentItemRecord,
+  AgentJsonValue,
   AgentModel,
   AgentPreflight,
   AgentProtocolMessageReference,
@@ -16,12 +17,14 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../../shared/contracts';
+import { AGENT_RUNTIME_LIMITS } from '../../../shared/agentRuntime';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
-import {
-  ArtifactAppendAmbiguousError,
-  type FileTaskStore
-} from '../../storage/FileTaskStore';
+import type {
+  AgentProviderRuntimeStore,
+  TaskAgentRuntimeAccess
+} from '../AgentRuntimeStore';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
@@ -290,7 +293,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly sensitiveValues: readonly string[];
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly taskRuntime: TaskAgentRuntimeAccess,
+    private readonly providerRuntime: AgentProviderRuntimeStore,
     private readonly appEvents: AppEventBus,
     readonly profile: AcpRuntimeProfile,
     private readonly options: AcpRuntimeAdapterOptions
@@ -537,7 +541,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async listSessionControls(): Promise<AgentSessionControlSet[]> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return snapshot.agentSessions
       .filter(
         (session) =>
@@ -880,14 +884,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       // Persist provider ownership before issuing follow-up configuration
       // mutations. A failed mode/model update can then resume this exact
       // session instead of creating an orphan or duplicating it on retry.
-      initialStored = await this.store.updateAgentSession(local.id, {
+      initialStored = await this.taskRuntime.updateAgentSession(local.id, {
         providerSessionId: state.sessionId,
         status: 'NOT_LOADED',
-        materialized: false,
         requestedSettings: settings,
         observedSettings: initialObservedSettings,
         lastAttachedAt: new Date().toISOString()
-      });
+      }, acpRuntimeOperationId('session/create-ownership', local.id, state.sessionId));
     } catch (cause) {
       const ambiguity = new AgentMutationAmbiguousError(
         'session/new',
@@ -925,13 +928,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const observedSettings = this.projectObservedSettings(state, settings);
     let stored: AgentSessionRecord;
     try {
-      stored = await this.store.updateAgentSession(local.id, {
+      stored = await this.taskRuntime.updateAgentSession(local.id, {
         status: 'IDLE',
-        materialized: false,
         requestedSettings: settings,
         observedSettings,
         lastAttachedAt: new Date().toISOString()
-      });
+      }, acpRuntimeOperationId('session/create-configured', local.id, state.sessionId, observedSettings));
       await this.recordSettingsObservation(
         stored,
         'TASK_MONKI_RESOLUTION',
@@ -977,7 +979,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     const existing = this.nativeSessions.get(providerSessionId);
     if (existing) {
-      const stored = await this.store.updateAgentSession(session.id, {
+      const stored = await this.taskRuntime.updateAgentSession(session.id, {
         providerSessionId,
         status: 'IDLE',
         observedSettings: this.projectObservedSettings(
@@ -985,7 +987,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           session.requestedSettings
         ),
         lastAttachedAt: new Date().toISOString()
-      });
+      }, acpRuntimeOperationId('session/attach-loaded', session.id, providerSessionId));
       this.provisionalProviderSessionIds.delete(session.id);
       this.setOperationalPreflight(existing);
       this.emitRuntimeUpdate();
@@ -1052,13 +1054,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       state,
       session.requestedSettings
     );
-    const stored = await this.store.updateAgentSession(session.id, {
+    const stored = await this.taskRuntime.updateAgentSession(session.id, {
       providerSessionId,
       status: 'IDLE',
       materialized: true,
       observedSettings,
       lastAttachedAt: new Date().toISOString()
-    });
+    }, acpProtocolOperationId('session/attach', response.raw, session.id, providerSessionId));
     this.provisionalProviderSessionIds.delete(session.id);
     await this.recordSettingsObservation(
       stored,
@@ -1079,7 +1081,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.inboundQueue;
     const session = await this.requireSession(ref.localSessionId);
     this.assertSessionOwnership(session);
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const activeRun = snapshot.runs.find(
       (run) => run.sessionId === session.id && ACTIVE_RUN_STATUSES.includes(run.status)
     );
@@ -1134,14 +1136,24 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         this.provisionalProviderSessionIds.delete(localSessionId);
       }
     }
-    await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+    await this.taskRuntime.updateAgentSession(
+      session.id,
+      { status: 'NOT_LOADED' },
+      acpRuntimeOperationId(
+        'session/release',
+        session.id,
+        providerSessionId,
+        session.updatedAt,
+        this.supervisor?.currentServer?.id
+      )
+    );
     this.refreshModels();
     this.emitRuntimeUpdate();
     await this.stopUnusedRuntimeProcess();
   }
 
   async releaseTask(taskId: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const sessions = snapshot.agentSessions.filter(
       (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
     );
@@ -1156,7 +1168,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   async readSession(ref: AgentSessionRef): Promise<AgentSessionSnapshot> {
     const session = await this.requireSession(ref.localSessionId);
     this.assertSessionOwnership(session);
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return {
       session,
       runs: snapshot.runs
@@ -1189,7 +1201,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       });
     }
     if (!session.providerSessionId) throw new Error('ACP session setup did not return an ID.');
-    const competing = await this.store.getActiveRunForSession(session.id);
+    const competing = await this.taskRuntime.getActiveRunForSession(session.id);
     if (competing && competing.id !== input.localRunId && ACTIVE_RUN_STATUSES.includes(competing.status)) {
       throw new Error(`ACP session ${session.id} already has active run ${competing.id}.`);
     }
@@ -1217,11 +1229,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const applied = await this.applyRequestedNativeSettings(client, nativeState, settings);
     const observedSettings = this.projectObservedSettings(applied.state, settings);
     try {
-      session = await this.store.updateAgentSession(session.id, {
+      session = await this.taskRuntime.updateAgentSession(session.id, {
         requestedSettings: settings,
         observedSettings,
         lastAttachedAt: new Date().toISOString()
-      });
+      }, acpRuntimeOperationId(
+        'session/turn-settings',
+        input.localRunId,
+        session.id,
+        nativeState.sessionId,
+        observedSettings
+      ));
       await this.recordSettingsObservation(
         session,
         'TASK_MONKI_RESOLUTION',
@@ -1241,11 +1259,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     const server = this.supervisor?.currentServer;
     if (!server) throw new Error('ACP runtime is not ready.');
-    await this.store.updateRun(input.localRunId, {
+    await this.taskRuntime.updateRun(input.localRunId, {
       serverInstanceId: server.id,
       status: 'STARTING',
       lastEventAt: new Date().toISOString()
-    });
+    }, acpRuntimeOperationId('turn/send-intent', input.localRunId, server.id));
 
     let started;
     this.activePromptRunIds.add(input.localRunId);
@@ -1264,18 +1282,18 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     void started.response.catch(() => undefined);
     const providerTurnId = `${server.id}:${String(started.requestId)}`;
     try {
-      await this.store.updateRun(input.localRunId, {
+      await this.taskRuntime.updateRun(input.localRunId, {
         providerTurnId,
         serverInstanceId: server.id,
         status: 'RUNNING',
         lastEventAt: new Date().toISOString()
-      });
-      await this.store.updateAgentSession(session.id, {
+      }, acpRuntimeOperationId('turn/acknowledged', input.localRunId, providerTurnId, server.id));
+      await this.taskRuntime.updateAgentSession(session.id, {
         status: 'ACTIVE',
         materialized: true,
         requestedSettings: settings,
         lastAttachedAt: new Date().toISOString()
-      });
+      }, acpRuntimeOperationId('session/turn-active', session.id, providerTurnId, server.id));
       await this.supervisor?.markRunning();
     } catch (cause) {
       await this.quarantineRuntimeAfterAmbiguousMutation(
@@ -1299,7 +1317,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const session = await this.requireSession(input.session.localSessionId);
     this.assertSessionOwnership(session);
     if (!session.providerSessionId) throw new Error('ACP session is not materialized.');
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
+    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
     if (!run || run.sessionId !== session.id) {
       throw new Error('ACP turn does not belong to the selected session.');
     }
@@ -1307,16 +1325,20 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const server = this.supervisor?.currentServer;
     if (!client || !server || server.id !== run.serverInstanceId) {
       this.activePromptRunIds.delete(run.id);
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        run.sessionId,
+        { status: 'NOT_LOADED' },
+        acpRuntimeOperationId('session/interrupt-runtime-missing', run.sessionId, run.id)
+      );
       throw new AgentMutationAmbiguousError(
         'session/cancel',
         'The ACP process that owns this turn is no longer available; cancellation delivery cannot be confirmed.'
       );
     }
-    await this.store.updateRun(run.id, {
+    await this.taskRuntime.updateRun(run.id, {
       status: 'INTERRUPTING',
       lastEventAt: new Date().toISOString()
-    });
+    }, acpRuntimeOperationId('turn/interrupt-intent', run.id, input.providerTurnId));
     try {
       await client.notify('session/cancel', { sessionId: session.providerSessionId });
       await this.cancelPendingPermissions(run, client);
@@ -1368,10 +1390,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         interaction.providerRequestId,
         { outcome },
         async (raw) => {
-          await this.store.transitionInteractionRequest(interaction.id, 'RESPONDING', {
+          await this.taskRuntime.transitionInteractionRequest(interaction.id, 'RESPONDING', {
             status: 'RESPONDING',
             responseRawMessage: raw
-          });
+          }, acpProtocolOperationId('interaction/response-sent', raw, interaction.id));
           responseEvidencePersisted = true;
         }
       );
@@ -1390,7 +1412,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     let resolved: InteractionRequestRecord;
     try {
-      resolved = await this.store.transitionInteractionRequest(
+      resolved = await this.taskRuntime.transitionInteractionRequest(
         interaction.id,
         'RESPONDING',
         {
@@ -1398,7 +1420,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           responseRawMessage: responseRaw,
           resolution: { outcome },
           resolvedAt: new Date().toISOString()
-        }
+        },
+        acpProtocolOperationId('interaction/response-acknowledged', responseRaw, interaction.id)
       );
     } catch (cause) {
       // The provider has consumed the response. Fence its generation before
@@ -1412,7 +1435,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         `ACP permission response was delivered, but local completion persistence failed: ${errorMessage(cause)}`
       );
       const recoveryFailures: unknown[] = [];
-      const run = await this.store.getRun(interaction.runId).catch((failure) => {
+      const run = await this.taskRuntime.getRun(interaction.runId).catch((failure) => {
         recoveryFailures.push(failure);
         return undefined;
       });
@@ -1437,10 +1460,67 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       throw ambiguity;
     }
     this.emitInteractionUpdate(resolved);
+    await this.resumeAfterInteractionResolution(resolved, responseRaw);
+  }
+
+  private async resumeAfterInteractionResolution(
+    interaction: InteractionRequestRecord,
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
+    const snapshot = await this.taskRuntime.snapshot();
+    if (
+      snapshot.interactionRequests.some(
+        (candidate) =>
+          candidate.runId === interaction.runId &&
+          candidate.sessionId === interaction.sessionId &&
+          candidate.serverInstanceId === interaction.serverInstanceId &&
+          ['PENDING', 'RESPONDING'].includes(candidate.status)
+      )
+    ) {
+      return;
+    }
+    const run = snapshot.runs.find((candidate) => candidate.id === interaction.runId);
+    if (
+      run?.status === 'AWAITING_APPROVAL' ||
+      run?.status === 'AWAITING_USER_INPUT'
+    ) {
+      await this.taskRuntime.applyTaskRuntimeEvent(
+        createDomainEvent({
+          type: 'AGENT_INTERACTION_RESOLVED',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
+          interactionRequestId: interaction.id,
+          source: 'provider',
+          payload: {
+            type: interaction.type,
+            status: interaction.status,
+            resumeConfirmed: true
+          }
+        }),
+        acpProtocolOperationId('event/interaction-resolved', raw, run.id, interaction.id)
+      );
+    }
+    const session = snapshot.agentSessions.find(
+      (candidate) => candidate.id === interaction.sessionId
+    );
+    if (
+      session?.status === 'AWAITING_APPROVAL' ||
+      session?.status === 'AWAITING_USER_INPUT'
+    ) {
+      await this.taskRuntime.updateAgentSession(
+        session.id,
+        { status: 'ACTIVE' },
+        acpProtocolOperationId('session/interaction-resolved', raw, session.id, interaction.id)
+      );
+    }
   }
 
   async reconcile(): Promise<AgentReconciliationResult> {
-    const runs = await this.store.getRunsRequiringRecovery({
+    const runs = await this.taskRuntime.getRunsRequiringRecovery({
       runtimeId: this.descriptor.id
     });
     const recoveryRequiredSessionIds = new Set<string>();
@@ -1460,7 +1540,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         reconciledSessionIds.add(run.sessionId);
         continue;
       }
-      const published = await this.store.appendRunEventIfStatus(
+      const published = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_RECONCILED',
           taskId: run.taskId,
@@ -1477,7 +1557,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             reason: 'ACP has no prompt-status read method. Task Monki will not replay an ambiguous prompt.'
           }
         }),
-        [run.status]
+        [run.status],
+        acpRuntimeOperationId('event/reconciled', run.id, run.status, run.serverInstanceId)
       );
       if (!published) continue;
       recoveryRequiredSessionIds.add(run.sessionId);
@@ -1763,7 +1844,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.waitForRuntimeQuarantine();
     if (!this.supervisor) {
       const runtime = await this.ensureResolvedRuntime();
-      const supervisor = new AcpStdioSupervisor(this.store, {
+      const supervisor = new AcpStdioSupervisor(this.providerRuntime, {
         profile: this.profile,
         runtime,
         cwd: this.options.cwd,
@@ -1925,7 +2006,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (this.activePromptRunIds.size > 0) return true;
     const server = this.supervisor?.currentServer;
     if (!server || !this.supervisor?.currentClient) return false;
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return snapshot.runs.some(
       (run) =>
         run.runtimeId === this.descriptor.id &&
@@ -2567,14 +2648,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await this.recordProtocolIncident(errorMessage(cause), raw);
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(
+    const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       notification.sessionId
     );
     if (!session || !this.isCurrentClientEvent(client, generation, raw)) return;
     const activeRun = this.replayingProviderSessionIds.has(notification.sessionId)
       ? undefined
-      : await this.store.getActiveRunForSession(session.id);
+      : await this.taskRuntime.getActiveRunForSession(session.id);
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
     // ACP session updates do not carry a prompt ID. Once a prompt mutation is
     // ambiguous, later traffic cannot safely be attributed to that recovered
@@ -2590,7 +2671,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     ].includes(update.sessionUpdate);
     if (run && !streamedContent) {
       await this.recordRunActivity(run, update.sessionUpdate, raw);
-      await this.store.updateRun(run.id, { lastEventAt: new Date().toISOString() });
+      await this.taskRuntime.updateRun(
+        run.id,
+        { lastEventAt: new Date().toISOString() },
+        acpProtocolOperationId('run/activity', raw, run.id, update.sessionUpdate)
+      );
     }
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
@@ -2647,11 +2732,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await client.respondError(request.id, -32602, errorMessage(cause));
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(
+    const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       permission.sessionId
     );
-    const activeRun = session ? await this.store.getActiveRunForSession(session.id) : undefined;
+    const activeRun = session ? await this.taskRuntime.getActiveRunForSession(session.id) : undefined;
     const run = activeRun && this.activePromptRunIds.has(activeRun.id)
       ? activeRun
       : undefined;
@@ -2692,7 +2777,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
       return;
     }
-    const providerItem = await this.store.getAgentItemByProviderId(
+    const providerItem = await this.taskRuntime.getAgentItemByProviderId(
       run.id,
       permission.toolCall.toolCallId
     );
@@ -2727,7 +2812,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     let interaction: InteractionRequestRecord;
     try {
-      interaction = await this.store.createInteractionRequest({
+      interaction = await this.taskRuntime.createInteractionRequest({
         runtimeId: this.descriptor.id,
         serverInstanceId: server.id,
         providerRequestId: request.id,
@@ -2742,7 +2827,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         allowedActions: materialized.allowedActions,
         policyWarnings: materialized.warnings,
         requestRawMessage: raw
-      });
+      }, acpProtocolOperationId('interaction/create', raw, run.id, request.id));
     } catch (cause) {
       await this.recoverPermissionMaterializationFailure({
         client,
@@ -2857,12 +2942,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.flushBufferedStreamOutput(runId);
     await this.materializeBufferedContentParts(runId, undefined, terminal);
     if (!terminal) return;
-    for (const item of await this.store.getAgentItemsForRun(runId)) {
+    for (const item of await this.taskRuntime.getAgentItemsForRun(runId)) {
       if (
         item.status === 'IN_PROGRESS' &&
         ['AGENT_MESSAGE', 'REASONING_SUMMARY', 'USER_MESSAGE'].includes(item.type)
       ) {
-        await this.store.upsertAgentItem({ ...item, status: 'COMPLETED' });
+        await this.taskRuntime.upsertAgentItem(
+          { ...item, status: 'COMPLETED' },
+          acpRuntimeOperationId('item/terminal', runId, item.id, terminal)
+        );
       }
     }
   }
@@ -2985,7 +3073,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private async flushCredentialCarries(runId: string): Promise<void> {
     const buffer = this.streamBuffers.get(runId);
     if (!buffer || buffer.credentialCarries.size === 0) return;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       this.discardStreamBuffer(runId);
       return;
@@ -3035,7 +3123,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     if (buffer.persistenceRecoveryStarted) return;
     buffer.persistenceRecoveryStarted = true;
-    const ambiguity = cause instanceof ArtifactAppendAmbiguousError;
+    const ambiguity = cause instanceof AgentRuntimeArtifactMutationAmbiguousError;
     const reason = this.redactProviderText(
       ambiguity
         ? `Task Monki cannot prove the ACP output artifact after an ambiguous append for run ${run.id}. The same bytes will not be retried.`
@@ -3079,7 +3167,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (buffer.timer) clearTimeout(buffer.timer);
     buffer.timer = undefined;
     if (buffer.outputBytes === 0) return;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       this.discardStreamBuffer(runId);
       return;
@@ -3093,11 +3181,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       )
       .join('');
     try {
-      if (artifactText) await this.store.appendArtifact(run.outputArtifactId, artifactText);
+      if (artifactText) {
+        await this.taskRuntime.appendArtifact(
+          run.outputArtifactId,
+          artifactText,
+          acpRuntimeOperationId('artifact/output', run.id, artifactText)
+        );
+      }
     } catch (cause) {
       buffer.outputAppendFailures += 1;
       if (
-        cause instanceof ArtifactAppendAmbiguousError ||
+        cause instanceof AgentRuntimeArtifactMutationAmbiguousError ||
         buffer.outputAppendFailures >= MAX_STREAM_OUTPUT_APPEND_ATTEMPTS
       ) {
         await this.recoverStreamOutputPersistenceFailure(buffer, run, cause);
@@ -3134,7 +3228,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const buffer = this.streamBuffers.get(runId);
     if (!buffer) return;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       this.discardStreamBuffer(runId);
       return;
@@ -3143,9 +3237,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     for (const partId of selectedIds) {
       const part = buffer.parts.get(partId);
       if (!part) continue;
-      const existing = await this.store.getAgentItemByProviderId(run.id, part.messageId);
+      const existing = await this.taskRuntime.getAgentItemByProviderId(run.id, part.messageId);
       const combined = `${itemText(existing)}${bufferedText(part.chunks)}`;
-      await this.store.upsertAgentItem({
+      await this.taskRuntime.upsertAgentItem({
         taskId: run.taskId,
         iterationId: run.iterationId,
         runId: run.id,
@@ -3153,9 +3247,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         providerItemId: part.messageId,
         type: part.itemType,
         status: terminal ? 'COMPLETED' : 'IN_PROGRESS',
-        payload: { type: part.updateType, text: combined },
+        payload: this.boundedItemPayload({ type: part.updateType, text: combined }),
         rawMessage: part.raw
-      });
+      }, acpProtocolOperationId('item/stream-flush', part.raw, run.id, part.messageId));
       await this.recordRunActivity(run, part.updateType, part.raw, {
         providerItemId: part.messageId,
         coalescedEvents: part.eventCount
@@ -3190,7 +3284,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           await this.flushBufferedStreamOutput(output.runId);
         } catch (cause) {
           const current = this.streamBuffers.get(output.runId);
-          const outputRun = await this.store.getRun(output.runId);
+          const outputRun = await this.taskRuntime.getRun(output.runId);
           if (current && outputRun) {
             await this.recoverStreamOutputPersistenceFailure(current, outputRun, cause);
           }
@@ -3211,7 +3305,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         await this.materializeBufferedContentParts(oldest.runId, [oldest.partId], false);
       } catch (cause) {
         const current = this.streamBuffers.get(oldest.runId);
-        const bufferedRun = await this.store.getRun(oldest.runId);
+        const bufferedRun = await this.taskRuntime.getRun(oldest.runId);
         if (current && bufferedRun) {
           await this.recoverStreamOutputPersistenceFailure(current, bufferedRun, cause);
         }
@@ -3244,9 +3338,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     if (typeof update.toolCallId !== 'string') return;
-    const existing = await this.store.getAgentItemByProviderId(run.id, update.toolCallId);
+    const existing = await this.taskRuntime.getAgentItemByProviderId(run.id, update.toolCallId);
     const toolCall = mergeAcpToolCallUpdate(existing?.payload, update);
-    await this.store.upsertAgentItem({
+    await this.taskRuntime.upsertAgentItem({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -3254,9 +3348,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       providerItemId: update.toolCallId,
       type: mapAcpToolKind(toolCall.kind),
       status: mapAcpToolStatus(toolCall.status),
-      payload: this.redactProviderValue(toolCall),
+      payload: this.boundedItemPayload(this.redactProviderValue(toolCall)),
       rawMessage: raw
-    });
+    }, acpProtocolOperationId('item/tool-call', raw, run.id, update.toolCallId));
   }
 
   private async handlePlan(
@@ -3264,7 +3358,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     update: AcpSessionUpdate,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    await this.store.recordAgentPlanRevision({
+    await this.taskRuntime.recordAgentPlanRevision({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -3272,7 +3366,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       runtimeId: this.descriptor.id,
       steps: this.redactProviderValue(mapAcpPlanEntries(update.entries)),
       rawMessage: raw
-    });
+    }, acpProtocolOperationId('plan/revision', raw, run.id));
   }
 
   private async handleUsage(
@@ -3283,7 +3377,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     if (!Number.isSafeInteger(update.used) || !Number.isSafeInteger(update.size)) return;
     const used = update.used as number;
-    await this.store.recordAgentUsageSnapshot({
+    await this.taskRuntime.recordAgentUsageSnapshot({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
@@ -3293,7 +3387,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       last: emptyUsage(0),
       modelContextWindow: update.size as number,
       rawMessage: raw
-    });
+    }, acpProtocolOperationId('usage/context', raw, session.id, run?.id));
   }
 
   private async handleConfigUpdate(
@@ -3366,7 +3460,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       session.requestedSettings
     );
     try {
-      await this.store.updateAgentSession(session.id, { observedSettings });
+      await this.taskRuntime.updateAgentSession(
+        session.id,
+        { observedSettings },
+        acpProtocolOperationId('session/settings-notification', raw, session.id)
+      );
       await this.recordSettingsObservation(
         session,
         'THREAD_SETTINGS_NOTIFICATION',
@@ -3394,7 +3492,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     // Runtime loss and interrupt timeout remove a run from this set before
     // marking it ambiguous. A late response must not reverse recovery.
     if (!this.activePromptRunIds.delete(runId)) return;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run || !PROMPT_OWNED_RUN_STATUSES.includes(run.status)) return;
 
     let prompt: ReturnType<typeof parsePromptResponse>;
@@ -3404,7 +3502,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       const detail = `ACP prompt response violated the negotiated schema: ${errorMessage(cause)}`;
       let finalArtifactId: string | undefined;
       try {
-        await this.store.appendEvent(
+        await this.taskRuntime.applyTaskRuntimeEvent(
           createDomainEvent({
             type: 'AGENT_PROTOCOL_INCIDENT',
             taskId: run.taskId,
@@ -3415,7 +3513,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             serverInstanceId: response.raw.serverInstanceId,
             source: 'provider',
             payload: { detail, rawMessage: response.raw }
-          })
+          }),
+          acpProtocolOperationId('event/protocol-incident', response.raw, run.id, detail)
         );
         finalArtifactId = await this.persistPromptFailure(
           run,
@@ -3449,7 +3548,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     let finalArtifactId: string;
     try {
       await this.flushRunContent(run.id, true);
-      const items = [...await this.store.getAgentItemsForRun(run.id)].reverse();
+      const items = [...await this.taskRuntime.getAgentItemsForRun(run.id)].sort(
+        (left, right) => left.createdAt.localeCompare(right.createdAt)
+      );
       const finalMessage = items
         .filter((item) => item.type === 'AGENT_MESSAGE')
         .map(itemText)
@@ -3462,15 +3563,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           prompt.stopReason,
           finalMessage
         );
-      const finalArtifact = await this.store.writeFinalArtifact(
+      const finalArtifactContent = formatFinalArtifact(
+        this.profile.descriptor.displayName,
+        prompt.stopReason,
+        finalMessage,
+        failureDiagnostic
+      );
+      const finalArtifact = await this.taskRuntime.writeFinalArtifact(
         run.taskId,
         run.id,
-        formatFinalArtifact(
-          this.profile.descriptor.displayName,
-          prompt.stopReason,
-          finalMessage,
-          failureDiagnostic
-        )
+        finalArtifactContent,
+        acpRuntimeOperationId('artifact/final', run.id, prompt.stopReason, finalArtifactContent)
       );
       terminal = failureDiagnostic ? 'failed' : mapAcpStopReason(prompt.stopReason);
       const type =
@@ -3480,11 +3583,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             ? 'AGENT_RUN_INTERRUPTED'
             : 'AGENT_RUN_FAILED';
       const reviewResult = run.mode === 'REVIEW' ? parseAgentReviewResult(finalMessage) : undefined;
-      await this.store.updateRun(run.id, {
+      await this.taskRuntime.updateRun(run.id, {
         finalMessage: finalMessage || undefined,
         providerTerminalRawMessage: response.raw
-      });
-      const terminalPublished = await this.store.appendRunEventIfStatus(
+      }, acpProtocolOperationId('run/terminal-details', response.raw, run.id));
+      const terminalPublished = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
         createDomainEvent({
           type,
           taskId: run.taskId,
@@ -3503,14 +3606,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             agentReviewResult: reviewResult
           }
         }),
-        PROMPT_OWNED_RUN_STATUSES
+        PROMPT_OWNED_RUN_STATUSES,
+        acpProtocolOperationId('event/run-terminal', response.raw, run.id, terminal, finalArtifact.id)
       );
       if (!terminalPublished) {
         throw new Error(
           `ACP run ${run.id} no longer owned its prompt when terminal persistence completed.`
         );
       }
-      await this.store.updateAgentSession(run.sessionId, { status: 'IDLE' });
+      await this.taskRuntime.updateAgentSession(
+        run.sessionId,
+        { status: 'IDLE' },
+        acpProtocolOperationId('session/turn-finished', response.raw, run.sessionId, run.id)
+      );
       this.clearInterruptDeadline(run.id);
       finalArtifactId = finalArtifact.id;
     } catch (cause) {
@@ -3537,7 +3645,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     if (!activeAlreadyClaimed && !this.activePromptRunIds.delete(runId)) return;
     this.clearInterruptDeadline(runId);
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run || !PROMPT_OWNED_RUN_STATUSES.includes(run.status)) return;
     let finalArtifactId: string | undefined;
     try {
@@ -3577,7 +3685,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.flushRunContent(run.id, true);
     await this.staleRunInteractions(run, failureMessage);
     if (cause instanceof AcpAmbiguousMutationError) {
-      const recoveryPublished = await this.store.appendRunEventIfStatus(
+      const recoveryPublished = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
         createDomainEvent({
           type: 'AGENT_MUTATION_AMBIGUOUS',
           taskId: run.taskId,
@@ -3589,14 +3697,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           source: 'provider',
           payload: { operation: cause.method, reason: failureMessage }
         }),
-        PROMPT_OWNED_RUN_STATUSES
+        PROMPT_OWNED_RUN_STATUSES,
+        acpRuntimeOperationId('event/prompt-ambiguous', run.id, cause.method, failureMessage)
       );
       if (!recoveryPublished) {
         throw new Error(
           `ACP run ${run.id} no longer owned its prompt when ambiguity persistence completed.`
         );
       }
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        run.sessionId,
+        { status: 'NOT_LOADED' },
+        acpRuntimeOperationId('session/prompt-ambiguous', run.sessionId, run.id, failureMessage)
+      );
       this.appEvents.emit({
         type: 'run.state.updated',
         taskId: run.taskId,
@@ -3612,15 +3725,21 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       });
       return undefined;
     }
-    const finalArtifact = await this.store.writeFinalArtifact(
+    const finalArtifactContent = `# ${this.profile.descriptor.displayName} turn failed\n\n${failureMessage}\n`;
+    const finalArtifact = await this.taskRuntime.writeFinalArtifact(
       run.taskId,
       run.id,
-      `# ${this.profile.descriptor.displayName} turn failed\n\n${failureMessage}\n`
+      finalArtifactContent,
+      acpRuntimeOperationId('artifact/failure', run.id, finalArtifactContent)
     );
     if (providerTerminalRawMessage) {
-      await this.store.updateRun(run.id, { providerTerminalRawMessage });
+      await this.taskRuntime.updateRun(
+        run.id,
+        { providerTerminalRawMessage },
+        acpProtocolOperationId('run/failure-details', providerTerminalRawMessage, run.id)
+      );
     }
-    const terminalPublished = await this.store.appendRunEventIfStatus(
+    const terminalPublished = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
       createDomainEvent({
         type: 'AGENT_RUN_FAILED',
         taskId: run.taskId,
@@ -3636,14 +3755,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           finalArtifactId: finalArtifact.id
         }
       }),
-      PROMPT_OWNED_RUN_STATUSES
+      PROMPT_OWNED_RUN_STATUSES,
+      acpRuntimeOperationId('event/run-failed', run.id, failureMessage, finalArtifact.id)
     );
     if (!terminalPublished) {
       throw new Error(
         `ACP run ${run.id} no longer owned its prompt when failure persistence completed.`
       );
     }
-    await this.store.updateAgentSession(run.sessionId, { status: 'SYSTEM_ERROR' });
+    await this.taskRuntime.updateAgentSession(
+      run.sessionId,
+      { status: 'SYSTEM_ERROR' },
+      acpRuntimeOperationId('session/run-failed', run.sessionId, run.id, failureMessage)
+    );
     return finalArtifact.id;
   }
 
@@ -3690,7 +3814,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       'Task Monki will not approve or replay the blocked prompt.';
     let recoveryPublicationFailure: unknown;
     try {
-      await this.store.appendRunEventIfStatus(
+      await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
         createDomainEvent({
           type: 'AGENT_MUTATION_AMBIGUOUS',
           taskId: run.taskId,
@@ -3708,7 +3832,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             ...(cancellationRawMessage ? { cancellationRawMessage } : {})
           }
         }),
-        PROMPT_OWNED_RUN_STATUSES
+        PROMPT_OWNED_RUN_STATUSES,
+        acpProtocolOperationId('event/permission-materialization-failed', raw, run.id, reason)
       );
     } catch (recoveryCause) {
       recoveryPublicationFailure = recoveryCause;
@@ -3716,7 +3841,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
     let sessionPublicationFailure: unknown;
     try {
-      await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        session.id,
+        { status: 'NOT_LOADED' },
+        acpProtocolOperationId('session/permission-materialization-failed', raw, session.id, run.id)
+      );
     } catch (sessionCause) {
       sessionPublicationFailure = sessionCause;
     }
@@ -3742,9 +3871,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
 
     const [currentRun, currentSession, snapshot] = await Promise.all([
-      this.store.getRun(run.id).catch(() => undefined),
-      this.store.getAgentSession(session.id).catch(() => undefined),
-      this.store.snapshot().catch(() => undefined)
+      this.taskRuntime.getRun(run.id).catch(() => undefined),
+      this.taskRuntime.getAgentSession(session.id).catch(() => undefined),
+      this.taskRuntime.snapshot().catch(() => undefined)
     ]);
     const runIsSafe = Boolean(
       currentRun &&
@@ -3830,9 +3959,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     );
     let recoveryPublicationFailure: unknown;
     try {
-      const current = await this.store.getRun(run.id);
+      const current = await this.taskRuntime.getRun(run.id);
       if (current) {
-        await this.store.appendRunEventIfStatus(
+        await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
           createDomainEvent({
             type: 'AGENT_MUTATION_AMBIGUOUS',
             taskId: current.taskId,
@@ -3849,10 +3978,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
               rawMessage: raw
             }
           }),
-          PROMPT_OWNED_RUN_STATUSES
+          PROMPT_OWNED_RUN_STATUSES,
+          raw
+            ? acpProtocolOperationId('event/prompt-finalization-failed', raw, current.id, reason)
+            : acpRuntimeOperationId('event/prompt-finalization-failed', current.id, reason)
         );
       }
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        run.sessionId,
+        { status: 'NOT_LOADED' },
+        acpRuntimeOperationId('session/prompt-finalization-failed', run.sessionId, run.id, reason)
+      );
     } catch (recoveryCause) {
       recoveryPublicationFailure = recoveryCause;
     }
@@ -3869,8 +4005,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
 
     const [currentRun, currentSession] = await Promise.all([
-      this.store.getRun(run.id).catch(() => undefined),
-      this.store.getAgentSession(run.sessionId).catch(() => undefined)
+      this.taskRuntime.getRun(run.id).catch(() => undefined),
+      this.taskRuntime.getAgentSession(run.sessionId).catch(() => undefined)
     ]);
     const runIsSafe = Boolean(
       currentRun &&
@@ -3903,19 +4039,20 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async staleRunInteractions(run: RunRecord, reason: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) =>
         candidate.runId === run.id && ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const stale = await this.store.transitionInteractionRequest(
+      const stale = await this.taskRuntime.transitionInteractionRequest(
         interaction.id,
         interaction.status,
         {
           status: 'STALE',
           resolution: { reason },
           resolvedAt: new Date().toISOString()
-        }
+        },
+        acpRuntimeOperationId('interaction/stale', interaction.id, interaction.status, reason)
       );
       this.emitInteractionUpdate(stale);
     }
@@ -4062,7 +4199,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     this.activePromptRunIds.clear();
     this.initializeResponse = undefined;
     this.invalidateBoundClient();
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const affectedRuns = snapshot.runs.filter(
       (candidate) =>
         candidate.runtimeId === this.descriptor.id &&
@@ -4071,7 +4208,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     );
     for (const run of affectedRuns) {
       await this.flushRunContent(run.id, true);
-      const lossPublished = await this.store.appendRunEventIfStatus(
+      const lossPublished = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
           taskId: run.taskId,
@@ -4085,10 +4222,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             reason: `${reason} Prompt outcome is ambiguous and will not be replayed.`
           }
         }),
-        [run.status]
+        [run.status],
+        acpRuntimeOperationId('event/runtime-lost', run.id, serverInstanceId, run.status, reason)
       );
       if (!lossPublished) continue;
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        run.sessionId,
+        { status: 'NOT_LOADED' },
+        acpRuntimeOperationId('session/runtime-lost', run.sessionId, serverInstanceId, run.id)
+      );
       this.appEvents.emit({
         type: 'run.state.updated',
         taskId: run.taskId,
@@ -4115,7 +4257,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             loadedProviderSessionIds.has(candidate.providerSessionId)))
     )) {
       if (session.status !== 'NOT_LOADED') {
-        await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+        await this.taskRuntime.updateAgentSession(
+          session.id,
+          { status: 'NOT_LOADED' },
+          acpRuntimeOperationId('session/runtime-lost-idle', session.id, serverInstanceId)
+        );
       }
     }
     for (const interaction of snapshot.interactionRequests.filter(
@@ -4123,24 +4269,25 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         candidate.serverInstanceId === serverInstanceId &&
         ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const latest = await this.store.getInteractionRequest(interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (!latest || !['PENDING', 'RESPONDING'].includes(latest.status)) continue;
       try {
-        const aborted = await this.store.transitionInteractionRequest(
+        const aborted = await this.taskRuntime.transitionInteractionRequest(
           latest.id,
           latest.status,
           {
             status: 'ABORTED_SERVER_LOST',
             resolution: { reason },
             resolvedAt: new Date().toISOString()
-          }
+          },
+          acpRuntimeOperationId('interaction/runtime-lost', latest.id, latest.status, serverInstanceId, reason)
         );
         this.emitInteractionUpdate(aborted);
       } catch (cause) {
         // A terminal prompt handler can resolve or stale the interaction while
         // process-loss reconciliation is running. That terminal state wins;
         // only propagate a failure if the interaction is still unresolved.
-        const raced = await this.store.getInteractionRequest(interaction.id);
+        const raced = await this.taskRuntime.getInteractionRequest(interaction.id);
         if (raced && ['PENDING', 'RESPONDING'].includes(raced.status)) throw cause;
       }
     }
@@ -4149,13 +4296,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     for (const server of agentServersRequiringLossRecovery(
       snapshot,
       this.descriptor.id
     )) {
       if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
-        await this.store.updateAgentServer(server.id, {
+        await this.providerRuntime.updateAgentServer(server.id, {
           status: 'LOST',
           disconnectedAt: new Date().toISOString(),
           exitedAt: new Date().toISOString(),
@@ -4167,30 +4314,31 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async cancelPendingPermissions(run: RunRecord, client: AcpRpcClient): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) => candidate.runId === run.id && candidate.status === 'PENDING'
     )) {
-      const responding = await this.store.transitionInteractionRequest(
+      const responding = await this.taskRuntime.transitionInteractionRequest(
         interaction.id,
         'PENDING',
         {
           status: 'RESPONDING',
           decision: { interactionType: 'COMMAND_APPROVAL', action: 'CANCEL' },
           respondedAt: new Date().toISOString()
-        }
+        },
+        acpRuntimeOperationId('interaction/cancel-intent', interaction.id, interaction.requestedAt)
       );
       const raw = await client.respond(
         responding.providerRequestId,
         { outcome: { outcome: 'cancelled' } },
         async (reference) => {
-          await this.store.transitionInteractionRequest(responding.id, 'RESPONDING', {
+          await this.taskRuntime.transitionInteractionRequest(responding.id, 'RESPONDING', {
             status: 'RESPONDING',
             responseRawMessage: reference
-          });
+          }, acpProtocolOperationId('interaction/cancel-sent', reference, responding.id));
         }
       );
-      const canceled = await this.store.transitionInteractionRequest(
+      const canceled = await this.taskRuntime.transitionInteractionRequest(
         responding.id,
         'RESPONDING',
         {
@@ -4198,7 +4346,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           responseRawMessage: raw,
           resolution: { outcome: 'cancelled' },
           resolvedAt: new Date().toISOString()
-        }
+        },
+        acpProtocolOperationId('interaction/cancel-acknowledged', raw, responding.id)
       );
       this.emitInteractionUpdate(canceled);
     }
@@ -4209,9 +4358,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const timer = setTimeout(() => {
       this.interruptTimers.delete(runId);
       this.enqueueInbound(async () => {
-        const run = await this.store.getRun(runId);
+        const run = await this.taskRuntime.getRun(runId);
         if (!run || run.status !== 'INTERRUPTING') return;
-        await this.store.appendEvent(
+        await this.taskRuntime.applyTaskRuntimeEvent(
           createDomainEvent({
             type: 'AGENT_MUTATION_AMBIGUOUS',
             taskId: run.taskId,
@@ -4225,7 +4374,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
               operation: 'session/cancel',
               reason: 'ACP agent did not return a cancelled prompt response before the deadline.'
             }
-          })
+          }),
+          acpRuntimeOperationId('event/interrupt-timeout', run.id, run.serverInstanceId)
         );
         await this.quarantineRuntimeAfterAmbiguousMutation(
           'session/cancel',
@@ -4267,7 +4417,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     rawMessage?: AgentProtocolMessageReference,
     detail?: string
   ): Promise<void> {
-    await this.store.recordAgentSettingsObservation({
+    await this.taskRuntime.recordAgentSettingsObservation({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
@@ -4276,7 +4426,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       settings,
       detail,
       rawMessage
-    });
+    }, rawMessage
+      ? acpProtocolOperationId('settings/observed', rawMessage, session.id, source)
+      : acpRuntimeOperationId('settings/observed', session.id, source, settings, detail));
   }
 
   private async recordRunActivity(
@@ -4286,7 +4438,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     details: Record<string, unknown> = {}
   ): Promise<void> {
     const payload = this.redactProviderValue({ eventType, ...details, rawMessage: raw });
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',
         taskId: run.taskId,
@@ -4297,7 +4449,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
         payload
-      })
+      }),
+      acpProtocolOperationId('event/activity', raw, run.id, eventType, details)
     );
     this.appEvents.emit({
       type: 'run.activity',
@@ -4318,9 +4471,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const providerSessionId =
       isRecord(params) && typeof params.sessionId === 'string' ? params.sessionId : undefined;
     const session = providerSessionId
-      ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
+      ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
-    const run = session ? await this.store.getActiveRunForSession(session.id) : undefined;
+    const run = session ? await this.taskRuntime.getActiveRunForSession(session.id) : undefined;
     if (run) await this.recordRunActivity(run, `extension:${method}`, raw);
   }
 
@@ -4329,10 +4482,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     detail = this.redactProviderText(detail);
-    const runs = await this.store.getRunsRequiringRecovery({ runtimeId: this.descriptor.id });
+    const runs = await this.taskRuntime.getRunsRequiringRecovery({ runtimeId: this.descriptor.id });
     const run = runs[0];
     if (!run) return;
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_PROTOCOL_INCIDENT',
         taskId: run.taskId,
@@ -4343,7 +4496,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: raw.serverInstanceId,
         source: 'provider',
         payload: { detail, rawMessage: raw }
-      })
+      }),
+      acpProtocolOperationId('event/protocol-incident', raw, run.id, detail)
     );
     this.appEvents.emit({
       type: 'run.diagnostic',
@@ -4499,7 +4653,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
-    const session = await this.store.getAgentSession(sessionId);
+    const session = await this.taskRuntime.getAgentSession(sessionId);
     if (!session) throw new Error(`Agent session not found: ${sessionId}`);
     return session;
   }
@@ -4571,6 +4725,24 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   private redactProviderValue<T>(value: T): T {
     return redactCredentialValue(value, this.sensitiveValues);
+  }
+
+  private boundedItemPayload(value: unknown): AgentJsonValue {
+    const encoded = JSON.stringify(value);
+    if (
+      encoded !== undefined &&
+      Buffer.byteLength(encoded, 'utf8') <= AGENT_RUNTIME_LIMITS.maxTelemetryPayloadBytes
+    ) {
+      return value as AgentJsonValue;
+    }
+    const type = isRecord(value) && typeof value.type === 'string'
+      ? this.redactProviderText(value.type)
+      : undefined;
+    return {
+      ...(type ? { type } : {}),
+      truncated: true,
+      byteLength: encoded === undefined ? 0 : Buffer.byteLength(encoded, 'utf8')
+    };
   }
 
   private projectObservedSettings(
@@ -5271,6 +5443,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
+}
+
+function acpRuntimeOperationId(action: string, ...identity: unknown[]): string {
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify(identity))
+    .digest('hex');
+  return `acp:${action}:${fingerprint}`;
+}
+
+function acpProtocolOperationId(
+  action: string,
+  raw: AgentProtocolMessageReference,
+  ...identity: unknown[]
+): string {
+  return acpRuntimeOperationId(
+    action,
+    raw.serverInstanceId,
+    raw.segment ?? 0,
+    raw.sequence,
+    raw.sha256,
+    ...identity
+  );
 }
 
 function normalizeExecutableOverride(value: string | undefined): string | undefined {

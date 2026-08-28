@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -16,12 +16,15 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../../shared/contracts';
+import { AGENT_RUNTIME_LIMITS } from '../../../shared/agentRuntime';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
-import {
-  ArtifactAppendAmbiguousError,
-  type FileTaskStore
-} from '../../storage/FileTaskStore';
+import type {
+  AgentProviderRuntimeStore,
+  TaskAgentRuntimeSnapshot,
+  TaskAgentRuntimeAccess
+} from '../AgentRuntimeStore';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import {
   type AgentTurnAttachment
 } from '../AgentAttachmentDelivery';
@@ -180,9 +183,9 @@ interface OpenCodeRunStreamBuffer {
   runId: string;
   sessionId: string;
   parts: Map<string, BufferedOpenCodeStreamPart>;
-  output: Array<{ source: string; chunks: string[] }>;
+  output: Array<{ source: string; chunks: string[]; evidence: string[] }>;
   outputBytes: number;
-  credentialCarry?: { source: string; text: string };
+  credentialCarry?: { source: string; text: string; evidence: string[] };
   failureCount: number;
   timer?: NodeJS.Timeout;
   flushing?: Promise<void>;
@@ -219,7 +222,7 @@ export interface OpenCodeAdapterOptions
   runtimeResolver?: typeof resolveOpenCodeRuntime;
   /** Explicit construction seam; production uses OpenCodeServerSupervisor. */
   supervisorFactory?: (
-    store: FileTaskStore,
+    store: AgentProviderRuntimeStore,
     options: OpenCodeServerSupervisorOptions
   ) => OpenCodeSessionSupervisor;
   /** Keeps inactive per-session loopback processes bounded; primarily shortened by lifecycle tests. */
@@ -280,7 +283,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private readonly interruptCompletionTimeoutMs: number;
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly taskRuntime: TaskAgentRuntimeAccess,
+    private readonly providerRuntime: AgentProviderRuntimeStore,
     private readonly appEvents: AppEventBus,
     private readonly options: OpenCodeAdapterOptions
   ) {
@@ -508,7 +512,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         existingProviderSession,
         session.worktreePath
       );
-      session = await this.store.updateAgentSession(session.id, {
+      session = await this.taskRuntime.updateAgentSession(session.id, {
         providerSessionId: existingProviderSession.id,
         providerSessionTreeId: existingProviderSession.id,
         status: await this.readProviderSessionStatus(client, existingProviderSession.id),
@@ -518,7 +522,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           settingsFromSession(existingProviderSession, selectedSettings)
         ),
         lastAttachedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId('session/discovery', session.id, existingProviderSession.id, server.id));
       const verified = await this.synchronizeSessionPermissionPolicy(
         session,
         client,
@@ -580,7 +584,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       );
     }
     try {
-      session = await this.store.updateAgentSession(session.id, {
+      session = await this.taskRuntime.updateAgentSession(session.id, {
         providerSessionId: response.id,
         providerSessionTreeId: response.id,
         status: 'IDLE',
@@ -590,9 +594,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           settingsFromSession(response, selectedSettings)
         ),
         lastAttachedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId('session/create', session.id, response.id));
     } catch (cause) {
-      const persisted = await this.store.getAgentSession(session.id).catch(() => undefined);
+      const persisted = await this.taskRuntime.getAgentSession(session.id).catch(() => undefined);
       if (persisted?.providerSessionId === response.id) {
         session = persisted;
       } else {
@@ -644,10 +648,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
     const { client, server } = await this.ensureSessionRuntime(session);
     let response: OpenCodeSession;
+    let responseRaw: AgentProtocolMessageReference;
     try {
-      response = parseOpenCodeSession(
-        (await client.get<unknown>(sessionPath(providerSessionId))).data
-      );
+      const result = await client.get<unknown>(sessionPath(providerSessionId));
+      response = parseOpenCodeSession(result.data);
+      responseRaw = result.raw;
     } catch (cause) {
       if (cause instanceof OpenCodeHttpError && cause.status === 404) {
         throw new AgentProviderSessionMissingError(
@@ -678,7 +683,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       await this.readProviderSessionStatus(client, providerSessionId),
       activeRun
     );
-    session = await this.store.updateAgentSession(session.id, {
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       providerSessionId: response.id,
       providerSessionTreeId: response.id,
       status,
@@ -687,9 +692,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         settingsFromSession(response, session.requestedSettings)
       ),
       lastAttachedAt: new Date().toISOString()
-    });
+    }, protocolOperationId(
+      'session/attach',
+      responseRaw,
+      session.id,
+      response.id,
+      server.id,
+      status
+    ));
     if (activeRun && activeRun.serverInstanceId !== server.id) {
-      await this.store.updateRun(activeRun.id, { serverInstanceId: server.id });
+      await this.taskRuntime.updateRun(
+        activeRun.id,
+        { serverInstanceId: server.id },
+        runtimeOperationId('run/attach-server', activeRun.id, server.id)
+      );
     }
     await this.bindEventStream(session, client, server.id);
     await this.reconcilePendingInteractions(session, client, server.id);
@@ -710,7 +726,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   async releaseTask(taskId: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const sessions = snapshot.agentSessions.filter(
       (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
     );
@@ -752,7 +768,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       session.worktreePath
     );
     const activeRun = await this.getCurrentRunForSession(session.id);
-    session = await this.store.updateAgentSession(session.id, {
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       status: await this.sessionStatusWithInteractionAuthority(
         await this.readProviderSessionStatus(client, providerSessionId),
         activeRun
@@ -762,8 +778,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         settingsFromSession(response, session.requestedSettings)
       ),
       lastAttachedAt: new Date().toISOString()
-    });
-    const snapshot = await this.store.snapshot();
+    }, runtimeOperationId('session/read', session.id, response.id, session.updatedAt));
+    const snapshot = await this.taskRuntime.snapshot();
     if (session.status === 'IDLE') this.scheduleSessionIdleEviction(session.id);
     return {
       session,
@@ -848,12 +864,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       throw new Error('OpenCode replaced the session runtime before prompt submission.');
     }
     const providerMessageId = createOpenCodeMessageId();
-    await this.store.updateRun(input.localRunId, {
+    await this.taskRuntime.updateRun(input.localRunId, {
       providerTurnId: providerMessageId,
       serverInstanceId: server.id,
       status: 'STARTING',
       lastEventAt: new Date().toISOString()
-    });
+    }, runtimeOperationId('turn/send-intent', input.localRunId, providerMessageId, server.id));
     if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
       throw new Error('OpenCode replaced the session runtime before prompt submission.');
     }
@@ -889,22 +905,22 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
     const submittedAt = new Date().toISOString();
     try {
-      await this.store.updateRun(input.localRunId, {
+      await this.taskRuntime.updateRun(input.localRunId, {
         status: 'RUNNING',
         observedSettings: selectedModel.settings,
         attachmentSubmissions: [],
         lastEventAt: submittedAt
-      });
+      }, runtimeOperationId('turn/acknowledged', input.localRunId, providerMessageId, server.id));
       if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
         throw new OpenCodeRuntimeGenerationChangedError();
       }
-      session = await this.store.updateAgentSession(session.id, {
+      session = await this.taskRuntime.updateAgentSession(session.id, {
         status: 'ACTIVE',
         materialized: true,
         requestedSettings: selectedModel.settings,
         observedSettings: selectedModel.settings,
         lastAttachedAt: submittedAt
-      });
+      }, runtimeOperationId('session/turn-active', session.id, providerMessageId, server.id));
       if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
         throw new OpenCodeRuntimeGenerationChangedError();
       }
@@ -946,7 +962,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           'The OpenCode session identifier matches a runtime credential and cannot be interrupted safely.'
         );
       }
-      const run = await this.store.getRunByProviderTurnId(
+      const run = await this.taskRuntime.getRunByProviderTurnId(
         this.descriptor.id,
         input.providerTurnId
       );
@@ -982,12 +998,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         throw error;
       }
       if (run && ACTIVE_RUN_STATES.includes(run.status)) {
-        await this.store.updateRun(run.id, {
+        await this.taskRuntime.updateRun(run.id, {
           status: 'INTERRUPTING',
           lastEventAt: new Date().toISOString()
-        });
+        }, runtimeOperationId('turn/interrupt-acknowledged', run.id, input.providerTurnId, server.id));
       }
-      const interrupting = await this.store.getRun(run.id);
+      const interrupting = await this.taskRuntime.getRun(run.id);
       if (!interrupting || interrupting.status !== 'INTERRUPTING') return;
       const deadline = this.armInterruptDeadline(interrupting, server.id);
       try {
@@ -999,7 +1015,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           Math.min(deadline.deadlineAt, Date.now() + controlWindowMs)
         );
       } catch (cause) {
-        const current = await this.store.getRun(run.id);
+        const current = await this.taskRuntime.getRun(run.id);
         if (current?.status === 'INTERRUPTING') {
           await this.recordRunActivity(current, 'session/abort/reconcile-deferred', {
             error: this.redactProviderText(errorMessage(cause))
@@ -1078,7 +1094,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     deadline: OpenCodeInterruptDeadline
   ): Promise<void> {
     if (!this.isCurrentInterruptDeadline(deadline)) return;
-    const run = await this.store.getRun(deadline.runId);
+    const run = await this.taskRuntime.getRun(deadline.runId);
     if (!run || run.status !== 'INTERRUPTING') {
       this.clearInterruptDeadline(deadline.runId, deadline);
       return;
@@ -1102,7 +1118,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       deadline.evidence = result === 'ACTIVE' ? 'ACTIVE' : 'UNCERTAIN';
     } catch (cause) {
       deadline.evidence = 'UNCERTAIN';
-      const current = await this.store.getRun(deadline.runId);
+      const current = await this.taskRuntime.getRun(deadline.runId);
       if (current?.status === 'INTERRUPTING') {
         await this.recordRunActivity(current, 'session/abort/reconcile-failed', {
           error: this.redactProviderText(errorMessage(cause))
@@ -1110,7 +1126,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
     }
     if (!this.isCurrentInterruptDeadline(deadline)) return;
-    const current = await this.store.getRun(deadline.runId);
+    const current = await this.taskRuntime.getRun(deadline.runId);
     if (!current || current.status !== 'INTERRUPTING') {
       this.clearInterruptDeadline(deadline.runId, deadline);
       return;
@@ -1135,7 +1151,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     deadline: OpenCodeInterruptDeadline
   ): Promise<void> {
     if (!this.isCurrentInterruptDeadline(deadline)) return;
-    const run = await this.store.getRun(deadline.runId);
+    const run = await this.taskRuntime.getRun(deadline.runId);
     if (!run || run.status !== 'INTERRUPTING') {
       this.clearInterruptDeadline(deadline.runId, deadline);
       return;
@@ -1154,7 +1170,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     } catch (cause) {
       quarantineFailure = cause;
     }
-    const current = await this.store.getRun(deadline.runId);
+    const current = await this.taskRuntime.getRun(deadline.runId);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
     if (!quarantineFailure) {
       await this.finalizeRun(
@@ -1235,19 +1251,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         finalized &&
         this.isCurrentSessionServerGeneration(session.id, serverInstanceId)
       ) {
-        await this.store.updateAgentSession(session.id, {
+        await this.taskRuntime.updateAgentSession(session.id, {
           status: 'IDLE',
           materialized: true
-        });
+        }, runtimeOperationId('session/interrupt-idle', session.id, run.id, serverInstanceId));
         this.scheduleSessionIdleEviction(session.id);
       }
       return finalized ? 'TERMINAL' : 'UNCERTAIN';
     }
     if (status === 'ACTIVE') {
-      await this.store.updateAgentSession(session.id, {
+      await this.taskRuntime.updateAgentSession(session.id, {
         status: 'ACTIVE',
         materialized: true
-      });
+      }, runtimeOperationId('session/interrupt-active', session.id, run.id, serverInstanceId));
       return 'ACTIVE';
     }
     return 'UNCERTAIN';
@@ -1355,7 +1371,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     let stored: AgentSessionRecord;
     try {
       await assertSessionDirectory(forked, target.worktreePath);
-      stored = await this.store.updateAgentSession(target.id, {
+      stored = await this.taskRuntime.updateAgentSession(target.id, {
         providerSessionId: forked.id,
         providerSessionTreeId: forked.id,
         providerForkedFromSessionId: sourceProviderId,
@@ -1367,11 +1383,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           settingsFromSession(forked, input.settings)
         ),
         lastAttachedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId('session/fork', target.id, forked.id, sourceProviderId));
     } catch (cause) {
       let persisted: AgentSessionRecord | undefined;
       try {
-        persisted = await this.store.getAgentSession(target.id);
+        persisted = await this.taskRuntime.getAgentSession(target.id);
       } catch (confirmationCause) {
         await this.throwAmbiguousAfterQuarantine(
           target.id,
@@ -1422,7 +1438,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     let existingOwner: AgentSessionRecord | undefined;
     try {
-      existingOwner = await this.store.getAgentSessionByProviderId(
+      existingOwner = await this.taskRuntime.getAgentSessionByProviderId(
         this.descriptor.id,
         providerSessionId
       );
@@ -1515,7 +1531,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       throw error;
     }
     try {
-      const latest = await this.store.getInteractionRequest(input.interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(input.interaction.id);
       if (!latest) {
         throw new Error('The acknowledged interaction no longer has a durable Task Monki record.');
       }
@@ -1523,12 +1539,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         throw new Error('The acknowledged interaction unexpectedly returned to pending state.');
       }
       if (latest.status !== 'RESPONDING') return;
-      const resolved = await this.store.transitionInteractionRequest(latest.id, 'RESPONDING', {
+      const resolved = await this.taskRuntime.transitionInteractionRequest(latest.id, 'RESPONDING', {
         status: interactionTerminalStatus(input.decision),
         responseRawMessage: responseRaw,
         resolution: { provider: OPENCODE_RUNTIME_ID, acknowledged: true },
         resolvedAt: new Date().toISOString()
-      });
+      }, protocolOperationId('interaction/response-acknowledged', responseRaw, latest.id));
       this.emitInteractionUpdate(resolved);
       await this.resumeAfterInteractionResolution(resolved);
     } catch (cause) {
@@ -1547,7 +1563,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   async reconcile(): Promise<AgentReconciliationResult> {
     const reconciledSessionIds = new Set<string>();
     const recoveryRequiredSessionIds = new Set<string>();
-    const runs = await this.store.getRunsRequiringRecovery({
+    const runs = await this.taskRuntime.getRunsRequiringRecovery({
       includeQueued: true,
       runtimeId: this.descriptor.id
     });
@@ -2183,13 +2199,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     update: Partial<Pick<AgentSessionRecord, 'status' | 'materialized'>> = {}
   ): Promise<AgentSessionRecord> {
     try {
-      return await this.store.updateAgentSession(session.id, {
+      return await this.taskRuntime.updateAgentSession(session.id, {
         ...update,
         requestedSettings: settings,
         observedSettings: this.safeObservedSettings(
           settingsFromSession(providerSession, settings)
         )
-      });
+      }, runtimeOperationId('session/permission-attestation', session.id, providerSession.id, operation));
     } catch (cause) {
       const diagnostic = this.redactProviderText(errorMessage(cause));
       await this.quarantineSessionRuntime(
@@ -2235,9 +2251,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.clearAssistantMessageParents(sessionId);
     const reason = `Task Monki quarantined the OpenCode session process after ${operation}. ${detail}`;
     if (serverId) await this.handleRuntimeLoss(serverId, reason, sessionId);
-    const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
+    const session = await this.taskRuntime.getAgentSession(sessionId).catch(() => undefined);
     if (session?.status !== 'NOT_LOADED') {
-      await this.store.updateAgentSession(sessionId, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        sessionId,
+        { status: 'NOT_LOADED' },
+        runtimeOperationId('session/quarantine', sessionId, serverId, operation)
+      );
     }
     if (shutdownFailure) {
       throw new Error(
@@ -2255,7 +2275,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     providerMessageId: string,
     serverId: string
   ): Promise<RunRecord | undefined> {
-    const run = await this.store.getRunByProviderTurnId(
+    const run = await this.taskRuntime.getRunByProviderTurnId(
       this.descriptor.id,
       providerMessageId
     );
@@ -2336,7 +2356,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       createdAt: info.time?.created ?? 0
     };
     const currentTotal = this.assistantUsageTotals.get(run.id) ??
-      latestUsageForRun(await this.store.snapshot(), run.id)?.total ??
+      latestUsageForRun(await this.taskRuntime.snapshot(), run.id)?.total ??
       emptyUsage();
     const total = replaceUsageInTotal(
       currentTotal,
@@ -2352,7 +2372,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const last = runUsage.sort(
       (left, right) => left.createdAt - right.createdAt
     ).at(-1)?.usage ?? usage;
-    await this.store.recordAgentUsageSnapshot({
+    await this.taskRuntime.recordAgentUsageSnapshot({
       taskId: run.taskId,
       iterationId: run.iterationId,
       sessionId: session.id,
@@ -2361,7 +2381,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       total,
       last,
       rawMessage: raw
-    });
+    }, protocolOperationId('usage/assistant', raw, run.id, info.id));
     this.rememberAssistantUsageTotal(run.id, total);
     this.rememberAssistantUsage(session.id, info.id, nextTracked);
   }
@@ -2451,8 +2471,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       maximumMajor: this.options.maximumMajor
     };
     return this.options.supervisorFactory
-      ? this.options.supervisorFactory(this.store, supervisorOptions)
-      : new OpenCodeServerSupervisor(this.store, supervisorOptions);
+      ? this.options.supervisorFactory(this.providerRuntime, supervisorOptions)
+      : new OpenCodeServerSupervisor(this.providerRuntime, supervisorOptions);
   }
 
   private async bindEventStream(
@@ -2599,7 +2619,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
             'inbound/persistence-resync',
             `OpenCode inbound persistence failed and its read-only recovery snapshot also failed: ${diagnostic}`
           );
-          const current = run ? await this.store.getRun(run.id) : undefined;
+          const current = run ? await this.taskRuntime.getRun(run.id) : undefined;
           if (current?.status === 'RECOVERY_REQUIRED') {
             await this.recordReconciliation(
               current,
@@ -2701,7 +2721,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       default: {
         const sessionId = stringProperty(event.properties, 'sessionID');
         const session = sessionId
-          ? await this.store.getAgentSessionByProviderId(this.descriptor.id, sessionId)
+          ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, sessionId)
           : undefined;
         const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
         if (
@@ -2718,12 +2738,16 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async handleSessionStatus(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     if (!providerSessionId) return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const status = mapOpenCodeSessionStatus(event.properties.status);
     const run = await this.getCurrentRunForSession(session.id);
     const sessionStatus = await this.sessionStatusWithInteractionAuthority(status, run);
-    await this.store.updateAgentSession(session.id, { status: sessionStatus });
+    await this.taskRuntime.updateAgentSession(
+      session.id,
+      { status: sessionStatus },
+      runtimeOperationId('session/status-event', serverId, event.id, session.id, sessionStatus)
+    );
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     if (run?.serverInstanceId === serverId) {
       await this.recordRunActivity(run, 'session/status', {
@@ -2742,7 +2766,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async handleSessionIdle(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
-      ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
+      ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     if (session && this.isCurrentSessionServerGeneration(session.id, serverId)) {
       await this.reconcileSessionOwned(session.id, serverId);
@@ -2758,7 +2782,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const info = asRecord(event.properties.info) as unknown as OpenCodeMessageInfo | undefined;
     if (!info || typeof info.id !== 'string' || typeof info.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, info.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, info.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     if (info.role === 'user') {
       const run = await this.runForProviderMessage(session, info.id, serverId);
@@ -2776,15 +2800,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         sessionStatus === 'AWAITING_APPROVAL' || sessionStatus === 'AWAITING_USER_INPUT'
           ? sessionStatus
           : 'RUNNING';
-      await this.store.updateRun(run.id, {
+      await this.taskRuntime.updateRun(run.id, {
         observedSettings: observed,
         status: runStatus
-      });
+      }, protocolOperationId('turn/message-observed', raw, run.id, info.id));
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      await this.store.updateAgentSession(session.id, {
+      await this.taskRuntime.updateAgentSession(session.id, {
         observedSettings: observed,
         status: sessionStatus
-      });
+      }, protocolOperationId('session/message-observed', raw, session.id, info.id));
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       if (providerSettings) {
         await this.recordSettingsObservation(
@@ -2811,7 +2835,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         !cachedUsage?.has(info.id) &&
         Boolean(this.assistantUsageEvictedMessageIds.get(session.id)?.has(info.id));
       if (!cacheHasRun || exactUsageMayHaveBeenEvicted) {
-        const latestUsage = latestUsageForRun(await this.store.snapshot(), run.id);
+        const latestUsage = latestUsageForRun(await this.taskRuntime.snapshot(), run.id);
         if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
         if (latestUsage) {
           const client = this.supervisors.get(session.id)?.currentClient;
@@ -2858,7 +2882,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const part = asRecord(event.properties.part) as unknown as OpenCodePart | undefined;
     if (!part || typeof part.id !== 'string' || typeof part.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, part.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, part.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     let run = await this.runForProviderMessage(session, part.messageID, serverId);
     const isUserPart = Boolean(run);
@@ -2878,7 +2902,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     serverId: string
   ): Promise<void> {
     const delta = parseOpenCodePartDelta(event.properties);
-    const session = await this.store.getAgentSessionByProviderId(
+    const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       delta.sessionID
     );
@@ -2894,7 +2918,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!run || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const previous =
       this.streamBuffers.get(run.id)?.parts.get(delta.partID)?.part ??
-      asRecord((await this.store.getAgentItemByProviderId(run.id, delta.partID))?.payload);
+      asRecord((await this.taskRuntime.getAgentItemByProviderId(run.id, delta.partID))?.payload);
     if (
       !previous ||
       previous.id !== delta.partID ||
@@ -2945,7 +2969,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       );
       return;
     }
-    await this.store.upsertAgentItem({
+    await this.taskRuntime.upsertAgentItem({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -2953,14 +2977,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       providerItemId: part.id,
       type,
       status,
-      payload: this.redactProviderValue(part),
+      payload: this.boundedItemPayload(part),
       rawMessage: raw,
       providerStartedAt: providerTimestamp(part.state?.time?.start),
       providerCompletedAt: providerTimestamp(part.state?.time?.end)
-    });
+    }, protocolOperationId('item/upsert', raw, run.id, part.id));
     const interactionPending =
       typeof part.callID === 'string' &&
-      (await this.store.snapshot()).interactionRequests.some(
+      (await this.taskRuntime.snapshot()).interactionRequests.some(
         (interaction) =>
           interaction.runId === run.id &&
           interaction.sessionId === session.id &&
@@ -2997,7 +3021,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
     const previousBuffered = buffer.parts.get(part.id);
     const previousPayload = previousBuffered?.part ??
-      (await this.store.getAgentItemByProviderId(run.id, part.id))?.payload;
+      (await this.taskRuntime.getAgentItemByProviderId(run.id, part.id))?.payload;
     const delta = explicitOutputDelta ?? outputDelta(previousPayload, part);
 
     if (!previousBuffered && buffer.parts.size >= MAX_BUFFERED_STREAM_PARTS_PER_RUN) {
@@ -3013,7 +3037,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       eventCount: (previousBuffered?.eventCount ?? 0) + 1
     });
     if (delta) {
-      this.bufferStreamOutput(buffer, part.type, delta);
+      this.bufferStreamOutput(buffer, part.type, delta, raw);
       if (this.bufferedStreamOutputBytes(buffer) > STREAM_OUTPUT_MAX_BUFFER_BYTES) {
         const terminal = streamPartIsTerminal(part, status);
         await this.flushBufferedStreamOutput(run.id, terminal);
@@ -3053,7 +3077,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
-      ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
+      ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
     if (
@@ -3064,7 +3088,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       return;
     }
     const steps = mapOpenCodeTodoSteps(event.properties.todos);
-    await this.store.recordAgentPlanRevision({
+    await this.taskRuntime.recordAgentPlanRevision({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -3072,7 +3096,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       runtimeId: this.descriptor.id,
       steps: this.redactProviderValue(steps),
       rawMessage: raw
-    });
+    }, protocolOperationId('plan/todo', raw, run.id));
     this.emitRunActivity(run, { eventType: 'turn/plan/updated', stepCount: steps.length });
   }
 
@@ -3083,7 +3107,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const permission = event.properties as unknown as OpenCodePermissionRequest;
     if (typeof permission.id !== 'string' || typeof permission.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, permission.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, permission.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.materializeInteraction(
       session,
@@ -3102,7 +3126,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const question = event.properties as unknown as OpenCodeQuestionRequest;
     if (typeof question.id !== 'string' || typeof question.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, question.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, question.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.materializeInteraction(
       session,
@@ -3170,7 +3194,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         action !== 'GRANT_SESSION' &&
         action !== 'DECLINE_FOR_SESSION'
     );
-    const interaction = await this.store.createInteractionRequest({
+    const interaction = await this.taskRuntime.createInteractionRequest({
       runtimeId: this.descriptor.id,
       serverInstanceId: serverId,
       providerRequestId,
@@ -3185,7 +3209,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       allowedActions,
       policyWarnings: policy.warnings,
       requestRawMessage: raw
-    });
+    }, protocolOperationId('interaction/create', raw, run.id, providerRequestId));
     this.emitInteractionUpdate(interaction);
     if (mapped.type === 'USER_INPUT' && allowedActions.length === 0) {
       await this.resolveBlockedUserInput(interaction);
@@ -3200,23 +3224,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       action: 'ANSWER',
       answers: {}
     };
-    const responding = await this.store.transitionInteractionRequest(
+    const responding = await this.taskRuntime.transitionInteractionRequest(
       interaction.id,
       'PENDING',
       {
         status: 'RESPONDING',
         decision,
         respondedAt: new Date().toISOString()
-      }
+      },
+      runtimeOperationId('interaction/auto-response', interaction.id, interaction.requestedAt)
     );
     this.emitInteractionUpdate(responding);
     try {
       await this.respondToInteraction({ interaction: responding, decision });
     } catch (cause) {
-      const latest = await this.store.getInteractionRequest(interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (latest?.status === 'RESPONDING') {
         const reason = errorMessage(cause);
-        const stale = await this.store.transitionInteractionRequest(
+        const stale = await this.taskRuntime.transitionInteractionRequest(
           latest.id,
           'RESPONDING',
           {
@@ -3226,12 +3251,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
               automaticResubmission: false
             },
             resolvedAt: new Date().toISOString()
-          }
+          },
+          runtimeOperationId('interaction/auto-response-failed', latest.id, latest.respondedAt, reason)
         );
         this.emitInteractionUpdate(stale);
-        const run = await this.store.getRun(interaction.runId);
+        const run = await this.taskRuntime.getRun(interaction.runId);
         if (run) {
-          await this.store.appendEvent(
+          await this.taskRuntime.applyTaskRuntimeEvent(
             createDomainEvent({
               type: 'AGENT_MUTATION_AMBIGUOUS',
               taskId: run.taskId,
@@ -3246,7 +3272,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
                 reason,
                 automaticResubmission: false
               }
-            })
+            }),
+            runtimeOperationId('event/mutation-ambiguous', run.id, latest.id, reason)
           );
           this.emitRunStateUpdate(run, {
             eventType: 'mutation/ambiguous',
@@ -3265,7 +3292,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const requestId = stringProperty(event.properties, 'requestID') ?? stringProperty(event.properties, 'permissionID');
     if (!requestId) return;
-    const interaction = await this.store.getInteractionRequestByProviderId(serverId, requestId);
+    const interaction = await this.taskRuntime.getInteractionRequestByProviderId(serverId, requestId);
     if (
       !interaction ||
       interaction.status !== 'PENDING' ||
@@ -3273,12 +3300,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     ) {
       return;
     }
-    const stale = await this.store.transitionInteractionRequest(interaction.id, 'PENDING', {
+    const stale = await this.taskRuntime.transitionInteractionRequest(interaction.id, 'PENDING', {
       status: 'STALE',
       responseRawMessage: raw,
       resolution: { providerResolvedExternally: true, eventType: event.type },
       resolvedAt: new Date().toISOString()
-    });
+    }, protocolOperationId('interaction/provider-resolved', raw, interaction.id, event.type));
     this.emitInteractionUpdate(stale);
     await this.resumeAfterInteractionResolution(stale);
   }
@@ -3297,7 +3324,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       return;
     }
     if (!child.parentID) return;
-    const parent = await this.store.getAgentSessionByProviderId(this.descriptor.id, child.parentID);
+    const parent = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, child.parentID);
     if (!parent || !this.isCurrentSessionServerGeneration(parent.id, serverId)) return;
     const parentRun = await this.getCurrentRunForSession(parent.id);
     if (
@@ -3315,7 +3342,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
       return;
     }
-    await this.store.observeSubagent({
+    await this.taskRuntime.observeSubagent({
       parentSessionId: parent.id,
       parentRunId: parentRun?.id,
       providerChildSessionId: child.id,
@@ -3324,13 +3351,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       status: 'RUNNING',
       materialized: true,
       rawMessage: raw
-    });
+    }, protocolOperationId('subagent/observed', raw, parent.id, child.id));
   }
 
   private async handleSessionError(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
-      ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
+      ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
@@ -3359,9 +3386,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const finalized = await this.finalizeRun(run, status, diagnostic);
     if (!finalized) return;
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-    await this.store.updateAgentSession(session.id, {
+    await this.taskRuntime.updateAgentSession(session.id, {
       status: status === 'INTERRUPTED' ? 'IDLE' : 'SYSTEM_ERROR'
-    });
+    }, runtimeOperationId('session/error', serverId, event.id, session.id, status));
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     this.scheduleSessionIdleEviction(session.id);
   }
@@ -3391,7 +3418,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     run: RunRecord,
     expectedServerId?: string
   ): Promise<'reconciled' | 'recovery-required'> {
-    const storedRun = await this.store.getRun(run.id);
+    const storedRun = await this.taskRuntime.getRun(run.id);
     if (!storedRun || TERMINAL_RUN_STATES.includes(storedRun.status)) return 'reconciled';
     run = storedRun;
     let session = await this.requireSession(run.sessionId);
@@ -3416,7 +3443,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       serverId = running.server.id;
       if (expectedServerId && serverId !== expectedServerId) return 'recovery-required';
       if (run.serverInstanceId !== serverId) {
-        run = await this.store.updateRun(run.id, { serverInstanceId: serverId });
+        run = await this.taskRuntime.updateRun(
+          run.id,
+          { serverInstanceId: serverId },
+          runtimeOperationId('run/reconcile-server', run.id, serverId)
+        );
       }
       await this.bindEventStream(session, client, serverId);
     } catch {
@@ -3492,15 +3523,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         settingsFromSession(providerSession, run.requestedSettings)
     );
     if (!isDeepStrictEqual(run.observedSettings, observed)) {
-      run = await this.store.updateRun(run.id, { observedSettings: observed });
+      run = await this.taskRuntime.updateRun(
+        run.id,
+        { observedSettings: observed },
+        protocolOperationId('run/reconcile-settings', messagesResult.raw, run.id)
+      );
     }
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
-    session = await this.store.updateAgentSession(session.id, {
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       observedSettings: observed,
       materialized: true
-    });
+    }, protocolOperationId('session/reconcile', sessionResult.raw, session.id, serverId));
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
@@ -3515,7 +3550,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       } catch (cause) {
         quarantineFailure = cause;
       }
-      const currentRun = await this.store.getRun(run.id);
+      const currentRun = await this.taskRuntime.getRun(run.id);
       if (currentRun && !TERMINAL_RUN_STATES.includes(currentRun.status)) {
         await this.recordReconciliation(
           currentRun,
@@ -3528,7 +3563,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       return 'recovery-required';
     }
     if (recoveredSettings) {
-      const duplicate = (await this.store.snapshot()).agentSettingsObservations.some(
+      const duplicate = (await this.taskRuntime.snapshot()).agentSettingsObservations.some(
         (observation) =>
           observation.runId === run.id &&
           observation.source === 'RECOVERY_RESUME_RESPONSE' &&
@@ -3559,7 +3594,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
         return 'recovery-required';
       }
-      const latestPlan = (await this.store.snapshot()).agentPlanRevisions
+      const latestPlan = (await this.taskRuntime.snapshot()).agentPlanRevisions
         .filter((revision) => revision.runId === run.id)
         .sort((left, right) => left.revision - right.revision)
         .at(-1);
@@ -3567,7 +3602,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         (latestPlan && !isDeepStrictEqual(latestPlan.steps, steps)) ||
         (!latestPlan && steps.length > 0)
       ) {
-        await this.store.recordAgentPlanRevision({
+        await this.taskRuntime.recordAgentPlanRevision({
           taskId: run.taskId,
           iterationId: run.iterationId,
           runId: run.id,
@@ -3575,7 +3610,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           runtimeId: this.descriptor.id,
           steps,
           rawMessage: todosResult.raw
-        });
+        }, protocolOperationId('plan/reconcile', todosResult.raw, run.id));
       }
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
         return 'recovery-required';
@@ -3592,13 +3627,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
-    const currentRunAfterInteractions = (await this.store.getRun(run.id)) ?? run;
-    session = await this.store.updateAgentSession(session.id, {
+    const currentRunAfterInteractions = (await this.taskRuntime.getRun(run.id)) ?? run;
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       status: await this.sessionStatusWithInteractionAuthority(
         status,
         currentRunAfterInteractions
       )
-    });
+    }, protocolOperationId('session/reconcile-status', statusesResult.raw, session.id, serverId));
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
@@ -3610,8 +3645,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (assistant && status === 'IDLE' && isTerminalAssistantMessage(assistant)) {
       await this.finalizeFromSnapshot(run, session, assistant, messagesResult.raw, serverId);
     } else if (status === 'ACTIVE') {
-      const currentRun = (await this.store.getRun(run.id)) ?? run;
-      const hasPendingInteraction = (await this.store.snapshot()).interactionRequests.some(
+      const currentRun = (await this.taskRuntime.getRun(run.id)) ?? run;
+      const hasPendingInteraction = (await this.taskRuntime.snapshot()).interactionRequests.some(
         (interaction) =>
           interaction.runId === run.id &&
           interaction.serverInstanceId === serverId &&
@@ -3672,7 +3707,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         const providerCompletedAt = providerTimestamp(
           part.state?.time?.end ?? (terminal ? message.info.time?.completed : undefined)
         );
-        const existing = await this.store.getAgentItemByProviderId(run.id, part.id);
+        const existing = await this.taskRuntime.getAgentItemByProviderId(run.id, part.id);
         if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
         if (
           existing?.type === type &&
@@ -3683,7 +3718,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         ) {
           continue;
         }
-        await this.store.upsertAgentItem({
+        await this.taskRuntime.upsertAgentItem({
           taskId: run.taskId,
           iterationId: run.iterationId,
           runId: run.id,
@@ -3695,7 +3730,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           rawMessage: raw,
           providerStartedAt,
           providerCompletedAt
-        });
+        }, protocolOperationId('item/recovered', raw, run.id, message.info.id, part.id));
       }
     }
     const assistants = related
@@ -3715,7 +3750,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       emptyUsage()
     );
     const last = mapOpenCodeUsage(assistant.info);
-    const latestUsage = latestUsageForRun(await this.store.snapshot(), run.id);
+    const latestUsage = latestUsageForRun(await this.taskRuntime.snapshot(), run.id);
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     if (
       latestUsage &&
@@ -3726,7 +3761,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.replaceAssistantUsageForRun(session.id, run.id, assistants);
       return;
     }
-    await this.store.recordAgentUsageSnapshot({
+    await this.taskRuntime.recordAgentUsageSnapshot({
       taskId: run.taskId,
       iterationId: run.iterationId,
       sessionId: session.id,
@@ -3735,7 +3770,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       total,
       last,
       rawMessage: raw
-    });
+    }, protocolOperationId('usage/recovered', raw, run.id, assistant.info.id));
     this.rememberAssistantUsageTotal(run.id, total);
     this.replaceAssistantUsageForRun(session.id, run.id, assistants);
   }
@@ -3816,7 +3851,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const providerRequestIds = new Set(pending.map((request) => request.id));
     for (const request of pending) {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      const existing = await this.store.getInteractionRequestByProviderId(
+      const existing = await this.taskRuntime.getInteractionRequestByProviderId(
         serverId,
         request.id
       );
@@ -3838,7 +3873,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         true
       );
     }
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) =>
         candidate.sessionId === session.id &&
@@ -3847,14 +3882,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         !providerRequestIds.has(String(candidate.providerRequestId))
     )) {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      const current = await this.store.getInteractionRequest(interaction.id);
+      const current = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (!current || (current.status !== 'PENDING' && current.status !== 'RESPONDING')) continue;
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      const stale = await this.store.transitionInteractionRequest(current.id, current.status, {
+      const stale = await this.taskRuntime.transitionInteractionRequest(current.id, current.status, {
         status: 'STALE',
         resolution: { providerQueueAbsent: true },
         resolvedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId(
+        'interaction/provider-queue-absent',
+        current.id,
+        serverId,
+        permissionsRaw.sha256,
+        questionsRaw.sha256
+      ));
       this.emitInteractionUpdate(stale);
       await this.resumeAfterInteractionResolution(stale);
     }
@@ -3867,19 +3908,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference,
     serverId: string
   ): Promise<boolean> {
-    const current = await this.store.getRun(run.id);
+    const current = await this.taskRuntime.getRun(run.id);
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return false;
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return false;
     await this.flushBufferedStreamOutput(current.id, true);
     for (const part of assistant.parts) {
       const type = mapOpenCodePartType(part);
       const status = terminalPartStatus(part);
-      const payload = this.redactProviderValue(part);
+      const payload = this.boundedItemPayload(part);
       const providerStartedAt = providerTimestamp(part.state?.time?.start);
       const providerCompletedAt = providerTimestamp(
         part.state?.time?.end ?? assistant.info.time?.completed
       );
-      const existing = await this.store.getAgentItemByProviderId(current.id, part.id);
+      const existing = await this.taskRuntime.getAgentItemByProviderId(current.id, part.id);
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return false;
       if (
         existing?.type === type &&
@@ -3890,7 +3931,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       ) {
         continue;
       }
-      await this.store.upsertAgentItem({
+      await this.taskRuntime.upsertAgentItem({
         taskId: current.taskId,
         iterationId: current.iterationId,
         runId: current.id,
@@ -3902,7 +3943,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         rawMessage: raw,
         providerStartedAt,
         providerCompletedAt
-      });
+      }, protocolOperationId('item/finalized', raw, current.id, assistant.info.id, part.id));
     }
     this.discardStreamBuffer(current.id);
     const finalMessage = assistant.parts
@@ -3933,7 +3974,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     );
     if (!finalized) return false;
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return false;
-    await this.store.updateAgentSession(session.id, { status: 'IDLE', materialized: true });
+    await this.taskRuntime.updateAgentSession(
+      session.id,
+      { status: 'IDLE', materialized: true },
+      protocolOperationId('session/finalized', raw, session.id, current.id, assistant.info.id)
+    );
     this.scheduleSessionIdleEviction(session.id);
     return true;
   }
@@ -3948,10 +3993,10 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     error = error === undefined ? undefined : this.redactProviderText(error);
     finalMessage = this.redactProviderText(finalMessage);
     await this.materializeRunStreamBuffer(run.id);
-    const current = await this.store.getRun(run.id);
+    const current = await this.taskRuntime.getRun(run.id);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return false;
     const reviewResult = current.mode === 'REVIEW' ? parseAgentReviewResult(finalMessage) : undefined;
-    const finalArtifact = await this.store.writeFinalArtifact(
+    const finalArtifact = await this.taskRuntime.writeFinalArtifact(
       current.taskId,
       current.id,
       [
@@ -3961,14 +4006,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         `Model: ${current.observedSettings?.modelProvider ?? current.requestedSettings.modelProvider ?? 'unknown'}/${current.observedSettings?.model ?? current.requestedSettings.model ?? 'unknown'}`,
         '',
         finalMessage || error || 'OpenCode returned no final text.'
-      ].join('\n')
+      ].join('\n'),
+      runtimeOperationId('artifact/final', current.id, status, finalMessage, error)
     );
     const eventType = status === 'COMPLETED'
       ? 'AGENT_RUN_COMPLETED'
       : status === 'INTERRUPTED'
         ? 'AGENT_RUN_INTERRUPTED'
         : 'AGENT_RUN_FAILED';
-    const published = await this.store.appendRunEventIfStatus(
+    const published = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
       createDomainEvent({
         type: eventType,
         taskId: current.taskId,
@@ -3987,7 +4033,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           agentReviewResult: reviewResult
         }
       }),
-      [current.status]
+      [current.status],
+      runtimeOperationId('event/run-terminal', current.id, current.status, status, finalArtifact.id)
     );
     if (!published) return false;
     this.clearInterruptDeadline(current.id);
@@ -4011,7 +4058,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     reason = 'OpenCode session runtime exited unexpectedly.',
     owningSessionId?: string
   ): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const runs = snapshot.runs.filter(
       (run) => run.serverInstanceId === serverInstanceId && ACTIVE_RUN_STATES.includes(run.status)
     );
@@ -4022,7 +4069,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         // The output buffer owns its bounded retry or ambiguity fence. Runtime
         // loss must still become authoritative even when artifact I/O fails.
       }
-      const published = await this.store.appendRunEventIfStatus(
+      const published = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
           taskId: run.taskId,
@@ -4034,7 +4081,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           source: 'process',
           payload: { reason }
         }),
-        [run.status]
+        [run.status],
+        runtimeOperationId('event/runtime-lost', run.id, serverInstanceId, run.status, reason)
       );
       if (!published) continue;
       this.clearInterruptDeadline(run.id);
@@ -4042,39 +4090,48 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         eventType: 'runtime/lost',
         reason
       });
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        run.sessionId,
+        { status: 'NOT_LOADED' },
+        runtimeOperationId('session/runtime-lost', run.sessionId, serverInstanceId, run.id)
+      );
     }
     if (owningSessionId && !runs.some((run) => run.sessionId === owningSessionId)) {
-      const session = await this.store.getAgentSession(owningSessionId);
+      const session = await this.taskRuntime.getAgentSession(owningSessionId);
       if (session && session.status !== 'NOT_LOADED') {
-        await this.store.updateAgentSession(owningSessionId, { status: 'NOT_LOADED' });
+        await this.taskRuntime.updateAgentSession(
+          owningSessionId,
+          { status: 'NOT_LOADED' },
+          runtimeOperationId('session/runtime-lost-unowned', owningSessionId, serverInstanceId)
+        );
       }
     }
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) => candidate.serverInstanceId === serverInstanceId && ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const latest = await this.store.getInteractionRequest(interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (!latest || !['PENDING', 'RESPONDING'].includes(latest.status)) continue;
       try {
-        const aborted = await this.store.transitionInteractionRequest(
+        const aborted = await this.taskRuntime.transitionInteractionRequest(
           latest.id,
           latest.status,
           {
             status: 'ABORTED_SERVER_LOST',
             resolution: { reason },
             resolvedAt: new Date().toISOString()
-          }
+          },
+          runtimeOperationId('interaction/runtime-lost', latest.id, serverInstanceId, reason)
         );
         this.emitInteractionUpdate(aborted);
       } catch (cause) {
-        const raced = await this.store.getInteractionRequest(interaction.id);
+        const raced = await this.taskRuntime.getInteractionRequest(interaction.id);
         if (raced && ['PENDING', 'RESPONDING'].includes(raced.status)) throw cause;
       }
     }
   }
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const inMemoryServerIds = new Set(
       [
         this.catalogSupervisor?.currentServer?.id,
@@ -4088,7 +4145,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.descriptor.id
     ).filter((candidate) => !inMemoryServerIds.has(candidate.id))) {
       if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
-        await this.store.updateAgentServer(server.id, {
+        await this.providerRuntime.updateAgentServer(server.id, {
           status: 'LOST',
           disconnectedAt: new Date().toISOString(),
           exitedAt: new Date().toISOString(),
@@ -4163,7 +4220,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
     const activeRun = await this.getCurrentRunForSession(sessionId);
     if (activeRun) return;
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const hasPendingInteraction = snapshot.interactionRequests.some(
       (interaction) =>
         interaction.sessionId === sessionId &&
@@ -4241,8 +4298,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (this.eventStreams.get(sessionId) === binding) {
         this.eventStreams.delete(sessionId);
       }
-      const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
-      if (session) await this.store.updateAgentSession(sessionId, { status: 'NOT_LOADED' });
+      const session = await this.taskRuntime.getAgentSession(sessionId).catch(() => undefined);
+      if (session) {
+        await this.taskRuntime.updateAgentSession(
+          sessionId,
+          { status: 'NOT_LOADED' },
+          runtimeOperationId('session/close', sessionId, session.updatedAt)
+        );
+      }
     } finally {
       if (shutdownConfirmed && this.sessionRuntimeFences.get(sessionId) === fence) {
         this.sessionRuntimeFences.delete(sessionId);
@@ -4276,7 +4339,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async hasActiveRuntimeWork(excludedQueuedRunId?: string): Promise<boolean> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return snapshot.runs.some(
       (run) =>
         run.runtimeId === this.descriptor.id &&
@@ -4377,7 +4440,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     runId?: string,
     rawMessage?: AgentProtocolMessageReference
   ): Promise<void> {
-    await this.store.recordAgentSettingsObservation({
+    await this.taskRuntime.recordAgentSettingsObservation({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
@@ -4386,7 +4449,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       source,
       settings,
       rawMessage
-    });
+    }, rawMessage
+      ? protocolOperationId('settings/observed', rawMessage, session.id, runId, source)
+      : runtimeOperationId('settings/observed', session.id, runId, source, settings));
   }
 
   private async recordRunActivity(
@@ -4395,7 +4460,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     payload: Record<string, unknown>
   ): Promise<void> {
     payload = this.redactProviderValue(payload);
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',
         taskId: run.taskId,
@@ -4406,24 +4471,40 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
         payload: { eventType, ...payload }
-      })
+      }),
+      runtimeOperationId('event/activity', run.id, eventType, payload)
     );
     this.emitRunActivity(run, { eventType, ...payload });
   }
 
   private async persistRunOutputGroups(
     run: RunRecord,
-    groups: ReadonlyArray<{ source: string; chunks: readonly string[] }>
+    groups: ReadonlyArray<{
+      source: string;
+      chunks: readonly string[];
+      evidence: readonly string[];
+    }>
   ): Promise<Array<{ source: string; text: string }>> {
-    const safeGroups = groups.map(({ source, chunks }) => ({
+    const safeGroups = groups.map(({ source, chunks, evidence }) => ({
       source: this.redactProviderText(source),
-      text: this.redactProviderText(chunks.join(''))
+      text: this.redactProviderText(chunks.join('')),
+      evidence
     }));
     const artifactText = safeGroups
       .map(({ source, text }) => `\n[${source}]\n${text}`)
       .join('');
-    if (artifactText) await this.store.appendArtifact(run.outputArtifactId, artifactText);
-    return safeGroups;
+    if (artifactText) {
+      await this.taskRuntime.appendArtifact(
+        run.outputArtifactId,
+        artifactText,
+        runtimeOperationId(
+          'artifact/output',
+          run.id,
+          safeGroups.map(({ source, text, evidence }) => ({ source, text, evidence }))
+        )
+      );
+    }
+    return safeGroups.map(({ source, text }) => ({ source, text }));
   }
 
   private scheduleBufferedStreamOutputFlush(buffer: OpenCodeRunStreamBuffer): void {
@@ -4476,7 +4557,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const outputBytes = buffer.outputBytes;
     buffer.output = [];
     buffer.outputBytes = 0;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       this.discardStreamBuffer(runId);
       return;
@@ -4489,7 +4570,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       buffer.outputBytes += outputBytes;
       const failureCount = buffer.failureCount + 1;
       if (
-        cause instanceof ArtifactAppendAmbiguousError ||
+        cause instanceof AgentRuntimeArtifactMutationAmbiguousError ||
         failureCount >= STREAM_OUTPUT_MAX_FAILURES ||
         this.bufferedStreamOutputBytes(buffer) > STREAM_OUTPUT_MAX_BUFFER_BYTES
       ) {
@@ -4527,11 +4608,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private bufferStreamOutput(
     buffer: OpenCodeRunStreamBuffer,
     source: string,
-    text: string
+    text: string,
+    raw: AgentProtocolMessageReference
   ): void {
     if (buffer.credentialCarry && buffer.credentialCarry.source !== source) {
       this.redactStreamCredentialCarry(buffer);
     }
+    const evidence = uniqueStrings([
+      ...(buffer.credentialCarry?.source === source
+        ? buffer.credentialCarry.evidence
+        : []),
+      protocolReferenceIdentity(raw)
+    ]);
     const combined = (
       buffer.credentialCarry?.source === source
         ? buffer.credentialCarry.text
@@ -4542,22 +4630,28 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.appendBufferedStreamOutput(
       buffer,
       source,
-      safe.slice(0, safe.length - carryLength)
+      safe.slice(0, safe.length - carryLength),
+      evidence
     );
     buffer.credentialCarry = carryLength > 0
-      ? { source, text: safe.slice(-carryLength) }
+      ? { source, text: safe.slice(-carryLength), evidence }
       : undefined;
   }
 
   private appendBufferedStreamOutput(
     buffer: OpenCodeRunStreamBuffer,
     source: string,
-    text: string
+    text: string,
+    evidence: readonly string[]
   ): void {
     if (!text) return;
     const previous = buffer.output.at(-1);
-    if (previous?.source === source) previous.chunks.push(text);
-    else buffer.output.push({ source, chunks: [text] });
+    if (previous?.source === source) {
+      previous.chunks.push(text);
+      previous.evidence = uniqueStrings([...previous.evidence, ...evidence]);
+    } else {
+      buffer.output.push({ source, chunks: [text], evidence: [...evidence] });
+    }
     buffer.outputBytes += Buffer.byteLength(text);
   }
 
@@ -4566,7 +4660,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.appendBufferedStreamOutput(
       buffer,
       buffer.credentialCarry.source,
-      REDACTED_CREDENTIAL
+      REDACTED_CREDENTIAL,
+      buffer.credentialCarry.evidence
     );
     buffer.credentialCarry = undefined;
   }
@@ -4577,7 +4672,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private fenceStreamOutputPersistence(run: RunRecord, cause: unknown): void {
     if (this.shuttingDown) return;
-    const detail = cause instanceof ArtifactAppendAmbiguousError
+    const detail = cause instanceof AgentRuntimeArtifactMutationAmbiguousError
       ? `Output persistence for run ${run.id} became ambiguous and cannot be retried safely.`
       : `Output persistence for run ${run.id} failed repeatedly or exceeded its safety bound.`;
     void this.quarantineSessionRuntime(
@@ -4600,7 +4695,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const buffer = this.streamBuffers.get(runId);
     if (!buffer) return;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       this.discardStreamBuffer(runId);
       return;
@@ -4612,7 +4707,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const status = streamPartIsTerminal(entry.part, entry.status)
         ? terminalPartStatus(entry.part)
         : entry.status;
-      await this.store.upsertAgentItem({
+      await this.taskRuntime.upsertAgentItem({
         taskId: run.taskId,
         iterationId: run.iterationId,
         runId: run.id,
@@ -4620,11 +4715,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         providerItemId: entry.part.id,
         type: entry.type,
         status,
-        payload: this.redactProviderValue(entry.part),
+        payload: this.boundedItemPayload(entry.part),
         rawMessage: entry.raw,
         providerStartedAt: providerTimestamp(entry.part.state?.time?.start),
         providerCompletedAt: providerTimestamp(entry.part.state?.time?.end)
-      });
+      }, protocolOperationId('item/stream-flush', entry.raw, run.id, entry.part.id));
       await this.recordRunActivity(run, `item/${entry.part.type}/${status.toLowerCase()}`, {
         providerItemId: entry.part.id,
         coalescedEvents: entry.eventCount
@@ -4664,7 +4759,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     recoveryState: RunRecord['recoveryState'],
     terminal: boolean
   ): Promise<void> {
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_RUNTIME_RECONCILED',
         taskId: run.taskId,
@@ -4675,7 +4770,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
         payload: { status, recoveryState, terminal }
-      })
+      }),
+      runtimeOperationId('event/reconciled', run.id, status, recoveryState, terminal)
     );
     this.emitRunStateUpdate(run, {
       eventType: 'runtime/reconciled',
@@ -4686,24 +4782,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async stalePendingInteractions(runId: string, reason: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) => candidate.runId === runId && ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const stale = await this.store.transitionInteractionRequest(interaction.id, interaction.status, {
+      const stale = await this.taskRuntime.transitionInteractionRequest(interaction.id, interaction.status, {
         status: 'STALE',
         resolution: { reason },
         resolvedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId('interaction/stale-terminal', interaction.id, interaction.status, reason));
       this.emitInteractionUpdate(stale);
     }
   }
 
   private async recordProtocolIncident(sessionId: string, cause: unknown): Promise<void> {
-    const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
+    const session = await this.taskRuntime.getAgentSession(sessionId).catch(() => undefined);
     const run = session ? await this.getCurrentRunForSession(session.id).catch(() => undefined) : undefined;
     if (!session || !run) return;
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_PROTOCOL_INCIDENT',
         taskId: run.taskId,
@@ -4714,7 +4810,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
         payload: { parseError: this.redactProviderText(errorMessage(cause)) }
-      })
+      }),
+      runtimeOperationId('event/protocol-incident', run.id, errorMessage(cause))
     );
     this.emitRunStateUpdate(run, {
       eventType: 'runtime/protocol-incident',
@@ -4763,6 +4860,35 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private redactProviderValue<T>(value: T): T {
     return redactCredentialValue(value, this.sensitiveValues);
+  }
+
+  private boundedItemPayload(part: OpenCodePart): AgentJsonValue {
+    const payload = this.redactProviderValue(part) as AgentJsonValue;
+    const encoded = JSON.stringify(payload);
+    if (
+      encoded !== undefined &&
+      Buffer.byteLength(encoded) <= AGENT_RUNTIME_LIMITS.maxTelemetryPayloadBytes
+    ) {
+      return payload;
+    }
+    const state = asRecord(part.state);
+    const time = asRecord(state?.time);
+    return {
+      type: part.type,
+      ...(part.tool ? { tool: this.redactProviderText(part.tool) } : {}),
+      ...(part.callID ? { callID: this.redactProviderText(part.callID) } : {}),
+      ...(typeof state?.status === 'string' ? { status: state.status } : {}),
+      ...(time
+        ? {
+            time: {
+              ...(typeof time.start === 'number' ? { start: time.start } : {}),
+              ...(typeof time.end === 'number' ? { end: time.end } : {})
+            }
+          }
+        : {}),
+      truncated: true,
+      byteLength: encoded === undefined ? 0 : Buffer.byteLength(encoded)
+    };
   }
 
   private isSafeOperationalIdentifier(value: string): boolean {
@@ -4848,15 +4974,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
-    const session = await this.store.getAgentSession(sessionId);
+    const session = await this.taskRuntime.getAgentSession(sessionId);
     if (!session) throw new Error(`Agent session not found: ${sessionId}`);
     return session;
   }
 
   private async getCurrentRunForSession(sessionId: string): Promise<RunRecord | undefined> {
-    const active = await this.store.getActiveRunForSession(sessionId);
+    const active = await this.taskRuntime.getActiveRunForSession(sessionId);
     if (active) return active;
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return snapshot.runs.find(
       (run) => run.sessionId === sessionId && ACTIVE_RUN_STATES.includes(run.status)
     );
@@ -4872,7 +4998,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     ) {
       return providerStatus;
     }
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return snapshot.interactionRequests.some(
       (interaction) =>
         interaction.runId === run.id &&
@@ -4887,7 +5013,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async resumeAfterInteractionResolution(
     interaction: InteractionRequestRecord
   ): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     if (
       snapshot.interactionRequests.some(
         (candidate) =>
@@ -4905,6 +5031,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       run?.status === 'AWAITING_USER_INPUT'
     ) {
       await this.recordRunActivity(run, 'interaction/resolved', {
+        interactionId: interaction.id,
         resumeConfirmed: true
       });
     }
@@ -4915,7 +5042,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       session?.status === 'AWAITING_APPROVAL' ||
       session?.status === 'AWAITING_USER_INPUT'
     ) {
-      await this.store.updateAgentSession(session.id, { status: 'ACTIVE' });
+      await this.taskRuntime.updateAgentSession(
+        session.id,
+        { status: 'ACTIVE' },
+        runtimeOperationId('session/interaction-resolved', session.id, interaction.id)
+      );
     }
   }
 
@@ -4933,6 +5064,41 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
 function sessionPath(providerSessionId: string): string {
   return `/session/${encodeURIComponent(providerSessionId)}`;
+}
+
+function runtimeOperationId(action: string, ...identity: unknown[]): string {
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify(identity))
+    .digest('hex');
+  return `opencode:${action}:${fingerprint}`;
+}
+
+function protocolOperationId(
+  action: string,
+  raw: AgentProtocolMessageReference,
+  ...identity: unknown[]
+): string {
+  return runtimeOperationId(
+    action,
+    raw.serverInstanceId,
+    raw.segment ?? 0,
+    raw.sequence,
+    raw.sha256,
+    ...identity
+  );
+}
+
+function protocolReferenceIdentity(raw: AgentProtocolMessageReference): string {
+  return [
+    raw.serverInstanceId,
+    raw.segment ?? 0,
+    raw.sequence,
+    raw.sha256
+  ].join(':');
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 const OPENCODE_ID_RANDOM_ALPHABET =
@@ -5092,7 +5258,7 @@ function isTerminalAssistantMessage(message: OpenCodeMessage): boolean {
 }
 
 function latestUsageForRun(
-  snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>,
+  snapshot: TaskAgentRuntimeSnapshot,
   runId: string
 ) {
   let latest: (typeof snapshot.agentUsageSnapshots)[number] | undefined;

@@ -9,6 +9,7 @@ import type {
   DesignStatus
 } from '../../shared/contracts';
 import type { DesignCanvasBounds } from '../../shared/designCanvas';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import { buildOverviewRunActivityRows, type OverviewActivityRow } from './overviewRunActivity';
 import { buildRunActivityProjection } from './runActivity';
 
@@ -312,28 +313,33 @@ export function eligibleDesignRuntimeCatalog(
   catalog: AgentRuntimeCatalog
 ): AgentRuntimeCatalog {
   const runtimes = catalog.runtimes.filter((runtime) => {
-    const capabilities = runtime.preflight.capabilities;
     return (
       runtime.preflight.readiness.canStart &&
-      capabilities.extensions['task-monki.design-instructions']?.maturity === 'stable' &&
-      capabilities.extensions['task-monki.design-skill-access']?.maturity === 'stable' &&
-      capabilities.extensions['task-monki.design-browser-verification']?.maturity === 'stable' &&
-      capabilities.attachmentDelivery.maturity === 'stable' &&
-      capabilities.turnInterruption.maturity === 'stable'
+      projectAgentExecutionSupport(
+        runtime.preflight.capabilities,
+        'DESIGN'
+      ).supported
     );
   });
   const runtimeIds = new Set(
     runtimes.map((runtime) => runtime.preflight.runtime.id)
   );
+  const capabilitiesByRuntime = new Map(
+    runtimes.map((runtime) => [
+      runtime.preflight.runtime.id,
+      runtime.preflight.capabilities
+    ] as const)
+  );
   return {
     ...catalog,
     runtimes,
     models: catalog.models.filter(
-      (model) =>
-        runtimeIds.has(model.runtimeId) &&
-        (model.inputModalities ?? []).some(
-          (modality) => modality.toLowerCase() === 'image'
-        )
+      (model) => {
+        const capabilities = capabilitiesByRuntime.get(model.runtimeId);
+        return capabilities
+          ? projectAgentExecutionSupport(capabilities, 'DESIGN', { model }).supported
+          : false;
+      }
     ),
     defaultRuntimeId: runtimeIds.has(catalog.defaultRuntimeId)
       ? catalog.defaultRuntimeId

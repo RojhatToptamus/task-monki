@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 import {
   CodexAmbiguousMutationError,
   CodexRpcClient
@@ -12,7 +12,7 @@ import {
 describe('CodexRpcClient', () => {
   it('correlates responses and journals both directions', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -41,7 +41,7 @@ describe('CodexRpcClient', () => {
 
   it('redacts exact credential values from journals and provider errors without altering wire data', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-redaction-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -90,7 +90,7 @@ describe('CodexRpcClient', () => {
 
   it('removes free-form streaming payloads from the journal across credential boundaries', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-stream-redaction-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -152,7 +152,7 @@ describe('CodexRpcClient', () => {
 
   it('journals and reports malformed frames without retaining their original payload', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-malformed-redaction-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -191,7 +191,7 @@ describe('CodexRpcClient', () => {
 
   it('surfaces notifications, server requests, and malformed messages separately', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-events-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -239,7 +239,7 @@ describe('CodexRpcClient', () => {
 
   it('routes unknown server requests without accepting them as generated requests', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-unsupported-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -275,7 +275,7 @@ describe('CodexRpcClient', () => {
 
   it('persists a server-request response reference before writing it to stdio', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-response-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -307,7 +307,7 @@ describe('CodexRpcClient', () => {
 
   it('does not write an outbound request before its journal append is durable', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-durable-send-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -349,7 +349,7 @@ describe('CodexRpcClient', () => {
 
   it('classifies a journaled response write failure as ambiguous delivery', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-response-write-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -376,7 +376,7 @@ describe('CodexRpcClient', () => {
 
   it('redacts exact credentials from query write failures', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-write-redaction-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -411,7 +411,7 @@ describe('CodexRpcClient', () => {
 
   it('settles a blocked response write when the client closes', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-blocked-write-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -439,7 +439,7 @@ describe('CodexRpcClient', () => {
 
   it('marks timed-out mutations as ambiguous instead of inviting an automatic retry', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-mutation-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -467,7 +467,7 @@ describe('CodexRpcClient', () => {
 
   it('ignores late responses for requests that already timed out', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-late-response-'));
-    const store = new FileTaskStore(dir);
+    const store = new FileAgentRuntimeStore(dir);
     const server = await store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',

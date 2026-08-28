@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 import {
   AcpStdioSupervisor,
   clientCapabilitiesForAcpProfile,
@@ -21,10 +21,10 @@ import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 import { spawnPortable } from '../../process/portableChildProcess';
 
 const temporaryDirectories: string[] = [];
-const testStores = new Set<FileTaskStore>();
+const testStores = new Set<FileAgentRuntimeStore>();
 
-function createTestStore(root: string): FileTaskStore {
-  const store = new FileTaskStore(root);
+function createTestStore(root: string): FileAgentRuntimeStore {
+  const store = new FileAgentRuntimeStore(root);
   testStores.add(store);
   return store;
 }
@@ -162,7 +162,7 @@ describe('AcpStdioSupervisor', () => {
     } finally {
       await supervisor.shutdown();
     }
-    const server = (await store.snapshot()).agentServers[0];
+    const server = (await store.snapshot()).servers[0];
     expect(server?.status).toBe('EXITED');
   });
 
@@ -211,7 +211,7 @@ describe('AcpStdioSupervisor', () => {
       requestTimeoutMs: 2_000
     });
     await expect(supervisor.start()).rejects.toThrow('supports stable protocol 1');
-    const server = (await store.snapshot()).agentServers[0];
+    const server = (await store.snapshot()).servers[0];
     expect(server?.exitReason).toContain('[REDACTED]');
     expect(server?.exitReason).not.toContain('TOPSECRET123');
     expect(server?.exitReason).not.toContain('OLD_DIAGNOSTIC_MARKER');
@@ -517,7 +517,7 @@ describe('AcpStdioSupervisor', () => {
     await expect(starting).rejects.toThrow('canceled');
     await stopping;
     expect(spawnProcess).not.toHaveBeenCalled();
-    expect((await store.snapshot()).agentServers).toEqual([
+    expect((await store.snapshot()).servers).toEqual([
       expect.objectContaining({ status: 'EXITED' })
     ]);
     await expect(supervisor.start()).rejects.toThrow('shut down');
@@ -561,7 +561,7 @@ describe('AcpStdioSupervisor', () => {
     expect(supervisor.currentServer).toEqual(
       expect.objectContaining({ status: 'LOST', disconnectedAt: expect.any(String) })
     );
-    expect((await store.snapshot()).agentServers[0]).toEqual(
+    expect((await store.snapshot()).servers[0]).toEqual(
       expect.objectContaining({ status: 'LOST', disconnectedAt: expect.any(String) })
     );
     expect(exit).toHaveBeenCalledOnce();
@@ -701,7 +701,7 @@ describe('AcpStdioSupervisor', () => {
     expect(child.listenerCount('close')).toBe(0);
     expect(child.stdout.listenerCount('data')).toBe(0);
     expect(child.stderr.listenerCount('data')).toBe(0);
-    expect((await store.snapshot()).agentServers[0]).toEqual(
+    expect((await store.snapshot()).servers[0]).toEqual(
       expect.objectContaining({ status: 'STOPPING' })
     );
     store.updateAgentServer = originalUpdate;

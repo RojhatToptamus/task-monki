@@ -44,7 +44,6 @@ import type {
   TombstoneDiscourseMessageRequest
 } from '../../shared/discourse';
 import type { AppEventBus } from '../runner/AppEventBus';
-import type { AgentScopedTurnProvider } from '../agent/AgentScopedTurnProvider';
 import {
   AgentProfileCatalog,
   discourseModelMatches,
@@ -74,7 +73,6 @@ export interface DiscourseServiceOptions {
   runtime?: {
     coordinator: DiscourseRuntimeCoordinator;
     contextSnapshots: DiscourseContextSnapshotService;
-    provider: AgentScopedTurnProvider;
     notifySchedulerWorkAvailable(): void;
   };
 }
@@ -1586,7 +1584,7 @@ export class DiscourseService {
     if (!wave) throw new Error(`Discourse wave not found: ${input.waveId}`);
     const stopped = ['PLANNED', 'SNAPSHOTTING', 'QUEUED'].includes(wave.status)
       ? await runtime.coordinator.cancelQueuedWave(input)
-      : await runtime.coordinator.stopActiveWave(input, runtime.provider);
+      : await runtime.coordinator.stopActiveWave(input);
     if (stopped.status === 'SETTLED') {
       await this.activateNextWave(
         input.conversationId,

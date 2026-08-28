@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,10 +7,19 @@ import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentInteractionService } from '../AgentInteractionService';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
-import {
-  ArtifactAppendAmbiguousError,
-  FileTaskStore
-} from '../../storage/FileTaskStore';
+import type {
+  AgentExecutionSettings,
+  AgentRunMode,
+  AgentSessionRecord,
+  RunRecord,
+  Task,
+  TaskIteration,
+  WorktreeRecord
+} from '../../../shared/contracts';
+import { FileTaskStore } from '../../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import type { TaskAgentRuntimeAccess } from '../AgentRuntimeStore';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import type { AcpNativeSessionState } from './AcpNativeSession';
 import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
 import type { AcpSessionConfigOption, AcpSessionUpdate } from './AcpProtocol';
@@ -22,16 +32,32 @@ import {
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 
 const temporaryDirectories: string[] = [];
-const testStores = new Set<FileTaskStore>();
+const testStores = new Set<{
+  tasks: FileTaskStore;
+  runtimeStore: FileAgentRuntimeStore;
+}>();
+const runtimeByTaskStore = new WeakMap<
+  FileTaskStore,
+  { runtimeStore: FileAgentRuntimeStore; runtime: TaskAgentRuntimeAccess }
+>();
+let testOperationOrdinal = 0;
 
 function createTestStore(root: string): FileTaskStore {
   const store = new FileTaskStore(root);
-  testStores.add(store);
+  const runtimeStore = new FileAgentRuntimeStore(`${root}-runtime`);
+  const runtime = runtimeStore.taskAgentRuntimeAccess(async (event, operationId) => {
+    await store.recordAgentRuntimeEvent(event, operationId);
+  });
+  store.bindAgentRuntime(runtime);
+  runtimeByTaskStore.set(store, { runtimeStore, runtime });
+  testStores.add({ tasks: store, runtimeStore });
   return store;
 }
 
 afterEach(async () => {
-  await Promise.all([...testStores].map((store) => store.close()));
+  await Promise.all(
+    [...testStores].flatMap(({ tasks, runtimeStore }) => [tasks.close(), runtimeStore.close()])
+  );
   testStores.clear();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
@@ -39,6 +65,202 @@ afterEach(async () => {
     )
   );
 });
+
+function runtimeFixture(store: FileTaskStore): {
+  runtimeStore: FileAgentRuntimeStore;
+  runtime: TaskAgentRuntimeAccess;
+} {
+  const fixture = runtimeByTaskStore.get(store);
+  if (!fixture) throw new Error('ACP test store has no runtime fixture.');
+  return fixture;
+}
+
+function createTestAdapter(
+  store: FileTaskStore,
+  appEvents: AppEventBus,
+  profile: AcpRuntimeProfile,
+  options: ConstructorParameters<typeof AcpRuntimeAdapter>[4]
+): AcpRuntimeAdapter {
+  const fixture = runtimeFixture(store);
+  return new AcpRuntimeAdapter(
+    fixture.runtime,
+    fixture.runtimeStore,
+    appEvents,
+    profile,
+    options
+  );
+}
+
+function testOperationId(action: string, ...identity: unknown[]): string {
+  testOperationOrdinal += 1;
+  return `acp-test:${action}:${testOperationOrdinal}:${JSON.stringify(identity)}`;
+}
+
+interface CreateTestAgentSessionInput {
+  task: Task;
+  iteration: TaskIteration;
+  worktree: WorktreeRecord;
+  runtimeId: string;
+  role?: AgentSessionRecord['role'];
+  requestedSettings?: AgentExecutionSettings;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+}
+
+async function createTestAgentSession(
+  store: FileTaskStore,
+  input: CreateTestAgentSessionInput
+): Promise<AgentSessionRecord> {
+  const runtime = runtimeFixture(store).runtime;
+  const id = randomUUID();
+  const requestedSettings = {
+    ...input.requestedSettings,
+    runtimeId: input.runtimeId,
+    model: input.requestedSettings?.model ?? 'default'
+  };
+  const operationId = testOperationId('session/create', id);
+  const session = await runtime.createTaskSession({
+    id,
+    taskId: input.task.id,
+    iterationId: input.iteration.id,
+    worktreeId: input.worktree.id,
+    worktreePath: input.worktree.worktreePath,
+    runtimeId: input.runtimeId,
+    role: input.role,
+    requestedSettings,
+    executionContext: {
+      attestation: { status: 'ATTESTED' },
+      primaryCwd: input.worktree.worktreePath,
+      readRoots: [{
+        canonicalPath: input.worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: input.worktree.id
+      }],
+      managedAttachments: [],
+      permissionProfileHash: 'a'.repeat(64),
+      modelSettings: requestedSettings,
+      externalTools: {
+        network: requestedSettings.networkAccess === true,
+        webSearch: requestedSettings.networkAccess === true ? 'live' : 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: operationId
+    },
+    operationId,
+    ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+    ...(input.forkedFromSessionId
+      ? { forkedFromSessionId: input.forkedFromSessionId }
+      : {})
+  });
+  await store.recordAgentSessionCreated(session);
+  return session;
+}
+
+function updateTestAgentSession(
+  store: FileTaskStore,
+  id: string,
+  update: Partial<AgentSessionRecord>
+) {
+  return runtimeFixture(store).runtime.updateAgentSession(
+    id,
+    update,
+    testOperationId('session/update', id, update)
+  );
+}
+
+interface CreateTestRunInput {
+  task: Task;
+  session: AgentSessionRecord;
+  mode: AgentRunMode;
+  prompt: string;
+  serverInstanceId?: string;
+  generationKey?: string;
+  retryOfRunId?: string;
+  continuedFromRunId?: string;
+  requestedSettings?: AgentExecutionSettings;
+  beforeGitSnapshotId?: string;
+}
+
+async function createTestRun(
+  store: FileTaskStore,
+  input: CreateTestRunInput
+): Promise<RunRecord> {
+  const id = randomUUID();
+  const run = await runtimeFixture(store).runtime.createTaskRun({
+    id,
+    taskId: input.task.id,
+    iterationId: input.session.iterationId,
+    worktreeId: input.session.worktreeId,
+    sessionId: input.session.id,
+    mode: input.mode,
+    prompt: input.prompt,
+    generationKey: input.generationKey ?? `acp-test:${id}`,
+    requestedSettings: input.requestedSettings ?? input.session.requestedSettings,
+    ...(input.beforeGitSnapshotId
+      ? { beforeGitSnapshotId: input.beforeGitSnapshotId }
+      : {}),
+    ...(input.retryOfRunId ? { retryOfRunId: input.retryOfRunId } : {}),
+    ...(input.continuedFromRunId
+      ? { continuedFromRunId: input.continuedFromRunId }
+      : {}),
+    operationId: testOperationId('run/create', id)
+  });
+  if (input.serverInstanceId) {
+    await updateTestRun(store, run.id, { serverInstanceId: input.serverInstanceId });
+  }
+  await store.recordAgentRunStarted(
+    (await runtimeFixture(store).runtime.getRun(run.id)) ?? run
+  );
+  return (await runtimeFixture(store).runtime.getRun(run.id)) ?? run;
+}
+
+function updateTestRun(store: FileTaskStore, id: string, update: Partial<RunRecord>) {
+  return runtimeFixture(store).runtime.updateRun(
+    id,
+    update,
+    testOperationId('run/update', id, update)
+  );
+}
+
+function getTestAgentSession(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtime.getAgentSession(id);
+}
+
+function getTestRun(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtime.getRun(id);
+}
+
+function getTestAgentServer(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtimeStore.getAgentServer(id);
+}
+
+function getTestAgentItemByProviderId(
+  store: FileTaskStore,
+  runId: string,
+  providerItemId: string
+) {
+  return runtimeFixture(store).runtime.getAgentItemByProviderId(runId, providerItemId);
+}
+
+function getTestInteractionRequest(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtime.getInteractionRequest(id);
+}
+
+function appendTestProtocolMessage(
+  store: FileTaskStore,
+  ...input: Parameters<FileAgentRuntimeStore['appendProtocolMessage']>
+) {
+  return runtimeFixture(store).runtimeStore.appendProtocolMessage(...input);
+}
+
+function createTestAgentServer(
+  store: FileTaskStore,
+  input: Parameters<FileAgentRuntimeStore['createAgentServer']>[0]
+) {
+  return runtimeFixture(store).runtimeStore.createAgentServer(input);
+}
 
 describe('AcpRuntimeAdapter end-to-end', () => {
   it.each([
@@ -98,7 +320,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         argv: [agentScript]
       };
       const store = createTestStore(path.join(directory, 'store'));
-      const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      const adapter = createTestAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         ...(credential
           ? { environment: { ...process.env, TEST_ACP_API_KEY: credential } }
@@ -138,14 +360,14 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         worktreePath: directory,
         baseSha: 'base'
       });
-      const session = await store.createAgentSession({
+      const session = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
         runtimeId,
         requestedSettings: settings
       });
-      const run = await store.createRun({
+      const run = await createTestRun(store, {
         task,
         session,
         mode: 'IMPLEMENTATION',
@@ -199,7 +421,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         await expect(fs.readFile(mutationMarker, 'utf8')).rejects.toMatchObject({
           code: 'ENOENT'
         });
-        expect((await store.getAgentSession(session.id))?.providerSessionId).toBeUndefined();
+        expect((await getTestAgentSession(store, session.id))?.providerSessionId).toBeUndefined();
       } finally {
         await adapter.shutdown();
       }
@@ -225,7 +447,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
       const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -258,7 +480,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     );
     temporaryDirectories.push(directory);
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(
+    const adapter = createTestAdapter(
       store,
       new AppEventBus(),
       TEST_ACP_PROFILE,
@@ -340,7 +562,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -439,7 +661,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         worktreePath,
         baseSha: 'base'
       });
-      const session = await store.createAgentSession({
+      const session = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
@@ -524,7 +746,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -563,7 +785,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
@@ -650,7 +872,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       environment: { ...process.env, TEST_ACP_API_KEY: secret },
       requestTimeoutMs: 1_000,
@@ -695,7 +917,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const client = internals.boundClient!;
       const server = (await store.snapshot()).agentServers[0]!;
       const emitModelUpdate = async (params: unknown) => {
-        const raw = await store.appendProtocolMessage(
+        const raw = await appendTestProtocolMessage(store,
           server.id,
           'INBOUND',
           JSON.stringify({
@@ -744,7 +966,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -782,7 +1004,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const localSession = await store.createAgentSession({
+    const localSession = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
@@ -873,7 +1095,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
       runtimeResolver: async () => ({
@@ -911,21 +1133,22 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId,
       requestedSettings: settings
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
       prompt: task.prompt,
       requestedSettings: settings
     });
-    const lookupSession = store.getAgentSessionByProviderId.bind(store);
+    const runtime = runtimeFixture(store).runtime;
+    const lookupSession = runtime.getAgentSessionByProviderId.bind(runtime);
     let releaseMaterialization!: () => void;
     const materializationGate = new Promise<void>((resolve) => {
       releaseMaterialization = resolve;
@@ -936,7 +1159,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     });
     let gatePending = true;
     const lookupSpy = vi
-      .spyOn(store, 'getAgentSessionByProviderId')
+      .spyOn(runtime, 'getAgentSessionByProviderId')
       .mockImplementation(async (requestedRuntimeId, providerSessionId) => {
         if (providerSessionId === 'replacement-fence-session' && gatePending) {
           gatePending = false;
@@ -972,9 +1195,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const lossReconciliation = new Promise<void>((resolve) => {
         lossReconciliationEntered = resolve;
       });
-      const readSnapshot = store.snapshot.bind(store);
+      const readSnapshot = runtime.snapshot.bind(runtime);
       let lossGatePending = true;
-      snapshotSpy = vi.spyOn(store, 'snapshot').mockImplementation(async () => {
+      snapshotSpy = vi.spyOn(runtime, 'snapshot').mockImplementation(async () => {
         if (lossGatePending && internals.boundClient === undefined) {
           lossGatePending = false;
           lossReconciliationEntered();
@@ -1058,7 +1281,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     events.on((event) => observedEvents.push(event));
     let resolutionCalls = 0;
     const resolvedExecutableOverrides: Array<string | undefined> = [];
-    const adapter = new AcpRuntimeAdapter(store, events, profile, {
+    const adapter = createTestAdapter(store, events, profile, {
       cwd: directory,
       environment: { ...process.env, GEMINI_API_KEY: opaqueProviderSecret },
       // Keep control calls bounded without making child startup sensitive to
@@ -1105,7 +1328,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const localSession = await store.createAgentSession({
+    const localSession = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
@@ -1204,7 +1427,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       ).toEqual([]);
       expect(resolutionCalls).toBe(1);
       expect(resolvedExecutableOverrides).toEqual([process.execPath]);
-      const attachmentRun = await store.createRun({
+      const attachmentRun = await createTestRun(store, {
         task,
         session: localSession,
         mode: 'IMPLEMENTATION',
@@ -1234,21 +1457,26 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           ]
         })
       ).rejects.toThrow('managed attachments are unavailable');
-      expect((await store.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
+      expect((await getTestAgentSession(store, localSession.id))?.providerSessionId).toBeUndefined();
       expect((await store.snapshot()).agentServers).toHaveLength(1);
-      await store.updateRun(attachmentRun.id, {
+      await updateTestRun(store, attachmentRun.id, {
         status: 'FAILED',
         endedAt: new Date().toISOString()
       });
-      const originalSessionUpdate = store.updateAgentSession.bind(store);
+      const sessionRuntime = runtimeFixture(store).runtime;
+      const originalSessionUpdate = sessionRuntime.updateAgentSession.bind(sessionRuntime);
       let failProviderOwnershipPersistence = true;
-      store.updateAgentSession = (async (id, update) => {
+      const sessionUpdateSpy = vi.spyOn(sessionRuntime, 'updateAgentSession').mockImplementation(async (
+        id,
+        update,
+        operationId
+      ) => {
         if (failProviderOwnershipPersistence && update.providerSessionId) {
           failProviderOwnershipPersistence = false;
           throw new Error('injected provider ownership persistence failure');
         }
-        return originalSessionUpdate(id, update);
-      }) as typeof store.updateAgentSession;
+        return originalSessionUpdate(id, update, operationId);
+      });
       try {
         await expect(
           adapter.createSession({
@@ -1262,11 +1490,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           })
         ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
       } finally {
-        store.updateAgentSession = originalSessionUpdate;
+        sessionUpdateSpy.mockRestore();
       }
       const quarantinedOwnershipServer = (await store.snapshot()).agentServers[0];
       expect(quarantinedOwnershipServer).toMatchObject({ status: 'EXITED' });
-      expect((await store.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
+      expect((await getTestAgentSession(store, localSession.id))?.providerSessionId).toBeUndefined();
       const session = await adapter.createSession({
         runtimeId: 'test-acp',
         localSessionId: localSession.id,
@@ -1294,7 +1522,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           }
         }
       });
-      const unsupportedReasoningRun = await store.createRun({
+      const unsupportedReasoningRun = await createTestRun(store, {
         task,
         session,
         mode: 'FOLLOW_UP',
@@ -1319,7 +1547,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(
         await protocolMethodCount(store, 'session/prompt')
       ).toBe(promptCountBeforeReasoningRejection);
-      await store.updateRun(unsupportedReasoningRun.id, {
+      await updateTestRun(store, unsupportedReasoningRun.id, {
         status: 'FAILED',
         endedAt: new Date().toISOString()
       });
@@ -1415,7 +1643,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(modelUpdate.native).toMatchObject({
         models: { currentModelId: 'grok-build' }
       });
-      expect(await store.getAgentSession(session.id)).toMatchObject({
+      expect(await getTestAgentSession(store, session.id)).toMatchObject({
         observedSettings: {
           model: 'grok-build',
           runtimeOptions: { 'test-acp': { modeId: 'code', configValues: { telemetry: true } } }
@@ -1460,9 +1688,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           }
         }
       };
-      const unsafePermissionRun = await store.createRun({
+      const unsafePermissionRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'unsafe permission identifiers',
         requestedSettings: turnSettings
@@ -1476,7 +1704,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings: turnSettings
       });
       await waitFor(async () =>
-        (await store.getRun(unsafePermissionRun.id))?.status === 'COMPLETED'
+        (await getTestRun(store, unsafePermissionRun.id))?.status === 'COMPLETED'
           ? true
           : undefined
       );
@@ -1498,9 +1726,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           })
         ]
       });
-      const delayedRun = await store.createRun({
+      const delayedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'delayed terminal',
         requestedSettings: settings
@@ -1514,18 +1742,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       await waitFor(async () => {
-        const current = await store.getRun(delayedRun.id);
+        const current = await getTestRun(store, delayedRun.id);
         return current?.status === 'COMPLETED' ? current : undefined;
       });
       await adapter.releaseSession({
         localSessionId: session.id,
         providerSessionId: session.providerSessionId
       });
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
       expect(await adapter.readNativeState()).toMatchObject({ sessions: [] });
-      const run = await store.createRun({
+      const run = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'IMPLEMENTATION',
         prompt: task.prompt,
         requestedSettings: settings
@@ -1573,8 +1801,12 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         executable: '/deferred/custom-acp',
         restart: true
       });
-      expect((await store.getAgentServer(originalServerId))?.status).toBe('RUNNING');
-      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      expect((await getTestAgentServer(store, originalServerId))?.status).toBe('RUNNING');
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
       await interactionService.respond({
         taskId: task.id,
         runId: run.id,
@@ -1587,7 +1819,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       });
 
       const completed = await waitFor(async () => {
-        const current = await store.getRun(run.id);
+        const current = await getTestRun(store, run.id);
         return current?.status === 'COMPLETED' ? current : undefined;
       });
       expect(completed.finalMessage).toBe('Implemented safely.');
@@ -1652,7 +1884,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         }
       });
       await waitFor(async () =>
-        (await store.getAgentServer(originalServerId))?.status === 'EXITED'
+        (await getTestAgentServer(store, originalServerId))?.status === 'EXITED'
           ? true
           : undefined
       );
@@ -1662,9 +1894,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       });
       expect(resolvedExecutableOverrides.at(-1)).toBe('/deferred/custom-acp');
 
-      const highVolumeRun = await store.createRun({
+      const highVolumeRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'high volume stream',
         requestedSettings: settings
@@ -1673,14 +1905,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         { length: 512 },
         (_, index) => String(index).padStart(4, '0')
       ).join('');
-      const originalUpsertAgentItem = store.upsertAgentItem.bind(store);
+      const itemRuntime = runtimeFixture(store).runtime;
+      const originalUpsertAgentItem = itemRuntime.upsertAgentItem.bind(itemRuntime);
       let highVolumeItemWrites = 0;
-      store.upsertAgentItem = (async (input) => {
+      const upsertSpy = vi.spyOn(itemRuntime, 'upsertAgentItem').mockImplementation(async (
+        input,
+        operationId
+      ) => {
         if (input.runId === highVolumeRun.id && input.providerItemId === 'message-high-volume') {
           highVolumeItemWrites += 1;
         }
-        return originalUpsertAgentItem(input);
-      }) as typeof store.upsertAgentItem;
+        return originalUpsertAgentItem(input, operationId);
+      });
       try {
         await adapter.startTurn({
           localRunId: highVolumeRun.id,
@@ -1691,16 +1927,16 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           settings
         });
         await waitFor(async () => {
-          const current = await store.getRun(highVolumeRun.id);
+          const current = await getTestRun(store, highVolumeRun.id);
           return current?.status === 'COMPLETED' ? current : undefined;
         }, 30_000);
       } finally {
-        store.upsertAgentItem = originalUpsertAgentItem;
+        upsertSpy.mockRestore();
       }
       expect(highVolumeItemWrites).toBe(1);
       expect(
         itemPayloadText(
-          await store.getAgentItemByProviderId(highVolumeRun.id, 'message-high-volume')
+          await getTestAgentItemByProviderId(store, highVolumeRun.id, 'message-high-volume')
         )
       ).toBe(expectedHighVolumeOutput);
       const highVolumeSnapshot = await store.snapshot();
@@ -1766,9 +2002,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         )
       ).toHaveLength(512);
 
-      const persistenceRun = await store.createRun({
+      const persistenceRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'persistence failure after permission delivery',
         requestedSettings: settings
@@ -1787,15 +2023,23 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             interaction.runId === persistenceRun.id && interaction.status === 'PENDING'
         )
       );
-      const originalTransition = store.transitionInteractionRequest.bind(store);
+      const interactionRuntime = runtimeFixture(store).runtime;
+      const originalTransition = interactionRuntime.transitionInteractionRequest.bind(
+        interactionRuntime
+      );
       let injected = false;
-      store.transitionInteractionRequest = (async (id, expected, update) => {
+      const transitionSpy = vi.spyOn(interactionRuntime, 'transitionInteractionRequest').mockImplementation(async (
+        id,
+        expected,
+        update,
+        operationId
+      ) => {
         if (!injected && expected === 'RESPONDING' && update.status === 'RESOLVED') {
           injected = true;
           throw new Error('injected completion persistence failure');
         }
-        return originalTransition(id, expected, update);
-      }) as typeof store.transitionInteractionRequest;
+        return originalTransition(id, expected, update, operationId);
+      });
       try {
         await expect(
           interactionService.respond({
@@ -1810,23 +2054,23 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           })
         ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
       } finally {
-        store.transitionInteractionRequest = originalTransition;
+        transitionSpy.mockRestore();
       }
-      const staleInteraction = await store.getInteractionRequest(persistenceInteraction.id);
+      const staleInteraction = await getTestInteractionRequest(store, persistenceInteraction.id);
       expect(staleInteraction?.status).toBe('STALE');
       await waitFor(async () => {
-        const current = await store.getRun(persistenceRun.id);
+        const current = await getTestRun(store, persistenceRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
       }, 45_000);
-      await store.updateRun(persistenceRun.id, {
+      await updateTestRun(store, persistenceRun.id, {
         status: 'INTERRUPTED',
         endedAt: new Date().toISOString()
       });
-      await store.updateAgentSession(session.id, { status: 'IDLE' });
+      await updateTestAgentSession(store, session.id, { status: 'IDLE' });
 
-      const failedRun = await store.createRun({
+      const failedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'definitive failure',
         requestedSettings: settings
@@ -1840,7 +2084,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       await waitFor(async () => {
-        const current = await store.getRun(failedRun.id);
+        const current = await getTestRun(store, failedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       await waitFor(async () =>
@@ -1862,7 +2106,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             ['PENDING', 'RESPONDING'].includes(interaction.status)
         )
       ).toHaveLength(0);
-      const failedRecord = (await store.getRun(failedRun.id))!;
+      const failedRecord = (await getTestRun(store, failedRun.id))!;
       const failedArtifact = (await store.snapshot()).artifacts.find(
         (artifact) => artifact.id === failedRecord.finalArtifactId
       );
@@ -1882,9 +2126,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const failedJournal = await fs.readFile(failedServer!.protocolJournalPath, 'utf8');
       expect(failedJournal).not.toContain(opaqueProviderSecret);
 
-      const tokenLimitedRun = await store.createRun({
+      const tokenLimitedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'token limit terminal',
         requestedSettings: settings
@@ -1898,7 +2142,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       const tokenLimited = await waitFor(async () => {
-        const current = await store.getRun(tokenLimitedRun.id);
+        const current = await getTestRun(store, tokenLimitedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       expect(tokenLimited.terminalReason).toBe(
@@ -1911,9 +2155,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         'Failure: The ACP agent reached its token limit before completing the turn.'
       );
 
-      const planLimitedRun = await store.createRun({
+      const planLimitedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'plan limit terminal',
         requestedSettings: settings
@@ -1927,7 +2171,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       const planLimited = await waitFor(async () => {
-        const current = await store.getRun(planLimitedRun.id);
+        const current = await getTestRun(store, planLimitedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       expect(planLimited.finalMessage).toBe('Upgrade your plan to continue');
@@ -1941,9 +2185,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         'Failure: Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
       );
 
-      const malformedRun = await store.createRun({
+      const malformedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'malformed terminal response',
         requestedSettings: settings
@@ -1957,7 +2201,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       await waitFor(async () => {
-        const current = await store.getRun(malformedRun.id);
+        const current = await getTestRun(store, malformedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       expect(
@@ -1966,12 +2210,12 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         )
       ).toBe(true);
       await adapter.releaseTask(task.id);
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
       expect((await store.snapshot()).agentServers[0]?.status).toBe('EXITED');
 
-      const interruptedRun = await store.createRun({
+      const interruptedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'hang for interrupt',
         requestedSettings: settings
@@ -1993,7 +2237,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         providerTurnId: interruptedTurn.providerTurnId!
       });
       await waitFor(async () => {
-        const current = await store.getRun(interruptedRun.id);
+        const current = await getTestRun(store, interruptedRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
       });
       await waitFor(async () =>
@@ -2008,12 +2252,12 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           ? true
           : undefined
       );
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
-      const quarantinedServerId = (await store.getRun(interruptedRun.id))?.serverInstanceId;
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
+      const quarantinedServerId = (await getTestRun(store, interruptedRun.id))?.serverInstanceId;
       expect(quarantinedServerId).toBeDefined();
       expect(quarantinedClient!.serverInstanceId).toBe(quarantinedServerId);
       await waitFor(async () =>
-        (await store.getAgentServer(quarantinedServerId!))?.status === 'EXITED'
+        (await getTestAgentServer(store, quarantinedServerId!))?.status === 'EXITED'
           ? true
           : undefined
       );
@@ -2022,15 +2266,15 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       // The fake process schedules a late old-turn chunk after the cancellation
       // deadline. Quarantine must kill that process so the chunk cannot be
       // attributed to this replacement run (ACP updates have no prompt ID).
-      await store.updateRun(interruptedRun.id, {
+      await updateTestRun(store, interruptedRun.id, {
         status: 'INTERRUPTED',
         endedAt: new Date().toISOString()
       });
-      await store.updateAgentSession(session.id, { status: 'IDLE' });
+      await updateTestAgentSession(store, session.id, { status: 'IDLE' });
 
-      const replacementRun = await store.createRun({
+      const replacementRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'replacement after ambiguous cancel',
         requestedSettings: settings
@@ -2080,7 +2324,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           options: [{ optionId: 'late-old-reject', name: 'Reject', kind: 'reject_once' }]
         }
       };
-      const lateNotificationRaw = await store.appendProtocolMessage(
+      const lateNotificationRaw = await appendTestProtocolMessage(store,
         quarantinedServerId!,
         'INBOUND',
         JSON.stringify({
@@ -2089,7 +2333,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           params: lateNotificationParams
         })
       );
-      const latePermissionRaw = await store.appendProtocolMessage(
+      const latePermissionRaw = await appendTestProtocolMessage(store,
         quarantinedServerId!,
         'INBOUND',
         JSON.stringify(latePermissionRequest)
@@ -2127,7 +2371,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         }
       });
       const replacementCompleted = await waitFor(async () => {
-        const current = await store.getRun(replacementRun.id);
+        const current = await getTestRun(store, replacementRun.id);
         return current?.status === 'COMPLETED' ? current : undefined;
       });
       expect(replacementCompleted.finalMessage).toBe('Implemented safely.');
@@ -2140,11 +2384,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(replacementItems.map(itemPayloadText).join('')).not.toContain(
         'late injected output from old ACP generation'
       );
-      expect((await store.getRun(interruptedRun.id))?.status).toBe('INTERRUPTED');
+      expect((await getTestRun(store, interruptedRun.id))?.status).toBe('INTERRUPTED');
 
-      const ambiguousRun = await store.createRun({
+      const ambiguousRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'ambiguous disconnect',
         requestedSettings: settings
@@ -2158,7 +2402,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       const recovery = await waitFor(async () => {
-        const current = await store.getRun(ambiguousRun.id);
+        const current = await getTestRun(store, ambiguousRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
       });
       expect(recovery.terminalReason).toMatch(/ambiguous|exited/iu);
@@ -2203,7 +2447,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     );
     temporaryDirectories.push(directory);
     const store = createTestStore(path.join(directory, 'store'));
-    const server = await store.createAgentServer({
+    const server = await createTestAgentServer(store, {
       runtimeId: 'test-acp-shutdown-fence',
       runtimeKind: 'ACP_AGENT',
       transport: 'STDIO',
@@ -2215,7 +2459,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-shutdown-fence' }
     };
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory
     });
     const shutdownFailure = new Error('ACP supervisor shutdown rejected');
@@ -2251,7 +2495,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-fence-'));
     temporaryDirectories.push(directory);
     const store = createTestStore(path.join(directory, 'store'));
-    const server = await store.createAgentServer({
+    const server = await createTestAgentServer(store, {
       runtimeId: 'test-acp-fence',
       runtimeKind: 'ACP_AGENT',
       transport: 'STDIO',
@@ -2263,7 +2507,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-fence' }
     };
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory
     });
     const shutdownFailure = new Error('old ACP child may still be live');
@@ -2315,7 +2559,7 @@ describe('AcpRuntimeAdapter native settings', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId }
     };
-    const adapter = new AcpRuntimeAdapter(
+    const adapter = createTestAdapter(
       createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       profile,
@@ -2409,7 +2653,7 @@ describe('AcpRuntimeAdapter native settings', () => {
     );
     temporaryDirectories.push(directory);
     const runtimeId = 'test-grok-reasoning-setting';
-    const adapter = new AcpRuntimeAdapter(
+    const adapter = createTestAdapter(
       createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       {
@@ -2478,7 +2722,7 @@ describe('AcpRuntimeAdapter native settings', () => {
       path.join(os.tmpdir(), 'task-monki-acp-invalid-config-update-')
     );
     temporaryDirectories.push(directory);
-    const adapter = new AcpRuntimeAdapter(
+    const adapter = createTestAdapter(
       createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       TEST_ACP_PROFILE,
@@ -2549,7 +2793,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           rawInput: { command: 'npm test', cwd: harness.directory }
         }
       };
-      const notificationRaw = await store.appendProtocolMessage(
+      const notificationRaw = await appendTestProtocolMessage(store,
         server.id,
         'INBOUND',
         JSON.stringify({
@@ -2584,7 +2828,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           ]
         }
       };
-      const raw = await store.appendProtocolMessage(
+      const raw = await appendTestProtocolMessage(store,
         server.id,
         'INBOUND',
         JSON.stringify(request)
@@ -2607,7 +2851,11 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         'ACP did not provide a verifiable command for this execution request.'
       );
 
-      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
       await interactionService.respond({
         taskId: task.id,
         runId: run.id,
@@ -2696,7 +2944,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
             ]
           }
         };
-        const raw = await store.appendProtocolMessage(
+        const raw = await appendTestProtocolMessage(store,
           server.id,
           'INBOUND',
           JSON.stringify(request)
@@ -2775,7 +3023,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
               options: request.params.options
             }
           };
-          const commandRaw = await store.appendProtocolMessage(
+          const commandRaw = await appendTestProtocolMessage(store,
             server.id,
             'INBOUND',
             JSON.stringify(command)
@@ -2836,7 +3084,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           ]
         }
       };
-      const raw = await store.appendProtocolMessage(
+      const raw = await appendTestProtocolMessage(store,
         server.id,
         'INBOUND',
         JSON.stringify(request)
@@ -2871,7 +3119,11 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         'owns the scope and lifetime of remembered choices'
       );
 
-      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
       await interactionService.respond({
         taskId: task.id,
         runId: run.id,
@@ -2931,7 +3183,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         argv: [agentScript]
       };
       const store = createTestStore(path.join(directory, 'store'));
-      const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      const adapter = createTestAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         requestTimeoutMs: 1_000,
         runtimeResolver: async () => ({
@@ -2969,14 +3221,14 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         worktreePath: directory,
         baseSha: 'base'
       });
-      const session = await store.createAgentSession({
+      const session = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
         runtimeId,
         requestedSettings: settings
       });
-      const run = await store.createRun({
+      const run = await createTestRun(store, {
         task,
         session,
         mode: 'IMPLEMENTATION',
@@ -2984,27 +3236,31 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         requestedSettings: settings
       });
 
+      const runtimeFixtureForPermission = runtimeFixture(store);
       const persistenceSpies: Array<{ mockRestore(): void }> = [];
       if (!failDuringPersistence) {
         persistenceSpies.push(
           vi
-            .spyOn(store, 'createInteractionRequest')
+            .spyOn(runtimeFixtureForPermission.runtime, 'createInteractionRequest')
             .mockRejectedValueOnce(new Error(failure))
         );
       } else {
-        const createInteractionRequest = store.createInteractionRequest.bind(store);
+        const createInteractionRequest =
+          runtimeFixtureForPermission.runtime.createInteractionRequest.bind(
+            runtimeFixtureForPermission.runtime
+          );
         persistenceSpies.push(
           vi
-            .spyOn(store, 'createInteractionRequest')
-            .mockImplementationOnce(async (input) => {
-              const internals = store as unknown as {
-                persistSnapshot(): Promise<boolean>;
+            .spyOn(runtimeFixtureForPermission.runtime, 'createInteractionRequest')
+            .mockImplementationOnce(async (input, operationId) => {
+              const internals = runtimeFixtureForPermission.runtimeStore as unknown as {
+                persist(state: unknown): Promise<void>;
               };
               const persist = vi
-                .spyOn(internals, 'persistSnapshot')
+                .spyOn(internals, 'persist')
                 .mockRejectedValueOnce(new Error(failure));
               try {
-                return await createInteractionRequest(input);
+                return await createInteractionRequest(input, operationId);
               } finally {
                 persist.mockRestore();
               }
@@ -3073,7 +3329,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
             ]
           }
         };
-        const raw = await store.appendProtocolMessage(
+        const raw = await appendTestProtocolMessage(store,
           server.id,
           'INBOUND',
           JSON.stringify(request)
@@ -3082,8 +3338,8 @@ describe('AcpRuntimeAdapter permission materialization', () => {
 
         const recovered = await waitFor(async () => {
           const [currentRun, currentSession, snapshot] = await Promise.all([
-            store.getRun(run.id),
-            store.getAgentSession(session.id),
+            getTestRun(store, run.id),
+            getTestAgentSession(store, session.id),
             store.snapshot()
           ]);
           const runtimeStopped = !snapshot.agentServers.some((server) =>
@@ -3147,8 +3403,8 @@ describe('AcpRuntimeAdapter permission materialization', () => {
 
         const reconciliation = await adapter.reconcile();
         expect(reconciliation.recoveryRequiredSessionIds).toContain(session.id);
-        expect((await store.getRun(run.id))?.status).toBe('RECOVERY_REQUIRED');
-        expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+        expect((await getTestRun(store, run.id))?.status).toBe('RECOVERY_REQUIRED');
+        expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
         expect(
           (await readProtocolMessages()).filter(
             (message) => message.method === 'session/prompt'
@@ -3183,7 +3439,7 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
     const appEvents = new AppEventBus();
     const observedEvents: Array<{ type: string; runId?: string }> = [];
     appEvents.on((event) => observedEvents.push(event));
-    const adapter = new AcpRuntimeAdapter(store, appEvents, profile, {
+    const adapter = createTestAdapter(store, appEvents, profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
       runtimeResolver: async () => ({
@@ -3221,14 +3477,14 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId,
       requestedSettings: settings
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -3236,16 +3492,17 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
       requestedSettings: settings
     });
 
-    const originalWriteFinalArtifact = store.writeFinalArtifact.bind(store);
+    const runtime = runtimeFixture(store).runtime;
+    const originalWriteFinalArtifact = runtime.writeFinalArtifact.bind(runtime);
     let injectedFailures = 0;
     const artifactSpy = vi
-      .spyOn(store, 'writeFinalArtifact')
-      .mockImplementation(async (taskId, runId, content) => {
+      .spyOn(runtime, 'writeFinalArtifact')
+      .mockImplementation(async (taskId, runId, content, operationId) => {
         if (runId === run.id && injectedFailures === 0) {
           injectedFailures += 1;
           throw new Error('injected post-response final artifact persistence failure');
         }
-        return originalWriteFinalArtifact(taskId, runId, content);
+        return originalWriteFinalArtifact(taskId, runId, content, operationId);
       });
 
     try {
@@ -3262,8 +3519,8 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
 
       const recovered = await waitFor(async () => {
         const [currentRun, currentSession, snapshot] = await Promise.all([
-          store.getRun(run.id),
-          store.getAgentSession(session.id),
+          getTestRun(store, run.id),
+          getTestAgentSession(store, session.id),
           store.snapshot()
         ]);
         const runtimeStopped = !snapshot.agentServers.some((server) =>
@@ -3327,8 +3584,8 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
 
       const reconciliation = await adapter.reconcile();
       expect(reconciliation.recoveryRequiredSessionIds).toContain(session.id);
-      expect((await store.getRun(run.id))?.status).toBe('RECOVERY_REQUIRED');
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect((await getTestRun(store, run.id))?.status).toBe('RECOVERY_REQUIRED');
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
       expect(await readPromptRequests()).toHaveLength(1);
       expect(
         (await store.snapshot()).agentServers.some((server) =>
@@ -3349,7 +3606,7 @@ describe('AcpRuntimeAdapter stream safety', () => {
     try {
       await harness.start();
       const completed = await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       });
       const snapshot = await harness.store.snapshot();
@@ -3388,7 +3645,7 @@ describe('AcpRuntimeAdapter stream safety', () => {
     try {
       await harness.start();
       const completed = await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       });
 
@@ -3404,7 +3661,7 @@ describe('AcpRuntimeAdapter stream safety', () => {
     try {
       await harness.start();
       const completed = await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       });
       const snapshot = await harness.store.snapshot();
@@ -3437,20 +3694,21 @@ describe('AcpRuntimeAdapter stream safety', () => {
     'fences the run after $kind artifact append failure without unbounded retries',
     async ({ kind, expectedAttempts }) => {
       const harness = await createStreamSafetyHarness(`persistence-${kind}`);
-      const appendArtifact = harness.store.appendArtifact.bind(harness.store);
+      const appendArtifact = runtimeFixture(harness.store).runtime.appendArtifact.bind(
+        runtimeFixture(harness.store).runtime
+      );
       let attempts = 0;
       const appendSpy = vi
-        .spyOn(harness.store, 'appendArtifact')
-        .mockImplementation(async (artifactId, text) => {
+        .spyOn(runtimeFixture(harness.store).runtime, 'appendArtifact')
+        .mockImplementation(async (artifactId, text, operationId) => {
           if (artifactId !== harness.run.outputArtifactId) {
-            return appendArtifact(artifactId, text);
+            return appendArtifact(artifactId, text, operationId);
           }
           attempts += 1;
           if (kind === 'ambiguous') {
-            throw new ArtifactAppendAmbiguousError(
-              artifactId,
-              new Error('injected append failure'),
-              new Error('injected rollback failure')
+            throw new AgentRuntimeArtifactMutationAmbiguousError(
+              `Artifact ${artifactId} append is ambiguous.`,
+              { cause: new Error('injected append and rollback failure') }
             );
           }
           throw new Error('injected persistent append failure');
@@ -3459,8 +3717,8 @@ describe('AcpRuntimeAdapter stream safety', () => {
         await harness.start();
         const recovered = await waitFor(async () => {
           const [run, session] = await Promise.all([
-            harness.store.getRun(harness.run.id),
-            harness.store.getAgentSession(harness.session.id)
+            getTestRun(harness.store, harness.run.id),
+            getTestAgentSession(harness.store, harness.session.id)
           ]);
           if (
             run?.status === 'RECOVERY_REQUIRED' &&
@@ -3492,23 +3750,25 @@ describe('AcpRuntimeAdapter stream safety', () => {
 
   it('keeps duplicated item and artifact buffering within the hard retained-byte cap', async () => {
     const harness = await createStreamSafetyHarness('large-stream');
-    const appendArtifact = harness.store.appendArtifact.bind(harness.store);
+    const appendArtifact = runtimeFixture(harness.store).runtime.appendArtifact.bind(
+      runtimeFixture(harness.store).runtime
+    );
     let maximumRetainedBytes = 0;
     const appendSpy = vi
-      .spyOn(harness.store, 'appendArtifact')
-      .mockImplementation(async (artifactId, text) => {
+      .spyOn(runtimeFixture(harness.store).runtime, 'appendArtifact')
+      .mockImplementation(async (artifactId, text, operationId) => {
         maximumRetainedBytes = Math.max(
           maximumRetainedBytes,
           (
             harness.adapter as unknown as { retainedStreamBytes(): number }
           ).retainedStreamBytes()
         );
-        return appendArtifact(artifactId, text);
+        return appendArtifact(artifactId, text, operationId);
       });
     try {
       await harness.start();
       await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       }, 20_000);
 
@@ -3590,7 +3850,7 @@ async function createPermissionHarness(input: {
   };
   const store = createTestStore(path.join(directory, 'store'));
   const events = new AppEventBus();
-  const adapter = new AcpRuntimeAdapter(store, events, profile, {
+  const adapter = createTestAdapter(store, events, profile, {
     cwd: directory,
     requestTimeoutMs: 1_000,
     runtimeResolver: async () => ({
@@ -3628,14 +3888,14 @@ async function createPermissionHarness(input: {
     worktreePath: directory,
     baseSha: 'base'
   });
-  const session = await store.createAgentSession({
+  const session = await createTestAgentSession(store, {
     task,
     iteration,
     worktree,
     runtimeId: input.runtimeId,
     requestedSettings: settings
   });
-  const run = await store.createRun({
+  const run = await createTestRun(store, {
     task,
     session,
     mode: 'IMPLEMENTATION',
@@ -3806,7 +4066,7 @@ async function createStreamSafetyHarness(scenario: string, secret = 'test-stream
   const appEvents = new AppEventBus();
   const observedEvents: Array<{ type: string; runId?: string; payload: unknown }> = [];
   appEvents.on((event) => observedEvents.push(event));
-  const adapter = new AcpRuntimeAdapter(store, appEvents, profile, {
+  const adapter = createTestAdapter(store, appEvents, profile, {
     cwd: directory,
     environment: { ...process.env, TEST_ACP_API_KEY: secret },
     requestTimeoutMs: 1_000,
@@ -3845,14 +4105,14 @@ async function createStreamSafetyHarness(scenario: string, secret = 'test-stream
     worktreePath: directory,
     baseSha: 'base'
   });
-  const session = await store.createAgentSession({
+  const session = await createTestAgentSession(store, {
     task,
     iteration,
     worktree,
     runtimeId,
     requestedSettings: settings
   });
-  const run = await store.createRun({
+  const run = await createTestRun(store, {
     task,
     session,
     mode: 'IMPLEMENTATION',

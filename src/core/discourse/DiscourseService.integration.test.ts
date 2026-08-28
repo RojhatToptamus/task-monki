@@ -13,10 +13,6 @@ import {
   codexCapabilities
 } from '../agent/codex/codexCapabilities';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
-import type {
-  AgentScopedTurnProvider,
-  StartScopedAgentTurnInput
-} from '../agent/AgentScopedTurnProvider';
 import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../storage/FileDiscourseStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
@@ -36,6 +32,7 @@ import {
   type DiscourseConversationAggregateRecord,
   type SendDiscourseMessageRequest
 } from '../../shared/discourse';
+import { ScriptedAgentRuntimeCoordinator } from '../../testSupport/ScriptedAgentRuntimeCoordinator';
 
 function selections(
   ...agentProfileIds: BuiltInAgentProfileId[]
@@ -83,9 +80,11 @@ describe('DiscourseService', () => {
       }),
       () => '2026-07-13T00:01:00.000Z'
     );
+    const agents = new ScriptedAgentRuntimeCoordinator(runtimeStore);
     const coordinator = new DiscourseRuntimeCoordinator(
       discourseStore,
       runtimeStore,
+      agents,
       () => '2026-07-13T00:01:00.000Z'
     );
     let schedulerNotifications = 0;
@@ -100,11 +99,6 @@ describe('DiscourseService', () => {
         runtime: {
           coordinator,
           contextSnapshots: snapshots,
-          provider: {
-            startScopedTurn: async () => {
-              throw new Error('The unit test must not dispatch provider work.');
-            }
-          },
           notifySchedulerWorkAvailable: () => {
             schedulerNotifications += 1;
           }
@@ -376,13 +370,12 @@ describe('DiscourseService', () => {
     for (const [index, lease] of leases.entries()) {
       await fixture.coordinator.dispatchLeasedJob(
         lease.id,
-        fixture.provider,
         `cross-runtime-dispatch-${index}`
       );
     }
     expect(fixture.provider.calls.map((call) => [
       call.session.runtimeId,
-      call.executionContext.modelSettings.model
+      call.session.executionContext.modelSettings.model
     ])).toEqual([
       ['codex', 'gpt-test'],
       ['alternate', 'reasoner']
@@ -1291,7 +1284,6 @@ describe('DiscourseService', () => {
     const [leadLease] = await fixture.scheduler.leaseAvailable('lease-lead');
     const leadRun = await fixture.coordinator.dispatchLeasedJob(
       leadLease!.id,
-      fixture.provider,
       'dispatch-lead'
     );
     const leadTerminal = await fixture.coordinator.ingestSuccessfulTerminal({
@@ -1316,7 +1308,6 @@ describe('DiscourseService', () => {
     const reviewRuns = await Promise.all(reviewLeases.map((lease, index) =>
       fixture.coordinator.dispatchLeasedJob(
         lease.id,
-        fixture.provider,
         `dispatch-review-${index}`
       )
     ));
@@ -1399,7 +1390,6 @@ describe('DiscourseService', () => {
     const [correctionLease] = await fixture.scheduler.leaseAvailable('lease-correction');
     const correctionRun = await fixture.coordinator.dispatchLeasedJob(
       correctionLease!.id,
-      fixture.provider,
       'dispatch-correction'
     );
     const correctionBody = JSON.stringify({
@@ -1509,16 +1499,17 @@ async function serviceFixture(
     },
     () => '2026-07-13T00:01:00.000Z'
   );
+  const provider = new ScriptedAgentRuntimeCoordinator(runtimeStore);
   const coordinator = new DiscourseRuntimeCoordinator(
     discourseStore,
     runtimeStore,
+    provider,
     () => '2026-07-13T00:05:00.000Z'
   );
   const scheduler = new AgentTurnScheduler(
     runtimeStore,
     () => '2026-07-13T00:06:00.000Z'
   );
-  const provider = new SequentialScopedProvider();
   const service = new DiscourseService(
     discourseStore,
     resolver,
@@ -1530,7 +1521,6 @@ async function serviceFixture(
       runtime: {
         coordinator,
         contextSnapshots: snapshots,
-        provider,
         notifySchedulerWorkAvailable: () => undefined
       }
     }
@@ -1546,22 +1536,6 @@ async function serviceFixture(
     snapshots,
     executionContextInputs
   };
-}
-
-class SequentialScopedProvider implements AgentScopedTurnProvider {
-  private sequence = 0;
-  calls: StartScopedAgentTurnInput[] = [];
-
-  async startScopedTurn(input: StartScopedAgentTurnInput) {
-    this.calls.push(input);
-    const sequence = ++this.sequence;
-    return {
-      serverInstanceId: 'server-test',
-      providerSessionId: `provider-session-${sequence}`,
-      providerTurnId: `provider-turn-${sequence}`,
-      startedAt: '2026-07-13T00:07:00.000Z'
-    };
-  }
 }
 
 function runtimeCatalog(

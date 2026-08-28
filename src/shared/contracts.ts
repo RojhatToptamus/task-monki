@@ -81,7 +81,7 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 23 as const;
+export const TASK_STORE_SCHEMA_VERSION = 24 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 

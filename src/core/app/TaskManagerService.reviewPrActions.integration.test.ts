@@ -8,7 +8,6 @@ import {
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
-import { createDomainEvent } from '../storage/domainEvent';
 
 const scenarios = new TaskMonkiScenarioRegistry();
 const createTaskMonkiScenario = scenarios.create.bind(scenarios);
@@ -28,18 +27,10 @@ describe('TaskManagerService review and PR action coordination', () => {
     });
     const run = await scenario.service.startRun({ taskId: task.id });
 
-    await scenario.store.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_RUN_FAILED',
-        taskId: task.id,
-        iterationId: run.iterationId,
-        runId: run.id,
-        worktreeId: run.worktreeId,
-        agentSessionId: run.sessionId,
-        source: 'provider',
-        payload: { error: 'Provider rejected the turn.' }
-      })
-    );
+    await scenario.transitionRun(run.id, {
+      status: 'FAILED',
+      terminalReason: 'Provider rejected the turn.'
+    });
 
     await expect(
       scenario.service.startReview({ taskId: task.id, runId: run.id })
@@ -60,18 +51,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     });
     const run = await scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' });
 
-    await scenario.store.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_RUN_COMPLETED',
-        taskId: task.id,
-        iterationId: run.iterationId,
-        runId: run.id,
-        worktreeId: run.worktreeId,
-        agentSessionId: run.sessionId,
-        source: 'provider',
-        payload: { terminalStatus: 'completed' }
-      })
-    );
+    await scenario.completeRun(run.id, 'Analysis completed.');
 
     await expect(
       scenario.service.startReview({ taskId: task.id, runId: run.id })

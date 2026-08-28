@@ -1,25 +1,32 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type {
+  AgentExecutionSettings,
+  AgentRunMode,
+  AgentSessionRecord,
   RespondToInteractionRequest,
-  RunRecord
+  RunRecord,
+  Task,
+  TaskIteration,
+  WorktreeRecord
 } from '../../../shared/contracts';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { git } from '../../git/gitCli';
 import { AgentOrchestrator } from '../AgentOrchestrator';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AppEventBus } from '../../runner/AppEventBus';
-import {
-  ArtifactAppendAmbiguousError,
-  FileTaskStore
-} from '../../storage/FileTaskStore';
+import { FileTaskStore } from '../../storage/FileTaskStore';
 import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
-import { CodexAppServerAdapter } from './CodexAppServerAdapter';
+import {
+  CodexAppServerAdapter,
+  type CodexAppServerAdapterOptions
+} from './CodexAppServerAdapter';
 import {
   CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS,
   CodexAppServerSupervisor
@@ -36,7 +43,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refinement-runtime-'));
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
@@ -130,19 +137,19 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const store = new FileTaskStore(path.join(dir, 'task-store'));
     const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
     await runtime.init();
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
-      scopedRuntimeStore: runtime
+      runtimeStore: runtime
     });
     let resolveTerminal!: () => void;
     const terminal = new Promise<void>((resolve) => {
       resolveTerminal = resolve;
     });
     const observedEvents: string[] = [];
-    const unsubscribe = adapter.onScopedTurnEvent((event) => {
+    const unsubscribe = adapter.onRuntimeTurnEvent((event) => {
       observedEvents.push(event.type);
       if (event.type === 'TERMINAL') resolveTerminal();
     });
@@ -154,7 +161,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         stableParticipantId: 'participant-1'
       };
       const sessionId = 'scoped-session-1';
-      const executionContext = await adapter.buildScopedExecutionContext({
+      const executionContext = await adapter.buildExecutionContext({
         sessionId,
         primaryCwd: workspace,
         readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
@@ -244,7 +251,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         { status: 'STARTING', delivery: 'SENDING', startedAt: '2026-07-13T00:00:01.000Z' },
         'scoped-start-intent'
       );
-      const started = await adapter.startScopedTurn({
+      const started = await adapter.startRuntimeTurn({
         session,
         run: starting,
         executionContext,
@@ -276,6 +283,34 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       );
       expect(observedEvents).toContain('DELTA');
       expect(observedEvents.at(-1)).toBe('TERMINAL');
+      const runtimeSnapshot = await runtime.snapshot();
+      const journal = await fs.readFile(
+        runtimeSnapshot.servers[0]!.protocolJournalPath,
+        'utf8'
+      );
+      const outbound = readOutboundMessages(journal);
+      expect(
+        outbound.find((message) => message.method === 'thread/start')?.params
+      ).toMatchObject({
+        model: 'fake-model',
+        modelProvider: 'openai',
+        cwd: workspace,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user',
+        ephemeral: false,
+        dynamicTools: []
+      });
+      expect(
+        outbound.find((message) => message.method === 'turn/start')?.params
+      ).toMatchObject({
+        threadId: 'thread-1',
+        clientUserMessageId: run.id,
+        cwd: workspace,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user',
+        model: 'fake-model',
+        effort: 'high'
+      });
       const taskSnapshot = await store.snapshot();
       expect(taskSnapshot.tasks).toEqual([]);
       expect(taskSnapshot.runs).toEqual([]);
@@ -291,14 +326,22 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     {
       name: 'requires recovery when an acknowledged scoped interrupt never becomes terminal',
       mode: 'scoped-interrupt-no-terminal',
+      action: 'interrupt',
       terminalStatus: 'RECOVERY_REQUIRED'
     },
     {
       name: 'persists a scoped interruption that races with the acknowledgement checkpoint',
       mode: 'scoped-interrupt-terminal-race',
+      action: 'interrupt',
       terminalStatus: 'INTERRUPTED'
+    },
+    {
+      name: 'settles a scoped owner through the canonical server-loss sweep',
+      mode: 'scoped-interrupt-no-terminal',
+      action: 'process-loss',
+      terminalStatus: 'RECOVERY_REQUIRED'
     }
-  ] as const)('$name', async ({ mode, terminalStatus }) => {
+  ] as const)('$name', async ({ mode, action, terminalStatus }) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-interrupt-'));
     const executable = await writeFakeCodexExecutable(dir, mode);
     const workspacePath = path.join(dir, 'read-only-workspace');
@@ -307,13 +350,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const store = new FileTaskStore(path.join(dir, 'task-store'));
     const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
     await runtime.init();
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       interruptCompletionTimeoutMs: 25,
       restartDelaysMs: [],
-      scopedRuntimeStore: runtime
+      runtimeStore: runtime
     });
     try {
       await adapter.initialize();
@@ -323,7 +366,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         stableParticipantId: 'participant-interrupt'
       };
       const sessionId = 'scoped-session-interrupt';
-      const executionContext = await adapter.buildScopedExecutionContext({
+      const executionContext = await adapter.buildExecutionContext({
         sessionId,
         primaryCwd: workspace,
         readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
@@ -417,7 +460,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         },
         'scoped-interrupt-start-intent'
       );
-      const started = await adapter.startScopedTurn({
+      const started = await adapter.startRuntimeTurn({
         session,
         run,
         executionContext,
@@ -438,29 +481,46 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         'scoped-interrupt-session-ack'
       );
       run = (await runtime.getRun(run.id))!;
-      run = await runtime.updateRun(
-        run.id,
-        run.recordRevision,
-        {
-          serverInstanceId: started.serverInstanceId,
-          providerTurnId: started.providerTurnId,
-          status: 'INTERRUPTING',
-          delivery: 'ACKNOWLEDGED',
-          interruptDelivery: 'SENDING',
-          stopRequestedAt: '2026-07-13T00:00:02.000Z'
-        },
-        'scoped-interrupt-stop-intent'
-      );
-
-      await adapter.interruptScopedTurn({ session, run });
-      run = (await runtime.getRun(run.id))!;
-      if (run.interruptDelivery === 'SENDING') {
-        await runtime.updateRun(
+      if (action === 'interrupt') {
+        run = await runtime.updateRun(
           run.id,
           run.recordRevision,
-          { interruptDelivery: 'ACKNOWLEDGED' },
-          'scoped-interrupt-ack'
+          {
+            serverInstanceId: started.serverInstanceId,
+            providerTurnId: started.providerTurnId,
+            status: 'INTERRUPTING',
+            delivery: 'ACKNOWLEDGED',
+            interruptDelivery: 'SENDING',
+            stopRequestedAt: '2026-07-13T00:00:02.000Z'
+          },
+          'scoped-interrupt-stop-intent'
         );
+        await adapter.interruptRuntimeTurn({ session, run });
+        run = (await runtime.getRun(run.id))!;
+        if (run.interruptDelivery === 'SENDING') {
+          await runtime.updateRun(
+            run.id,
+            run.recordRevision,
+            { interruptDelivery: 'ACKNOWLEDGED' },
+            'scoped-interrupt-ack'
+          );
+        }
+      } else {
+        run = await runtime.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            serverInstanceId: started.serverInstanceId,
+            providerTurnId: started.providerTurnId,
+            status: 'RUNNING',
+            delivery: 'ACKNOWLEDGED'
+          },
+          'scoped-process-loss-ack'
+        );
+        const supervisor = (
+          adapter as unknown as { supervisor: CodexAppServerSupervisor }
+        ).supervisor;
+        await supervisor.terminateUnresponsive('Injected scoped process loss.');
       }
       for (let attempt = 0; attempt < 1_000; attempt += 1) {
         run = (await runtime.getRun(run.id))!;
@@ -469,7 +529,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       }
 
       await expect(runtime.getRun(run.id)).resolves.toMatchObject(
-        terminalStatus === 'RECOVERY_REQUIRED'
+        action === 'process-loss'
+          ? {
+              status: 'RECOVERY_REQUIRED',
+              delivery: 'AMBIGUOUS',
+              recoveryState: 'REQUIRES_USER_ACTION',
+              providerTerminalSource: 'PROVIDER_PROCESS_LOSS'
+            }
+          : terminalStatus === 'RECOVERY_REQUIRED'
           ? {
               status: 'RECOVERY_REQUIRED',
               delivery: 'ACKNOWLEDGED',
@@ -495,7 +562,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-reenable-'));
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -527,7 +594,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-empty-models-'));
     const executable = await writeFakeCodexExecutable(dir, 'empty-models');
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -560,7 +627,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -618,7 +685,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-app-server-missing-model-')
     );
     const executable = await writeFakeCodexExecutable(dir);
-    const adapter = new CodexAppServerAdapter(
+    const adapter = createCodexAdapter(
       new FileTaskStore(path.join(dir, 'store')),
       new AppEventBus(),
       {
@@ -653,7 +720,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-restart-'));
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -691,7 +758,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await fs.mkdir(worktreePath);
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -719,7 +786,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         worktreePath,
         baseSha: 'base'
       });
-      const session = await store.createAgentSession({
+      const session = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
@@ -761,7 +828,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -769,7 +836,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       designSkillRoot
     });
     adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree, turnId } = await createDesignTaskContext(
       store,
@@ -844,7 +911,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -861,7 +928,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       }
     }));
     adapter.setDesignBrowserToolHandler(inspect);
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree, turnId } = await createDesignTaskContext(
       store,
@@ -927,7 +994,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -935,7 +1002,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       designSkillRoot
     });
     adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree, turnId } = await createDesignTaskContext(
       store,
@@ -944,7 +1011,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
 
     const firstTerminal = waitForAppEvent(events, 'run.terminal');
-    await orchestrator.startTurn({
+    const firstRun = await orchestrator.startTurn({
       task,
       iteration,
       worktree,
@@ -970,7 +1037,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       attachmentDraftId: laterDraft.id
     });
     const laterTask = (await store.getTask(task.id))!;
-    await orchestrator.startTurn({
+    const laterRun = await orchestrator.startTurn({
       task: laterTask,
       iteration,
       worktree,
@@ -1003,6 +1070,17 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
 
     expect(firstConfig.default_permissions).not.toBe(laterConfig.default_permissions);
+    expect(laterRun.sessionId).not.toBe(firstRun.sessionId);
+    expect(
+      (await store.snapshot()).agentSessions.filter(
+        (session) => session.taskId === task.id && session.role === 'PRIMARY'
+      )
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: firstRun.sessionId, providerSessionId: 'thread-1' }),
+        expect.objectContaining({ id: laterRun.sessionId, providerSessionId: 'thread-rebound' })
+      ])
+    );
     expect(firstPath).toBeTruthy();
     expect(laterPath).toBeTruthy();
     expect(laterFilesystem).not.toHaveProperty(firstPath!);
@@ -1022,7 +1100,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-release-task-'));
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -1031,14 +1109,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     try {
       await adapter.initialize();
       const { task, iteration, worktree } = await createDesignTaskContext(store, dir);
-      const created = await store.createAgentSession({
+      const created = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
         runtimeId: 'codex',
         requestedSettings: task.agentSettings
       });
-      const session = await store.updateAgentSession(created.id, {
+      const session = await updateTestAgentSession(store, created.id, {
         providerSessionId: 'thread-1',
         status: 'IDLE',
         materialized: true
@@ -1063,7 +1141,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
       expect(profiles.size).toBe(0);
       expect(internals.unmaterializedThreadAttestations.size).toBe(0);
-      expect(await store.getAgentSession(session.id)).toMatchObject({
+      expect(await taskRuntimeForTaskStore(store).getAgentSession(session.id)).toMatchObject({
         providerSessionId: 'thread-1',
         status: 'NOT_LOADED'
       });
@@ -1089,7 +1167,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'design-delete');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createDesignTaskContext(store, dir);
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: worktree.worktreePath,
       executable,
       requestTimeoutMs: 2_000,
@@ -1097,14 +1175,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     try {
       await adapter.initialize();
-      const created = await store.createAgentSession({
+      const created = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
         runtimeId: 'codex',
         requestedSettings: task.agentSettings
       });
-      await store.updateAgentSession(created.id, {
+      await updateTestAgentSession(store, created.id, {
         providerSessionId: 'thread-1',
         providerSessionTreeId: 'session-tree-1',
         status: 'IDLE',
@@ -1142,14 +1220,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
       designSkillRoot: path.join(dir, 'missing-design-skills')
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
 
     await expect(adapter.capabilities()).resolves.toMatchObject({
@@ -1178,9 +1256,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const appendArtifact = vi.spyOn(store, 'appendArtifact');
+    const appendArtifact = vi.spyOn(runtimeForTaskStore(store), 'appendArtifact');
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -1191,7 +1269,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         apps: 'enabled'
       }
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
 
@@ -1333,13 +1411,15 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         ),
       'provider observations'
     );
-    const completed = snapshot.runs.find((candidate) => candidate.id === run.id);
+    const completed = await taskRuntimeForTaskStore(store).getRun(run.id);
     expect(completed?.status).toBe('COMPLETED');
     expect(completed?.providerTurnId).toBe('turn-1');
     expect(completed?.finalMessage).toBe('Fake task completed.');
     expect(appendArtifact).toHaveBeenCalledTimes(1);
     expect(appendArtifact.mock.calls[0]?.[1]).toContain('Fake task completed.');
-    expect(await store.readArtifact(completed!.outputArtifactId)).toContain(
+    expect(
+      await runtimeForTaskStore(store).readArtifact(completed!.outputArtifactId)
+    ).toContain(
       'Fake task completed.'
     );
     expect(completed?.attachmentSubmissions).toEqual([
@@ -1477,7 +1557,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'credential-telemetry');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       environment: {
@@ -1487,7 +1567,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     const outputEvents: Array<{ source: string; text: string }> = [];
     events.on((event) => {
       if (event.type === 'run.output') {
@@ -1509,8 +1589,12 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     const snapshot = await store.snapshot();
     const completed = snapshot.runs.find((candidate) => candidate.id === run.id)!;
-    const output = await store.readArtifact(completed.outputArtifactId);
-    const final = await store.readArtifact(completed.finalArtifactId!);
+    const output = await runtimeForTaskStore(store).readArtifact(
+      completed.outputArtifactId
+    );
+    const final = await runtimeForTaskStore(store).readArtifact(
+      completed.finalArtifactId!
+    );
     const journal = await fs.readFile(
       snapshot.agentServers[0]!.protocolJournalPath,
       'utf8'
@@ -1558,7 +1642,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('restores a failed output batch ahead of deltas appended during persistence', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-output-buffer-'));
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       environment: {
         OPENAI_API_KEY: 'opaque-provider-credential-1742'
@@ -1566,21 +1650,21 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       restartDelaysMs: []
     });
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex',
       requestedSettings: task.agentSettings
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
       prompt: task.prompt,
       requestedSettings: task.agentSettings
     });
-    await store.updateRun(run.id, {
+    await updateTestRun(store, run.id, {
       providerTurnId: 'buffered-turn',
       status: 'RUNNING'
     });
@@ -1588,7 +1672,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
       flushBufferedOutput(runId: string, releaseCredentialCarry?: boolean): Promise<void>;
     };
-    const appendArtifact = store.appendArtifact.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const appendArtifact = runtime.appendArtifact.bind(runtime);
     let releasePersistence!: () => void;
     let markPersistenceStarted!: () => void;
     const persistenceRelease = new Promise<void>((resolve) => {
@@ -1598,7 +1683,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       markPersistenceStarted = resolve;
     });
     let appendAttempts = 0;
-    vi.spyOn(store, 'appendArtifact').mockImplementation(async (...args) => {
+    vi.spyOn(runtime, 'appendArtifact').mockImplementation(async (...args) => {
       appendAttempts += 1;
       if (appendAttempts === 1) {
         markPersistenceStarted();
@@ -1624,7 +1709,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await concurrentFailure;
     await buffered.flushBufferedOutput(run.id, true);
 
-    const output = await store.readArtifact(run.outputArtifactId);
+    const output = await runtimeForTaskStore(store).readArtifact(run.outputArtifactId);
     expect(output).toContain('[REDACTED] after');
     expect(output).not.toContain('opaque-provider-credential-1742');
     expect(appendAttempts).toBe(2);
@@ -1652,7 +1737,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     await buffered.recordLocalInterruption(run, 'Provider output ended.');
 
-    const output = await store.readArtifact(run.outputArtifactId);
+    const output = await runtimeForTaskStore(store).readArtifact(run.outputArtifactId);
     expect(output.match(/\[REDACTED\]/gu)).toHaveLength(2);
     expect(output).not.toContain('opaque-provider-');
     await store.close();
@@ -1671,7 +1756,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await buffered.appendTurnOutput('buffered-turn', 'output', 'aaaaaaaa');
     await buffered.recordLocalInterruption(run, 'Provider output ended.');
 
-    const output = await store.readArtifact(run.outputArtifactId);
+    const output = await runtimeForTaskStore(store).readArtifact(run.outputArtifactId);
     expect(output).toContain('\n[output]\n[REDACTED]');
     expect(output).not.toContain('\n[output]\na[REDACTED]');
     await store.close();
@@ -1686,17 +1771,19 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       flushBufferedOutput(runId: string): Promise<void>;
       streamBuffers: Map<string, unknown>;
     };
-    const appendArtifact = vi.spyOn(store, 'appendArtifact').mockRejectedValue(
-      new ArtifactAppendAmbiguousError(
-        run.outputArtifactId,
-        new Error('injected snapshot persistence failure'),
-        new Error('injected artifact rollback failure')
+    const appendArtifact = vi.spyOn(
+      runtimeForTaskStore(store),
+      'appendArtifact'
+    ).mockRejectedValue(
+      new AgentRuntimeArtifactMutationAmbiguousError(
+        `Artifact ${run.outputArtifactId} append outcome is ambiguous.`,
+        { cause: new Error('injected artifact persistence failure') }
       )
     );
 
     await buffered.appendTurnOutput('buffered-turn', 'agentMessage', 'safe output');
     await expect(buffered.flushBufferedOutput(run.id)).rejects.toBeInstanceOf(
-      ArtifactAppendAmbiguousError
+      AgentRuntimeArtifactMutationAmbiguousError
     );
     await expect(buffered.flushBufferedOutput(run.id)).resolves.toBeUndefined();
 
@@ -1718,7 +1805,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       streamBuffers: Map<string, unknown>;
     };
     const appendArtifact = vi
-      .spyOn(store, 'appendArtifact')
+      .spyOn(runtimeForTaskStore(store), 'appendArtifact')
       .mockRejectedValue(new Error('injected output persistence failure'));
 
     await buffered.appendTurnOutput('buffered-turn', 'agentMessage', 'safe output');
@@ -1819,7 +1906,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         terminal: boolean
       ): Promise<RunRecord | undefined>;
     };
-    const writeFinalArtifact = store.writeFinalArtifact.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const writeFinalArtifact = runtime.writeFinalArtifact.bind(runtime);
     let releaseFinalArtifact!: () => void;
     let markFinalArtifactStarted!: () => void;
     const finalArtifactRelease = new Promise<void>((resolve) => {
@@ -1828,7 +1916,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const finalArtifactStarted = new Promise<void>((resolve) => {
       markFinalArtifactStarted = resolve;
     });
-    vi.spyOn(store, 'writeFinalArtifact').mockImplementation(async (...args) => {
+    vi.spyOn(runtime, 'writeFinalArtifact').mockImplementation(async (...args) => {
       markFinalArtifactStarted();
       await finalArtifactRelease;
       return writeFinalArtifact(...args);
@@ -1878,27 +1966,36 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const appendRunEventIfStatus = store.appendRunEventIfStatus.bind(store);
-    const updateAgentSession = store.updateAgentSession.bind(store);
+    const recordAgentRuntimeEvent = store.recordAgentRuntimeEvent.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateAgentSession = runtime.updateSession.bind(runtime);
     let rejectedTerminalEvent = false;
     let rejectedRecoveryEcho = false;
-    vi.spyOn(store, 'appendRunEventIfStatus').mockImplementation(async (event, statuses) => {
+    vi.spyOn(store, 'recordAgentRuntimeEvent').mockImplementation(async (
+      event,
+      operationId
+    ) => {
       if (!rejectedTerminalEvent && event.type === 'AGENT_RUN_COMPLETED') {
         rejectedTerminalEvent = true;
         throw new Error('injected terminal event persistence failure');
       }
-      return appendRunEventIfStatus(event, statuses);
+      return recordAgentRuntimeEvent(event, operationId);
     });
-    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, update) => {
+    vi.spyOn(runtime, 'updateSession').mockImplementation(async (
+      sessionId,
+      expectedRevision,
+      update,
+      operationId
+    ) => {
       if (
         rejectedTerminalEvent &&
         !rejectedRecoveryEcho &&
@@ -1909,7 +2006,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         rejectedRecoveryEcho = true;
         throw new Error('injected recovery notification echo persistence failure');
       }
-      return updateAgentSession(sessionId, update);
+      return updateAgentSession(sessionId, expectedRevision, update, operationId);
     });
 
     const terminal = waitForAppEvent(events, 'run.terminal');
@@ -1966,25 +2063,25 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [5, 10]
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const appendRunEventIfStatus = store.appendRunEventIfStatus.bind(store);
-    vi.spyOn(store, 'appendRunEventIfStatus').mockImplementation(
-      async (event, statuses) => {
+    const recordAgentRuntimeEvent = store.recordAgentRuntimeEvent.bind(store);
+    vi.spyOn(store, 'recordAgentRuntimeEvent').mockImplementation(
+      async (event, operationId) => {
         if (
           event.type === 'AGENT_RUN_COMPLETED' ||
           event.type === 'AGENT_RUNTIME_RECONCILED'
         ) {
           throw new Error('injected persistent AGENT_RUN_COMPLETED persistence failure');
         }
-        return appendRunEventIfStatus(event, statuses);
+        return recordAgentRuntimeEvent(event, operationId);
       }
     );
 
@@ -2054,7 +2151,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const firstAdapter = new CodexAppServerAdapter(store, events, {
+    const firstAdapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -2062,7 +2159,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     await firstAdapter.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const localSession = await store.createAgentSession({
+    const localSession = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
@@ -2085,13 +2182,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     await firstAdapter.shutdown();
 
-    const secondAdapter = new CodexAppServerAdapter(store, events, {
+    const secondAdapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, secondAdapter);
+    const orchestrator = createAgentOrchestrator(store, events, secondAdapter);
     await orchestrator.initialize();
     const run = await orchestrator.startTurn({
       task,
@@ -2113,6 +2210,19 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
     expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
     expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+    const snapshot = await store.snapshot();
+    expect(
+      snapshot.agentSessions.filter(
+        (session) => session.providerSessionId === 'thread-1'
+      )
+    ).toHaveLength(1);
+    expect(
+      snapshot.agentSessions.find((session) => session.id === localSession.id)
+    ).toMatchObject({ status: 'NOT_LOADED', materialized: false });
+    expect(
+      snapshot.agentSessions.find((session) => session.id === localSession.id)
+        ?.providerSessionId
+    ).toBeUndefined();
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -2124,23 +2234,29 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const updateRun = store.updateRun.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateRun = runtime.updateRun.bind(runtime);
     let rejectedStartingPersistence = false;
-    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+    vi.spyOn(runtime, 'updateRun').mockImplementation(async (
+      runId,
+      expectedRevision,
+      patch,
+      operationId
+    ) => {
       if (!rejectedStartingPersistence && patch.status === 'STARTING') {
         rejectedStartingPersistence = true;
         throw new Error('injected pre-submit run persistence failure');
       }
-      return updateRun(runId, patch);
+      return updateRun(runId, expectedRevision, patch, operationId);
     });
 
     await expect(
@@ -2219,13 +2335,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
 
@@ -2290,13 +2406,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
 
@@ -2344,18 +2460,24 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const updateRun = store.updateRun.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateRun = runtime.updateRun.bind(runtime);
     let rejectedTurnEvidence = false;
-    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+    vi.spyOn(runtime, 'updateRun').mockImplementation(async (
+      runId,
+      expectedRevision,
+      patch,
+      operationId
+    ) => {
       if (
         !rejectedTurnEvidence &&
         patch.providerTurnId === 'turn-error-evidence' &&
@@ -2364,7 +2486,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         rejectedTurnEvidence = true;
         throw new Error('injected turn evidence persistence failure');
       }
-      return updateRun(runId, patch);
+      return updateRun(runId, expectedRevision, patch, operationId);
     });
 
     await expect(
@@ -2423,13 +2545,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await adapter.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const client = (
@@ -2459,7 +2581,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       snapshot.agentSessions.find((session) => session.id === recoveryRun.sessionId)
     ).toMatchObject({ materialized: true });
 
-    const raw = await store.appendProtocolMessage(
+    const raw = await appendTestProtocolMessage(store,
       client.serverInstanceId,
       'INBOUND',
       JSON.stringify({
@@ -2520,26 +2642,32 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const updateAgentSession = store.updateAgentSession.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateAgentSession = runtime.updateSession.bind(runtime);
     let injectedDrift = false;
-    vi.spyOn(store, 'updateAgentSession').mockImplementation(
-      async (sessionId, patch) => {
-        const stored = await updateAgentSession(sessionId, patch);
+    vi.spyOn(runtime, 'updateSession').mockImplementation(
+      async (sessionId, expectedRevision, patch, operationId) => {
+        const stored = await updateAgentSession(
+          sessionId,
+          expectedRevision,
+          patch,
+          operationId
+        );
         if (!injectedDrift && patch.materialized === true) {
           injectedDrift = true;
           const client = (
             adapter as unknown as { boundClient?: CodexRpcClient }
           ).boundClient!;
-          const raw = await store.appendProtocolMessage(
+          const raw = await appendTestProtocolMessage(store,
             client.serverInstanceId,
             'INBOUND',
             JSON.stringify({
@@ -2628,21 +2756,27 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'ack-only');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir, {
       withTextAttachment: true
     });
-    const updateRun = store.updateRun.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateRun = runtime.updateRun.bind(runtime);
     let rejectedAcknowledgement = false;
-    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+    vi.spyOn(runtime, 'updateRun').mockImplementation(async (
+      runId,
+      expectedRevision,
+      patch,
+      operationId
+    ) => {
       if (
         !rejectedAcknowledgement &&
         patch.status === 'RUNNING' &&
@@ -2651,7 +2785,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         rejectedAcknowledgement = true;
         throw new Error('injected persistence failure');
       }
-      return updateRun(runId, patch);
+      return updateRun(runId, expectedRevision, patch, operationId);
     });
 
     await expect(
@@ -2692,13 +2826,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     await orchestrator.shutdown();
 
-    const replacementAdapter = new CodexAppServerAdapter(store, events, {
+    const replacementAdapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const replacementOrchestrator = new AgentOrchestrator(
+    const replacementOrchestrator = createAgentOrchestrator(
       store,
       events,
       replacementAdapter
@@ -2739,23 +2873,29 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'ack-only');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const updateSession = store.updateAgentSession.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateSession = runtime.updateSession.bind(runtime);
     let rejectedAcknowledgement = false;
-    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, patch) => {
+    vi.spyOn(runtime, 'updateSession').mockImplementation(async (
+      sessionId,
+      expectedRevision,
+      patch,
+      operationId
+    ) => {
       if (!rejectedAcknowledgement && patch.providerSessionId === 'thread-1') {
         rejectedAcknowledgement = true;
         throw new Error('injected thread ownership persistence failure');
       }
-      return updateSession(sessionId, patch);
+      return updateSession(sessionId, expectedRevision, patch, operationId);
     });
 
     await expect(
@@ -2801,13 +2941,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'profile-mismatch-create');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
 
@@ -2843,13 +2983,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'approval');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -2927,13 +3067,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'user-input');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
 
@@ -3040,13 +3180,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'user-input-clear');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -3110,13 +3250,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'user-input');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -3180,13 +3320,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'user-input-answer-exit');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -3246,13 +3386,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'user-input-exit');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -3298,13 +3438,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'approval');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -3356,13 +3496,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'approval');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {});
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {});
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
 
@@ -3411,28 +3551,28 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'recovery-approval');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const priorServer = await store.createAgentServer({
+    const priorServer = await createTestAgentServer(store, {
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable,
       argv: ['app-server', '--stdio']
     });
-    await store.updateAgentServer(priorServer.id, { status: 'RUNNING', pid: 41 });
-    let session = await store.createAgentSession({
+    await updateTestAgentServer(store, priorServer.id, { status: 'RUNNING', pid: 41 });
+    let session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex',
       requestedSettings: task.agentSettings
     });
-    session = await store.updateAgentSession(session.id, {
+    session = await updateTestAgentSession(store, session.id, {
       providerSessionId: 'thread-1',
       providerSessionTreeId: 'session-tree-1',
       status: 'NOT_LOADED',
       materialized: true
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -3440,16 +3580,18 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       serverInstanceId: priorServer.id,
       requestedSettings: task.agentSettings
     });
-    await store.updateRun(run.id, {
+    await updateTestRun(store, run.id, {
       providerTurnId: 'turn-1',
       status: 'RUNNING'
     });
-    const priorInteractionRaw = await store.appendProtocolMessage(
+    const priorInteractionRaw = await appendTestProtocolMessage(store,
       priorServer.id,
       'INBOUND',
       '{"method":"item/commandExecution/requestApproval","id":41}'
     );
-    const priorInteraction = await store.createInteractionRequest({
+    const priorInteraction = await taskRuntimeForTaskStore(
+      store
+    ).createInteractionRequest({
       runtimeId: 'codex',
       serverInstanceId: priorServer.id,
       providerRequestId: 41,
@@ -3463,8 +3605,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
       policyWarnings: [],
       requestRawMessage: priorInteractionRaw
-    });
-    await store.updateAgentServer(priorServer.id, {
+    }, `test:interaction:${randomUUID()}`);
+    await updateTestAgentServer(store, priorServer.id, {
       status: 'EXITED',
       disconnectedAt: new Date().toISOString(),
       exitedAt: new Date().toISOString(),
@@ -3472,13 +3614,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
 
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
 
     const interaction = await waitForInteraction(store, 'PENDING');
@@ -3513,6 +3655,11 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
     await store.close();
     const reloaded = new FileTaskStore(path.join(dir, 'store'));
+    reloaded.bindAgentRuntime(
+      runtimeForTaskStore(store).taskAgentRuntimeAccess((event, operationId) =>
+        reloaded.recordAgentRuntimeEvent(event, operationId)
+      )
+    );
     await expect(reloaded.getRun(run.id)).resolves.toMatchObject({
       status: 'COMPLETED',
       serverInstanceId: interaction.serverInstanceId
@@ -3536,33 +3683,33 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const priorServer = await store.createAgentServer({
+    const priorServer = await createTestAgentServer(store, {
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable,
       argv: ['app-server', '--stdio']
     });
-    await store.updateAgentServer(priorServer.id, {
+    await updateTestAgentServer(store, priorServer.id, {
       status: 'EXITED',
       disconnectedAt: new Date().toISOString(),
       exitedAt: new Date().toISOString(),
       exitReason: 'Injected prior App Server crash.'
     });
-    let session = await store.createAgentSession({
+    let session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex',
       requestedSettings: task.agentSettings
     });
-    session = await store.updateAgentSession(session.id, {
+    session = await updateTestAgentSession(store, session.id, {
       providerSessionId: 'thread-1',
       providerSessionTreeId: 'session-tree-1',
       status: 'NOT_LOADED',
       materialized: true
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -3570,19 +3717,19 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       serverInstanceId: priorServer.id,
       requestedSettings: task.agentSettings
     });
-    await store.updateRun(run.id, {
+    await updateTestRun(store, run.id, {
       providerTurnId: 'turn-1',
       status: 'RUNNING'
     });
 
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
 
     const recovered = await waitForSnapshot(
@@ -3625,28 +3772,28 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'recovery-user-input');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const priorServer = await store.createAgentServer({
+    const priorServer = await createTestAgentServer(store, {
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable,
       argv: ['app-server', '--stdio']
     });
-    await store.updateAgentServer(priorServer.id, { status: 'RUNNING', pid: 41 });
-    let session = await store.createAgentSession({
+    await updateTestAgentServer(store, priorServer.id, { status: 'RUNNING', pid: 41 });
+    let session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex',
       requestedSettings: task.agentSettings
     });
-    session = await store.updateAgentSession(session.id, {
+    session = await updateTestAgentSession(store, session.id, {
       providerSessionId: 'thread-1',
       providerSessionTreeId: 'session-tree-1',
       status: 'NOT_LOADED',
       materialized: true
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -3654,16 +3801,18 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       serverInstanceId: priorServer.id,
       requestedSettings: task.agentSettings
     });
-    await store.updateRun(run.id, {
+    await updateTestRun(store, run.id, {
       providerTurnId: 'turn-1',
       status: 'RUNNING'
     });
-    const priorInteractionRaw = await store.appendProtocolMessage(
+    const priorInteractionRaw = await appendTestProtocolMessage(store,
       priorServer.id,
       'INBOUND',
       '{"method":"item/tool/requestUserInput","id":81}'
     );
-    const priorInteraction = await store.createInteractionRequest({
+    const priorInteraction = await taskRuntimeForTaskStore(
+      store
+    ).createInteractionRequest({
       runtimeId: 'codex',
       serverInstanceId: priorServer.id,
       providerRequestId: 81,
@@ -3688,8 +3837,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       allowedActions: ['ANSWER'],
       policyWarnings: [],
       requestRawMessage: priorInteractionRaw
-    });
-    await store.updateAgentServer(priorServer.id, {
+    }, `test:interaction:${randomUUID()}`);
+    await updateTestAgentServer(store, priorServer.id, {
       status: 'EXITED',
       disconnectedAt: new Date().toISOString(),
       exitedAt: new Date().toISOString(),
@@ -3697,13 +3846,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
 
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
 
     const interaction = await waitForInteraction(store, 'PENDING', {
@@ -3759,13 +3908,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'stale-generation');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [0]
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
 
     try {
       await orchestrator.initialize();
@@ -3803,17 +3952,17 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       expect(replacementClient).not.toBe(oldClient);
       expect(replacementClient.serverInstanceId).toBe(recoveredRun.serverInstanceId);
 
-      const staleTurnRaw = await store.appendProtocolMessage(
+      const staleTurnRaw = await appendTestProtocolMessage(store,
         oldServerId,
         'INBOUND',
         JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1' } })
       );
-      const staleThreadRaw = await store.appendProtocolMessage(
+      const staleThreadRaw = await appendTestProtocolMessage(store,
         oldServerId,
         'INBOUND',
         JSON.stringify({ method: 'thread/closed', params: { threadId: 'thread-1' } })
       );
-      const staleRequestRaw = await store.appendProtocolMessage(
+      const staleRequestRaw = await appendTestProtocolMessage(store,
         oldServerId,
         'INBOUND',
         JSON.stringify({
@@ -3896,13 +4045,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'exit');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     const internals = adapter as unknown as {
       supervisor: CodexAppServerSupervisor;
       handleNotification(
@@ -3937,24 +4086,24 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       );
 
       const durableOrder: string[] = [];
-      const upsertAgentItem = store.upsertAgentItem.bind(store);
-      vi.spyOn(store, 'upsertAgentItem').mockImplementation(async (item) => {
+      const runtime = runtimeForTaskStore(store);
+      const upsertAgentItem = runtime.upsertItem.bind(runtime);
+      vi.spyOn(runtime, 'upsertItem').mockImplementation(async (item) => {
         const stored = await upsertAgentItem(item);
         if (stored.providerItemId === 'command-1') durableOrder.push('item');
         return stored;
       });
-      const appendRunEventIfStatus = store.appendRunEventIfStatus.bind(store);
-      vi.spyOn(store, 'appendRunEventIfStatus').mockImplementation(
-        async (event, statuses) => {
-          const appended = await appendRunEventIfStatus(event, statuses);
-          if (appended && event.type === 'AGENT_RUNTIME_LOST') {
+      const recordAgentRuntimeEvent = store.recordAgentRuntimeEvent.bind(store);
+      vi.spyOn(store, 'recordAgentRuntimeEvent').mockImplementation(
+        async (event, operationId) => {
+          await recordAgentRuntimeEvent(event, operationId);
+          if (event.type === 'AGENT_RUNTIME_LOST') {
             durableOrder.push('runtime-loss');
           }
-          return appended;
         }
       );
-      const createAgentServer = store.createAgentServer.bind(store);
-      vi.spyOn(store, 'createAgentServer').mockImplementation(async (input) => {
+      const createAgentServer = runtime.createAgentServer.bind(runtime);
+      vi.spyOn(runtime, 'createAgentServer').mockImplementation(async (input) => {
         const server = await createAgentServer(input);
         durableOrder.push('replacement');
         return server;
@@ -4009,13 +4158,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'permission');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir, {
@@ -4074,13 +4223,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'exit');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -4117,13 +4266,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'clear');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -4157,13 +4306,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'subagent');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -4251,13 +4400,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -4315,14 +4464,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
       designSkillRoot
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir, {
@@ -4494,13 +4643,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir, {
       linkedWorktree: true
@@ -4545,14 +4694,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'unsafe-review-fork');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
       enforceBrowserDevBoundary: true
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
       allowNetworkAccess: false
     });
     await orchestrator.initialize();
@@ -4604,8 +4753,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const executable = await writeFakeCodexExecutable(dir, 'unsafe-live-settings');
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const updateAgentSession = store.updateAgentSession.bind(store);
-    const updateAgentServer = store.updateAgentServer.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateAgentSession = runtime.updateSession.bind(runtime);
+    const updateAgentServer = runtime.updateAgentServer.bind(runtime);
     let releaseUnsafeObservation!: () => void;
     let markUnsafeObservationBlocked!: () => void;
     let releaseTerminalServerPersistence!: () => void;
@@ -4623,15 +4773,20 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const terminalServerPersistenceBlocked = new Promise<void>((resolve) => {
       markTerminalServerPersistenceBlocked = resolve;
     });
-    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, patch) => {
+    vi.spyOn(runtime, 'updateSession').mockImplementation(async (
+      sessionId,
+      expectedRevision,
+      patch,
+      operationId
+    ) => {
       if (patch.observedSettings?.sandbox === 'DANGER_FULL_ACCESS') {
         unsafeObservationReached = true;
         markUnsafeObservationBlocked();
         await unsafeObservationRelease;
       }
-      return updateAgentSession(sessionId, patch);
+      return updateAgentSession(sessionId, expectedRevision, patch, operationId);
     });
-    vi.spyOn(store, 'updateAgentServer').mockImplementation(async (serverId, patch) => {
+    vi.spyOn(runtime, 'updateAgentServer').mockImplementation(async (serverId, patch) => {
       if (patch.status === 'EXITED' || patch.status === 'FAILED') {
         markTerminalServerPersistenceBlocked();
         await terminalServerPersistenceRelease;
@@ -4639,14 +4794,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       return updateAgentServer(serverId, patch);
     });
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
       enforceBrowserDevBoundary: true
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
       allowNetworkAccess: false
     });
     await orchestrator.initialize();
@@ -4707,13 +4862,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const executable = await writeFakeCodexExecutable(dir, 'profile-drift');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: []
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -4755,38 +4910,38 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       approvalPolicy: 'never',
       approvalsReviewer: 'user' as const
     };
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex',
       requestedSettings: safeSettings
     });
-    await store.updateAgentSession(session.id, {
+    await updateTestAgentSession(store, session.id, {
       providerSessionId: 'thread-1',
       providerSessionTreeId: 'session-tree-1',
       status: 'ACTIVE'
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
       prompt: task.prompt,
       requestedSettings: safeSettings
     });
-    await store.updateRun(run.id, {
+    await updateTestRun(store, run.id, {
       providerTurnId: 'turn-1',
       status: 'RUNNING'
     });
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
       enforceBrowserDevBoundary: true
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
       allowNetworkAccess: false
     });
 
@@ -4813,13 +4968,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir, {
@@ -4836,9 +4991,15 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     await sourceTerminal;
 
-    const updateRun = store.updateRun.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const updateRun = runtime.updateRun.bind(runtime);
     let rejectedAcknowledgement = false;
-    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+    vi.spyOn(runtime, 'updateRun').mockImplementation(async (
+      runId,
+      expectedRevision,
+      patch,
+      operationId
+    ) => {
       if (
         !rejectedAcknowledgement &&
         patch.status === 'RUNNING' &&
@@ -4847,7 +5008,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         rejectedAcknowledgement = true;
         throw new Error('injected review persistence failure');
       }
-      return updateRun(runId, patch);
+      return updateRun(runId, expectedRevision, patch, operationId);
     });
 
     await expect(
@@ -4893,13 +5054,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir, {
@@ -4916,9 +5077,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     await sourceTerminal;
 
-    const recordObservation = store.recordAgentSettingsObservation.bind(store);
+    const runtime = runtimeForTaskStore(store);
+    const recordObservation = runtime.recordSettingsObservation.bind(runtime);
     let rejectedForkObservation = false;
-    vi.spyOn(store, 'recordAgentSettingsObservation').mockImplementation(
+    vi.spyOn(runtime, 'recordSettingsObservation').mockImplementation(
       async (record) => {
         if (
           !rejectedForkObservation &&
@@ -4988,13 +5150,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -5049,7 +5211,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -5057,7 +5219,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       interruptRequestTimeoutMs: 40,
       interruptCompletionTimeoutMs: 40
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -5104,13 +5266,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -5162,7 +5324,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -5170,7 +5332,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       interruptRequestTimeoutMs: 40,
       interruptCompletionTimeoutMs: 200
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -5205,7 +5367,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -5213,7 +5375,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       interruptRequestTimeoutMs: 40,
       interruptCompletionTimeoutMs: 40
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    const orchestrator = createAgentOrchestrator(store, events, adapter, {
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -5260,7 +5422,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
-    const adapter = new CodexAppServerAdapter(store, events, {
+    const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
@@ -5268,7 +5430,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       interruptRequestTimeoutMs: 40,
       interruptCompletionTimeoutMs: 40
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -5315,6 +5477,224 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   });
 });
+
+const runtimeByTaskStore = new WeakMap<FileTaskStore, FileAgentRuntimeStore>();
+
+function runtimeForTaskStore(
+  store: FileTaskStore,
+  explicit?: FileAgentRuntimeStore
+): FileAgentRuntimeStore {
+  const current = runtimeByTaskStore.get(store);
+  if (current && explicit && current !== explicit) {
+    throw new Error('Codex test task store is already bound to another runtime store.');
+  }
+  const runtime = explicit ?? current ?? new FileAgentRuntimeStore(
+    path.join(os.tmpdir(), `task-monki-codex-runtime-${randomUUID()}`)
+  );
+  if (!current) {
+    const taskRuntime = runtime.taskAgentRuntimeAccess((event, operationId) =>
+      store.recordAgentRuntimeEvent(event, operationId)
+    );
+    store.bindAgentRuntime(taskRuntime);
+    runtimeByTaskStore.set(store, runtime);
+  }
+  return runtime;
+}
+
+function createCodexAdapter(
+  store: FileTaskStore,
+  events: AppEventBus,
+  options: CodexAppServerAdapterOptions & { runtimeStore?: FileAgentRuntimeStore }
+): CodexAppServerAdapter {
+  const { runtimeStore: explicitRuntime, ...adapterOptions } = options;
+  const runtime = runtimeForTaskStore(store, explicitRuntime);
+  return new CodexAppServerAdapter(
+    store,
+    runtime.taskAgentRuntimeAccess((event, operationId) =>
+      store.recordAgentRuntimeEvent(event, operationId)
+    ),
+    runtime,
+    events,
+    adapterOptions
+  );
+}
+
+function createAgentOrchestrator(
+  store: FileTaskStore,
+  events: AppEventBus,
+  adapter: CodexAppServerAdapter,
+  options?: ConstructorParameters<typeof AgentOrchestrator>[4]
+): AgentOrchestrator {
+  return new AgentOrchestrator(
+    store,
+    runtimeForTaskStore(store),
+    events,
+    adapter,
+    options
+  );
+}
+
+function taskRuntimeForTaskStore(store: FileTaskStore) {
+  return runtimeForTaskStore(store).taskAgentRuntimeAccess((event, operationId) =>
+    store.recordAgentRuntimeEvent(event, operationId)
+  );
+}
+
+async function createTestAgentSession(
+  store: FileTaskStore,
+  input: {
+    task: Task;
+    iteration: TaskIteration;
+    worktree: WorktreeRecord;
+    runtimeId: string;
+    role?: AgentSessionRecord['role'];
+    requestedSettings?: AgentExecutionSettings;
+    parentSessionId?: string;
+    forkedFromSessionId?: string;
+  }
+): Promise<AgentSessionRecord> {
+  const id = randomUUID();
+  const operationId = `test:session:${id}`;
+  const settings = {
+    ...(input.requestedSettings ?? input.task.agentSettings),
+    runtimeId: input.runtimeId
+  };
+  const permissionProfileHash = createHash('sha256')
+    .update(JSON.stringify({ id, worktreePath: input.worktree.worktreePath, settings }))
+    .digest('hex');
+  const session = await taskRuntimeForTaskStore(store).createTaskSession({
+    id,
+    taskId: input.task.id,
+    iterationId: input.iteration.id,
+    worktreeId: input.worktree.id,
+    worktreePath: input.worktree.worktreePath,
+    runtimeId: input.runtimeId,
+    role: input.role,
+    requestedSettings: settings,
+    executionContext: {
+      attestation: { status: 'ATTESTED' },
+      primaryCwd: input.worktree.worktreePath,
+      readRoots: [
+        {
+          canonicalPath: input.worktree.worktreePath,
+          kind: 'WORKTREE',
+          entityId: input.worktree.id
+        }
+      ],
+      managedAttachments: [],
+      permissionProfileHash,
+      modelSettings: settings,
+      externalTools: {
+        network: settings.networkAccess === true,
+        webSearch: 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: input.task.kind === 'DESIGN'
+      },
+      clientOperationId: operationId
+    },
+    operationId,
+    parentSessionId: input.parentSessionId,
+    forkedFromSessionId: input.forkedFromSessionId
+  });
+  await store.recordAgentSessionCreated(session);
+  return session;
+}
+
+async function updateTestAgentSession(
+  store: FileTaskStore,
+  sessionId: string,
+  update: Partial<AgentSessionRecord>
+): Promise<AgentSessionRecord> {
+  return taskRuntimeForTaskStore(store).updateAgentSession(
+    sessionId,
+    update,
+    `test:session-update:${randomUUID()}`
+  );
+}
+
+async function createTestRun(
+  store: FileTaskStore,
+  input: {
+    task: Task;
+    session: AgentSessionRecord;
+    mode: AgentRunMode;
+    prompt: string;
+    serverInstanceId?: string;
+    generationKey?: string;
+    retryOfRunId?: string;
+    continuedFromRunId?: string;
+    requestedSettings?: AgentExecutionSettings;
+    beforeGitSnapshotId?: string;
+  }
+): Promise<RunRecord> {
+  const id = randomUUID();
+  let run = await taskRuntimeForTaskStore(store).createTaskRun({
+    id,
+    taskId: input.task.id,
+    iterationId: input.session.iterationId,
+    worktreeId: input.session.worktreeId,
+    sessionId: input.session.id,
+    mode: input.mode,
+    prompt: input.prompt,
+    generationKey: input.generationKey,
+    requestedSettings: input.requestedSettings,
+    beforeGitSnapshotId: input.beforeGitSnapshotId,
+    retryOfRunId: input.retryOfRunId,
+    continuedFromRunId: input.continuedFromRunId,
+    operationId: `test:run:${id}`
+  });
+  await store.recordAgentRunStarted(run);
+  if (input.serverInstanceId) {
+    run = await updateTestRun(store, run.id, {
+      serverInstanceId: input.serverInstanceId
+    });
+  }
+  return run;
+}
+
+async function updateTestRun(
+  store: FileTaskStore,
+  runId: string,
+  update: Partial<RunRecord>
+): Promise<RunRecord> {
+  const runtime = taskRuntimeForTaskStore(store);
+  const current = await runtime.getRun(runId);
+  if (current?.status === 'QUEUED' && update.status === 'RUNNING') {
+    await runtime.updateRun(
+      runId,
+      { status: 'STARTING' },
+      `test:run-starting:${randomUUID()}`
+    );
+  }
+  return runtime.updateRun(
+    runId,
+    update,
+    `test:run-update:${randomUUID()}`
+  );
+}
+
+function createTestAgentServer(
+  store: FileTaskStore,
+  input: Parameters<FileAgentRuntimeStore['createAgentServer']>[0]
+) {
+  return runtimeForTaskStore(store).createAgentServer(input);
+}
+
+function updateTestAgentServer(
+  store: FileTaskStore,
+  serverId: string,
+  update: Parameters<FileAgentRuntimeStore['updateAgentServer']>[1]
+) {
+  return runtimeForTaskStore(store).updateAgentServer(serverId, update);
+}
+
+function appendTestProtocolMessage(
+  store: FileTaskStore,
+  ...input: Parameters<FileAgentRuntimeStore['appendProtocolMessage']>
+) {
+  return runtimeForTaskStore(store).appendProtocolMessage(...input);
+}
 
 async function createTaskContext(
   store: FileTaskStore,
@@ -5450,7 +5830,7 @@ async function createBufferedCodexRun(
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), directoryPrefix));
   const store = new FileTaskStore(path.join(dir, 'store'));
   const events = new AppEventBus();
-  const adapter = new CodexAppServerAdapter(store, events, {
+  const adapter = createCodexAdapter(store, events, {
     cwd: dir,
     environment: {
       ...process.env,
@@ -5459,21 +5839,21 @@ async function createBufferedCodexRun(
     restartDelaysMs: []
   });
   const { task, iteration, worktree } = await createTaskContext(store, dir);
-  const session = await store.createAgentSession({
+  const session = await createTestAgentSession(store, {
     task,
     iteration,
     worktree,
     runtimeId: 'codex',
     requestedSettings: task.agentSettings
   });
-  const created = await store.createRun({
+  const created = await createTestRun(store, {
     task,
     session,
     mode: 'IMPLEMENTATION',
     prompt: task.prompt,
     requestedSettings: task.agentSettings
   });
-  const run = await store.updateRun(created.id, {
+  const run = await updateTestRun(store, created.id, {
     providerTurnId: 'buffered-turn',
     status: 'RUNNING'
   });
@@ -6074,15 +6454,21 @@ rl.on('line', (line) => {
           message.params.threadId === 'thread-1';
         const response = {
           ...threadResponse(message.params),
-          thread: thread([
-            turn(
-              recoveringTurn
-                ? 'inProgress'
-                : recoveringGoalContinuation
-                  ? 'interrupted'
-                  : 'completed'
-            )
-          ])
+          thread: {
+            ...thread([
+              turn(
+                recoveringTurn
+                  ? 'inProgress'
+                  : recoveringGoalContinuation
+                    ? 'interrupted'
+                    : 'completed'
+              )
+            ]),
+            id:
+              mode === 'profile-rebind'
+                ? message.params.threadId
+                : 'thread-1'
+          }
         };
         if (mode === 'unsafe-recovery-resume') {
           response.sandbox = { type: 'dangerFullAccess' };

@@ -348,13 +348,16 @@ delivered.
 
 ## Runtime compatibility
 
-Discourse execution is routed by immutable `runtimeId` through
-`AgentScopedTurnRouter`. There is no default-runtime fallback. A runtime appears
-as available only when its adapter supplies an exact scoped binding that can:
+Discourse execution uses the immutable `runtimeId` through `AgentOrchestrator`.
+There is no default-runtime fallback.
+A runtime is available only when its adapter declares stable Discourse support.
+The shared support projection also requires a read-only, offline, no-approval
+policy.
+The adapter must use the common runtime operations to:
 
-- build and attest the read-only, offline execution context;
-- start and interrupt a turn owned by a Discourse session/run;
-- correlate deltas, terminal output, and recovery-required events back to that
+- build and attest the read-only and offline execution context.
+- start and interrupt a turn that a Discourse session and run own.
+- correlate deltas, terminal output, and recovery-required events with that
   exact run.
 
 The conversation selector receives the attested Discourse runtime catalog, not
@@ -363,14 +366,16 @@ advertise a stable Discourse capability with the required read-only/offline
 execution preset. Core repeats the same validation at send time; hiding an
 unsafe option in the renderer is never the security boundary.
 
-Codex currently implements this binding with an attested App Server permission
-profile. OpenCode and the registered ACP runtimes remain available for their
-normal task flows but are unavailable in Discourse because their current
-process boundaries cannot attest the required isolated read-only/offline scope.
-Task Monki does not weaken the policy, send through Codex as a substitute, or
-claim that executable discovery is sufficient. Adding another Discourse runtime
-requires implementing and testing the same scoped binding in that runtime's
-adapter.
+Codex currently implements these operations with an attested App Server
+permission profile.
+OpenCode and the registered ACP runtimes remain available for normal Task work.
+They do not yet implement the common Discourse operations or attest the
+required policy.
+Task Monki does not weaken the policy or send the request through Codex as a
+substitute.
+Executable discovery alone does not enable Discourse.
+Another runtime must implement the common operations and pass the same policy
+tests.
 
 ## Storage, paging, and limits
 

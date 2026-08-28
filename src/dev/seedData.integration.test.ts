@@ -47,7 +47,7 @@ describe('Task Monki development seed data', () => {
   beforeAll(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
-    snapshot = await readStoreSnapshot(manifest.storeDir);
+    snapshot = await readStoreSnapshot(manifest.storeDir, manifest.agentRuntimeDir);
   }, 180_000);
 
   afterAll(async () => {
@@ -517,6 +517,11 @@ describe('Task Monki development seed data', () => {
 
   it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
     const store = new FileTaskStore(manifest.storeDir);
+    const runtimeStore = new FileAgentRuntimeStore(manifest.agentRuntimeDir);
+    const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+      store.recordAgentRuntimeEvent(event, operationId)
+    );
+    store.bindAgentRuntime(taskRuntime);
     const before = await store.snapshot();
     const initialize = vi.fn(async () => undefined);
     const adapter = {
@@ -530,7 +535,8 @@ describe('Task Monki development seed data', () => {
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
       appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
       agentRuntimeAdapters: [adapter],
-      agentRuntimeStore: new FileAgentRuntimeStore(manifest.agentRuntimeDir),
+      agentRuntimeStore: runtimeStore,
+      taskRuntimeAccess: taskRuntime,
       discourseStore: new FileDiscourseStore(manifest.discourseDir),
       discourseWorkspaceRoot: manifest.discourseWorkspaceRoot,
       allowAgentNetworkAccess: false,
@@ -698,12 +704,21 @@ function prView(snapshot: TaskSnapshot, task: Task) {
   });
 }
 
-async function readStoreSnapshot(storeDir: string): Promise<TaskSnapshot> {
+async function readStoreSnapshot(
+  storeDir: string,
+  agentRuntimeDir: string
+): Promise<TaskSnapshot> {
   const store = new FileTaskStore(storeDir);
+  const runtimeStore = new FileAgentRuntimeStore(agentRuntimeDir);
+  const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+    store.recordAgentRuntimeEvent(event, operationId)
+  );
+  store.bindAgentRuntime(taskRuntime);
   try {
     return await store.snapshot();
   } finally {
     await store.close();
+    await runtimeStore.close();
   }
 }
 

@@ -81,6 +81,15 @@ const ACTIVE_RUN_STATUSES = new Set<RunRecord['status']>([
   'INTERRUPTING'
 ]);
 
+export function canStopTaskRun(run: RunRecord | undefined): boolean {
+  if (!run) return false;
+  if (run.status === 'QUEUED') return true;
+  return (
+    Boolean(run.providerTurnId) &&
+    ['RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status)
+  );
+}
+
 export function buildRunProgressViewModel(input: {
   preferredRun?: RunRecord;
   runs: RunRecord[];

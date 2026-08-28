@@ -310,6 +310,11 @@ describe('TaskManagerService shutdown coordination', () => {
 function initializeRuntimeLifecycle(service: TaskManagerService): void {
   Object.assign(service as unknown as Record<string, unknown>, {
     runtimeOperations: new RuntimeOperationGate(),
+    agentRuntimeStore: {
+      init: () => Promise.resolve(),
+      snapshot: () => Promise.resolve({ sessions: [], runs: [] }),
+      close: () => Promise.resolve()
+    },
     postRunEvidenceTasks: new Map<string, Promise<void>>(),
     disposeAgentEventListener: () => undefined
   });

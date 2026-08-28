@@ -156,6 +156,13 @@ function state(entries: AgentSchedulerQueueEntry[]): AgentRuntimeStoreState {
     runs,
     queueEntries: entries,
     artifacts: [],
+    items: [],
+    interactions: [],
+    goalSnapshots: [],
+    planRevisions: [],
+    usageSnapshots: [],
+    settingsObservations: [],
+    subagentObservations: [],
     telemetryRecords: [],
     events: []
   };

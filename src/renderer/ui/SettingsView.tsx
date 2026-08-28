@@ -18,6 +18,7 @@ import {
   type TestExternalToolRequest,
   type UpdateAppSettingsRequest
 } from '../../shared/contracts';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
 import {
   buildExecutableTestRequest,
@@ -307,13 +308,18 @@ function ModelSettings({
   const promptRefinementRuntimes = enabledRuntimes.filter(
     (runtime) =>
       runtime.preflight.readiness.canStart &&
-      runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
+      projectAgentExecutionSupport(
+        runtime.preflight.capabilities,
+        'PROMPT_REFINEMENT'
+      ).supported
   );
   const reviewRuntimes = enabledRuntimes.filter(
     (runtime) =>
       runtime.preflight.readiness.canStart &&
-      (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-        runtime.preflight.capabilities.detachedReview.maturity === 'stable')
+      projectAgentExecutionSupport(
+        runtime.preflight.capabilities,
+        'REVIEW'
+      ).supported
   );
 
   return (
@@ -428,7 +434,10 @@ export function selectSettingsModels(
       .filter(
         (runtime) =>
           runtime.preflight.readiness.canStart &&
-          runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
+          projectAgentExecutionSupport(
+            runtime.preflight.capabilities,
+            'PROMPT_REFINEMENT'
+          ).supported
       )
       .map((runtime) => runtime.preflight.runtime.id)
   );
@@ -437,8 +446,10 @@ export function selectSettingsModels(
       .filter(
         (runtime) =>
           runtime.preflight.readiness.canStart &&
-          (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-            runtime.preflight.capabilities.detachedReview.maturity === 'stable')
+          projectAgentExecutionSupport(
+            runtime.preflight.capabilities,
+            'REVIEW'
+          ).supported
       )
       .map((runtime) => runtime.preflight.runtime.id)
   );

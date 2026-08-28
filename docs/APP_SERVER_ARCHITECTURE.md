@@ -40,7 +40,10 @@ flowchart LR
   Codex --> RPC["CodexRpcClient"]
   RPC --> Server["resolved codex app-server stdio transport"]
   RPC --> Journal["Protocol journal"]
-  Journal --> Store["FileTaskStore"]
+  Orchestrator --> RuntimeStore["FileAgentRuntimeStore"]
+  Codex --> RuntimeStore
+  Journal --> RuntimeStore
+  Service --> TaskStore["FileTaskStore domain state"]
   Service --> Git["GitSnapshotService"]
   Service --> GitHub["GitHubService"]
 ```
@@ -61,6 +64,10 @@ stdio transport remains the production default; unsupported experimental
 WebSocket transport is not used.
 
 ## Important records
+
+`FileAgentRuntimeStore` owns provider sessions, runs, items, interactions,
+observations, artifacts, and journal metadata.
+`FileTaskStore` owns Task and workflow domain records.
 
 - `Task`
   - User intent, workflow phase, current implementation-side run, worktree,
@@ -205,7 +212,9 @@ It cannot replace that identity with a different exact attachment scope.
 When a Design turn selects a different reference set, Task Monki uses the
 existing native thread-fork operation. The fork keeps the conversation history
 but starts with a new, attested profile for only that turn's selected files.
-Task Monki then updates the same local primary session to own the forked thread.
+Task Monki creates a new local primary session for the forked thread. The old
+local session keeps its immutable provider thread identity. Both sessions stay
+in the same Task conversation lineage.
 If the reference scope is unchanged, it resumes the current thread as usual.
 
 Full access remains available for attachment-free tasks and requires the

@@ -20,6 +20,7 @@ import type {
   DiscourseWavePolicy
 } from '../../shared/discourse';
 import type { AgentRuntimeCatalog } from '../../shared/agent';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import type {
   DiscourseComposerToken,
   DiscourseMentionCandidate
@@ -241,15 +242,11 @@ export function eligibleDiscourseRuntimeCatalog(
   catalog: DiscourseMentionCatalogSnapshot
 ): AgentRuntimeCatalog {
   const runtimes = catalog.runtimeCatalog.runtimes.filter((runtime) => {
-    const discourse = runtime.preflight.capabilities.extensions['task-monki.discourse'];
     return runtime.preflight.readiness.canStart &&
-      discourse?.maturity === 'stable' &&
-      runtime.preflight.capabilities.executionPolicy.presets.some(
-        (preset) =>
-          preset.sandbox === 'READ_ONLY' &&
-          preset.networkAccess === 'DISABLED' &&
-          preset.approvalPolicy.toLowerCase() === 'never'
-      );
+      projectAgentExecutionSupport(
+        runtime.preflight.capabilities,
+        'DISCOURSE'
+      ).supported;
   });
   const runtimeIds = new Set(
     runtimes.map((runtime) => runtime.preflight.runtime.id)

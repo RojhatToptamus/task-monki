@@ -11,7 +11,7 @@ import {
   DesignToolProtocolSanitizer,
   redactProtocolJournalRecord
 } from '../journal/AgentProtocolRedaction';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AgentProviderRuntimeStore } from '../AgentRuntimeStore';
 import {
   decodeCodexProtocolMessage,
   type CodexRpcErrorPayload,
@@ -139,7 +139,7 @@ export class CodexRpcClient {
   constructor(
     private readonly input: Writable,
     output: Readable,
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProviderRuntimeStore,
     readonly serverInstanceId: string,
     private readonly requestTimeoutMs = 30_000,
     private readonly sensitiveValues: readonly string[] = [],

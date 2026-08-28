@@ -1,9 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AgentExecutionSettings,
+  AgentRunMode,
+  AgentSessionRecord,
   CiChecksStatus,
   GitSnapshotRecord,
   MergeStatus,
@@ -11,17 +14,31 @@ import type {
   PreviewPlanSource,
   PreviewSourceIdentity,
   RunRecord,
+  Task,
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { ArtifactAppendAmbiguousError, FileTaskStore } from './FileTaskStore';
+import { FileAgentRuntimeStore } from './FileAgentRuntimeStore';
+import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
 import { createDomainEvent } from './domainEvent';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 const TEST_PREVIEW_RECIPE_DIGEST = 'a'.repeat(64);
 const TEST_PREVIEW_EXECUTION_DIGEST = 'b'.repeat(64);
 const TEST_PREVIEW_HEAD_SHA = 'c'.repeat(40);
+
+const runtimeFixtures = new Set<FileAgentRuntimeStore>();
+const runtimeByTaskStore = new WeakMap<
+  FileTaskStore,
+  { store: FileAgentRuntimeStore; task: TaskAgentRuntimeAccess }
+>();
+
+afterEach(async () => {
+  await Promise.all([...runtimeFixtures].map((runtime) => runtime.close()));
+  runtimeFixtures.clear();
+});
 
 describe('FileTaskStore', () => {
   it('allows exactly one live owner for a store root', async () => {
@@ -263,24 +280,24 @@ describe('FileTaskStore', () => {
       worktreePath: dir,
       baseSha: 'base'
     });
-    const consumerSession = await store.createAgentSession({
+    const consumerSession = await createTestAgentSession(store, {
       task: consumer,
       ...consumerOwnership,
       runtimeId: 'codex'
     });
-    const producerSession = await store.createAgentSession({
+    const producerSession = await createTestAgentSession(store, {
       task: producer,
       ...producerOwnership,
       runtimeId: 'codex'
     });
-    const server = await store.createAgentServer({
+    const server = await createTestAgentServer(store, {
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
       argv: ['app-server', '--stdio']
     });
-    const eventOnlyServer = await store.createAgentServer({
+    const eventOnlyServer = await createTestAgentServer(store, {
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
@@ -296,27 +313,37 @@ describe('FileTaskStore', () => {
         payload: { reason: 'event-only server reference' }
       })
     );
-    const rawMessage = await store.appendProtocolMessage(
+    const rawMessage = await appendTestProtocolMessage(store,
       server.id,
       'INBOUND',
       '{"method":"seed/update"}',
       { method: 'seed/update' }
     );
-    const consumerRun = await store.createRun({
+    const consumerRun = await createTestRun(store, {
       task: consumer,
       session: consumerSession,
       serverInstanceId: server.id,
       mode: 'IMPLEMENTATION',
       prompt: consumer.prompt
     });
-    const producerRun = await store.createRun({
+    const producerRun = await createTestRun(store, {
       task: producer,
       session: producerSession,
       serverInstanceId: server.id,
       mode: 'IMPLEMENTATION',
       prompt: producer.prompt
     });
-    const consumerItem = await store.upsertAgentItem({
+    await updateTestAgentSession(store, consumerSession.id, {
+      providerSessionId: 'consumer-session',
+      status: 'ACTIVE',
+      materialized: true
+    });
+    await updateTestRun(store, consumerRun.id, {
+      status: 'STARTING',
+      providerTurnId: 'consumer-turn'
+    });
+    await updateTestRun(store, consumerRun.id, { status: 'RUNNING' });
+    const consumerItem = await upsertTestAgentItem(store, {
       taskId: consumer.id,
       iterationId: consumerOwnership.iteration.id,
       runId: consumerRun.id,
@@ -327,7 +354,7 @@ describe('FileTaskStore', () => {
       payload: { text: 'current consumer item' },
       rawMessage
     });
-    const producerItem = await store.upsertAgentItem({
+    const producerItem = await upsertTestAgentItem(store, {
       taskId: producer.id,
       iterationId: producerOwnership.iteration.id,
       runId: producerRun.id,
@@ -338,7 +365,7 @@ describe('FileTaskStore', () => {
       payload: { text: 'unrelated producer item' },
       rawMessage
     });
-    const consumerPlan = await store.recordAgentPlanRevision({
+    const consumerPlan = await recordTestAgentPlanRevision(store, {
       taskId: consumer.id,
       iterationId: consumerOwnership.iteration.id,
       runId: consumerRun.id,
@@ -348,7 +375,7 @@ describe('FileTaskStore', () => {
       steps: [{ step: 'Inspect', status: 'IN_PROGRESS' }],
       rawMessage
     });
-    const consumerUsage = await store.recordAgentUsageSnapshot({
+    const consumerUsage = await recordTestAgentUsageSnapshot(store, {
       taskId: consumer.id,
       iterationId: consumerOwnership.iteration.id,
       runId: consumerRun.id,
@@ -359,7 +386,7 @@ describe('FileTaskStore', () => {
       modelContextWindow: 200_000,
       rawMessage
     });
-    const consumerInteraction = await store.createInteractionRequest({
+    const consumerInteraction = await createTestInteractionRequest(store, {
       runtimeId: 'codex',
       serverInstanceId: server.id,
       providerRequestId: 'consumer-request',
@@ -436,14 +463,225 @@ describe('FileTaskStore', () => {
       }
     ]);
 
+    await runtimeFixture(store).store.close();
     await store.close();
     const restarted = new FileTaskStore(dir);
+    runtimeFixture(restarted);
     await expect(restarted.getBoardSnapshot()).resolves.toEqual(board);
     await expect(restarted.getTaskDetail(consumer.id)).resolves.toMatchObject({
       task: { id: consumer.id },
       runs: [{ id: consumerRun.id }]
     });
     await restarted.close();
+  });
+
+  it('keeps provider runtime records out of the durable Task store', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-runtime-boundary-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Keep runtime state separate',
+      prompt: 'Exercise the canonical provider store.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/runtime-boundary',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex'
+    });
+    const server = await createTestAgentServer(store, {
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const rawMessage = await appendTestProtocolMessage(
+      store,
+      server.id,
+      'INBOUND',
+      '{"method":"item/completed"}',
+      { method: 'item/completed' }
+    );
+    const run = await createTestRun(store, {
+      task,
+      session,
+      serverInstanceId: server.id,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+    await updateTestAgentSession(store, session.id, {
+      providerSessionId: 'runtime-boundary-session',
+      status: 'ACTIVE',
+      materialized: true
+    });
+    await updateTestRun(store, run.id, {
+      status: 'STARTING',
+      providerTurnId: 'runtime-boundary-turn'
+    });
+    await updateTestRun(store, run.id, { status: 'RUNNING' });
+    const item = await upsertTestAgentItem(store, {
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      sessionId: session.id,
+      providerItemId: 'runtime-boundary-item',
+      type: 'AGENT_MESSAGE',
+      status: 'COMPLETED',
+      payload: { text: 'Runtime-owned item.' },
+      rawMessage
+    });
+    await createTestInteractionRequest(store, {
+      runtimeId: 'codex',
+      serverInstanceId: server.id,
+      providerRequestId: 'runtime-boundary-request',
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      sessionId: session.id,
+      providerItemId: item.providerItemId,
+      type: 'COMMAND_APPROVAL',
+      request: { command: 'npm test', startedAtMs: 0 },
+      allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
+      policyWarnings: [],
+      requestRawMessage: rawMessage
+    });
+
+    const taskState = JSON.parse(
+      await fs.readFile(path.join(dir, 'store.json'), 'utf8')
+    ) as Record<string, unknown>;
+    for (const runtimeKey of [
+      'agentServers',
+      'agentSessions',
+      'runs',
+      'agentItems',
+      'agentGoalSnapshots',
+      'agentPlanRevisions',
+      'agentUsageSnapshots',
+      'agentSettingsObservations',
+      'agentSubagentObservations',
+      'interactionRequests'
+    ]) {
+      expect(taskState).not.toHaveProperty(runtimeKey);
+    }
+
+    const runtimeState = await runtimeFixture(store).store.snapshot();
+    expect(runtimeState.servers).toHaveLength(1);
+    expect(runtimeState.sessions).toHaveLength(1);
+    expect(runtimeState.runs).toHaveLength(1);
+    expect(runtimeState.items).toHaveLength(1);
+    expect(runtimeState.interactions).toHaveLength(1);
+
+    await runtimeFixture(store).store.close();
+    await store.close();
+    const restarted = new FileTaskStore(dir);
+    runtimeFixture(restarted);
+    await expect(restarted.getTaskDetail(task.id)).resolves.toMatchObject({
+      runs: [{ id: run.id }],
+      agentSessions: [{ id: session.id }],
+      agentItems: [{ id: item.id }],
+      interactionRequests: [expect.objectContaining({ taskId: task.id })]
+    });
+    await restarted.close();
+  });
+
+  it('rejects provider runtime collections in the current Task store schema', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-runtime-shape-'));
+    const store = new FileTaskStore(dir);
+    await store.snapshot();
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    persisted.agentSessions = [];
+    await fs.writeFile(storePath, `${JSON.stringify(persisted)}\n`, { mode: 0o600 });
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'agentSessions belongs to the agent runtime store'
+    );
+  });
+
+  it('rejects provider artifacts in the current Task store schema', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-runtime-artifact-'));
+    const store = new FileTaskStore(dir);
+    await store.snapshot();
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      artifacts: unknown[];
+    };
+    persisted.artifacts.push({ kind: 'agent-output' });
+    await fs.writeFile(storePath, `${JSON.stringify(persisted)}\n`, { mode: 0o600 });
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'agent artifacts belong to the agent runtime store'
+    );
+  });
+
+  it('switches the current primary session together with its replacement run', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-primary-session-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Replace the primary session',
+      prompt: 'Continue through the newest usable session.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/replace-primary-session',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    const original = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId: task.runtimeId
+    });
+    const originalRun = await createTestRun(store, {
+      task,
+      session: original,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+    await updateTestRun(store, originalRun.id, { status: 'FAILED' });
+
+    const replacement = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId: task.runtimeId,
+      parentSessionId: original.id
+    });
+    await expect(store.getTask(task.id)).resolves.toMatchObject({
+      currentRunId: originalRun.id,
+      currentAgentSessionId: original.id
+    });
+
+    const replacementRun = await createTestRun(store, {
+      task,
+      session: replacement,
+      mode: 'FOLLOW_UP',
+      prompt: 'Continue in the replacement session.',
+      continuedFromRunId: originalRun.id
+    });
+    await expect(store.getTask(task.id)).resolves.toMatchObject({
+      currentRunId: replacementRun.id,
+      currentAgentSessionId: replacement.id
+    });
+    await expect(
+      store.getPrimaryAgentSession(task.id, iteration.id)
+    ).resolves.toMatchObject({ id: replacement.id });
   });
 
   it.runIf(process.platform !== 'win32')(
@@ -497,65 +735,6 @@ describe('FileTaskStore', () => {
     }
   );
 
-  it.runIf(process.platform !== 'win32')(
-    'does not report a published run as retryable when directory sync fails',
-    async () => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-run-publish-'));
-      const store = new FileTaskStore(dir);
-      const task = await store.createTask({
-        title: 'Publish one run',
-        prompt: 'Do not duplicate a committed run.',
-      repositoryId: (await addTestRepository(store, dir)).id
-      });
-      const { iteration, worktree } = await store.createIterationAndWorktree({
-        task,
-        branchName: 'codex/run-publish',
-        worktreePath: dir,
-        baseSha: 'base'
-      });
-      const session = await store.createAgentSession({
-        task,
-        iteration,
-        worktree,
-        runtimeId: 'codex'
-      });
-
-      const originalOpen = fs.open.bind(fs);
-      let injectedFailure = false;
-      const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
-        const handle = await originalOpen(...args);
-        if (!injectedFailure && String(args[0]) === dir) {
-          injectedFailure = true;
-          vi.spyOn(handle, 'sync').mockRejectedValueOnce(
-            new Error('Injected post-publication directory sync failure.')
-          );
-        }
-        return handle;
-      });
-      let run: RunRecord;
-      try {
-        run = await store.createRun({
-          task,
-          session,
-          mode: 'IMPLEMENTATION',
-          prompt: task.prompt
-        });
-      } finally {
-        open.mockRestore();
-      }
-
-      expect(injectedFailure).toBe(true);
-      expect((await store.snapshot()).runs.map((candidate) => candidate.id)).toEqual([
-        run.id
-      ]);
-      await store.close();
-      const restarted = new FileTaskStore(dir);
-      await expect(restarted.getRun(run.id)).resolves.toMatchObject({ id: run.id });
-      expect((await restarted.snapshot()).runs).toHaveLength(1);
-      await restarted.close();
-    }
-  );
-
   it.runIf(process.platform === 'win32')(
     'accepts the existing managed artifact directory with different Windows casing',
     async () => {
@@ -567,48 +746,6 @@ describe('FileTaskStore', () => {
       await store.close();
     }
   );
-
-  it('surfaces a crash-persisted queued run for startup recovery', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-queued-recovery-'));
-    const store = new FileTaskStore(dir);
-    const task = await store.createTask({
-      title: 'Recover queued run',
-      prompt: 'Start safely.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/queued-recovery',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const session = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    const run = await store.createRun({
-      task,
-      session,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-
-    expect(run.status).toBe('QUEUED');
-    await expect(store.getRunsRequiringRecovery()).resolves.toEqual([]);
-    await expect(
-      store.getRunsRequiringRecovery({ includeQueued: true })
-    ).resolves.toEqual([
-      expect.objectContaining({ id: run.id, status: 'QUEUED' })
-    ]);
-    for (const status of ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'] as const) {
-      await store.updateRun(run.id, { status });
-      await expect(store.getRunsRequiringRecovery()).resolves.toEqual([
-        expect.objectContaining({ id: run.id, status })
-      ]);
-    }
-  });
 
   it('rejects a mutation before publishing a snapshot too large to reload', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-limit-'));
@@ -644,165 +781,6 @@ describe('FileTaskStore', () => {
     await reloaded.close();
   });
 
-  it('persists tasks, runs, events, and artifacts', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-'));
-    const store = new FileTaskStore(dir);
-
-    const task = await store.createTask({
-      title: 'Read repo',
-      prompt: 'Summarize and do not write.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/test',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const session = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    const run = await store.createRun({
-      task,
-      session,
-      mode: 'ANALYSIS',
-      prompt: task.prompt
-    });
-
-    await store.appendArtifact(run.outputArtifactId, '{"type":"turn.started"}\n');
-    const final = await store.writeFinalArtifact(task.id, run.id, '# Final\n');
-
-    await store.close();
-    const reloaded = new FileTaskStore(dir);
-    const snapshot = await reloaded.snapshot();
-
-    expect(snapshot.tasks).toHaveLength(1);
-    expect(snapshot.runs).toHaveLength(1);
-    expect(snapshot.agentSessions).toHaveLength(1);
-    expect(snapshot.events.some((event) => event.type === 'TASK_CREATED')).toBe(true);
-    expect(snapshot.artifacts.some((artifact) => artifact.id === final.id)).toBe(true);
-    await expect(reloaded.readArtifact(final.id)).resolves.toBe('# Final\n');
-  });
-
-  it('reuses one durable final artifact for every write attempt on a run', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-final-artifact-'));
-    const store = new FileTaskStore(dir);
-    const task = await store.createTask({
-      runtimeId: 'opencode',
-      title: 'Retry terminal persistence',
-      prompt: 'Persist one terminal artifact.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/final-artifact-idempotency',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const session = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'opencode'
-    });
-    const run = await store.createRun({
-      task,
-      session,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-
-    const [first, concurrentRetry] = await Promise.all([
-      store.writeFinalArtifact(task.id, run.id, 'first durable result\n'),
-      store.writeFinalArtifact(task.id, run.id, 'replacement must not win\n')
-    ]);
-    const sequentialRetry = await store.writeFinalArtifact(
-      task.id,
-      run.id,
-      'another replacement must not win\n'
-    );
-
-    expect(concurrentRetry.id).toBe(first.id);
-    expect(sequentialRetry.id).toBe(first.id);
-    await expect(store.readArtifact(first.id)).resolves.toBe('first durable result\n');
-
-    const snapshot = await store.snapshot();
-    expect(
-      snapshot.artifacts.filter(
-        (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
-      )
-    ).toEqual([expect.objectContaining({ id: first.id })]);
-    expect(
-      snapshot.events.filter(
-        (event) => event.type === 'ARTIFACT_CREATED' && event.runId === run.id
-      )
-    ).toHaveLength(1);
-    expect(snapshot.runs.find((candidate) => candidate.id === run.id)?.finalArtifactId).toBe(
-      first.id
-    );
-    expect(snapshot.tasks.find((candidate) => candidate.id === task.id)?.projection.artifact).toBe(
-      'FINAL_MESSAGE_PRESENT'
-    );
-
-    await store.close();
-    const reloaded = new FileTaskStore(dir);
-    const restartRetry = await reloaded.writeFinalArtifact(
-      task.id,
-      run.id,
-      'restart replacement must not win\n'
-    );
-    expect(restartRetry.id).toBe(first.id);
-    await expect(reloaded.readArtifact(first.id)).resolves.toBe('first durable result\n');
-    await expect(reloaded.getRun(run.id)).resolves.toMatchObject({
-      finalArtifactId: first.id
-    });
-  });
-
-  it.runIf(process.platform !== 'win32')(
-    'refuses a symlink swapped into a managed artifact path',
-    async () => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-swap-'));
-      const store = new FileTaskStore(dir);
-      const task = await store.createTask({
-        title: 'Artifact swap',
-        prompt: 'Keep output contained.',
-        repositoryId: (await addTestRepository(store, dir)).id
-      });
-      const { iteration, worktree } = await store.createIterationAndWorktree({
-        task,
-        branchName: 'codex/artifact-swap',
-        worktreePath: dir,
-        baseSha: 'base'
-      });
-      const session = await store.createAgentSession({
-        task,
-        iteration,
-        worktree,
-        runtimeId: 'codex'
-      });
-      const run = await store.createRun({
-        task,
-        session,
-        mode: 'ANALYSIS',
-        prompt: task.prompt
-      });
-      const output = (await store.snapshot()).artifacts.find(
-        (artifact) => artifact.id === run.outputArtifactId
-      )!;
-      const outside = path.join(dir, 'outside.txt');
-      await fs.writeFile(outside, 'outside', 'utf8');
-      await fs.rm(output.path);
-      await fs.symlink(outside, output.path);
-
-      await expect(store.appendArtifact(output.id, 'leak')).rejects.toThrow();
-      await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
-      await store.close();
-    }
-  );
-
   it.runIf(process.platform !== 'win32')(
     'reconciles managed file orphans after a published delete survives restart',
     async () => {
@@ -824,29 +802,10 @@ describe('FileTaskStore', () => {
       });
       const attachmentPath = (await store.verifyTaskAttachments(task.id))[0]!
         .absolutePath;
-      const { iteration, worktree } = await store.createIterationAndWorktree({
-        task,
-        branchName: 'codex/artifact-crash-cleanup',
-        worktreePath: dir,
-        baseSha: 'base'
-      });
-      const session = await store.createAgentSession({
-        task,
-        iteration,
-        worktree,
-        runtimeId: 'codex'
-      });
-      const run = await store.createRun({
-        task,
-        session,
-        mode: 'IMPLEMENTATION',
-        prompt: task.prompt
-      });
-      const final = await store.writeFinalArtifact(task.id, run.id, 'final output');
+      await store.writeTextArtifact(task.id, 'git-snapshot', 'captured git state');
       const artifactPaths = (await store.snapshot()).artifacts
         .filter((artifact) => artifact.taskId === task.id)
         .map((artifact) => artifact.path);
-      expect(artifactPaths).toContain(final.path);
 
       const artifactsDir = path.join(dir, 'artifacts');
       const unknownFile = path.join(artifactsDir, 'user-notes.txt');
@@ -956,90 +915,6 @@ describe('FileTaskStore', () => {
       expect((await fs.lstat(unsafePath)).isSymbolicLink()).toBe(true);
     }
   );
-
-  it('rejects a durable artifact record that claims a path outside the managed directory', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-path-'));
-    const store = new FileTaskStore(dir);
-    const task = await store.createTask({
-      title: 'Artifact path integrity',
-      prompt: 'Keep artifact paths managed.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/artifact-path-integrity',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const session = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    await store.createRun({
-      task,
-      session,
-      mode: 'ANALYSIS',
-      prompt: task.prompt
-    });
-    await store.close();
-
-    const outside = path.join(dir, 'outside-artifact.log');
-    await fs.writeFile(outside, 'outside', 'utf8');
-    const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      artifacts: Array<{ path: string }>;
-    };
-    persisted.artifacts[0]!.path = outside;
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
-      mode: 0o600
-    });
-
-    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
-      'artifact path failed its managed-path integrity check'
-    );
-    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
-  });
-
-  it('rejects a run whose required artifact record is missing', async () => {
-    const fixture = await createRunFixture('missing-run-artifact');
-    await fixture.store.close();
-    const storePath = path.join(fixture.dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      artifacts: Array<{ id: string }>;
-    };
-    persisted.artifacts = persisted.artifacts.filter(
-      (artifact) => artifact.id !== fixture.run.promptArtifactId
-    );
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
-
-    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
-      'run artifact ownership is inconsistent'
-    );
-  });
-
-  it('rejects a run whose task differs from its session and worktree', async () => {
-    const fixture = await createRunFixture('cross-task-run');
-    const otherTask = await fixture.store.createTask({
-      title: 'Unrelated task',
-      prompt: 'Must not own the first task run.',
-      repositoryId: (await addTestRepository(fixture.store, fixture.dir)).id
-    });
-    await fixture.store.close();
-    const storePath = path.join(fixture.dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      runs: Array<{ id: string; taskId: string }>;
-    };
-    persisted.runs = persisted.runs.map((run) =>
-      run.id === fixture.run.id ? { ...run, taskId: otherTask.id } : run
-    );
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
-
-    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
-      'run ownership is inconsistent'
-    );
-  });
 
   it('rejects a Git snapshot that does not belong to its recorded worktree', async () => {
     const fixture = await createRunFixture('cross-worktree-git-snapshot');
@@ -2230,13 +2105,13 @@ describe('FileTaskStore', () => {
       worktreePath: dir,
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -2618,13 +2493,13 @@ describe('FileTaskStore', () => {
       worktreePath: path.join(dir, 'worktree'),
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: task.runtimeId
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -2672,13 +2547,13 @@ describe('FileTaskStore', () => {
         worktreePath: path.join(dir, 'source'),
         baseSha: 'base'
       });
-    const sourceSession = await store.createAgentSession({
+    const sourceSession = await createTestAgentSession(store, {
       task: sourceTask,
       iteration: sourceIteration,
       worktree: sourceWorktree,
       runtimeId: 'codex'
     });
-    const sourceRun = await store.createRun({
+    const sourceRun = await createTestRun(store, {
       task: sourceTask,
       session: sourceSession,
       mode: 'IMPLEMENTATION',
@@ -2699,23 +2574,6 @@ describe('FileTaskStore', () => {
         worktreePath: path.join(dir, 'alternative'),
         baseSha: 'base'
       });
-    const alternativeSession = await store.createAgentSession({
-      task: alternativeTask,
-      iteration: alternativeIteration,
-      worktree: alternativeWorktree,
-      runtimeId: 'codex'
-    });
-    const alternativeRun = await store.createRun({
-      task: alternativeTask,
-      session: alternativeSession,
-      mode: 'IMPLEMENTATION',
-      prompt: alternativeTask.prompt
-    });
-    const finalArtifact = await store.writeFinalArtifact(
-      alternativeTask.id,
-      alternativeRun.id,
-      'done\n'
-    );
     const gitSnapshot = await store.recordGitSnapshot(
       {
         taskId: alternativeTask.id,
@@ -2810,8 +2668,6 @@ describe('FileTaskStore', () => {
     const artifactsBeforeDelete = (await store.snapshot()).artifacts;
     const artifactPath = (artifactId: string) =>
       artifactsBeforeDelete.find((artifact) => artifact.id === artifactId)!.path;
-    const promptArtifactPath = artifactPath(alternativeRun.promptArtifactId);
-    const finalArtifactPath = artifactPath(finalArtifact.id);
     const diffArtifactPath = artifactPath(gitSnapshot.diffArtifactId!);
 
     await store.deleteTask(alternativeTask.id);
@@ -2859,8 +2715,6 @@ describe('FileTaskStore', () => {
           (event.payload as { alternativeTaskId?: string }).alternativeTaskId === alternativeTask.id
       )
     ).toBe(true);
-    await expect(fs.access(promptArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(finalArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(diffArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -2879,13 +2733,13 @@ describe('FileTaskStore', () => {
       worktreePath: path.join(dir, 'source'),
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task: sourceTask,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task: sourceTask,
       session,
       mode: 'IMPLEMENTATION',
@@ -2899,6 +2753,8 @@ describe('FileTaskStore', () => {
       sourceRunId: run.id
     });
 
+    await updateTestRun(store, run.id, { status: 'FAILED' });
+    await runtimeFixture(store).store.purgeTask(sourceTask.id);
     await store.deleteTask(sourceTask.id);
 
     const snapshot = await store.snapshot();
@@ -2954,13 +2810,13 @@ describe('FileTaskStore', () => {
       worktreePath: dir,
       baseSha: 'base'
     });
-    const implementationSession = await store.createAgentSession({
+    const implementationSession = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    const implementationRun = await store.createRun({
+    const implementationRun = await createTestRun(store, {
       task,
       session: implementationSession,
       mode: 'IMPLEMENTATION',
@@ -2980,7 +2836,7 @@ describe('FileTaskStore', () => {
     );
 
     const reviewTask = (await store.getTask(task.id))!;
-    const reviewSession = await store.createAgentSession({
+    const reviewSession = await createTestAgentSession(store, {
       task: reviewTask,
       iteration,
       worktree,
@@ -2989,7 +2845,7 @@ describe('FileTaskStore', () => {
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
     });
-    const reviewRun = await store.createRun({
+    const reviewRun = await createTestRun(store, {
       task: reviewTask,
       session: reviewSession,
       mode: 'REVIEW',
@@ -3044,20 +2900,20 @@ describe('FileTaskStore', () => {
         worktreePath: path.join(dir, task.id),
         baseSha: 'base'
       });
-      const sourceSession = await store.createAgentSession({
+      const sourceSession = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
         runtimeId: task.runtimeId
       });
-      const sourceRun = await store.createRun({
+      const sourceRun = await createTestRun(store, {
         task,
         session: sourceSession,
         mode: 'IMPLEMENTATION',
         prompt: task.prompt
       });
       await store.transitionTask(task.id, 'REVIEW', 'Implementation complete.');
-      const reviewSession = await store.createAgentSession({
+      const reviewSession = await createTestAgentSession(store, {
         task: (await store.getTask(task.id))!,
         iteration,
         worktree,
@@ -3066,14 +2922,14 @@ describe('FileTaskStore', () => {
         parentSessionId: sourceSession.id,
         forkedFromSessionId: sourceSession.id
       });
-      const reviewRun = await store.createRun({
+      const reviewRun = await createTestRun(store, {
         task: (await store.getTask(task.id))!,
         session: reviewSession,
         mode: 'REVIEW',
         prompt: 'Review the implementation.',
         continuedFromRunId: sourceRun.id
       });
-      const finalArtifact = await store.writeFinalArtifact(
+      const finalArtifact = await writeTestFinalArtifact(store,
         task.id,
         reviewRun.id,
         'Review complete.\n'
@@ -3105,240 +2961,10 @@ describe('FileTaskStore', () => {
     );
     await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
 
-    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
-      'task agent review'
-    );
+    const reopened = new FileTaskStore(dir);
+    runtimeFixture(reopened);
+    await expect(reopened.snapshot()).rejects.toThrow('task agent review');
   });
-
-  it.each([
-    {
-      status: 'FAILED' as const,
-      eventType: 'AGENT_RUN_FAILED' as const,
-      payload: { error: 'Provider startup failed.' }
-    },
-    {
-      status: 'INTERRUPTED' as const,
-      eventType: 'AGENT_RUN_INTERRUPTED' as const,
-      payload: { terminalReason: 'Stopped by user.' }
-    },
-    {
-      status: 'RECOVERY_REQUIRED' as const,
-      eventType: 'AGENT_MUTATION_AMBIGUOUS' as const,
-      payload: { reason: 'Prompt delivery is ambiguous.' }
-    },
-    {
-      status: 'LOST' as const,
-      eventType: 'AGENT_RUNTIME_RECONCILED' as const,
-      payload: {
-        terminal: true,
-        status: 'LOST',
-        recoveryState: 'UNRECOVERABLE'
-      }
-    }
-  ])(
-    'repairs a persisted REVIEW task with a $status implementation back to in progress',
-    async ({ status, eventType, payload }) => {
-      const dir = await fs.mkdtemp(
-        path.join(os.tmpdir(), `task-manager-${status.toLowerCase()}-run-phase-repair-`)
-      );
-      const store = new FileTaskStore(dir);
-      const task = await store.createTask({
-        title: 'Retry failed implementation',
-        prompt: 'Implement the task.',
-      repositoryId: (await addTestRepository(store, dir)).id
-      });
-      const { iteration, worktree } = await store.createIterationAndWorktree({
-        task,
-        branchName: 'codex/failed-run-phase-repair',
-        worktreePath: dir,
-        baseSha: 'base'
-      });
-      const session = await store.createAgentSession({
-        task,
-        iteration,
-        worktree,
-        runtimeId: 'codex'
-      });
-      const run = await store.createRun({
-        task,
-        session,
-        mode: 'IMPLEMENTATION',
-        prompt: task.prompt
-      });
-      await store.appendEvent(
-        createDomainEvent({
-          type: eventType,
-          taskId: task.id,
-          iterationId: iteration.id,
-          runId: run.id,
-          worktreeId: worktree.id,
-          agentSessionId: session.id,
-          source: 'provider',
-          payload
-        })
-      );
-
-      const storePath = path.join(dir, 'store.json');
-      const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
-      raw.tasks = raw.tasks.map((candidate: any) =>
-        candidate.id === task.id
-          ? { ...candidate, workflowPhase: 'REVIEW' }
-          : candidate
-      );
-      await store.close();
-      await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
-
-      const repairedStore = new FileTaskStore(dir);
-      const repairedTask = await repairedStore.getTask(task.id);
-
-      expect(repairedTask?.workflowPhase).toBe('IN_PROGRESS');
-      expect(repairedTask?.currentRunId).toBe(run.id);
-      expect(repairedTask?.projection.agentRun).toBe(status);
-      const persisted = JSON.parse(await fs.readFile(storePath, 'utf8'));
-      expect(
-        persisted.tasks.find((candidate: any) => candidate.id === task.id)?.workflowPhase
-      ).toBe('IN_PROGRESS');
-    }
-  );
-
-  it.each([
-    { mode: 'ANALYSIS' as const, expectedPhase: 'IN_PROGRESS' as const },
-    { mode: 'COMPACTION' as const, expectedPhase: 'IN_PROGRESS' as const },
-    { mode: 'FOLLOW_UP' as const, expectedPhase: 'REVIEW' as const },
-    {
-      mode: 'RETRY' as const,
-      expectedPhase: 'IN_PROGRESS' as const,
-      blockReason: 'A provider execution request was declined and produced no Git change.'
-    }
-  ])(
-    'keeps restart workflow repair anchored to the exact current $mode run',
-    async ({ mode, expectedPhase, blockReason }) => {
-      const dir = await fs.mkdtemp(
-        path.join(os.tmpdir(), `task-manager-historical-review-${mode.toLowerCase()}-`)
-      );
-      const store = new FileTaskStore(dir);
-      const task = await store.createTask({
-        title: 'Keep historical review contextual',
-        prompt: 'Run implementation, review it, then do newer work.',
-      repositoryId: (await addTestRepository(store, dir)).id
-      });
-      const { iteration, worktree } = await store.createIterationAndWorktree({
-        task,
-        branchName: `codex/historical-review-${mode.toLowerCase()}`,
-        worktreePath: dir,
-        baseSha: 'base'
-      });
-      const implementationSession = await store.createAgentSession({
-        task,
-        iteration,
-        worktree,
-        runtimeId: 'codex'
-      });
-      const implementationRun = await store.createRun({
-        task,
-        session: implementationSession,
-        mode: 'IMPLEMENTATION',
-        prompt: task.prompt
-      });
-      await store.appendEvent(
-        createDomainEvent({
-          type: 'AGENT_RUN_COMPLETED',
-          taskId: task.id,
-          iterationId: iteration.id,
-          runId: implementationRun.id,
-          worktreeId: worktree.id,
-          agentSessionId: implementationSession.id,
-          source: 'provider',
-          payload: { terminalStatus: 'completed' }
-        })
-      );
-
-      const reviewTask = (await store.getTask(task.id))!;
-      const reviewSession = await store.createAgentSession({
-        task: reviewTask,
-        iteration,
-        worktree,
-        runtimeId: 'codex',
-        role: 'REVIEW',
-        parentSessionId: implementationSession.id,
-        forkedFromSessionId: implementationSession.id
-      });
-      const reviewRun = await store.createRun({
-        task: reviewTask,
-        session: reviewSession,
-        mode: 'REVIEW',
-        prompt: 'Review the implementation.',
-        continuedFromRunId: implementationRun.id
-      });
-      await store.appendEvent(
-        createDomainEvent({
-          type: 'AGENT_RUN_COMPLETED',
-          taskId: task.id,
-          iterationId: iteration.id,
-          runId: reviewRun.id,
-          worktreeId: worktree.id,
-          agentSessionId: reviewSession.id,
-          source: 'provider',
-          payload: {
-            mode: 'REVIEW',
-            agentReviewResult: {
-              schemaVersion: 'agent-review/v1',
-              verdict: 'PASSED',
-              summary: 'The implementation passed review.',
-              findings: []
-            }
-          }
-        })
-      );
-
-      const taskWithHistoricalReview = (await store.getTask(task.id))!;
-      const currentRun = await store.createRun({
-        task: taskWithHistoricalReview,
-        session: implementationSession,
-        mode,
-        prompt: `Run ${mode.toLowerCase()} work after review.`,
-        continuedFromRunId: implementationRun.id
-      });
-      await store.appendEvent(
-        createDomainEvent({
-          type: 'AGENT_RUN_COMPLETED',
-          taskId: task.id,
-          iterationId: iteration.id,
-          runId: currentRun.id,
-          worktreeId: worktree.id,
-          agentSessionId: implementationSession.id,
-          source: 'provider',
-          payload: { terminalStatus: 'completed' }
-        })
-      );
-      if (blockReason) {
-        await store.appendEvent(
-          createDomainEvent({
-            type: 'IMPLEMENTATION_OUTCOME_BLOCKED',
-            taskId: task.id,
-            iterationId: iteration.id,
-            runId: currentRun.id,
-            worktreeId: worktree.id,
-            source: 'git',
-            payload: { reason: blockReason }
-          })
-        );
-      }
-
-      const beforeRestart = (await store.getTask(task.id))!;
-      expect(beforeRestart.workflowPhase).toBe(expectedPhase);
-      expect(beforeRestart.currentRunId).toBe(currentRun.id);
-      expect(beforeRestart.projection.agentReview?.status).toBe('STALE');
-      expect(beforeRestart.projection.implementationRetry?.reason).toBe(blockReason);
-
-      await store.close();
-      const reloadedTask = (await new FileTaskStore(dir).getTask(task.id))!;
-      expect(reloadedTask.workflowPhase).toBe(expectedPhase);
-      expect(reloadedTask.currentRunId).toBe(currentRun.id);
-      expect(reloadedTask.projection.agentReview?.status).toBe('STALE');
-      expect(reloadedTask.projection.implementationRetry?.reason).toBe(blockReason);
-    }
-  );
 
   it('keeps detached review runs inside the review workflow phase', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-store-'));
@@ -3355,13 +2981,13 @@ describe('FileTaskStore', () => {
       worktreePath: dir,
       baseSha: 'base'
     });
-    const implementationSession = await store.createAgentSession({
+    const implementationSession = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    const implementationRun = await store.createRun({
+    const implementationRun = await createTestRun(store, {
       task,
       session: implementationSession,
       mode: 'IMPLEMENTATION',
@@ -3370,7 +2996,7 @@ describe('FileTaskStore', () => {
 
     await store.transitionTask(task.id, 'REVIEW', 'implementation complete');
     const reviewTask = (await store.getTask(task.id))!;
-    const reviewSession = await store.createAgentSession({
+    const reviewSession = await createTestAgentSession(store, {
       task: reviewTask,
       iteration,
       worktree,
@@ -3379,7 +3005,7 @@ describe('FileTaskStore', () => {
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
     });
-    const reviewRun = await store.createRun({
+    const reviewRun = await createTestRun(store, {
       task: reviewTask,
       session: reviewSession,
       mode: 'REVIEW',
@@ -3392,541 +3018,6 @@ describe('FileTaskStore', () => {
     expect(storedTask.currentRunId).toBe(implementationRun.id);
     expect(storedTask.projection.agentReview?.status).toBe('RUNNING');
     expect(storedTask.projection.agentReview?.runId).toBe(reviewRun.id);
-  });
-
-  it('repairs persisted active review runs that were incorrectly moved to in progress', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-repair-'));
-    const store = new FileTaskStore(dir);
-
-    const task = await store.createTask({
-      title: 'Repair review flow',
-      prompt: 'Implement and review.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/review-repair',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const implementationSession = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    const implementationRun = await store.createRun({
-      task,
-      session: implementationSession,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-    await store.transitionTask(task.id, 'REVIEW', 'implementation complete');
-    const reviewTask = (await store.getTask(task.id))!;
-    const reviewSession = await store.createAgentSession({
-      task: reviewTask,
-      iteration,
-      worktree,
-      runtimeId: 'codex',
-      role: 'REVIEW',
-      parentSessionId: implementationSession.id,
-      forkedFromSessionId: implementationSession.id
-    });
-    const reviewRun = await store.createRun({
-      task: reviewTask,
-      session: reviewSession,
-      mode: 'REVIEW',
-      prompt: 'Review current changes.',
-      continuedFromRunId: implementationRun.id
-    });
-
-    const storePath = path.join(dir, 'store.json');
-    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
-    raw.runs = raw.runs.map((candidate: any) =>
-      candidate.id === implementationRun.id
-        ? {
-            ...candidate,
-            status: 'COMPLETED'
-          }
-        : candidate.id === reviewRun.id
-          ? {
-              ...candidate,
-              status: 'RUNNING'
-            }
-        : candidate
-    );
-    raw.tasks = raw.tasks.map((candidate: any) =>
-      candidate.id === task.id
-        ? {
-            ...candidate,
-            currentRunId: reviewRun.id,
-            currentAgentSessionId: reviewSession.id,
-            workflowPhase: 'IN_PROGRESS',
-            projection: {
-              ...candidate.projection,
-              agentRun: 'RUNNING',
-              agentReview: undefined
-            }
-          }
-        : candidate
-    );
-    await store.close();
-    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
-
-    const repaired = await new FileTaskStore(dir).snapshot();
-    const repairedTask = repaired.tasks.find((candidate) => candidate.id === task.id);
-    expect(repairedTask?.workflowPhase).toBe('REVIEW');
-    expect(repairedTask?.currentRunId).toBe(implementationRun.id);
-    expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.agentReview?.status).toBe('RUNNING');
-    expect(repairedTask?.projection.agentReview?.runId).toBe(reviewRun.id);
-  });
-
-  it('repairs interrupting reviews whose provider session is already idle', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-manager-review-idle-repair-')
-    );
-    const store = new FileTaskStore(dir);
-
-    const task = await store.createTask({
-      title: 'Repair idle review',
-      prompt: 'Implement and review.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/review-idle-repair',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const implementationSession = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    const implementationRun = await store.createRun({
-      task,
-      session: implementationSession,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-    await store.transitionTask(task.id, 'REVIEW', 'implementation complete');
-    const reviewTask = (await store.getTask(task.id))!;
-    const reviewSession = await store.createAgentSession({
-      task: reviewTask,
-      iteration,
-      worktree,
-      runtimeId: 'codex',
-      role: 'REVIEW',
-      parentSessionId: implementationSession.id,
-      forkedFromSessionId: implementationSession.id
-    });
-    const reviewRun = await store.createRun({
-      task: reviewTask,
-      session: reviewSession,
-      mode: 'REVIEW',
-      prompt: 'Review current changes.',
-      continuedFromRunId: implementationRun.id
-    });
-
-    const storePath = path.join(dir, 'store.json');
-    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
-    raw.agentSessions = raw.agentSessions.map((candidate: any) =>
-      candidate.id === reviewSession.id
-        ? {
-            ...candidate,
-            status: 'IDLE'
-          }
-        : candidate
-    );
-    raw.runs = raw.runs.map((candidate: any) =>
-      candidate.id === reviewRun.id
-        ? {
-            ...candidate,
-            status: 'INTERRUPTING'
-          }
-        : candidate.id === implementationRun.id
-          ? {
-              ...candidate,
-              status: 'COMPLETED'
-            }
-          : candidate
-    );
-    raw.tasks = raw.tasks.map((candidate: any) =>
-      candidate.id === task.id
-        ? {
-            ...candidate,
-            currentRunId: reviewRun.id,
-            currentAgentSessionId: reviewSession.id,
-            workflowPhase: 'REVIEW',
-            projection: {
-              ...candidate.projection,
-              agentRun: 'COMPLETED',
-              agentReview: {
-                status: 'RUNNING',
-                runId: reviewRun.id,
-                summary: 'Codex is reviewing the current diff.',
-                updatedAt: candidate.updatedAt
-              }
-            }
-          }
-        : candidate
-    );
-    await store.close();
-    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
-
-    const repaired = await new FileTaskStore(dir).snapshot();
-    const repairedTask = repaired.tasks.find((candidate) => candidate.id === task.id);
-    const repairedReviewRun = repaired.runs.find(
-      (candidate) => candidate.id === reviewRun.id
-    );
-    expect(repairedReviewRun?.status).toBe('INTERRUPTED');
-    expect(repairedReviewRun?.recoveryState).toBe('NONE');
-    expect(repairedTask?.workflowPhase).toBe('REVIEW');
-    expect(repairedTask?.currentRunId).toBe(implementationRun.id);
-    expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.agentReview?.status).toBe('CANCELED');
-    expect(repairedTask?.projection.agentReview?.summary).toBe(
-      'Agent review was stopped before completion.'
-    );
-  });
-
-  it('repairs running reviews whose provider session is already idle', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-manager-review-running-idle-repair-')
-    );
-    const store = new FileTaskStore(dir);
-
-    const task = await store.createTask({
-      title: 'Repair completed but unfinalized review',
-      prompt: 'Implement and review.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/review-running-idle-repair',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const implementationSession = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    const implementationRun = await store.createRun({
-      task,
-      session: implementationSession,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-    await store.transitionTask(task.id, 'REVIEW', 'implementation complete');
-    const reviewTask = (await store.getTask(task.id))!;
-    const reviewSession = await store.createAgentSession({
-      task: reviewTask,
-      iteration,
-      worktree,
-      runtimeId: 'codex',
-      role: 'REVIEW',
-      parentSessionId: implementationSession.id,
-      forkedFromSessionId: implementationSession.id
-    });
-    const reviewRun = await store.createRun({
-      task: reviewTask,
-      session: reviewSession,
-      mode: 'REVIEW',
-      prompt: 'Review current changes.',
-      continuedFromRunId: implementationRun.id
-    });
-
-    const storePath = path.join(dir, 'store.json');
-    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
-    raw.agentSessions = raw.agentSessions.map((candidate: any) =>
-      candidate.id === reviewSession.id
-        ? {
-            ...candidate,
-            status: 'IDLE'
-          }
-        : candidate
-    );
-    raw.runs = raw.runs.map((candidate: any) =>
-      candidate.id === implementationRun.id
-        ? {
-            ...candidate,
-            status: 'COMPLETED'
-          }
-        : candidate.id === reviewRun.id
-          ? {
-              ...candidate,
-              status: 'RUNNING'
-            }
-        : candidate
-    );
-    raw.tasks = raw.tasks.map((candidate: any) =>
-      candidate.id === task.id
-        ? {
-            ...candidate,
-            projection: {
-              ...candidate.projection,
-              agentRun: 'COMPLETED',
-              agentReview: {
-                status: 'RUNNING',
-                runId: reviewRun.id,
-                summary: 'Codex is reviewing the current diff.',
-                updatedAt: candidate.updatedAt
-              }
-            }
-          }
-        : candidate
-    );
-    await store.close();
-    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
-
-    const repaired = await new FileTaskStore(dir).snapshot();
-    const repairedTask = repaired.tasks.find((candidate) => candidate.id === task.id);
-    const repairedReviewRun = repaired.runs.find(
-      (candidate) => candidate.id === reviewRun.id
-    );
-    expect(repairedReviewRun?.status).toBe('RECOVERY_REQUIRED');
-    expect(repairedReviewRun?.recoveryState).toBe('REQUIRES_USER_ACTION');
-    expect(repairedTask?.workflowPhase).toBe('REVIEW');
-    expect(repairedTask?.currentRunId).toBe(implementationRun.id);
-    expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.agentReview?.status).toBe('FAILED');
-    expect(repairedTask?.projection.agentReview?.summary).toBe(
-      'Agent review stopped sending updates before Task Monki received a terminal event.'
-    );
-  });
-
-  it('repairs persisted completed review results with structured findings', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-result-repair-'));
-    const store = new FileTaskStore(dir);
-
-    const task = await store.createTask({
-      title: 'Repair completed review result',
-      prompt: 'Implement and review.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/review-result-repair',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const implementationSession = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    const implementationRun = await store.createRun({
-      task,
-      session: implementationSession,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-    await store.transitionTask(task.id, 'REVIEW', 'implementation complete');
-    const reviewTask = (await store.getTask(task.id))!;
-    const reviewSession = await store.createAgentSession({
-      task: reviewTask,
-      iteration,
-      worktree,
-      runtimeId: 'codex',
-      role: 'REVIEW',
-      parentSessionId: implementationSession.id,
-      forkedFromSessionId: implementationSession.id
-    });
-    const reviewRun = await store.createRun({
-      task: reviewTask,
-      session: reviewSession,
-      mode: 'REVIEW',
-      prompt: 'Review current changes.',
-      continuedFromRunId: implementationRun.id
-    });
-
-    const finalMessage = `Review found a blocker.
-
-\`\`\`json
-{
-  "schemaVersion": "agent-review/v1",
-  "verdict": "NEEDS_CHANGES",
-  "summary": "A keyboard shortcut listener leaks.",
-  "findings": [
-    {
-      "id": "listener-leak",
-      "severity": "BLOCKER",
-      "title": "Listener is not cleaned up",
-      "explanation": "The listener is added repeatedly.",
-      "path": "src/renderer/ui/App.tsx",
-      "line": 42
-    }
-  ]
-}
-\`\`\``;
-    const storePath = path.join(dir, 'store.json');
-    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
-    raw.runs = raw.runs.map((candidate: any) =>
-      candidate.id === reviewRun.id
-        ? {
-            ...candidate,
-            status: 'COMPLETED',
-            finalMessage
-          }
-        : candidate.id === implementationRun.id
-          ? {
-              ...candidate,
-              status: 'COMPLETED'
-            }
-        : candidate
-    );
-    raw.tasks = raw.tasks.map((candidate: any) =>
-      candidate.id === task.id
-        ? {
-            ...candidate,
-            currentRunId: reviewRun.id,
-            currentAgentSessionId: reviewSession.id,
-            workflowPhase: 'IN_PROGRESS',
-            projection: {
-              ...candidate.projection,
-              agentRun: 'RUNNING',
-              agentReview: undefined
-            }
-          }
-        : candidate
-    );
-    await store.close();
-    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
-
-    const repaired = await new FileTaskStore(dir).snapshot();
-    const repairedTask = repaired.tasks.find((candidate) => candidate.id === task.id);
-    expect(repairedTask?.workflowPhase).toBe('REVIEW');
-    expect(repairedTask?.currentRunId).toBe(implementationRun.id);
-    expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.agentReview?.status).toBe('NEEDS_CHANGES');
-    expect(repairedTask?.projection.agentReview?.summary).toBe(
-      'A keyboard shortcut listener leaks.'
-    );
-    expect(repairedTask?.projection.agentReview?.result?.findings[0]?.id).toBe(
-      'listener-leak'
-    );
-  });
-
-  it('repairs persisted completed review results with native Codex review comments', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-manager-native-review-result-repair-')
-    );
-    const store = new FileTaskStore(dir);
-
-    const task = await store.createTask({
-      title: 'Repair native review result',
-      prompt: 'Implement and review.',
-      repositoryId: (await addTestRepository(store, dir)).id
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/native-review-result-repair',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const implementationSession = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
-    const implementationRun = await store.createRun({
-      task,
-      session: implementationSession,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-    await store.transitionTask(task.id, 'REVIEW', 'implementation complete');
-    const reviewTask = (await store.getTask(task.id))!;
-    const reviewSession = await store.createAgentSession({
-      task: reviewTask,
-      iteration,
-      worktree,
-      runtimeId: 'codex',
-      role: 'REVIEW',
-      parentSessionId: implementationSession.id,
-      forkedFromSessionId: implementationSession.id
-    });
-    const reviewRun = await store.createRun({
-      task: reviewTask,
-      session: reviewSession,
-      mode: 'REVIEW',
-      prompt: 'Review current changes.',
-      continuedFromRunId: implementationRun.id
-    });
-
-    const finalMessage = `The patch introduces review-flow regressions that can bypass the review gate.
-
-Full review comments:
-
-- [P2] Pause source-run controls while reviews run — ${dir}/src/renderer/ui/AgentControlPanel.tsx:44-45
-  The selected run remains the completed implementation run while a detached review is running.
-
-- [P3] Allow change requests from unstructured reviews — ${dir}/src/renderer/ui/taskView.ts:96-99
-  The predicate hides Request changes even though the drawer can build a follow-up from raw output.
-`;
-    const storePath = path.join(dir, 'store.json');
-    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
-    raw.runs = raw.runs.map((candidate: any) =>
-      candidate.id === reviewRun.id
-        ? {
-            ...candidate,
-            status: 'COMPLETED',
-            finalMessage
-          }
-        : candidate.id === implementationRun.id
-          ? {
-              ...candidate,
-              status: 'COMPLETED'
-            }
-          : candidate
-    );
-    raw.tasks = raw.tasks.map((candidate: any) =>
-      candidate.id === task.id
-        ? {
-            ...candidate,
-            currentRunId: reviewRun.id,
-            currentAgentSessionId: reviewSession.id,
-            workflowPhase: 'REVIEW',
-            projection: {
-              ...candidate.projection,
-              agentRun: 'COMPLETED',
-              agentReview: {
-                status: 'INCONCLUSIVE',
-                runId: reviewRun.id,
-                sourceRunId: implementationRun.id,
-                summary: 'Codex review completed, but no structured pass/fail verdict was provided.',
-                updatedAt: candidate.updatedAt
-              }
-            }
-          }
-        : candidate
-    );
-    await store.close();
-    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
-
-    const repaired = await new FileTaskStore(dir).snapshot();
-    const repairedTask = repaired.tasks.find((candidate) => candidate.id === task.id);
-    expect(repairedTask?.workflowPhase).toBe('REVIEW');
-    expect(repairedTask?.currentRunId).toBe(implementationRun.id);
-    expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.agentReview?.status).toBe('NEEDS_CHANGES');
-    expect(repairedTask?.projection.agentReview?.summary).toBe(
-      'The patch introduces review-flow regressions that can bypass the review gate.'
-    );
-    expect(repairedTask?.projection.agentReview?.result?.findings).toHaveLength(2);
-    expect(repairedTask?.projection.agentReview?.result?.findings[0]).toMatchObject({
-      severity: 'MAJOR',
-      title: 'Pause source-run controls while reviews run',
-      path: 'src/renderer/ui/AgentControlPanel.tsx',
-      line: 44,
-      endLine: 45
-    });
   });
 });
 
@@ -3944,13 +3035,13 @@ async function createRunFixture(suffix: string) {
     worktreePath: dir,
     baseSha: 'base'
   });
-  const session = await store.createAgentSession({
+  const session = await createTestAgentSession(store, {
     task,
     iteration,
     worktree,
     runtimeId: 'codex'
   });
-  const run = await store.createRun({
+  const run = await createTestRun(store, {
     task,
     session,
     mode: 'IMPLEMENTATION',
@@ -4111,6 +3202,218 @@ async function recordOpenPullRequest(
       status: mergeStatus
     }
   });
+}
+
+function runtimeFixture(store: FileTaskStore): {
+  store: FileAgentRuntimeStore;
+  task: TaskAgentRuntimeAccess;
+} {
+  const current = runtimeByTaskStore.get(store);
+  if (current) return current;
+  const runtimeStore = new FileAgentRuntimeStore(
+    path.join(store.getStorageRoot(), '.test-agent-runtime')
+  );
+  const task = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+    store.recordAgentRuntimeEvent(event, operationId)
+  );
+  store.bindAgentRuntime(task);
+  const fixture = { store: runtimeStore, task };
+  runtimeByTaskStore.set(store, fixture);
+  runtimeFixtures.add(runtimeStore);
+  return fixture;
+}
+
+async function createTestAgentSession(
+  store: FileTaskStore,
+  input: {
+    task: Task;
+    iteration: TaskIteration;
+    worktree: WorktreeRecord;
+    runtimeId: string;
+    role?: AgentSessionRecord['role'];
+    requestedSettings?: AgentExecutionSettings;
+    parentSessionId?: string;
+    forkedFromSessionId?: string;
+  }
+): Promise<AgentSessionRecord> {
+  const id = randomUUID();
+  const operationId = `test:session:${id}`;
+  const requestedSettings = {
+    ...(input.requestedSettings ?? input.task.agentSettings),
+    runtimeId: input.runtimeId,
+    model: input.requestedSettings?.model ?? input.task.agentSettings.model ?? 'test-model'
+  };
+  const permissionProfileHash = createHash('sha256')
+    .update(JSON.stringify({ id, path: input.worktree.worktreePath, requestedSettings }))
+    .digest('hex');
+  const session = await runtimeFixture(store).task.createTaskSession({
+    id,
+    taskId: input.task.id,
+    iterationId: input.iteration.id,
+    worktreeId: input.worktree.id,
+    worktreePath: input.worktree.worktreePath,
+    runtimeId: input.runtimeId,
+    role: input.role,
+    requestedSettings,
+    executionContext: {
+      attestation: { status: 'ATTESTED' },
+      primaryCwd: input.worktree.worktreePath,
+      readRoots: [{
+        canonicalPath: input.worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: input.worktree.id
+      }],
+      managedAttachments: [],
+      permissionProfileHash,
+      modelSettings: requestedSettings,
+      externalTools: {
+        network: requestedSettings.networkAccess === true,
+        webSearch: 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: input.task.kind === 'DESIGN'
+      },
+      clientOperationId: operationId
+    },
+    operationId,
+    parentSessionId: input.parentSessionId,
+    forkedFromSessionId: input.forkedFromSessionId
+  });
+  await store.recordAgentSessionCreated(session);
+  return session;
+}
+
+async function createTestRun(
+  store: FileTaskStore,
+  input: {
+    task: Task;
+    session: AgentSessionRecord;
+    mode: AgentRunMode;
+    prompt: string;
+    serverInstanceId?: string;
+    generationKey?: string;
+    retryOfRunId?: string;
+    continuedFromRunId?: string;
+    requestedSettings?: AgentExecutionSettings;
+    beforeGitSnapshotId?: string;
+  }
+): Promise<RunRecord> {
+  const id = randomUUID();
+  let run = await runtimeFixture(store).task.createTaskRun({
+    id,
+    taskId: input.task.id,
+    iterationId: input.session.iterationId,
+    worktreeId: input.session.worktreeId,
+    sessionId: input.session.id,
+    mode: input.mode,
+    prompt: input.prompt,
+    generationKey: input.generationKey,
+    requestedSettings: input.requestedSettings,
+    beforeGitSnapshotId: input.beforeGitSnapshotId,
+    retryOfRunId: input.retryOfRunId,
+    continuedFromRunId: input.continuedFromRunId,
+    reviewTarget: input.mode === 'REVIEW' ? { type: 'UNCOMMITTED_CHANGES' } : undefined,
+    operationId: `test:run:${id}`
+  });
+  await store.recordAgentRunStarted(run);
+  if (input.serverInstanceId) {
+    run = await updateTestRun(store, run.id, {
+      serverInstanceId: input.serverInstanceId
+    });
+  }
+  return run;
+}
+
+function updateTestRun(
+  store: FileTaskStore,
+  runId: string,
+  update: Partial<RunRecord>
+): Promise<RunRecord> {
+  return runtimeFixture(store).task.updateRun(
+    runId,
+    update,
+    `test:run-update:${randomUUID()}`
+  );
+}
+
+function updateTestAgentSession(
+  store: FileTaskStore,
+  sessionId: string,
+  update: Partial<AgentSessionRecord>
+): Promise<AgentSessionRecord> {
+  return runtimeFixture(store).task.updateAgentSession(
+    sessionId,
+    update,
+    `test:session-update:${randomUUID()}`
+  );
+}
+
+function createTestAgentServer(
+  store: FileTaskStore,
+  input: Parameters<FileAgentRuntimeStore['createAgentServer']>[0]
+) {
+  return runtimeFixture(store).store.createAgentServer(input);
+}
+
+function appendTestProtocolMessage(
+  store: FileTaskStore,
+  ...input: Parameters<FileAgentRuntimeStore['appendProtocolMessage']>
+) {
+  return runtimeFixture(store).store.appendProtocolMessage(...input);
+}
+
+function upsertTestAgentItem(
+  store: FileTaskStore,
+  item: Parameters<TaskAgentRuntimeAccess['upsertAgentItem']>[0]
+) {
+  return runtimeFixture(store).task.upsertAgentItem(
+    item,
+    `test:item:${randomUUID()}`
+  );
+}
+
+function recordTestAgentPlanRevision(
+  store: FileTaskStore,
+  record: Parameters<TaskAgentRuntimeAccess['recordAgentPlanRevision']>[0]
+) {
+  return runtimeFixture(store).task.recordAgentPlanRevision(
+    record,
+    `test:plan:${randomUUID()}`
+  );
+}
+
+function recordTestAgentUsageSnapshot(
+  store: FileTaskStore,
+  record: Parameters<TaskAgentRuntimeAccess['recordAgentUsageSnapshot']>[0]
+) {
+  return runtimeFixture(store).task.recordAgentUsageSnapshot(
+    record,
+    `test:usage:${randomUUID()}`
+  );
+}
+
+function createTestInteractionRequest(
+  store: FileTaskStore,
+  input: Parameters<TaskAgentRuntimeAccess['createInteractionRequest']>[0]
+) {
+  return runtimeFixture(store).task.createInteractionRequest(
+    input,
+    `test:interaction:${randomUUID()}`
+  );
+}
+
+function writeTestFinalArtifact(
+  store: FileTaskStore,
+  taskId: string,
+  runId: string,
+  content: string
+) {
+  return runtimeFixture(store).task.writeFinalArtifact(
+    taskId,
+    runId,
+    content,
+    `test:final:${randomUUID()}`
+  );
 }
 
 function testUsage(totalTokens: number) {
