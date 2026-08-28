@@ -1387,9 +1387,9 @@
   min-width: 280px;
   min-height: 100%;
   overflow: hidden;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 10px;
-  background: var(--surface);
+  background: var(--card);
   box-shadow: var(--shadow-panel);
 }
 

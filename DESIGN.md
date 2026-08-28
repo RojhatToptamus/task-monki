@@ -208,9 +208,10 @@ planes.
   | `--edge-raised` | the boundary of an **object** resting on its plane | card, panel, response, decision block |
   | `--edge` | a **seam** between structural planes, and **floating** layers | rail↔sheet, drawer edge, menu, popover, modal, tooltip |
 
-  `--control-edge` is the fifth and separate: an opaque 3:1 line for a control
-  with no fill at all to be identified by (an unchecked checkbox, a radio, a
-  toggle track in the off position).
+  `--control-edge` is the fifth and separate: an opaque 3:1 rim for a compact
+  binary control whose boundary must remain unmistakable (an unchecked
+  checkbox, a radio, or a toggle track in its off or disabled state). It is
+  never a surface fill.
 
 - **A line states the ratio it must clear, not its alpha.** Each weight is solved
   per theme and per mode against **both** surfaces it separates — `--hair`
@@ -225,13 +226,25 @@ planes.
   rejects is two lines on one control, or a line drawn **instead of** the fill
   step. An object — something with a boundary that sits above its plane and could
   conceptually be picked up — gets `--edge-raised` instead.
+- **Disabling a binary control changes its fill and ink, never its boundary.**
+  The disabled state must read as inert, not absent, so a toggle keeps its
+  `--control-edge` rim while its track moves to `--field-disabled`.
 - **Polarity is automatic, and it is the whole reason this works in both modes.**
   All three tokens are alpha over `ink`, so the same token is a dark hairline in
   light mode and a light rim in dark mode. That is not a trick, it is the right
   physics: in light mode an object's edge is where it *casts* shade, in dark mode
-  it is where it *catches* light. Light mode pairs the hairline with a soft
-  shadow; dark mode uses the hairline alone, because a cast shadow on near-black
-  is invisible at a 1px scale.
+  it is where it *catches* light. Light mode pairs the edge with a soft shadow;
+  dark mode pairs the edge with the object's fill step and no cast shadow,
+  because a shadow on near-black is invisible at a 1px scale.
+- **Every object stays legible from two independent cues in every mode.** The
+  cues do not have to be the same: a large panel commonly reads from its fill
+  step, edge and two-layer shadow in light, then from its fill step and edge in
+  dark where `--shadow-panel` is `none`. Never make a mode depend on a cue that
+  the other mode intentionally zeroes out.
+- **A large non-interactive panel on the content sheet uses the card recipe:**
+  `--card`, `--edge-raised` and `--shadow-panel`. It does not take
+  `--card-hover` or `--shadow-card-hover`; those belong only to clickable
+  objects that respond to hover.
 - **Where the plane changes, no divider.** The fill already said it. Two lines
   within 14px of each other means one of them is wrong. A hairline over the sheet
   is a larger local step than the card step above it, so an interior line is the
@@ -901,7 +914,8 @@ correct answer far more often than a border is).
 | Card | `--card` | `--edge-raised` | `--shadow-card` |
 | Card, hover (clickable) | `--card-hover` | `--edge-raised` | `--shadow-card-hover` |
 | Card internal divider | — | `--hair` | — |
-| Settings panel | `--surface` | `--edge-raised` | `--shadow-panel` |
+| Settings panel | `--card` | `--edge-raised` | `--shadow-panel` |
+| Design canvas viewport | `--card` | `--edge-raised` | `--shadow-panel` |
 | Settings row separator | — | `--hair` | — |
 | Popover, dropdown, context menu | `--overlay` | `--edge` | `--shadow-pop` |
 | Menu item, hover | `--hover` | — | — |
@@ -949,8 +963,11 @@ correct answer far more often than a border is).
 | Select trigger | `--field` | `--text`, chevron `--muted` | as input |
 | Checkbox / radio, unchecked | `--field` | — | `--control-edge` inset 1px |
 | Checkbox / radio, checked | `--accent` | `--on-primary` | — |
-| Toggle track, off / on | `--control-edge` / `--accent` | — | — |
-| Toggle knob | `--card` | — | `--shadow-card` |
+| Toggle track, off | `--field` | — | `--control-edge` inset 1px |
+| Toggle track, on | `--accent` | — | — |
+| Toggle track, disabled | `--field-disabled` | — | `--control-edge` inset 1px |
+| Toggle knob, off / disabled | `--overlay` | — | `--edge-raised` inset 1px + `--shadow-card` |
+| Toggle knob, on | `--on-primary` | — | `--edge-raised` inset 1px + `--shadow-card` |
 | Slider track / fill / knob | `--field` / `--accent` / `--card` | — | — |
 | Search field | `--field` | `--text`, icon `--faint` | as input |
 | Filter chip, rest / active | `--field` / `--sel` | `--muted` / `--text` | — |

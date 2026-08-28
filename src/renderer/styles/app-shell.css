@@ -1804,8 +1804,8 @@ button.tm-software-update:hover {
 }
 
 .tm-setup__panel {
-  background: var(--surface);
-  border-block: 1px solid var(--hair);
+  background: var(--card);
+  border: 1px solid var(--edge-raised);
 }
 
 .tm-setup-step {
@@ -2024,9 +2024,9 @@ button.tm-software-update:hover {
 .tm-settings__list {
   overflow: visible;
   padding: 0 16px;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 11px;
-  background: var(--surface);
+  background: var(--card);
   box-shadow: var(--shadow-panel);
 }
 
@@ -2671,9 +2671,9 @@ button.tm-software-update:hover {
 .tm-model-defaults {
   overflow: visible;
   padding: 0 16px;
-  border: 0;
+  border: 1px solid var(--edge-raised);
   border-radius: 11px;
-  background: var(--surface);
+  background: var(--card);
   box-shadow: var(--shadow-panel);
 }
 
