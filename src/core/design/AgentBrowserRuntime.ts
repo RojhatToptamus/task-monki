@@ -12,6 +12,7 @@ const MAX_RUN_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_RUN_SCREENSHOTS = 64;
 const COMMAND_TIMEOUT_MS = 30_000;
 const OPEN_TIMEOUT_MS = 45_000;
+const BROWSER_IDLE_TIMEOUT_MS = 60 * 60_000;
 const REF = /^@e[1-9][0-9]{0,4}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const AGENT_BROWSER_VERSION = '0.34.0';
@@ -572,7 +573,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
       AGENT_BROWSER_ACTION_POLICY: path.join(root, 'action-policy.json'),
       AGENT_BROWSER_CONTENT_BOUNDARIES: '1',
       AGENT_BROWSER_MAX_OUTPUT: String(MAX_TEXT_BYTES),
-      AGENT_BROWSER_IDLE_TIMEOUT_MS: '60000',
+      AGENT_BROWSER_IDLE_TIMEOUT_MS: String(BROWSER_IDLE_TIMEOUT_MS),
       AGENT_BROWSER_AUTOSAVE_INTERVAL_MS: '0',
       AGENT_BROWSER_SCREENSHOT_DIR: root,
       AGENT_BROWSER_SCREENSHOT_FORMAT: 'png',

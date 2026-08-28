@@ -23,9 +23,15 @@ describe('AgentBrowserRuntime', () => {
   it('uses current refs, returns transient screenshots, and removes owned scratch on close', async () => {
     const root = await fixtureRoot();
     const calls: string[][] = [];
+    const environments: NodeJS.ProcessEnv[] = [];
     let snapshotCount = 0;
-    const execute = vi.fn(async (_executable: string, argv: string[]) => {
+    const execute = vi.fn(async (
+      _executable: string,
+      argv: string[],
+      options?: { env?: NodeJS.ProcessEnv }
+    ) => {
       calls.push(argv);
+      if (options?.env) environments.push(options.env);
       if (argv[0] === '--version') {
         return { stdout: 'agent-browser 0.34.0\n', stderr: '' };
       }
@@ -55,6 +61,9 @@ describe('AgentBrowserRuntime', () => {
         lease
       })
     ).resolves.toMatchObject({ snapshot: expect.stringContaining('ref=e1') });
+    expect(environments).toContainEqual(
+      expect.objectContaining({ AGENT_BROWSER_IDLE_TIMEOUT_MS: '3600000' })
+    );
     const [ownedRoot] = await fs.readdir(path.join(root, 'scratch'));
     const policy = JSON.parse(
       await fs.readFile(path.join(root, 'scratch', ownedRoot!, 'action-policy.json'), 'utf8')
