@@ -84,15 +84,15 @@ details[open] > summary .tm-disclosure__chevron {
   grid-template-columns: 1fr 1fr;
   gap: 2px;
   margin: 0 0 12px;
-  padding: 3px;
-  border-radius: 9px;
-  background: var(--panel);
+  padding: 2px;
+  border-radius: var(--r);
+  background: var(--field);
 }
 
 .theme-switcher__button {
-  height: 30px;
+  height: var(--h-toolbar);
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--muted);
   font-size: 12.5px;
@@ -114,9 +114,9 @@ details[open] > summary .tm-disclosure__chevron {
   justify-content: center;
   gap: 6px;
   width: 100%;
-  height: 36px;
+  height: var(--h-control);
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--primary);
   color: var(--on-primary);
   font-size: 13.5px;
@@ -237,7 +237,7 @@ details[open] > summary .tm-disclosure__chevron {
 }
 
 .attention-item:hover {
-  background: var(--field-hover);
+  background: var(--card-hover);
 }
 
 .attention-item span {
@@ -328,9 +328,9 @@ details[open] > summary .tm-disclosure__chevron {
 
 .board-view__header h2 {
   margin: 4px 0 0;
-  font-size: 26px;
+  font-size: var(--t-title);
   font-weight: 600;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.02em;
 }
 
 .board-view__header p {
@@ -407,19 +407,20 @@ details[open] > summary .tm-disclosure__chevron {
 
 .board-column__empty {
   margin: 0;
-  border: 1px dashed var(--edge);
-  border-radius: 10px;
+  border: 0;
+  border-radius: var(--r);
+  background: var(--well);
   color: var(--muted);
   padding: 16px;
-  font-size: 12.5px;
+  font-size: var(--t-help);
 }
 
 .board-card {
   display: grid;
-  gap: 9px;
+  gap: 8px;
   width: 100%;
-  border: 0;
-  border-radius: 13px;
+  border: 1px solid var(--edge-raised);
+  border-radius: var(--r-md);
   background: var(--card);
   color: inherit;
   box-shadow: var(--shadow-card);
@@ -429,8 +430,8 @@ details[open] > summary .tm-disclosure__chevron {
 }
 
 .board-card:hover {
-  background: var(--field-hover);
-  box-shadow: var(--shadow-pop);
+  background: var(--card-hover);
+  box-shadow: var(--shadow-card-hover);
 }
 
 .board-card--selected {
@@ -438,13 +439,8 @@ details[open] > summary .tm-disclosure__chevron {
   box-shadow: var(--shadow-card);
 }
 
-.board-card--warning:not(.board-card--selected) {
-  box-shadow: inset 3px 0 0 var(--waiting), var(--shadow-card);
-}
-
-.board-card--error:not(.board-card--selected) {
-  box-shadow: inset 3px 0 0 var(--blocked), var(--shadow-card);
-}
+/* Status is carried by the pill in the top line of the card (6). The card
+   itself stays neutral: a stripe plus a pill reads as two separate facts. */
 
 .board-card__topline {
   display: flex;
@@ -460,10 +456,10 @@ details[open] > summary .tm-disclosure__chevron {
 
 .board-card strong {
   color: var(--text);
-  font-size: 15px;
+  font-size: var(--t-label);
   font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
+  letter-spacing: -0.005em;
+  line-height: 1.3;
 }
 
 .board-card__repo {
@@ -540,8 +536,13 @@ details[open] > summary .tm-disclosure__chevron {
   color: var(--muted);
 }
 
+/* Inside a pill the glyph inherits the pill ink (6). */
+.status-pill .tm-status-glyph {
+  color: inherit;
+}
+
 .tm-status-glyph--working {
-  color: var(--working);
+  color: var(--accent);
   animation: tm-spin 900ms linear infinite;
 }
 
@@ -554,11 +555,11 @@ details[open] > summary .tm-disclosure__chevron {
 }
 
 .tm-status-glyph--blocked {
-  color: var(--text-soft);
+  color: var(--blocked);
 }
 
 .tm-status-glyph--verified {
-  color: var(--text-soft);
+  color: var(--verified);
 }
 
 .status-pill__label {
@@ -595,18 +596,18 @@ details[open] > summary .tm-disclosure__chevron {
 
 .status-pill--warning,
 .status-pill--action {
-  background: var(--amber-bg);
+  background: var(--waiting-bg);
   color: var(--waiting-ink);
 }
 
 .status-pill--error {
-  background: var(--error-bg);
+  background: var(--blocked-bg);
   color: var(--blocked-ink);
 }
 
 .status-pill--info {
-  background: var(--ctx-bg);
-  color: var(--working-ink);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }
 
 .status-pill--word-only.status-pill--warning,
@@ -747,15 +748,16 @@ details[open] > summary .tm-disclosure__chevron {
   align-items: center;
   gap: 2px;
   padding: 2px;
-  border-radius: 9px;
+  border-radius: var(--r);
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .segmented__btn {
-  height: 30px;
+  height: var(--h-toolbar);
   padding: 0 12px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text);
   font-size: 13px;
@@ -770,16 +772,17 @@ details[open] > summary .tm-disclosure__chevron {
 .primary-button,
 .outline-button,
 .danger-button {
-  height: 34px;
-  border-radius: 9px;
-  font-size: 13px;
+  height: var(--h-control);
+  min-width: 64px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  font-size: var(--t-label);
   font-weight: 600;
   white-space: nowrap;
 }
 
 .primary-button {
-  padding: 0 15px;
-  border: 1px solid transparent;
   background: var(--primary);
   color: var(--on-primary);
 }
@@ -789,9 +792,8 @@ details[open] > summary .tm-disclosure__chevron {
 }
 
 .outline-button {
-  padding: 0 14px;
-  border: 0;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
 }
 
@@ -805,14 +807,13 @@ details[open] > summary .tm-disclosure__chevron {
 }
 
 .danger-button {
-  padding: 0 14px;
-  border: 0;
-  background: var(--error-bg);
+  background: var(--blocked-bg);
   color: var(--blocked-ink);
 }
 
-.danger-button:not(:disabled):hover {
-  background: var(--error-bg);
+.danger-button:not(:disabled):hover,
+.outline-button--danger:not(:disabled):hover {
+  background: var(--blocked-bg-hover);
 }
 
 .tm-actiontitle {
@@ -828,10 +829,6 @@ details[open] > summary .tm-disclosure__chevron {
   pointer-events: none;
 }
 
-.tm-delete-modal .danger-button:disabled {
-  opacity: 0.55;
-}
-
 /* Overflow menu */
 
 .overflow {
@@ -842,10 +839,10 @@ details[open] > summary .tm-disclosure__chevron {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: var(--h-toolbar);
+  height: var(--h-toolbar);
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--field);
   color: var(--text);
   font-size: 18px;
@@ -865,7 +862,7 @@ details[open] > summary .tm-disclosure__chevron {
   flex-direction: column;
   min-width: 180px;
   padding: 5px;
-  border: 0;
+  border: 1px solid var(--edge);
   border-radius: 10px;
   background: var(--overlay);
   box-shadow: var(--shadow-pop);
@@ -886,7 +883,7 @@ details[open] > summary .tm-disclosure__chevron {
 }
 
 .overflow__item--danger {
-  color: var(--blocked);
+  color: var(--blocked-ink);
 }
 
 /* Status strip */
@@ -970,11 +967,11 @@ details[open] > summary .tm-disclosure__chevron {
 /* Card primitive */
 
 .card {
-  border: 0;
-  border-radius: 13px;
+  border: 1px solid var(--edge-raised);
+  border-radius: var(--r-md);
   background: var(--card);
   box-shadow: var(--shadow-card);
-  padding: 18px;
+  padding: 16px;
 }
 
 .card__header {
@@ -1230,12 +1227,12 @@ details[open] > summary .tm-disclosure__chevron {
   width: 14px;
   height: 14px;
   margin: 0;
-  accent-color: var(--working);
+  accent-color: var(--accent);
 }
 
 .interaction-remember:has(input:disabled) {
   cursor: default;
-  opacity: 0.58;
+  color: var(--text-disabled);
 }
 
 .interaction-details {
@@ -1411,7 +1408,7 @@ details[open] > summary .tm-disclosure__chevron {
 .interaction-choice > label > input {
   flex: 0 0 auto;
   margin: 2px 0 0;
-  accent-color: var(--working);
+  accent-color: var(--accent);
 }
 
 .interaction-choice > span {
