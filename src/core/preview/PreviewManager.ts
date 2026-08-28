@@ -34,7 +34,10 @@ import { PreviewPlanResolver } from './PreviewPlanResolver';
 import { PreviewLocalBindingRequiredError } from './PreviewPlanResolver';
 import { PreviewRecipeLoader, selectPreviewScenario } from './PreviewRecipeLoader';
 import { PreviewReconciler } from './PreviewReconciler';
-import { previewRouteHostname } from './PreviewRouteHostname';
+import {
+  previewCandidateRouteHostname,
+  previewRouteHostname
+} from './PreviewRouteHostname';
 import { PreviewSourcePreparer, serializePreviewSourceManifest } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import {
@@ -635,29 +638,61 @@ export class PreviewManager {
   async openManagedDesignBrowserLease(
     generationId: string
   ): Promise<ManagedDesignBrowserLease> {
-    const generation = await this.requireGeneration(generationId);
-    const running = this.live.get(generation.id);
-    if (
-      generation.state !== 'READY' ||
-      generation.routingState !== 'CANDIDATE' ||
-      generation.source.type !== 'EXACT_COMMIT' ||
-      generation.source.designRevisionId !== undefined ||
-      !running?.isRunning()
-    ) {
-      throw new Error('Design browser verification requires one live exact-commit candidate.');
-    }
-    const route = generation.routes.find(
-      (candidate) =>
-        candidate.id === MANAGED_DESIGN_STATIC_ROUTE_ID &&
-        candidate.state === 'ATTACHED'
-    );
-    if (!route) throw new Error('Design browser candidate route is unavailable.');
+    const generation = await this.requireLiveManagedDesignCandidate(generationId);
+    const route = requireManagedDesignRoute(generation, this.requireGatewayPort());
     const origin = new URL(route.url).origin;
     const lease = await this.gateway.openBrowserLease({
       origin: `${origin}/`,
       target: { host: route.targetHost, port: route.targetPort }
     });
     return { ...lease, origin };
+  }
+
+  async publishManagedDesignCandidateCanvas(generationId: string): Promise<void> {
+    const generation = await this.requireLiveManagedDesignCandidate(generationId);
+    const route = requireManagedDesignRoute(generation, this.requireGatewayPort());
+    const hostname = previewCandidateRouteHostname(
+      generation.taskId,
+      generation.id,
+      route.id
+    );
+    this.gateway.attachOwnedRoute(generation.id, hostname, {
+      host: route.targetHost,
+      port: route.targetPort
+    });
+  }
+
+  async resolveDesignCanvasRoute(
+    input: OpenPreviewRequest
+  ): Promise<ResolvedPreviewRoute> {
+    const generation = await this.requireGeneration(input.generationId);
+    if (generation.routingState === 'ACTIVE') {
+      return this.opener.resolve(input);
+    }
+    if (generation.taskId !== input.taskId) {
+      throw new Error('The Design canvas route belongs to another task.');
+    }
+    const candidate = await this.requireLiveManagedDesignCandidate(generation.id);
+    const route = requireManagedDesignRoute(candidate, this.requireGatewayPort());
+    if (route.id !== input.routeId) {
+      throw new Error('The Design candidate canvas route is not attached.');
+    }
+    const hostname = previewCandidateRouteHostname(
+      candidate.taskId,
+      candidate.id,
+      route.id
+    );
+    if (!this.gateway.hasRoute(hostname)) {
+      throw new Error('The Design candidate is not available to the canvas.');
+    }
+    const url = `http://${hostname}:${this.requireGatewayPort()}/`;
+    return {
+      taskId: candidate.taskId,
+      generationId: candidate.id,
+      routeId: route.id,
+      url,
+      origin: new URL(url).origin
+    };
   }
 
   async cutoverManagedDesignCandidate(input: {
@@ -698,6 +733,7 @@ export class PreviewManager {
         await canvasLease.rollback().catch(() => undefined);
         throw new Error('Preview service exited during the Design canvas cutover fence.');
       }
+      this.removeManagedDesignCandidateCanvasRoute(generation);
       this.gateway.replaceRoutes(
         generation.id,
         Object.fromEntries(
@@ -1798,6 +1834,36 @@ export class PreviewManager {
     return generation;
   }
 
+  private async requireLiveManagedDesignCandidate(
+    generationId: string
+  ): Promise<PreviewGenerationRecord> {
+    const generation = await this.requireGeneration(generationId);
+    const running = this.live.get(generation.id);
+    if (
+      generation.state !== 'READY' ||
+      generation.routingState !== 'CANDIDATE' ||
+      generation.source.type !== 'EXACT_COMMIT' ||
+      generation.source.designRevisionId !== undefined ||
+      !running?.isRunning()
+    ) {
+      throw new Error('Managed Design access requires one live exact-commit candidate.');
+    }
+    return generation;
+  }
+
+  private removeManagedDesignCandidateCanvasRoute(
+    generation: PreviewGenerationRecord
+  ): void {
+    const route = generation.routes.find(
+      (candidate) => candidate.id === MANAGED_DESIGN_STATIC_ROUTE_ID
+    );
+    if (!route) return;
+    this.gateway.removeOwnedRoute(
+      generation.id,
+      previewCandidateRouteHostname(generation.taskId, generation.id, route.id)
+    );
+  }
+
   private requireGatewayPort(): number {
     if (!this.gatewayPort) throw new Error('Preview gateway is not initialized.');
     return this.gatewayPort;
@@ -1835,6 +1901,29 @@ function designCanvasRouteIdentity(
     generationId: generation.id,
     routeId: route.id
   };
+}
+
+function requireManagedDesignRoute(
+  generation: PreviewGenerationRecord,
+  gatewayPort: number
+) {
+  const route = generation.routes.find(
+    (candidate) =>
+      candidate.id === MANAGED_DESIGN_STATIC_ROUTE_ID &&
+      candidate.state === 'ATTACHED'
+  );
+  if (!route) throw new Error('Managed Design Preview route is not attached.');
+  const hostname = previewRouteHostname(generation.taskId, route.id);
+  if (
+    route.hostname !== hostname ||
+    route.url !== `http://${hostname}:${route.gatewayPort}/` ||
+    route.gatewayPort !== gatewayPort ||
+    route.targetHost !== '127.0.0.1' ||
+    route.targetPort <= 0
+  ) {
+    throw new Error('Managed Design Preview route failed its safety check.');
+  }
+  return route;
 }
 
 function designPreviewSettlement(

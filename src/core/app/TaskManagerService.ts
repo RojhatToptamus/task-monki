@@ -2948,7 +2948,21 @@ export class TaskManagerService {
     if (task.kind !== 'DESIGN') {
       throw new Error('The in-app canvas is available only for Designs.');
     }
-    return this.previews.resolveOpenRoute(input);
+    const detail = await this.store.getDesignDetail(task.id);
+    const isProjectedTarget =
+      detail.canvas.target?.generationId === input.generationId &&
+      detail.canvas.target.routeId === input.routeId;
+    const isLastReadyTarget =
+      detail.currentPreview?.id === input.generationId &&
+      detail.currentPreview.state === 'READY' &&
+      detail.currentPreview.routingState === 'ACTIVE' &&
+      detail.currentPreview.routes.some(
+        (route) => route.id === input.routeId && route.state === 'ATTACHED'
+      );
+    if (!isProjectedTarget && !isLastReadyTarget) {
+      throw new Error('The Design canvas route is not current.');
+    }
+    return this.previews.resolveDesignCanvasRoute(input);
   }
 
   readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {

@@ -54,7 +54,7 @@ export type DesignCanvasPresentation =
   | { kind: 'DESKTOP_ONLY'; title: string; detail: string }
   | { kind: 'HIDDEN'; title: string; detail: string }
   | { kind: 'PLACEHOLDER'; title: string; detail: string; restart: boolean }
-  | { kind: 'NATIVE'; target: DesignCanvasTarget };
+  | { kind: 'NATIVE'; target: DesignCanvasTarget; progress: boolean };
 
 export interface DesignCanvasExternalLinkRequest {
   designId: string;
@@ -163,8 +163,15 @@ export function designCanvasPresentation(input: {
       detail: 'Close the dialog to return to the preview.'
     };
   }
-  if (canvas.state === 'READY' && canvas.target) {
-    return { kind: 'NATIVE', target: canvas.target };
+  if (
+    (canvas.state === 'READY' || canvas.state === 'PREVIEWING') &&
+    canvas.target
+  ) {
+    return {
+      kind: 'NATIVE',
+      target: canvas.target,
+      progress: canvas.state === 'PREVIEWING'
+    };
   }
   if (canvas.state === 'RESTART_REQUIRED') {
     return {

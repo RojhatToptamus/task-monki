@@ -55,6 +55,71 @@ describe('DesignSourceService', () => {
     expect(await git(created.path, ['status', '--porcelain=v1', '--untracked-files=all'])).toBe(
       ''
     );
+    expect(
+      (await git(created.path, ['ls-tree', '-r', '--name-only', created.headSha]))
+        .trim()
+        .split('\n')
+    ).toEqual(['app.js', 'assets/.gitkeep', 'index.html', 'styles.css']);
+    const index = await git(created.path, ['show', `${created.headSha}:index.html`]);
+    expect(index).toContain('href="./styles.css"');
+    expect(index).toContain('src="./app.js" defer');
+    expect(index).not.toMatch(/<style\b|style\s*=|<script(?!\s+src=)/iu);
+    expect(await git(created.path, ['show', `${created.headSha}:styles.css`])).toBe('');
+    expect(await git(created.path, ['show', `${created.headSha}:app.js`])).toBe('');
+    expect(await git(created.path, ['show', `${created.headSha}:assets/.gitkeep`])).toBe('');
+  }, 20_000);
+
+  it('finishes an interrupted legacy one-file repository without rewriting it', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-legacy-source-'));
+    const repositoryRoot = path.join(root, 'repositories');
+    const worktreeRoot = path.join(root, 'worktrees');
+    const repositoryId = randomUUID();
+    const repositoryPath = path.join(repositoryRoot, repositoryId);
+    const creationToken = 'design-legacy-staging-token';
+    const legacyIndex = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New Design</title>
+</head>
+<body>
+  <main>
+    <h1>New Design</h1>
+    <p>Replace this minimal shell with the requested experience.</p>
+  </main>
+</body>
+</html>
+`;
+    await fs.mkdir(repositoryPath, { recursive: true, mode: 0o700 });
+    await fs.chmod(repositoryPath, 0o700);
+    await fs.writeFile(path.join(repositoryPath, 'index.html'), legacyIndex, { mode: 0o600 });
+    await fs.writeFile(
+      path.join(repositoryPath, DESIGN_REPOSITORY_MARKER),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        repositoryId,
+        creationToken,
+        state: 'STAGING',
+        createdAt: new Date().toISOString()
+      })}\n`,
+      { mode: 0o600 }
+    );
+
+    const service = new DesignSourceService({ repositoryRoot, worktreeRoot });
+    const recovered = await service.prepareBlankRepository({ creationToken });
+    const retried = await service.prepareBlankRepository({ creationToken });
+
+    expect(retried.headSha).toBe(recovered.headSha);
+    expect(
+      (await git(repositoryPath, ['ls-tree', '-r', '--name-only', recovered.headSha])).trim()
+    ).toBe('index.html');
+    expect(await git(repositoryPath, ['show', `${recovered.headSha}:index.html`])).toBe(
+      legacyIndex
+    );
+    await expect(fs.access(path.join(repositoryPath, 'styles.css'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    });
   }, 20_000);
 
   it('publishes exactly the captured tree, recovers it, repairs the index, and safely removes owned state', async () => {
@@ -108,7 +173,17 @@ describe('DesignSourceService', () => {
 
     const firstBytes = '<!doctype html><title>Captured</title>\n';
     const laterBytes = '<!doctype html><title>Changed after capture</title>\n';
+    const firstStyles = 'body { color: rebeccapurple; }\n';
+    const firstScript = 'document.body.dataset.ready = "true";\n';
+    const firstAsset = '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n';
     await fs.writeFile(path.join(worktree.worktreePath, 'index.html'), firstBytes, 'utf8');
+    await fs.writeFile(path.join(worktree.worktreePath, 'styles.css'), firstStyles, 'utf8');
+    await fs.writeFile(path.join(worktree.worktreePath, 'app.js'), firstScript, 'utf8');
+    await fs.writeFile(
+      path.join(worktree.worktreePath, 'assets', 'mark.svg'),
+      firstAsset,
+      'utf8'
+    );
     const capture = await source.captureCandidate({
       ...ownership,
       expectedParentCommit: prepared.headSha
@@ -117,6 +192,11 @@ describe('DesignSourceService', () => {
     if (capture.kind !== 'CAPTURED') throw new Error('Expected a captured Design tree.');
 
     await fs.writeFile(path.join(worktree.worktreePath, 'index.html'), laterBytes, 'utf8');
+    await fs.writeFile(
+      path.join(worktree.worktreePath, 'styles.css'),
+      'body { color: seagreen; }\n',
+      'utf8'
+    );
     const candidateMessage = [
       'Task Monki Design candidate',
       '',
@@ -162,6 +242,18 @@ describe('DesignSourceService', () => {
     expect(
       await git(repository.path, ['show', `${published.candidateCommitSha}:index.html`])
     ).toBe(firstBytes);
+    expect(
+      await git(repository.path, ['show', `${published.candidateCommitSha}:styles.css`])
+    ).toBe(firstStyles);
+    expect(
+      await git(repository.path, ['show', `${published.candidateCommitSha}:app.js`])
+    ).toBe(firstScript);
+    expect(
+      await git(repository.path, [
+        'show',
+        `${published.candidateCommitSha}:assets/mark.svg`
+      ])
+    ).toBe(firstAsset);
     expect(await fs.readFile(path.join(worktree.worktreePath, 'index.html'), 'utf8')).toBe(
       laterBytes
     );
@@ -342,11 +434,13 @@ describe('DesignSourceService', () => {
         repository: project.repository,
         worktree: project.worktree
       })
-    ).resolves.toEqual({
-      files: [
+    ).resolves.toMatchObject({
+      files: expect.arrayContaining([
         { path: 'assets/brand.txt', byteCount: bytes.byteLength },
-        expect.objectContaining({ path: 'index.html' })
-      ],
+        expect.objectContaining({ path: 'index.html' }),
+        expect.objectContaining({ path: 'styles.css' }),
+        expect.objectContaining({ path: 'app.js' })
+      ]),
       truncated: false
     });
 
@@ -362,6 +456,10 @@ describe('DesignSourceService', () => {
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const outside = path.join(project.root, 'outside');
       await fs.mkdir(outside);
+      await fs.rm(path.join(project.worktree.worktreePath, 'assets'), {
+        recursive: true,
+        force: true
+      });
       await fs.symlink(outside, path.join(project.worktree.worktreePath, 'assets'));
 
       await expect(

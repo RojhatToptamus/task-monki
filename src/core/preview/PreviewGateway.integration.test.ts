@@ -69,6 +69,46 @@ describe('PreviewGateway', () => {
     });
   });
 
+  it('adds and removes a candidate-owned route without replacing the Ready route', async () => {
+    const readyTarget = await fixture((_request, response) => response.end('ready'));
+    const candidateTarget = await fixture((_request, response) => response.end('candidate'));
+    const gateway = await startGateway();
+    const ready = previewRouteHostname('design-progress', 'app');
+    const candidate = previewRouteHostname('design-progress', 'candidate-generation');
+    gateway.instance.replaceRoutes('ready-generation', {
+      [ready]: { host: '127.0.0.1', port: readyTarget }
+    });
+
+    gateway.instance.attachOwnedRoute(
+      'candidate-generation',
+      candidate,
+      { host: '127.0.0.1', port: candidateTarget }
+    );
+    await expect(request(gateway.port, ready)).resolves.toMatchObject({ body: 'ready' });
+    await expect(request(gateway.port, candidate)).resolves.toMatchObject({ body: 'candidate' });
+
+    gateway.instance.removeOwnedRoute('ready-generation', candidate);
+    await expect(request(gateway.port, candidate)).resolves.toMatchObject({ body: 'candidate' });
+    gateway.instance.removeOwnedRoute('candidate-generation', candidate);
+    await expect(request(gateway.port, candidate)).resolves.toMatchObject({ status: 503 });
+    await expect(request(gateway.port, ready)).resolves.toMatchObject({ body: 'ready' });
+  });
+
+  it('does not let a candidate route replace another generation owner', async () => {
+    const target = await fixture((_request, response) => response.end('first'));
+    const gateway = await startGateway();
+    const hostname = previewRouteHostname('design-progress-owner', 'candidate');
+    gateway.instance.attachOwnedRoute('first', hostname, {
+      host: '127.0.0.1',
+      port: target
+    });
+
+    expect(() => gateway.instance.attachOwnedRoute('second', hostname, {
+      host: '127.0.0.1',
+      port: target
+    })).toThrow('belongs to another generation');
+  });
+
   it('relocates a colliding preferred gateway port and returns bounded route/upstream errors', async () => {
     const occupied = await fixture((_request, response) => response.end('occupied'));
     const instance = new PreviewGateway();

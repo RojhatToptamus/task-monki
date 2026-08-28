@@ -545,6 +545,7 @@ async function waitAndInspect(
   }
 
   const sourceTree = await readSourceTree(requireWorktree(detail));
+  assertStandaloneSourceStructure(input.name, sourceTree);
   if (
     /(?:src|href)\s*=\s*["']https?:\/\/|@import\s+(?:url\()?\s*["']?https?:\/\/|url\(\s*["']?https?:\/\//iu.test(
       sourceTree.source
@@ -552,7 +553,7 @@ async function waitAndInspect(
   ) {
     throw new Error(`${input.name} added a remote runtime asset or URL.`);
   }
-  const checks: string[] = [];
+  const checks: string[] = ['kept the standalone Design source structure'];
   for (const [label, pattern] of input.sourceChecks) {
     if (!pattern.test(sourceTree.source)) {
       throw new Error(`${input.name} failed its source check: ${label}.`);
@@ -726,9 +727,10 @@ function toolInvocationText(item: AgentItemRecord): string {
 
 async function readSourceTree(
   root: string
-): Promise<{ files: string[]; source: string }> {
+): Promise<{ files: string[]; source: string; contents: Map<string, string> }> {
   const files: string[] = [];
   const chunks: string[] = [];
+  const contents = new Map<string, string>();
   let bytes = 0;
   const visit = async (directory: string): Promise<void> => {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -743,6 +745,7 @@ async function readSourceTree(
       const content = await fs.readFile(absolute, 'utf8');
       bytes += Buffer.byteLength(content, 'utf8');
       files.push(relative);
+      contents.set(relative, content);
       chunks.push(`\n--- ${relative} ---\n${content}`);
       if (files.length > MAX_SOURCE_FILES || bytes > MAX_SOURCE_BYTES) {
         throw new Error('Design acceptance source exceeds its inspection limit.');
@@ -751,7 +754,41 @@ async function readSourceTree(
   };
   await visit(root);
   files.sort();
-  return { files, source: chunks.join('') };
+  return { files, source: chunks.join(''), contents };
+}
+
+function assertStandaloneSourceStructure(
+  name: string,
+  sourceTree: { files: readonly string[]; contents: ReadonlyMap<string, string> }
+): void {
+  for (const required of ['index.html', 'styles.css', 'app.js']) {
+    if (!sourceTree.contents.has(required)) {
+      throw new Error(`${name} is missing required source file ${required}.`);
+    }
+  }
+  if (!sourceTree.files.some((file) => file.startsWith('assets/'))) {
+    throw new Error(`${name} removed the standalone assets directory.`);
+  }
+  const unexpected = sourceTree.files.filter(
+    (file) => !['index.html', 'styles.css', 'app.js'].includes(file) && !file.startsWith('assets/')
+  );
+  if (unexpected.length > 0) {
+    throw new Error(`${name} added unsupported source paths: ${unexpected.join(', ')}.`);
+  }
+
+  const index = sourceTree.contents.get('index.html')!;
+  if (!/href=["']\.\/styles\.css["']/iu.test(index)) {
+    throw new Error(`${name} does not load ./styles.css from index.html.`);
+  }
+  if (!/<script\b(?=[^>]*\bsrc=["']\.\/app\.js["'])(?=[^>]*\bdefer\b)[^>]*>/iu.test(index)) {
+    throw new Error(`${name} does not load ./app.js with defer from index.html.`);
+  }
+  if (/<style\b|\sstyle\s*=|\son[a-z]+\s*=|<script\b(?![^>]*\bsrc=["']\.\/app\.js["'])/iu.test(index)) {
+    throw new Error(`${name} placed CSS or JavaScript inline in index.html.`);
+  }
+  if (/(?:src|href)\s*=\s*["'](?:\/|\.\.\/|file:)/iu.test(index)) {
+    throw new Error(`${name} used an unsafe non-relative project path.`);
+  }
 }
 
 async function addRenderedDefect(detail: DesignDetailSnapshot): Promise<void> {

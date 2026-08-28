@@ -11,6 +11,7 @@ import {
   type PreparedPreviewGeneration,
   type PreviewTaskContext
 } from './PreviewManager';
+import { previewCandidateRouteHostname } from './PreviewRouteHostname';
 
 describe('PreviewManager managed Design cutover', () => {
   it('prepares one exact commit with app-owned authority and no approval', async () => {
@@ -110,7 +111,7 @@ describe('PreviewManager managed Design cutover', () => {
     ]);
   });
 
-  it('keeps a candidate unrouted during browser checks and cuts over the same live process', async () => {
+  it('adds transient candidate progress without replacing Ready and cuts over the same process', async () => {
     const fixture = await createFixture();
 
     const candidate = await fixture.manager.executeManagedDesignCandidate(
@@ -136,6 +137,27 @@ describe('PreviewManager managed Design cutover', () => {
       origin: `${origin}/`,
       target: { host: '127.0.0.1', port: 41_000 }
     });
+    await fixture.manager.publishManagedDesignCandidateCanvas(candidate.id);
+    const progressHostname = previewCandidateRouteHostname(
+      candidate.taskId,
+      candidate.id,
+      MANAGED_DESIGN_STATIC_ROUTE_ID
+    );
+    expect(fixture.gateway.attachOwnedRoute).toHaveBeenCalledWith(
+      candidate.id,
+      progressHostname,
+      { host: '127.0.0.1', port: 41_000 }
+    );
+    await expect(
+      fixture.manager.resolveDesignCanvasRoute({
+        taskId: candidate.taskId,
+        generationId: candidate.id,
+        routeId: MANAGED_DESIGN_STATIC_ROUTE_ID
+      })
+    ).resolves.toMatchObject({
+      generationId: candidate.id,
+      origin: `http://${progressHostname}:4000`
+    });
 
     const settled = await fixture.manager.cutoverManagedDesignCandidate({
       generationId: candidate.id,
@@ -147,7 +169,9 @@ describe('PreviewManager managed Design cutover', () => {
     expect(fixture.graph.start).toHaveBeenCalledOnce();
     expect(fixture.order).toEqual([
       'candidate-ready',
+      'gateway-attach:candidate-1',
       'fence-begin',
+      'gateway-remove-one:candidate-1',
       'gateway-replace:candidate-1',
       'store-cutover',
       'fence-commit'
@@ -273,6 +297,30 @@ async function createFixture(options: {
     async close() {},
     removeOwnedRoutes: vi.fn((generationId: string) => {
       order.push(`gateway-remove:${generationId}`);
+    }),
+    attachedRoutes: new Set<string>(),
+    attachOwnedRoute: vi.fn(function (
+      this: { attachedRoutes: Set<string> },
+      generationId: string,
+      hostname: string
+    ) {
+      this.attachedRoutes.add(`${generationId}:${hostname}`);
+      order.push(`gateway-attach:${generationId}`);
+    }),
+    removeOwnedRoute: vi.fn(function (
+      this: { attachedRoutes: Set<string> },
+      generationId: string,
+      hostname: string
+    ) {
+      if (this.attachedRoutes.delete(`${generationId}:${hostname}`)) {
+        order.push(`gateway-remove-one:${generationId}`);
+      }
+    }),
+    hasRoute: vi.fn(function (
+      this: { attachedRoutes: Set<string> },
+      hostname: string
+    ) {
+      return [...this.attachedRoutes].some((entry) => entry.endsWith(`:${hostname}`));
     }),
     replaceRoutes: vi.fn((generationId: string) => {
       order.push(`gateway-replace:${generationId}`);

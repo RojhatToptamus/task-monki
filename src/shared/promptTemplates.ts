@@ -59,6 +59,15 @@ Provide keyboard access, visible focus, useful labels, non-color state signals, 
 Do not claim compliance from source inspection alone.
 
 Use HTML, CSS, JavaScript, SVG, the current project stack, and local project assets as needed.
+New standalone Designs use the existing app-owned source layout:
+- index.html contains semantic structure and content. Link ./styles.css and load ./app.js with defer.
+- styles.css contains all CSS. Do not add style blocks or style attributes to new HTML.
+- app.js contains all JavaScript. Do not add inline script blocks or event-handler attributes to new HTML.
+- assets/ contains local images, SVG files, fonts, and other editable project files. Reference them with ./assets/... paths.
+Keep these files even when one is small. Use only safe relative project paths. Do not use absolute paths, parent traversal, or file URLs.
+Do not add a framework, package manager, package file, build step, or dependency installation to a standalone Design.
+For a CSS-only refinement, normally edit styles.css only. For a behavior-only refinement, normally edit app.js only.
+If an older Design already keeps CSS or JavaScript inside index.html, do not reorganize it only to match the new layout.
 Do not use public runtime assets, CDN resources, remote fonts, remote scripts, or network services.
 Use an intentional browser-safe font stack when the project has no local fonts.
 Inspect the source and use available local lint, type, test, and build tools when they apply.

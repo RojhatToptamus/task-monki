@@ -125,6 +125,7 @@ export interface DesignsWorkspaceProps {
   onRestartCanvas(designId: string): Promise<void>;
   onSelectRevision(designId: string, revisionId: string): Promise<void>;
   onOpenCanvas?(taskId: string, generationId: string, routeId: string): Promise<void>;
+  onOpenDesignLocation(designId: string, worktreeId: string): Promise<void>;
   onRestoreRevision(designId: string, revisionId: string): Promise<void>;
   onDuplicateDesign(designId: string, revisionId: string): Promise<void>;
   onRenameDesign(designId: string, title: string): Promise<void>;
@@ -169,6 +170,7 @@ export function DesignsWorkspace({
   onRestartCanvas,
   onSelectRevision,
   onOpenCanvas,
+  onOpenDesignLocation,
   onRestoreRevision,
   onDuplicateDesign,
   onRenameDesign,
@@ -452,6 +454,14 @@ export function DesignsWorkspace({
                 persistDesignLayout(nextLayout);
               }}
               onToggleFiles={() => setFilesOpen((open) => !open)}
+              onOpenInFinder={() => {
+                if (project.currentWorktree) {
+                  void onOpenDesignLocation(
+                    project.design.id,
+                    project.currentWorktree.id
+                  ).catch(() => undefined);
+                }
+              }}
               onDuplicate={() => {
                 const revision = project.revisions.at(-1);
                 if (revision) {
@@ -624,6 +634,7 @@ function DesignHeader({
   onHistoryCollapsedChange,
   onLayoutChange,
   onToggleFiles,
+  onOpenInFinder,
   onDuplicate,
   onRename,
   onArchive,
@@ -637,6 +648,7 @@ function DesignHeader({
   onHistoryCollapsedChange?(collapsed: boolean): void;
   onLayoutChange(layout: DesignWorkspaceLayoutMode): void;
   onToggleFiles(): void;
+  onOpenInFinder(): void;
   onDuplicate(): void;
   onRename(): void;
   onArchive(): void;
@@ -689,9 +701,11 @@ function DesignHeader({
         </button>
         <DesignProjectMenu
           title={project.design.title}
+          canOpenInFinder={project.currentWorktree?.status === 'PRESENT'}
           canDuplicate={project.actions.canDuplicate}
           canArchive={project.actions.canArchive}
           canDelete={project.actions.canDelete}
+          onOpenInFinder={onOpenInFinder}
           onDuplicate={onDuplicate}
           onRename={onRename}
           onArchive={onArchive}

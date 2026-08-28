@@ -168,6 +168,10 @@ describe('Task Monki development seed data', () => {
       ]);
       await expect(fs.readFile(path.join(startingDetail.currentWorktree!.worktreePath, 'index.html'), 'utf8'))
         .resolves.toContain('Release dashboard');
+      await expect(fs.readFile(path.join(startingDetail.currentWorktree!.worktreePath, 'styles.css'), 'utf8'))
+        .resolves.toContain('font-family');
+      await expect(fs.readFile(path.join(startingDetail.currentWorktree!.worktreePath, 'app.js'), 'utf8'))
+        .resolves.toContain('dataset.seeded');
     } finally {
       await store.close();
     }

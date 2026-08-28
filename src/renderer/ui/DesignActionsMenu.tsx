@@ -17,18 +17,22 @@ interface DesignMenuItem {
 
 export function DesignProjectMenu({
   title,
+  canOpenInFinder,
   canDuplicate,
   canArchive,
   canDelete,
+  onOpenInFinder,
   onDuplicate,
   onRename,
   onArchive,
   onDelete
 }: {
   title: string;
+  canOpenInFinder: boolean;
   canDuplicate: boolean;
   canArchive: boolean;
   canDelete: boolean;
+  onOpenInFinder(): void;
   onDuplicate(): void;
   onRename(): void;
   onArchive(): void;
@@ -38,6 +42,7 @@ export function DesignProjectMenu({
     <DesignMenu
       label={`Design options for ${title}`}
       items={[
+        { label: 'Open in Finder', disabled: !canOpenInFinder, action: onOpenInFinder },
         { label: 'Duplicate current', disabled: !canDuplicate, action: onDuplicate },
         { label: 'Rename…', action: onRename },
         { label: 'Archive', disabled: !canArchive, action: onArchive },

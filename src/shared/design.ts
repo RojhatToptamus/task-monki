@@ -283,7 +283,7 @@ export interface DesignCanvasTarget {
 }
 
 export interface DesignCanvasProjection {
-  state: 'EMPTY' | 'UPDATING' | 'READY' | 'RESTART_REQUIRED';
+  state: 'EMPTY' | 'UPDATING' | 'PREVIEWING' | 'READY' | 'RESTART_REQUIRED';
   target?: DesignCanvasTarget;
   detail?: string;
 }

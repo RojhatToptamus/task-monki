@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isPreviewRouteHostname,
+  previewCandidateRouteHostname,
   previewRouteHostname
 } from './PreviewRouteHostname';
 
@@ -25,6 +26,20 @@ describe('PreviewRouteHostname', () => {
     );
   });
 
+  it('gives each candidate a separate origin without changing the stable route', () => {
+    const stable = previewRouteHostname('task-a', 'app');
+    const first = previewCandidateRouteHostname('task-a', 'generation-a', 'app');
+
+    expect(first).toBe(
+      previewCandidateRouteHostname('task-a', 'generation-a', 'app')
+    );
+    expect(first).not.toBe(stable);
+    expect(first).not.toBe(
+      previewCandidateRouteHostname('task-a', 'generation-b', 'app')
+    );
+    expect(isPreviewRouteHostname(first)).toBe(true);
+  });
+
   it('does not put long or repository-controlled identities into DNS labels', () => {
     const hostname = previewRouteHostname('t'.repeat(512), 'r'.repeat(512));
 
@@ -40,6 +55,9 @@ describe('PreviewRouteHostname', () => {
     );
     expect(() => previewRouteHostname('t'.repeat(513), 'app')).toThrow(
       'Preview task identity is invalid.'
+    );
+    expect(() => previewCandidateRouteHostname('task-a', '', 'app')).toThrow(
+      'Preview generation identity is invalid.'
     );
 
     for (const hostname of [

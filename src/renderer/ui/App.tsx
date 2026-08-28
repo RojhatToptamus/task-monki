@@ -1031,6 +1031,25 @@ export function App() {
     },
     [applyDesignActionDetail, notify]
   );
+  const openDesignLocation = useCallback(
+    async (designId: string, worktreeId: string) => {
+      try {
+        const result = await taskManagerApi.executeOpenTargetAction({
+          target: { type: 'worktree', worktreeId, taskId: designId },
+          action: 'open'
+        });
+        if (!result.ok) {
+          throw new Error(result.message ?? 'Could not open the Design folder.');
+        }
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : 'Could not open the Design folder.';
+        notify(message, 'error');
+        throw caught instanceof Error ? caught : new Error(message);
+      }
+    },
+    [notify]
+  );
   const restoreDesignRevision = useCallback(
     async (designId: string, revisionId: string) => {
       const key = `restore:${designId}:${revisionId}`;
@@ -3092,6 +3111,7 @@ export function App() {
             onRestartCanvas={restartDesignCanvas}
             onSelectRevision={showDesignRevision}
             onOpenCanvas={openPreview}
+            onOpenDesignLocation={openDesignLocation}
             onRestoreRevision={restoreDesignRevision}
             onDuplicateDesign={duplicateDesign}
             onRenameDesign={renameDesign}

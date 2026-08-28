@@ -9109,6 +9109,14 @@ function projectDesignCanvas(
           (candidate) => candidate.state === 'ATTACHED'
         )
       : undefined;
+  const progressTarget = selectDesignCandidateCanvasTarget(state, task.id);
+  if (progressTarget) {
+    return {
+      state: 'PREVIEWING',
+      target: progressTarget,
+      detail: 'Codex is checking this working preview. It is not Ready yet.'
+    };
+  }
   if (currentPreview && route) {
     return {
       state: 'READY',
@@ -9137,6 +9145,40 @@ function projectDesignCanvas(
     return { state: 'UPDATING' };
   }
   return { state: 'EMPTY', detail: sourceFailure };
+}
+
+function selectDesignCandidateCanvasTarget(
+  state: StoreState,
+  designId: string
+): NonNullable<DesignDetailSnapshot['canvas']['target']> | undefined {
+  const turns = state.designTurns
+    .filter(
+      (turn) =>
+        turn.designId === designId &&
+        turn.outcome === undefined &&
+        turn.finalOpenedCandidate
+    )
+    .sort((left, right) => right.order - left.order);
+  for (const turn of turns) {
+    const opened = turn.finalOpenedCandidate!;
+    const generation = state.previewGenerations.find(
+      (candidate) => candidate.id === opened.previewGenerationId
+    );
+    if (
+      !generation ||
+      generation.taskId !== designId ||
+      generation.state !== 'READY' ||
+      generation.routingState !== 'CANDIDATE' ||
+      generation.source.type !== 'EXACT_COMMIT' ||
+      generation.source.designRevisionId !== undefined ||
+      generation.source.commitSha !== opened.source.candidateCommitSha
+    ) {
+      continue;
+    }
+    const route = generation.routes.find((candidate) => candidate.state === 'ATTACHED');
+    if (route) return { generationId: generation.id, routeId: route.id };
+  }
+  return undefined;
 }
 
 function projectDesignActions(

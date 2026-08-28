@@ -300,7 +300,7 @@ async function verifyDesignBrowser(agentBrowser, chrome, temporaryDirectory) {
     AGENT_BROWSER_EXECUTABLE_PATH: chrome,
     AGENT_BROWSER_ACTION_POLICY: policyPath,
     AGENT_BROWSER_CONTENT_BOUNDARIES: '1',
-    AGENT_BROWSER_IDLE_TIMEOUT_MS: '60000',
+    AGENT_BROWSER_IDLE_TIMEOUT_MS: '3600000',
     AGENT_BROWSER_AUTOSAVE_INTERVAL_MS: '0',
     AGENT_BROWSER_PLUGINS: '[]'
   };
