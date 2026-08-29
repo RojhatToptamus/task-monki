@@ -108,8 +108,8 @@ observations, artifacts, and journal metadata.
     provider delivery.
 - `RunRecord.attachmentSubmissions`
   - Path-free evidence recorded only after `turn/start` succeeds. It identifies
-    the verified bytes and submission mode, but does not assert that the model
-    read or used them.
+    the verified selection, transport, and provider-turn correlation. It does
+    not assert that the model read or used the files.
 
 ## Codex adapter responsibilities
 
@@ -166,9 +166,10 @@ The generated Codex protocol currently exposes `text`, `image`, `localImage`,
   `skill`, and `mention` user inputs. It does not expose a generic file or PDF
 turn input. Task Monki therefore sends supported images through `localImage`
 after reverifying the immutable task-owned file. It provides supported
-text-like files through an untrusted-data prompt manifest containing the exact
-read-only managed path. Task-owned files remain outside Git worktrees and are
-reused across runs and reviews. PDFs, Office files, video, audio, archives,
+text-like files through an untrusted-data prompt manifest. A qualified runtime
+uses the exact read-only managed path. An older restricted runtime uses bounded
+inline text. Task-owned files remain outside Git worktrees and are reused
+across runs and reviews. PDFs, Office files, video, audio, archives,
 databases, and arbitrary binaries remain unsupported because they require a
 separately secured extraction or tool boundary.
 
@@ -211,8 +212,12 @@ The adapter does not expose separate review or refinement workflow methods.
 It compares that state after terminal output and fails a changed or unreadable turn.
 Task Monki leaves detected repository changes in place as evidence.
 
-Codex keeps the active permission-profile identity when it resumes a thread.
-It cannot replace that identity with a different exact attachment scope.
+An empty local Codex session can bind its first exact attachment scope before
+the first provider prompt. The store permits this only before materialization
+and before any provider turn ID exists.
+
+Codex keeps that permission-profile identity after provider admission.
+It cannot replace it with a different exact attachment scope.
 When a Design turn selects a different reference set, Task Monki uses the
 existing native thread-fork operation. The fork keeps the conversation history
 but starts with a new, attested profile for only that turn's selected files.
@@ -221,11 +226,12 @@ local session keeps its immutable provider thread identity. Both sessions stay
 in the same Task conversation lineage.
 If the reference scope is unchanged, it resumes the current thread as usual.
 
-Full access remains available for attachment-free tasks and requires the
+Full access remains available with or without attachments. It requires the
 runtime to attest the exact `:danger-full-access` profile and sole Task Monki
-worktree root. It is rejected when attachments are present. Attachment tasks
-also force network off. In packaged Electron, they do not override the user's
-Codex web search, MCP server, or app settings: enabling an integration is an
+worktree root. Full access does not claim to confine managed files. The user's
+network choice also remains unchanged. In packaged Electron, attachments do
+not override the user's Codex web search, MCP server, or app settings.
+Enabling an integration is an
 explicit decision to trust it with task content, including attachment content
 the agent supplies to it. Exact file permissions and path checks do not confine
 a same-user integration process or prevent an enabled external tool from
@@ -233,9 +239,10 @@ transmitting content. Browser development retains its independent fail-closed
 rule that forces all three integration modes off.
 
 Codex serializes a submitted `localImage` into an image data URL in its
-model-facing conversation history. Opaque delivery paths can still occur in
-the outbound request, provider telemetry, and raw protocol journal, so Task
-Monki makes no complete-erasure claim. Normal task snapshots, interaction
+model-facing conversation history. Task Monki protocol journals replace
+attachment input and managed paths before durable storage. Codex history and
+provider telemetry can still retain delivered content, so Task Monki makes no
+complete-erasure claim. Normal task snapshots, interaction
 requests, approval decisions, and submission evidence remain path-free.
 External provider permission paths are redacted and declined. The Debug view
 shows the path-free submission record, not proof of model consumption.

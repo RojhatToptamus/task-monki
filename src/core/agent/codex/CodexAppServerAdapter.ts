@@ -59,7 +59,10 @@ import type {
   AgentRuntimeTurnEvent,
   BuildAgentRuntimeExecutionContextInput
 } from '../AgentRuntimeCoordinator';
-import { assertReadOnlyExecutionContext } from '../AgentRuntimeOwnership';
+import {
+  assertReadOnlyExecutionContext,
+  createAgentSessionAccessEpoch
+} from '../AgentRuntimeOwnership';
 import { agentServersRequiringLossRecovery } from '../AgentRuntimeRecovery';
 import {
   AgentMutationAmbiguousError,
@@ -73,9 +76,8 @@ import {
 } from '../AgentRuntimeReadiness';
 import { assertBrowserDevSettingsSafe } from '../BrowserDevAgentBoundary';
 import {
-  assertAttachmentSandboxSupportsDelivery,
+  assertAgentTurnAttachmentSelection,
   assertModelSupportsAttachments,
-  prepareAgentAttachmentDelivery,
   toAgentTurnAttachments,
   verifyAgentTurnAttachments,
   type AgentTurnAttachment
@@ -93,6 +95,7 @@ import {
   assertCodexPermissionProfileEvidence,
   assertCodexReadOnlyScopeEvidence,
   codexPermissionProfileConfig,
+  codexPermissionProfileHash,
   codexPermissionProfileId,
   codexReadOnlyScopeProfile,
   type CodexPermissionProfileEvidence
@@ -171,7 +174,14 @@ import {
   loadDesignSkillPack,
   type DesignSkillPack
 } from '../../design/DesignSkillPack';
-import { DesignToolProtocolSanitizer } from '../journal/AgentProtocolRedaction';
+import {
+  assertCodexInlineRequestSize,
+  codexAttachmentSupport,
+  codexExactGrantAttachments,
+  prepareCodexAttachmentDelivery,
+  type CodexAttachmentSupport
+} from './CodexAttachmentDelivery';
+import { CodexProtocolSanitizer } from './CodexProtocolSanitizer';
 import {
   parseInspectDesignOperation,
   type DesignBrowserToolResult,
@@ -244,7 +254,11 @@ export interface CodexAppServerAdapterOptions
 
 type CodexTaskDomainStore = Pick<
   FileTaskStore,
-  'getTask' | 'getWorktree' | 'getRepository' | 'verifyRunAttachments'
+  | 'getTask'
+  | 'getWorktree'
+  | 'getRepository'
+  | 'verifyRunAttachments'
+  | 'verifyTaskAttachments'
 >;
 
 interface UnmaterializedThreadAttestation {
@@ -281,6 +295,7 @@ interface CodexTurnTransportInput {
   settings: AgentExecutionSettings;
   prompt: string;
   localImagePaths: readonly string[];
+  enforceInlineRequestSize?: boolean;
   approvalPolicy: NonNullable<TurnStartParams['approvalPolicy']>;
   approvalsReviewer: NonNullable<TurnStartParams['approvalsReviewer']>;
   collaborationMode?: CollaborationMode;
@@ -386,7 +401,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
    */
   private readonly pendingRunByProviderTurn = new Map<string, string>();
   private readonly pendingRunByProviderThread = new Map<string, string>();
-  private readonly designToolProtocolSanitizer = new DesignToolProtocolSanitizer();
+  private readonly protocolSanitizer = new CodexProtocolSanitizer();
   private designBrowserToolHandler?: CodexDesignBrowserToolHandler;
   private readonly activeDesignBrowserCalls = new Map<string, string>();
 
@@ -624,14 +639,25 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     input: BuildAgentRuntimeExecutionContextInput
   ): Promise<AgentExecutionContext> {
     const primaryCwd = path.resolve(input.primaryCwd);
+    await this.ensureClient();
+    const support = this.currentAttachmentSupport();
     const attachments = await verifyAgentTurnAttachments(input.attachments ?? []);
-    const readRoots = appendAttachmentReadRoots(input.readRoots, attachments);
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: 'restricted',
+      attachments,
+      support
+    });
+    const readRoots = input.readRoots.map((root) => ({
+      ...root,
+      canonicalPath: path.resolve(root.canonicalPath)
+    }));
     const profile = await codexReadOnlyScopeProfile({
       sessionId: input.sessionId,
       scope: {
         primaryCwd,
         readOnlyRoots: readRoots.map((root) => root.canonicalPath)
       },
+      attachmentPaths: grantAttachments.map((attachment) => attachment.path),
       reasoningEffort: input.modelSettings.reasoningEffort
     });
     const context: AgentExecutionContext = {
@@ -639,11 +665,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       primaryCwd,
       repositoryAccess: 'READ_ONLY',
       readRoots,
-      managedAttachments: attachments.map((attachment) => ({
-        attachmentId: attachment.attachmentId,
-        contentSha256: attachment.sha256,
-        byteCount: attachment.byteCount
-      })),
+      managedAttachments: managedAttachmentAccess(grantAttachments),
       permissionProfileHash: profile.scopeHash,
       modelSettings: {
         ...input.modelSettings,
@@ -786,6 +808,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           ? { collaborationMode: input.collaborationMode }
           : {})
       };
+      if (input.enforceInlineRequestSize) {
+        assertCodexInlineRequestSize(params);
+      }
       const response = await input.client.requestMutation('turn/start', params);
       this.pendingRunByProviderTurn.set(response.turn.id, input.localRunId);
       return response;
@@ -814,22 +839,50 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     ) {
       throw new Error('Codex runtime turns require one attested read-only owner/session.');
     }
-    const attachmentDelivery = prepareAgentAttachmentDelivery({
-      prompt: input.prompt,
-      attachments: await verifyAgentTurnAttachments(input.attachments),
-      includeLocalImages: true
-    });
-    const profile = await codexReadOnlyScopeProfile({
-      sessionId: input.session.id,
-      scope: {
-        primaryCwd: input.executionContext.primaryCwd,
-        readOnlyRoots: input.executionContext.readRoots.map((root) => root.canonicalPath)
-      },
-      reasoningEffort: input.executionContext.modelSettings.reasoningEffort
-    });
-    if (profile.scopeHash !== input.executionContext.permissionProfileHash) {
-      throw new Error('Codex permission profile does not match the attested execution context.');
-    }
+    const { attachmentDelivery, profile } = await (async () => {
+      try {
+        assertAgentTurnAttachmentSelection(
+          input.run.attachmentSelection,
+          input.attachments
+        );
+        const support = this.currentAttachmentSupport();
+        const attachmentDelivery = prepareCodexAttachmentDelivery({
+          prompt: input.prompt,
+          sandbox: 'restricted',
+          attachments: await verifyAgentTurnAttachments(input.attachments, {
+            includeBytes: () => !support.exactFileAccess
+          }),
+          support
+        });
+        const profile = await codexReadOnlyScopeProfile({
+          sessionId: input.session.id,
+          scope: {
+            primaryCwd: input.executionContext.primaryCwd,
+            readOnlyRoots: input.executionContext.readRoots.map(
+              (root) => root.canonicalPath
+            )
+          },
+          attachmentPaths: attachmentDelivery.exactGrantPaths,
+          reasoningEffort: input.executionContext.modelSettings.reasoningEffort
+        });
+        if (profile.scopeHash !== input.executionContext.permissionProfileHash) {
+          throw new Error(
+            'Codex permission profile does not match the attested execution context.'
+          );
+        }
+        assertManagedAttachmentAccess(
+          input.executionContext.managedAttachments,
+          codexExactGrantAttachments({
+            sandbox: 'restricted',
+            attachments: input.attachments,
+            support
+          })
+        );
+        return { attachmentDelivery, profile };
+      } catch (error) {
+        throw runtimeDeliveryError(error);
+      }
+    })();
     const settings = input.executionContext.modelSettings;
     let opened: CodexThreadTransportResult;
     try {
@@ -893,6 +946,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         settings,
         prompt: attachmentDelivery.prompt,
         localImagePaths: attachmentDelivery.localImagePaths,
+        enforceInlineRequestSize: attachmentDelivery.hasInlineText,
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       });
@@ -934,12 +988,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         providerSessionId: threadId,
         ...(threadSessionId ? { providerSessionTreeId: threadSessionId } : {}),
         providerTurnId: response.turn.id,
-        ...(attachmentDelivery.submissionCandidates.length > 0
+        ...(attachmentDelivery.submissions.length > 0
           ? {
-              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
+              attachmentSubmissions: attachmentDelivery.submissions.map(
                 (submission) => ({
                   ...submission,
-                  providerTurnId: response.turn.id,
+                  correlation: {
+                    kind: 'provider-turn' as const,
+                    id: response.turn.id
+                  },
                   submittedAt: new Date().toISOString()
                 })
               )
@@ -1041,7 +1098,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       reasoningEffort: effort,
       serviceTier: input.settings.serviceTier ?? model.defaultServiceTier
     };
-    assertAttachmentSandboxSupportsDelivery(settings, input.attachments);
     return { settings, model: resolvedModel };
   }
 
@@ -1078,15 +1134,17 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     settings: AgentExecutionSettings,
     attachments: readonly AgentTurnAttachment[]
   ): Promise<AgentSessionRecord> {
-    assertAttachmentSandboxSupportsDelivery(settings, attachments);
-
-    const attachmentPaths = attachments
-      .map((attachment) => attachment.path)
-      .sort((left, right) => left.localeCompare(right));
+    await this.ensureClient();
+    const support = this.currentAttachmentSupport();
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(settings),
+      attachments,
+      support
+    });
     const config = await this.permissionProfileConfigForSession(
       session,
       settings,
-      attachmentPaths
+      grantAttachments.map((attachment) => attachment.path)
     );
     const expectedProfileId = permissionProfileIdFromConfig(config);
     const dynamicTools = await this.dynamicToolsForSession(session);
@@ -1127,6 +1185,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     );
 
     try {
+      await this.persistAttachmentAccessContext(
+        session.id,
+        settings,
+        config,
+        grantAttachments
+      );
       const stored = await this.persistAgentSession(session.id, {
         providerSessionId: response.thread.id,
         providerSessionTreeId: response.thread.sessionId,
@@ -1168,11 +1232,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       );
     }
 
+    const attachments = await this.attachmentsForStoredAccess(session.id, session.taskId);
     const response = await this.resumeSessionWithProfile(
       session,
       providerSessionId,
       session.requestedSettings,
-      []
+      attachments
     );
     const observedSettings = await this.prepareObservedSettings(
       settingsFromThreadResponse(response),
@@ -1240,7 +1305,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const attachments = input.attachments ?? [];
     let session = await this.requireSession(input.session.localSessionId);
     const settings = input.settings ?? session.requestedSettings;
-    assertAttachmentSandboxSupportsDelivery(settings, attachments);
     if (attachments.length > 0 || input.mode === 'DESIGN') {
       const selectedModel =
         this.models.find((candidate) => candidate.model === settings.model) ??
@@ -1263,7 +1327,16 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         assertModelSupportsAttachments(selectedModel, attachments);
       }
     }
-    const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
+    const run = await this.taskRuntime.getRun(input.localRunId);
+    if (!run) {
+      throw new Error(`Cannot submit missing Codex run ${input.localRunId}.`);
+    }
+    assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
+    const support = this.currentAttachmentSupport();
+    const verifiedAttachments = await verifyAgentTurnAttachments(attachments, {
+      includeBytes: () =>
+        settings.sandbox !== 'DANGER_FULL_ACCESS' && !support.exactFileAccess
+    });
     if (!session.providerSessionId) {
       session = await this.createSession({
         runtimeId: this.descriptor.id,
@@ -1277,10 +1350,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       });
     }
 
-    const attachmentDelivery = prepareAgentAttachmentDelivery({
+    const attachmentDelivery = prepareCodexAttachmentDelivery({
       prompt: input.prompt,
+      sandbox: codexAttachmentSandbox(settings),
       attachments: verifiedAttachments,
-      includeLocalImages: !session.materialized
+      support
     });
     const requiresFirstTurnFence = !session.materialized;
     let client: CodexRpcClient;
@@ -1298,7 +1372,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         session,
         session.providerSessionId,
         settings,
-        verifiedAttachments.map((attachment) => attachment.path)
+        verifiedAttachments
       );
       if (this.boundClient !== client || this.supervisor.currentServer?.id !== server.id) {
         throw new Error(
@@ -1403,6 +1477,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         settings,
         prompt: attachmentDelivery.prompt,
         localImagePaths: attachmentDelivery.localImagePaths,
+        enforceInlineRequestSize: attachmentDelivery.hasInlineText,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
         ...(collaboration
@@ -1443,12 +1518,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         providerTurnId: response.turn.id,
         serverInstanceId,
         status: 'RUNNING',
-        ...(attachmentDelivery.submissionCandidates.length > 0
+        ...(attachmentDelivery.submissions.length > 0
           ? {
-              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
+              attachmentSubmissions: attachmentDelivery.submissions.map(
                 (submission) => ({
                   ...submission,
-                  providerTurnId: response.turn.id,
+                  correlation: {
+                    kind: 'provider-turn' as const,
+                    id: response.turn.id
+                  },
                   submittedAt: new Date().toISOString()
                 })
               )
@@ -1611,19 +1689,23 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   async forkSession(input: ForkAgentSession): Promise<AgentSessionRecord> {
     const source = await this.requireSession(input.sourceSession.localSessionId);
     const target = await this.requireSession(input.localSessionId);
+    const client = await this.ensureClient();
     const attachments = input.attachments ?? [];
-    assertAttachmentSandboxSupportsDelivery(input.settings, attachments);
     const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(input.settings),
+      attachments: verifiedAttachments,
+      support: this.currentAttachmentSupport()
+    });
     const providerSessionId =
       input.sourceSession.providerSessionId ?? source.providerSessionId;
     if (!providerSessionId) {
       throw new Error('Cannot fork a session without a provider thread id.');
     }
-    const client = await this.ensureClient();
     const config = await this.permissionProfileConfigForSession(
       target,
       input.settings,
-      verifiedAttachments.map((attachment) => attachment.path)
+      grantAttachments.map((attachment) => attachment.path)
     );
     const expectedProfileId = permissionProfileIdFromConfig(config);
     const dynamicTools = await this.dynamicToolsForSession(target);
@@ -1670,6 +1752,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       'Forked session observed settings'
     );
     try {
+      await this.persistAttachmentAccessContext(
+        target.id,
+        input.settings,
+        config,
+        grantAttachments
+      );
       const stored = await this.persistAgentSession(target.id, {
         providerSessionId: response.thread.id,
         providerSessionTreeId: response.thread.sessionId,
@@ -2056,11 +2144,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         const attachments = toAgentTurnAttachments(
           await this.taskStore.verifyRunAttachments(run.id, run.taskId)
         );
+        assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
         const response = await this.resumeSessionWithProfile(
           session,
           session.providerSessionId,
           session.requestedSettings,
-          attachments.map((attachment) => attachment.path),
+          attachments,
           { allowProfileFork: false }
         );
         const observedSettings = await this.prepareObservedSettings(
@@ -3430,18 +3519,18 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const item = params.itemId
       ? await this.taskRuntime.getAgentItemByProviderId(run.id, params.itemId)
       : undefined;
-    const providerInteractionRequest = withProviderItemContext(
-      mapped.type,
-      this.redactProviderValue(mapped.request),
-      item?.payload
-    );
-    const interactionRequest =
+    const mappedRequest =
       mapped.type === 'PERMISSION_APPROVAL'
         ? redactExternalPermissionPaths(
-            providerInteractionRequest as AgentPermissionApprovalRequest,
+            mapped.request as AgentPermissionApprovalRequest,
             session.worktreePath
           )
-        : providerInteractionRequest;
+        : mapped.request;
+    const interactionRequest = withProviderItemContext(
+      mapped.type,
+      this.redactProviderValue(mappedRequest),
+      item?.payload
+    );
     const policy = buildInteractionPolicy({
       type: mapped.type,
       request: interactionRequest,
@@ -5825,7 +5914,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   private redactProviderValue<T>(value: T): T {
     return redactCredentialValue(
-      this.designToolProtocolSanitizer.sanitizeValue(value),
+      this.protocolSanitizer.sanitizeValue(value),
       this.sensitiveValues
     );
   }
@@ -5886,13 +5975,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     inboundFailureGeneration: number;
   }> {
     let session = inputSession;
-    const attachmentPaths = attachments
-      .map((attachment) => attachment.path)
-      .sort((left, right) => left.localeCompare(right));
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(settings),
+      attachments,
+      support: this.currentAttachmentSupport()
+    });
     const config = await this.permissionProfileConfigForSession(
       session,
       settings,
-      attachmentPaths
+      grantAttachments.map((attachment) => attachment.path)
     );
     const requiredFingerprint = threadStartProfileFingerprint(settings, config);
     let client = await this.ensureClient();
@@ -6004,10 +6095,16 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     session: AgentSessionRecord,
     providerSessionId: string,
     settings: AgentExecutionSettings,
-    attachmentPaths: readonly string[],
+    attachments: readonly AgentTurnAttachment[],
     options: { allowProfileFork?: boolean } = {}
   ) {
     const client = await this.ensureClient();
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(settings),
+      attachments,
+      support: this.currentAttachmentSupport()
+    });
+    const attachmentPaths = grantAttachments.map((attachment) => attachment.path);
     const config = await this.permissionProfileConfigForSession(
       session,
       settings,
@@ -6020,12 +6117,25 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         ? activeProfile.profileId
         : undefined;
     const task = await this.taskStore.getTask(session.taskId);
+    const storedGrantMatches = await this.storedAttachmentAccessMatches(
+      session.id,
+      grantAttachments
+    );
+    if (
+      options.allowProfileFork === false &&
+      settings.sandbox !== 'DANGER_FULL_ACCESS' &&
+      !storedGrantMatches
+    ) {
+      throw new Error(
+        'Codex recovery attachment access does not match the stored session grant.'
+      );
+    }
     const shouldFork =
       options.allowProfileFork !== false &&
       settings.sandbox !== 'DANGER_FULL_ACCESS' &&
       (currentProfileId
         ? currentProfileId !== expectedProfileId
-        : task?.kind === 'DESIGN' || attachmentPaths.length > 0);
+        : task?.kind === 'DESIGN' || !storedGrantMatches);
     if (shouldFork) {
       throw new AgentProviderSessionMissingError(
         'thread/fork',
@@ -6228,6 +6338,88 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         isolateHome: session.role === 'REVIEW'
       })
     };
+  }
+
+  private currentAttachmentSupport(): CodexAttachmentSupport {
+    return codexAttachmentSupport(this.supervisor.currentServer?.runtimeVersion);
+  }
+
+  private async persistAttachmentAccessContext(
+    sessionId: string,
+    settings: AgentExecutionSettings,
+    config: Record<string, JsonValue>,
+    grantAttachments: readonly AgentTurnAttachment[]
+  ): Promise<void> {
+    const session = await this.runtimeStore.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Cannot update missing Codex runtime session ${sessionId}.`);
+    }
+    const executionContext: AgentExecutionContext = {
+      ...session.executionContext,
+      managedAttachments: managedAttachmentAccess(grantAttachments),
+      permissionProfileHash: codexPermissionProfileHash(config),
+      modelSettings: { ...settings, runtimeId: this.descriptor.id },
+      externalTools: {
+        ...session.executionContext.externalTools,
+        network: settings.networkAccess === true
+      }
+    };
+    const accessEpoch = createAgentSessionAccessEpoch({
+      owner: session.owner,
+      sessionId: session.id,
+      epoch: session.accessEpoch.epoch,
+      runtimeId: session.runtimeId,
+      model: settings.model ?? session.accessEpoch.model,
+      executionContext,
+      createdAt: session.accessEpoch.createdAt
+    });
+    await this.taskRuntime.updateAgentSessionAccess(
+      session.id,
+      { executionContext, accessEpoch },
+      codexRuntimeOperationId('session/attachment-access', session.id, executionContext)
+    );
+  }
+
+  private async storedAttachmentAccessMatches(
+    sessionId: string,
+    grantAttachments: readonly AgentTurnAttachment[]
+  ): Promise<boolean> {
+    const session = await this.runtimeStore.getSession(sessionId);
+    if (!session) return false;
+    return sameManagedAttachmentAccess(
+      session.executionContext.managedAttachments,
+      managedAttachmentAccess(grantAttachments)
+    );
+  }
+
+  private async attachmentsForStoredAccess(
+    sessionId: string,
+    taskId: string
+  ): Promise<AgentTurnAttachment[]> {
+    const runtimeSession = await this.runtimeStore.getSession(sessionId);
+    if (!runtimeSession) {
+      throw new Error(`Cannot attach missing Codex runtime session ${sessionId}.`);
+    }
+    const expected = runtimeSession.executionContext.managedAttachments;
+    if (expected.length === 0) return [];
+
+    const verified = toAgentTurnAttachments(
+      await this.taskStore.verifyTaskAttachments(taskId)
+    );
+    const byId = new Map(verified.map((attachment) => [attachment.attachmentId, attachment]));
+    return expected.map((access) => {
+      const attachment = byId.get(access.attachmentId);
+      if (
+        !attachment ||
+        attachment.sha256 !== access.contentSha256 ||
+        attachment.byteCount !== access.byteCount
+      ) {
+        throw new Error(
+          `Stored Codex attachment access cannot be reconstructed for ${access.attachmentId}.`
+        );
+      }
+      return attachment;
+    });
   }
 
   private emitProviderUpdate(): void {
@@ -6904,33 +7096,56 @@ function isSharedReadOnlyRuntimePurpose(
   );
 }
 
-function appendAttachmentReadRoots(
-  roots: readonly import('../../../shared/agentRuntime').AgentAttestedReadRoot[],
-  attachments: readonly AgentTurnAttachment[]
-): import('../../../shared/agentRuntime').AgentAttestedReadRoot[] {
-  const result = roots.map((root) => ({
-    ...root,
-    canonicalPath: path.resolve(root.canonicalPath)
-  }));
-  for (const attachment of attachments) {
-    if (
-      result.some((root) => isPathInside(root.canonicalPath, attachment.path))
-    ) {
-      continue;
-    }
-    const attachmentRoot = path.dirname(path.resolve(attachment.path));
-    if (result.some((root) => root.canonicalPath === attachmentRoot)) continue;
-    result.push({
-      canonicalPath: attachmentRoot,
-      kind: 'ATTACHMENT_STORAGE'
-    });
-  }
-  return result;
+function codexAttachmentSandbox(
+  settings: AgentExecutionSettings
+): 'restricted' | 'danger-full-access' {
+  return settings.sandbox === 'DANGER_FULL_ACCESS'
+    ? 'danger-full-access'
+    : 'restricted';
 }
 
-function isPathInside(root: string, candidate: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+function managedAttachmentAccess(
+  attachments: readonly AgentTurnAttachment[]
+): AgentExecutionContext['managedAttachments'] {
+  return attachments
+    .map((attachment) => ({
+      attachmentId: attachment.attachmentId,
+      contentSha256: attachment.sha256,
+      byteCount: attachment.byteCount
+    }))
+    .sort((left, right) => left.attachmentId.localeCompare(right.attachmentId));
+}
+
+function sameManagedAttachmentAccess(
+  left: readonly AgentExecutionContext['managedAttachments'][number][],
+  right: readonly AgentExecutionContext['managedAttachments'][number][]
+): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort((a, b) =>
+    a.attachmentId.localeCompare(b.attachmentId)
+  );
+  const sortedRight = [...right].sort((a, b) =>
+    a.attachmentId.localeCompare(b.attachmentId)
+  );
+  return sortedLeft.every((attachment, index) => {
+    const candidate = sortedRight[index];
+    return (
+      candidate?.attachmentId === attachment.attachmentId &&
+      candidate.contentSha256 === attachment.contentSha256 &&
+      candidate.byteCount === attachment.byteCount
+    );
+  });
+}
+
+function assertManagedAttachmentAccess(
+  actual: readonly AgentExecutionContext['managedAttachments'][number][],
+  attachments: readonly AgentTurnAttachment[]
+): void {
+  if (!sameManagedAttachmentAccess(actual, managedAttachmentAccess(attachments))) {
+    throw new Error(
+      'Codex managed attachment access does not match the attested execution context.'
+    );
+  }
 }
 
 function mapMutationError(operation: string, error: unknown): Error {

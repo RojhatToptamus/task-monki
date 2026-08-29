@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  AgentCapability,
   AgentExecutionSettings,
   AgentModel,
   AgentObservationSource,
@@ -22,14 +23,22 @@ import type {
   RunRecord,
   TaskSnapshot
 } from '../shared/contracts';
+import type {
+  AgentAttachmentSelection,
+  AttachmentKind,
+  AttachmentSubmissionRecord,
+  AttachmentTransport
+} from '../shared/attachments';
 import { projectAgentExecutionSupport } from '../shared/agentExecutionSupport';
+import { toAgentAttachmentSelectionFromRecords } from '../core/agent/AgentAttachmentDelivery';
+import { codexAttachmentSupport } from '../core/agent/codex/CodexAttachmentDelivery';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
 import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 
-const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v3' as const;
+const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v4' as const;
 const SMOKE_SENTINEL = 'TASK_MONKI_PROVIDER_SMOKE_OK';
 const SMOKE_FILE_NAME = 'task-monki-provider-smoke.txt';
 const SMOKE_FILE_CONTENT = `${SMOKE_SENTINEL}\n`;
@@ -74,15 +83,36 @@ export interface ProviderSmokeOptions {
   confirmThrowaway: boolean;
   confirmProviderUsage: boolean;
   qualifyReadOnly: boolean;
+  qualifyAttachments: boolean;
   help: boolean;
 }
 
 export interface ProviderSmokeTarget {
   runtimeId: string;
+  runtimeVersion?: string;
   runtimeStatus: AgentRuntimeReadinessStatus;
   model: AgentModel;
   reasoningEffort?: string;
   executionSettings?: AgentExecutionSettings;
+  attachmentDelivery: AgentCapability;
+  advertisedImageInput?: boolean;
+}
+
+export interface ProviderAttachmentQualificationResult {
+  status: 'PASSED' | 'FAILED' | 'UNSUPPORTED';
+  reason?: string;
+  requestedKinds: AttachmentKind[];
+  modelInputModalities: string[];
+  payloadByteCount: number;
+  textContentUsed: boolean;
+  imageContentUsed?: boolean;
+  advertisedImageInput?: boolean;
+  capabilityDrift?:
+    | 'ADVERTISED_FALSE_VERIFIED_TRUE'
+    | 'ADVERTISED_TRUE_VERIFICATION_FAILED';
+  evidenceMatches: boolean;
+  selection: AgentAttachmentSelection[];
+  submissions: AttachmentSubmissionRecord[];
 }
 
 export interface ProviderSmokeResult {
@@ -114,6 +144,7 @@ export interface ProviderSmokeResult {
   observedModelProvider?: string;
   observedReasoningEffort?: string;
   observationSource?: string;
+  attachmentQualification?: ProviderAttachmentQualificationResult;
   error?: string;
   startedAt: string;
   completedAt: string;
@@ -161,6 +192,8 @@ export interface ProviderSmokeReport {
     canStart: boolean;
     visibleModelCount: number;
     summary: string;
+    runtimeVersion?: string;
+    attachmentDelivery: AgentCapability;
     skipReason?: string;
     models: Array<{
       modelId: string;
@@ -191,6 +224,7 @@ export type ProviderSmokeService = Pick<
   | 'getAgentRuntimeCatalog'
   | 'discoverAgentRuntimeModels'
   | 'addRepository'
+  | 'stageTaskAttachmentBatch'
   | 'createTask'
   | 'startRun'
   | 'listTasks'
@@ -242,6 +276,7 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
     confirmThrowaway: false,
     confirmProviderUsage: false,
     qualifyReadOnly: false,
+    qualifyAttachments: false,
     help: false
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -275,6 +310,9 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
         break;
       case '--qualify-read-only':
         options.qualifyReadOnly = true;
+        break;
+      case '--qualify-attachments':
+        options.qualifyAttachments = true;
         break;
       case '--help':
       case '-h':
@@ -348,10 +386,13 @@ export function discoverProviderSmokeTargets(
         )
         .map((model) => ({
           runtimeId: runtime.preflight.runtime.id,
+          runtimeVersion: runtime.preflight.runtimeVersion,
           runtimeStatus: runtime.preflight.readiness.status,
           model,
           reasoningEffort: selectLowestReasoningEffort(model),
-          executionSettings: nonInteractiveSmokeSettings(runtime)
+          executionSettings: nonInteractiveSmokeSettings(runtime),
+          attachmentDelivery: runtime.preflight.capabilities.attachmentDelivery,
+          advertisedImageInput: advertisedImageInput(runtime, model)
         }))
     )
     .sort(
@@ -359,6 +400,22 @@ export function discoverProviderSmokeTargets(
         left.runtimeId.localeCompare(right.runtimeId) ||
         left.model.id.localeCompare(right.model.id)
     );
+}
+
+function advertisedImageInput(
+  runtime: AgentRuntimeState,
+  model: AgentModel
+): boolean | undefined {
+  if (runtime.preflight.runtime.kind !== 'ACP_AGENT') {
+    return model.inputModalities.some(
+      (modality) => modality.toLocaleLowerCase() === 'image'
+    );
+  }
+  const native = recordValue(runtime.native);
+  const initialize = recordValue(native?.initialize);
+  const capabilities = recordValue(initialize?.agentCapabilities);
+  const prompt = recordValue(capabilities?.promptCapabilities);
+  return typeof prompt?.image === 'boolean' ? prompt.image : undefined;
 }
 
 function nonInteractiveSmokeSettings(
@@ -501,12 +558,18 @@ export async function runProviderSmoke(
           options.timeoutMs,
           pollIntervalMs,
           cancelTimeoutMs,
+          options.qualifyAttachments,
           () => stopRequested,
           (_taskId, runId) => {
             activeRunId = runId;
           }
         );
         const result = execution.result;
+        if (result.attachmentQualification?.capabilityDrift) {
+          console.warn(
+            `[provider-smoke] image capability drift: ${target.runtimeId} / ${target.model.displayName} / ${result.attachmentQualification.capabilityDrift}`
+          );
+        }
         if (
           execution.lifecycleSettled &&
           (!result.runStatus || CONTAINED_TERMINAL_STATUSES.has(result.runStatus))
@@ -637,6 +700,12 @@ export async function runProviderSmoke(
     errors.length === 0 &&
     results.length > 0 &&
     results.every((result) => result.verdict === 'PASSED') &&
+    (!options.qualifyAttachments ||
+      results.every(
+        (result) =>
+          result.attachmentQualification?.status === 'PASSED' ||
+          result.attachmentQualification?.status === 'UNSUPPORTED'
+      )) &&
     (!options.qualifyReadOnly ||
       readOnlyQualifications.every(
         (qualification) =>
@@ -675,6 +744,8 @@ export async function runProviderSmoke(
         canStart: runtime.preflight.readiness.canStart,
         visibleModelCount: models.filter((model) => !model.hidden).length,
         summary: runtime.preflight.readiness.summary,
+        runtimeVersion: runtime.preflight.runtimeVersion,
+        attachmentDelivery: runtime.preflight.capabilities.attachmentDelivery,
         skipReason: runtimeSkipReason(runtime, models, options),
         models: models.map((model) =>
           modelAudit(model, runtime, options, resultByModel, stopRequested)
@@ -813,9 +884,11 @@ async function qualifySelectedReadOnlyProfiles(input: {
       repositoryId: input.repositoryId,
       target: {
         runtimeId,
+        runtimeVersion: runtime.preflight.runtimeVersion,
         runtimeStatus: runtime.preflight.readiness.status,
         model,
-        reasoningEffort: normalResult.reasoningEffort
+        reasoningEffort: normalResult.reasoningEffort,
+        attachmentDelivery: runtime.preflight.capabilities.attachmentDelivery
       },
       timeoutMs: input.options.timeoutMs,
       cancelTimeoutMs: input.cancelTimeoutMs,
@@ -1101,6 +1174,149 @@ async function inspectProbeAbsence(
   }
 }
 
+type AttachmentSmokeExpectation =
+  | {
+      kind: 'UNSUPPORTED';
+      reason: string;
+      modelInputModalities: string[];
+      advertisedImageInput?: boolean;
+    }
+  | {
+      kind: 'ENABLED';
+      textFact: string;
+      requestedKinds: AttachmentKind[];
+      modelInputModalities: string[];
+      payloadByteCount: number;
+      expectedSelection: AgentAttachmentSelection[];
+      expectedSubmissions?: Array<{
+        transport: AttachmentTransport;
+        correlationKind: AttachmentSubmissionRecord['correlation']['kind'];
+      }>;
+      advertisedImageInput?: boolean;
+    };
+
+function createAttachmentSmokeExpectation(
+  target: ProviderSmokeTarget
+): AttachmentSmokeExpectation {
+  if (target.attachmentDelivery.maturity === 'unsupported') {
+    return {
+      kind: 'UNSUPPORTED',
+      reason:
+        target.attachmentDelivery.detail?.trim() ||
+        'This provider profile does not advertise attachment delivery.',
+      modelInputModalities: [...target.model.inputModalities],
+      advertisedImageInput: target.advertisedImageInput
+    };
+  }
+  const imageEnabled = target.model.inputModalities.some(
+    (modality) => modality.toLocaleLowerCase() === 'image'
+  );
+  const requestedKinds: AttachmentKind[] = imageEnabled ? ['text', 'image'] : ['text'];
+  return {
+    kind: 'ENABLED',
+    textFact: `TM_ATTACHMENT_FACT_${randomUUID().replaceAll('-', '').toUpperCase()}`,
+    requestedKinds,
+    modelInputModalities: [...target.model.inputModalities],
+    payloadByteCount: 0,
+    expectedSelection: [],
+    expectedSubmissions: expectedAttachmentSubmissions(target, requestedKinds),
+    advertisedImageInput: target.advertisedImageInput
+  };
+}
+
+function expectedAttachmentSubmissions(
+  target: ProviderSmokeTarget,
+  kinds: readonly AttachmentKind[]
+): Extract<AttachmentSmokeExpectation, { kind: 'ENABLED' }>['expectedSubmissions'] {
+  const correlationKind = target.runtimeId === 'codex'
+    ? 'provider-turn'
+    : target.runtimeId === 'opencode'
+      ? 'provider-message'
+      : ['grok-acp', 'cursor-agent-acp'].includes(target.runtimeId)
+        ? 'client-request'
+        : undefined;
+  if (!correlationKind) return undefined;
+
+  return kinds.map((kind) => ({
+    correlationKind,
+    transport:
+      kind === 'image'
+        ? target.runtimeId === 'opencode'
+          ? 'native-file'
+          : 'native-image'
+        : target.runtimeId === 'opencode'
+          ? 'native-file'
+          : target.runtimeId === 'grok-acp'
+            ? 'embedded-resource'
+            : target.runtimeId === 'cursor-agent-acp'
+              ? 'text-block'
+              : target.executionSettings?.sandbox === 'DANGER_FULL_ACCESS' ||
+                  codexAttachmentSupport(target.runtimeVersion).exactFileAccess
+                ? 'managed-path'
+                : 'text-block'
+  }));
+}
+
+async function stageSmokeAttachments(
+  service: ProviderSmokeService,
+  expectation: Extract<AttachmentSmokeExpectation, { kind: 'ENABLED' }>
+): Promise<{
+  draftId: string;
+  expectation: Extract<AttachmentSmokeExpectation, { kind: 'ENABLED' }>;
+}> {
+  const textBytes = Buffer.from(
+    `The unique attachment fact is ${expectation.textFact}.\n`,
+    'utf8'
+  );
+  const attachments = [{
+    clientToken: randomUUID(),
+    displayName: 'provider-smoke-context.txt',
+    declaredMediaType: 'text/plain',
+    bytes: exactArrayBuffer(textBytes)
+  }];
+  let payloadByteCount = textBytes.byteLength;
+  if (expectation.requestedKinds.includes('image')) {
+    const imageBytes = await fs.readFile(
+      path.resolve(__dirname, '../../build/provider-smoke-image.png')
+    );
+    payloadByteCount += imageBytes.byteLength;
+    attachments.push({
+      clientToken: randomUUID(),
+      displayName: 'provider-smoke-image.png',
+      declaredMediaType: 'image/png',
+      bytes: exactArrayBuffer(imageBytes)
+    });
+  }
+  const draft = await service.stageTaskAttachmentBatch({ attachments });
+  return {
+    draftId: draft.id,
+    expectation: {
+      ...expectation,
+      payloadByteCount,
+      expectedSelection: toAgentAttachmentSelectionFromRecords(draft.attachments)
+    }
+  };
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength
+  ) as ArrayBuffer;
+}
+
+function smokePrompt(expectation: AttachmentSmokeExpectation | undefined): string {
+  if (expectation?.kind !== 'ENABLED') {
+    return `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff, then reply with exactly: ${SMOKE_SENTINEL}`;
+  }
+  const implementation =
+    `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff.`;
+  const imageRequest = expectation.requestedKinds.includes('image')
+    ? ' Also inspect the attached image. Report the exact two-character code, the three shapes from left to right, and the background color in one sentence.'
+    : '';
+  return `${implementation} Read the attached text file and include its unique fact verbatim in your reply.${imageRequest} Include ${SMOKE_SENTINEL} in the reply.`;
+}
+
 async function runTarget(
   service: ProviderSmokeService,
   target: ProviderSmokeTarget,
@@ -1108,6 +1324,7 @@ async function runTarget(
   timeoutMs: number,
   pollIntervalMs: number,
   cancelTimeoutMs: number,
+  qualifyAttachments: boolean,
   isStopping: () => boolean,
   setActiveRun: (taskId: string | undefined, runId: string | undefined) => void
 ): Promise<{ result: ProviderSmokeResult; lifecycleSettled: boolean }> {
@@ -1124,6 +1341,9 @@ async function runTarget(
   let lifecycleSettled = false;
   let cancellationSafe = true;
   let cancellationApplied = false;
+  let attachmentExpectation = qualifyAttachments
+    ? createAttachmentSmokeExpectation(target)
+    : undefined;
   let cancellationPhase:
     | {
         deadline: number;
@@ -1164,11 +1384,17 @@ async function runTarget(
 
   const lifecycle = (async () => {
     try {
+      let attachmentDraftId: string | undefined;
+      if (attachmentExpectation?.kind === 'ENABLED') {
+        const staged = await stageSmokeAttachments(service, attachmentExpectation);
+        attachmentDraftId = staged.draftId;
+        attachmentExpectation = staged.expectation;
+      }
       const task = await service.createTask({
         title: `Provider smoke: ${target.runtimeId} / ${target.model.displayName}`,
-        prompt:
-          `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff, then reply with exactly: ${SMOKE_SENTINEL}`,
+        prompt: smokePrompt(attachmentExpectation),
         repositoryId,
+        attachmentDraftId,
         runtimeId: target.runtimeId,
         agentSettings: {
           ...target.executionSettings,
@@ -1276,6 +1502,7 @@ async function runTarget(
       snapshot,
       gitSnapshot,
       worktreeVerification,
+      attachmentExpectation,
       interrupted: isStopping() || boundary === 'INTERRUPTED',
       errors: [
         failure,
@@ -1329,11 +1556,16 @@ function evaluateResult(input: {
   snapshot?: TaskSnapshot;
   gitSnapshot?: GitSnapshotRecord;
   worktreeVerification?: SmokeWorktreeVerification;
+  attachmentExpectation?: AttachmentSmokeExpectation;
   interrupted: boolean;
   errors: Array<string | undefined>;
 }): ProviderSmokeResult {
   const { target, run, snapshot } = input;
   const receivedSentinel = run?.finalMessage?.includes(SMOKE_SENTINEL) === true;
+  const attachmentQualification = evaluateAttachmentQualification(
+    input.attachmentExpectation,
+    run
+  );
   const interactionRequested = Boolean(
     run && snapshot?.interactionRequests.some((request) => request.runId === run.id)
   );
@@ -1374,6 +1606,9 @@ function evaluateResult(input: {
       : undefined,
     input.worktreeVerification && !input.worktreeVerification.verified
       ? input.worktreeVerification.error
+      : undefined,
+    attachmentQualification?.status === 'FAILED'
+      ? attachmentQualification.reason
       : undefined,
     selection.attestation === 'OBSERVED_MISMATCH'
       ? `The observed selection ${formatObservedSelection(selection)} did not match ${formatTargetSelection(target)}.`
@@ -1424,10 +1659,177 @@ function evaluateResult(input: {
     observedModelProvider: selection.observedModelProvider,
     observedReasoningEffort: selection.observedReasoningEffort,
     observationSource: selection.observationSource,
+    attachmentQualification,
     error: errors.length > 0 ? [...new Set(errors)].join(' ') : undefined,
     startedAt: input.startedAt,
     completedAt: new Date().toISOString()
   };
+}
+
+function evaluateAttachmentQualification(
+  expectation: AttachmentSmokeExpectation | undefined,
+  run: RunRecord | undefined
+): ProviderAttachmentQualificationResult | undefined {
+  if (!expectation) return undefined;
+  if (expectation.kind === 'UNSUPPORTED') {
+    return {
+      status: 'UNSUPPORTED',
+      reason: expectation.reason,
+      requestedKinds: [],
+      modelInputModalities: [...expectation.modelInputModalities],
+      payloadByteCount: 0,
+      textContentUsed: false,
+      advertisedImageInput: expectation.advertisedImageInput,
+      evidenceMatches: false,
+      selection: [],
+      submissions: []
+    };
+  }
+  const selection = (run?.attachmentSelection ?? []).map(copyAttachmentSelection);
+  const submissions = (run?.attachmentSubmissions ?? []).map(copyAttachmentSubmission);
+  const evidenceMatches =
+    sameAttachmentSelection(expectation.expectedSelection, selection) &&
+    sameAttachmentSubmissions(
+      expectation.expectedSelection,
+      submissions,
+      expectation.expectedSubmissions
+    );
+  const finalMessage = run?.finalMessage ?? '';
+  const textContentUsed = finalMessage.includes(expectation.textFact);
+  const imageContentUsed = expectation.requestedKinds.includes('image')
+    ? hasConcreteImageObservation(finalMessage)
+    : undefined;
+  const reasons = [
+    expectation.expectedSelection.length === 0
+      ? 'Task Monki did not stage the attachment qualification batch.'
+      : undefined,
+    !evidenceMatches
+      ? 'The run attachment selection and submission evidence did not exactly match the staged batch.'
+      : undefined,
+    !expectation.expectedSubmissions
+      ? 'The smoke harness has no native transport expectation for this provider.'
+      : undefined,
+    !textContentUsed
+      ? 'The provider response did not include the unique fact from the attached text file.'
+      : undefined,
+    imageContentUsed === false
+      ? 'The provider response did not give the required concrete observation of the attached image.'
+      : undefined
+  ].filter((value): value is string => Boolean(value));
+  const imageQualificationWasConclusive =
+    run?.status === 'COMPLETED' &&
+    textContentUsed &&
+    evidenceMatches &&
+    Boolean(expectation.expectedSubmissions);
+  const imageQualificationPassed =
+    imageQualificationWasConclusive && imageContentUsed === true;
+  const capabilityDrift = expectation.requestedKinds.includes('image')
+    ? expectation.advertisedImageInput === false && imageQualificationPassed
+      ? 'ADVERTISED_FALSE_VERIFIED_TRUE' as const
+      : expectation.advertisedImageInput === true &&
+          imageQualificationWasConclusive &&
+          imageContentUsed === false
+        ? 'ADVERTISED_TRUE_VERIFICATION_FAILED' as const
+        : undefined
+    : undefined;
+  return {
+    status: reasons.length === 0 ? 'PASSED' : 'FAILED',
+    reason: reasons.length > 0 ? reasons.join(' ') : undefined,
+    requestedKinds: [...expectation.requestedKinds],
+    modelInputModalities: [...expectation.modelInputModalities],
+    payloadByteCount: expectation.payloadByteCount,
+    textContentUsed,
+    imageContentUsed,
+    advertisedImageInput: expectation.advertisedImageInput,
+    capabilityDrift,
+    evidenceMatches,
+    selection,
+    submissions
+  };
+}
+
+function copyAttachmentSelection(
+  selection: AgentAttachmentSelection
+): AgentAttachmentSelection {
+  return {
+    attachmentId: selection.attachmentId,
+    ordinal: selection.ordinal,
+    kind: selection.kind,
+    mediaType: selection.mediaType,
+    byteCount: selection.byteCount,
+    sha256: selection.sha256
+  };
+}
+
+function copyAttachmentSubmission(
+  submission: AttachmentSubmissionRecord
+): AttachmentSubmissionRecord {
+  return {
+    ...copyAttachmentSelection(submission),
+    transport: submission.transport,
+    verifiedAt: submission.verifiedAt,
+    correlation: {
+      kind: submission.correlation.kind,
+      id: submission.correlation.id
+    },
+    submittedAt: submission.submittedAt
+  };
+}
+
+function sameAttachmentSelection(
+  expected: readonly AgentAttachmentSelection[],
+  actual: readonly AgentAttachmentSelection[]
+): boolean {
+  return expected.length === actual.length && expected.every((attachment, index) => {
+    const candidate = actual[index];
+    return Boolean(
+      candidate &&
+      candidate.attachmentId === attachment.attachmentId &&
+      candidate.ordinal === attachment.ordinal &&
+      candidate.kind === attachment.kind &&
+      candidate.mediaType === attachment.mediaType &&
+      candidate.byteCount === attachment.byteCount &&
+      candidate.sha256 === attachment.sha256
+    );
+  });
+}
+
+function sameAttachmentSubmissions(
+  expected: readonly AgentAttachmentSelection[],
+  submissions: readonly AttachmentSubmissionRecord[],
+  expectedDelivery: Extract<
+    AttachmentSmokeExpectation,
+    { kind: 'ENABLED' }
+  >['expectedSubmissions']
+): boolean {
+  return Boolean(
+    expectedDelivery &&
+      submissions.length === expected.length &&
+      expectedDelivery.length === expected.length &&
+      submissions.every((submission, index) => {
+        const delivery = expectedDelivery[index];
+        return Boolean(
+          delivery &&
+            sameAttachmentSelection(
+              [expected[index]!],
+              [copyAttachmentSelection(submission)]
+            ) &&
+            submission.transport === delivery.transport &&
+            submission.correlation.kind === delivery.correlationKind &&
+            submission.correlation.id.length > 0
+        );
+      })
+  );
+}
+
+function hasConcreteImageObservation(message: string): boolean {
+  const normalized = message.toLocaleLowerCase();
+  const code = /\bq7\b/u.test(normalized);
+  const shapes = /\bcircle\b[^.\n]{0,100}\btriangle\b[^.\n]{0,100}\b(?:square|rectangle)\b/u.test(
+    normalized
+  );
+  const background = /\b(?:navy|dark blue|deep blue)\b/u.test(normalized);
+  return code && shapes && background;
 }
 
 interface SmokeWorktreeVerification {
@@ -2053,6 +2455,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -2065,13 +2473,16 @@ function usage(): string {
     --confirm-provider-usage
 
 Optional repeatable filters: --runtime <runtime-id>, --model <qualified-model-id>
-Other options: --qualify-read-only, --timeout-seconds <10-3600>,
---state-root <empty-path>, --help
+Other options:
+  --qualify-read-only, --qualify-attachments
+  --timeout-seconds <10-3600>, --state-root <empty-path>, --help
 
 The repository must be a clean Git root with a commit and no remotes. Runs are
 sequential, interactions are never approved, and report.json retains the result.
 Read-only qualification adds one DIRECT Discourse mutation-denial probe for
-each selected profile that advertises a qualified native read-only policy.`;
+each selected profile that advertises a qualified native read-only policy.
+Attachment qualification adds managed text to each supported profile. It also
+adds the visual qualification fixture when the selected model has qualified image input.`;
 }
 
 async function main(): Promise<void> {

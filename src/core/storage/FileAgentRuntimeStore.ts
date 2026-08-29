@@ -107,6 +107,18 @@ const SERVER_STATUSES = new Set<AgentServerInstance['status']>([
   'FAILED',
   'LOST'
 ]);
+const ATTACHMENT_TRANSPORTS = new Set([
+  'native-image',
+  'native-file',
+  'embedded-resource',
+  'text-block',
+  'managed-path'
+] as const);
+const ATTACHMENT_CORRELATION_KINDS = new Set([
+  'provider-turn',
+  'provider-message',
+  'client-request'
+] as const);
 
 const RUN_STATUS_TRANSITIONS: Record<AgentRuntimeRunRecord['status'], readonly AgentRuntimeRunRecord['status'][]> = {
   QUEUED: ['STARTING', 'INTERRUPTED', 'FAILED', 'RECOVERY_REQUIRED'],
@@ -460,6 +472,8 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         AgentRuntimeSessionRecord,
         | 'providerSessionId'
         | 'providerSessionTreeId'
+        | 'executionContext'
+        | 'accessEpoch'
         | 'parentSessionId'
         | 'forkedFromSessionId'
         | 'providerParentSessionId'
@@ -496,6 +510,34 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       const existing = draft.sessions[index]!;
       if (existing.recordRevision !== expectedRevision) {
         throw new Error('Agent runtime session changed before the requested update.');
+      }
+      const changesAccessIdentity =
+        update.executionContext !== undefined || update.accessEpoch !== undefined;
+      if (
+        changesAccessIdentity &&
+        (update.executionContext === undefined || update.accessEpoch === undefined)
+      ) {
+        throw new Error(
+          'Agent runtime execution context and access epoch must change together.'
+        );
+      }
+      if (
+        changesAccessIdentity &&
+        (existing.materialized ||
+          draft.runs.some(
+            (run) =>
+              run.sessionId === existing.id &&
+              // A new Task can create its first provider session while its
+              // exact selected run is still QUEUED/NOT_SENT. Shared turns can
+              // already be STARTING/SENDING. Both states precede admission.
+              (run.providerTurnId !== undefined ||
+                (run.delivery !== 'NOT_SENT' &&
+                  !(run.delivery === 'SENDING' && run.status === 'STARTING')))
+          ))
+      ) {
+        throw new Error(
+          'Agent runtime access identity is immutable after provider delivery.'
+        );
       }
       const canReplaceReviewSessionIdentity =
         existing.owner.kind === 'TASK' &&
@@ -566,6 +608,22 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         recordRevision: existing.recordRevision + 1,
         updatedAt: this.now()
       };
+      if (changesAccessIdentity) {
+        if (
+          stored.accessEpoch.epoch !== existing.accessEpoch.epoch ||
+          stored.accessEpoch.createdAt !== existing.accessEpoch.createdAt
+        ) {
+          throw new Error(
+            'Agent runtime access identity cannot change its durable epoch.'
+          );
+        }
+        assertAccessEpochMatches({
+          epoch: stored.accessEpoch,
+          owner: stored.owner,
+          sessionId: stored.id
+        });
+        assertExecutionContextMatchesEpoch(stored);
+      }
       const canClearMaterializationFence =
         existing.materialized &&
         !stored.materialized &&
@@ -1631,6 +1689,16 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         );
         return projectTaskSession(stored);
       },
+      async updateAgentSessionAccess(sessionId, update, operationId) {
+        const existing = await store.requireTaskSession(sessionId);
+        const stored = await store.updateSession(
+          sessionId,
+          existing.recordRevision,
+          clone(update),
+          operationId
+        );
+        return projectTaskSession(stored);
+      },
       async getRun(runId) {
         const run = await store.getRun(runId);
         return run?.owner.kind === 'TASK'
@@ -1973,6 +2041,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
           outputArtifactId: `output-${input.id}`,
           diagnosticArtifactId: `diagnostic-${input.id}`,
           instructionProfile: input.instructionProfile,
+          attachmentSelection: input.attachmentSelection,
           taskDetails: {
             retryOfRunId: input.retryOfRunId,
             continuedFromRunId: input.continuedFromRunId,
@@ -2286,6 +2355,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
           promptArtifactId,
           outputArtifactId,
           diagnosticArtifactId,
+          attachmentSelection: [],
           taskDetails: { eventCount: 0 }
         },
         {
@@ -3059,7 +3129,12 @@ function insertRuntimeRun(
   ) {
     throw new Error('Agent runtime run does not match its session owner/access epoch.');
   }
-  const fingerprint = requestFingerprint(input);
+  const normalizedInput = {
+    ...input,
+    attachmentSelection: clone(input.attachmentSelection ?? [])
+  };
+  assertAttachmentSelection(normalizedInput.attachmentSelection);
+  const fingerprint = requestFingerprint(normalizedInput);
   const existing = draft.runs.find(
     (run) =>
       agentOwnerScopeKey(run.owner) === agentOwnerScopeKey(input.owner) &&
@@ -3079,7 +3154,7 @@ function insertRuntimeRun(
   }
   const { providerObserved, ...lifecycle } = initial;
   const run: AgentRuntimeRunRecord = {
-    ...clone(input),
+    ...clone(normalizedInput),
     ...lifecycle,
     requestFingerprint: fingerprint,
     recordRevision: 1,
@@ -3541,8 +3616,13 @@ function validateState(state: AgentRuntimeStoreState): void {
     if (run.providerTerminalRawMessage) {
       assertProtocolReferenceShape(run.providerTerminalRawMessage);
     }
+    assertAttachmentSelection(run.attachmentSelection);
     if (run.attachmentSubmissions) {
-      assertAttachmentSubmissions(run.attachmentSubmissions, run.providerTurnId);
+      assertAttachmentSubmissions(
+        run.attachmentSubmissions,
+        run.attachmentSelection,
+        run.providerTurnId
+      );
     }
     if (
       run.clientToolGrants &&
@@ -4099,6 +4179,7 @@ function projectTaskRun(
     eventCount: run.taskDetails?.eventCount ?? 0,
     lastEventType: run.taskDetails?.lastEventType,
     finalMessage: run.taskDetails?.finalMessage,
+    attachmentSelection: clone(run.attachmentSelection),
     attachmentSubmissions: clone(run.attachmentSubmissions)
   };
 }
@@ -4579,25 +4660,69 @@ function assertTokenUsage(value: import('../../shared/agent').AgentTokenUsageBre
   }
 }
 
+function assertAttachmentSelection(
+  selection: readonly AgentRuntimeRunRecord['attachmentSelection'][number][]
+): void {
+  if (
+    !Array.isArray(selection) ||
+    selection.length > AGENT_RUNTIME_LIMITS.maxManagedAttachments
+  ) {
+    throw new Error('Agent runtime attachment selection is invalid.');
+  }
+  const ids = new Set<string>();
+  const ordinals = new Set<number>();
+  for (const attachment of selection) {
+    if (
+      !SAFE_ID.test(attachment.attachmentId) ||
+      ids.has(attachment.attachmentId) ||
+      !Number.isSafeInteger(attachment.ordinal) ||
+      attachment.ordinal < 0 ||
+      ordinals.has(attachment.ordinal) ||
+      !['image', 'text'].includes(attachment.kind) ||
+      !attachment.mediaType ||
+      Buffer.byteLength(attachment.mediaType, 'utf8') > 512 ||
+      !Number.isSafeInteger(attachment.byteCount) ||
+      attachment.byteCount < 0 ||
+      !HASH.test(attachment.sha256)
+    ) {
+      throw new Error('Agent runtime attachment selection is invalid.');
+    }
+    ids.add(attachment.attachmentId);
+    ordinals.add(attachment.ordinal);
+  }
+}
+
 function assertAttachmentSubmissions(
   submissions: readonly NonNullable<AgentRuntimeRunRecord['attachmentSubmissions']>[number][],
+  selection: readonly AgentRuntimeRunRecord['attachmentSelection'][number][],
   providerTurnId: string | undefined
 ): void {
-  const ordinals = new Set<number>();
-  const ids = new Set<string>();
-  for (const submission of submissions) {
+  if (submissions.length !== selection.length) {
+    throw new Error('Agent runtime attachment submission evidence is incomplete.');
+  }
+  for (const [index, submission] of submissions.entries()) {
+    const selected = selection[index];
     requireTimestamp(submission.verifiedAt);
     requireTimestamp(submission.submittedAt);
     if (
-      !submission.attachmentId || ids.has(submission.attachmentId) ||
-      !Number.isSafeInteger(submission.ordinal) || submission.ordinal < 0 ||
-      ordinals.has(submission.ordinal) || !HASH.test(submission.sha256) ||
-      !Number.isSafeInteger(submission.byteCount) || submission.byteCount < 0 ||
-      !submission.providerTurnId ||
-      (providerTurnId !== undefined && submission.providerTurnId !== providerTurnId)
-    ) throw new Error('Agent runtime attachment submission evidence is invalid.');
-    ids.add(submission.attachmentId);
-    ordinals.add(submission.ordinal);
+      !selected ||
+      submission.attachmentId !== selected.attachmentId ||
+      submission.ordinal !== selected.ordinal ||
+      submission.kind !== selected.kind ||
+      submission.mediaType !== selected.mediaType ||
+      submission.byteCount !== selected.byteCount ||
+      submission.sha256 !== selected.sha256 ||
+      !ATTACHMENT_TRANSPORTS.has(submission.transport) ||
+      !ATTACHMENT_CORRELATION_KINDS.has(submission.correlation.kind) ||
+      !submission.correlation.id ||
+      Buffer.byteLength(submission.correlation.id, 'utf8') >
+        AGENT_RUNTIME_LIMITS.maxOwnerIdBytes ||
+      (submission.correlation.kind === 'provider-turn' &&
+        providerTurnId !== undefined &&
+        submission.correlation.id !== providerTurnId)
+    ) {
+      throw new Error('Agent runtime attachment submission evidence is invalid.');
+    }
   }
 }
 

@@ -46,8 +46,8 @@ repository by ID and never accepts a repository path as task identity.
 Capturing a text-only task is a local operation and remains available when the
 selected agent runtime is unavailable; live model resolution is deferred until
 Start. Attachment-backed creation still requires a runtime/model with an
-attested attachment boundary because Task Monki must validate modality and
-isolation before adopting the draft.
+enabled delivery path for each selected content type. Task Monki validates the
+model input types before it adopts the draft.
 
 The New Task composer is a parallel workspace panel rather than a modal
 decision. Closing it preserves title and description text for the current app
@@ -57,9 +57,9 @@ successful Create clears the preserved text draft.
 Refine is a reversible proposal, not an automatic append or overwrite. One
 short-lived read-only agent run receives the current title and description.
 It also receives the selected downstream model capabilities and supported staged attachments.
-OpenCode and Cursor currently refine requests without managed attachments.
 The adapter applies its qualified native mutation-denial policy.
-Task Monki does not grant app-owned web, MCP, app, attachment, dynamic-tool, or approval access for the turn.
+Task Monki grants only the exact selected attachments. It does not grant
+app-owned web, MCP, app, dynamic-tool, or approval access for the turn.
 An ACP provider can still expose its own tools when its native policy permits them.
 The provider process can still use its model transport.
 The agent first decides whether repository or attachment inspection can
@@ -131,22 +131,21 @@ original paths or places them in the repository worktree. The composer uses
 Chromium's native decoder to re-encode images before submission so embedded
 metadata is not copied. PDFs, Office files, video, audio,
 archives, databases, and arbitrary binaries are not supported. Codex uses
-verified local-image inputs and managed path references. OpenCode retains
-native file parts for provider-owned integrations, but Task Monki managed
-attachments are disabled because that process cannot attest attachment
-confinement. Every runtime must advertise attachment delivery before the
-composer enables it, and Task Monki does not provide a generic extraction
-pipeline.
+verified local-image inputs and managed path references. OpenCode uses bounded
+native file parts. Qualified ACP profiles use their native text or image blocks.
+The composer uses the effective runtime and model projection for each content
+type. Negotiated ACP support is the default. A tested provider-local exception
+can correct one false capability flag and must show a diagnostic.
+Task Monki does not provide a generic extraction pipeline.
 
-Provider delivery is runtime-specific and fail-closed. Codex uses a complete
-thread-local permission profile for the exact worktree and verified files.
-Attachment runs force network off, so runtimes such as OpenCode whose network
-is provider-controlled cannot accept them. Full access remains available for
-attachment-free tasks but is rejected when attachments are present. In the
-packaged app, the user's Codex web search, MCP server, and app choices remain in
-effect for attachment runs; enabling those integrations means trusting them
-with the task content the agent can provide to them. Browser development keeps
-its separate rule that forces those integrations off.
+Provider delivery is runtime-specific and fail-closed. A restricted Codex
+session uses a complete permission profile for the exact worktree and verified
+files. The task's network and full-access settings do not change only because
+the task has attachments. These settings define provider access, not file
+delivery eligibility. In the packaged app, the user's Codex web search, MCP
+server, and app choices remain in effect. Enabling those integrations means
+trusting them with the task content the agent can provide. Browser development
+keeps its separate rule that forces those integrations off.
 
 Files stay renderer-local during editing and cross the trusted boundary in one
 bounded batch. A successful task create atomically adopts that batch as one
@@ -161,8 +160,6 @@ that the verified bytes were submitted with a provider turn, but never presents
 that as proof that the model read or used the file. See
 `docs/architecture/ATTACHMENT_LIFECYCLE.md` for limits, delivery, portability,
 cleanup, and privacy semantics.
-
-Task Monki attachment runs require read-only or managed workspace access.
 
 Task records remain bound to exactly one repository ID. Runs, worktrees, Git
 evidence, GitHub delivery, and provider sessions resolve through task and

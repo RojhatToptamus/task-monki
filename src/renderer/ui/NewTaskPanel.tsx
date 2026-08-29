@@ -107,13 +107,11 @@ interface NewTaskPanelProps {
 export function ExecutionPolicySelect({
   presets,
   selectedPreset,
-  attachmentsIncluded,
   disabled,
   onChange
 }: {
   presets: readonly AgentExecutionPolicyPreset[];
   selectedPreset?: AgentExecutionPolicyPreset;
-  attachmentsIncluded: boolean;
   disabled: boolean;
   onChange(presetId: string): void;
 }) {
@@ -178,17 +176,14 @@ export function ExecutionPolicySelect({
         <div className="tm-access-select__menu" id={popupId} role="menu" aria-label="Execution policy">
           {presets.map((preset) => {
             const selected = preset.id === selectedPreset?.id;
-            const blockedByAttachments =
-              preset.sandbox === 'DANGER_FULL_ACCESS' && attachmentsIncluded;
             return (
               <button
                 type="button"
                 role="menuitemradio"
                 className={`tm-access-select__option ${selected ? 'is-selected' : ''}`}
                 aria-checked={selected}
-                disabled={disabled || blockedByAttachments}
+                disabled={disabled}
                 key={preset.id}
-                title={blockedByAttachments ? 'Remove attachments to use full access.' : undefined}
                 onClick={() => {
                   onChange(preset.id);
                   close();
@@ -367,7 +362,6 @@ export function NewTaskPanel({
     resolveReasoningEffort(selectedModel, reasoningEffort) ?? '';
   const networkDisabledByPreset = permissionPreset?.networkAccess === 'DISABLED';
   const networkRequiredByPreset = permissionPreset?.networkAccess === 'REQUIRED';
-  const fullAccessSelected = permissionPreset?.sandbox === 'DANGER_FULL_ACCESS';
   const availableRepositories = repositories.filter(
     (repository) => repository.status === 'AVAILABLE'
   );
@@ -396,7 +390,7 @@ export function NewTaskPanel({
   };
   const attachments = useTaskAttachments({
     enabled: effectiveAttachmentsEnabled,
-    blocked: composerLocked || fullAccessSelected,
+    blocked: composerLocked,
     model: selectedModel,
     onStageBatch: onStageAttachmentBatch,
     onDiscard: (draftId) => onDiscardAttachmentDraft({ draftId }),
@@ -418,11 +412,9 @@ export function NewTaskPanel({
     drop: dropAttachments,
     close: closeAttachments
   } = attachments;
-  const attachmentsRestrictNetwork = activeAttachmentItems.length > 0;
   const effectiveNetworkAccess =
-    !attachmentsRestrictNetwork &&
-    (networkRequiredByPreset ||
-      (permissionPreset?.networkAccess === 'OPTIONAL' && networkAccess));
+    networkRequiredByPreset ||
+    (permissionPreset?.networkAccess === 'OPTIONAL' && networkAccess);
   const selectedModelRejectsImages = Boolean(attachmentModelError);
   const selectedRuntimeRejectsAttachments =
     activeAttachmentItems.length > 0 && !effectiveAttachmentsEnabled;
@@ -802,9 +794,7 @@ export function NewTaskPanel({
                 bindDropTarget={false}
                 removeDisabled={composerLocked}
                 addButtonTitle={
-                  fullAccessSelected
-                    ? 'Choose a runtime policy with managed attachment isolation.'
-                    : effectiveAttachmentsEnabled
+                  effectiveAttachmentsEnabled
                     ? `Stored locally and shared read-only with ${
                         selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent'
                       } for this task.`
@@ -816,19 +806,17 @@ export function NewTaskPanel({
                         : 'Attachments require file-read isolation between tasks.'
                 }
                 hint={
-                  fullAccessSelected
-                    ? `Unavailable with ${permissionPreset?.label ?? 'this policy'}`
-                    : !effectiveAttachmentsEnabled
-                      ? runtimeSupportsAttachments
-                        ? 'Unavailable in this build'
-                        : 'Unavailable for this runtime'
-                      : isReadingClipboardImage
-                        ? 'Reading clipboard image…'
-                        : activeAttachmentItems.length > 0
-                          ? `${activeAttachmentItems.length} ${
-                              activeAttachmentItems.length === 1 ? 'file' : 'files'
-                            } · ${formatAttachmentBytes(attachmentByteCount)}`
-                          : 'Paste or drop files'
+                  !effectiveAttachmentsEnabled
+                    ? runtimeSupportsAttachments
+                      ? 'Unavailable in this build'
+                      : 'Unavailable for this runtime'
+                    : isReadingClipboardImage
+                      ? 'Reading clipboard image…'
+                      : activeAttachmentItems.length > 0
+                        ? `${activeAttachmentItems.length} ${
+                            activeAttachmentItems.length === 1 ? 'file' : 'files'
+                          } · ${formatAttachmentBytes(attachmentByteCount)}`
+                        : 'Paste or drop files'
                 }
               >
                 <textarea
@@ -917,7 +905,6 @@ export function NewTaskPanel({
                       <ExecutionPolicySelect
                         presets={permissionPresets}
                         selectedPreset={permissionPreset}
-                        attachmentsIncluded={activeAttachmentItems.length > 0}
                         disabled={composerLocked}
                         onChange={setPermissionPresetId}
                       />
@@ -932,15 +919,13 @@ export function NewTaskPanel({
                     Network access
                   </span>
                   <span className="network-toggle__state">
-                    {attachmentsRestrictNetwork
-                      ? 'Disabled while attachments are included.'
-                      : networkDisabledByPreset
-                        ? `Disabled by ${permissionPreset?.label ?? 'this mode'}.`
-                        : networkRequiredByPreset
-                          ? 'Required by this execution policy.'
-                          : effectiveNetworkAccess
-                            ? 'Enabled - commands may use the network during this task.'
-                            : 'Disabled - network use stays outside the task boundary.'}
+                    {networkDisabledByPreset
+                      ? `Disabled by ${permissionPreset?.label ?? 'this mode'}.`
+                      : networkRequiredByPreset
+                        ? 'Required by this execution policy.'
+                        : effectiveNetworkAccess
+                          ? 'Enabled - commands may use the network during this task.'
+                          : 'Disabled - network use stays outside the task boundary.'}
                   </span>
                 </div>
                 <button
@@ -951,12 +936,7 @@ export function NewTaskPanel({
                   role="switch"
                   aria-labelledby="task-network-access-label"
                   aria-checked={effectiveNetworkAccess}
-                  disabled={
-                    composerLocked ||
-                    networkDisabledByPreset ||
-                    networkRequiredByPreset ||
-                    attachmentsRestrictNetwork
-                  }
+                  disabled={composerLocked || networkDisabledByPreset || networkRequiredByPreset}
                   onClick={() => setNetworkAccess((current) => !current)}
                 >
                   <span />

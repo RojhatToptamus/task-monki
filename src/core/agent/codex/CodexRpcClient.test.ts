@@ -8,6 +8,7 @@ import {
   CodexAmbiguousMutationError,
   CodexRpcClient
 } from './CodexRpcClient';
+import { CODEX_ATTACHMENT_PROMPT_MARKER } from './CodexAttachmentDelivery';
 
 describe('CodexRpcClient', () => {
   it('correlates responses and journals both directions', async () => {
@@ -85,6 +86,102 @@ describe('CodexRpcClient', () => {
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     expect(journal).toContain('[REDACTED]');
     expect(journal).not.toContain(secret);
+    client.close();
+  });
+
+  it('removes managed attachment content from provider errors', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-error-attachment-'));
+    const store = new FileAgentRuntimeStore(dir);
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const client = new CodexRpcClient(input, output, store, server.id, 1_000);
+    const managedPath = path.join(
+      dir,
+      'attachments',
+      'tasks',
+      'task-1',
+      'private.txt'
+    );
+
+    const requestLine = readLine(input);
+    const requestPromise = client.request('model/list', {
+      includeHidden: false,
+      limit: 10
+    });
+    const request = JSON.parse(await requestLine) as { id: number };
+    output.write(
+      `${JSON.stringify({
+        id: request.id,
+        error: {
+          code: -1,
+          message: `could not read ${managedPath}`,
+          data: {
+            path: managedPath,
+            prompt: `${CODEX_ATTACHMENT_PROMPT_MARKER}private attachment bytes`
+          }
+        }
+      })}\n`
+    );
+
+    await expect(requestPromise).rejects.toMatchObject({
+      message: '[Task Monki managed attachment path omitted]',
+      data: {
+        path: '[Task Monki managed attachment path omitted]',
+        prompt: expect.stringContaining('[Task Monki attachment input omitted]')
+      }
+    });
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    expect(journal).not.toContain(managedPath);
+    expect(journal).not.toContain('private attachment bytes');
+    client.close();
+  });
+
+  it('keeps attachment input on the wire but removes its bytes and paths from the journal', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-attachment-'));
+    const store = new FileAgentRuntimeStore(dir);
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const input = new PassThrough();
+    const client = new CodexRpcClient(
+      input,
+      new PassThrough(),
+      store,
+      server.id,
+      1_000
+    );
+    const managedPath = path.join(
+      dir,
+      'attachments',
+      'tasks',
+      'task-1',
+      'reference.png'
+    );
+    const outbound = readLine(input);
+
+    await client.respond(41, {
+      prompt: `Inspect.${CODEX_ATTACHMENT_PROMPT_MARKER}private attachment bytes`,
+      image: { type: 'localImage', path: managedPath }
+    });
+
+    const wire = await outbound;
+    expect(wire).toContain('private attachment bytes');
+    expect(wire).toContain(managedPath);
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    expect(journal).toContain('attachment input omitted');
+    expect(journal).not.toContain('private attachment bytes');
+    expect(journal).not.toContain(managedPath);
     client.close();
   });
 

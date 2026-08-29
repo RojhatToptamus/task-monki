@@ -76,10 +76,33 @@ export interface AcpRuntimeProfile {
   };
   /** The provider may offer an exact option whose remembered scope it owns. */
   allowRememberedPermissions?: true;
+  /** Exact native ACP mapping enabled by a packaged content-use test. */
+  attachmentTextTransport?: 'embedded-resource' | 'text-block';
+  /** Why this profile has no qualified managed-attachment delivery. */
+  attachmentDeliveryUnavailableReason?: string;
+  /** Exact runtime/model pairs proven to consume native ACP image blocks. */
+  imageInputQualifications?: readonly AcpImageInputQualification[];
   /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
   extensions: Readonly<
     Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
   >;
+}
+
+export interface AcpImageInputQualification {
+  runtimeVersion: string;
+  modelId: string;
+  /** Narrow compatibility exception for an agent with a proven false capability flag. */
+  allowWhenNotAdvertised?: true;
+  /** Provider/model formats allowed through this exact qualified path. */
+  mediaTypes: readonly [string, ...string[]];
+}
+
+export interface AcpImageInputSupport {
+  advertised?: boolean;
+  enabled: boolean;
+  qualification?: AcpImageInputQualification;
+  capabilityDrift: boolean;
+  unavailableReason?: string;
 }
 
 export type AcpApprovalPolicy = 'on-request' | 'auto-accept-edits' | 'never';
@@ -171,6 +194,15 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   readOnlyTurnUnavailableReason:
     'Grok plan mode blocks edit tools, but it can still run mutating shell, MCP, or subagent work. This does not deny repository mutation.',
   allowRememberedPermissions: true,
+  attachmentTextTransport: 'embedded-resource',
+  imageInputQualifications: [
+    {
+      runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+      modelId: 'grok-4.6',
+      allowWhenNotAdvertised: true,
+      mediaTypes: ['image/png']
+    }
+  ],
   environmentPolicy: {
     contractId: 'task-monki/grok-acp-environment@v1',
     allowedKeys: [
@@ -239,6 +271,14 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
       'Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
   },
   allowRememberedPermissions: true,
+  attachmentTextTransport: 'text-block',
+  imageInputQualifications: [
+    {
+      runtimeVersion: '2026.08.25-3e8eec8',
+      modelId: 'composer-2.5',
+      mediaTypes: ['image/png']
+    }
+  ],
   environmentPolicy: {
     contractId: 'task-monki/cursor-agent-acp-environment@v1',
     allowedKeys: [
@@ -284,6 +324,9 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   approvalPolicies: ['on-request'],
   readOnlyTurnUnavailableReason:
     'Claude Agent ACP plan mode has not passed the required packaged-runtime mutation test on this Task Monki build.',
+  attachmentDeliveryUnavailableReason:
+    'Claude Agent ACP attachments are unavailable until an installed runtime passes Task Monki content-use qualification.',
+  imageInputQualifications: [],
   environmentPolicy: {
     contractId: 'task-monki/claude-agent-acp-environment@v1',
     allowedKeys: [
@@ -501,10 +544,7 @@ export function acpCapabilities(
       maturity: 'unsupported',
       detail: 'Task Monki exposes no client tools to ACP agents.'
     },
-    attachmentDelivery: {
-      maturity: 'unsupported',
-      detail: 'Current ACP profiles have no Task Monki-attested sandbox that protects managed attachment copies from a full-access provider process.'
-    },
+    attachmentDelivery: acpAttachmentCapability(profile, negotiated?.prompt),
     runtimeRecovery: {
       maturity: 'stable',
       detail: 'Disconnects fail closed; ambiguous prompts are never replayed automatically.'
@@ -535,7 +575,7 @@ export function acpCapabilities(
         negotiated?.prompt?.image || negotiated?.prompt?.embeddedContext
           ? {
               maturity: 'stable',
-              detail: 'The agent negotiated native ACP content blocks, but Task Monki attachments remain disabled until confidentiality isolation is attested.'
+              detail: 'The connected agent negotiated native ACP image or embedded-resource prompt blocks.'
             }
           : {
               maturity: negotiated ? 'stable' : 'inferred',
@@ -551,6 +591,96 @@ export function acpCapabilities(
           },
       ...profile.extensions
     }
+  };
+}
+
+function acpAttachmentCapability(
+  profile: AcpRuntimeProfile,
+  prompt: { image?: boolean; embeddedContext?: boolean } | undefined
+): AgentRuntimeCapabilities['attachmentDelivery'] {
+  if (!profile.attachmentTextTransport) {
+    return {
+      maturity: 'unsupported',
+      detail:
+        profile.attachmentDeliveryUnavailableReason ??
+        `${profile.descriptor.displayName} has no qualified managed-attachment transport.`
+    };
+  }
+  if (
+    profile.attachmentTextTransport === 'embedded-resource' &&
+    prompt &&
+    prompt.embeddedContext !== true
+  ) {
+    return {
+      maturity: 'unsupported',
+      detail: `${profile.descriptor.displayName} did not negotiate ACP embedded context for text attachments.`
+    };
+  }
+  return {
+    maturity: prompt || profile.attachmentTextTransport === 'text-block'
+      ? 'stable'
+      : 'inferred',
+    detail:
+      profile.attachmentTextTransport === 'embedded-resource'
+        ? 'Verified text files use native ACP embedded resources after capability negotiation.'
+        : 'Verified text files use bounded ACP text content blocks.'
+  };
+}
+
+export function acpModelInputModalities(input: {
+  profile: AcpRuntimeProfile;
+  promptCapabilities?: { image?: boolean; audio?: boolean };
+  runtimeVersion?: string;
+  modelId: string;
+}): string[] {
+  const imageSupport = acpImageInputSupport(input);
+  return [
+    'text',
+    ...(imageSupport.enabled ? ['image'] : []),
+    ...(input.promptCapabilities?.audio ? ['audio'] : [])
+  ];
+}
+
+export function acpImageInputSupport(input: {
+  profile: AcpRuntimeProfile;
+  promptCapabilities?: { image?: boolean };
+  runtimeVersion?: string;
+  modelId: string;
+}): AcpImageInputSupport {
+  const advertised = input.promptCapabilities?.image;
+  const qualification = input.runtimeVersion && input.modelId !== 'default'
+    ? input.profile.imageInputQualifications?.find(
+        (candidate) =>
+          candidate.runtimeVersion === input.runtimeVersion &&
+          candidate.modelId === input.modelId
+      )
+    : undefined;
+  const capabilityDrift = Boolean(
+    qualification?.allowWhenNotAdvertised && advertised === false
+  );
+  const enabled = Boolean(qualification && (advertised || capabilityDrift));
+  if (enabled) {
+    return { advertised, enabled, qualification, capabilityDrift };
+  }
+
+  const runtime = input.runtimeVersion ?? 'an unknown runtime version';
+  const unavailableReason = input.modelId === 'default'
+    ? `${input.profile.descriptor.displayName} automatic model selection is not image-qualified.`
+    : !qualification
+      ? advertised === true
+        ? `${input.profile.descriptor.displayName} advertises ACP image input, but ${input.modelId} on ${runtime} has not passed Task Monki image qualification.`
+        : advertised === false
+          ? `${input.profile.descriptor.displayName} did not advertise ACP image input, and ${input.modelId} on ${runtime} has no verified compatibility exception.`
+          : `${input.profile.descriptor.displayName} did not report whether ACP image input is supported for ${input.modelId} on ${runtime}.`
+      : advertised === false
+        ? `${input.profile.descriptor.displayName} did not advertise ACP image input for ${input.modelId} on ${runtime}.`
+        : `${input.profile.descriptor.displayName} did not report ACP image support for ${input.modelId} on ${runtime}.`;
+  return {
+    advertised,
+    enabled: false,
+    qualification,
+    capabilityDrift: false,
+    unavailableReason
   };
 }
 

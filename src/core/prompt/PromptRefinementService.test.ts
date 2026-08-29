@@ -6,7 +6,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgentExecutionSettings, AgentModel } from '../../shared/agent';
 import type { AgentTurnAttachment } from '../agent/AgentAttachmentDelivery';
 import {
-  imageAttachmentLooksRelevant,
   type PromptRefinementRun,
   PromptRefinementCanceledError,
   PromptRefinementService,
@@ -14,16 +13,6 @@ import {
 } from './PromptRefinementService';
 
 describe('PromptRefinementService', () => {
-  it('selects image inspection from task relevance instead of attachment presence alone', () => {
-    expect(
-      imageAttachmentLooksRelevant('Fix the database connection timeout.', 'unrelated.png')
-    ).toBe(false);
-    expect(imageAttachmentLooksRelevant('Fix this.', 'reference.png')).toBe(true);
-    expect(
-      imageAttachmentLooksRelevant('Match the attached UI screenshot.', 'reference.png')
-    ).toBe(true);
-  });
-
   it('accepts a concise rewrite without forcing repository inspection or headings', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
     let capturedInstruction = '';
@@ -112,7 +101,7 @@ describe('PromptRefinementService', () => {
         repositoryInspection: 'none',
         attachmentIdsInspected: [attachment.attachmentId],
         attachmentIdsReferenced: [attachment.attachmentId]
-      }));
+      }), [submission(attachment, 'native-image')]);
     });
 
     const refined = await service.refine(refinementInput({
@@ -158,7 +147,7 @@ describe('PromptRefinementService', () => {
         repositoryInspection: 'none',
         attachmentIdsInspected: [first.attachmentId, second.attachmentId],
         attachmentIdsReferenced: [first.attachmentId, second.attachmentId]
-      }));
+      }), [submission(first, 'native-image'), submission(second, 'native-image')]);
     });
 
     const refined = await service.refine(refinementInput({
@@ -173,7 +162,7 @@ describe('PromptRefinementService', () => {
     expect(capturedInstruction).toContain('Attachment 2 (image.png)');
   });
 
-  it('preserves relevant images without claiming inspection for a text-only refiner', async () => {
+  it('keeps provider attachment transport out of the refinement prompt', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
     const attachment = await createAttachment(repositoryPath, 'screenshot.png', 'image');
     let capturedInstruction = '';
@@ -202,9 +191,8 @@ describe('PromptRefinementService', () => {
     }));
 
     expect(refined.source).toBe('model');
-    expect(refined.warning).toContain('cannot inspect');
     expect(refined.evidence.attachmentIdsInspected).toEqual([]);
-    expect(capturedInstruction).toContain('"providedAsImage":false');
+    expect(capturedInstruction).not.toContain('providedAsImage');
     expect(capturedInstruction).not.toContain(attachment.path);
   });
 
@@ -218,7 +206,7 @@ describe('PromptRefinementService', () => {
         repositoryInspection: 'none',
         attachmentIdsInspected: [attachment.attachmentId],
         attachmentIdsReferenced: [attachment.attachmentId]
-      }))
+      }), [submission(attachment, 'text-block')])
     );
 
     const refined = await service.refine(refinementInput({
@@ -229,6 +217,29 @@ describe('PromptRefinementService', () => {
 
     expect(refined.source).toBe('unchanged-fallback');
     expect(refined.prompt).toBe('Apply the attached requirements.');
+  });
+
+  it('keeps ephemeral attachment paths out of accepted titles', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const attachment = await createAttachment(repositoryPath, 'requirements.txt', 'text');
+    const service = new PromptRefinementService(async () =>
+      completedRun(refinementJson({
+        titleSuggestion: `Apply ${attachment.path}`,
+        prompt: 'Apply requirements.txt.',
+        repositoryInspection: 'none',
+        attachmentIdsInspected: [attachment.attachmentId],
+        attachmentIdsReferenced: [attachment.attachmentId]
+      }), [submission(attachment, 'text-block')])
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Apply the attached requirements.',
+      attachments: [attachment]
+    }));
+
+    expect(refined.source).toBe('unchanged-fallback');
+    expect(refined.titleSuggestion).toBe('Apply the attached requirements');
   });
 
   it('cancels an obsolete refinement run', async () => {
@@ -245,7 +256,7 @@ describe('PromptRefinementService', () => {
       signalStarted();
       return {
         cancel,
-        result: new Promise<string>((_resolve, reject) => {
+        result: new Promise<never>((_resolve, reject) => {
           rejectRun = reject;
         })
       };
@@ -292,7 +303,7 @@ describe('PromptRefinementService', () => {
     const cancel = vi.fn(async () => rejectResult(new Error('canceled')));
     releaseRunner({
       cancel,
-      result: new Promise<string>((_resolve, reject) => {
+      result: new Promise<never>((_resolve, reject) => {
         rejectResult = reject;
       })
     });
@@ -386,10 +397,31 @@ function refinementJson(input: {
   });
 }
 
-function completedRun(output: string): PromptRefinementRun {
+function completedRun(
+  output: string,
+  attachmentSubmissions: import('../../shared/attachments').AttachmentSubmissionRecord[] = []
+): PromptRefinementRun {
   return {
-    result: Promise.resolve(output),
+    result: Promise.resolve({ output, attachmentSubmissions }),
     cancel: async () => undefined
+  };
+}
+
+function submission(
+  attachment: AgentTurnAttachment,
+  transport: import('../../shared/attachments').AttachmentTransport
+): import('../../shared/attachments').AttachmentSubmissionRecord {
+  return {
+    attachmentId: attachment.attachmentId,
+    ordinal: attachment.ordinal,
+    kind: attachment.kind,
+    mediaType: attachment.mediaType,
+    byteCount: attachment.byteCount,
+    sha256: attachment.sha256,
+    transport,
+    verifiedAt: attachment.verifiedAt,
+    correlation: { kind: 'provider-turn', id: 'turn-1' },
+    submittedAt: attachment.verifiedAt
   };
 }
 

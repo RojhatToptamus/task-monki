@@ -1,15 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentExecutionSettings, AgentModel } from '../../shared/agent';
+import type { AttachmentSubmissionRecord } from '../../shared/attachments';
 import {
   type PromptRefinementEvidence,
   type RefinePromptResponse
 } from '../../shared/contracts';
 import { buildPromptRefinementInstruction } from '../../shared/promptTemplates';
-import {
-  verifyAgentTurnAttachments,
-  type AgentTurnAttachment
-} from '../agent/AgentAttachmentDelivery';
+import type { AgentTurnAttachment } from '../agent/AgentAttachmentDelivery';
 const MAX_REFINED_PROMPT_CHARS = 60_000;
 const MAX_EVIDENCE_ITEMS = 64;
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/u;
@@ -35,7 +33,10 @@ export interface PromptRefinementRunRequest {
 }
 
 export interface PromptRefinementRun {
-  result: Promise<string>;
+  result: Promise<{
+    output: string;
+    attachmentSubmissions: AttachmentSubmissionRecord[];
+  }>;
   cancel(): Promise<void>;
 }
 
@@ -91,24 +92,15 @@ export class PromptRefinementService {
     const active: ActiveRefinement = { canceled: false };
     this.active.set(requestId, active);
     try {
-      const attachments = await verifyAgentTurnAttachments(input.attachments ?? []);
-      const nativeImageIds = nativeImageAttachmentIds(
-        userRequest,
-        attachments,
-        input.refinementModel
-      );
+      const attachments = input.attachments ?? [];
       const attachmentContext = attachments.map((attachment, index) => {
-        const providedAsImage = nativeImageIds.has(attachment.attachmentId);
-        const canReadAsText = attachment.kind === 'text';
         return {
           id: attachment.attachmentId,
           referenceLabel: `Attachment ${index + 1} (${attachment.displayName})`,
           displayName: attachment.displayName,
           kind: attachment.kind,
           mediaType: attachment.mediaType,
-          byteCount: attachment.byteCount,
-          ...(canReadAsText ? { readOnlyPath: attachment.path } : {}),
-          providedAsImage
+          byteCount: attachment.byteCount
         };
       });
       const starting = this.runModel({
@@ -134,32 +126,23 @@ export class PromptRefinementService {
         throw new PromptRefinementCanceledError();
       }
 
-      const modelOutput = await run.result;
+      const { output: modelOutput, attachmentSubmissions } = await run.result;
       if (active.canceled) throw new PromptRefinementCanceledError();
       let refined: Awaited<ReturnType<typeof parseModelRefinement>>;
       try {
         refined = await parseModelRefinement({
           output: modelOutput,
           repositoryPath: input.repositoryPath,
-          attachments: attachmentContext
+          attachments: attachmentContext,
+          attachmentSubmissions,
+          forbiddenManagedPaths: attachments.map((attachment) => attachment.path)
         });
       } catch (cause) {
         throw new PromptRefinementResponseValidationError(cause);
       }
-      const relevantImagesNotInspectable = attachments.some(
-        (attachment) =>
-          attachment.kind === 'image' &&
-          imageAttachmentLooksRelevant(userRequest, attachment.displayName) &&
-          !nativeImageIds.has(attachment.attachmentId)
-      );
       return {
         ...refined,
-        source: 'model',
-        ...(relevantImagesNotInspectable
-          ? {
-              warning: `${input.refinementModel.displayName} cannot inspect the relevant image attachment directly. The image remains attached to the downstream task and was referenced without claiming to understand its contents.`
-            }
-          : {})
+        source: 'model'
       };
     } catch (cause) {
       if (active.canceled || cause instanceof PromptRefinementCanceledError) {
@@ -215,9 +198,9 @@ async function parseModelRefinement(input: {
     id: string;
     displayName: string;
     kind: 'image' | 'text';
-    readOnlyPath?: string;
-    providedAsImage: boolean;
   }[];
+  attachmentSubmissions: readonly AttachmentSubmissionRecord[];
+  forbiddenManagedPaths: readonly string[];
 }): Promise<Pick<RefinePromptResponse, 'prompt' | 'titleSuggestion' | 'evidence'>> {
   const normalized = input.output
     .trim()
@@ -264,13 +247,12 @@ async function parseModelRefinement(input: {
   const attachmentsById = new Map(
     input.attachments.map((attachment) => [attachment.id, attachment])
   );
+  const inspectedAttachmentIds = new Set(
+    input.attachmentSubmissions.map((submission) => submission.attachmentId)
+  );
   for (const id of attachmentIdsInspected) {
     const attachment = attachmentsById.get(id);
-    if (
-      !attachment ||
-      (attachment.kind === 'image' && !attachment.providedAsImage) ||
-      (attachment.kind === 'text' && !attachment.readOnlyPath)
-    ) {
+    if (!attachment || !inspectedAttachmentIds.has(id)) {
       throw new Error('Prompt refinement claimed attachment evidence it could not inspect.');
     }
   }
@@ -281,8 +263,9 @@ async function parseModelRefinement(input: {
     }
   }
   if (
-    input.attachments.some(
-      (attachment) => attachment.readOnlyPath && prompt.includes(attachment.readOnlyPath)
+    input.forbiddenManagedPaths.some(
+      (managedPath) =>
+        prompt.includes(managedPath) || titleSuggestion.includes(managedPath)
     )
   ) {
     throw new Error('Prompt refinement exposed an ephemeral attachment path.');
@@ -373,42 +356,6 @@ function emptyEvidence(): PromptRefinementEvidence {
     attachmentIdsInspected: [],
     attachmentIdsReferenced: []
   };
-}
-
-function nativeImageAttachmentIds(
-  userRequest: string,
-  attachments: readonly AgentTurnAttachment[],
-  model: AgentModel
-): Set<string> {
-  const supportsImages = model.inputModalities.some(
-    (modality) => modality.toLowerCase() === 'image'
-  );
-  if (!supportsImages) return new Set();
-  return new Set(
-    attachments
-      .filter(
-        (attachment) =>
-          attachment.kind === 'image' &&
-          imageAttachmentLooksRelevant(userRequest, attachment.displayName)
-      )
-      .map((attachment) => attachment.attachmentId)
-  );
-}
-
-export function imageAttachmentLooksRelevant(
-  userRequest: string,
-  displayName: string
-): boolean {
-  const normalized = userRequest.toLocaleLowerCase('en-US');
-  return (
-    normalized.includes(displayName.toLocaleLowerCase('en-US')) ||
-    /^(?:please\s+)?(?:fix|change|update|match|make)\s+(?:this|that|it)\b/u.test(
-      normalized.trim()
-    ) ||
-    /\b(attach(?:ed|ment)?|image|screenshot|screen|mockup|design|visual|ui|ux|layout|style|color|colour|icon|photo|diagram|shown|look|pixel|responsive|frontend|page|button|modal|panel)\b/u.test(
-      normalized
-    )
-  );
 }
 
 function requireRequestId(requestId: string): string {

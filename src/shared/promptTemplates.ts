@@ -449,8 +449,6 @@ export interface PromptRefinementAttachmentContext {
   kind: 'image' | 'text';
   mediaType: string;
   byteCount: number;
-  readOnlyPath?: string;
-  providedAsImage: boolean;
 }
 
 export function buildPromptRefinementInstruction(input: {
@@ -499,7 +497,7 @@ export function buildPromptRefinementInstruction(input: {
       ? `Downstream implementation model: ${input.targetModel.displayName}; input modalities: ${input.targetModel.inputModalities.join(', ') || 'unknown'}. Account for real capabilities without adding model-specific boilerplate.`
       : 'The downstream implementation model was not resolved. Do not assume unsupported capabilities.',
     attachments.length > 0
-      ? 'Attachments remain part of the downstream task. Inspect only relevant attachments whose read-only path or native image input is available. If an image has no native image input, do not claim to understand its visual contents. Reference relevant uninspected attachments without inventing observations. Use each attachment referenceLabel to distinguish files, including files with the same display name. Managed read-only paths are inspection-only and must never appear in the refined prompt.'
+      ? 'Attachments remain part of the downstream task. Inspect only relevant attachments delivered with this turn. Reference relevant uninspected attachments without inventing observations. Use each attachment referenceLabel to distinguish files, including files with the same display name.'
       : 'No attachments are included.',
     ...attachments.map((attachment) =>
       `Attachment metadata: ${JSON.stringify(attachment)}`

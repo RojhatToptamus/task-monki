@@ -32,7 +32,11 @@ import type {
 } from '../../../shared/agentRuntime';
 import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import {
-  type AgentTurnAttachment
+  assertModelSupportsAttachments,
+  completeAttachmentSubmissions,
+  type AgentTurnAttachment,
+  type AttachmentSubmissionCandidate,
+  verifyAgentTurnAttachments
 } from '../AgentAttachmentDelivery';
 import {
   REDACTED_CREDENTIAL,
@@ -111,6 +115,7 @@ import {
   type OpenCodeMessage,
   type OpenCodeMessageInfo,
   type OpenCodePart,
+  type OpenCodePromptPart,
   type OpenCodePermissionRequest,
   type OpenCodeQuestionRequest,
   type OpenCodeSession
@@ -231,6 +236,11 @@ interface OpenCodeSessionRuntimeOwner {
   runtimeId: string;
   worktreePath: string;
   pure?: boolean;
+}
+
+interface PreparedOpenCodeAttachmentDelivery {
+  parts: OpenCodePromptPart[];
+  submissionCandidates: AttachmentSubmissionCandidate[];
 }
 
 export interface OpenCodeAdapterOptions
@@ -402,7 +412,6 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
     await this.applyPendingRuntimeConfiguration();
-    assertOpenCodeManagedAttachmentsUnsupported(input.attachments);
     const models = await this.listModels();
     return this.resolveExecutionFromModels(
       {
@@ -426,7 +435,6 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   async buildExecutionContext(
     input: BuildAgentRuntimeExecutionContextInput
   ): Promise<AgentExecutionContext> {
-    assertOpenCodeManagedAttachmentsUnsupported(input.attachments ?? []);
     const primaryCwd = await canonicalExistingDirectory(
       input.primaryCwd,
       'read-only working directory'
@@ -442,8 +450,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     );
     if (
       readRoots.length !== 1 ||
-      readRoots[0]?.canonicalPath !== primaryCwd ||
-      readRoots[0]?.kind === 'ATTACHMENT_STORAGE'
+      readRoots[0]?.canonicalPath !== primaryCwd
     ) {
       throw new Error(
         'OpenCode read-only turns support one repository working directory and no additional readable path.'
@@ -492,7 +499,6 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   async startRuntimeTurn(input: StartAgentRuntimeTurn): Promise<StartedAgentRuntimeTurn> {
     await this.applyPendingRuntimeConfiguration(input.run.id);
-    assertOpenCodeManagedAttachmentsUnsupported(input.attachments);
     this.assertRuntimeExecutionContext(input);
     return this.enqueueSessionOperation(input.session.id, async () => {
       let session = (await this.providerRuntime.getSession(input.session.id)) ?? input.session;
@@ -502,13 +508,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       ) {
         throw new Error('OpenCode received an invalid owner-neutral read-only turn.');
       }
-      const running = await this.ensureSessionRuntime(runtimeSessionOwner(session));
       const settings = openCodeNativeReadOnlySettings(
         input.executionContext.modelSettings
       );
       if (!settings.model || !settings.modelProvider) {
         throw new Error('OpenCode read-only turns require a resolved model and provider.');
       }
+      const selectedModel = this.resolveExecutionFromModels(
+        { settings, attachments: input.attachments },
+        this.models,
+        'application OpenCode catalog'
+      ).model;
+      const running = await this.ensureSessionRuntime(runtimeSessionOwner(session));
       let providerSession: OpenCodeSession;
       if (session.providerSessionId) {
         providerSession = parseOpenCodeSession(
@@ -570,6 +581,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           'OpenCode replaced the read-only session runtime before prompt submission.'
         );
       }
+      let attachmentDelivery: PreparedOpenCodeAttachmentDelivery;
+      try {
+        attachmentDelivery = await prepareOpenCodeAttachmentDelivery(
+          input.prompt,
+          selectedModel,
+          input.attachments
+        );
+      } catch (cause) {
+        throw new AgentRuntimeDeliveryError(
+          'NOT_DELIVERED',
+          errorMessage(cause),
+          { cause }
+        );
+      }
       const providerMessageId = createOpenCodeMessageId();
       await this.updateRuntimeRun(
         input.run.id,
@@ -596,7 +621,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           ...(settings.reasoningEffort
             ? { variant: settings.reasoningEffort }
             : {}),
-          parts: [{ type: 'text', text: input.prompt }]
+          parts: attachmentDelivery.parts
         });
       } catch (cause) {
         throw runtimeDeliveryErrorFromOpenCode('session/prompt_async', cause);
@@ -607,12 +632,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           `OpenCode accepted message ${providerMessageId}, but its owning runtime generation changed before acknowledgement.`
         );
       }
+      const startedAt = new Date().toISOString();
       return {
         serverInstanceId: running.server.id,
         providerSessionId: providerSession.id,
         providerSessionTreeId: providerSession.id,
         providerTurnId: providerMessageId,
-        startedAt: new Date().toISOString()
+        startedAt,
+        attachmentSubmissions: completeAttachmentSubmissions(
+          attachmentDelivery.submissionCandidates,
+          { kind: 'provider-message', id: providerMessageId },
+          startedAt
+        )
       };
     });
   }
@@ -808,6 +839,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       serviceTier: undefined
     };
     assertOpenCodeExecutionSettings(settings);
+    assertModelSupportsAttachments(model, input.attachments);
     return { settings, model };
   }
 
@@ -827,7 +859,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       (await client.get<unknown>('/provider')).data
     );
     const selectedSettings = this.resolveExecutionFromModels(
-      { settings: input.settings, attachments: [] },
+      { settings: input.settings, attachments: input.attachments ?? [] },
       this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
       `worktree catalog for ${session.worktreePath}`
     ).settings;
@@ -1152,7 +1184,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (quarantine) await quarantine;
     let session = await this.requireSession(input.session.localSessionId);
     this.assertSessionOwnership(session);
-    assertOpenCodeManagedAttachmentsUnsupported(input.attachments ?? []);
+    const attachments = input.attachments ?? [];
     const settings = input.settings ?? session.requestedSettings;
     assertOpenCodeExecutionSettings(settings);
     const hadProviderSession = Boolean(session.providerSessionId);
@@ -1162,7 +1194,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       (await running.client.get<unknown>('/provider')).data
     );
     const selectedModel = this.resolveExecutionFromModels(
-      { settings, attachments: [] },
+      { settings, attachments },
       this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
       `worktree catalog for ${session.worktreePath}`
     );
@@ -1174,7 +1206,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         iterationId: session.iterationId,
         worktreeId: session.worktreeId,
         worktreePath: session.worktreePath,
-        settings: selectedModel.settings
+        settings: selectedModel.settings,
+        attachments
       });
     }
     if (
@@ -1214,6 +1247,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
       throw new Error('OpenCode replaced the session runtime before prompt submission.');
     }
+    const attachmentDelivery = await prepareOpenCodeAttachmentDelivery(
+      input.prompt,
+      selectedModel.model,
+      attachments
+    );
     const providerMessageId = createOpenCodeMessageId();
     await this.taskRuntime.updateRun(input.localRunId, {
       providerTurnId: providerMessageId,
@@ -1236,7 +1274,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           ...(selectedModel.settings.reasoningEffort
             ? { variant: selectedModel.settings.reasoningEffort }
             : {}),
-          parts: [{ type: 'text', text: input.prompt }]
+          parts: attachmentDelivery.parts
         })
       ).raw;
     } catch (cause) {
@@ -1262,7 +1300,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       await this.taskRuntime.updateRun(input.localRunId, {
         status: 'RUNNING',
         observedSettings: selectedModel.settings,
-        attachmentSubmissions: [],
+        attachmentSubmissions: completeAttachmentSubmissions(
+          attachmentDelivery.submissionCandidates,
+          { kind: 'provider-message', id: providerMessageId },
+          submittedAt
+        ),
         lastEventAt: submittedAt
       }, runtimeOperationId('turn/acknowledged', input.localRunId, providerMessageId, server.id));
       if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
@@ -2610,7 +2652,6 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       context.managedAttachments.length > 0 ||
       context.readRoots.length !== 1 ||
       context.readRoots[0]?.canonicalPath !== context.primaryCwd ||
-      context.readRoots[0]?.kind === 'ATTACHMENT_STORAGE' ||
       context.modelSettings.runtimeId !== this.descriptor.id ||
       context.modelSettings.sandbox !== 'DANGER_FULL_ACCESS' ||
       context.modelSettings.approvalPolicy !== 'NEVER' ||
@@ -6343,14 +6384,49 @@ function terminalPartStatus(part: OpenCodePart): ReturnType<typeof mapOpenCodePa
   return mapped;
 }
 
-function assertOpenCodeManagedAttachmentsUnsupported(
-  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[]
-): void {
-  if (attachments.length > 0) {
-    throw new Error(
-      'Task Monki managed attachments are unavailable for OpenCode because its credential-bearing process cannot attest attachment confinement. OpenCode native file parts remain available to OpenCode-owned tools and integrations.'
+async function prepareOpenCodeAttachmentDelivery(
+  prompt: string,
+  model: AgentModel,
+  attachments: readonly AgentTurnAttachment[]
+): Promise<PreparedOpenCodeAttachmentDelivery> {
+  assertModelSupportsAttachments(model, attachments);
+  const verified = await verifyAgentTurnAttachments(attachments, {
+    includeBytes: () => true
+  });
+  const parts: OpenCodePromptPart[] = [{ type: 'text', text: prompt }];
+  const submissionCandidates: AttachmentSubmissionCandidate[] = [];
+
+  for (const attachment of verified) {
+    if (!attachment.bytes) {
+      throw new Error(
+        `Attachment ${attachment.attachmentId} was not available for inline delivery.`
+      );
+    }
+    const mime = attachment.kind === 'text' ? 'text/plain' : attachment.mediaType;
+    const bytes = Buffer.from(
+      attachment.bytes.buffer,
+      attachment.bytes.byteOffset,
+      attachment.bytes.byteLength
     );
+    parts.push({
+      type: 'file',
+      mime,
+      filename: attachment.displayName,
+      url: `data:${mime};base64,${bytes.toString('base64')}`
+    });
+    submissionCandidates.push({
+      attachmentId: attachment.attachmentId,
+      ordinal: attachment.ordinal,
+      kind: attachment.kind,
+      mediaType: attachment.mediaType,
+      byteCount: attachment.byteCount,
+      sha256: attachment.sha256,
+      transport: 'native-file',
+      verifiedAt: attachment.verifiedAt
+    });
   }
+
+  return { parts, submissionCandidates };
 }
 
 function outputDelta(

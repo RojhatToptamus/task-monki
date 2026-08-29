@@ -92,7 +92,7 @@ export function imageAttachmentModelError(
 ): string | undefined {
   if (!hasImageAttachments || modelAcceptsImageAttachments(selectedModel)) return undefined;
   return selectedModel
-    ? 'Selected model does not accept images. Choose an image-capable model or remove them.'
+    ? 'Image input is not qualified for the selected model and provider version. Choose an image-capable model or remove the images.'
     : 'The selected runtime has not reported an image-capable model yet. Wait for models to load or remove the images.';
 }
 

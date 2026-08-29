@@ -4,6 +4,7 @@ import type {
   AgentSessionRole
 } from '../../shared/agent';
 import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
+import type { AgentAttachmentSelection } from '../../shared/attachments';
 import type {
   AgentAttestedReadRoot,
   AgentExecutionContext,
@@ -46,6 +47,7 @@ export interface PrepareAgentRuntimeTurnInput {
   taskContext?: AgentRuntimeSessionRecord['taskContext'];
   taskDetails?: AgentRuntimeRunRecord['taskDetails'];
   taskReviewTarget?: AgentReviewTarget;
+  attachmentSelection?: readonly AgentAttachmentSelection[];
 }
 
 export interface PreparedAgentRuntimeTurn {

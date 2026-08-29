@@ -24,9 +24,12 @@ import type {
   AgentTokenUsageBreakdown,
   AgentSubagentStatus
 } from './agent';
-import type { AttachmentSubmissionRecord } from './attachments';
+import type {
+  AgentAttachmentSelection,
+  AttachmentSubmissionRecord
+} from './attachments';
 
-export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 5 as const;
+export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 6 as const;
 
 export const AGENT_RUNTIME_LIMITS = {
   maxSessions: 20_000,
@@ -93,7 +96,7 @@ export type AgentRunScope =
 
 export interface AgentAttestedReadRoot {
   canonicalPath: string;
-  kind: 'WORKTREE' | 'REPOSITORY' | 'EMPTY_MANAGED' | 'ATTACHMENT_STORAGE';
+  kind: 'WORKTREE' | 'REPOSITORY' | 'EMPTY_MANAGED';
   entityId?: string;
 }
 
@@ -244,6 +247,8 @@ export interface AgentRuntimeRunRecord {
     detail?: string;
   };
   instructionProfile?: AgentInstructionProfile;
+  /** Exact ordered files selected by the workflow before provider submission. */
+  attachmentSelection: AgentAttachmentSelection[];
   attachmentSubmissions?: AttachmentSubmissionRecord[];
   providerTerminalRawMessage?: AgentProtocolMessageReference;
   /** Exact app-owned tools granted to this run. Empty means no app-owned tool. */

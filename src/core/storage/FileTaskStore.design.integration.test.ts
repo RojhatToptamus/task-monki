@@ -18,6 +18,7 @@ import type {
 import { FileTaskStore, type ManagedDesignRepositoryInput } from './FileTaskStore';
 import { FileAgentRuntimeStore } from './FileAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
+import { toAgentAttachmentSelectionFromRecords } from '../agent/AgentAttachmentDelivery';
 
 const COMMIT = 'a'.repeat(40);
 const EXECUTION_DIGEST = 'b'.repeat(64);
@@ -348,9 +349,12 @@ describe('FileTaskStore Design ownership', () => {
         mediaType: attachment.mediaType,
         byteCount: attachment.byteCount,
         sha256: attachment.sha256,
-        submittedAs: 'prompt-file-reference',
+        transport: 'managed-path',
         verifiedAt: submittedAt,
-        providerTurnId: 'provider-design-reference-turn',
+        correlation: {
+          kind: 'provider-turn',
+          id: 'provider-design-reference-turn'
+        },
         submittedAt
       }]
     });
@@ -1285,6 +1289,13 @@ async function createTestRun(
   }
 ): Promise<RunRecord> {
   const id = randomUUID();
+  const attachmentSelection = toAgentAttachmentSelectionFromRecords(
+    await store.getTurnAttachments({
+      taskId: input.task.id,
+      mode: input.mode,
+      generationKey: input.generationKey
+    })
+  );
   const run = await runtimeFixture(store).task.createTaskRun({
     id,
     taskId: input.task.id,
@@ -1295,6 +1306,7 @@ async function createTestRun(
     prompt: input.prompt,
     generationKey: input.generationKey,
     requestedSettings: input.requestedSettings,
+    attachmentSelection,
     operationId: `test:run:${id}`
   });
   await store.recordAgentRunStarted(run);

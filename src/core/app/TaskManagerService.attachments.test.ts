@@ -146,41 +146,44 @@ describe('TaskManagerService attachments', () => {
     expect((await store.snapshot()).tasks).toEqual([]);
   });
 
-  it('keeps the draft and task store unchanged when full access is selected', async () => {
+  it('allows attachments with network access and full access', async () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
     const service = new TaskManagerService(store, dir, undefined, {
       ...scriptedRuntime.serviceOptions
     });
-    const draft = await service.stageTaskAttachmentBatch({ attachments: [
+    const networkDraft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-full-access-0001', 'notes.txt', 'private context')
     ] });
+    const fullAccessDraft = await service.stageTaskAttachmentBatch({ attachments: [
+      batchFile('client-token-full-access-0002', 'more-notes.txt', 'more private context')
+    ] });
+    const repository = await addTestRepository(store, dir);
 
-    await expect(
-      service.createTask({
-        title: 'Network attachment boundary',
-        prompt: 'Use the attachment.',
-        repositoryId: (await addTestRepository(store, dir)).id,
-        agentSettings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
-        attachmentDraftId: draft.id
-      })
-    ).rejects.toThrow('Network access must be disabled');
-
-    await expect(
-      service.createTask({
-        title: 'Unsafe attachment boundary',
-        prompt: 'Use the attachment.',
-        repositoryId: (await addTestRepository(store, dir)).id,
-        agentSettings: { sandbox: 'DANGER_FULL_ACCESS' },
-        attachmentDraftId: draft.id
-      })
-    ).rejects.toThrow('Full access cannot safely protect attachment copies');
-
-    await expect(store.listAttachmentDraft(draft.id)).resolves.toMatchObject({
-      attachments: [expect.objectContaining({ displayName: 'notes.txt' })]
+    const networkTask = await service.createTask({
+      title: 'Network attachment delivery',
+      prompt: 'Use the attachment.',
+      repositoryId: repository.id,
+      agentSettings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
+      attachmentDraftId: networkDraft.id
     });
-    expect((await store.snapshot()).tasks).toEqual([]);
+    const fullAccessTask = await service.createTask({
+      title: 'Full access attachment delivery',
+      prompt: 'Use the attachment.',
+      repositoryId: repository.id,
+      agentSettings: { sandbox: 'DANGER_FULL_ACCESS' },
+      attachmentDraftId: fullAccessDraft.id
+    });
+
+    expect(networkTask.agentSettings.networkAccess).toBe(true);
+    expect(fullAccessTask.agentSettings.sandbox).toBe('DANGER_FULL_ACCESS');
+    expect(await store.getTaskAttachments(networkTask.id)).toEqual([
+      expect.objectContaining({ displayName: 'notes.txt' })
+    ]);
+    expect(await store.getTaskAttachments(fullAccessTask.id)).toEqual([
+      expect.objectContaining({ displayName: 'more-notes.txt' })
+    ]);
   });
 
   it('rejects malformed and over-limit batch payloads before storage', async () => {

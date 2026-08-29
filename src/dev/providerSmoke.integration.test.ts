@@ -1,8 +1,20 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentModel, AgentRuntimeCatalog } from '../shared/agent';
+import type {
+  AgentCapability,
+  AgentModel,
+  AgentRuntimeCatalog
+} from '../shared/agent';
+import type {
+  AttachmentKind,
+  AttachmentSubmissionRecord,
+  AttachmentDraftSnapshot,
+  StageTaskAttachmentBatchRequest,
+  StagedAttachmentRecord
+} from '../shared/attachments';
 import type {
   AgentRuntimeRunRecord,
   AgentRuntimeStoreState
@@ -64,6 +76,7 @@ describe('parseProviderSmokeArguments', () => {
         '--timeout-seconds',
         '45',
         '--qualify-read-only',
+        '--qualify-attachments',
         '--confirm-throwaway',
         '--confirm-provider-usage'
       ])
@@ -74,7 +87,8 @@ describe('parseProviderSmokeArguments', () => {
       timeoutMs: 45_000,
       confirmThrowaway: true,
       confirmProviderUsage: true,
-      qualifyReadOnly: true
+      qualifyReadOnly: true,
+      qualifyAttachments: true
     });
   });
 
@@ -205,7 +219,319 @@ describe('runProviderSmoke', () => {
     expect(report.authoritative).toBe(true);
     expect(providerSmokeSucceeded(report)).toBe(true);
     expect(service.readOnlySendCount).toBe(0);
+    expect(service.attachmentStageCount).toBe(0);
     expect(report.readOnlyQualifications).toEqual([]);
+  });
+
+  it('qualifies real text and image content with exact path-free run evidence', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'codex:openai/attachment-capable',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'codex',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' }
+        )
+      ])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(service.attachmentStageCount).toBe(1);
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        requestedKinds: ['text', 'image'],
+        textContentUsed: true,
+        imageContentUsed: true,
+        evidenceMatches: true,
+        selection: [
+          expect.objectContaining({ ordinal: 0, kind: 'text' }),
+          expect.objectContaining({ ordinal: 1, kind: 'image' })
+        ],
+        submissions: [
+          expect.objectContaining({ ordinal: 0, transport: 'managed-path' }),
+          expect.objectContaining({ ordinal: 1, transport: 'native-image' })
+        ]
+      }
+    });
+    const evidence = JSON.stringify(report.results[0]?.attachmentQualification);
+    expect(evidence).not.toContain('displayName');
+    expect(evidence).not.toContain('"path"');
+    expect(evidence).not.toContain('"bytes"');
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('reports a verified ACP image path that contradicts the advertised capability', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        advertisedImageInput: false,
+        capabilityDrift: 'ADVERTISED_FALSE_VERIFIED_TRUE'
+      }
+    });
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('does not accept an image guess as false-advertisement qualification', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])],
+      finalMessage:
+        'TASK_MONKI_PROVIDER_SMOKE_OK Q7 appears over a circle, triangle, and square on a dark blue background.'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]?.attachmentQualification).toMatchObject({
+      status: 'FAILED',
+      advertisedImageInput: false,
+      textContentUsed: false,
+      imageContentUsed: true
+    });
+    expect(
+      report.results[0]?.attachmentQualification?.capabilityDrift
+    ).toBeUndefined();
+  });
+
+  it('reports an advertised ACP image path when real content qualification fails', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'cursor-agent-acp:cursor/gpt-5.6-luna',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'cursor-agent-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: '2026.08.25-3e8eec8',
+            advertisedImageInput: true
+          }
+        )
+      ])],
+      omitImageObservation: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      attachmentQualification: {
+        status: 'FAILED',
+        advertisedImageInput: true,
+        capabilityDrift: 'ADVERTISED_TRUE_VERIFICATION_FAILED'
+      }
+    });
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('does not label a general provider failure as image capability drift', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'cursor-agent-acp:cursor/gpt-5.6-luna',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'cursor-agent-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: '2026.08.25-3e8eec8',
+            advertisedImageInput: true
+          }
+        )
+      ])],
+      finalMessage: 'Upgrade your plan to continue'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]?.attachmentQualification).toMatchObject({
+      status: 'FAILED',
+      advertisedImageInput: true,
+      textContentUsed: false,
+      imageContentUsed: false
+    });
+    expect(
+      report.results[0]?.attachmentQualification?.capabilityDrift
+    ).toBeUndefined();
+  });
+
+  it('fails attachment qualification when submission evidence differs from selection', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/attachment-mismatch');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'codex',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' }
+        )
+      ])],
+      mismatchAttachmentEvidence: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      attachmentQualification: {
+        status: 'FAILED',
+        evidenceMatches: false,
+        textContentUsed: true
+      }
+    });
+    expect(report.results[0]?.error).toContain(
+      'did not exactly match the staged batch'
+    );
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('fails attachment qualification when the provider transport is wrong', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/attachment-transport');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'codex',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' }
+        )
+      ])],
+      mismatchAttachmentTransport: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      attachmentQualification: {
+        status: 'FAILED',
+        evidenceMatches: false,
+        textContentUsed: true
+      }
+    });
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('keeps the normal Task smoke when a profile does not support attachments', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('claude-agent-acp:anthropic/claude-test');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime('claude-agent-acp', 'READY', true, [candidate])
+      ])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(service.attachmentStageCount).toBe(0);
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'UNSUPPORTED',
+        requestedKinds: [],
+        evidenceMatches: false
+      }
+    });
+    expect(report.authoritative).toBe(true);
   });
 
   it('qualifies a supported profile through one DIRECT read-only Discourse turn', async () => {
@@ -794,7 +1120,8 @@ describe('runProviderSmoke', () => {
 function model(
   id: string,
   supportedReasoningEfforts: string[] = [],
-  defaultReasoningEffort?: string
+  defaultReasoningEffort?: string,
+  inputModalities: string[] = ['text']
 ): AgentModel {
   const colon = id.indexOf(':');
   const slash = id.indexOf('/');
@@ -811,7 +1138,7 @@ function model(
     supportedReasoningEfforts,
     defaultReasoningEffort,
     serviceTiers: [],
-    inputModalities: ['text'],
+    inputModalities,
     isDefault: false
   };
 }
@@ -821,11 +1148,21 @@ function runtime(
   status: string,
   canStart: boolean,
   models: AgentModel[],
-  explicitModelDiscovery = false
+  explicitModelDiscovery = false,
+  attachmentDelivery: AgentCapability = { maturity: 'unsupported' },
+  options: {
+    kind?: 'ACP_AGENT';
+    runtimeVersion?: string;
+    advertisedImageInput?: boolean;
+  } = {}
 ) {
   return {
     preflight: {
-      runtime: { id: runtimeId, displayName: runtimeId },
+      runtime: {
+        id: runtimeId,
+        displayName: runtimeId,
+        ...(options.kind ? { kind: options.kind } : {})
+      },
       readiness: {
         status,
         canStart,
@@ -835,6 +1172,7 @@ function runtime(
       capabilities: explicitModelDiscovery
         ? {
             modelCatalog: { activation: 'EXPLICIT' },
+            attachmentDelivery,
             executionPolicy:
               runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
             extensions: {},
@@ -842,13 +1180,30 @@ function runtime(
           }
         : {
             modelCatalog: {},
+            attachmentDelivery,
             executionPolicy:
               runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
             extensions: {},
             detachedReview: { maturity: 'unsupported' }
-          }
+          },
+      ...(
+        options.runtimeVersion || runtimeId === 'codex'
+          ? { runtimeVersion: options.runtimeVersion ?? '0.146.0' }
+          : {}
+      )
     },
     models,
+    ...(options.advertisedImageInput === undefined
+      ? {}
+      : {
+          native: {
+            initialize: {
+              agentCapabilities: {
+                promptCapabilities: { image: options.advertisedImageInput }
+              }
+            }
+          }
+        }),
     refreshedAt: '2026-07-14T00:00:00.000Z'
   };
 }
@@ -918,6 +1273,9 @@ interface FakeProviderBehavior {
   onStart?: () => Promise<void>;
   readOnlyIntegrity?: 'UNCHANGED' | 'CHANGED' | 'UNVERIFIABLE';
   mutateReadOnlyProbe?: boolean;
+  mismatchAttachmentEvidence?: boolean;
+  mismatchAttachmentTransport?: boolean;
+  omitImageObservation?: boolean;
 }
 
 class FakeProviderSmokeService implements ProviderSmokeService {
@@ -925,7 +1283,17 @@ class FakeProviderSmokeService implements ProviderSmokeService {
   private catalogIndex = 0;
   private taskSequence = 0;
   private runSequence = 0;
+  private attachmentDraftSequence = 0;
+  private attachmentSequence = 0;
   private readonly worktreePaths = new Map<string, string>();
+  private readonly attachmentDrafts = new Map<
+    string,
+    { snapshot: AttachmentDraftSnapshot; bytes: Map<string, Uint8Array> }
+  >();
+  private readonly taskAttachments = new Map<
+    string,
+    { records: StagedAttachmentRecord[]; bytes: Map<string, Uint8Array> }
+  >();
   cancelCount = 0;
   readonly discoveredRuntimeIds: string[] = [];
   readonly cancellationTransitions: Array<{
@@ -934,6 +1302,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
   }> = [];
   readonly startedModels: Array<{ model?: string; reasoningEffort?: string }> = [];
   readOnlySendCount = 0;
+  attachmentStageCount = 0;
   readOnlyProbeFileName?: string;
   private discourseAggregate?: DiscourseConversationAggregateRecord;
   private readonly runtimeRuns: AgentRuntimeRunRecord[] = [];
@@ -980,6 +1349,37 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     };
     this.snapshot.repositories = [repository];
     return structuredClone(repository);
+  }
+
+  async stageTaskAttachmentBatch(
+    input: StageTaskAttachmentBatchRequest
+  ): Promise<AttachmentDraftSnapshot> {
+    this.attachmentStageCount += 1;
+    const now = new Date().toISOString();
+    const draftId = `attachment-draft-${++this.attachmentDraftSequence}`;
+    const bytes = new Map<string, Uint8Array>();
+    const attachments = input.attachments.map((candidate, ordinal) => {
+      const attachmentBytes = new Uint8Array(candidate.bytes.slice(0));
+      const id = `attachment-${++this.attachmentSequence}`;
+      bytes.set(id, attachmentBytes);
+      return {
+        id,
+        draftId,
+        clientToken: candidate.clientToken,
+        ordinal,
+        displayName: candidate.displayName,
+        kind: candidate.displayName.endsWith('.png') ? 'image' : 'text',
+        mediaType: candidate.displayName.endsWith('.png')
+          ? 'image/png'
+          : 'text/plain',
+        byteCount: attachmentBytes.byteLength,
+        sha256: createHash('sha256').update(attachmentBytes).digest('hex'),
+        createdAt: now
+      } satisfies StagedAttachmentRecord;
+    });
+    const snapshot = { id: draftId, attachments, createdAt: now, updatedAt: now };
+    this.attachmentDrafts.set(draftId, { snapshot, bytes });
+    return structuredClone(snapshot);
   }
 
   async createDiscourseConversation(input: Parameters<
@@ -1081,6 +1481,17 @@ class FakeProviderSmokeService implements ProviderSmokeService {
       projection: createInitialProjection(now)
     } satisfies Task;
     this.snapshot.tasks.push(task);
+    if (input.attachmentDraftId) {
+      const draft = this.attachmentDrafts.get(input.attachmentDraftId);
+      if (!draft) throw new Error(`Fake attachment draft is missing: ${input.attachmentDraftId}`);
+      this.taskAttachments.set(task.id, {
+        records: structuredClone(draft.snapshot.attachments),
+        bytes: new Map(
+          [...draft.bytes].map(([id, value]) => [id, new Uint8Array(value)])
+        )
+      });
+      this.attachmentDrafts.delete(input.attachmentDraftId);
+    }
     return structuredClone(task);
   }
 
@@ -1089,6 +1500,21 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     if (!task) throw new Error(`Fake task is missing: ${input.taskId}`);
     const now = new Date().toISOString();
     const timesOut = this.runSequence < (this.behavior.timedOutRunCount ?? 0);
+    const selectedAttachments = this.taskAttachments.get(task.id);
+    const attachmentSelection = (selectedAttachments?.records ?? []).map(
+      (attachment) => ({
+        attachmentId: attachment.id,
+        ordinal: attachment.ordinal,
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        byteCount: attachment.byteCount,
+        sha256: attachment.sha256
+      })
+    );
+    const defaultFinalMessage = attachmentSmokeFinalMessage(
+      selectedAttachments,
+      !this.behavior.omitImageObservation
+    );
     const run = {
       id: `run-${++this.runSequence}`,
       runtimeId: task.runtimeId,
@@ -1109,7 +1535,24 @@ class FakeProviderSmokeService implements ProviderSmokeService {
       eventCount: 1,
       finalMessage: this.behavior.hangStart || timesOut
         ? undefined
-        : (this.behavior.finalMessage ?? 'TASK_MONKI_PROVIDER_SMOKE_OK')
+        : (this.behavior.finalMessage ?? defaultFinalMessage),
+      attachmentSelection,
+      attachmentSubmissions: attachmentSelection.map((attachment, index) => ({
+        ...attachment,
+        ...(this.behavior.mismatchAttachmentEvidence && index === 0
+          ? { attachmentId: 'different-attachment' }
+          : {}),
+        transport:
+          this.behavior.mismatchAttachmentTransport && index === 0
+            ? 'text-block'
+            : fakeAttachmentTransport(task.runtimeId, attachment.kind),
+        verifiedAt: now,
+        correlation: {
+          kind: fakeAttachmentCorrelation(task.runtimeId),
+          id: `provider-turn-${task.id}`
+        },
+        submittedAt: now
+      }))
     } as RunRecord;
     this.snapshot.runs.push(run);
     this.startedModels.push({
@@ -1316,6 +1759,47 @@ class FakeProviderSmokeService implements ProviderSmokeService {
   }
 }
 
+function attachmentSmokeFinalMessage(
+  attachments:
+    | { records: readonly StagedAttachmentRecord[]; bytes: ReadonlyMap<string, Uint8Array> }
+    | undefined,
+  includeImageObservation = true
+): string {
+  if (!attachments || attachments.records.length === 0) {
+    return 'TASK_MONKI_PROVIDER_SMOKE_OK';
+  }
+  const text = attachments.records.find((attachment) => attachment.kind === 'text');
+  const token = text
+    ? Buffer.from(attachments.bytes.get(text.id) ?? []).toString('utf8')
+      .match(/TM_ATTACHMENT_FACT_[A-F0-9]+/u)?.[0]
+    : undefined;
+  const imageObservation = includeImageObservation && attachments.records.some(
+    (attachment) => attachment.kind === 'image'
+  )
+    ? '\nThe code is Q7, with a circle, triangle, and square from left to right on a navy background.'
+    : '';
+  return `TASK_MONKI_PROVIDER_SMOKE_OK${token ? `\n${token}` : ''}${imageObservation}`;
+}
+
+function fakeAttachmentTransport(
+  runtimeId: string,
+  kind: AttachmentKind
+): AttachmentSubmissionRecord['transport'] {
+  if (kind === 'image') return runtimeId === 'opencode' ? 'native-file' : 'native-image';
+  if (runtimeId === 'opencode') return 'native-file';
+  if (runtimeId === 'grok-acp') return 'embedded-resource';
+  if (runtimeId === 'cursor-agent-acp') return 'text-block';
+  return 'managed-path';
+}
+
+function fakeAttachmentCorrelation(
+  runtimeId: string
+): AttachmentSubmissionRecord['correlation']['kind'] {
+  if (runtimeId === 'opencode') return 'provider-message';
+  if (runtimeId.endsWith('-acp')) return 'client-request';
+  return 'provider-turn';
+}
+
 function protocolReference(run: RunRecord, sequence: number, recordedAt: string) {
   return {
     serverInstanceId: `server-${run.id}`,
@@ -1390,6 +1874,7 @@ async function runHarness(
       confirmThrowaway: true,
       confirmProviderUsage: true,
       qualifyReadOnly: false,
+      qualifyAttachments: false,
       help: false,
       ...optionOverrides
     },

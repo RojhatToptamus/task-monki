@@ -101,6 +101,7 @@ import type {
   ValidatePreviewRecipeDraftRequest,
   AttachmentContent,
   AttachmentDraftSnapshot,
+  AgentAttachmentSelection,
   DiscardTaskAttachmentDraftRequest,
   ReadTaskAttachmentRequest,
   StageTaskAttachmentBatchRequest
@@ -183,7 +184,7 @@ import type {
   ResolvedPreviewRoute
 } from '../preview/runtime/PreviewOpenService';
 import {
-  assertAttachmentSandboxSupportsDelivery,
+  toAgentAttachmentSelection,
   toAgentTurnAttachments,
   type AgentTurnAttachment
 } from '../agent/AgentAttachmentDelivery';
@@ -1934,7 +1935,8 @@ export class TaskManagerService {
       prompt: input.instruction,
       priority: 'TASK_FOREGROUND',
       clientOperationId: operationId,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      attachmentSelection: toAgentAttachmentSelection(input.attachments)
     });
     try {
       const started = await this.agents.startPreparedTurnNow(
@@ -2014,7 +2016,10 @@ export class TaskManagerService {
             run.terminalReason ?? `Prompt refinement ended with ${run.status}.`
           );
         }
-        return output;
+        return {
+          output,
+          attachmentSubmissions: [...(run.attachmentSubmissions ?? [])]
+        };
       })
       .catch(async (error: unknown) => {
         const run = await this.agentRuntimeStore.getRun(runId);
@@ -4379,7 +4384,10 @@ function executableForRuntime(result: ExternalToolProbeResult): string {
 async function prepareTaskCreationSettings(
   adapter: AgentRuntimeAdapter,
   requestedSettings: AgentExecutionSettings,
-  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[]
+  attachments: readonly Pick<
+    AgentAttachmentSelection,
+    'kind' | 'mediaType' | 'byteCount' | 'sha256'
+  >[]
 ): Promise<AgentExecutionSettings> {
   const capabilities = await adapter.capabilities();
   const policy = capabilities.executionPolicy;
@@ -4410,7 +4418,6 @@ async function prepareTaskCreationSettings(
     ...explicitSettings,
     runtimeId: adapter.descriptor.id
   };
-  assertAttachmentSandboxSupportsDelivery(settings, attachments);
   if (attachments.length === 0) {
     // Task capture is local and must remain available while a runtime is
     // offline. Model/catalog resolution is definitive at turn start.
@@ -4425,7 +4432,6 @@ async function prepareTaskCreationSettings(
       `${adapter.descriptor.displayName} returned execution settings for another runtime.`
     );
   }
-  assertAttachmentSandboxSupportsDelivery(resolved.settings, attachments);
   return resolved.settings;
 }
 

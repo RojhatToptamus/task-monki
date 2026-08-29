@@ -18,7 +18,10 @@ import type {
   InteractionRequestRecord
 } from '../../shared/agent';
 import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
-import type { AttachmentSubmissionRecord } from '../../shared/attachments';
+import type {
+  AgentAttachmentSelection,
+  AttachmentSubmissionRecord
+} from '../../shared/attachments';
 import type {
   AgentExecutionContext,
   AgentRuntimeRunRecord,
@@ -38,8 +41,8 @@ export interface CreateAgentSession {
   worktreePath: string;
   settings: AgentExecutionSettings;
   /**
-   * Storage-verified task attachments whose exact managed paths must be part
-   * of a provider session's initial confinement boundary.
+   * Storage-verified task attachments used to qualify the initial session.
+   * Each adapter owns any session-scoped access and turn transport.
    */
   attachments?: AgentTurnAttachment[];
 }
@@ -102,7 +105,10 @@ export interface AgentReconciliationResult {
 
 export interface ResolveAgentExecution {
   settings: AgentExecutionSettings;
-  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[];
+  attachments: readonly Pick<
+    AgentAttachmentSelection,
+    'kind' | 'mediaType' | 'byteCount' | 'sha256'
+  >[];
 }
 
 export interface ResolvedAgentExecution {

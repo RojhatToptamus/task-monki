@@ -122,8 +122,8 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       detail: 'OpenCode retains its native tool, plugin, and MCP runtime.'
     },
     attachmentDelivery: {
-      maturity: 'unsupported',
-      detail: 'Managed attachment delivery is disabled because OpenCode cannot attest confinement of attachment bytes from its credential-bearing process.'
+      maturity: 'stable',
+      detail: 'Task Monki sends selected verified files as bounded native data-URL parts. OpenCode and its model service receive those bytes; this is not an OS confinement boundary.'
     },
     runtimeRecovery: {
       maturity: 'stable',
@@ -149,7 +149,7 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       },
       nativeFileParts: {
         maturity: 'stable',
-        detail: 'OpenCode retains its native file-part capability for OpenCode-owned tools and integrations; Task Monki does not expose it as managed attachment delivery.'
+        detail: 'OpenCode native file parts carry Task Monki managed attachments as verified bounded data URLs.'
       },
     }
   };

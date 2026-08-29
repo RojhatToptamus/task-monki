@@ -96,7 +96,7 @@ describe('NewTaskPanel', () => {
         serviceTiers: [],
         inputModalities: ['text']
       })
-    ).toContain('does not accept images');
+    ).toContain('not qualified');
     expect(
       imageAttachmentModelError(true, {
         id: 'vision-model',

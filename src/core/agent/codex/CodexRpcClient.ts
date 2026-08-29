@@ -7,10 +7,7 @@ import {
   redactCredentialText,
   redactCredentialValue
 } from '../AgentCredentialRedaction';
-import {
-  DesignToolProtocolSanitizer,
-  redactProtocolJournalRecord
-} from '../journal/AgentProtocolRedaction';
+import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
 import type { AgentProviderRuntimeStore } from '../AgentRuntimeStore';
 import {
   decodeCodexProtocolMessage,
@@ -55,6 +52,7 @@ import type { TurnSteerParams } from './protocol/generated/v2/TurnSteerParams';
 import type { TurnSteerResponse } from './protocol/generated/v2/TurnSteerResponse';
 import type { ReviewStartParams } from './protocol/generated/v2/ReviewStartParams';
 import type { ReviewStartResponse } from './protocol/generated/v2/ReviewStartResponse';
+import { CodexProtocolSanitizer } from './CodexProtocolSanitizer';
 
 interface CodexMethodMap {
   initialize: { params: InitializeParams; result: InitializeResponse };
@@ -143,7 +141,7 @@ export class CodexRpcClient {
     readonly serverInstanceId: string,
     private readonly requestTimeoutMs = 30_000,
     private readonly sensitiveValues: readonly string[] = [],
-    private readonly designToolSanitizer = new DesignToolProtocolSanitizer()
+    private readonly protocolSanitizer = new CodexProtocolSanitizer()
   ) {
     this.closedSignal = new Promise((resolve) => {
       this.resolveClosedSignal = resolve;
@@ -285,7 +283,7 @@ export class CodexRpcClient {
   ): Promise<AgentProtocolMessageReference> {
     const raw = JSON.stringify(message);
     const safe = redactProtocolJournalRecord(
-      this.designToolSanitizer.sanitizeRaw(raw, 'OUTBOUND'),
+      this.protocolSanitizer.sanitizeRaw(raw, 'OUTBOUND'),
       { transport: 'stdio' },
       this.sensitiveValues
     );
@@ -328,7 +326,7 @@ export class CodexRpcClient {
     let rawReference: AgentProtocolMessageReference | undefined;
     try {
       const safe = redactProtocolJournalRecord(
-        this.designToolSanitizer.sanitizeRaw(
+        this.protocolSanitizer.sanitizeRaw(
           redactInboundStreamingJournalPayload(line),
           'INBOUND'
         ),
@@ -386,11 +384,12 @@ export class CodexRpcClient {
     this.pending.delete(response.id);
 
     if (response.error) {
+      const safeError = this.protocolSanitizer.sanitizeValue(response.error);
       pending.reject(
         new CodexRpcError(
-          response.error.code,
-          redactCredentialText(response.error.message, this.sensitiveValues),
-          redactCredentialValue(response.error.data, this.sensitiveValues)
+          safeError.code,
+          redactCredentialText(safeError.message, this.sensitiveValues),
+          redactCredentialValue(safeError.data, this.sensitiveValues)
         )
       );
       return;

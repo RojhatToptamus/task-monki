@@ -557,6 +557,137 @@ describe('FileAgentRuntimeStore', () => {
     expect((await fixture.store.snapshot()).revision).toBe(2);
   });
 
+  it('stores the exact attachment selection and rejects changed retries or evidence', async () => {
+    const fixture = await storeFixture();
+    const session = await fixture.store.createSession(
+      sessionInput('attachment-session', taskOwner, 'attachment-session-operation')
+    );
+    const selection = [{
+      attachmentId: 'attachment-1',
+      ordinal: 0,
+      kind: 'text' as const,
+      mediaType: 'text/plain',
+      byteCount: 12,
+      sha256: 'a'.repeat(64)
+    }];
+    const request = {
+      ...runInput('attachment-run', session, taskScope, 'attachment-run-operation'),
+      attachmentSelection: selection
+    };
+    const run = await fixture.store.createRun(request);
+    expect(run.attachmentSelection).toEqual(selection);
+    await expect(
+      fixture.store.createRun({
+        ...request,
+        attachmentSelection: [{ ...selection[0]!, sha256: 'b'.repeat(64) }]
+      })
+    ).rejects.toThrow('conflicts');
+    await expect(
+      fixture.store.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          attachmentSubmissions: [{
+            ...selection[0]!,
+            sha256: 'b'.repeat(64),
+            transport: 'text-block',
+            verifiedAt: '2026-07-13T00:00:10.000Z',
+            correlation: { kind: 'client-request', id: 'request-1' },
+            submittedAt: '2026-07-13T00:00:11.000Z'
+          }]
+        },
+        'attachment-run-invalid-evidence'
+      )
+    ).rejects.toThrow('submission evidence is invalid');
+    expect((await fixture.store.getRun(run.id))?.delivery).toBe('NOT_SENT');
+  });
+
+  it('binds first-turn access to a queued selected run but keeps it immutable after materialization', async () => {
+    const fixture = await storeFixture();
+    const runtime = fixture.store.taskAgentRuntimeAccess(async () => undefined);
+    const session = await fixture.store.createSession(
+      sessionInput('attachment-access-session', taskOwner, 'attachment-access-session')
+    );
+    const run = await fixture.store.createRun({
+      ...runInput('attachment-access-run', session, taskScope, 'attachment-access-run'),
+      attachmentSelection: [{
+        attachmentId: 'attachment-1',
+        ordinal: 0,
+        kind: 'text',
+        mediaType: 'text/plain',
+        byteCount: 12,
+        sha256: 'b'.repeat(64)
+      }]
+    });
+    expect(run).toMatchObject({ status: 'QUEUED', delivery: 'NOT_SENT' });
+    const executionContext: AgentExecutionContext = {
+      ...session.executionContext,
+      managedAttachments: [{
+        attachmentId: 'attachment-1',
+        contentSha256: 'b'.repeat(64),
+        byteCount: 12
+      }],
+      permissionProfileHash: 'c'.repeat(64)
+    };
+    const accessEpoch = createAgentSessionAccessEpoch({
+      owner: session.owner,
+      sessionId: session.id,
+      epoch: session.accessEpoch.epoch,
+      runtimeId: session.runtimeId,
+      model: session.accessEpoch.model,
+      executionContext,
+      createdAt: session.accessEpoch.createdAt
+    });
+
+    await expect(
+      runtime.updateAgentSessionAccess(
+        session.id,
+        { executionContext, accessEpoch },
+        'attachment-access-before-provider-prompt'
+      )
+    ).resolves.toBeDefined();
+
+    const updated = (await fixture.store.getSession(session.id))!;
+    const owned = await fixture.store.updateSession(
+      updated.id,
+      updated.recordRevision,
+      { providerSessionId: 'thread-1', status: 'IDLE', materialized: false },
+      'attachment-access-provider-session'
+    );
+    await fixture.store.updateSession(
+      owned.id,
+      owned.recordRevision,
+      { materialized: true },
+      'attachment-access-materialized'
+    );
+    await expect(
+      runtime.updateAgentSessionAccess(
+        session.id,
+        {
+          executionContext: {
+            ...executionContext,
+            managedAttachments: []
+          },
+          accessEpoch: createAgentSessionAccessEpoch({
+            owner: session.owner,
+            sessionId: session.id,
+            epoch: session.accessEpoch.epoch,
+            runtimeId: session.runtimeId,
+            model: session.accessEpoch.model,
+            executionContext: {
+              ...executionContext,
+              managedAttachments: []
+            },
+            createdAt: session.accessEpoch.createdAt
+          })
+        },
+        'attachment-access-after-provider-prompt'
+      )
+    ).rejects.toThrow('immutable after provider delivery');
+  });
+
   it('records provider-observed subagent runs as acknowledged without scheduler send intent', async () => {
     const fixture = await storeFixture();
     const session = await fixture.store.createSession(

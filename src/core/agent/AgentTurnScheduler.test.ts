@@ -186,6 +186,7 @@ function runtimeRun(entry: AgentSchedulerQueueEntry): AgentRuntimeRunRecord {
     promptArtifactId: `${entry.id}-prompt`,
     outputArtifactId: `${entry.id}-output`,
     diagnosticArtifactId: `${entry.id}-diagnostics`,
+    attachmentSelection: [],
     recordRevision: 1,
     createdAt: entry.enqueuedAt
   };

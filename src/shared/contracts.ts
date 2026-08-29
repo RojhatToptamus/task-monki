@@ -81,7 +81,7 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 24 as const;
+export const TASK_STORE_SCHEMA_VERSION = 25 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -589,6 +589,8 @@ export interface RunRecord {
   eventCount: number;
   lastEventType?: string;
   finalMessage?: string;
+  /** Derived from the canonical runtime run. It contains no path or bytes. */
+  attachmentSelection: import('./attachments').AgentAttachmentSelection[];
   attachmentSubmissions?: AttachmentSubmissionRecord[];
 }
 

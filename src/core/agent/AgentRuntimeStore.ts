@@ -11,6 +11,7 @@ import type {
   AgentRuntimeArtifactKind,
   AgentRuntimeArtifactRecord,
   AgentRuntimeRunRecord,
+  AgentSessionAccessEpoch,
   AgentRuntimeSessionRecord,
   AgentRuntimeStoreState,
   AgentRuntimeTelemetryKind,
@@ -35,6 +36,7 @@ import type {
   InteractionRequestStatus
 } from '../../shared/agent';
 import type { ArtifactRecord, DomainEvent, RunRecord } from '../../shared/contracts';
+import type { AgentAttachmentSelection } from '../../shared/attachments';
 
 export interface CreateAgentRuntimeServerInput {
   runtimeId: AgentServerInstance['runtimeId'];
@@ -122,7 +124,10 @@ export interface CreateRuntimeRunInput
     | 'stopRequestedAt'
     | 'lastEventAt'
     | 'endedAt'
-  > {}
+    | 'attachmentSelection'
+  > {
+  attachmentSelection?: AgentAttachmentSelection[];
+}
 
 export interface CreateObservedRuntimeRunInput extends CreateRuntimeRunInput {
   serverInstanceId: string;
@@ -267,6 +272,7 @@ export interface CreateTaskRuntimeRunInput {
   continuedFromRunId?: string;
   reviewTarget?: import('../../shared/agent').AgentReviewTarget;
   instructionProfile?: import('../../shared/agent').AgentInstructionProfile;
+  attachmentSelection?: AgentAttachmentSelection[];
   operationId: string;
 }
 
@@ -286,6 +292,14 @@ export interface TaskAgentRuntimeAccess {
   updateAgentSession(
     sessionId: string,
     update: Partial<AgentSessionRecord>,
+    operationId: string
+  ): Promise<AgentSessionRecord>;
+  updateAgentSessionAccess(
+    sessionId: string,
+    update: {
+      executionContext: AgentExecutionContext;
+      accessEpoch: AgentSessionAccessEpoch;
+    },
     operationId: string
   ): Promise<AgentSessionRecord>;
   getRun(runId: string): Promise<RunRecord | undefined>;
@@ -405,6 +419,8 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
         AgentRuntimeSessionRecord,
         | 'providerSessionId'
         | 'providerSessionTreeId'
+        | 'executionContext'
+        | 'accessEpoch'
         | 'parentSessionId'
         | 'forkedFromSessionId'
         | 'providerParentSessionId'

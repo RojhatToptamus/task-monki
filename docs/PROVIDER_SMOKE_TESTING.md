@@ -1,6 +1,6 @@
 # Provider Runtime Smoke Testing
 
-Date: 2026-07-26
+Date: 2026-08-29
 
 `npm run smoke:providers` verifies real provider/model connectivity, selection,
 streaming, tool execution, repository mutation, Git evidence, and terminal
@@ -48,7 +48,7 @@ Use repeatable exact selectors for a focused rerun:
 npm run smoke:providers -- \
   --repository /tmp/task-monki-provider-smoke-repo \
   --runtime grok-acp \
-  --model grok-acp:xai/grok-build \
+  --model grok-acp:xai/grok-4.6 \
   --timeout-seconds 300 \
   --confirm-throwaway \
   --confirm-provider-usage
@@ -97,6 +97,55 @@ If a write occurs, the harness does not erase it. It keeps the changed
 repository, runtime records, Discourse records, and `report.json` as evidence.
 Inspect that evidence before you remove the state root or the probe file.
 
+## Qualify attachment content
+
+Add `--qualify-attachments` to the normal smoke command:
+
+```sh
+npm run smoke:providers -- \
+  --repository /tmp/task-monki-provider-smoke-repo \
+  --qualify-attachments \
+  --confirm-throwaway \
+  --confirm-provider-usage
+```
+
+The command keeps the normal Task smoke flow. It adds one managed text file to
+the same Task when the provider profile supports attachments. The file contains
+a new random fact. The prompt does not contain that fact.
+
+The provider must return the fact. The run must also contain the exact ordered
+selection and one matching submission for each selected file. Each submission
+must use the expected provider transport and correlation kind.
+
+If the selected model supports image input, the command also attaches
+`build/provider-smoke-image.png`. The provider must report an unrevealed visual
+code, the ordered shapes, and the background color. The report includes the
+payload size and the model's effective input modes. Effective support normally
+follows ACP negotiation and exact model qualification. It can also include one
+exact provider-local exception for a proven false capability flag.
+
+The report stores only path-free selection and submission evidence. It does not
+store attachment paths or bytes. A supported qualification fails if the
+content result or evidence does not match. An unsupported profile keeps its
+normal Task result and records the reason.
+
+The content answer proves that the model used the file. The submission record
+proves which Task Monki transport reached provider admission. Inspect the saved
+provider journal as independent native request evidence. The journal must keep
+the content shape and replace attachment bytes, data URLs, and managed paths.
+
+The report keeps the advertised image flag separate from verified behavior.
+It reports `ADVERTISED_FALSE_VERIFIED_TRUE` when an exact image test passes
+despite an explicit false flag. It reports
+`ADVERTISED_TRUE_VERIFICATION_FAILED` only when text and delivery evidence pass
+but image understanding fails. Account, network, timeout, and cancellation
+failures keep their exact failure reason. They are not capability evidence.
+
+Task Monki never runs this paid test during normal app use. Both command
+confirmations are required. A passing result can justify a reviewed profile
+entry. It does not create a persistent qualification cache or update support
+automatically.
+
 ## What the harness verifies
 
 - Runtime and model discovery use the same registry exposed to the app.
@@ -116,6 +165,11 @@ Inspect that evidence before you remove the state root or the probe file.
   `TASK_MONKI_PROVIDER_SMOKE_OK` sentinel. When a runtime advertises a
   non-interactive write-capable execution preset, the harness selects the
   least-privileged such preset; otherwise its normal policy remains in force.
+- Attachment qualification reuses the normal Task attachment draft and
+  adoption flow. It does not create a separate smoke-only file path.
+- The attachment report records the runtime version, advertised image flag,
+  effective model input modes, qualification result, capability drift, payload
+  size, exact path-free selection, and submissions.
 - The execution timeout covers task creation, provider session/turn startup,
   execution, and normal post-run evidence. When it expires, or when an
   interaction appears, a separate bounded cancellation window starts. The
@@ -189,8 +243,10 @@ status. It requires a complete selected matrix and at least one executed model.
 Profiles excluded by runtime or model selectors receive no qualification. It
 also requires only `PASSED` results, complete selector coverage, and an
 unchanged source repository. With `--qualify-read-only`, each supported
-qualification must also pass. An `UNSUPPORTED` result records an intentional
-profile limit.
+qualification must also pass. With `--qualify-attachments`, every requested
+qualified content path must pass. An `UNSUPPORTED` result records an
+intentional profile or model limit. Capability drift stays visible even when
+the normal Task passes.
 
 The harness does not remove Git worktrees, branches, or evidence automatically.
 Cleanup is an explicit operator action after the report has been inspected.

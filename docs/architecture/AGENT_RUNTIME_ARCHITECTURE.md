@@ -2,7 +2,7 @@
 
 Date: 2026-08-29
 
-Status: Provider milestones 1 and 2 are implemented. The milestone 3 plan is final and ready to implement. Later milestones are approved but not implemented.
+Status: Provider milestones 1, 2, and 3 are implemented. Later milestones are approved but not implemented.
 
 This document is the provider architecture source of truth.
 It records current behavior and the approved target direction.
@@ -20,6 +20,8 @@ Provider milestone 1 removed this split.
 Task, Design, Discourse, and review now use one runtime coordinator and one runtime store.
 Provider milestone 2 moved review, prompt refinement, and Discourse to one shared read-only turn path.
 Each workflow still owns its product state and rules.
+Provider milestone 3 added provider-neutral selection and evidence.
+Each adapter still owns its native attachment transport.
 
 Provider adapters translate these items:
 
@@ -103,8 +105,8 @@ Discourse and Design then added separate Codex paths instead of extending one ru
 
 Attachment history shows a different result.
 The secure store, staging, adoption, and cleanup remain correct.
-The multi-provider work added transport blocks because shared policy was still Codex-shaped.
-Milestone 3 must change transport and run evidence, not attachment byte ownership.
+The multi-provider work first added transport blocks because shared policy was Codex-shaped.
+Milestone 3 changed transport and run evidence without changing attachment byte ownership.
 
 ### Main files inspected
 
@@ -280,9 +282,9 @@ This table describes current code, not provider protocol potential.
 | Stop active turn | Yes | Yes | Yes | Yes | Yes |
 | Queue next message | Yes | Yes | Yes | Yes | Yes |
 | Live steering | Yes | No | No | No | No |
-| Managed attachments | Yes | Blocked in adapter | Blocked in adapter | Blocked in adapter | Blocked in adapter |
-| Prompt refinement | Yes | Yes, no attachments | No | Yes, no attachments | No |
-| Review provider | Yes | Yes, no attachments | No | Yes, no attachments | No |
+| Managed attachments | Text and image | Text and model-gated image | Text and exact-qualified Grok 4.6 PNG image | Text and exact-qualified Composer 2.5 PNG image | No |
+| Prompt refinement | Yes | Yes | No | Yes, with the exact-qualified image path | No |
+| Review provider | Yes | Yes | No | Yes, with the exact-qualified image path | No |
 | Discourse participant | Yes | Yes | No | Yes | No |
 | Design | Yes | No | No | No | No |
 | Provider resume | Yes | Yes | Negotiated | Negotiated | Negotiated |
@@ -293,8 +295,7 @@ This table describes current code, not provider protocol potential.
 The user-facing fork alternative creates a new Task and worktree.
 It does not use native provider fork.
 
-Provider-neutral managed attachment delivery belongs to milestone 3.
-Milestone 2 does not widen file delivery for OpenCode or ACP profiles.
+Provider-neutral managed attachment delivery is implemented in milestone 3.
 
 ## Why current combinations fail
 
@@ -303,11 +304,9 @@ Milestone 2 does not widen file delivery for OpenCode or ACP profiles.
 | Non-Codex Design creation | The request, service, store, and validation require Codex. | Historical coupling and unnecessary restriction |
 | Non-Codex `inspect_design` | Tool registration exists only inside the Codex adapter. | Adapter transport responsibility |
 | Non-Codex Design instructions | Only Codex maps the app-owned instruction and skill pack. | Adapter responsibility |
-| OpenCode attachments | The adapter rejects them and sends text-only parts. | Missing adapter feature |
-| ACP attachments | The adapter rejects them and sends one text block. | Missing adapter feature |
-| Attachment plus provider network | Shared code requires network-off execution. | Unnecessary Codex-shaped restriction |
-| Attachment plus full process access | Shared code rejects the run. | Unnecessary universal restriction |
-| Selected Codex attachment in a shared read-only turn | The current adapter grants the parent attachment directory. This exposes unselected sibling files. | Incorrect Codex path mapping |
+| OpenCode image attachment with a text-only model | The adapter rejects it before submission. | Model input limit |
+| ACP image attachment without an exact qualification entry | The adapter rejects it before submission. | Profile and model limit |
+| Claude ACP attachments | No installed profile has passed content-use qualification. | Unqualified provider profile |
 | Grok ACP read-only workflows | Plan mode still permits mutation through shell, MCP, or subagent work. | Provider policy limit |
 | Claude ACP read-only workflows | Its plan mode has not passed the packaged mutation qualification test. | Unqualified provider profile |
 | Preview recipe model selection | UI can select another runtime, while core always runs Codex. | Historical coupling |
@@ -368,7 +367,7 @@ Every cell requires a compatible packaged runtime and selected model.
 | Stop active turn | Yes | Yes | Yes | Yes | Yes |
 | Active conversation | Live steer | Queue fallback | Queue fallback | Queue fallback | Queue fallback |
 | Text attachment | Exact managed path after qualification; bounded inline fallback | `data:` file part | Embedded text resource | Bounded text block | Embedded text resource after qualification |
-| Image attachment | `localImage`, model-gated | `data:` file part, model-gated | No: profile advertises false | Image block, model-gated | Image block after qualification |
+| Image attachment | `localImage`, model-gated | `data:` file part, model-gated | Native PNG block for the exact qualified Grok 1.0.13 and Grok 4.6 pair | Native PNG block for the exact qualified Cursor 2026.08.25-3e8eec8 and Composer 2.5 pair | Image block after installed-profile qualification |
 | Prompt refinement | Shared short turn | Shared short turn | Disabled by read-only policy | Shared short turn | Disabled until qualified |
 | Review | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Disabled until qualified |
 | Discourse | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Disabled until qualified |
@@ -384,10 +383,11 @@ Task Monki must also verify that the repository did not change.
 This rule does not claim OS confinement.
 If an installed profile cannot deny mutation, that profile cannot run a read-only workflow.
 Normal Task work remains available.
-Later Design support has its own qualification rules.
-
-Design also needs a model that can consume image tool results.
-Each packaged adapter must pass the same real Design behavior tests before the UI enables it.
+Later Design support has separate behavior qualification.
+It uses the milestone 3 effective image capability as its image prerequisite.
+This capability includes negotiated support and narrow tested provider-local exceptions.
+A normal attachment image pass does not prove that `inspect_design` image results work.
+Each provider profile, packaged version, and model must pass a real Design test before the UI enables it.
 
 The attachment rows describe milestone 3.
 They do not enable a read-only workflow or Design by themselves.
@@ -529,20 +529,30 @@ The adapter does not receive a managed path until core verifies the file.
 The existing `attachmentDelivery` capability stays small.
 It says whether the runtime has any qualified attachment path.
 `AgentModel.inputModalities` contains the effective runtime and model intersection.
-For example, Grok stays text-only while its ACP profile advertises `image: false`.
 The adapter uses the concrete attachment descriptors for size and media checks.
 Do not add transport capability flags to shared contracts.
 Do not mark delivery stable from a schema check alone.
 The packaged content-use test must pass first.
 
 Stable ACP reports image support for the agent, not for each model.
-Each ACP runtime profile therefore owns one small code-defined image qualification table.
+Negotiated image support is the default transport fact.
+Each ACP runtime profile owns one small code-defined model qualification table.
 Its keys are the exact packaged runtime version and provider model ID.
 Add an entry only after that exact pair passes a real image content-use test.
-The adapter intersects this table with the negotiated ACP image capability.
+The adapter normally intersects this table with the negotiated ACP image capability.
 A dynamic catalog entry is image-capable only when its exact model ID is in the table.
 An unlisted model and Cursor `Auto` remain text-only.
 Do not add a persistent qualification cache or infer image support from a model name.
+
+A profile can override a false negotiated image flag only for one exact tested pair.
+The profile row must state that exception.
+The adapter must report the mismatch as capability drift.
+Grok Build 1.0.13 with Grok 4.6 is the only current exception.
+Other Grok versions and models remain text-only.
+
+Milestone 4 must reuse this effective image capability.
+It must not add another image compatibility table or override registry.
+Design qualification remains separate because `inspect_design` returns images through tool-result transport.
 
 Core does the final live verification before turn submission.
 For read-only work, core also compares repository state before it accepts completion.
@@ -612,8 +622,18 @@ In milestone 3, only a restricted Codex session with qualified exact-file access
 OpenCode, ACP, Codex inline delivery, and Codex full access keep it empty.
 `AgentRuntimeOwnership` includes this derived grant identity in the session access-epoch hash.
 Reuse is valid only when the grant identity matches.
-A different grant forks or replaces the provider thread and creates a new local Codex session with its own immutable access epoch.
-Do not mutate the access epoch of the existing local session.
+An empty, unmaterialized Codex session can bind its first exact grant before the
+first provider prompt. The exact run selection is already durable. A new Task
+can still be `QUEUED` and `NOT_SENT` while Codex creates that first provider
+session. Other entry points can already be `STARTING` and `SENDING`. The store
+allows the bind only in these pre-admission states and only without a provider
+turn ID. The bind updates the execution context and access-epoch hash together.
+It keeps the same epoch number and creation time.
+
+After materialization or provider admission, the grant identity is immutable.
+A different grant then forks or replaces the provider thread and creates a new
+local Codex session. This keeps one lifecycle and avoids a placeholder session
+before Task Monki knows the first exact grant.
 The field is not per-turn delivery evidence and never replaces the ordered run selection.
 
 Transport submission evidence must match the run selection exactly.
@@ -713,9 +733,9 @@ The adapter selects one explicit delivery method for each record:
 | Runtime or profile | Text | Image |
 | --- | --- | --- |
 | Codex App Server | Exact managed path when qualified; otherwise bounded inline text | `localImage` on every turn that selects the image |
-| OpenCode 1.18.21 | `data:text/plain` file part with the safe display name | `data:` file part with the admitted image media type |
-| Grok ACP 1.0.5 | Embedded text resource | Unsupported while `image: false` is negotiated |
-| Cursor ACP 2026.07.16 | Bounded text block with the safe display name | Native ACP image block for an exact profile-qualified model |
+| OpenCode 1.18.25 | `data:text/plain` file part with the safe display name | `data:` file part with the admitted image media type |
+| Grok ACP 1.0.13 | Embedded text resource | Native ACP image block for the exact qualified Grok 4.6 pair. Only PNG is qualified. |
+| Cursor ACP 2026.08.25-3e8eec8 | Bounded text block with the safe display name | Native ACP image block for the exact qualified Composer 2.5 pair. Only PNG is qualified. |
 | Claude Agent ACP | Embedded text resource after packaged qualification | Native ACP image block after packaged qualification |
 
 OpenCode receives a bounded base64 `data:` URL, not a managed `file:` URL.
@@ -727,10 +747,12 @@ A resource link does not contain bytes or grant access.
 ACP also does not use attachment directories or exact-path fallback in milestone 3.
 Current text and image inputs do not need that machinery.
 
-The ACP adapter uses the negotiated prompt capabilities.
+The ACP adapter uses negotiated prompt capabilities by default.
 It uses an embedded text resource when `embeddedContext` is true.
 It uses a bounded text block when embedded context is false.
-It uses an image block only when both ACP and the selected model accept images.
+It uses an image block only when the selected model and exact runtime pass qualification.
+A provider-local row can override a false negotiated image flag only after a real packaged test.
+The adapter reports that mismatch as capability drift.
 It never sends an embedded blob for current Task Monki images.
 Each inline text input includes the safe name and an untrusted-data marker.
 
@@ -747,15 +769,17 @@ This limit covers the current 20 MiB attachment quota and base64 overhead.
 Reject an oversized outbound payload before delivery.
 Reject any larger inbound frame before JSON parsing.
 
-OpenCode 1.18.21 stores resolved file parts and publishes them through SSE.
+OpenCode 1.18.25 stores resolved file parts and publishes them through SSE.
 An ACP agent can also echo an image or embedded resource in a session update.
 Sanitize these known content fields immediately after parsing.
 Do not pass their bytes into the journal, normalized events, or runtime store.
 After sanitization, apply the existing smaller journal and normalized-event limits.
 
 Use the same 32 MiB outbound limit for a Codex inline-text fallback.
-Apply a global 32 MiB Codex inbound line limit because App Server can echo user input.
 Redact the marked inline attachment block before journaling or event storage.
+Do not claim an inbound Codex line bound while `readline` owns framing.
+The previous post-readline length check did not bound memory and was removed.
+Add a bounded reader only if a measured App Server failure requires it.
 
 Only Codex can use a managed attachment path in milestone 3.
 First, qualify individual file roots with the packaged App Server.
@@ -885,6 +909,10 @@ The current screenshot rules remain:
 - local scratch files are deleted after response creation.
 - screenshots never become attachments, assets, revisions, or Preview records.
 
+Each transport must preserve the bounded text and image result blocks.
+It must not convert an `inspect_design` image into a user attachment.
+The Design test must prove that the selected model consumes the real image result.
+
 A provider can retain the tool result in its own conversation history.
 Task Monki must state this limit clearly.
 
@@ -941,7 +969,8 @@ Use no `resource_link`, attachment path, or additional directory for current att
 
 Keep profile mapping inside the ACP adapter:
 
-- Grok uses embedded text and keeps images disabled.
+- Grok uses embedded text. The exact Grok Build 1.0.13 and Grok 4.6 pair also
+  accepts qualified PNG image blocks despite its false capability flag.
 - Cursor uses bounded text blocks and image blocks only for profile-qualified runtime and model pairs.
 - Claude uses embedded text and image blocks only for profile-qualified runtime and model pairs after installation tests.
 
@@ -1082,10 +1111,16 @@ Provider milestone 2 removed these parts:
 - the Codex-only prompt-refinement runner path.
 - workflow-specific `refinePrompt` and detached-review capability gates.
 
+Provider milestone 3 removed these parts:
+
+- the universal attachment sandbox and network rule.
+- parent-directory attachment grants in Codex.
+- Codex-shaped attachment submission evidence.
+- workflow-level attachment transport choices.
+
 Later milestones remove these parts:
 
 - Design `CODEX_RUNTIME_ID` validation and creation defaults.
-- the universal attachment sandbox and network rule.
 - Codex product names in provider-neutral Design copy.
 - capability extensions that exist only to repeat method presence.
 
@@ -1159,7 +1194,17 @@ Acceptance:
 
 ### Provider milestone 3: provider-neutral attachments
 
-Status: final implementation plan. Codex is the working baseline, but milestone 3 corrects its path grants, fallback, later-turn image delivery, and journal limits. The cross-provider change is not implemented.
+Status: implemented on 2026-08-29.
+
+Codex 0.151.0-alpha.7.1 with GPT-5.6-Luna, OpenCode 1.18.25 with MiMo V2.5,
+and Grok Build 1.0.13 with Grok 4.6 passed their enabled image paths.
+Grok passed even though its ACP handshake reports no image support.
+Task Monki reports this mismatch and enables only that exact pair.
+Cursor 2026.08.25-3e8eec8 advertised image support.
+Composer 2.5 passed text and PNG image qualification with the native ACP payload.
+Other Cursor versions, models, and image formats remain text-only.
+Cursor `Auto` also remains text-only.
+Claude Agent ACP remains disabled because it is not installed.
 
 Goal: send the workflow-selected files through each provider's real prompt protocol.
 Keep one Task Monki byte owner and one runtime lifecycle.
@@ -1204,7 +1249,8 @@ Keep one Task Monki byte owner and one runtime lifecycle.
    - Map Cursor text to a bounded text block.
    - Map qualified images to native ACP image blocks.
    - Apply the same mapping to Claude after packaged qualification.
-   - Keep Grok images disabled while its profile advertises `image: false`.
+   - Keep Grok images disabled unless one exact profile row records a tested
+     false-advertisement compatibility exception.
    - Keep the code-defined profile image qualification table keyed by exact packaged version and model ID.
    - Treat unlisted models and Cursor `Auto` as text-only.
    - Apply the 32 MiB cap to outbound prompts and inbound JSON-RPC frames.
@@ -1225,6 +1271,8 @@ Keep one Task Monki byte owner and one runtime lifecycle.
    - Test exact content use, not only protocol acceptance.
    - Enable only the content path that passes for the installed profile and selected model.
    - Add an ACP image table entry only for the exact runtime-version and model pair that passes.
+   - Record negotiated support and tested behavior separately.
+   - Report both false-advertisement passes and advertised-support failures.
    - Update current operational documents after the behavior ships.
 
 #### Expected implementation surface
@@ -1254,9 +1302,14 @@ Do not change the shared composer or `AttachmentFileStore` ownership model.
    Restricted images stay disabled if `localImage` requires a wider root.
 5. Codex sends every enabled and qualified later-turn image as native image input.
 6. OpenCode sends verified text and images as bounded `data:` file parts.
-7. Grok sends verified text as embedded context and rejects images before prompt submission.
+7. Grok sends verified text as embedded context.
+   Grok Build 1.0.13 sends PNG images to Grok 4.6 as native ACP image blocks.
+   Its false negotiated flag remains visible as capability drift.
+   Other Grok versions, models, and image formats reject images before prompt submission.
 8. Cursor sends verified text as a bounded text block.
-   It sends an image only when negotiated ACP support and its exact profile table entry both allow it.
+   Cursor 2026.08.25-3e8eec8 sends qualified PNG images to Composer 2.5 as native ACP image blocks.
+   Negotiated ACP support and the exact profile row must both allow the image.
+   Other versions, models, and image formats reject images before prompt submission.
 9. Claude attachment delivery remains disabled until its installed profile passes the same packaged tests.
 10. No ACP attachment uses `resource_link`, a managed path, or an added directory.
 11. Network and full-access choices do not cause a shared attachment rejection.
@@ -1273,6 +1326,7 @@ Do not change the shared composer or `AttachmentFileStore` ownership model.
 19. Task Monki-managed staging and Task-owned files keep their current discard, delete, restart, archive, and duplicate lifetimes.
 20. The renderer shows effective provider and model support without provider-name checks.
     ACP image support comes from the adapter's negotiated capability and exact profile qualification.
+    A tested provider-local exception reports capability drift instead of hiding it.
 21. Existing Codex Design, normal Task, and milestone 2 read-only behavior still passes.
 22. Every enabled path passes a real packaged-provider content-use test.
 
@@ -1283,8 +1337,10 @@ Do not change the shared composer or `AttachmentFileStore` ownership model.
 3. Extract the current `inspect_design` tool contract from Codex.
 4. Add the one packaged stdio MCP bridge.
 5. Register it through OpenCode and ACP session creation.
-6. Run the complete Design behavior suite for each packaged runtime.
-7. Enable a provider only after its runtime and selected model pass.
+6. Reuse the milestone 3 effective image capability and its narrow tested exceptions.
+7. Run the complete Design suite for each exact provider profile, packaged version, and model.
+8. Require a real `inspect_design` image result that the model uses to inspect or correct a candidate.
+9. Enable only the exact combination that passes. Show one clear reason for every other combination.
 
 ### Provider milestone 5: hardening and cleanup
 
@@ -1362,6 +1418,10 @@ For every eligible provider and implemented milestone, test:
 - cancellation during a tool call.
 - provider restart during a tool call.
 - last Ready preservation on every failure.
+- native text and image result delivery for each enabled transport.
+- exact provider profile, packaged version, and model qualification.
+- one unique visual fact that proves that the model consumed the image result.
+- one unqualified combination with a clear unsupported reason.
 
 ### Real application tests
 
@@ -1372,19 +1432,25 @@ At minimum, verify one normal Task for every installed provider. Verify one
 read-only workflow for every installed profile that advertises read-only
 support, and record an explicit unsupported result for the other profiles.
 Verify one attachment turn for every enabled content path.
-Verify the full Design browser loop before enabling Design for that runtime.
+Verify the full Design browser loop for each exact provider profile, packaged version, and model.
+The loop must include a real `inspect_design` image result.
+The model must use a unique visual fact to inspect or correct the candidate.
+Inspect the native tool-result transport as delivery evidence.
 
 Milestone 3 requires these packaged checks:
 
 - Codex restricted text by the qualified exact-path result or its bounded inline fallback.
 - Codex full-access text by exact path.
-- Codex image by `localImage` when its selected access profile qualifies.
+- Codex 0.151.0-alpha.7.1 with GPT-5.6-Luna by native `localImage`.
 - A Codex image selected on a later turn.
-- OpenCode 1.18.21 text and image `data:` file parts.
-- Grok 1.0.5 embedded text and an explicit unsupported image result.
-- Cursor 2026.07.16 text and a model-visible image for each exact model entered in its profile qualification table.
+- OpenCode 1.18.25 with MiMo V2.5 by native text and image `data:` file parts.
+- Grok Build 1.0.13 with Grok 4.6 by embedded text and a native ACP image block.
+- the Grok false-advertisement pass as visible capability drift.
+- Cursor 2026.08.25-3e8eec8 with Composer 2.5 by bounded text and a native PNG image block.
+- Cursor Composer 2.5 image understanding with exact native submission evidence.
 - Cursor `Auto` and an unlisted Cursor model with a clear text-only result.
 - Claude text and image only after an installed packaged version is available.
+- unknown ACP versions and models with a clear image-unqualified reason.
 - one cancellation before provider prompt submission for each enabled runtime family.
 - one cancellation after possible provider admission for each enabled runtime family.
 - one provider restart or process-loss recovery without resend.
@@ -1395,7 +1461,10 @@ Inspect the native request or provider session as evidence for the transport.
 Ask about a unique file fact as evidence that the selected model consumed it.
 Do not accept a final answer alone as proof of the native transport.
 
-Record the packaged version, negotiated capabilities, selected model, payload size, and result.
+Record the packaged version, negotiated capabilities, selected model, effective
+input modes, payload size, result, and capability-drift classification.
+Qualification is an explicit test command and can use provider quota.
+Normal app use never starts a paid qualification probe.
 
 Run these repository checks for milestone 3:
 
@@ -1422,18 +1491,23 @@ Mock-only results do not satisfy milestone 3.
 These items need implementation-time conformance tests.
 They do not require another architecture decision.
 
-### Milestone 3 uncertainties
+### Milestone 3 remaining provider limits
 
-1. Confirm that the packaged Codex App Server enforces an individual file as a readable root.
-2. Confirm whether Codex `localImage` uses readable roots.
-3. Confirm that a later Codex turn can replace any changed exact-file grant through the existing fork path.
-4. Confirm OpenCode 1.18.21 consumption of every admitted text extension through a `text/plain` data file part.
-5. Confirm image consumption for each packaged OpenCode model that reports image input.
-6. Confirm Cursor image consumption for each candidate model before adding its exact packaged-version and model ID to the profile table.
-7. Confirm Grok embedded-text consumption and provider-owned temporary-file cleanup.
-8. Confirm the largest accepted OpenCode and ACP request, up to Task Monki's 32 MiB cap.
-9. Install and qualify Claude Agent ACP before enabling either attachment kind.
-10. Measure provider-side attachment retention where the provider exposes it.
+1. OpenCode 1.18.25 image delivery is enabled only when its model catalog reports image input.
+   MiMo V2.5 passed the current packaged content-use test.
+2. Grok image delivery is enabled only for the exact tested 1.0.13 and Grok 4.6 pair.
+   Only PNG passed this path. Other versions, models, and media types stay disabled.
+   The shared composer projects the generic `image` mode, so an unsupported
+   JPEG or WebP selection receives its exact error when core qualifies the turn.
+3. Cursor 2026.08.25-3e8eec8 advertises image input.
+   Composer 2.5 passed the text and PNG image test with the native ACP block.
+   Other versions, models, and image formats remain text-only.
+   Cursor `Auto` remains text-only.
+4. Claude Agent ACP is not installed. Text and image delivery stay disabled.
+5. The 32 MiB OpenCode and ACP parser limits have boundary tests. The live
+   providers used normal admitted payloads, not a full-size paid request.
+6. Provider-owned temporary-file cleanup and remote retention are not visible
+   through every protocol. Task Monki does not claim remote erasure.
 
 Do not add a managed-path fallback when OpenCode or ACP inline delivery fails.
 Disable only the failed content kind, model, or encoded-size range with a clear reason.
@@ -1441,7 +1515,8 @@ Disable only the failed content kind, model, or encoded-size range with a clear 
 ### Later milestone uncertainties
 
 1. Confirm OpenCode `--pure` and configuration precedence for the Design MCP bridge.
-2. Confirm image MCP results for each packaged ACP agent and selected model.
+2. Qualify `inspect_design` image results for each exact packaged provider version and selected model.
+   Include native transport evidence and a unique visual fact in each test.
 3. Qualify Grok or Claude read-only support only after its packaged profile denies every repository mutation path.
 4. Record the exact provider-session deletion meaning for each adapter.
 5. Measure provider-side screenshot retention where documentation allows it.
@@ -1453,7 +1528,7 @@ Do not disable unrelated workflows for that provider.
 
 ### T3 Code
 
-The inspected T3 Code revision was `053affbed2659f90cd1b1efaaa7a75865c4131c7`.
+The inspected T3 Code revision was `72c44a847c0a76f33b0d21f47548125b7032ec35`.
 
 Useful patterns:
 
@@ -1477,8 +1552,7 @@ Task Monki must keep optional behavior explicit.
 
 ### OpenCode
 
-The current inspected OpenCode revision was `dc4449df0d52199704ea4989a5a993ebbc605612`.
-Milestone 3 targets the installed `1.18.21` protocol.
+Milestone 3 targets the installed OpenCode `1.18.25` protocol and source tag.
 
 Useful patterns:
 
@@ -1518,10 +1592,17 @@ It gates image and embedded-resource blocks through negotiated prompt capabiliti
 A resource link only names a resource that the agent can already access.
 
 The installed Cursor profile advertises image input but no embedded context.
-The installed Grok profile advertises embedded context but no image input.
-Current Claude Agent ACP source advertises both, but no packaged Claude profile is installed.
+Composer 2.5 consumed the qualified PNG through a native ACP image block.
+Task Monki enables only that exact version, model, and media type.
 
-OpenCode 1.18.21 accepts native file parts with `file:` or `data:` URLs.
+The installed Grok profile advertises embedded context but no image input.
+Its parser accepts image blocks, and Grok 4.6 used the test image correctly.
+Task Monki reports this false advertisement and enables only the tested pair.
+
+Claude Agent ACP 0.70.0 source advertises image input and maps native image blocks.
+No Claude ACP bridge is installed, so Task Monki cannot qualify it.
+
+OpenCode 1.18.25 accepts native file parts with `file:` or `data:` URLs.
 Provider-owned session history can retain the resolved content.
 
 These protocol features support one shared workflow layer with adapter-specific transport.
@@ -1536,20 +1617,25 @@ These protocol features support one shared workflow layer with adapter-specific 
 - [ACP cancellation](https://agentclientprotocol.com/protocol/v1/cancellation)
 - [ACP session delete](https://agentclientprotocol.com/protocol/v1/session-delete)
 - [OpenCode server](https://opencode.ai/docs/server/)
-- [OpenCode 1.18.21 file-part source](https://github.com/anomalyco/opencode/blob/v1.18.21/packages/opencode/src/session/prompt.ts)
-- [OpenCode current revision inspected](https://github.com/anomalyco/opencode/tree/dc4449df0d52199704ea4989a5a993ebbc605612)
+- [OpenCode attachments](https://opencode.ai/v2/docs/attachments)
+- [OpenCode 1.18.25 file-part source](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/session/prompt.ts)
+- [OpenCode 1.18.25 model transform](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/provider/transform.ts)
 - [Cursor ACP](https://cursor.com/docs/cli/acp)
+- [Cursor agent image input](https://cursor.com/docs/agent/overview)
 - [Grok Build ACP source](https://github.com/xai-org/grok-build/blob/bc7f02eddd3d84085849dc19ed216f11c23b0571/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs)
-- [Claude Agent ACP source](https://github.com/agentclientprotocol/claude-agent-acp/tree/c3ff3438844f5249d6a7f5c297906e2cd3d5fa7f)
-- [T3 Code provider source used](https://github.com/pingdotgg/t3code/tree/053affbed2659f90cd1b1efaaa7a75865c4131c7/apps/server/src/provider)
+- [Grok Build image parser](https://github.com/xai-org/grok-build/blob/bc7f02eddd3d84085849dc19ed216f11c23b0571/crates/codegen/xai-grok-shell/src/session/prompt_parser.rs)
+- [xAI image input](https://docs.x.ai/developers/model-capabilities/images/understanding)
+- [Claude Agent ACP 0.70.0 source](https://github.com/agentclientprotocol/claude-agent-acp/blob/v0.70.0/src/acp-agent.ts)
+- [Anthropic model capabilities](https://platform.claude.com/docs/en/about-claude/models/overview)
+- [Anthropic vision limits](https://platform.claude.com/docs/en/build-with-claude/vision)
+- [T3 Code provider source used](https://github.com/pingdotgg/t3code/tree/72c44a847c0a76f33b0d21f47548125b7032ec35/apps/server/src/provider)
 - [Continue source used](https://github.com/continuedev/continue/tree/5522c6f44ca0ac3528b37244818fbfa39b5af470)
 
 ## Final recommendation
 
 Keep the single runtime coordinator and runtime store from provider milestones 1 and 2.
-Milestone 3 is ready to implement with the sequence and acceptance criteria above.
-Implement provider-neutral attachment delivery next.
-Then add the shared Design tool transport.
+Provider milestone 3 now uses the same byte owner and runtime lifecycle.
+Implement the shared Design tool transport next.
 
 This is the smallest clean path to broad provider support.
 It keeps lifecycle code in one place.

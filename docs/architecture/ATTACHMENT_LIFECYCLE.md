@@ -1,14 +1,13 @@
 # Task Attachment and Design Reference Lifecycle
 
-Date: 2026-07-11
+Date: 2026-08-29
 
 Attachments are immutable task inputs or Design references. They are neither
 provider artifacts nor repository files. They never live in a Git worktree.
 
 This document describes current implemented behavior.
-The provider-neutral delivery change is planned in
-`docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`.
-Until that change ships, the Codex-only delivery restrictions below remain in force.
+Task Monki owns the files and the selected file set.
+Each provider adapter owns its wire format.
 
 ## Supported input
 
@@ -81,12 +80,12 @@ publication adopts the files and creates the Design, active references, and
 seeded first turn. That first turn selects all initial references.
 
 Prompt refinement re-verifies the staged manifest and immutable files before
-provider submission. Text-like files are made available by exact managed path.
-Relevant images are supplied as native image inputs only when the selected
-refinement model reports image input support; otherwise the refiner receives
-metadata and must not claim to understand their visual contents. The attachment
-draft remains composer-owned and is still adopted only by successful task
-creation.
+provider submission. Its runtime run stores the exact ordered file selection.
+The workflow prompt contains safe metadata, not managed paths or transport
+choices. The provider adapter selects the wire format. The refinement result
+can claim inspection only when the runtime stored matching submission evidence.
+The attachment draft remains composer-owned. Only successful task creation
+adopts it.
 
 ## Design messages and drafts
 
@@ -175,15 +174,11 @@ Normal task runs reuse all immutable task-owned files. Each Design turn uses
 only its stored reference selection. The first turn selects the references
 adopted during Design creation.
 
-A Codex thread cannot replace its active permission-profile identity during
-resume. If a Design turn changes the exact reference selection, Task Monki
-forks the existing provider thread with a new attested profile. The provider
-history continues, but the new thread can read only the current turn's selected
-managed files. A new Task Monki primary session owns that provider thread.
-The prior local session keeps its immutable provider identity and remains in the
-same Task conversation lineage. Task Monki unsubscribes the replaced thread so
-the App Server can unload it.
-An unchanged selection resumes the current thread without a fork.
+A restricted Codex session binds its first exact file grant before its first
+provider prompt. At that point, the local session has no provider history.
+After materialization, the access identity is immutable. A changed grant uses
+the existing replacement or fork path. An unchanged grant reuses the session.
+This rule does not apply to turn-local OpenCode or ACP content.
 
 Core reopens files with no-follow semantics immediately before provider
 delivery. It verifies managed-root containment, regular-file and non-symlink
@@ -195,39 +190,47 @@ described above. No run cache or second physical representation exists.
 
 Delivery is selected by the owning runtime:
 
-- Codex sends supported images as `localImage` and lists text-like files by
-  exact managed read-only path in an untrusted-data prompt manifest.
-- Other runtimes must advertise and negotiate the required content type before
-  the composer enables attachments.
+- Codex uses `localImage` for images. It uses an exact managed path for text
+  when the runtime supports exact files. Older restricted runtimes use bounded
+  inline text.
+- OpenCode uses bounded native file parts with verified `data:` URLs. It uses
+  `text/plain` for admitted text and the admitted media type for images.
+- Grok ACP uses an embedded text resource. The exact Grok Build 1.0.13 and
+  Grok 4.6 pair also sends qualified PNG input as a native ACP image block.
+  Its handshake reports no image support, so Task Monki shows capability drift.
+- Cursor ACP uses a bounded text block. Cursor 2026.08.25-3e8eec8 sends
+  qualified PNG images to Composer 2.5 as native ACP image blocks. Other
+  versions, models, and image formats remain text-only. Cursor `Auto` remains
+  text-only.
+- Claude ACP attachments stay disabled. No bridge is installed to run the
+  packaged content-use tests.
 
-OpenCode native file parts are intentionally not a Task Monki managed delivery
-mode. Its provider, plugin, MCP, and tool execution share a credential-bearing
-process without an attested network or filesystem confinement boundary.
-Task Monki therefore reports attachment delivery as unsupported for OpenCode
-and rejects attachments before starting or mutating provider state.
+The selected model and runtime must have qualified effective image support.
+ACP negotiation is the default transport fact. An exact provider-local row can
+override a false flag only after a real packaged test. The adapter must report
+that mismatch as capability drift.
 
-The selected model must report image support whenever images are present.
+Before submission, the run stores the exact ordered path-free selection.
+After admission, it stores matching path-free submission evidence. The evidence
+contains transport, verification time, correlation, and submission time. It
+proves Task Monki's transport action. It does not prove model use.
 
-After the owning runtime acknowledges a turn, Task Monki records path-free submission
-evidence: attachment id, ordinal, kind, media type, size, hash, submission mode,
-verification time, provider turn id, and submission time. This proves what Task
-Monki submitted, not that the model read or used it. Raw protocol journals can
-still contain provider-visible paths and belong only in Debug.
-
-Submission modes are truthful transport evidence: `localImage` for a native
-image input, `prompt-file-reference` for a managed path described in text, and
-`nativeFile` only for a future runtime whose native file-part boundary is
-explicitly supported and attested. OpenCode does not produce `nativeFile`
-submission evidence.
+The transport values are `native-image`, `native-file`, `embedded-resource`,
+`text-block`, and `managed-path`. Protocol journals remove attachment bytes,
+data URLs, marked inline text, and managed paths before durable storage.
 
 ## Confidentiality boundary
 
-An attached task or Design requires a runtime-supported restricted execution
-mode. Full access remains available for attachment-free tasks. Task Monki
-rejects full access when attachments are present. Network is forced off. Codex
-also attests a complete permission profile. It contains only the runtime
-minimum, exact worktree, and exact verified files. Other runtimes must enforce
-and document their native tool and permission boundaries.
+Attachment selection authorizes Task Monki to send those files to the selected
+provider. It does not claim to confine that provider process.
+
+Codex restricted profiles grant exact selected files, not their parent
+directory. Codex full access keeps its normal meaning. The user's network and
+external-tool choices also keep their normal meaning.
+
+OpenCode and ACP receive verified bytes through their native prompt protocols.
+Their processes run as the current OS user and use provider network access.
+Task Monki does not describe their native tool policies as OS sandboxes.
 
 For Codex submission in packaged Electron, web search, external MCP servers,
 and apps follow the user's app settings and do not make attachments ineligible.
@@ -259,9 +262,8 @@ Monki is closed. It must also keep Design draft files and their owned staging
 together. Other staging is disposable and is removed on restart. Task
 attachments last for the task lifetime.
 
-Runtime conversation history and Task Monki protocol journals may retain image
-bytes, managed paths, hashes, or derived discussion after local task deletion.
-Journal data remains only until its bounded per-server segment retention prunes
-it; a pruned raw-message reference fails closed. Task Monki must not claim that
-deleting its task directory erases provider history. Task deletion unsubscribes
-the current live Codex thread but does not delete its stored provider history.
+Provider conversation history can retain files, paths, or derived discussion
+after local task deletion. Task Monki cannot erase that provider history.
+Task Monki protocol journals keep only bounded, redacted protocol evidence.
+A pruned raw-message reference fails closed. Task deletion unsubscribes the
+current live Codex thread but does not delete its stored provider history.

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { opencodeCapabilities } from './opencodeCapabilities';
 
 describe('opencodeCapabilities', () => {
-  it('truthfully reports provider-controlled network and no managed attachment boundary', () => {
+  it('reports native attachment delivery without claiming process confinement', () => {
     const capabilities = opencodeCapabilities();
 
     expect(
@@ -18,7 +18,10 @@ describe('opencodeCapabilities', () => {
       { sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'on-request' },
       { sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'never' }
     ]);
-    expect(capabilities.attachmentDelivery.maturity).toBe('unsupported');
+    expect(capabilities.attachmentDelivery).toEqual({
+      maturity: 'stable',
+      detail: expect.stringContaining('not an OS confinement boundary')
+    });
     expect(capabilities.promptRefinement.maturity).toBe('stable');
     expect(capabilities.sessionFork).toEqual({
       maturity: 'stable',

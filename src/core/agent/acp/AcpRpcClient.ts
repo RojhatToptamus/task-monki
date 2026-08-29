@@ -10,7 +10,7 @@ import {
   redactProtocolText
 } from '../journal/AgentProtocolRedaction';
 import {
-  ACP_MAX_MESSAGE_BYTES,
+  ACP_MAX_FRAME_BYTES,
   decodeAcpMessage,
   isNotification,
   isRequest,
@@ -19,6 +19,10 @@ import {
   type AcpJsonRpcMessage,
   type AcpJsonRpcRequest
 } from './AcpProtocol';
+import {
+  journalSafeAcpMessage,
+  sanitizeAcpAttachmentContent
+} from './AcpAttachmentDelivery';
 
 export type AcpJournalWriter = (
   direction: AgentProtocolMessageReference['direction'],
@@ -80,13 +84,21 @@ export class AcpAmbiguousMutationError extends Error {
   }
 }
 
+class AcpOutboundMessageTooLargeError extends Error {
+  constructor() {
+    super(`ACP outbound message exceeds ${ACP_MAX_FRAME_BYTES} bytes.`);
+    this.name = 'AcpOutboundMessageTooLargeError';
+  }
+}
+
 /** Newline-delimited JSON-RPC 2.0 transport used by ACP stdio agents. */
 export class AcpRpcClient {
   readonly events = new EventEmitter<AcpRpcEvents>();
 
   private readonly pending = new Map<AcpJsonRpcId, PendingRequest>();
   private readonly expiredRequestIds = new Set<AcpJsonRpcId>();
-  private inbound = Buffer.alloc(0);
+  private inboundChunks: Buffer[] = [];
+  private inboundByteCount = 0;
   private inboundQueue: Promise<void> = Promise.resolve();
   private inboundFailure?: Error;
   private outboundQueue: Promise<unknown> = Promise.resolve();
@@ -167,6 +179,8 @@ export class AcpRpcClient {
   close(reason = 'ACP connection closed.'): void {
     if (this.closed) return;
     this.closed = true;
+    this.inboundChunks = [];
+    this.inboundByteCount = 0;
     this.output.off('data', this.onData);
     this.output.off('end', this.onEnd);
     this.output.off('error', this.onOutputError);
@@ -233,7 +247,7 @@ export class AcpRpcClient {
       return { requestId, response, outbound };
     } catch (cause) {
       const safeMessage = this.redactText(errorMessage(cause));
-      const deliveryError = mutation
+      const deliveryError = mutation && !(cause instanceof AcpOutboundMessageTooLargeError)
         ? new AcpAmbiguousMutationError(
             method,
             `ACP mutation delivery is ambiguous: ${safeMessage}`
@@ -253,38 +267,27 @@ export class AcpRpcClient {
 
   private readonly onData = (chunk: Buffer | string): void => {
     const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    this.inbound = Buffer.concat([this.inbound, incoming]);
-    if (this.inbound.byteLength > ACP_MAX_MESSAGE_BYTES && this.inbound.indexOf(0x0a) === -1) {
-      const error = new Error(`ACP message exceeds ${ACP_MAX_MESSAGE_BYTES} bytes.`);
-      this.events.emit('protocolError', error);
-      this.close(error.message);
-      return;
-    }
-    let newline: number;
-    while ((newline = this.inbound.indexOf(0x0a)) >= 0) {
-      const line = this.inbound.subarray(0, newline);
-      this.inbound = this.inbound.subarray(newline + 1);
-      if (line.byteLength === 0) continue;
-      if (line.byteLength > ACP_MAX_MESSAGE_BYTES) {
-        const error = new Error(`ACP message exceeds ${ACP_MAX_MESSAGE_BYTES} bytes.`);
-        this.events.emit('protocolError', error);
-        this.close(error.message);
+    let offset = 0;
+    while (offset < incoming.byteLength) {
+      const newline = incoming.indexOf(0x0a, offset);
+      const end = newline >= 0 ? newline : incoming.byteLength;
+      const segment = incoming.subarray(offset, end);
+      if (segment.byteLength > 0) {
+        this.inboundChunks.push(segment);
+        this.inboundByteCount += segment.byteLength;
+      }
+      if (this.inboundByteCount > ACP_MAX_FRAME_BYTES) {
+        this.failOversizedFrame();
         return;
       }
-      const rawLine = line.toString('utf8').trim();
-      if (!rawLine) continue;
-      this.enqueueInboundLine(rawLine);
+      if (newline < 0) return;
+      this.enqueueCompleteInboundLine();
+      offset = newline + 1;
     }
   };
 
   private readonly onEnd = (): void => {
-    if (this.inbound.byteLength > 0) {
-      const rawLine = this.inbound.toString('utf8').trim();
-      this.inbound = Buffer.alloc(0);
-      if (rawLine) {
-        this.enqueueInboundLine(rawLine);
-      }
-    }
+    this.enqueueCompleteInboundLine();
     // `close` rejects every pending request. Do not let stream teardown win a
     // race with a complete response that was already accepted from stdout but
     // is still waiting for its durable journal append.
@@ -307,10 +310,9 @@ export class AcpRpcClient {
   };
 
   private async handleLine(rawLine: string): Promise<void> {
-    const safeRawLine = redactProtocolText(rawLine, this.sensitiveValues);
     let message: AcpJsonRpcMessage;
     try {
-      message = decodeAcpMessage(rawLine);
+      message = sanitizeAcpAttachmentContent(decodeAcpMessage(rawLine));
     } catch (cause) {
       this.events.emit(
         'protocolError',
@@ -319,12 +321,16 @@ export class AcpRpcClient {
       );
       return;
     }
+    const safeParsedLine = redactProtocolText(
+      journalSafeInboundMessage(message),
+      this.sensitiveValues
+    );
 
     let raw: AgentProtocolMessageReference;
     try {
       raw = await this.appendJournal(
         'INBOUND',
-        journalSafeInboundMessage(message, rawLine),
+        journalSafeInboundMessage(message),
         rpcMetadata(message)
       );
     } catch (cause) {
@@ -332,7 +338,7 @@ export class AcpRpcClient {
         this.redactText(`Could not durably journal ACP input: ${errorMessage(cause)}`),
         { cause }
       );
-      this.events.emit('protocolError', error, safeRawLine);
+      this.events.emit('protocolError', error, safeParsedLine);
       this.close(error.message);
       return;
     }
@@ -348,7 +354,7 @@ export class AcpRpcClient {
                 `ACP response has no pending request: ${String(message.id)}`
               )
             ),
-            safeRawLine,
+            safeParsedLine,
             raw
           );
         }
@@ -386,6 +392,28 @@ export class AcpRpcClient {
       });
   }
 
+  private enqueueCompleteInboundLine(): void {
+    if (this.inboundByteCount === 0) {
+      this.inboundChunks = [];
+      return;
+    }
+    const line = this.inboundChunks.length === 1
+      ? this.inboundChunks[0]!
+      : Buffer.concat(this.inboundChunks, this.inboundByteCount);
+    this.inboundChunks = [];
+    this.inboundByteCount = 0;
+    const rawLine = line.toString('utf8').trim();
+    if (rawLine) this.enqueueInboundLine(rawLine);
+  }
+
+  private failOversizedFrame(): void {
+    this.inboundChunks = [];
+    this.inboundByteCount = 0;
+    const error = new Error(`ACP message exceeds ${ACP_MAX_FRAME_BYTES} bytes.`);
+    this.events.emit('protocolError', error);
+    this.close(error.message);
+  }
+
   private write(
     message: AcpJsonRpcMessage,
     onJournaled?: (reference: AgentProtocolMessageReference) => Promise<void>
@@ -393,10 +421,15 @@ export class AcpRpcClient {
     const operation = this.outboundQueue.then(async () => {
       if (this.closed) throw new Error('ACP connection is closed.');
       const raw = JSON.stringify(message);
-      if (Buffer.byteLength(raw, 'utf8') > ACP_MAX_MESSAGE_BYTES) {
-        throw new Error(`ACP outbound message exceeds ${ACP_MAX_MESSAGE_BYTES} bytes.`);
+      if (Buffer.byteLength(raw, 'utf8') > ACP_MAX_FRAME_BYTES) {
+        throw new AcpOutboundMessageTooLargeError();
       }
-      const reference = await this.appendJournal('OUTBOUND', raw, rpcMetadata(message));
+      const journalRaw = JSON.stringify(journalSafeAcpMessage(message));
+      const reference = await this.appendJournal(
+        'OUTBOUND',
+        journalRaw,
+        rpcMetadata(message)
+      );
       await onJournaled?.(reference);
       await writeWithBackpressure(this.input, `${raw}\n`);
       return reference;
@@ -452,11 +485,13 @@ const ACP_STREAM_CONTENT_FIELDS = new Set([
  * messages, which a record-local exact-value redactor cannot recognize. Keep
  * routing/status fields and remove free-form stream payloads structurally.
  */
-function journalSafeInboundMessage(message: AcpJsonRpcMessage, rawLine: string): string {
-  if (!isNotification(message) || message.method !== 'session/update') return rawLine;
-  if (!isRecord(message.params)) return rawLine;
+function journalSafeInboundMessage(message: AcpJsonRpcMessage): string {
+  if (!isNotification(message) || message.method !== 'session/update') {
+    return JSON.stringify(journalSafeAcpMessage(message));
+  }
+  if (!isRecord(message.params)) return JSON.stringify(message);
   const update = message.params.update;
-  if (!isRecord(update)) return rawLine;
+  if (!isRecord(update)) return JSON.stringify(message);
   return JSON.stringify({
     ...message,
     params: {

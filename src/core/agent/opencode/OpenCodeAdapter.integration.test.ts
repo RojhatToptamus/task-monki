@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,7 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../../shared/contracts';
+import type { AgentAttachmentSelection } from '../../../shared/attachments';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
 import { FileTaskStore } from '../../storage/FileTaskStore';
@@ -4975,42 +4976,171 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
-  it('rejects managed attachments before starting or mutating OpenCode state', async () => {
+  it('sends verified text and image attachments as native data parts', async () => {
     const fixture = await createFixture();
     await fixture.adapter.initialize();
+    const textBytes = Buffer.from('The launch code is MONKI-42.');
+    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const textPath = path.join(fixture.root, 'brief.txt');
+    const imagePath = path.join(fixture.root, 'reference.png');
+    await Promise.all([
+      fs.writeFile(textPath, textBytes, { mode: 0o400 }),
+      fs.writeFile(imagePath, imageBytes, { mode: 0o400 })
+    ]);
+    const attachments = [
+      {
+        attachmentId: 'att_text',
+        ordinal: 0,
+        displayName: 'brief.txt',
+        kind: 'text' as const,
+        mediaType: 'text/markdown',
+        byteCount: textBytes.byteLength,
+        sha256: createHash('sha256').update(textBytes).digest('hex'),
+        path: textPath,
+        verifiedAt: new Date().toISOString()
+      },
+      {
+        attachmentId: 'att_image',
+        ordinal: 1,
+        displayName: 'reference.png',
+        kind: 'image' as const,
+        mediaType: 'image/png',
+        byteCount: imageBytes.byteLength,
+        sha256: createHash('sha256').update(imageBytes).digest('hex'),
+        path: imagePath,
+        verifiedAt: new Date().toISOString()
+      }
+    ];
     await expect(
       fixture.adapter.resolveExecution({
         settings: SETTINGS,
-        attachments: [{ kind: 'image' }]
+        attachments
       })
-    ).rejects.toThrow('managed attachments are unavailable');
+    ).resolves.toMatchObject({ model: { inputModalities: ['text', 'image'] } });
     const session = await createLocalSession(fixture);
-    const run = await createRun(fixture, session);
-    await expect(
-      fixture.adapter.startTurn({
-        localRunId: run.id,
-        session: { localSessionId: session.id },
-        mode: 'IMPLEMENTATION',
-        prompt: fixture.task.prompt,
-        authoritativeGoal: fixture.task.prompt,
-        settings: SETTINGS,
-        attachments: [
-          {
-            attachmentId: 'att_1',
-            ordinal: 0,
-            displayName: 'secret.png',
-            kind: 'image',
-            mediaType: 'image/png',
-            byteCount: 1,
-            sha256: '0'.repeat(64),
-            path: path.join(fixture.root, 'secret.png'),
-            verifiedAt: new Date().toISOString()
+    const run = await createRun(
+      fixture,
+      session,
+      SETTINGS,
+      attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        ordinal: attachment.ordinal,
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        byteCount: attachment.byteCount,
+        sha256: attachment.sha256
+      }))
+    );
+    const started = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS,
+      attachments
+    });
+
+    const body = fixture.harness.promptBodies[0] as {
+      parts: Array<{
+        type: string;
+        text?: string;
+        mime?: string;
+        filename?: string;
+        url?: string;
+      }>;
+    };
+    expect(body.parts).toHaveLength(3);
+    expect(body.parts[0]).toEqual({ type: 'text', text: fixture.task.prompt });
+    expect(body.parts[1]).toMatchObject({
+      type: 'file',
+      mime: 'text/plain',
+      filename: 'brief.txt'
+    });
+    expect(body.parts[2]).toMatchObject({
+      type: 'file',
+      mime: 'image/png',
+      filename: 'reference.png'
+    });
+    expect(decodeDataUrl(body.parts[1]!.url!)).toEqual(textBytes);
+    expect(decodeDataUrl(body.parts[2]!.url!)).toEqual(imageBytes);
+    expect(JSON.stringify(body)).not.toContain(textPath);
+    expect(JSON.stringify(body)).not.toContain(imagePath);
+    await expect(fixture.runtime.getRun(run.id)).resolves.toMatchObject({
+      attachmentSubmissions: attachments.map((attachment) =>
+        expect.objectContaining({
+          attachmentId: attachment.attachmentId,
+          transport: 'native-file',
+          correlation: { kind: 'provider-message', id: started.providerTurnId }
+        })
+      )
+    });
+    expect(fixture.harness.supervisors).toHaveLength(2);
+    expect(fixture.harness.promptBodies).toHaveLength(1);
+    await fixture.adapter.shutdown();
+  });
+
+  it('rejects an image before provider mutation when the selected model is text-only', async () => {
+    const fixture = await createFixture();
+    fixture.harness.catalogs.set(path.resolve(fixture.appCwd), {
+      connected: ['anthropic'],
+      default: { anthropic: 'claude-test' },
+      all: [{
+        id: 'anthropic',
+        name: 'Anthropic',
+        models: {
+          'claude-test': {
+            id: 'claude-test',
+            name: 'Claude Test',
+            status: 'active',
+            capabilities: { input: { text: true } },
+            variants: { high: {} }
           }
-        ]
+        }
+      }]
+    });
+    await fixture.adapter.initialize();
+
+    await expect(
+      fixture.adapter.resolveExecution({
+        settings: SETTINGS,
+        attachments: [{
+          kind: 'image',
+          mediaType: 'image/png',
+          byteCount: 4,
+          sha256: createHash('sha256')
+            .update(Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+            .digest('hex')
+        }]
       })
-    ).rejects.toThrow('managed attachments are unavailable');
-    expect(fixture.harness.supervisors).toHaveLength(1);
+    ).rejects.toThrow('does not accept image attachments');
     expect(fixture.harness.promptBodies).toHaveLength(0);
+    await fixture.adapter.shutdown();
+  });
+
+  it('uses the same native attachment mapping for owner-neutral turns', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({}, true);
+    const body = fixture.harness.promptBodies[0] as {
+      parts: Array<{ type: string; mime?: string; filename?: string; url?: string }>;
+    };
+
+    expect(body.parts[1]).toMatchObject({
+      type: 'file',
+      mime: 'text/plain',
+      filename: 'review-context.txt'
+    });
+    expect(decodeDataUrl(body.parts[1]!.url!)).toEqual(fixture.attachmentBytes);
+    expect(JSON.stringify(body)).not.toContain(fixture.attachmentPath);
+    expect(fixture.started.attachmentSubmissions).toEqual([
+      expect.objectContaining({
+        attachmentId: fixture.attachments[0]!.attachmentId,
+        transport: 'native-file',
+        correlation: {
+          kind: 'provider-message',
+          id: fixture.started.providerTurnId
+        }
+      })
+    ]);
     await fixture.adapter.shutdown();
   });
 });
@@ -5036,9 +5166,30 @@ interface AdapterFixtureOptions {
   environment?: NodeJS.ProcessEnv;
 }
 
-async function createOwnerNeutralRuntimeFixture(options: AdapterFixtureOptions = {}) {
+async function createOwnerNeutralRuntimeFixture(
+  options: AdapterFixtureOptions = {},
+  withAttachment = false
+) {
   const fixture = await createFixture(options);
   await fixture.adapter.initialize();
+  const attachmentBytes = Buffer.from('The owner-neutral code is MONKI-READ-42.');
+  const attachmentPath = path.join(fixture.root, 'review-context.txt');
+  const attachments = withAttachment
+    ? [{
+        attachmentId: 'att_runtime_text',
+        ordinal: 0,
+        displayName: 'review-context.txt',
+        kind: 'text' as const,
+        mediaType: 'text/plain',
+        byteCount: attachmentBytes.byteLength,
+        sha256: createHash('sha256').update(attachmentBytes).digest('hex'),
+        path: attachmentPath,
+        verifiedAt: new Date().toISOString()
+      }]
+    : [];
+  if (withAttachment) {
+    await fs.writeFile(attachmentPath, attachmentBytes, { mode: 0o400 });
+  }
   const context = await fixture.adapter.buildExecutionContext({
     sessionId: 'runtime-session-denial',
     primaryCwd: fixture.worktree.worktreePath,
@@ -5048,13 +5199,19 @@ async function createOwnerNeutralRuntimeFixture(options: AdapterFixtureOptions =
       entityId: fixture.worktree.id
     }],
     modelSettings: SETTINGS,
-    clientOperationId: 'runtime-context-denial'
+    clientOperationId: 'runtime-context-denial',
+    attachments
   });
-  const owner = {
-    kind: 'DISCOURSE' as const,
-    conversationId: 'conversation-denial',
-    stableParticipantId: 'participant-denial'
-  };
+  const owner = withAttachment
+    ? {
+        kind: 'PROMPT_REFINEMENT' as const,
+        requestId: 'refinement-attachment'
+      }
+    : {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-denial',
+        stableParticipantId: 'participant-denial'
+      };
   const session = await fixture.runtimeStore.createSession({
     id: 'runtime-session-denial',
     owner,
@@ -5079,23 +5236,33 @@ async function createOwnerNeutralRuntimeFixture(options: AdapterFixtureOptions =
   let run = await fixture.runtimeStore.createRun({
     id: 'runtime-run-denial',
     owner,
-    scope: {
-      kind: 'DISCOURSE',
-      conversationId: owner.conversationId,
-      waveId: 'wave-denial',
-      jobId: 'job-denial',
-      contextSnapshotId: 'snapshot-denial',
-      attemptId: 'attempt-denial'
-    },
+    scope: withAttachment
+      ? { kind: 'PROMPT_REFINEMENT', requestId: 'refinement-attachment' }
+      : {
+          kind: 'DISCOURSE',
+          conversationId: 'conversation-denial',
+          waveId: 'wave-denial',
+          jobId: 'job-denial',
+          contextSnapshotId: 'snapshot-denial',
+          attemptId: 'attempt-denial'
+        },
     sessionId: session.id,
     sessionAccessEpoch: 1,
-    purpose: 'DISCOURSE_ANSWER',
+    purpose: withAttachment ? 'PROMPT_REFINEMENT' : 'DISCOURSE_ANSWER',
     generationKey: 'runtime-generation-denial',
     clientOperationId: 'runtime-run-denial-create',
     requestedSettings: context.modelSettings,
     promptArtifactId: 'runtime-prompt-denial',
     outputArtifactId: 'runtime-output-denial',
-    diagnosticArtifactId: 'runtime-diagnostic-denial'
+    diagnosticArtifactId: 'runtime-diagnostic-denial',
+    attachmentSelection: attachments.map((attachment) => ({
+      attachmentId: attachment.attachmentId,
+      ordinal: attachment.ordinal,
+      kind: attachment.kind,
+      mediaType: attachment.mediaType,
+      byteCount: attachment.byteCount,
+      sha256: attachment.sha256
+    }))
   });
   await Promise.all([
     fixture.runtimeStore.createArtifact({
@@ -5138,9 +5305,19 @@ async function createOwnerNeutralRuntimeFixture(options: AdapterFixtureOptions =
     run,
     executionContext: context,
     prompt: 'Inspect without changing files.',
-    attachments: []
+    attachments
   });
-  return { ...fixture, owner, session, run, context, started };
+  return {
+    ...fixture,
+    owner,
+    session,
+    run,
+    context,
+    started,
+    attachments,
+    attachmentBytes,
+    attachmentPath
+  };
 }
 
 async function createFixture(options: AdapterFixtureOptions = {}): Promise<AdapterFixture> {
@@ -5239,7 +5416,8 @@ async function materializeSession(fixture: AdapterFixture): Promise<AgentSession
 async function createRun(
   fixture: AdapterFixture,
   session: AgentSessionRecord,
-  requestedSettings: AgentExecutionSettings = SETTINGS
+  requestedSettings: AgentExecutionSettings = SETTINGS,
+  attachmentSelection: AgentAttachmentSelection[] = []
 ): Promise<RunRecord> {
   const id = nextRuntimeTestId('run');
   const owner = { kind: 'TASK' as const, taskId: fixture.task.id };
@@ -5261,6 +5439,7 @@ async function createRun(
     promptArtifactId: `${id}-prompt`,
     outputArtifactId: `${id}-output`,
     diagnosticArtifactId: `${id}-diagnostics`,
+    attachmentSelection,
     taskDetails: { eventCount: 0 }
   });
   await Promise.all([
@@ -5904,6 +6083,14 @@ function providerSessionId(requestPath: string): string {
   const match = requestPath.match(/^\/session\/([^/]+)/u);
   if (!match) throw new Error(`Missing provider session id in ${requestPath}`);
   return decodeURIComponent(match[1]);
+}
+
+function decodeDataUrl(value: string): Buffer {
+  const separator = value.indexOf(',');
+  if (separator < 0 || !value.slice(0, separator).endsWith(';base64')) {
+    throw new Error('Expected a base64 data URL.');
+  }
+  return Buffer.from(value.slice(separator + 1), 'base64');
 }
 
 function defaultProviderCatalog(): unknown {

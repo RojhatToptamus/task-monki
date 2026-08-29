@@ -10,7 +10,7 @@
 
 export const ACP_PROTOCOL_VERSION = 1 as const;
 export const ACP_SCHEMA_ARTIFACT_VERSION = '1.19.0' as const;
-export const ACP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
+export const ACP_MAX_FRAME_BYTES = 32 * 1024 * 1024;
 
 export type AcpJsonRpcId = string | number | null;
 
@@ -171,6 +171,7 @@ export interface AcpRequestPermissionParams {
 export interface AcpTextContent {
   type: 'text';
   text: string;
+  annotations?: AcpAnnotations | null;
   _meta?: Record<string, unknown> | null;
 }
 
@@ -179,6 +180,28 @@ export interface AcpImageContent {
   data: string;
   mimeType: string;
   uri?: string | null;
+  annotations?: AcpAnnotations | null;
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface AcpAnnotations {
+  audience?: Array<'assistant' | 'user'> | null;
+  priority?: number | null;
+  lastModified?: string | null;
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface AcpEmbeddedTextResource {
+  uri: string;
+  text: string;
+  mimeType?: string | null;
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface AcpEmbeddedResource {
+  type: 'resource';
+  resource: AcpEmbeddedTextResource;
+  annotations?: AcpAnnotations | null;
   _meta?: Record<string, unknown> | null;
 }
 
@@ -196,6 +219,7 @@ export interface AcpResourceLink {
 export type AcpContentBlock =
   | AcpTextContent
   | AcpImageContent
+  | AcpEmbeddedResource
   | AcpResourceLink
   | (Record<string, unknown> & { type: string });
 
@@ -316,8 +340,8 @@ export type AcpSessionUpdate = Record<string, unknown> & {
 };
 
 export function decodeAcpMessage(rawLine: string): AcpJsonRpcMessage {
-  if (Buffer.byteLength(rawLine, 'utf8') > ACP_MAX_MESSAGE_BYTES) {
-    throw new Error(`ACP message exceeds ${ACP_MAX_MESSAGE_BYTES} bytes.`);
+  if (Buffer.byteLength(rawLine, 'utf8') > ACP_MAX_FRAME_BYTES) {
+    throw new Error(`ACP message exceeds ${ACP_MAX_FRAME_BYTES} bytes.`);
   }
   let value: unknown;
   try {

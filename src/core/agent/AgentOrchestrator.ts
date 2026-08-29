@@ -15,7 +15,11 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
-import type { TaskAttachmentRecord } from '../../shared/attachments';
+import type {
+  AgentAttachmentSelection,
+  TaskAttachmentRecord
+} from '../../shared/attachments';
+import type { AgentExecutionContext } from '../../shared/agentRuntime';
 import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import type { FileTaskStore } from '../storage/FileTaskStore';
@@ -33,8 +37,10 @@ import {
 } from './AgentRuntimeReadiness';
 import { AgentInteractionService } from './AgentInteractionService';
 import {
+  assertAgentTurnAttachmentSelection,
+  toAgentAttachmentSelection,
+  toAgentAttachmentSelectionFromRecords,
   toAgentTurnAttachments,
-  verifyAgentTurnAttachments,
   type AgentTurnAttachment
 } from './AgentAttachmentDelivery';
 import {
@@ -120,27 +126,12 @@ async function inspectReadOnlyRepositoryState(
   return hash.digest('hex');
 }
 
-async function verifyRuntimeTurnAttachments(
-  context: import('../../shared/agentRuntime').AgentExecutionContext,
+function verifyRuntimeTurnAttachments(
+  selection: readonly AgentAttachmentSelection[],
   attachments: readonly AgentTurnAttachment[]
-): Promise<AgentTurnAttachment[]> {
-  const verified = await verifyAgentTurnAttachments(attachments);
-  const expected = [...context.managedAttachments].sort((left, right) =>
-    left.attachmentId.localeCompare(right.attachmentId)
-  );
-  const actual = verified
-    .map((attachment) => ({
-      attachmentId: attachment.attachmentId,
-      contentSha256: attachment.sha256,
-      byteCount: attachment.byteCount
-    }))
-    .sort((left, right) => left.attachmentId.localeCompare(right.attachmentId));
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(
-      'Runtime turn attachments do not match the attested execution context.'
-    );
-  }
-  return verified;
+): AgentTurnAttachment[] {
+  assertAgentTurnAttachmentSelection(selection, attachments);
+  return [...attachments];
 }
 
 function errorMessage(error: unknown): string {
@@ -152,20 +143,9 @@ function taskExecutionContext(input: {
   operationId: string;
   worktree: WorktreeRecord;
   settings: AgentExecutionSettings;
-  attachments: readonly {
-    id: string;
-    sha256: string;
-    byteCount: number;
-  }[];
   allowDynamicTools: boolean;
-}): import('../../shared/agentRuntime').AgentExecutionContext {
-  const managedAttachments = input.attachments
-    .map((attachment) => ({
-      attachmentId: attachment.id,
-      contentSha256: attachment.sha256,
-      byteCount: attachment.byteCount
-    }))
-    .sort((left, right) => left.attachmentId.localeCompare(right.attachmentId));
+}): AgentExecutionContext {
+  const managedAttachments: AgentExecutionContext['managedAttachments'] = [];
   const permissionProfileHash = createHash('sha256')
     .update(
       JSON.stringify({
@@ -368,6 +348,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         promptArtifactId,
         outputArtifactId,
         diagnosticArtifactId,
+        attachmentSelection: [...(input.attachmentSelection ?? [])],
         ...(input.taskDetails ? { taskDetails: input.taskDetails } : {}),
         ...(input.taskReviewTarget
           ? { taskReviewTarget: input.taskReviewTarget }
@@ -415,8 +396,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       );
     }
     const prompt = await this.runtimeStore.readArtifact(run.promptArtifactId);
-    const verifiedAttachments = await verifyRuntimeTurnAttachments(
-      session.executionContext,
+    const verifiedAttachments = verifyRuntimeTurnAttachments(
+      run.attachmentSelection,
       attachments
     );
     if (isReadOnlyRuntimePurpose(run.purpose)) {
@@ -1691,7 +1672,6 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           operationId,
           worktree: input.worktree,
           settings,
-          attachments: taskAttachments,
           allowDynamicTools: input.mode === 'DESIGN'
         }),
         operationId
@@ -1744,6 +1724,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: input.retryOfRunId,
       continuedFromRunId: input.continuedFromRunId,
       instructionProfile: input.instructionProfile,
+      attachmentSelection: toAgentAttachmentSelectionFromRecords(taskAttachments),
       operationId: `task-run:${runId}`
     });
     await this.store.recordAgentRunStarted(run);
@@ -1886,7 +1867,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         beforeGitSnapshotId: input.beforeGitSnapshotId,
         eventCount: 0
       },
-      taskReviewTarget: input.target
+      taskReviewTarget: input.target,
+      attachmentSelection: toAgentAttachmentSelection(preflightAttachments)
     });
     const reviewSession = await this.taskRuntime.getAgentSession(prepared.session.id);
     const reviewRun = await this.taskRuntime.getRun(prepared.run.id);
@@ -2209,6 +2191,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     settings: AgentExecutionSettings,
     attachments: AgentTurnAttachment[]
   ): Promise<boolean> {
+    assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
     if (!(await this.claimTaskTurnSubmission(run.id))) return false;
     await adapter.startTurn({
       localRunId: run.id,
@@ -2307,7 +2290,6 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         operationId: replacementSessionOperation,
         worktree: input.input.worktree,
         settings: input.settings,
-        attachments: input.attachmentRecords,
         allowDynamicTools: input.input.mode === 'DESIGN'
       }),
       operationId: replacementSessionOperation
@@ -2328,6 +2310,9 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: current.id,
       continuedFromRunId: input.input.continuedFromRunId,
       instructionProfile: input.input.instructionProfile,
+      attachmentSelection: toAgentAttachmentSelectionFromRecords(
+        input.attachmentRecords
+      ),
       operationId: `replacement-run:${current.id}`
     });
     await this.store.recordAgentRunStarted(replacementRun);
@@ -2413,7 +2398,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   private async validateSettings(
     adapter: AgentRuntimeAdapter,
     settings: AgentExecutionSettings,
-    attachments: readonly Pick<AgentTurnAttachment, 'kind'>[] = []
+    attachments: readonly Pick<
+      AgentAttachmentSelection,
+      'kind' | 'mediaType' | 'byteCount' | 'sha256'
+    >[] = []
   ): Promise<AgentExecutionSettings> {
     if (this.options.allowNetworkAccess === false) {
       assertBrowserDevRuntimeIsolation(

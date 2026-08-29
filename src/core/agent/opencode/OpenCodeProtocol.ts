@@ -89,6 +89,15 @@ export interface OpenCodeMessage {
   parts: OpenCodePart[];
 }
 
+export type OpenCodePromptPart =
+  | { type: 'text'; text: string }
+  | {
+      type: 'file';
+      mime: string;
+      filename: string;
+      url: string;
+    };
+
 export interface OpenCodePermissionRequest {
   id: string;
   sessionID: string;

@@ -6,13 +6,12 @@ import { ExecutionPolicySelect } from './NewTaskPanel';
 
 const executionPolicy = codexCapabilities().executionPolicy;
 
-function ControlledPolicySelect({ attachmentsIncluded = false }: { attachmentsIncluded?: boolean }) {
+function ControlledPolicySelect() {
   const [presetId, setPresetId] = useState(executionPolicy.defaultPresetId);
   return (
     <ExecutionPolicySelect
       presets={executionPolicy.presets}
       selectedPreset={executionPolicy.presets.find((preset) => preset.id === presetId)}
-      attachmentsIncluded={attachmentsIncluded}
       disabled={false}
       onChange={setPresetId}
     />
@@ -42,13 +41,14 @@ describe('New task execution policy menu', () => {
     ).toBe('false');
   });
 
-  it('keeps full access unavailable while attachments are included', () => {
-    render(<ControlledPolicySelect attachmentsIncluded />);
+  it('allows full access selection', () => {
+    render(<ControlledPolicySelect />);
     fireEvent.click(screen.getByRole('button', { name: 'Execution policy: Restricted' }));
 
     const fullAccess = screen.getByRole('menuitemradio', { name: /Full access/ });
-    expect((fullAccess as HTMLButtonElement).disabled).toBe(true);
-    expect(fullAccess.getAttribute('title')).toBe('Remove attachments to use full access.');
+    expect((fullAccess as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(fullAccess);
+    expect(screen.getByRole('button', { name: 'Execution policy: Full access' })).toBeTruthy();
   });
 
   it('closes when focus leaves the control', () => {

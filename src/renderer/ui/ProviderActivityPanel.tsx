@@ -286,14 +286,15 @@ function AttachmentSubmissionDetails({
                 <strong>
                   {submission.kind === 'image' ? 'Image' : 'Text'} attachment #{submission.ordinal + 1}
                 </strong>
-                <span>{humanizeEnum(submission.submittedAs)}</span>
+                <span>{humanizeEnum(submission.transport)}</span>
               </header>
               <p>
                 {submission.mediaType} · {submission.byteCount.toLocaleString()} bytes ·{' '}
                 <code>sha256:{submission.sha256.slice(0, 12)}…</code>
               </p>
               <footer>
-                Turn {submission.providerTurnId} · submitted{' '}
+                {humanizeEnum(submission.correlation.kind)}{' '}
+                {submission.correlation.id} · submitted{' '}
                 {new Date(submission.submittedAt).toLocaleString()}
               </footer>
             </article>

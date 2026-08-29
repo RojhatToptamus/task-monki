@@ -67,11 +67,12 @@ import {
 } from '../AgentRuntimeReadiness';
 import { agentServersRequiringLossRecovery } from '../AgentRuntimeRecovery';
 import {
+  assertAgentTurnAttachmentSelection,
+  completeAttachmentSubmissions,
   type AgentTurnAttachment
 } from '../AgentAttachmentDelivery';
 import { interactionTerminalStatus } from '../AgentInteractionPolicy';
 import {
-  ACP_MAX_MESSAGE_BYTES,
   flattenSelectOptions,
   mergeAcpToolCallUpdate,
   parseConfigOptions,
@@ -99,7 +100,6 @@ import {
 } from './AcpRpcClient';
 import {
   acpPermissionKindForAgentAction,
-  acpTextBlock,
   acpThoughtLevelSelector,
   mapAcpPlanEntries,
   mapAcpStopReason,
@@ -107,13 +107,20 @@ import {
   mapAcpToolStatus,
   observedSettingsFromAcpState,
   permissionOutcomeForDecision,
-  promptInputModalities,
   requestedNativeConfigValues,
   textFromAcpContent
 } from './AcpEventMapper';
+import {
+  assertAcpAttachmentKindsMapped,
+  assertAcpAttachmentsSupported,
+  prepareAcpAttachmentDelivery,
+  type PreparedAcpAttachmentDelivery
+} from './AcpAttachmentDelivery';
 import type { AcpNativeSessionState } from './AcpNativeSession';
 import {
   acpCapabilities,
+  acpImageInputSupport,
+  acpModelInputModalities,
   defaultAcpModel,
   type AcpRuntimeProfile
 } from './AcpRuntimeProfiles';
@@ -173,7 +180,7 @@ const MAX_BUFFERED_STREAM_BYTES = 4 * 1024 * 1024;
 const MAX_STREAM_OUTPUT_APPEND_ATTEMPTS = 3;
 const MAX_STREAM_CREDENTIAL_CARRY_BYTES = 64 * 1024;
 const MAX_STARTUP_EVENTS = 256;
-const MAX_STARTUP_EVENT_BYTES = 2 * ACP_MAX_MESSAGE_BYTES;
+const MAX_STARTUP_EVENT_BYTES = 4 * 1024 * 1024;
 
 interface BufferedAcpTextSegment {
   text: string;
@@ -418,7 +425,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   async buildExecutionContext(
     input: BuildAgentRuntimeExecutionContextInput
   ): Promise<AgentExecutionContext> {
-    assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments ?? []);
     const policy = requireAcpReadOnlyTurnPolicy(this.profile);
     const primaryCwd = path.resolve(input.primaryCwd);
     const readRoots = input.readRoots
@@ -587,6 +593,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             modelCatalog: hasProfileCatalog ? 'AVAILABLE' : 'UNKNOWN'
           },
           diagnostics: acpRuntimeDiagnostics(authenticationAdvertised)
+            .concat(this.imageInputDiagnostics())
         }
       ),
       capabilities: this.currentCapabilities(),
@@ -596,6 +603,50 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         this.redactProviderText(initialize.agentInfo?.title ?? initialize.agentInfo?.name ?? '') ||
         undefined
     };
+  }
+
+  private imageInputDiagnostics(): AgentRuntimeDiagnostic[] {
+    const initialize = this.initializeResponse;
+    if (!initialize || this.models.length === 0) return [];
+    const promptCapabilities = initialize.agentCapabilities.promptCapabilities;
+    const runtimeVersion = this.resolvedRuntime?.version;
+    const decisions = this.models.map((model) => ({
+      model,
+      support: acpImageInputSupport({
+        profile: this.profile,
+        promptCapabilities,
+        runtimeVersion,
+        modelId: model.model
+      })
+    }));
+    const drift = decisions.filter(({ support }) => support.capabilityDrift);
+    const unavailable = decisions.filter(({ support }) => !support.enabled);
+    const diagnostics: AgentRuntimeDiagnostic[] = [];
+    if (drift.length > 0) {
+      diagnostics.push(
+        warningDiagnostic(
+          'ACP_IMAGE_CAPABILITY_DRIFT',
+          'COMPATIBILITY',
+          `${this.descriptor.displayName} reports no ACP image support, but an exact packaged image test passed.`,
+          `Task Monki enables native image input only for ${drift.map(({ model }) => model.displayName).join(', ')} on ${runtimeVersion ?? 'the qualified runtime'}. Other versions and models remain disabled.`
+        )
+      );
+    }
+    if (unavailable.length > 0) {
+      const reasons = unavailable
+        .slice(0, 3)
+        .map(({ support }) => support.unavailableReason)
+        .filter((reason): reason is string => Boolean(reason));
+      diagnostics.push(
+        infoDiagnostic(
+          'ACP_IMAGE_INPUT_UNQUALIFIED',
+          'MODEL_CATALOG',
+          `${unavailable.length} current ${this.descriptor.displayName} model${unavailable.length === 1 ? ' is' : 's are'} not image-qualified.`,
+          `${reasons.join(' ')}${unavailable.length > reasons.length ? ` ${unavailable.length - reasons.length} more current models remain disabled.` : ''}`
+        )
+      );
+    }
+    return diagnostics;
   }
 
   async readNativeState(): Promise<import('../../../shared/agent').AgentJsonValue> {
@@ -749,7 +800,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
-    assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments);
     const requestedSettings = normalizeAcpReadOnlyExecutionSettings(
       this.profile,
       input.settings
@@ -767,7 +817,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         'ACP rejected a model selection whose operational identifier matches a runtime credential.'
       );
     }
+    assertAcpAttachmentKindsMapped(this.profile, input.attachments);
     await this.ensureResolvedRuntime();
+    if (input.attachments.length > 0) await this.ensureClient();
     const modelExtension = this.profile.sessionModelExtension;
     if (
       modelExtension?.initializeResponseMetaField &&
@@ -839,10 +891,18 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         id: `${this.descriptor.id}:${requestedSettings.modelProvider ?? this.profile.defaultModelProvider}/${requestedModel}`,
         model: requestedModel,
         displayName: requestedModel,
+        inputModalities: this.modelInputModalities(requestedModel),
         isDefault: false,
         native: { source: 'explicit-runtime-setting' }
       };
     }
+    assertAcpAttachmentsSupported({
+      profile: this.profile,
+      initialize: this.initializeResponse,
+      runtimeVersion: this.resolvedRuntime?.version,
+      model,
+      attachments: input.attachments
+    });
     const reasoningEffort = requestedSettings.reasoningEffort;
     if (
       reasoningEffort &&
@@ -863,6 +923,25 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       reasoningEffort
     });
     return { settings, model };
+  }
+
+  private async prepareAttachmentDelivery(input: {
+    settings: AgentExecutionSettings;
+    prompt: string;
+    attachments: readonly AgentTurnAttachment[];
+  }): Promise<PreparedAcpAttachmentDelivery> {
+    const resolved = await this.resolveExecution({
+      settings: input.settings,
+      attachments: input.attachments
+    });
+    return prepareAcpAttachmentDelivery({
+      profile: this.profile,
+      initialize: this.initializeResponse,
+      runtimeVersion: this.resolvedRuntime?.version,
+      model: resolved.model,
+      prompt: input.prompt,
+      attachments: input.attachments
+    });
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -1348,7 +1427,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     input: StartAgentRuntimeTurn
   ): Promise<StartedAgentRuntimeTurn> {
     await this.waitForRuntimeQuarantine();
-    assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments);
     const policy = requireAcpReadOnlyTurnPolicy(this.profile);
     if (
       input.run.sessionId !== input.session.id ||
@@ -1380,6 +1458,20 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (expectedHash !== input.executionContext.permissionProfileHash) {
       throw new Error('ACP read-only policy does not match the attested execution context.');
     }
+    let attachmentDelivery: PreparedAcpAttachmentDelivery;
+    try {
+      assertAgentTurnAttachmentSelection(
+        input.run.attachmentSelection,
+        input.attachments
+      );
+      attachmentDelivery = await this.prepareAttachmentDelivery({
+        settings: expectedSettings,
+        prompt: input.prompt,
+        attachments: input.attachments
+      });
+    } catch (cause) {
+      throw runtimeDeliveryErrorForAcp('ACP attachment preparation', cause);
+    }
     const materialized = await this.materializeRuntimeSession(
       input.session,
       expectedSettings
@@ -1402,7 +1494,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         'session/prompt',
         {
           sessionId: materialized.state.sessionId,
-          prompt: [acpTextBlock(input.prompt)]
+          prompt: attachmentDelivery.prompt
         },
         { timeoutMs: null }
       );
@@ -1414,6 +1506,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     void started.response.catch(() => undefined);
     const providerTurnId = `${server.id}:${String(started.requestId)}`;
     const startedAt = new Date().toISOString();
+    const attachmentSubmissions = completeAttachmentSubmissions(
+      attachmentDelivery.submissionCandidates,
+      { kind: 'client-request', id: String(started.requestId) },
+      startedAt
+    );
     try {
       const currentSession =
         (await this.providerRuntime.getSession(input.session.id)) ?? materialized.session;
@@ -1442,6 +1539,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           providerTurnId,
           status: 'RUNNING',
           delivery: 'ACKNOWLEDGED',
+          ...(attachmentSubmissions.length > 0 ? { attachmentSubmissions } : {}),
           lastEventAt: startedAt
         },
         `acp-runtime-turn-acknowledged:${input.run.id}`
@@ -1468,6 +1566,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       serverInstanceId: server.id,
       providerSessionId: materialized.state.sessionId,
       providerTurnId,
+      ...(attachmentSubmissions.length > 0 ? { attachmentSubmissions } : {}),
       startedAt
     };
   }
@@ -1612,9 +1711,21 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
     await this.waitForRuntimeQuarantine();
-    assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments ?? []);
     let session = await this.requireSession(input.session.localSessionId);
     this.assertSessionOwnership(session);
+    const run = await this.taskRuntime.getRun(input.localRunId);
+    if (!run || run.sessionId !== session.id) {
+      throw new Error('ACP turn does not belong to the selected session.');
+    }
+    const attachments = input.attachments ?? [];
+    assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
+    const settings = input.settings ?? session.requestedSettings;
+    assertAcpExecutionPolicy(this.profile, settings);
+    const attachmentDelivery = await this.prepareAttachmentDelivery({
+      settings,
+      prompt: input.prompt,
+      attachments
+    });
     if (!session.providerSessionId) {
       session = await this.createSession({
         runtimeId: this.descriptor.id,
@@ -1623,7 +1734,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         iterationId: session.iterationId,
         worktreeId: session.worktreeId,
         worktreePath: session.worktreePath,
-        settings: input.settings ?? session.requestedSettings
+        settings
       });
     } else if (!this.nativeSessions.has(session.providerSessionId)) {
       // Provider session IDs survive process restarts, but the new ACP process
@@ -1639,9 +1750,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       throw new Error(`ACP session ${session.id} already has active run ${competing.id}.`);
     }
 
-    const settings = input.settings ?? session.requestedSettings;
-    assertAcpExecutionPolicy(this.profile, settings);
-    const prompt = [acpTextBlock(input.prompt)];
     let client = await this.ensureClient();
     // A quarantine can begin after the initial native-session check but before
     // the client is acquired. Never submit a prompt on a relaunched process
@@ -1703,7 +1811,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     try {
       started = await client.startMutation<unknown>('session/prompt', {
         sessionId: session.providerSessionId,
-        prompt
+        prompt: attachmentDelivery.prompt
       }, { timeoutMs: null });
     } catch (cause) {
       this.activePromptRunIds.delete(input.localRunId);
@@ -1714,18 +1822,25 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     // terminal handler is registered below after persistence succeeds.
     void started.response.catch(() => undefined);
     const providerTurnId = `${server.id}:${String(started.requestId)}`;
+    const submittedAt = new Date().toISOString();
+    const attachmentSubmissions = completeAttachmentSubmissions(
+      attachmentDelivery.submissionCandidates,
+      { kind: 'client-request', id: String(started.requestId) },
+      submittedAt
+    );
     try {
       await this.taskRuntime.updateRun(input.localRunId, {
         providerTurnId,
         serverInstanceId: server.id,
         status: 'RUNNING',
-        lastEventAt: new Date().toISOString()
+        ...(attachmentSubmissions.length > 0 ? { attachmentSubmissions } : {}),
+        lastEventAt: submittedAt
       }, acpRuntimeOperationId('turn/acknowledged', input.localRunId, providerTurnId, server.id));
       await this.taskRuntime.updateAgentSession(session.id, {
         status: 'ACTIVE',
         materialized: true,
         requestedSettings: settings,
-        lastAttachedAt: new Date().toISOString()
+        lastAttachedAt: submittedAt
       }, acpRuntimeOperationId('session/turn-active', session.id, providerTurnId, server.id));
       await this.supervisor?.markRunning();
     } catch (cause) {
@@ -2672,7 +2787,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           },
           diagnostics: acpRuntimeDiagnostics(
             Boolean(this.initializeResponse?.authMethods.length)
-          )
+          ).concat(this.imageInputDiagnostics())
         }
       ),
       capabilities: this.currentCapabilities(),
@@ -5724,9 +5839,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private refreshModels(): void {
-    const modalities = promptInputModalities(
-      this.initializeResponse?.agentCapabilities.promptCapabilities
-    );
     const extension = this.profile.sessionModelExtension;
     const profileModels = this.profileModelState;
     if (extension?.initializeResponseMetaField && profileModels) {
@@ -5758,7 +5870,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           supportedReasoningEfforts,
           defaultReasoningEffort: providerDefaultReasoningEffort,
           serviceTiers: [],
-          inputModalities: modalities,
+          inputModalities: this.modelInputModalities(model.modelId),
           isDefault: model.modelId === profileModels.currentModelId,
           native: {
             source: 'provider-model-extension',
@@ -5804,7 +5916,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           supportedReasoningEfforts,
           defaultReasoningEffort,
           serviceTiers: [],
-          inputModalities: modalities,
+          inputModalities: this.modelInputModalities(model.value),
           isDefault: model.value === this.profile.defaultModel,
           native: {
             source: 'provider-parameterized-model-catalog',
@@ -5818,7 +5930,22 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     // Stable ACP model selectors remain scoped to the provider session that
     // advertised them. Only an explicit provider catalog contract may populate
     // the application model picker before session creation.
-    this.models = [defaultAcpModel(this.profile, modalities)];
+    this.models = [
+      defaultAcpModel(
+        this.profile,
+        this.modelInputModalities(this.profile.defaultModel)
+      )
+    ];
+  }
+
+  private modelInputModalities(modelId: string): string[] {
+    return acpModelInputModalities({
+      profile: this.profile,
+      promptCapabilities:
+        this.initializeResponse?.agentCapabilities.promptCapabilities,
+      runtimeVersion: this.resolvedRuntime?.version,
+      modelId
+    });
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
@@ -6283,17 +6410,6 @@ function runtimeDeliveryErrorForAcp(
     `${operation} failed: ${errorMessage(cause)}`,
     { cause }
   );
-}
-
-export function assertAcpManagedAttachmentsUnsupported(
-  profile: AcpRuntimeProfile,
-  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[]
-): void {
-  if (attachments.length > 0) {
-    throw new Error(
-      `Task Monki managed attachments are unavailable for ${profile.descriptor.displayName} because its credential-bearing ACP process cannot attest attachment confinement.`
-    );
-  }
 }
 
 function providerOptions(interaction: InteractionRequestRecord): AcpPermissionOption[] {

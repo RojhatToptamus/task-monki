@@ -7,6 +7,8 @@ import {
   GROK_SESSION_MODEL_EXTENSION,
   CLAUDE_AGENT_ACP_PROFILE,
   acpCapabilities,
+  acpImageInputSupport,
+  acpModelInputModalities,
   defaultAcpModel
 } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
@@ -339,5 +341,102 @@ describe('ACP runtime profiles', () => {
     expect(defaultAcpModel(CURSOR_ACP_PROFILE).description).not.toContain(
       'task-owned session'
     );
+  });
+
+  it('intersects ACP image negotiation with exact profile version and model evidence', () => {
+    expect(
+      acpModelInputModalities({
+        profile: CURSOR_ACP_PROFILE,
+        promptCapabilities: { image: true },
+        runtimeVersion: '2026.08.25-3e8eec8',
+        modelId: 'composer-2.5'
+      })
+    ).toEqual(['text', 'image']);
+    for (const input of [
+      { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'default', image: true },
+      { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'other', image: true },
+      { runtimeVersion: 'other-version', modelId: 'composer-2.5', image: true },
+      { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'composer-2.5', image: false }
+    ]) {
+      expect(
+        acpModelInputModalities({
+          profile: CURSOR_ACP_PROFILE,
+          promptCapabilities: { image: input.image },
+          runtimeVersion: input.runtimeVersion,
+          modelId: input.modelId
+        })
+      ).toEqual(['text']);
+    }
+    expect(
+      acpImageInputSupport({
+        profile: GROK_ACP_PROFILE,
+        promptCapabilities: { image: false },
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.6'
+      })
+    ).toMatchObject({
+      advertised: false,
+      enabled: true,
+      capabilityDrift: true,
+      qualification: {
+        allowWhenNotAdvertised: true,
+        mediaTypes: ['image/png']
+      }
+    });
+    expect(
+      acpImageInputSupport({
+        profile: GROK_ACP_PROFILE,
+        promptCapabilities: {},
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.6'
+      })
+    ).toMatchObject({
+      advertised: undefined,
+      enabled: false,
+      capabilityDrift: false,
+      unavailableReason: expect.stringContaining('did not report ACP image support')
+    });
+    for (const input of [
+      {
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.5'
+      },
+      { runtimeVersion: 'grok 1.0.13', modelId: 'grok-4.6' }
+    ]) {
+      expect(
+        acpImageInputSupport({
+          profile: GROK_ACP_PROFILE,
+          promptCapabilities: { image: false },
+          ...input
+        })
+      ).toMatchObject({
+        advertised: false,
+        enabled: false,
+        capabilityDrift: false,
+        unavailableReason: expect.stringContaining('no verified compatibility exception')
+      });
+    }
+    expect(GROK_ACP_PROFILE.attachmentTextTransport).toBe('embedded-resource');
+    expect(CURSOR_ACP_PROFILE.attachmentTextTransport).toBe('text-block');
+    expect(CLAUDE_AGENT_ACP_PROFILE.attachmentTextTransport).toBeUndefined();
+    expect(
+      acpCapabilities(GROK_ACP_PROFILE, {
+        prompt: { embeddedContext: true }
+      }).attachmentDelivery.maturity
+    ).toBe('stable');
+    expect(
+      acpCapabilities(GROK_ACP_PROFILE, {
+        prompt: { embeddedContext: false }
+      }).attachmentDelivery.maturity
+    ).toBe('unsupported');
+    expect(acpCapabilities(CURSOR_ACP_PROFILE).attachmentDelivery.maturity).toBe(
+      'stable'
+    );
+    expect(
+      acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).attachmentDelivery
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('content-use qualification')
+    });
   });
 });

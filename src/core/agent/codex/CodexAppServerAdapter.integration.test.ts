@@ -16,7 +16,10 @@ import type {
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { git } from '../../git/gitCli';
 import { AgentOrchestrator } from '../AgentOrchestrator';
-import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
+import {
+  AgentMutationAmbiguousError,
+  AgentRuntimeDeliveryError
+} from '../AgentRuntimeAdapter';
 import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AppEventBus } from '../../runner/AppEventBus';
@@ -231,6 +234,145 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       expect(taskSnapshot.agentSessions).toEqual([]);
     } finally {
       unsubscribe();
+      await adapter.shutdown();
+      await runtime.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('rejects a missing read-only attachment before starting a provider thread', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-scoped-attachment-preflight-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'scoped');
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const attachmentFilePath = path.join(dir, 'reference.txt');
+    const attachmentBytes = Buffer.from('immutable reference\n');
+    await fs.writeFile(attachmentFilePath, attachmentBytes, { mode: 0o400 });
+    const attachmentPath = await fs.realpath(attachmentFilePath);
+    const attachment = {
+      attachmentId: 'scoped-attachment-1',
+      ordinal: 0,
+      displayName: 'reference.txt',
+      kind: 'text' as const,
+      mediaType: 'text/plain',
+      byteCount: attachmentBytes.byteLength,
+      sha256: createHash('sha256').update(attachmentBytes).digest('hex'),
+      path: attachmentPath,
+      verifiedAt: new Date().toISOString()
+    };
+    const store = new FileTaskStore(path.join(dir, 'task-store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    await runtime.init();
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      runtimeStore: runtime
+    });
+    try {
+      await adapter.initialize();
+      const owner = {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-attachment-preflight',
+        stableParticipantId: 'participant-attachment-preflight'
+      };
+      const sessionId = 'scoped-session-attachment-preflight';
+      const executionContext = await adapter.buildExecutionContext({
+        sessionId,
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: 'scoped-attachment-preflight-context',
+        attachments: [attachment]
+      });
+      const session = await runtime.createSession({
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId: 'codex',
+          model: 'fake-model',
+          executionContext,
+          createdAt: '2026-07-13T00:00:00.000Z'
+        }),
+        executionContext,
+        clientOperationId: 'create-scoped-attachment-preflight-session',
+        runtimeId: 'codex',
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: executionContext.modelSettings
+      });
+      let run = await runtime.createRun({
+        id: 'scoped-run-attachment-preflight',
+        owner,
+        scope: {
+          kind: 'DISCOURSE',
+          conversationId: owner.conversationId,
+          waveId: 'wave-attachment-preflight',
+          jobId: 'job-attachment-preflight',
+          contextSnapshotId: 'context-attachment-preflight',
+          attemptId: 'attempt-attachment-preflight'
+        },
+        sessionId: session.id,
+        sessionAccessEpoch: session.accessEpoch.epoch,
+        purpose: 'DISCOURSE_ANSWER',
+        generationKey: 'generation-attachment-preflight',
+        clientOperationId: 'create-scoped-attachment-preflight-run',
+        requestedSettings: executionContext.modelSettings,
+        promptArtifactId: 'scoped-attachment-preflight-prompt',
+        outputArtifactId: 'scoped-attachment-preflight-output',
+        diagnosticArtifactId: 'scoped-attachment-preflight-diagnostic',
+        attachmentSelection: [attachment]
+      });
+      run = await runtime.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: '2026-07-13T00:00:01.000Z'
+        },
+        'scoped-attachment-preflight-start-intent'
+      );
+      await fs.unlink(attachmentPath);
+
+      const failure = await adapter
+        .startRuntimeTurn({
+          session,
+          run,
+          executionContext,
+          prompt: 'Use the selected reference.',
+          attachments: [attachment]
+        })
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(AgentRuntimeDeliveryError);
+      expect(failure).toMatchObject({
+        delivery: 'NOT_DELIVERED',
+        message: expect.stringContaining('is missing or no longer accessible')
+      });
+      const server = (await runtime.snapshot()).servers[0]!;
+      const outbound = readOutboundMessages(
+        await fs.readFile(server.protocolJournalPath, 'utf8')
+      );
+      expect(outbound.map((message) => message.method)).not.toContain('thread/start');
+      expect(outbound.map((message) => message.method)).not.toContain('turn/start');
+    } finally {
       await adapter.shutdown();
       await runtime.close();
     }
@@ -1142,18 +1284,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const profileFork = outbound.find((message) => message.method === 'thread/fork');
     const firstConfig = (threadStart?.params as { config: unknown }).config as {
       default_permissions: string;
-      permissions: Record<string, { filesystem: Record<string, string> }>;
     };
     const laterConfig = (profileFork?.params as { config: unknown }).config as typeof firstConfig;
-    const firstFilesystem = firstConfig.permissions[firstConfig.default_permissions]!.filesystem;
-    const laterFilesystem = laterConfig.permissions[laterConfig.default_permissions]!.filesystem;
-    const attachmentPathMarker = `${path.sep}attachments${path.sep}tasks${path.sep}`;
-    const firstPath = Object.keys(firstFilesystem).find((candidate) =>
-      candidate.includes(attachmentPathMarker)
-    );
-    const laterPath = Object.keys(laterFilesystem).find((candidate) =>
-      candidate.includes(attachmentPathMarker)
-    );
+    const runtime = runtimeForTaskStore(store);
+    const firstAccess = (await runtime.getSession(firstRun.sessionId))!.executionContext
+      .managedAttachments;
+    const laterAccess = (await runtime.getSession(laterRun.sessionId))!.executionContext
+      .managedAttachments;
 
     expect(firstConfig.default_permissions).not.toBe(laterConfig.default_permissions);
     expect(laterRun.sessionId).not.toBe(firstRun.sessionId);
@@ -1167,10 +1304,12 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         expect.objectContaining({ id: laterRun.sessionId, providerSessionId: 'thread-rebound' })
       ])
     );
-    expect(firstPath).toBeTruthy();
-    expect(laterPath).toBeTruthy();
-    expect(laterFilesystem).not.toHaveProperty(firstPath!);
-    expect(firstFilesystem).not.toHaveProperty(laterPath!);
+    expect(firstAccess).toHaveLength(1);
+    expect(laterAccess).toHaveLength(1);
+    expect(firstAccess[0]?.attachmentId).not.toBe(laterAccess[0]?.attachmentId);
+    expect(JSON.stringify(outbound)).not.toContain(
+      `${path.sep}attachments${path.sep}tasks${path.sep}`
+    );
     expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(2);
     expect(outbound).toContainEqual(
       expect.objectContaining({
@@ -1178,6 +1317,76 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         params: { threadId: 'thread-1' }
       })
     );
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('sends a selected Design image as a native input on every turn', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-image-turns-'));
+    const executable = await writeFakeCodexExecutable(dir, 'profile-rebind');
+    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot
+    });
+    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree, turnId } = await createDesignTaskContext(
+      store,
+      dir,
+      { initialAttachment: { displayName: 'reference.png', body: onePixelPng() } }
+    );
+    const [reference] = (await store.getDesignDetail(task.id)).references;
+
+    const firstTerminal = waitForAppEvent(events, 'run.terminal');
+    const firstRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'DESIGN',
+      prompt: task.prompt,
+      instructionProfile: 'DESIGN',
+      generationKey: turnId,
+      settings: task.agentSettings
+    });
+    await firstTerminal;
+
+    const laterTurn = await store.createInlineDesignTurn({
+      designId: task.id,
+      clientMessageId: 'reuse-image-turn',
+      message: 'Use this image again.',
+      referenceIds: [reference!.id]
+    });
+    const laterRun = await orchestrator.startTurn({
+      task: (await store.getTask(task.id))!,
+      iteration,
+      worktree,
+      mode: 'DESIGN',
+      prompt: 'Use this image again.',
+      instructionProfile: 'DESIGN',
+      generationKey: laterTurn.id,
+      settings: task.agentSettings
+    });
+
+    const server = (await store.snapshot()).agentServers[0]!;
+    const turnStarts = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    ).filter((message) => message.method === 'turn/start');
+    expect(firstRun.sessionId).toBe(laterRun.sessionId);
+    expect(turnStarts).toHaveLength(2);
+    expect(
+      turnStarts.map((message) =>
+        (message.params as { input?: Array<{ type?: string }> }).input?.filter(
+          (item) => item.type === 'localImage'
+        ).length
+      )
+    ).toEqual([1, 1]);
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -1511,14 +1720,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(completed?.attachmentSubmissions).toEqual([
       expect.objectContaining({
         kind: 'image',
-        submittedAs: 'localImage',
-        providerTurnId: 'turn-1',
+        transport: 'native-image',
+        correlation: { kind: 'provider-turn', id: 'turn-1' },
         submittedAt: expect.any(String)
       }),
       expect.objectContaining({
         kind: 'text',
-        submittedAs: 'prompt-file-reference',
-        providerTurnId: 'turn-1',
+        transport: 'managed-path',
+        correlation: { kind: 'provider-turn', id: 'turn-1' },
         submittedAt: expect.any(String)
       })
     ]);
@@ -1557,8 +1766,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const outbound = readOutboundMessages(finalJournal);
     expect(finalJournal).not.toContain(imageBytes.toString('utf8'));
     expect(finalJournal).not.toContain(textBytes.toString('utf8').trim());
-    // The parsed raw protocol journal is the explicit debug-only exception to
-    // the path-free durable-record rule because Codex receives managed paths.
+    expect(finalJournal).not.toContain(canonicalImagePath);
+    expect(finalJournal).not.toContain(canonicalTextPath);
     const firstThreadStart = outbound.find((message) => message.method === 'thread/start');
     expect(firstThreadStart?.params).toMatchObject({
       approvalPolicy: 'on-request',
@@ -1618,22 +1827,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       input?: Array<{ type?: string; text?: string; path?: string }>;
     } | undefined)?.input;
     const deliveryImagePath = turnInput?.find((item) => item.type === 'localImage')?.path;
-    const manifestPaths = readAttachmentManifestPaths(
-      turnInput?.find((item) => item.type === 'text')?.text
-    );
-    const deliveryTextPath = manifestPaths.find((candidate) => candidate !== deliveryImagePath);
-    expect(deliveryImagePath).toBe(canonicalImagePath);
-    expect(deliveryTextPath).toBe(canonicalTextPath);
     expect(turnInput).toEqual([
       expect.objectContaining({
         type: 'text',
-        text: expect.stringContaining('Task Monki attachment manifest:')
+        text: expect.stringContaining('attachment input omitted')
       }),
       { type: 'localImage', path: deliveryImagePath }
     ]);
-    expect(manifestPaths).toContain(canonicalTextPath);
-    await expect(fs.access(deliveryImagePath!)).resolves.toBeUndefined();
-    await expect(fs.access(deliveryTextPath!)).resolves.toBeUndefined();
+    expect(deliveryImagePath).toContain('managed attachment path omitted');
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -2897,18 +3098,13 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const server = snapshot.agentServers[0]!;
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     const firstOutbound = readOutboundMessages(journal);
-    const turnStart = firstOutbound.find(
-      (message) => message.method === 'turn/start'
-    );
     expect(firstOutbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
     expect(firstOutbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
     expect(firstOutbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
-    const manifest = (
-      turnStart?.params as { input?: Array<{ type?: string; text?: string }> } | undefined
-    )?.input?.find((item) => item.type === 'text')?.text;
-    const deliveryPath = readAttachmentManifestPaths(manifest)[0];
-    expect(deliveryPath).toContain(`${path.sep}attachments${path.sep}tasks${path.sep}`);
-    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+    expect(journal).not.toContain(`${path.sep}attachments${path.sep}tasks${path.sep}`);
+    const retained = await store.verifyRunAttachments(run!.id, task.id);
+    expect(retained).toHaveLength(1);
+    await expect(fs.access(retained[0]!.absolutePath)).resolves.toBeUndefined();
 
     await orchestrator.shutdown();
 
@@ -2949,7 +3145,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       replacementOutbound.filter((message) => message.method === 'turn/start')
     ).toHaveLength(0);
     await replacementOrchestrator.shutdown();
-    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+    await expect(fs.access(retained[0]!.absolutePath)).resolves.toBeUndefined();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('records recovery before a provider-acknowledged thread/start can be retried', async () => {
@@ -5127,7 +5323,9 @@ async function createTaskContext(
 async function createDesignTaskContext(
   store: FileTaskStore,
   dir: string,
-  options: { initialAttachment?: { displayName: string; body: string } } = {}
+  options: {
+    initialAttachment?: { displayName: string; body: string | Uint8Array };
+  } = {}
 ) {
   const repositoryPath = path.join(dir, 'design-repository');
   await fs.mkdir(repositoryPath, { recursive: true });
@@ -5359,17 +5557,6 @@ function readOutboundMessages(
       result?: unknown;
       error?: unknown;
     });
-}
-
-function readAttachmentManifestPaths(manifest: string | undefined): string[] {
-  if (!manifest) return [];
-  const prefix = 'Attachment metadata: ';
-  return manifest
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith(prefix))
-    .map((line) => JSON.parse(line.slice(prefix.length)) as { readOnlyPath?: unknown })
-    .map((metadata) => metadata.readOnlyPath)
-    .filter((value): value is string => typeof value === 'string');
 }
 
 async function writeFakeCodexExecutable(

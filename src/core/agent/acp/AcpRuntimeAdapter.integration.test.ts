@@ -1,12 +1,19 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentInteractionService } from '../AgentInteractionService';
+import {
+  toAgentAttachmentSelection,
+  type AgentTurnAttachment
+} from '../AgentAttachmentDelivery';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
-import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
+import {
+  AgentMutationAmbiguousError,
+  AgentRuntimeDeliveryError
+} from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
 import type {
   AgentExecutionSettings,
@@ -17,6 +24,7 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../../shared/contracts';
+import type { AgentAttachmentSelection } from '../../../shared/attachments';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from '../AgentRuntimeStore';
@@ -183,6 +191,7 @@ interface CreateTestRunInput {
   continuedFromRunId?: string;
   requestedSettings?: AgentExecutionSettings;
   beforeGitSnapshotId?: string;
+  attachmentSelection?: AgentAttachmentSelection[];
 }
 
 async function createTestRun(
@@ -200,6 +209,9 @@ async function createTestRun(
     prompt: input.prompt,
     generationKey: input.generationKey ?? `acp-test:${id}`,
     requestedSettings: input.requestedSettings ?? input.session.requestedSettings,
+    ...(input.attachmentSelection
+      ? { attachmentSelection: input.attachmentSelection }
+      : {}),
     ...(input.beforeGitSnapshotId
       ? { beforeGitSnapshotId: input.beforeGitSnapshotId }
       : {}),
@@ -264,6 +276,29 @@ function createTestAgentServer(
   return runtimeFixture(store).runtimeStore.createAgentServer(input);
 }
 
+async function createManagedTextAttachment(input: {
+  directory: string;
+  attachmentId: string;
+  displayName: string;
+  text: string;
+}): Promise<AgentTurnAttachment> {
+  const bytes = Buffer.from(input.text);
+  const filePath = path.join(input.directory, input.displayName);
+  await fs.writeFile(filePath, bytes, { mode: 0o400 });
+  await fs.chmod(filePath, 0o400);
+  return {
+    attachmentId: input.attachmentId,
+    ordinal: 0,
+    displayName: input.displayName,
+    kind: 'text',
+    mediaType: 'text/plain',
+    byteCount: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    path: filePath,
+    verifiedAt: new Date(0).toISOString()
+  };
+}
+
 describe('AcpRuntimeAdapter end-to-end', () => {
   it('fences unconfirmed shared read-only cancellation before recovery is visible', async () => {
     const directory = await fs.mkdtemp(
@@ -284,6 +319,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         policyId: 'test-acp/ask-read-only@v1',
         detail: 'Test Ask mode denies repository mutation.'
       },
+      attachmentTextTransport: 'text-block',
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
@@ -317,13 +353,20 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       model: 'default',
       modelProvider: 'test-provider'
     };
+    const attachment = await createManagedTextAttachment({
+      directory,
+      attachmentId: 'read-only-reference',
+      displayName: 'reference.txt',
+      text: 'read-only attachment content'
+    });
+    const attachmentSelection = toAgentAttachmentSelection([attachment]);
     const context = await adapter.buildExecutionContext({
       sessionId,
       primaryCwd: directory,
       readRoots: [{ canonicalPath: directory, kind: 'EMPTY_MANAGED' }],
       modelSettings: settings,
       clientOperationId: `read-only-context:${sessionId}`,
-      attachments: []
+      attachments: [attachment]
     });
     const prepared = await fixture.runtimeStore.prepareRuntimeTurn({
       session: {
@@ -356,6 +399,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         generationKey: `read-only:${runId}`,
         clientOperationId: `read-only-run:${runId}`,
         requestedSettings: context.modelSettings,
+        attachmentSelection,
         promptArtifactId: `prompt-${runId}`,
         outputArtifactId: `output-${runId}`,
         diagnosticArtifactId: `diagnostic-${runId}`
@@ -378,12 +422,24 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         },
         `read-only-starting:${runId}`
       );
-      await adapter.startRuntimeTurn({
+      const preDeliveryError = await adapter.startRuntimeTurn({
         session: prepared.session,
         run: startingRun,
         executionContext: context,
         prompt: 'Refine this prompt without changing files.',
         attachments: []
+      }).catch((cause: unknown) => cause);
+      expect(preDeliveryError).toBeInstanceOf(AgentRuntimeDeliveryError);
+      expect(preDeliveryError).toMatchObject({
+        name: 'AgentRuntimeDeliveryError',
+        delivery: 'NOT_DELIVERED'
+      });
+      await adapter.startRuntimeTurn({
+        session: prepared.session,
+        run: startingRun,
+        executionContext: context,
+        prompt: 'Refine this prompt without changing files.',
+        attachments: [attachment]
       });
       const completed = await waitFor(async () => {
         const run = await fixture.runtimeStore.getRun(runId);
@@ -395,6 +451,19 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       await expect(
         fixture.runtimeStore.readArtifact(completed.diagnosticArtifactId)
       ).resolves.toContain('denied an ACP permission request');
+      expect(completed.attachmentSubmissions).toEqual([
+        expect.objectContaining({
+          attachmentId: attachment.attachmentId,
+          transport: 'text-block',
+          correlation: {
+            kind: 'client-request',
+            id: completed.providerTurnId?.split(':').at(-1)
+          }
+        })
+      ]);
+      expect(JSON.stringify(completed.attachmentSubmissions)).not.toContain(
+        attachment.path
+      );
       await waitFor(async () =>
         events.some((event) => event.type === 'TERMINAL' && event.runId === runId)
           ? true
@@ -418,6 +487,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           }
         })
       );
+      const submittedPrompt = messages.find(
+        (message) => message.method === 'session/prompt'
+      );
+      expect(JSON.stringify(submittedPrompt)).toContain('read-only attachment content');
+      expect(JSON.stringify(submittedPrompt)).not.toContain(attachment.path);
 
       const cancellationSessionId = randomUUID();
       const cancellationRunId = randomUUID();
@@ -575,6 +649,158 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       }
     } finally {
       unsubscribe();
+      await adapter.shutdown();
+    }
+  });
+
+  it('delivers a verified text attachment on a normal turn and reuses the ACP session', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-attachment-turn-')
+    );
+    temporaryDirectories.push(directory);
+    const messageLog = path.join(directory, 'attachment-messages.jsonl');
+    const agentScript = path.join(directory, 'attachment-agent.cjs');
+    await fs.writeFile(agentScript, attachmentDeliveryAgentSource(messageLog), {
+      mode: 0o600
+    });
+    const runtimeId = 'test-acp-attachment-turn';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      attachmentTextTransport: 'text-block',
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 1_000,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
+    };
+    const task = await store.createTask({
+      title: 'ACP attachment turn',
+      prompt: 'Use the selected reference.',
+      repositoryId: (await addTestRepository(store, directory)).id,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-attachment-turn',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const attachment = await createManagedTextAttachment({
+      directory,
+      attachmentId: 'normal-reference',
+      displayName: 'normal-reference.txt',
+      text: 'normal turn attachment content'
+    });
+    const firstRun = await createTestRun(store, {
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: settings,
+      attachmentSelection: toAgentAttachmentSelection([attachment])
+    });
+
+    try {
+      await adapter.initialize();
+      await adapter.startTurn({
+        localRunId: firstRun.id,
+        session: { localSessionId: session.id },
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: [attachment]
+      });
+      const completedFirst = await waitFor(async () => {
+        const run = await getTestRun(store, firstRun.id);
+        return run?.status === 'COMPLETED' ? run : undefined;
+      });
+      expect(completedFirst.attachmentSubmissions).toEqual([
+        expect.objectContaining({
+          attachmentId: attachment.attachmentId,
+          transport: 'text-block',
+          correlation: {
+            kind: 'client-request',
+            id: completedFirst.providerTurnId?.split(':').at(-1)
+          }
+        })
+      ]);
+      expect(JSON.stringify(completedFirst.attachmentSubmissions)).not.toContain(
+        attachment.path
+      );
+
+      const activeSession = await getTestAgentSession(store, session.id);
+      if (!activeSession) throw new Error('Expected the ACP session to remain available.');
+      const secondRun = await createTestRun(store, {
+        task,
+        session: activeSession,
+        mode: 'FOLLOW_UP',
+        prompt: 'Continue without a reference.',
+        requestedSettings: settings,
+        attachmentSelection: []
+      });
+      await adapter.startTurn({
+        localRunId: secondRun.id,
+        session: { localSessionId: session.id },
+        mode: 'FOLLOW_UP',
+        prompt: 'Continue without a reference.',
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: []
+      });
+      await waitFor(async () => {
+        const run = await getTestRun(store, secondRun.id);
+        return run?.status === 'COMPLETED' ? run : undefined;
+      });
+
+      const messages = await readProtocolMessagesFromLog(messageLog);
+      expect(messages.filter((message) => message.method === 'session/new')).toHaveLength(1);
+      const prompts = messages.filter((message) => message.method === 'session/prompt');
+      expect(prompts).toHaveLength(2);
+      expect(JSON.stringify(prompts[0])).toContain('normal turn attachment content');
+      expect(JSON.stringify(prompts[0])).not.toContain(attachment.path);
+      expect(JSON.stringify(prompts[1])).not.toContain('normal turn attachment content');
+
+      const journals = await Promise.all(
+        (await store.snapshot()).agentServers.map((server) =>
+          fs.readFile(server.protocolJournalPath, 'utf8')
+        )
+      );
+      expect(journals.join('\n')).not.toContain('normal turn attachment content');
+      expect(journals.join('\n')).not.toContain(attachment.path);
+    } finally {
       await adapter.shutdown();
     }
   });
@@ -1655,8 +1881,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     try {
       await adapter.configureRuntime({ executable: process.execPath, restart: false });
       await expect(
-        adapter.resolveExecution({ settings, attachments: [{ kind: 'text' }] })
-      ).rejects.toThrow('managed attachments are unavailable');
+        adapter.resolveExecution({
+          settings,
+          attachments: [
+            {
+              kind: 'text',
+              mediaType: 'text/plain',
+              byteCount: 1,
+              sha256: '0'.repeat(64)
+            }
+          ]
+        })
+      ).rejects.toThrow('has no qualified text attachment transport');
       expect(resolutionCalls).toBe(0);
       await adapter.initialize();
       expect(await adapter.preflight()).toMatchObject({
@@ -1748,7 +1984,17 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         session: localSession,
         mode: 'IMPLEMENTATION',
         prompt: 'Must reject before provider session creation.',
-        requestedSettings: settings
+        requestedSettings: settings,
+        attachmentSelection: [
+          {
+            attachmentId: 'attachment-unsupported',
+            ordinal: 0,
+            kind: 'text',
+            mediaType: 'text/plain',
+            byteCount: 1,
+            sha256: '0'.repeat(64)
+          }
+        ]
       });
       await expect(
         adapter.startTurn({
@@ -1772,7 +2018,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             }
           ]
         })
-      ).rejects.toThrow('managed attachments are unavailable');
+      ).rejects.toThrow('has no qualified text attachment transport');
       expect((await getTestAgentSession(store, localSession.id))?.providerSessionId).toBeUndefined();
       expect((await store.snapshot()).agentServers).toHaveLength(1);
       await updateTestRun(store, attachmentRun.id, {
@@ -1859,7 +2105,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           settings: { ...settings, reasoningEffort: 'low' },
           attachments: []
         })
-      ).rejects.toThrow('did not advertise reasoning effort low');
+      ).rejects.toThrow('does not advertise reasoning effort low');
       expect(
         await protocolMethodCount(store, 'session/prompt')
       ).toBe(promptCountBeforeReasoningRejection);
@@ -4571,6 +4817,38 @@ input.on('line', (line) => {
   if (message.method === 'session/new') {
     send({ jsonrpc: '2.0', id: message.id, result: {
       sessionId: 'terminal-persistence-session'
+    }});
+    return;
+  }
+  if (message.method === 'session/prompt') {
+    send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+    return;
+  }
+  send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
+}
+
+function attachmentDeliveryAgentSource(messageLog: string): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(${JSON.stringify(messageLog)}, JSON.stringify(message) + '\\n');
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {} },
+      agentInfo: { name: 'attachment-delivery-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: 'attachment-delivery-session'
     }});
     return;
   }

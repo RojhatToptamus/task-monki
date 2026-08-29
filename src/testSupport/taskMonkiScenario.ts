@@ -47,7 +47,10 @@ import type { TaskAgentRuntimeAccess } from '../core/agent/AgentRuntimeStore';
 import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
-import { assertModelSupportsAttachments } from '../core/agent/AgentAttachmentDelivery';
+import {
+  assertModelSupportsAttachments,
+  completeAttachmentSubmissions
+} from '../core/agent/AgentAttachmentDelivery';
 import type { PreviewRecipeGenerationService } from '../core/preview/generation/PreviewRecipeGenerationService';
 import type { AgentRuntimeTurnEvent } from '../core/agent/AgentRuntimeCoordinator';
 import type { AgentExecutionContext } from '../shared/agentRuntime';
@@ -716,6 +719,20 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
       providerTurnId: `scenario-runtime-turn-${this.turnCounter}`,
       startedAt: new Date().toISOString()
     };
+    const attachmentSubmissions = completeAttachmentSubmissions(
+      input.attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        ordinal: attachment.ordinal,
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        byteCount: attachment.byteCount,
+        sha256: attachment.sha256,
+        transport: attachment.kind === 'image' ? 'native-image' : 'managed-path',
+        verifiedAt: attachment.verifiedAt
+      })),
+      { kind: 'provider-turn', id: started.providerTurnId },
+      started.startedAt
+    );
     if (this.rawRuntime) {
       const session = await this.rawRuntime.getSession(input.session.id);
       if (session && !session.providerSessionId) {
@@ -741,6 +758,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
             providerTurnId: started.providerTurnId,
             status: 'RUNNING',
             delivery: 'ACKNOWLEDGED',
+            ...(attachmentSubmissions.length > 0 ? { attachmentSubmissions } : {}),
             lastEventAt: started.startedAt
           },
           `scenario-runtime-started:${input.run.id}`
@@ -762,7 +780,10 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         );
       });
     }
-    return started;
+    return {
+      ...started,
+      ...(attachmentSubmissions.length > 0 ? { attachmentSubmissions } : {})
+    };
   }
 
   private async createRuntimeServer(): Promise<string> {

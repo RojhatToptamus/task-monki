@@ -56,6 +56,7 @@ export function makeRunRecord(overrides: Partial<RunRecord> = {}): RunRecord {
     promptArtifactId: 'prompt-1',
     outputArtifactId: 'output-1',
     diagnosticArtifactId: 'diagnostic-1',
+    attachmentSelection: [],
     startedAt: TEST_NOW,
     eventCount: 0,
     ...overrides
