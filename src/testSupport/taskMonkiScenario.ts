@@ -19,7 +19,10 @@ import type {
   TaskSnapshot,
   WorktreeRecord
 } from '../shared/contracts';
-import { AgentMutationAmbiguousError } from '../core/agent/AgentRuntimeAdapter';
+import {
+  AgentMutationAmbiguousError,
+  AgentRuntimeDeliveryError
+} from '../core/agent/AgentRuntimeAdapter';
 import { createRuntimeReadiness } from '../core/agent/AgentRuntimeReadiness';
 import type {
   AgentRuntimeAdapter,
@@ -28,7 +31,6 @@ import type {
   AgentTurn,
   CreateAgentSession,
   InterruptAgentTurn,
-  StartAgentReview,
   StartAgentTurn,
   SteerAgentTurn,
   ResolveAgentExecution,
@@ -47,6 +49,8 @@ import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { assertModelSupportsAttachments } from '../core/agent/AgentAttachmentDelivery';
 import type { PreviewRecipeGenerationService } from '../core/preview/generation/PreviewRecipeGenerationService';
+import type { AgentRuntimeTurnEvent } from '../core/agent/AgentRuntimeCoordinator';
+import type { AgentExecutionContext } from '../shared/agentRuntime';
 
 export interface ScenarioOptions {
   name?: string;
@@ -141,7 +145,7 @@ export function createScriptedAgentRuntimeFixture(
     store.recordAgentRuntimeEvent(event, operationId)
   );
   store.bindAgentRuntime(taskRuntime);
-  const adapter = new ScriptedAgentRuntimeAdapter(taskRuntime);
+  const adapter = new ScriptedAgentRuntimeAdapter(taskRuntime, runtimeStore);
   return {
     adapter,
     runtimeStore,
@@ -164,6 +168,7 @@ export function createScriptedAgentRuntimeFixture(
       const operationId = `scenario-fixture-session:${id}`;
       const executionContext = {
         attestation: { status: 'ATTESTED' as const },
+        repositoryAccess: 'WRITE' as const,
         primaryCwd: input.worktree.worktreePath,
         readRoots: [
           {
@@ -509,14 +514,31 @@ export function commandLine(...argv: string[]): string {
 export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   readonly startedTurns: StartAgentTurn[] = [];
-  readonly startedReviews: StartAgentReview[] = [];
+  readonly startedReviews: unknown[] = [];
+  readonly startedRuntimeTurns: Array<
+    Parameters<NonNullable<AgentRuntimeAdapter['startRuntimeTurn']>>[0]
+  > = [];
   readonly steeredTurns: SteerAgentTurn[] = [];
   ambiguousStart = false;
   ambiguousInterrupt = false;
+  ambiguousRuntimeInterrupt = false;
+  nextRuntimeTurnResult?: {
+    output: string;
+    status?: 'completed' | 'failed';
+    error?: string;
+  };
+  beforeNextRuntimeTurnTerminal?: () => Promise<void>;
+  private runtimeServer?: Promise<string>;
   private threadCounter = 0;
   private turnCounter = 0;
+  private readonly runtimeTurnListeners = new Set<
+    (event: AgentRuntimeTurnEvent) => void
+  >();
 
-  constructor(private readonly runtime: TaskAgentRuntimeAccess) {}
+  constructor(
+    private readonly runtime: TaskAgentRuntimeAccess,
+    private readonly rawRuntime?: FileAgentRuntimeStore
+  ) {}
 
   initialize(): Promise<void> {
     return Promise.resolve();
@@ -565,6 +587,45 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         reasoningEffort: input.settings.reasoningEffort ?? model.defaultReasoningEffort
       }
     };
+  }
+
+  buildExecutionContext(
+    input: Parameters<NonNullable<AgentRuntimeAdapter['buildExecutionContext']>>[0]
+  ): Promise<AgentExecutionContext> {
+    const managedAttachments = (input.attachments ?? []).map((attachment) => ({
+      attachmentId: attachment.attachmentId,
+      contentSha256: attachment.sha256,
+      byteCount: attachment.byteCount
+    }));
+    return Promise.resolve({
+      attestation: { status: 'ATTESTED' as const },
+      repositoryAccess: 'READ_ONLY' as const,
+      primaryCwd: input.primaryCwd,
+      readRoots: input.readRoots,
+      managedAttachments,
+      permissionProfileHash: createHash('sha256')
+        .update(JSON.stringify({
+          sessionId: input.sessionId,
+          readRoots: input.readRoots,
+          managedAttachments
+        }))
+        .digest('hex'),
+      modelSettings: {
+        ...input.modelSettings,
+        runtimeId: this.descriptor.id,
+        sandbox: 'READ_ONLY' as const,
+        approvalPolicy: 'NEVER' as const,
+        networkAccess: false
+      },
+      externalTools: {
+        network: false,
+        webSearch: 'disabled' as const,
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: input.clientOperationId
+    });
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -639,20 +700,111 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     }
   }
 
-  async startReview(input: StartAgentReview): Promise<AgentTurn> {
-    this.startedReviews.push(input);
+  async startRuntimeTurn(
+    input: Parameters<NonNullable<AgentRuntimeAdapter['startRuntimeTurn']>>[0]
+  ) {
+    this.startedRuntimeTurns.push(input);
+    if (input.run.purpose === 'TASK_REVIEW') this.startedReviews.push(input);
     this.threadCounter += 1;
-    await this.runtime.updateAgentSession(
-      input.reviewSessionId,
-      {
-        providerSessionId: `scenario-review-thread-${this.threadCounter}`,
-        providerSessionTreeId: `scenario-review-thread-${this.threadCounter}`,
-        status: 'ACTIVE',
-        materialized: true
-      },
-      `scenario-review-session-materialized:${input.reviewSessionId}`
-    );
-    return this.startRun(input.localRunId, input.reviewSessionId, 'scenario-review');
+    this.turnCounter += 1;
+    const serverInstanceId = this.rawRuntime
+      ? await (this.runtimeServer ??= this.createRuntimeServer())
+      : 'scenario-server';
+    const started = {
+      serverInstanceId,
+      providerSessionId: `scenario-thread-${this.threadCounter}`,
+      providerTurnId: `scenario-runtime-turn-${this.turnCounter}`,
+      startedAt: new Date().toISOString()
+    };
+    if (this.rawRuntime) {
+      const session = await this.rawRuntime.getSession(input.session.id);
+      if (session && !session.providerSessionId) {
+        await this.rawRuntime.updateSession(
+          session.id,
+          session.recordRevision,
+          {
+            providerSessionId: started.providerSessionId,
+            status: 'ACTIVE',
+            materialized: true,
+            lastAttachedAt: started.startedAt
+          },
+          `scenario-runtime-session:${input.run.id}`
+        );
+      }
+      const run = await this.rawRuntime.getRun(input.run.id);
+      if (run?.status === 'STARTING') {
+        await this.rawRuntime.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            serverInstanceId: started.serverInstanceId,
+            providerTurnId: started.providerTurnId,
+            status: 'RUNNING',
+            delivery: 'ACKNOWLEDGED',
+            lastEventAt: started.startedAt
+          },
+          `scenario-runtime-started:${input.run.id}`
+        );
+      }
+    }
+    const result = this.nextRuntimeTurnResult;
+    const beforeTerminal = this.beforeNextRuntimeTurnTerminal;
+    this.nextRuntimeTurnResult = undefined;
+    this.beforeNextRuntimeTurnTerminal = undefined;
+    if (result && this.rawRuntime) {
+      setImmediate(() => {
+        void this.completeRuntimeTurn(
+          input.run.id,
+          started.providerTurnId,
+          result,
+          undefined,
+          beforeTerminal
+        );
+      });
+    }
+    return started;
+  }
+
+  private async createRuntimeServer(): Promise<string> {
+    const server = await this.rawRuntime!.createAgentServer({
+      runtimeId: this.descriptor.id,
+      runtimeKind: this.descriptor.kind,
+      transport: this.descriptor.transport,
+      executable: 'scenario-runtime',
+      argv: ['scenario-runtime']
+    });
+    await this.rawRuntime!.updateAgentServer(server.id, {
+      status: 'READY',
+      initializedAt: new Date().toISOString(),
+      lastHealthAt: new Date().toISOString()
+    });
+    return server.id;
+  }
+
+  onRuntimeTurnEvent(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
+    this.runtimeTurnListeners.add(listener);
+    return () => this.runtimeTurnListeners.delete(listener);
+  }
+
+  emitRuntimeTurnEvent(event: AgentRuntimeTurnEvent): void {
+    for (const listener of this.runtimeTurnListeners) listener(event);
+  }
+
+  async interruptRuntimeTurn(
+    input: Parameters<NonNullable<AgentRuntimeAdapter['interruptRuntimeTurn']>>[0]
+  ): Promise<void> {
+    if (this.ambiguousRuntimeInterrupt) {
+      throw new AgentRuntimeDeliveryError(
+        'AMBIGUOUS',
+        'The scripted runtime could not confirm interruption.'
+      );
+    }
+    if (!this.rawRuntime || !input.run.providerTurnId) return;
+    await this.completeRuntimeTurn(input.run.id, input.run.providerTurnId, {
+      output: '',
+      status: 'failed',
+      error: 'interrupted'
+    }, 'interrupted');
   }
 
   respondToInteraction(): Promise<void> {
@@ -672,6 +824,71 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   shutdown(): Promise<void> {
     return Promise.resolve();
+  }
+
+  private async completeRuntimeTurn(
+    runId: string,
+    providerTurnId: string,
+    result: { output: string; status?: 'completed' | 'failed'; error?: string },
+    forcedStatus?: 'interrupted',
+    beforeTerminal?: () => Promise<void>
+  ): Promise<void> {
+    if (!this.rawRuntime) return;
+    await beforeTerminal?.();
+    let run = await this.rawRuntime.getRun(runId);
+    if (!run || ['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) {
+      return;
+    }
+    if (result.output) {
+      const artifact = await this.rawRuntime.getArtifact(run.outputArtifactId);
+      if (artifact) {
+        await this.rawRuntime.updateArtifact({
+          artifactId: artifact.id,
+          expectedRevision: artifact.recordRevision,
+          clientOperationId: `scenario-runtime-output:${run.id}`,
+          content: result.output
+        });
+      }
+    }
+    const status = forcedStatus ?? result.status ?? 'completed';
+    const completedAt = new Date().toISOString();
+    run = await this.rawRuntime.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status:
+          status === 'completed'
+            ? 'COMPLETED'
+            : status === 'interrupted'
+              ? 'INTERRUPTED'
+              : 'FAILED',
+        delivery: 'TERMINAL',
+        recoveryState: 'NONE',
+        providerTerminalSource: 'SCRIPTED_RUNTIME',
+        terminalReason: result.error,
+        lastEventAt: completedAt,
+        endedAt: completedAt
+      },
+      `scenario-runtime-terminal:${run.id}`
+    );
+    const session = await this.rawRuntime.getSession(run.sessionId);
+    if (session && session.status !== 'IDLE') {
+      await this.rawRuntime.updateSession(
+        session.id,
+        session.recordRevision,
+        { status: 'IDLE' },
+        `scenario-runtime-session-idle:${run.id}`
+      );
+    }
+    const event: AgentRuntimeTurnEvent = {
+      type: 'TERMINAL',
+      runId: run.id,
+      providerTurnId,
+      status,
+      ...(result.error ? { error: result.error } : {}),
+      completedAt
+    };
+    this.emitRuntimeTurnEvent(event);
   }
 
   private async startRun(

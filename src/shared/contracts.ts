@@ -994,7 +994,7 @@ export interface CreateTaskRequest {
 
 export interface StartRunRequest {
   taskId: string;
-  mode?: AgentRunMode;
+  mode?: Exclude<AgentRunMode, 'REVIEW'>;
   settings?: AgentExecutionSettings;
 }
 

@@ -78,7 +78,7 @@ export class DiscourseRuntimeHost {
       resolver,
       options.events,
       {
-        getRuntimeCatalog: () => this.getRuntimeCatalog(),
+        getRuntimeCatalog: options.getRuntimeCatalog,
         getAppSettings: () => structuredClone(options.getAppSettings()),
         runtime: {
           coordinator: this.coordinator,
@@ -149,39 +149,6 @@ export class DiscourseRuntimeHost {
 
   async closeStores(): Promise<void> {
     await this.options.discourseStore.close();
-  }
-
-  private async getRuntimeCatalog(): Promise<AgentRuntimeCatalog> {
-    const catalog = await this.options.getRuntimeCatalog();
-    return {
-      ...catalog,
-      runtimes: catalog.runtimes.map((runtime) => {
-        const runtimeId = runtime.preflight.runtime.id;
-        const declared =
-          runtime.preflight.capabilities.extensions['task-monki.discourse'];
-        const configured =
-          declared?.maturity === 'stable' &&
-          this.options.agents.hasRuntime(runtimeId);
-        return {
-          ...runtime,
-          preflight: {
-            ...runtime.preflight,
-            capabilities: {
-              ...runtime.preflight.capabilities,
-              extensions: {
-                ...runtime.preflight.capabilities.extensions,
-                'task-monki.discourse': configured
-                  ? declared!
-                  : {
-                      maturity: 'unsupported' as const,
-                      detail: `${runtime.preflight.runtime.displayName} is not configured for Discourse turns.`
-                    }
-              }
-            }
-          }
-        };
-      })
-    };
   }
 
   private notifySchedulerWorkAvailable(): void {

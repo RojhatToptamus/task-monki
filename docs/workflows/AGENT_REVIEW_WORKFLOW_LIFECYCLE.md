@@ -1,6 +1,6 @@
 # Agent Review Workflow Lifecycle
 
-Date: 2026-07-11
+Date: 2026-08-29
 
 Status: authoritative for review, follow-up, stale-review, and review
 interruption behavior.
@@ -48,11 +48,10 @@ The important product rule is:
     summary, final artifact id, and structured findings when available.
 - `RunRecord.mode`
   - `IMPLEMENTATION`, `FOLLOW_UP`, and `RETRY` modify the task worktree.
-  - `REVIEW` inspects a diff and should use read-only settings.
+  - `REVIEW` inspects a diff and must use read-only settings.
 - `AgentSessionRecord`
   - Primary sessions back implementation/follow-up/retry runs.
-  - Review sessions use `role: "REVIEW"`. A runtime may use a native review
-    primitive, or Task Monki may start an ordinary read-only review turn.
+  - Review sessions use `role: "REVIEW"` and one ordinary read-only turn.
 
 ## State flow
 
@@ -86,17 +85,17 @@ Expected UI:
    implementation-side run. Failed and superseded runs are rejected.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
    agent session.
-5. When the selected review runtime is the source runtime and advertises a
-   native review primitive, its adapter uses that primitive. Otherwise Task
-   Monki materializes a review session in the selected runtime and starts the
-   provider-neutral read-only review prompt as a normal turn only when that
-   runtime advertises stable detached-review isolation. Runtimes without either
-   capability are not eligible review runtimes.
-6. Reducer keeps the task workflow phase in Review.
-7. `projection.agentReview.status` becomes `RUNNING`.
+5. Task Monki sends the provider-neutral review prompt as a normal read-only turn.
+6. The selected runtime must provide a qualified native mutation-denial policy.
+7. `AgentOrchestrator` records repository state before provider delivery.
+8. It compares repository state after terminal output.
+9. A changed or unreadable repository fails the review.
+10. Task Monki leaves detected changes in place as evidence.
+11. Reducer keeps the task workflow phase in Review.
+12. `projection.agentReview.status` becomes `RUNNING`.
 
-Before a Codex review fork or detached review turn is launched, the adapter
-resolves the selected repository and task worktree through Git, canonicalizes
+Before a Codex review turn starts, the adapter resolves the selected repository
+and task worktree through Git. It canonicalizes
 the worktree Git directory and common Git directory, verifies that the
 worktree is registered to that repository, and adds only the exact common Git
 directory to the review permission profile as read-only. This is required for
@@ -108,26 +107,23 @@ the resolved Git executable directly, disable login-shell path rewriting, and
 ignore system/user Git configuration so the read-only sandbox does not need
 home-directory or temporary-cache grants.
 
-Review execution is always read-only. Selecting Full access for implementation
-or in submitted overrides does not select Codex's unrestricted profile for the
-review; Task Monki normalizes review settings to `READ_ONLY` and then adds the
-validated Git metadata root.
+Review execution always requests read-only repository access with no approval exceptions.
+Each adapter maps that request to its qualified native policy.
+Selecting Full access for implementation does not weaken the review policy.
+
+Codex uses an attested read-only permission profile.
+OpenCode uses native deny rules in a dedicated `--pure` session.
+Cursor ACP uses native Ask mode and rejects every permission request.
+The OpenCode and Cursor processes are not operating-system sandboxes.
+Task Monki uses repository comparison as an independent backstop.
+Until provider milestone 3, a review with managed attachments requires Codex.
 
 The review session must carry the configured runtime, model provider, model,
 service tier, cwd, and reasoning effort. Cross-runtime review never reuses a
 model identifier from the implementation runtime.
 
-For Codex's native path, reasoning effort for `thread/fork` is exposed through the
-request `config.model_reasoning_effort` field rather than a top-level `effort`
-field. If that config is omitted, the fork can run at the provider default or an
-inherited effort such as `xhigh`, making reviews much slower than the user's
-selected review setting.
-
-On that Codex path, after creating the review fork, Task Monki must call
-`review/start` with
-`delivery: "inline"` on that fork. Asking `review/start` for another detached
-thread can cause the provider to create a second review thread with a different
-cwd, so the AI reviews unrelated local changes instead of the task worktree.
+The review session carries the configured reasoning effort through the selected adapter.
+Codex sends this value in its ordinary thread and turn settings.
 
 Expected UI:
 
@@ -305,10 +301,9 @@ Agent review:
 
 - Uses a local review session with `role: "REVIEW"`.
 - May use a different registered runtime from the source implementation.
-- Uses native fork/review APIs only when the owning runtime advertises them.
-- Otherwise, only when stable detached-review isolation is advertised, creates
-  a fresh provider session and starts a normal read-only review turn against
-  the same Task Monki worktree.
+- Creates a fresh provider session for one normal read-only review turn.
+- Requires a qualified native mutation-denial policy from the selected runtime.
+- Uses the same `AgentOrchestrator` and `FileAgentRuntimeStore` lifecycle as other turns.
 - The review run id is tracked through `projection.agentReview.runId`.
 
 The review session must not be confused with the task's active implementation

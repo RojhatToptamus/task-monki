@@ -57,6 +57,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       delivery: 'ACKNOWLEDGED',
       providerTurnId: 'provider-turn-1'
     });
+    await markRepositoryUnchanged(fixture.runtime, running.id, 'terminal-1-integrity');
 
     const terminal = await fixture.coordinator.ingestContribution({
       runId: running.id,
@@ -135,6 +136,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: '2026-07-13T00:10:00.000Z',
         lastEventAt: '2026-07-13T00:10:00.000Z'
@@ -158,6 +163,54 @@ describe('DiscourseRuntimeCoordinator', () => {
       status: 'COMPLETED',
       result: { outputMessageId: recovered.message.id }
     });
+  });
+
+  it('does not curate successful output before repository integrity is verified', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Do not accept this output before the read-only boundary is verified.',
+      clientOperationId: 'prepare-unverified-terminal'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable(
+      'lease-unverified-terminal'
+    );
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      'dispatch-unverified-terminal'
+    );
+
+    await expect(
+      fixture.coordinator.ingestContribution({
+        runId: running.id,
+        providerTurnId: running.providerTurnId!,
+        body: 'This output must not become a conversation message.',
+        freshnessAtCompletion: 'FRESH',
+        clientOperationId: 'terminal-unverified',
+        completedAt: '2026-07-13T00:10:00.000Z',
+        providerTerminalSource: 'TEST_TERMINAL'
+      })
+    ).resolves.toMatchObject({
+      kind: 'IGNORED_TERMINAL',
+      job: { status: 'RECOVERY_REQUIRED' }
+    });
+    expect(
+      (await fixture.discourse.listMessages({
+        conversationId: fixture.conversationId,
+        limit: 100
+      })).messages
+    ).toHaveLength(1);
+    expect(await fixture.runtime.getSession(running.sessionId)).toMatchObject({
+      status: 'IDLE'
+    });
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'SETTLED'
+    });
+    expect(fixture.provider.finishedRunIds).toEqual([running.id]);
+    expect(fixture.provider.releasedSessionIds).toEqual([running.sessionId]);
   });
 
   it('accepts an authoritative started notification that wins the start-response race', async () => {
@@ -577,6 +630,11 @@ describe('DiscourseRuntimeCoordinator', () => {
       leased!.id,
       'dispatch-oversized'
     );
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'terminal-oversized-integrity'
+    );
 
     await expect(fixture.coordinator.ingestContribution({
       runId: running.id,
@@ -730,6 +788,11 @@ describe('DiscourseRuntimeCoordinator', () => {
       expectedRevision: conversation.conversation.recordRevision,
       clientOperationId: 'delete-active-conversation'
     });
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'late-terminal-integrity'
+    );
 
     const result = await fixture.coordinator.ingestContribution({
       runId: running.id,
@@ -787,6 +850,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: '2026-07-13T00:10:00.000Z',
@@ -835,6 +902,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: completedAt
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: completedAt,
@@ -911,6 +982,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: '2026-07-13T00:10:00.000Z',
@@ -1144,6 +1219,11 @@ describe('DiscourseRuntimeCoordinator', () => {
 
     await expect(fixture.coordinator.recoverConversation(fixture.conversationId))
       .resolves.toMatchObject({ recoveryRequiredJobIds: [fixture.jobId] });
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'natural-success-integrity'
+    );
     await expect(fixture.coordinator.ingestContribution({
       runId: running.id,
       providerTurnId: running.providerTurnId!,
@@ -1404,6 +1484,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         endedAt: '2026-07-13T00:10:00.000Z',
         lastEventAt: '2026-07-13T00:10:00.000Z'
       },
@@ -1598,7 +1682,8 @@ async function coordinatorFixture() {
   const emptyWorkspace = path.join(root, 'empty-workspace');
   await fs.mkdir(emptyWorkspace, { mode: 0o700 });
   const executionContext = {
-    attestation: { status: 'ATTESTED' as const },
+      attestation: { status: 'ATTESTED' as const },
+      repositoryAccess: 'READ_ONLY' as const,
     primaryCwd: emptyWorkspace,
     readRoots: [{ canonicalPath: emptyWorkspace, kind: 'EMPTY_MANAGED' as const }],
     managedAttachments: [],
@@ -1695,6 +1780,26 @@ async function createSiblingRuntimeRun(
     `enqueue-${input.id}`
   );
   return { run, queueEntry };
+}
+
+async function markRepositoryUnchanged(
+  runtime: FileAgentRuntimeStore,
+  runId: string,
+  clientOperationId: string
+): Promise<void> {
+  const run = await runtime.getRun(runId);
+  if (!run) throw new Error(`Runtime run not found: ${runId}`);
+  await runtime.updateRun(
+    run.id,
+    run.recordRevision,
+    {
+      repositoryIntegrity: {
+        status: 'UNCHANGED',
+        checkedAt: '2026-07-13T00:10:00.000Z'
+      }
+    },
+    clientOperationId
+  );
 }
 
 async function prepareDeliveredDuplicate(

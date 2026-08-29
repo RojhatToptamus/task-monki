@@ -13,7 +13,6 @@ import type {
   AgentRuntimeDiagnostic,
   AgentRuntimeCapabilities,
   AgentGoalSnapshotRecord,
-  AgentReviewTarget,
   AgentSessionRecord,
   AgentSessionSnapshot,
   AgentSubagentStatus,
@@ -24,6 +23,10 @@ import type {
   AgentExecutionContext,
   AgentRuntimeRunRecord,
   AgentRuntimeSessionRecord
+} from '../../../shared/agentRuntime';
+import {
+  AGENT_RUNTIME_LIMITS,
+  agentOwnerScopeKey
 } from '../../../shared/agentRuntime';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
@@ -38,13 +41,11 @@ import type {
   CreateAgentSession,
   ForkAgentSession,
   InterruptAgentTurn,
-  StartAgentReview,
   StartAgentTurn,
   SyncAgentGoal,
   SteerAgentTurn,
   ResolveAgentExecution,
   ResolvedAgentExecution,
-  RefineAgentPrompt,
   StartAgentRuntimeTurn,
   StartedAgentRuntimeTurn
 } from '../AgentRuntimeAdapter';
@@ -58,7 +59,7 @@ import type {
   AgentRuntimeTurnEvent,
   BuildAgentRuntimeExecutionContextInput
 } from '../AgentRuntimeCoordinator';
-import { assertDiscourseExecutionContext } from '../AgentRuntimeOwnership';
+import { assertReadOnlyExecutionContext } from '../AgentRuntimeOwnership';
 import { agentServersRequiringLossRecovery } from '../AgentRuntimeRecovery';
 import {
   AgentMutationAmbiguousError,
@@ -136,7 +137,6 @@ import type { TurnPlanStep } from './protocol/generated/v2/TurnPlanStep';
 import type { CollabAgentStatus } from './protocol/generated/v2/CollabAgentStatus';
 import type { SubAgentActivityKind } from './protocol/generated/v2/SubAgentActivityKind';
 import type { TurnStatus } from './protocol/generated/v2/TurnStatus';
-import type { ReviewTarget } from './protocol/generated/v2/ReviewTarget';
 import type { TurnStartParams } from './protocol/generated/v2/TurnStartParams';
 import type { ThreadStartResponse } from './protocol/generated/v2/ThreadStartResponse';
 import type { ThreadResumeResponse } from './protocol/generated/v2/ThreadResumeResponse';
@@ -166,19 +166,11 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
-import {
-  AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
-  buildDesignAgentDeveloperInstructions
-} from '../../../shared/promptTemplates';
+import { buildDesignAgentDeveloperInstructions } from '../../../shared/promptTemplates';
 import {
   loadDesignSkillPack,
   type DesignSkillPack
 } from '../../design/DesignSkillPack';
-import {
-  agentReviewStatusFromResult,
-  parseAgentReviewResult
-} from '../../review/AgentReviewContract';
-import { PromptRefinementService } from '../../prompt/PromptRefinementService';
 import { DesignToolProtocolSanitizer } from '../journal/AgentProtocolRedaction';
 import {
   parseInspectDesignOperation,
@@ -238,21 +230,6 @@ class BrowserDevBoundaryViolationError extends Error {
     super(message);
     this.name = 'BrowserDevBoundaryViolationError';
   }
-}
-
-function canRetargetReviewTurn(
-  run: RunRecord,
-  session: AgentSessionRecord
-): boolean {
-  return (
-    session.role === 'REVIEW' &&
-    run.mode === 'REVIEW' &&
-    ACTIVE_RUN_STATES.includes(run.status)
-  );
-}
-
-function isNoActiveTurnToInterrupt(error: Error): boolean {
-  return /no active turn to interrupt/i.test(error.message);
 }
 
 export interface CodexAppServerAdapterOptions
@@ -322,7 +299,7 @@ type CodexProviderTurnTarget =
       run: RunRecord;
     }
   | {
-      kind: 'DISCOURSE';
+      kind: 'RUNTIME';
       session: AgentRuntimeSessionRecord;
       run: AgentRuntimeRunRecord;
     };
@@ -376,8 +353,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   private readonly enforceBrowserDevBoundary: boolean;
   private readonly sensitiveValues: string[];
   private externalToolSettings: CodexExternalToolSettings;
-  private promptRefinementExecutable?: string;
-  private readonly promptRefiner = new PromptRefinementService();
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private readonly streamBuffers = new Map<string, CodexRunOutputBuffer>();
   private readonly runSettlementQueues = new Map<string, Promise<unknown>>();
@@ -441,7 +416,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       options.environment ?? process.env
     );
     this.externalToolSettings = normalizeCodexExternalToolSettings(options.toolSettings);
-    this.promptRefinementExecutable = options.executable;
     this.supervisorOptions = {
       ...supervisorOptions,
       appVersion: appVersion ?? '0.1.0'
@@ -505,7 +479,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const snapshot = await this.runtimeStore.snapshot();
     const affected = snapshot.runs.filter(
       (run) =>
-        run.owner.kind === 'DISCOURSE' &&
+        isSharedReadOnlyRuntimePurpose(run.purpose) &&
         run.serverInstanceId === serverInstanceId &&
         !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status) &&
         !(
@@ -515,6 +489,52 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     );
     for (const run of affected) {
       const observedAt = new Date().toISOString();
+      if (
+        options.confirmedStopped === true &&
+        run.status === 'INTERRUPTING' &&
+        run.providerTurnId
+      ) {
+        const unexpectedRequest =
+          run.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST';
+        const terminal = await this.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            status: unexpectedRequest ? 'FAILED' : 'INTERRUPTED',
+            delivery: 'TERMINAL',
+            ...(run.interruptDelivery
+              ? { interruptDelivery: 'TERMINAL' as const }
+              : {}),
+            recoveryState: 'NONE',
+            providerTerminalSource: unexpectedRequest
+              ? 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST'
+              : 'CONFIRMED_STOP_AFTER_RUNTIME_INTERRUPT',
+            lastEventAt: observedAt,
+            endedAt: observedAt
+          },
+          `codex-runtime-confirmed-stop:${serverInstanceId}:${run.id}`
+        );
+        const session = await this.runtimeStore.getSession(run.sessionId);
+        if (session && session.status !== 'NOT_LOADED') {
+          await this.runtimeStore.updateSession(
+            session.id,
+            session.recordRevision,
+            { status: 'NOT_LOADED', materialized: true, lastAttachedAt: observedAt },
+            `codex-runtime-confirmed-stop-session:${run.id}`
+          );
+        }
+        this.emitRuntimeTurnEvent({
+          type: 'TERMINAL',
+          runId: terminal.id,
+          providerTurnId: run.providerTurnId,
+          status: unexpectedRequest ? 'failed' : 'interrupted',
+          ...(unexpectedRequest && terminal.terminalReason
+            ? { error: terminal.terminalReason }
+            : {}),
+          completedAt: observedAt
+        });
+        continue;
+      }
       const updated = await this.runtimeStore.updateRun(
         run.id,
         run.recordRevision,
@@ -604,19 +624,26 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     input: BuildAgentRuntimeExecutionContextInput
   ): Promise<AgentExecutionContext> {
     const primaryCwd = path.resolve(input.primaryCwd);
+    const attachments = await verifyAgentTurnAttachments(input.attachments ?? []);
+    const readRoots = appendAttachmentReadRoots(input.readRoots, attachments);
     const profile = await codexReadOnlyScopeProfile({
       sessionId: input.sessionId,
       scope: {
         primaryCwd,
-        readOnlyRoots: input.readRoots.map((root) => root.canonicalPath)
+        readOnlyRoots: readRoots.map((root) => root.canonicalPath)
       },
       reasoningEffort: input.modelSettings.reasoningEffort
     });
     const context: AgentExecutionContext = {
       attestation: { status: 'ATTESTED' },
       primaryCwd,
-      readRoots: input.readRoots.map((root) => ({ ...root })),
-      managedAttachments: [],
+      repositoryAccess: 'READ_ONLY',
+      readRoots,
+      managedAttachments: attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        contentSha256: attachment.sha256,
+        byteCount: attachment.byteCount
+      })),
       permissionProfileHash: profile.scopeHash,
       modelSettings: {
         ...input.modelSettings,
@@ -635,7 +662,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       },
       clientOperationId: input.clientOperationId
     };
-    assertDiscourseExecutionContext(context);
+    assertReadOnlyExecutionContext(context);
     return context;
   }
 
@@ -778,16 +805,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   }
 
   async startRuntimeTurn(input: StartAgentRuntimeTurn): Promise<StartedAgentRuntimeTurn> {
-    assertDiscourseExecutionContext(input.executionContext);
+    assertReadOnlyExecutionContext(input.executionContext);
     if (
-      input.run.owner.kind !== 'DISCOURSE' ||
-      input.session.owner.kind !== 'DISCOURSE' ||
+      !isSharedReadOnlyRuntimePurpose(input.run.purpose) ||
+      agentOwnerScopeKey(input.run.owner) !== agentOwnerScopeKey(input.session.owner) ||
       input.run.sessionId !== input.session.id ||
-      input.session.runtimeId !== this.descriptor.id ||
-      input.executionContext.managedAttachments.length > 0
+      input.session.runtimeId !== this.descriptor.id
     ) {
-      throw new Error('Codex runtime turns require one attachment-free discourse owner/session.');
+      throw new Error('Codex runtime turns require one attested read-only owner/session.');
     }
+    const attachmentDelivery = prepareAgentAttachmentDelivery({
+      prompt: input.prompt,
+      attachments: await verifyAgentTurnAttachments(input.attachments),
+      includeLocalImages: true
+    });
     const profile = await codexReadOnlyScopeProfile({
       sessionId: input.session.id,
       scope: {
@@ -860,16 +891,60 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         threadId,
         cwd: input.executionContext.primaryCwd,
         settings,
-        prompt: input.prompt,
-        localImagePaths: [],
+        prompt: attachmentDelivery.prompt,
+        localImagePaths: attachmentDelivery.localImagePaths,
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       });
+      // A server request can arrive in the same stdout batch as turn/start's
+      // response. Materialize it before the shared orchestrator persists its
+      // acknowledgement so a denied request cannot be overwritten as RUNNING.
+      await this.drainInbound();
+      const latest = await this.runtimeStore.getRun(input.run.id);
+      if (
+        latest?.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST' &&
+        latest.status === 'INTERRUPTING'
+      ) {
+        let terminationFailure: unknown;
+        try {
+          await this.supervisor.terminateUnresponsive(
+            latest.terminalReason ??
+              'Codex requested an unsupported action before the turn acknowledgement was persisted.'
+          );
+        } catch (error) {
+          terminationFailure = error;
+        }
+        await this.drainInbound();
+        await this.settleRuntimeInterruptDeadline(
+          latest.id,
+          latest.providerTurnId ?? response.turn.id,
+          terminationFailure
+        );
+      }
+      const settled = await this.runtimeStore.getRun(input.run.id);
+      if (settled?.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST') {
+        throw new AgentRuntimeDeliveryError(
+          'AMBIGUOUS',
+          settled.terminalReason ??
+            'Codex requested an unsupported action during the read-only turn.'
+        );
+      }
       return {
         serverInstanceId,
         providerSessionId: threadId,
         ...(threadSessionId ? { providerSessionTreeId: threadSessionId } : {}),
         providerTurnId: response.turn.id,
+        ...(attachmentDelivery.submissionCandidates.length > 0
+          ? {
+              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
+                (submission) => ({
+                  ...submission,
+                  providerTurnId: response.turn.id,
+                  submittedAt: new Date().toISOString()
+                })
+              )
+            }
+          : {}),
         startedAt: response.turn.startedAt
           ? new Date(response.turn.startedAt * 1_000).toISOString()
           : new Date().toISOString()
@@ -884,15 +959,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     run: AgentRuntimeRunRecord;
   }): Promise<void> {
     if (
-      input.session.owner.kind !== 'DISCOURSE' ||
-      input.run.owner.kind !== 'DISCOURSE' ||
+      !isSharedReadOnlyRuntimePurpose(input.run.purpose) ||
+      agentOwnerScopeKey(input.run.owner) !== agentOwnerScopeKey(input.session.owner) ||
       input.run.sessionId !== input.session.id ||
       !input.session.providerSessionId ||
       !input.run.providerTurnId
     ) {
       throw new AgentRuntimeDeliveryError(
         'NOT_DELIVERED',
-        'A runtime interrupt requires one materialized discourse session and turn.'
+        'A runtime interrupt requires one materialized read-only session and turn.'
       );
     }
     const client = await this.ensureClient();
@@ -968,30 +1043,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     };
     assertAttachmentSandboxSupportsDelivery(settings, input.attachments);
     return { settings, model: resolvedModel };
-  }
-
-  refinePrompt(input: RefineAgentPrompt) {
-    const activeServer = this.supervisor.currentServer;
-    const activeExecutable =
-      activeServer && ['READY', 'RUNNING', 'DEGRADED'].includes(activeServer.status)
-        ? activeServer.executable
-        : undefined;
-    return this.promptRefiner.refine({
-      requestId: input.requestId,
-      repositoryPath: input.repositoryPath,
-      input: input.input,
-      title: input.title,
-      refinementModel: input.refinementModel,
-      targetModel: input.targetModel,
-      attachments: input.attachments,
-      codexExecutable: activeExecutable ?? this.promptRefinementExecutable,
-      toolSettings: this.externalToolSettings,
-      failClosedMcpDiscovery: this.enforceBrowserDevBoundary
-    });
-  }
-
-  cancelPromptRefinement(requestId: string) {
-    return this.promptRefiner.cancel(requestId);
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -1508,24 +1559,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         this.interruptRequestTimeoutMs
       );
     };
-    const stopAlreadyInactiveReview = async (
-      providerTurnId: string,
-      error: Error
-    ): Promise<boolean> => {
-      if (!isNoActiveTurnToInterrupt(error)) {
-        return false;
-      }
-      const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
-      if (!run || !canRetargetReviewTurn(run, session)) {
-        return false;
-      }
-      await this.recordLocalInterruption(
-        run,
-        'Codex reported no active turn to interrupt; treating the review as already stopped.'
-      );
-      await this.persistAgentSession(run.sessionId, { status: 'IDLE' });
-      return true;
-    };
     try {
       await interrupt(input.providerTurnId);
     } catch (error) {
@@ -1533,9 +1566,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       if (mapped instanceof AgentMutationAmbiguousError) {
         await this.recordInterruptAmbiguity(input.providerTurnId, mapped.message);
         this.armInterruptDeadline(input.providerTurnId);
-        return;
-      }
-      if (await stopAlreadyInactiveReview(input.providerTurnId, mapped)) {
         return;
       }
       const activeTurnId = activeTurnIdFromInterruptMismatch(mapped);
@@ -1565,9 +1595,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
             if (retryMapped instanceof AgentMutationAmbiguousError) {
               await this.recordInterruptAmbiguity(activeTurnId, retryMapped.message);
               this.armInterruptDeadline(activeTurnId);
-              return;
-            }
-            if (await stopAlreadyInactiveReview(activeTurnId, retryMapped)) {
               return;
             }
             throw retryMapped;
@@ -1665,6 +1692,45 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   async releaseSession(ref: AgentSessionRef): Promise<void> {
     await this.drainInbound();
+    const runtimeSession = await this.runtimeStore.getSession(ref.localSessionId);
+    if (
+      runtimeSession &&
+      (await this.isSharedReadOnlyRuntimeSession(runtimeSession))
+    ) {
+      if (
+        ref.providerSessionId &&
+        runtimeSession.providerSessionId &&
+        ref.providerSessionId !== runtimeSession.providerSessionId
+      ) {
+        throw new Error('Codex session release does not match the stored provider thread.');
+      }
+      const activeRun = await this.runtimeStore.getActiveRunForSession(runtimeSession.id);
+      if (activeRun) {
+        throw new Error(
+          `Cannot release Codex session ${runtimeSession.id} while run ${activeRun.id} is ${activeRun.status}.`
+        );
+      }
+      const providerSessionId =
+        ref.providerSessionId ?? runtimeSession.providerSessionId;
+      const client = this.supervisor.currentClient;
+      if (providerSessionId && client) {
+        await client.requestMutation('thread/unsubscribe', {
+          threadId: providerSessionId
+        });
+      }
+      if (providerSessionId && runtimeSession.status !== 'NOT_LOADED') {
+        await this.runtimeStore.updateSession(
+          runtimeSession.id,
+          runtimeSession.recordRevision,
+          { status: 'NOT_LOADED' },
+          `codex-runtime-release:${runtimeSession.id}`
+        );
+      }
+      this.activePermissionProfiles.delete(runtimeSession.id);
+      this.recoveryRunBySession.delete(runtimeSession.id);
+      this.unmaterializedThreadAttestations.delete(runtimeSession.id);
+      return;
+    }
     const session = await this.requireSession(ref.localSessionId);
     if (
       ref.providerSessionId &&
@@ -1803,152 +1869,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   deleteTaskProviderHistory(taskId: string): Promise<void> {
     return this.deleteDesignTaskThreads(taskId);
-  }
-
-  async startReview(input: StartAgentReview): Promise<AgentTurn> {
-    const attachments = input.attachments ?? [];
-    const source = await this.requireSession(input.sourceSession.localSessionId);
-    const reviewSession = await this.requireSession(input.reviewSessionId);
-    const providerSessionId =
-      input.sourceSession.providerSessionId ?? source.providerSessionId;
-    if (!providerSessionId) {
-      throw new Error('Cannot review a session without a provider thread id.');
-    }
-    const client = await this.ensureClient();
-    const server = this.supervisor.currentServer;
-    if (!server) {
-      throw new Error('Codex App Server is not ready to start a review.');
-    }
-    await this.persistRun(input.localRunId, {
-      serverInstanceId: server.id,
-      status: 'STARTING',
-      lastEventAt: new Date().toISOString()
-    });
-    const settings = reviewSession.requestedSettings;
-    assertAttachmentSandboxSupportsDelivery(settings, attachments);
-    if (attachments.length > 0) {
-      const selectedModel =
-        this.models.find((candidate) => candidate.model === settings.model) ??
-        this.models.find((candidate) => candidate.id === settings.model) ??
-        this.models.find((candidate) => candidate.isDefault);
-      if (!selectedModel) {
-        throw new Error('Codex did not report an available model for attachment delivery.');
-      }
-      assertModelSupportsAttachments(selectedModel, attachments);
-    }
-    const attachmentDelivery = prepareAgentAttachmentDelivery({
-      prompt: AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
-      attachments: await verifyAgentTurnAttachments(attachments),
-      includeLocalImages: false
-    });
-    const config = await this.permissionProfileConfigForSession(
-      reviewSession,
-      settings,
-      attachmentDelivery.attachments.map((attachment) => attachment.path)
-    );
-    const expectedProfileId = permissionProfileIdFromConfig(config);
-    let reviewBase;
-    try {
-      reviewBase = await client.requestMutation('thread/fork', withDynamicTools({
-        threadId: providerSessionId,
-        model: settings.model ?? null,
-        modelProvider: settings.modelProvider ?? null,
-        serviceTier: settings.serviceTier ?? null,
-        cwd: reviewSession.worktreePath,
-        approvalPolicy: toApprovalPolicy(settings),
-        approvalsReviewer: toApprovalsReviewer(settings),
-        config,
-        developerInstructions: attachmentDelivery.prompt,
-        ephemeral: false
-      }, []));
-    } catch (error) {
-      throw mapMutationError('thread/fork', error);
-    }
-    await this.assertProviderPermissionProfileOrFence({
-      sessionId: reviewSession.id,
-      settings,
-      worktreePath: reviewSession.worktreePath,
-      expectedProfileId,
-      operation: 'thread/fork',
-      providerReference: reviewBase.thread.id,
-      response: reviewBase
-    });
-    this.activePermissionProfiles.set(reviewSession.id, {
-      providerSessionId: reviewBase.thread.id,
-      profileId: expectedProfileId
-    });
-    const observedSettings = await this.prepareObservedSettings(
-      settingsFromThreadResponse(reviewBase),
-      'Review fork observed settings'
-    );
-    let storedReviewBase: AgentSessionRecord;
-    try {
-      storedReviewBase = await this.persistAgentSession(reviewSession.id, {
-        providerSessionId: reviewBase.thread.id,
-        providerSessionTreeId: reviewBase.thread.sessionId,
-        status: mapThreadStatus(reviewBase.thread.status),
-        materialized: true,
-        requestedSettings: settings,
-        observedSettings,
-        lastAttachedAt: new Date().toISOString()
-      });
-      await this.recordSettingsObservation(
-        storedReviewBase,
-        'THREAD_FORK_RESPONSE',
-        observedSettings
-      );
-    } catch {
-      throw postAcknowledgementPersistenceError(
-        'thread/fork',
-        reviewBase.thread.id
-      );
-    }
-    let response;
-    try {
-      response = await client.requestMutation('review/start', {
-        threadId: reviewBase.thread.id,
-        target: toReviewTarget(input.target),
-        delivery: 'inline'
-      });
-    } catch (error) {
-      throw mapMutationError('review/start', error);
-    }
-    this.pendingRunByProviderTurn.set(response.turn.id, input.localRunId);
-    this.pendingRunByProviderThread.set(response.reviewThreadId, input.localRunId);
-    try {
-      await this.persistAgentSession(reviewSession.id, {
-        providerSessionId: response.reviewThreadId,
-        providerSessionTreeId: response.reviewThreadId,
-        status: 'ACTIVE',
-        materialized: true,
-        lastAttachedAt: new Date().toISOString()
-      });
-      await this.persistRun(input.localRunId, {
-        providerTurnId: response.turn.id,
-        serverInstanceId: server.id,
-        status: 'RUNNING',
-        ...(attachmentDelivery.submissionCandidates.length > 0
-          ? {
-              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
-                (submission) => ({
-                  ...submission,
-                  providerTurnId: response.turn.id,
-                  submittedAt: new Date().toISOString()
-                })
-              )
-            }
-          : {}),
-        lastEventAt: new Date().toISOString()
-      });
-      this.pendingRunByProviderTurn.delete(response.turn.id);
-      this.pendingRunByProviderThread.delete(response.reviewThreadId);
-    } catch {
-      throw postAcknowledgementPersistenceError('review/start', response.turn.id);
-    }
-    return {
-      localRunId: input.localRunId,
-      providerTurnId: response.turn.id
-    };
   }
 
   async syncGoal(input: SyncAgentGoal): Promise<AgentGoalSnapshotRecord> {
@@ -2383,7 +2303,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     restart: boolean;
   }): Promise<void> {
     this.externalToolSettings = normalizeCodexExternalToolSettings(input.toolSettings);
-    this.promptRefinementExecutable = input.executable;
     this.supervisorOptions.executable = input.executable;
     this.supervisorOptions.toolSettings = this.externalToolSettings;
     if (!this.initialized) {
@@ -3284,12 +3203,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         });
       }
     }
-    if (session.role === 'REVIEW') {
-      const activeReviewRun = await this.taskRuntime.getActiveRunForSession(session.id);
-      if (activeReviewRun?.mode === 'REVIEW') {
-        return activeReviewRun;
-      }
-    }
     if (session.role !== 'SUBAGENT') {
       const snapshot = await this.taskRuntime.snapshot();
       const uncorrelated = snapshot.runs.filter(
@@ -3327,7 +3240,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   /**
    * Resolve provider identity once from the canonical runtime store. The
    * returned branch contains only the owner-specific projection needed to
-   * publish Task domain events or a Discourse runtime event.
+   * publish Task domain events or a shared read-only runtime event.
    */
   private async resolveProviderTurnTarget(
     providerTurnId: string,
@@ -3360,9 +3273,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       return undefined;
     }
 
-    if (runtimeSession.owner.kind === 'DISCOURSE') {
-      if (!runtimeRun || runtimeRun.owner.kind !== 'DISCOURSE') return undefined;
-      return { kind: 'DISCOURSE', session: runtimeSession, run: runtimeRun };
+    if (runtimeRun && isSharedReadOnlyRuntimePurpose(runtimeRun.purpose)) {
+      if (
+        agentOwnerScopeKey(runtimeRun.owner) !==
+        agentOwnerScopeKey(runtimeSession.owner)
+      ) {
+        return undefined;
+      }
+      return { kind: 'RUNTIME', session: runtimeSession, run: runtimeRun };
     }
 
     const taskSession = await this.taskRuntime.getAgentSession(runtimeSession.id);
@@ -3778,54 +3696,197 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     if (!session) return false;
     const turnId = typeof params.turnId === 'string' ? params.turnId : '';
     const run = await this.findRuntimeRun(turnId, threadId);
-    const reason =
-      `Codex requested ${request.method} during an offline read-only Discourse turn.`;
+    const reason = `Codex requested ${utf8Prefix(
+      redactCredentialText(request.method, this.sensitiveValues),
+      512
+    )} during a read-only turn.`;
     await client.respondError(request.id, {
       code: -32000,
-      message: 'Discourse turns cannot request approvals, tools, or user input.'
+      message: 'Read-only turns cannot request approvals, tools, or user input.'
     });
     if (!run) return true;
-    const artifact = await this.runtimeStore.getArtifact(run.diagnosticArtifactId);
-    if (artifact) {
-      const existing = await this.runtimeStore.readArtifact(artifact.id);
-      await this.runtimeStore.updateArtifact({
-        artifactId: artifact.id,
-        expectedRevision: artifact.recordRevision,
-        clientOperationId: `codex-runtime-request:${run.id}:${String(request.id)}`,
-        content: `${existing}${existing ? '\n' : ''}${reason}`
-      });
-    }
+    // Diagnostic storage must not prevent the stop path from running.
+    await this.appendUnexpectedRuntimeRequestDiagnostic(run, reason, raw).catch(
+      () => undefined
+    );
     let latest = (await this.runtimeStore.getRun(run.id)) ?? run;
-    const completedAt = new Date().toISOString();
-    if (!['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(latest.status)) {
-      latest = await this.runtimeStore.updateRun(
+    if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(latest.status)) {
+      return true;
+    }
+    if (
+      latest.status === 'RECOVERY_REQUIRED' ||
+      latest.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST'
+    ) {
+      return true;
+    }
+    if (latest.status === 'INTERRUPTING') {
+      await this.runtimeStore.updateRun(
         latest.id,
         latest.recordRevision,
         {
-          status: 'FAILED',
-          delivery: latest.providerTurnId ? 'TERMINAL' : 'AMBIGUOUS',
-          recoveryState: latest.providerTurnId ? 'NONE' : 'REQUIRES_USER_ACTION',
           terminalReason: reason,
           providerTerminalSource: 'UNEXPECTED_SERVER_REQUEST',
-          lastEventAt: completedAt,
-          ...(latest.providerTurnId ? { endedAt: completedAt } : {})
+          lastEventAt: new Date().toISOString()
         },
-        `codex-runtime-request-run:${run.id}:${String(request.id)}`
+        `codex-runtime-request-existing-stop:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
       );
+      return true;
     }
     const providerTurnId = latest.providerTurnId ?? turnId;
-    if (providerTurnId) {
-      this.emitRuntimeTurnEvent({
-        type: 'TERMINAL',
-        runId: latest.id,
-        providerTurnId,
-        status: 'failed',
-        error: reason,
-        completedAt
-      });
+    if (!providerTurnId) {
+      await this.stopAfterUnexpectedRuntimeRequest(
+        latest,
+        reason,
+        'AMBIGUOUS',
+        raw
+      );
+      return true;
     }
-    void raw;
+    if (latest.providerTurnId && latest.providerTurnId !== providerTurnId) {
+      await this.stopAfterUnexpectedRuntimeRequest(
+        latest,
+        `${reason} The request identified a different provider turn.`,
+        'AMBIGUOUS',
+        raw
+      );
+      return true;
+    }
+    const requestedAt = new Date().toISOString();
+    latest = await this.runtimeStore.updateRun(
+      latest.id,
+      latest.recordRevision,
+      {
+        providerTurnId,
+        serverInstanceId: latest.serverInstanceId ?? raw.serverInstanceId,
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: requestedAt,
+        terminalReason: reason,
+        providerTerminalSource: 'UNEXPECTED_SERVER_REQUEST',
+        lastEventAt: requestedAt
+      },
+      `codex-runtime-request-stop:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+    );
+    try {
+      await this.interruptRuntimeTurn({ session, run: latest });
+      const current = (await this.runtimeStore.getRun(latest.id)) ?? latest;
+      if (
+        current.status === 'INTERRUPTING' &&
+        current.interruptDelivery === 'SENDING'
+      ) {
+        await this.runtimeStore.updateRun(
+          current.id,
+          current.recordRevision,
+          {
+            interruptDelivery: 'ACKNOWLEDGED',
+            lastEventAt: new Date().toISOString()
+          },
+          `codex-runtime-request-stop-ack:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+        );
+      }
+    } catch (error) {
+      const interruptDelivery =
+        error instanceof AgentRuntimeDeliveryError ? error.delivery : 'AMBIGUOUS';
+      await this.stopAfterUnexpectedRuntimeRequest(
+        latest,
+        reason,
+        interruptDelivery,
+        raw
+      );
+    }
     return true;
+  }
+
+  private async stopAfterUnexpectedRuntimeRequest(
+    run: AgentRuntimeRunRecord,
+    reason: string,
+    interruptDelivery: 'ACKNOWLEDGED' | 'NOT_DELIVERED' | 'AMBIGUOUS',
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
+    try {
+      await this.supervisor.terminateUnresponsive(reason);
+      const current = (await this.runtimeStore.getRun(run.id)) ?? run;
+      if (current.serverInstanceId !== raw.serverInstanceId) {
+        await this.markUnexpectedRuntimeRequestRecovery(
+          current,
+          reason,
+          interruptDelivery,
+          raw
+        );
+        return;
+      }
+      await this.handleCanonicalServerLoss(raw.serverInstanceId, {
+        reason,
+        restarting: false,
+        confirmedStopped: true
+      });
+    } catch (terminationError) {
+      const current = (await this.runtimeStore.getRun(run.id)) ?? run;
+      await this.markUnexpectedRuntimeRequestRecovery(
+        current,
+        `${reason} Task Monki could not confirm that Codex stopped: ${redactCredentialText(
+          errorMessage(terminationError),
+          this.sensitiveValues
+        )}`,
+        interruptDelivery,
+        raw
+      );
+    }
+  }
+
+  private async appendUnexpectedRuntimeRequestDiagnostic(
+    run: AgentRuntimeRunRecord,
+    reason: string,
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
+    const artifact = await this.runtimeStore.getArtifact(run.diagnosticArtifactId);
+    if (!artifact || artifact.byteCount >= AGENT_RUNTIME_LIMITS.maxArtifactBytes) return;
+    const prefix = artifact.byteCount > 0 ? '\n' : '';
+    const text = utf8Prefix(
+      `${prefix}${redactCredentialText(reason, this.sensitiveValues)}`,
+      AGENT_RUNTIME_LIMITS.maxArtifactBytes - artifact.byteCount
+    );
+    if (!text) return;
+    await this.runtimeStore.appendArtifact(
+      artifact.id,
+      text,
+      `codex-runtime-request-diagnostic:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+    );
+  }
+
+  private async markUnexpectedRuntimeRequestRecovery(
+    run: AgentRuntimeRunRecord,
+    reason: string,
+    interruptDelivery: 'ACKNOWLEDGED' | 'NOT_DELIVERED' | 'AMBIGUOUS',
+    raw: AgentProtocolMessageReference | undefined
+  ): Promise<void> {
+    const observedAt = new Date().toISOString();
+    const current = (await this.runtimeStore.getRun(run.id)) ?? run;
+    if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(current.status)) return;
+    const updated = await this.runtimeStore.updateRun(
+      current.id,
+      current.recordRevision,
+      {
+        status: 'RECOVERY_REQUIRED',
+        delivery: current.delivery === 'SENDING' ? 'AMBIGUOUS' : current.delivery,
+        ...(current.interruptDelivery ? { interruptDelivery } : {}),
+        recoveryState: 'REQUIRES_USER_ACTION',
+        terminalReason: reason,
+        providerTerminalSource: 'UNEXPECTED_SERVER_REQUEST',
+        lastEventAt: observedAt
+      },
+      raw
+        ? `codex-runtime-request-recovery:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+        : `codex-runtime-request-start-recovery:${run.id}`
+    );
+    this.emitRuntimeTurnEvent({
+      type: 'RECOVERY_REQUIRED',
+      runId: updated.id,
+      ...(updated.providerTurnId ? { providerTurnId: updated.providerTurnId } : {}),
+      reason,
+      observedAt
+    });
   }
 
   private async handleServerRequestResolved(
@@ -3902,7 +3963,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   private async handleTurnStarted(threadId: string, turn: Turn): Promise<void> {
     const target = await this.resolveProviderTurnTarget(turn.id, threadId);
     if (!target) return;
-    if (target.kind === 'DISCOURSE') {
+    if (target.kind === 'RUNTIME') {
       await this.handleRuntimeTurnStarted(target, threadId, turn);
       return;
     }
@@ -4003,7 +4064,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const target = await this.resolveProviderTurnTarget(turn.id, threadId);
     if (!target) return;
-    if (target.kind === 'DISCOURSE') {
+    if (target.kind === 'RUNTIME') {
       await this.handleRuntimeTurnCompleted(target, threadId, turn);
       this.clearInterruptDeadline(turn.id);
       return;
@@ -4052,10 +4113,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   }
 
   private async handleRuntimeTurnStarted(
-    target: Extract<CodexProviderTurnTarget, { kind: 'DISCOURSE' }>,
+    target: Extract<CodexProviderTurnTarget, { kind: 'RUNTIME' }>,
     threadId: string,
     turn: Turn
   ): Promise<void> {
+    if (isTerminalRunStatus(target.run.status)) return;
     let run = target.run;
     this.pendingRunByProviderTurn.set(turn.id, run.id);
     let session = target.session;
@@ -4097,12 +4159,13 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   }
 
   private async handleRuntimeItem(
-    target: Extract<CodexProviderTurnTarget, { kind: 'DISCOURSE' }>,
+    target: Extract<CodexProviderTurnTarget, { kind: 'RUNTIME' }>,
     turnId: string,
     item: ThreadItem,
     status: AgentItemStatus
   ): Promise<void> {
     const run = target.run;
+    if (isTerminalRunStatus(run.status)) return;
     if (item.type === 'agentMessage' && status === 'COMPLETED') {
       const text = redactCredentialText(item.text, this.sensitiveValues);
       const artifact = await this.runtimeStore.getArtifact(run.outputArtifactId);
@@ -4119,8 +4182,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   private async emitRuntimeDelta(turnId: string, text: string): Promise<boolean> {
     const target = await this.resolveProviderTurnTarget(turnId);
-    if (!target || target.kind !== 'DISCOURSE') return false;
+    if (!target || target.kind !== 'RUNTIME') return false;
     const run = target.run;
+    if (isTerminalRunStatus(run.status)) return true;
     const event: AgentRuntimeTurnEvent = {
       type: 'DELTA',
       runId: run.id,
@@ -4133,10 +4197,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   }
 
   private async handleRuntimeTurnCompleted(
-    target: Extract<CodexProviderTurnTarget, { kind: 'DISCOURSE' }>,
+    target: Extract<CodexProviderTurnTarget, { kind: 'RUNTIME' }>,
     threadId: string,
     turn: Turn
   ): Promise<void> {
+    if (isTerminalRunStatus(target.run.status)) {
+      this.pendingRunByProviderTurn.delete(turn.id);
+      this.pendingRunByProviderThread.delete(threadId);
+      return;
+    }
     if (turn.status === 'inProgress') return;
     let run = target.run;
     let session = target.session;
@@ -4163,13 +4232,21 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const completedAt = turn.completedAt
       ? new Date(turn.completedAt * 1_000).toISOString()
       : new Date().toISOString();
+    const unexpectedRequestReason =
+      run.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST'
+        ? run.terminalReason ??
+          'Codex requested an unsupported action during the read-only turn.'
+        : undefined;
     if (session.status !== 'IDLE' || !session.materialized) {
       session = await this.runtimeStore.updateSession(
         session.id,
         session.recordRevision,
         {
           providerSessionId: session.providerSessionId ?? threadId,
-          status: turn.status === 'failed' ? 'SYSTEM_ERROR' : 'IDLE',
+          status:
+            unexpectedRequestReason || turn.status === 'failed'
+              ? 'SYSTEM_ERROR'
+              : 'IDLE',
           materialized: true,
           lastAttachedAt: completedAt
         },
@@ -4193,11 +4270,13 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const artifactBody = await this.runtimeStore.readArtifact(run.outputArtifactId);
     const hasOutput = Boolean(finalMessage.trim() || artifactBody.trim());
     const status =
-      turn.status === 'completed' && hasOutput
-        ? 'COMPLETED'
-        : turn.status === 'interrupted'
-          ? 'INTERRUPTED'
-          : 'FAILED';
+      unexpectedRequestReason
+        ? 'FAILED'
+        : turn.status === 'completed' && hasOutput
+          ? 'COMPLETED'
+          : turn.status === 'interrupted'
+            ? 'INTERRUPTED'
+            : 'FAILED';
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) break;
       try {
@@ -4214,11 +4293,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
               ? { contextFreshnessAtCompletion: 'UNKNOWN' as const }
               : {}),
             terminalReason:
+              unexpectedRequestReason ??
               turn.error?.message ??
               (turn.status === 'completed' && !hasOutput
                 ? 'Codex completed the runtime turn without a response.'
                 : undefined),
-            providerTerminalSource: 'TURN_COMPLETED_NOTIFICATION',
+            providerTerminalSource: unexpectedRequestReason
+              ? 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST'
+              : 'TURN_COMPLETED_NOTIFICATION',
             lastEventAt: completedAt,
             endedAt: completedAt
           },
@@ -4242,8 +4324,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       type: 'TERMINAL',
       runId: run.id,
       providerTurnId: turn.id,
-      status: turn.status,
-      ...(turn.error?.message ? { error: turn.error.message } : {}),
+      status: unexpectedRequestReason ? 'failed' : turn.status,
+      ...(unexpectedRequestReason || turn.error?.message
+        ? { error: unexpectedRequestReason ?? turn.error!.message }
+        : {}),
       completedAt
     });
     this.pendingRunByProviderTurn.delete(turn.id);
@@ -4256,14 +4340,27 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     threadId?: string
   ): Promise<AgentRuntimeRunRecord | undefined> {
     const target = await this.resolveProviderTurnTarget(turnId, threadId);
-    return target?.kind === 'DISCOURSE' ? target.run : undefined;
+    return target?.kind === 'RUNTIME' ? target.run : undefined;
   }
 
   private async findRuntimeSessionByProviderId(
     providerSessionId: string
   ): Promise<AgentRuntimeSessionRecord | undefined> {
     const session = await this.runtimeStore.getSessionByProviderId(providerSessionId);
-    return session?.owner.kind === 'DISCOURSE' ? session : undefined;
+    if (!session) return undefined;
+    return (await this.isSharedReadOnlyRuntimeSession(session))
+      ? session
+      : undefined;
+  }
+
+  private async isSharedReadOnlyRuntimeSession(
+    session: AgentRuntimeSessionRecord
+  ): Promise<boolean> {
+    const runs = await this.runtimeStore.listRunsByOwner(session.owner);
+    return runs.some(
+      (run) =>
+        run.sessionId === session.id && isSharedReadOnlyRuntimePurpose(run.purpose)
+    );
   }
 
   private emitRuntimeTurnEvent(event: AgentRuntimeTurnEvent): void {
@@ -4281,7 +4378,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const target = await this.resolveProviderTurnTarget(turnId, threadId);
     if (!target) return;
-    if (target.kind === 'DISCOURSE') {
+    if (target.kind === 'RUNTIME') {
       await this.handleRuntimeItem(target, turnId, item, status);
       return;
     }
@@ -4340,7 +4437,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       this.descriptor.id
     );
     if (!runtimeSession) return;
-    if (runtimeSession.owner.kind === 'DISCOURSE') {
+    if (await this.isSharedReadOnlyRuntimeSession(runtimeSession)) {
       const mapped = mapThreadStatus(status);
       if (runtimeSession.status !== mapped) {
         await this.runtimeStore.updateSession(
@@ -4371,7 +4468,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       this.descriptor.id
     );
     if (!runtimeSession) return;
-    if (runtimeSession.owner.kind === 'DISCOURSE') {
+    if (await this.isSharedReadOnlyRuntimeSession(runtimeSession)) {
       if (runtimeSession.status !== 'NOT_LOADED') {
         await this.runtimeStore.updateSession(
           runtimeSession.id,
@@ -4520,7 +4617,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           reasoningEffort: runtimeSession.executionContext.modelSettings.reasoningEffort
         });
         if (profile.scopeHash !== runtimeSession.executionContext.permissionProfileHash) {
-          throw new Error('Codex Discourse permission scope no longer matches its access epoch.');
+          throw new Error('Codex read-only permission scope no longer matches its access epoch.');
         }
         assertCodexActivePermissionProfileId(
           profile.profileId,
@@ -4533,7 +4630,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           observed.approvalPolicy?.toLowerCase() !== 'never' ||
           observed.approvalsReviewer !== 'user'
         ) {
-          throw new Error('Codex changed the offline read-only settings for a Discourse turn.');
+          throw new Error('Codex changed the settings for a read-only turn.');
         }
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -5206,9 +5303,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       ? redactCredentialText(finalMessage, this.sensitiveValues)
       : undefined;
     const safeTurn = this.redactProviderValue(turn);
-    const reviewResult =
-      run.mode === 'REVIEW' ? parseAgentReviewResult(safeFinalMessage) : undefined;
-    const agentReviewStatus = agentReviewStatusFromResult(reviewResult);
     const finalArtifact = await this.persistFinalArtifact(
       run.taskId,
       run.id,
@@ -5238,9 +5332,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           terminalStatus: safeTurn.status,
           error: safeTurn.error?.message,
           finalArtifactId: finalArtifact.id,
-          terminalReason: safeTurn.error?.message,
-          agentReviewStatus,
-          agentReviewResult: reviewResult
+          terminalReason: safeTurn.error?.message
         }
       }),
       ACTIVE_RUN_STATES
@@ -5403,8 +5495,33 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
       this.interruptTimers.delete(providerTurnId);
-      void this.settleRuntimeInterruptDeadline(runId, providerTurnId)
-        .catch((error: unknown) => this.handleInboundMaterializationFailure(error));
+      const reason =
+        'Codex acknowledged the interruption but did not confirm a terminal turn before the interruption deadline.';
+      this.enqueueInbound(async () => {
+        const run = await this.runtimeStore.getRun(runId);
+        if (
+          !run ||
+          run.providerTurnId !== providerTurnId ||
+          run.status !== 'INTERRUPTING'
+        ) {
+          return;
+        }
+        let terminationFailure: unknown;
+        try {
+          await this.supervisor.terminateUnresponsive(reason);
+        } catch (error) {
+          terminationFailure = error;
+        }
+        // Process exit queues canonical server-loss handling immediately.
+        // Settle behind it so only confirmed stop can become terminal.
+        this.enqueueInbound(() =>
+          this.settleRuntimeInterruptDeadline(
+            runId,
+            providerTurnId,
+            terminationFailure
+          )
+        );
+      });
     }, this.interruptCompletionTimeoutMs);
     timer.unref();
     this.interruptTimers.set(providerTurnId, timer);
@@ -5412,10 +5529,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   private async settleRuntimeInterruptDeadline(
     runId: string,
-    providerTurnId: string
+    providerTurnId: string,
+    terminationFailure?: unknown
   ): Promise<void> {
     const observedAt = new Date().toISOString();
-    const reason =
+    const deadlineReason =
       'Codex acknowledged the interruption but did not confirm a terminal turn before the interruption deadline.';
     let run = await this.runtimeStore.getRun(runId);
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -5427,6 +5545,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         return;
       }
       try {
+        if (terminationFailure === undefined && run.serverInstanceId) {
+          await this.handleCanonicalServerLoss(run.serverInstanceId, {
+            reason: deadlineReason,
+            restarting: false,
+            confirmedStopped: true
+          });
+          return;
+        }
+        const reason = terminationFailure
+          ? `${deadlineReason} Task Monki could not confirm that Codex stopped: ${redactCredentialText(
+              errorMessage(terminationFailure),
+              this.sensitiveValues
+            )}`
+          : `${deadlineReason} Task Monki could not identify the owning App Server.`;
         const updated = await this.runtimeStore.updateRun(
           run.id,
           run.recordRevision,
@@ -6762,21 +6894,43 @@ function toApprovalsReviewer(settings: AgentExecutionSettings): ApprovalsReviewe
     : 'user';
 }
 
-function toReviewTarget(target: AgentReviewTarget): ReviewTarget {
-  switch (target.type) {
-    case 'UNCOMMITTED_CHANGES':
-      return { type: 'uncommittedChanges' };
-    case 'BASE_BRANCH':
-      return { type: 'baseBranch', branch: target.branch };
-    case 'COMMIT':
-      return {
-        type: 'commit',
-        sha: target.sha,
-        title: target.title ?? null
-      };
-    case 'CUSTOM':
-      return { type: 'custom', instructions: target.instructions };
+function isSharedReadOnlyRuntimePurpose(
+  purpose: AgentRuntimeRunRecord['purpose']
+): boolean {
+  return (
+    purpose === 'TASK_REVIEW' ||
+    purpose === 'PROMPT_REFINEMENT' ||
+    purpose.startsWith('DISCOURSE_')
+  );
+}
+
+function appendAttachmentReadRoots(
+  roots: readonly import('../../../shared/agentRuntime').AgentAttestedReadRoot[],
+  attachments: readonly AgentTurnAttachment[]
+): import('../../../shared/agentRuntime').AgentAttestedReadRoot[] {
+  const result = roots.map((root) => ({
+    ...root,
+    canonicalPath: path.resolve(root.canonicalPath)
+  }));
+  for (const attachment of attachments) {
+    if (
+      result.some((root) => isPathInside(root.canonicalPath, attachment.path))
+    ) {
+      continue;
+    }
+    const attachmentRoot = path.dirname(path.resolve(attachment.path));
+    if (result.some((root) => root.canonicalPath === attachmentRoot)) continue;
+    result.push({
+      canonicalPath: attachmentRoot,
+      kind: 'ATTACHMENT_STORAGE'
+    });
   }
+  return result;
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function mapMutationError(operation: string, error: unknown): Error {
@@ -7094,6 +7248,15 @@ async function canonicalPath(input: string): Promise<string> {
 
 function hashString(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  if (!value || maxBytes <= 0) return '';
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.byteLength <= maxBytes) return value;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
 }
 
 function isRuntimeRevisionConflict(error: unknown): boolean {

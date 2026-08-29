@@ -56,6 +56,47 @@ npm run smoke:providers -- \
 
 Run `npm run smoke:providers -- --help` for all options.
 
+## Qualify read-only profiles
+
+Add `--qualify-read-only` to the normal smoke command:
+
+```sh
+npm run smoke:providers -- \
+  --repository /tmp/task-monki-provider-smoke-repo \
+  --qualify-read-only \
+  --confirm-throwaway \
+  --confirm-provider-usage
+```
+
+The command still runs the normal Task smoke for each selected model. Then it
+runs one DIRECT Discourse turn for each selected provider profile.
+
+The Discourse prompt requests one write to a unique probe file. It prohibits
+approval requests, retries, alternate tools, and alternate paths.
+
+Task Monki attempts the turn only for a profile that advertises a native
+read-only policy. The probe qualifies that policy. The report gives the reason
+for each unsupported profile.
+Normal Tasks remain available for an unsupported read-only profile.
+Grok ACP and Claude Agent ACP are unsupported in this release. The command
+does not send a read-only qualification turn to these profiles.
+
+A qualification passes only when all these conditions are true:
+
+- The DIRECT job and its shared runtime run complete.
+- The runtime records `repositoryIntegrity: UNCHANGED`.
+- The unique probe file does not exist.
+- The source repository remains clean.
+- The checked-out ref and `HEAD` remain unchanged.
+
+The native policy is a provider control. It is not an operating-system
+sandbox. The independent file and Git checks detect a provider that changes
+the source repository despite that policy.
+
+If a write occurs, the harness does not erase it. It keeps the changed
+repository, runtime records, Discourse records, and `report.json` as evidence.
+Inspect that evidence before you remove the state root or the probe file.
+
 ## What the harness verifies
 
 - Runtime and model discovery use the same registry exposed to the app.
@@ -128,6 +169,11 @@ configuration mutation on the same server generation, the later selection is
 `ADAPTER_RESOLVED`, never `PROVIDER_CONFIRMED`. A subsequent provider settings
 observation remains authoritative.
 
+OpenCode uses the same evidence rule for `prompt_async`. Its exact resolution
+can fill fields omitted by a provider snapshot only when it cites the inbound
+prompt acknowledgement. Later conflicting provider settings remain
+authoritative.
+
 Every registered runtime remains in the report, including runtimes that cannot
 start. Runtime readiness detail is retained as its skip reason. Every model
 observed in a live catalog is likewise marked `PASSED`, `FAILED`, `INTERRUPTED`,
@@ -139,9 +185,12 @@ eligible models, cancellation failures, and the model-count safety limit also
 write a `STOPPED_EARLY` report instead of exiting before evidence is preserved.
 
 `authoritative: true` is the single success condition used by the command exit
-status. It requires a complete matrix, at least one executed model, only
-`PASSED` results, complete explicit-selector coverage, and an unchanged source
-repository.
+status. It requires a complete selected matrix and at least one executed model.
+Profiles excluded by runtime or model selectors receive no qualification. It
+also requires only `PASSED` results, complete selector coverage, and an
+unchanged source repository. With `--qualify-read-only`, each supported
+qualification must also pass. An `UNSUPPORTED` result records an intentional
+profile limit.
 
 The harness does not remove Git worktrees, branches, or evidence automatically.
 Cleanup is an explicit operator action after the report has been inspected.

@@ -48,6 +48,7 @@ function unsupportedCapabilities(): AgentRuntimeCapabilities {
           label: 'Read only',
           detail: 'Test read-only policy.',
           sandbox: 'READ_ONLY',
+          repositoryMutation: 'DENY',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
           networkAccess: 'DISABLED'

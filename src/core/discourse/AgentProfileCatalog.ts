@@ -75,7 +75,7 @@ export class AgentProfileCatalog {
           catalog.runtimes.find(
             (runtime) => runtime.preflight.runtime.id === settings.defaultRuntimeId
           ) ?? catalog.runtimes[0]
-        ) ?? 'No agent can confirm the read-only, offline access required by Discourse.';
+        );
     return {
       profiles: BUILT_IN_PROFILES.map((profile): AgentProfileCatalogEntry => ({
         profile: { ...profile },
@@ -211,7 +211,7 @@ function resolveCatalogSettings(
     runtimeId: selectedRuntime.preflight.runtime.id,
     modelId: selected.id,
     model: selected.model,
-    modelProvider: selected.modelProvider ?? selected.runtimeId,
+    ...(selected.modelProvider ? { modelProvider: selected.modelProvider } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(selected.defaultServiceTier ? { serviceTier: selected.defaultServiceTier } : {})
   };
@@ -222,7 +222,7 @@ export function discourseRuntimeUnavailableReason(
 ): string | undefined {
   if (!runtime) return 'The selected agent connection is not configured.';
   if (!runtime.preflight.readiness.canStart) {
-    return 'The selected agent is unavailable. Check its connection in Settings.';
+    return runtime.preflight.readiness.detail;
   }
   const support = projectAgentExecutionSupport(
     runtime.preflight.capabilities,
@@ -258,6 +258,6 @@ export function discourseModelMatches(
   return (
     model.runtimeId === revision.runtimeId &&
     model.model === revision.model &&
-    (model.modelProvider ?? model.runtimeId) === revision.modelProvider
+    model.modelProvider === revision.modelProvider
   );
 }

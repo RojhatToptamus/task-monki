@@ -24,7 +24,10 @@ import {
   buildExecutableTestRequest,
   selectExecutableDisplayStatus
 } from '../model/executableSettings';
-import { runtimeReadinessView } from '../model/runtimeReadiness';
+import {
+  runtimeExecutionUnavailableReason,
+  runtimeReadinessView
+} from '../model/runtimeReadiness';
 import { AccessibleTab } from './AccessibleTabs';
 import { AgentModelSetting } from './AgentModelSelector';
 import type { ThemePreference } from './theme';
@@ -305,23 +308,6 @@ function ModelSettings({
   );
   const enabledModels = models.filter((model) => enabledRuntimeIds.has(model.runtimeId));
   const selected = selectSettingsModels(enabledModels, enabledRuntimes, appSettings);
-  const promptRefinementRuntimes = enabledRuntimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      projectAgentExecutionSupport(
-        runtime.preflight.capabilities,
-        'PROMPT_REFINEMENT'
-      ).supported
-  );
-  const reviewRuntimes = enabledRuntimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      projectAgentExecutionSupport(
-        runtime.preflight.capabilities,
-        'REVIEW'
-      ).supported
-  );
-
   return (
     <SettingsPane
       id="models"
@@ -358,7 +344,10 @@ function ModelSettings({
           runtimeId={selected.promptRefinementRuntimeId}
           modelId={selected.selectedPromptRefinementModel?.id ?? ''}
           models={enabledModels}
-          runtimes={promptRefinementRuntimes}
+          runtimes={enabledRuntimes}
+          runtimeUnavailableReason={(runtime) =>
+            runtimeExecutionUnavailableReason(runtime, 'PROMPT_REFINEMENT')
+          }
           onDiscoverModels={onDiscoverAgentRuntimeModels}
           onSelectionChange={(runtimeId, modelId) => {
             const nextModel =
@@ -378,7 +367,10 @@ function ModelSettings({
           modelId={selected.selectedReviewModel?.id ?? ''}
           reasoningEffort={selected.selectedReviewEffort}
           models={enabledModels}
-          runtimes={reviewRuntimes}
+          runtimes={enabledRuntimes}
+          runtimeUnavailableReason={(runtime) =>
+            runtimeExecutionUnavailableReason(runtime, 'REVIEW')
+          }
           onDiscoverModels={onDiscoverAgentRuntimeModels}
           onSelectionChange={(runtimeId, modelId) => {
             const nextModel =
@@ -455,13 +447,13 @@ export function selectSettingsModels(
   );
   const promptRefinementRuntimeId =
     appSettings.promptRefinementRuntimeId &&
-    promptRefinementRuntimeIds.has(appSettings.promptRefinementRuntimeId)
+    availableRuntimeIds.has(appSettings.promptRefinementRuntimeId)
       ? appSettings.promptRefinementRuntimeId
       : promptRefinementRuntimeIds.has(defaultRuntimeId)
         ? defaultRuntimeId
         : ([...promptRefinementRuntimeIds][0] ?? defaultRuntimeId);
   const reviewRuntimeId =
-    appSettings.reviewRuntimeId && reviewRuntimeIds.has(appSettings.reviewRuntimeId)
+    appSettings.reviewRuntimeId && availableRuntimeIds.has(appSettings.reviewRuntimeId)
       ? appSettings.reviewRuntimeId
       : reviewRuntimeIds.has(defaultRuntimeId)
         ? defaultRuntimeId

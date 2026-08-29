@@ -130,6 +130,43 @@ describe('FileDiscourseStore', () => {
     expect((await fixture.store.getConversation(conversation.id)).participants).toHaveLength(1);
   });
 
+  it('stores a providerless participant and its immutable assignment without a fallback', async () => {
+    const fixture = await storeFixture();
+    const seed = participantSeed('conversation-1');
+    delete seed.revision.modelProvider;
+    const conversation = await fixture.store.createConversation({
+      id: 'conversation-1',
+      title: 'Providerless model',
+      defaultPolicy: 'DIRECT',
+      participants: [seed.participant],
+      participantRevisions: [seed.revision],
+      requestFingerprint: 'f'.repeat(64),
+      clientOperationId: 'create-providerless'
+    });
+    const trigger = await fixture.store.appendHumanMessage({
+      conversationId: conversation.id,
+      body: 'Use the providerless model.',
+      clientMessageId: 'providerless-message'
+    });
+    const assignment = assignmentFromRevision(seed.revision);
+    const wave = directWave(trigger.id, trigger.contextRevisionId!, assignment);
+    await fixture.store.createWave({
+      conversationId: conversation.id,
+      expectedConversationRevision: (
+        await fixture.store.getConversation(conversation.id)
+      ).conversation.recordRevision,
+      wave,
+      jobs: [directJob(trigger.id, assignment)],
+      contextSnapshot: contextSnapshot(wave, trigger.ordinal),
+      clientOperationId: wave.clientOperationId
+    });
+
+    const restarted = await new FileDiscourseStore(fixture.root)
+      .getConversation(conversation.id);
+    expect(restarted.participantRevisions[0]).not.toHaveProperty('modelProvider');
+    expect(restarted.waves[0]?.assignments[0]).not.toHaveProperty('modelProvider');
+  });
+
   it('serializes concurrent appends, pages backward, and retries a lost response exactly', async () => {
     const fixture = await storeFixture();
     await createConversation(fixture.store, 'conversation-1', 'create-1');
@@ -942,7 +979,11 @@ describe('FileDiscourseStore', () => {
         .createOperations
     ).toHaveLength(1);
 
-    for (const schemaVersion of [1, DISCOURSE_STORE_SCHEMA_VERSION + 1]) {
+    for (const schemaVersion of [
+      1,
+      DISCOURSE_STORE_SCHEMA_VERSION - 1,
+      DISCOURSE_STORE_SCHEMA_VERSION + 1
+    ]) {
       const unsupportedRoot = await fs.mkdtemp(
         path.join(os.tmpdir(), 'task-monki-discourse-unsupported-')
       );
@@ -1147,7 +1188,7 @@ function assignmentFromRevision(
     displayNameSnapshot: revision.displayNameSnapshot,
     runtimeId: revision.runtimeId,
     model: revision.model,
-    modelProvider: revision.modelProvider,
+    ...(revision.modelProvider ? { modelProvider: revision.modelProvider } : {}),
     configuredRole: revision.configuredRole,
     roleContractVersion: revision.roleContractVersion,
     roleContractHash: revision.roleContractHash,

@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-07-18
+Date: 2026-08-29
 
 This document describes the Codex runtime adapter. The provider-neutral runtime
 registry and cross-runtime invariants live in
@@ -137,8 +137,8 @@ The adapter must:
   use as verified evidence;
 - discover account, models, supported reasoning efforts, and settings;
 - create, attach, and read provider sessions;
-- fork Codex sessions only when the Codex runtime supplies the detached-review path;
-- start implementation, follow-up, retry, and review turns;
+- map native thread fork only through the optional session-fork operation;
+- start implementation, follow-up, retry, and shared read-only turns;
 - correlate provider thread IDs, turn IDs, item IDs, and request IDs;
 - materialize useful provider events into Task Monki records;
 - keep structurally redacted protocol traffic in the journal;
@@ -196,16 +196,20 @@ Multi-agent V1/V2 and memories are disabled in both configurations. Runtime
 discovery proves the custom-profile surface with a disposable ephemeral thread
 before selecting a Codex binary.
 
-Review settings are always normalized to Task Monki's read-only policy. A Full
-access implementation or UI selection therefore does not make the detached
-review unrestricted; the review still uses the restricted profile plus the
-validated read-only Git common directory.
+Review, prompt-refinement, and Discourse settings use Task Monki's read-only policy.
+A Full access implementation selection does not make a review unrestricted.
+The review uses the isolated read-only profile plus the validated Git common directory.
 
-Thread create, resume, fork, each ordinary turn, recovery, and the explicit
-fork-plus-inline review path all require the returned active profile and sole
-runtime workspace root before provider input. Live settings drift terminates
-the provider and fails active runs. Attachment reads therefore need no separate
-permission escalation or path expansion flow.
+Thread create, resume, fork, each ordinary turn, and recovery require the returned profile.
+They also require the sole runtime workspace root before provider input.
+Live settings drift terminates the provider and fails active runs.
+Attachment reads need no separate permission escalation or path expansion flow.
+
+Codex review, prompt refinement, and Discourse use ordinary `turn/start` requests.
+The adapter does not expose separate review or refinement workflow methods.
+`AgentOrchestrator` records repository state before delivery.
+It compares that state after terminal output and fails a changed or unreadable turn.
+Task Monki leaves detected repository changes in place as evidence.
 
 Codex keeps the active permission-profile identity when it resumes a thread.
 It cannot replace that identity with a different exact attachment scope.
@@ -408,9 +412,8 @@ runtime resolution can scan all candidates and choose a compatible runtime.
 Saved custom paths, constructor overrides, and `TASK_MONKI_CODEX_BIN` are
 intentional and are passed explicitly.
 
-After App Server startup resolves a compatible runtime, Codex-owned auxiliary
-operations such as prompt refinement use that active server's resolved
-executable. They must not fall back to an unrelated `codex` earlier on `PATH`.
+After App Server startup resolves a compatible runtime, all Codex turns use that active server.
+They must not fall back to an unrelated `codex` earlier on `PATH`.
 
 ## Runtime resolution
 
@@ -449,8 +452,8 @@ Codex protocol detail:
   follow-up, and retry turns select Codex's interactive `plan` collaboration
   preset because that is the native surface that exposes
   `request_user_input`, while explicit developer instructions keep the turn in
-  implementation mode with normal file and command work. Review turns retain
-  their dedicated review protocol.
+  implementation mode with normal file and command work. Shared read-only turns
+  use the ordinary turn protocol without interactive implementation controls.
 - `turn/start` has a first-class `effort` field.
 - `thread/start`, `thread/resume`, and `thread/fork` do not; they must pass
   `model_reasoning_effort` through the request `config` object.
@@ -478,11 +481,8 @@ Codex protocol detail:
   evidence materialization retain it. Provider reads never downgrade a durable
   materialization fence merely because a transient response has no turns. The
   normal resume-and-attest path is required for every later turn.
-- Reviews use `thread/fork` before `review/start`, so review latency depends on
-  this config being set correctly.
-- Task Monki starts `review/start` inline on that fork. Requesting a second
-  detached review thread can lose the fork cwd and review unrelated local
-  changes.
+- Shared read-only sessions carry their selected reasoning effort in the same
+  thread and turn settings as other ordinary Codex turns.
 
 ## Mid-turn user input
 

@@ -1,6 +1,6 @@
 # Product Workflow
 
-Date: 2026-07-18
+Date: 2026-08-29
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
@@ -55,16 +55,22 @@ session, while unsubmitted attachment batches are still discarded. A
 successful Create clears the preserved text draft.
 
 Refine is a reversible proposal, not an automatic append or overwrite. One
-ephemeral read-only, network-isolated agent run receives the current title and
-description, the selected downstream model's capabilities, and any staged
-attachments. It first decides whether repository or attachment inspection can
+short-lived read-only agent run receives the current title and description.
+It also receives the selected downstream model capabilities and supported staged attachments.
+OpenCode and Cursor currently refine requests without managed attachments.
+The adapter applies its qualified native mutation-denial policy.
+Task Monki does not grant app-owned web, MCP, app, attachment, dynamic-tool, or approval access for the turn.
+An ACP provider can still expose its own tools when its native policy permits them.
+The provider process can still use its model transport.
+The agent first decides whether repository or attachment inspection can
 materially improve the request. Clear, small tasks may use no repository tools;
 ambiguous or cross-cutting tasks start in the likely relevant area and broaden
 only when inspected dependencies justify it. The run returns a standalone
 rewrite plus path-free inspection evidence. Core accepts repository paths and
 attachment observations only when they match files that were actually made
-available to that run. If refinement cannot be validated, the original request
-is returned unchanged with a visible degraded-result warning.
+available to that run. Task Monki compares repository state before and after the turn.
+If the repository changes, Task Monki rejects the result and leaves the changes as evidence.
+If refinement cannot be validated, the original request remains unchanged with a visible warning.
 
 The composer locks refinement inputs while that run is active, cancels the run
 when the panel closes, and accepts a proposal only while its repository, title,
@@ -75,11 +81,11 @@ copy their generic rules into every task prompt.
 ## Runtime and model configuration
 
 First-launch defaults, New Task, and Settings use the same runtime/model
-selector. Implementation defaults can use every enabled runtime. Prompt
-refinement and review receive narrower runtime lists derived from their typed
-capabilities, so those operations are never assumed to be Codex-only and an
-unsupported provider is never offered for them. Reasoning choices come from the
-selected model's native catalog.
+selector. Implementation defaults can use every enabled runtime.
+Prompt refinement, review, and Discourse use one shared read-only support projection.
+The projection requires qualified native mutation denial.
+Unsupported providers remain visible with the reason that blocks the operation.
+Reasoning choices come from the selected model's native catalog.
 
 ## Discourse
 
@@ -91,11 +97,13 @@ correction. It never creates a hidden task or treats an agent response as Git,
 test, GitHub, workflow, or acceptance evidence.
 
 Task and repository context is explicit per message or explicitly pinned.
-Agent turns use immutable context snapshots and a read-only, offline execution
-scope. Runtime/model identity is frozen in participant revisions, so a reply is
-never silently rerouted to the current default runtime. Only runtimes with an
-adapter-attested scoped Discourse boundary are offered; unsupported runtimes
-stay visible as unavailable with their reason rather than falling back.
+Agent turns use immutable context snapshots and a provider-native read-only policy.
+Task Monki grants no app-owned external tools for these turns and compares repository state after the turn.
+Provider-owned tools remain subject to the selected native policy.
+Runtime and model identity remain frozen in participant revisions.
+A reply is never silently rerouted to the current default runtime.
+Only qualified runtimes are offered.
+Unsupported runtimes remain visible with their reason instead of falling back.
 
 See `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md` for response policies,
 waiting, review/correction, stale context, cancellation, recovery, and limits.

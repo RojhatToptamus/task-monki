@@ -26,7 +26,7 @@ import type {
 } from './agent';
 import type { AttachmentSubmissionRecord } from './attachments';
 
-export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 4 as const;
+export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 5 as const;
 
 export const AGENT_RUNTIME_LIMITS = {
   maxSessions: 20_000,
@@ -63,6 +63,7 @@ export const AGENT_SCHEDULER_POLICY = {
 /** Durable participant/task owner. It never fabricates a task for discourse. */
 export type AgentOwnerScope =
   | { kind: 'TASK'; taskId: string }
+  | { kind: 'PROMPT_REFINEMENT'; requestId: string }
   | {
       kind: 'DISCOURSE';
       conversationId: string;
@@ -84,11 +85,15 @@ export type AgentRunScope =
       jobId: string;
       contextSnapshotId: string;
       attemptId: string;
+    }
+  | {
+      kind: 'PROMPT_REFINEMENT';
+      requestId: string;
     };
 
 export interface AgentAttestedReadRoot {
   canonicalPath: string;
-  kind: 'WORKTREE' | 'REPOSITORY' | 'EMPTY_MANAGED';
+  kind: 'WORKTREE' | 'REPOSITORY' | 'EMPTY_MANAGED' | 'ATTACHMENT_STORAGE';
   entityId?: string;
 }
 
@@ -112,6 +117,8 @@ export interface AgentExecutionContext {
         reason: string;
       };
   primaryCwd: string;
+  /** Logical repository access requested by the workflow. */
+  repositoryAccess: 'READ_ONLY' | 'WRITE';
   readRoots: AgentAttestedReadRoot[];
   managedAttachments: AgentManagedAttachmentAccess[];
   permissionProfileHash: string;
@@ -185,6 +192,7 @@ export type AgentRuntimePurpose =
   | 'TASK_DESIGN'
   | 'TASK_COMPACTION'
   | 'PROVIDER_SUBAGENT'
+  | 'PROMPT_REFINEMENT'
   | 'DISCOURSE_ANSWER'
   | 'DISCOURSE_CRITIQUE'
   | 'DISCOURSE_CORRECT'
@@ -227,6 +235,14 @@ export interface AgentRuntimeRunRecord {
   terminalReason?: string;
   providerTerminalSource?: string;
   contextFreshnessAtCompletion?: 'FRESH' | 'CHANGED_DURING_JOB' | 'UNKNOWN';
+  /** Durable before/after evidence for a provider-native read-only turn. */
+  repositoryIntegrity?: {
+    beforeFingerprint?: string;
+    afterFingerprint?: string;
+    status: 'PENDING' | 'UNCHANGED' | 'CHANGED' | 'UNVERIFIABLE';
+    checkedAt?: string;
+    detail?: string;
+  };
   instructionProfile?: AgentInstructionProfile;
   attachmentSubmissions?: AttachmentSubmissionRecord[];
   providerTerminalRawMessage?: AgentProtocolMessageReference;
@@ -508,16 +524,22 @@ export interface AgentRuntimeStoreState {
 }
 
 export function agentOwnerScopeKey(scope: AgentOwnerScope): string {
-  return scope.kind === 'TASK'
-    ? `task:${scope.taskId}`
-    : `discourse:${scope.conversationId}:${scope.stableParticipantId}`;
+  if (scope.kind === 'TASK') return `task:${scope.taskId}`;
+  if (scope.kind === 'PROMPT_REFINEMENT') {
+    return `prompt-refinement:${scope.requestId}`;
+  }
+  return `discourse:${scope.conversationId}:${scope.stableParticipantId}`;
 }
 
 export function agentRunScopeBelongsToOwner(
   scope: AgentRunScope,
   owner: AgentOwnerScope
 ): boolean {
-  return scope.kind === 'TASK'
-    ? owner.kind === 'TASK' && owner.taskId === scope.taskId
-    : owner.kind === 'DISCOURSE' && owner.conversationId === scope.conversationId;
+  if (scope.kind === 'TASK') {
+    return owner.kind === 'TASK' && owner.taskId === scope.taskId;
+  }
+  if (scope.kind === 'PROMPT_REFINEMENT') {
+    return owner.kind === 'PROMPT_REFINEMENT' && owner.requestId === scope.requestId;
+  }
+  return owner.kind === 'DISCOURSE' && owner.conversationId === scope.conversationId;
 }

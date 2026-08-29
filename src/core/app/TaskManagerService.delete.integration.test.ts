@@ -304,6 +304,7 @@ async function createDeletionSession(
       requestedSettings: settings,
       executionContext: {
         attestation: { status: 'ATTESTED' },
+        repositoryAccess: 'WRITE',
         primaryCwd: worktree.worktreePath,
         readRoots: [
           {

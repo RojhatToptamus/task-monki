@@ -54,6 +54,18 @@ export interface AcpRuntimeProfile {
   /** Access policies Task Monki can enforce for this provider's ACP requests. */
   approvalPolicies?: readonly AcpApprovalPolicy[];
   /**
+   * Exact provider mode used for shared read-only turns. This is a native tool
+   * policy, not an operating-system sandbox. A profile stays unsupported when
+   * its current mode cannot deny repository mutation on its own.
+   */
+  readOnlyTurnPolicy?: {
+    modeId: string;
+    policyId: string;
+    detail: string;
+  };
+  /** Why this profile cannot currently run shared read-only workflows. */
+  readOnlyTurnUnavailableReason?: string;
+  /**
    * Exact provider text that represents a failed turn despite an ACP
    * `end_turn` response. This is profile-owned because ACP has no structured
    * account or usage-limit terminal reason.
@@ -156,6 +168,8 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   // Task Monki decides only how to answer those exact requests; Grok still owns
   // its documented global allow/deny rules and the unconfined agent process.
   approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
+  readOnlyTurnUnavailableReason:
+    'Grok plan mode blocks edit tools, but it can still run mutating shell, MCP, or subagent work. This does not deny repository mutation.',
   allowRememberedPermissions: true,
   environmentPolicy: {
     contractId: 'task-monki/grok-acp-environment@v1',
@@ -213,6 +227,12 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   defaultModel: 'default',
   parameterizedModelCatalog: CURSOR_PARAMETERIZED_MODEL_CATALOG,
   approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
+  readOnlyTurnPolicy: {
+    modeId: 'ask',
+    policyId: 'cursor-agent-acp/ask-read-only@v1',
+    detail:
+      'Cursor Ask mode provides read-only code exploration. Task Monki also rejects every permission request and compares repository state after the turn.'
+  },
   terminalFailureMessage: {
     exactText: 'Upgrade your plan to continue',
     diagnostic:
@@ -262,6 +282,8 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   defaultModelProvider: 'anthropic',
   defaultModel: 'default',
   approvalPolicies: ['on-request'],
+  readOnlyTurnUnavailableReason:
+    'Claude Agent ACP plan mode has not passed the required packaged-runtime mutation test on this Task Monki build.',
   environmentPolicy: {
     contractId: 'task-monki/claude-agent-acp-environment@v1',
     allowedKeys: [
@@ -331,7 +353,7 @@ export function acpCapabilities(
     ? 'Enabled only when advertised by the connected ACP agent.'
     : 'Pending ACP initialize capability negotiation.';
   const approvalPolicies = profile.approvalPolicies ?? ['on-request'];
-  const executionPresets = approvalPolicies.map((approvalPolicy) => {
+  const normalExecutionPresets = approvalPolicies.map((approvalPolicy) => {
     switch (approvalPolicy) {
       case 'on-request':
         return {
@@ -342,6 +364,7 @@ export function acpCapabilities(
           sandbox: 'DANGER_FULL_ACCESS' as const,
           approvalPolicy,
           approvalsReviewer: 'user' as const,
+          repositoryMutation: 'ASK' as const,
           networkAccess: 'REQUIRED' as const
         };
       case 'auto-accept-edits':
@@ -353,6 +376,7 @@ export function acpCapabilities(
           sandbox: 'DANGER_FULL_ACCESS' as const,
           approvalPolicy,
           approvalsReviewer: 'user' as const,
+          repositoryMutation: 'ALLOW' as const,
           networkAccess: 'REQUIRED' as const
         };
       case 'never':
@@ -364,22 +388,49 @@ export function acpCapabilities(
           sandbox: 'DANGER_FULL_ACCESS' as const,
           approvalPolicy,
           approvalsReviewer: 'user' as const,
+          repositoryMutation: 'ALLOW' as const,
           networkAccess: 'REQUIRED' as const
         };
     }
   });
+  const readOnlyPolicy = profile.readOnlyTurnPolicy;
+  const executionPresets = [
+    ...normalExecutionPresets,
+    ...(readOnlyPolicy
+      ? [
+          {
+            id: 'native-read-only',
+            label: 'Read-only',
+            detail: `${readOnlyPolicy.detail} The provider process still has normal user permissions and is not operating-system sandboxed.`,
+            sandbox: 'DANGER_FULL_ACCESS' as const,
+            approvalPolicy: 'NEVER',
+            approvalsReviewer: 'user' as const,
+            repositoryMutation: 'DENY' as const,
+            networkAccess: 'REQUIRED' as const
+          }
+        ]
+      : [])
+  ];
+  const readOnlyCapability = readOnlyPolicy
+    ? {
+        maturity: 'stable' as const,
+        detail: readOnlyPolicy.detail
+      }
+    : {
+        maturity: 'unsupported' as const,
+        detail:
+          profile.readOnlyTurnUnavailableReason ??
+          `${profile.descriptor.displayName} has no qualified native repository-mutation denial policy.`
+      };
   return {
     runtimeId: profile.descriptor.id,
     executionPolicy: {
-      defaultPresetId: executionPresets[0]!.id,
+      defaultPresetId: normalExecutionPresets[0]!.id,
       presets: executionPresets,
       detail:
         'Access modes govern Task Monki responses to reported ACP permission requests. ACP does not provide an enforceable process sandbox.'
     },
-    promptRefinement: {
-      maturity: 'unsupported',
-      detail: 'No current ACP profile attests the read-only isolation required for prompt refinement.'
-    },
+    promptRefinement: readOnlyCapability,
     modelCatalog: {
       maturity: 'inferred',
       ...(profile.parameterizedModelCatalog ? { activation: 'EXPLICIT' as const } : {}),
@@ -433,10 +484,7 @@ export function acpCapabilities(
     },
     goals: { maturity: 'unsupported', detail: 'ACP stable v1 has no goal API.' },
     plans: { maturity: 'stable', detail: 'Plans arrive as typed session/update records.' },
-    detachedReview: {
-      maturity: 'unsupported',
-      detail: 'Current ACP profiles cannot attest an isolated read-only review workspace.'
-    },
+    detachedReview: readOnlyCapability,
     review: {
       maturity: 'unsupported',
       detail: 'ACP stable v1 has no detached review primitive; review requires a higher-level workflow.'
@@ -482,6 +530,7 @@ export function acpCapabilities(
         maturity: 'stable',
         detail: 'Unknown extension notifications and _meta payloads remain in the protected durable journal.'
       },
+      'task-monki.read-only-turn': readOnlyCapability,
       nativeContentBlocks:
         negotiated?.prompt?.image || negotiated?.prompt?.embeddedContext
           ? {

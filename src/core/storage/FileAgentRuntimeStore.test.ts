@@ -1025,6 +1025,83 @@ describe('FileAgentRuntimeStore', () => {
     });
   });
 
+  it('purges settled prompt-refinement sessions and artifacts', async () => {
+    const fixture = await storeFixture();
+    const owner: AgentOwnerScope = {
+      kind: 'PROMPT_REFINEMENT',
+      requestId: 'refinement-1'
+    };
+    const scope: AgentRunScope = {
+      kind: 'PROMPT_REFINEMENT',
+      requestId: 'refinement-1'
+    };
+    const session = await fixture.store.createSession(
+      sessionInput('refinement-session', owner, 'create-refinement-session')
+    );
+    const run = await fixture.store.createRun({
+      ...runInput('refinement-run', session, scope, 'create-refinement-run'),
+      purpose: 'PROMPT_REFINEMENT'
+    });
+    const artifact = await fixture.store.createArtifact({
+      id: run.outputArtifactId,
+      owner,
+      runId: run.id,
+      kind: 'OUTPUT',
+      clientOperationId: 'create-refinement-output',
+      content: 'Refined prompt'
+    });
+    const queued = await fixture.store.enqueueRun(
+      run.id,
+      'TASK_FOREGROUND',
+      'enqueue-refinement'
+    );
+    await fixture.store.leaseQueueEntry(
+      queued.id,
+      queued.recordRevision,
+      'lease-refinement'
+    );
+    let current = (await fixture.store.getRun(run.id))!;
+    current = await fixture.store.updateRun(
+      current.id,
+      current.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: '2026-07-13T00:00:10.000Z'
+      },
+      'start-refinement'
+    );
+    await fixture.store.updateRun(
+      current.id,
+      current.recordRevision,
+      {
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        providerTurnId: 'refinement-turn',
+        endedAt: '2026-07-13T00:00:20.000Z'
+      },
+      'complete-refinement'
+    );
+    const leased = (await fixture.store.snapshot()).queueEntries[0]!;
+    await fixture.store.settleQueueEntry(
+      leased.id,
+      leased.recordRevision,
+      'settle-refinement'
+    );
+
+    await expect(
+      fixture.store.purgePromptRefinement('refinement-1')
+    ).resolves.toEqual({
+      sessionCount: 1,
+      runCount: 1,
+      artifactCount: 1,
+      queueEntryCount: 1
+    });
+    await expect(
+      fs.stat(path.join(fixture.root, 'artifacts', artifact.storageKey))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('repairs pre-publish crashes and forces restart after a post-rename failure', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-runtime-crash-'));
     let fileSyncs = 0;
@@ -1269,6 +1346,7 @@ function executionContext(clientOperationId: string): AgentExecutionContext {
   const primaryCwd = path.join(path.parse(process.cwd()).root, 'tmp', 'runtime-primary');
   return {
     attestation: { status: 'ATTESTED' },
+    repositoryAccess: 'READ_ONLY',
     primaryCwd,
     readRoots: [{ canonicalPath: primaryCwd, kind: 'EMPTY_MANAGED' }],
     managedAttachments: [],

@@ -42,6 +42,7 @@ class DiscourseCapableRuntimeAdapter extends ScriptedAgentRuntimeAdapter {
   async buildExecutionContext(input: BuildAgentRuntimeExecutionContextInput) {
     return {
       attestation: { status: 'ATTESTED' as const },
+      repositoryAccess: 'READ_ONLY' as const,
       primaryCwd: input.primaryCwd,
       readRoots: input.readRoots,
       managedAttachments: [],
@@ -70,10 +71,6 @@ class DiscourseCapableRuntimeAdapter extends ScriptedAgentRuntimeAdapter {
 
   async syncGoal(): Promise<never> {
     throw new Error('Discourse does not synchronize Task goals.');
-  }
-
-  async refinePrompt(): Promise<never> {
-    throw new Error('Discourse does not use Task prompt refinement.');
   }
 
   async startRuntimeTurn(

@@ -66,6 +66,30 @@ describe('AgentProfileCatalog', () => {
     });
   });
 
+  it('preserves the difference between a providerless model and an explicit provider', () => {
+    const providerless = model({ modelProvider: undefined });
+    const explicitCollision = model({
+      id: 'opencode:opencode/model',
+      runtimeId: 'opencode',
+      modelProvider: 'opencode',
+      model: 'model'
+    });
+    const catalog = runtimeCatalog([providerless, explicitCollision]);
+    catalog.runtimes[0] = { ...catalog.runtimes[0]!, models: [providerless] };
+    catalog.runtimes[1] = { ...catalog.runtimes[1]!, models: [explicitCollision] };
+
+    expect(new AgentProfileCatalog().resolveSelection(catalog, {
+      agentProfileId: 'builtin.lead',
+      runtimeId: 'codex',
+      modelId: providerless.id
+    })).not.toHaveProperty('modelProvider');
+    expect(new AgentProfileCatalog().resolveSelection(catalog, {
+      agentProfileId: 'builtin.lead',
+      runtimeId: 'opencode',
+      modelId: explicitCollision.id
+    })).toMatchObject({ modelProvider: 'opencode' });
+  });
+
   it('honors a selected hidden model without using it as an implicit fallback', () => {
     const catalog = runtimeCatalog([
       model({ id: 'codex:hidden-saved', model: 'hidden-saved', hidden: true, isDefault: false }),
@@ -91,7 +115,7 @@ describe('AgentProfileCatalog', () => {
     })).toThrow('selected Discourse agent provider is no longer available');
   });
 
-  it('falls back to a Discourse-safe runtime when the app default cannot attest the boundary', () => {
+  it('falls back to another qualified runtime when the app default has no model', () => {
     const catalog = runtimeCatalog();
     catalog.defaultRuntimeId = 'opencode';
 
@@ -101,17 +125,44 @@ describe('AgentProfileCatalog', () => {
     });
   });
 
-  it('keeps roles visible but explains when no runtime has a safe discourse boundary', () => {
+  it('keeps roles visible and explains an unqualified read-only profile', () => {
     const catalog = runtimeCatalog();
     catalog.defaultRuntimeId = 'opencode';
     catalog.runtimes = catalog.runtimes.filter(
       (runtime) => runtime.preflight.runtime.id === 'opencode'
     );
     catalog.models = [];
+    const capabilities = catalog.runtimes[0]!.preflight.capabilities;
+    capabilities.executionPolicy = {
+      ...capabilities.executionPolicy,
+      presets: capabilities.executionPolicy.presets.filter(
+        (preset) => preset.repositoryMutation !== 'DENY'
+      )
+    };
+    capabilities.detachedReview = {
+      maturity: 'unsupported',
+      detail: 'This profile can still mutate through shell commands.'
+    };
 
     expect(new AgentProfileCatalog().list(catalog).profiles[0]).toMatchObject({
       availability: 'UNAVAILABLE',
-      unavailableReason: 'This agent cannot confirm the read-only, offline access required by Discourse.'
+      unavailableReason:
+        'This profile can still mutate through shell commands. Normal Tasks remain available.'
+    });
+  });
+
+  it('uses typed readiness detail when the selected runtime cannot start', () => {
+    const catalog = runtimeCatalog();
+    const runtime = catalog.runtimes[0]!;
+    runtime.preflight.readiness = createRuntimeReadiness(
+      'AUTHENTICATION_REQUIRED',
+      'Sign in to Codex before starting Discourse.'
+    );
+    catalog.runtimes = [runtime];
+
+    expect(new AgentProfileCatalog().list(catalog).profiles[0]).toMatchObject({
+      availability: 'UNAVAILABLE',
+      unavailableReason: 'Sign in to Codex before starting Discourse.'
     });
   });
 

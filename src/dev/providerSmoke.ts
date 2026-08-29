@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,17 +11,25 @@ import type {
   AgentRuntimeReadinessStatus,
   AgentRuntimeState
 } from '../shared/agent';
+import type { AgentRuntimeStoreState } from '../shared/agentRuntime';
+import type {
+  DiscourseAgentJobRecord,
+  DiscourseConversationAggregateRecord
+} from '../shared/discourse';
 import type {
   GitSnapshotRecord,
   GitStatus,
   RunRecord,
   TaskSnapshot
 } from '../shared/contracts';
+import { projectAgentExecutionSupport } from '../shared/agentExecutionSupport';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
+import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 
-const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v2' as const;
+const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v3' as const;
 const SMOKE_SENTINEL = 'TASK_MONKI_PROVIDER_SMOKE_OK';
 const SMOKE_FILE_NAME = 'task-monki-provider-smoke.txt';
 const SMOKE_FILE_CONTENT = `${SMOKE_SENTINEL}\n`;
@@ -48,6 +57,13 @@ const PROVIDER_DERIVED_OBSERVATION_SOURCES = new Set<AgentObservationSource>([
   'MODEL_REROUTED_NOTIFICATION',
   'RECOVERY_RESUME_RESPONSE'
 ]);
+const TERMINAL_DISCOURSE_JOB_STATUSES = new Set<DiscourseAgentJobRecord['status']>([
+  'COMPLETED',
+  'FAILED',
+  'CANCELED',
+  'CONTEXT_STALE',
+  'RECOVERY_REQUIRED'
+]);
 
 export interface ProviderSmokeOptions {
   repositoryPath: string;
@@ -57,6 +73,7 @@ export interface ProviderSmokeOptions {
   timeoutMs: number;
   confirmThrowaway: boolean;
   confirmProviderUsage: boolean;
+  qualifyReadOnly: boolean;
   help: boolean;
 }
 
@@ -102,6 +119,26 @@ export interface ProviderSmokeResult {
   completedAt: string;
 }
 
+export interface ProviderReadOnlyQualificationResult {
+  runtimeId: string;
+  modelId?: string;
+  status: 'PASSED' | 'FAILED' | 'UNSUPPORTED' | 'NOT_REACHED';
+  reason?: string;
+  conversationId?: string;
+  waveId?: string;
+  jobId?: string;
+  runId?: string;
+  runStatus?: AgentRunStatus;
+  repositoryIntegrity?: 'PENDING' | 'UNCHANGED' | 'CHANGED' | 'UNVERIFIABLE';
+  probeFileName?: string;
+  probeAbsent: boolean;
+  repositoryClean: boolean;
+  repositoryIdentityUnchanged: boolean;
+  executionContained: boolean;
+  startedAt: string;
+  completedAt: string;
+}
+
 export interface ProviderSmokeReport {
   schemaVersion: typeof REPORT_SCHEMA_VERSION;
   completionStatus: 'COMPLETED' | 'STOPPED_EARLY';
@@ -134,6 +171,7 @@ export interface ProviderSmokeReport {
     }>;
   }>;
   results: ProviderSmokeResult[];
+  readOnlyQualifications: ProviderReadOnlyQualificationResult[];
   selection: {
     requestedRuntimeIds: string[];
     requestedModelIds: string[];
@@ -158,14 +196,24 @@ export type ProviderSmokeService = Pick<
   | 'listTasks'
   | 'refreshEvidence'
   | 'cancelRun'
+  | 'createDiscourseConversation'
+  | 'previewDiscourseContext'
+  | 'sendDiscourseMessage'
+  | 'getDiscourseConversation'
+  | 'stopDiscourseWave'
   | 'shutdown'
 >;
+
+export interface ProviderSmokeRuntimeStore {
+  snapshot(): Promise<AgentRuntimeStoreState>;
+}
 
 export interface ProviderSmokeDependencies {
   createService?: (input: {
     repositoryPath: string;
     stateRoot: string;
   }) => ProviderSmokeService;
+  runtimeStore?: ProviderSmokeRuntimeStore;
   pollIntervalMs?: number;
   cancelTimeoutMs?: number;
   maxModels?: number;
@@ -193,6 +241,7 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
     timeoutMs: DEFAULT_TIMEOUT_MS,
     confirmThrowaway: false,
     confirmProviderUsage: false,
+    qualifyReadOnly: false,
     help: false
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -224,6 +273,9 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
       case '--confirm-provider-usage':
         options.confirmProviderUsage = true;
         break;
+      case '--qualify-read-only':
+        options.qualifyReadOnly = true;
+        break;
       case '--help':
       case '-h':
         options.help = true;
@@ -244,7 +296,7 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
   }
   if (!options.help && !options.confirmProviderUsage) {
     throw new Error(
-      '--confirm-provider-usage is required because this command sends one billable prompt to every selected model.'
+      '--confirm-provider-usage is required because this command sends billable prompts to the selected providers.'
     );
   }
   return options;
@@ -343,18 +395,39 @@ export async function runProviderSmoke(
   const repository = await requireThrowawayRepository(options.repositoryPath);
   const repositoryPath = repository.path;
   const stateRoot = await createStateRoot(options.stateRoot, repositoryPath);
-  const service = dependencies.createService?.({ repositoryPath, stateRoot }) ??
-    new TaskManagerService(
-      new FileTaskStore(path.join(stateRoot, 'store')),
+  let runtimeStore = dependencies.runtimeStore;
+  let service: ProviderSmokeService;
+  if (dependencies.createService) {
+    service = dependencies.createService({ repositoryPath, stateRoot });
+  } else {
+    const taskStore = new FileTaskStore(path.join(stateRoot, 'store'));
+    const fileRuntimeStore = options.qualifyReadOnly
+      ? new FileAgentRuntimeStore(path.join(stateRoot, 'store', 'agent-runtime'))
+      : undefined;
+    runtimeStore = fileRuntimeStore;
+    service = new TaskManagerService(
+      taskStore,
       repositoryPath,
       undefined,
-      { worktreeRoot: path.join(stateRoot, 'worktrees'), agentCwd: repositoryPath }
+      {
+        worktreeRoot: path.join(stateRoot, 'worktrees'),
+        agentCwd: repositoryPath,
+        ...(fileRuntimeStore
+          ? {
+              agentRuntimeStore: fileRuntimeStore,
+              discourseStore: new FileDiscourseStore(path.join(stateRoot, 'discourse')),
+              discourseWorkspaceRoot: path.join(stateRoot, 'discourse-workspaces')
+            }
+          : {})
+      }
     );
+  }
   const pollIntervalMs = dependencies.pollIntervalMs ?? POLL_INTERVAL_MS;
   const cancelTimeoutMs = dependencies.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS;
   const maxModels = dependencies.maxModels ?? MAX_MODELS;
   const startedAt = new Date().toISOString();
   const results: ProviderSmokeResult[] = [];
+  const readOnlyQualifications: ProviderReadOnlyQualificationResult[] = [];
   const errors: string[] = [];
   const completedModelIds = new Set<string>();
   const queuedModelIds = new Set<string>();
@@ -484,6 +557,31 @@ export async function runProviderSmoke(
           queue
         );
       }
+      if (options.qualifyReadOnly) {
+        const qualifications = await qualifySelectedReadOnlyProfiles({
+          service,
+          runtimeStore,
+          repository,
+          repositoryId: repositoryRecord.id,
+          options,
+          runtimes: discoveredRuntimes,
+          models: discoveredModels,
+          normalResults: results,
+          pollIntervalMs,
+          cancelTimeoutMs,
+          isStopping: () => stopRequested
+        });
+        readOnlyQualifications.push(...qualifications);
+        if (
+          qualifications.some(
+            (qualification) =>
+              !qualification.repositoryClean ||
+              !qualification.repositoryIdentityUnchanged
+          )
+        ) {
+          stopRequested = true;
+        }
+      }
       if (results.length === 0 && !stopRequested) {
         appendUnique(
           errors,
@@ -539,6 +637,12 @@ export async function runProviderSmoke(
     errors.length === 0 &&
     results.length > 0 &&
     results.every((result) => result.verdict === 'PASSED') &&
+    (!options.qualifyReadOnly ||
+      readOnlyQualifications.every(
+        (qualification) =>
+          qualification.status === 'PASSED' ||
+          qualification.status === 'UNSUPPORTED'
+      )) &&
     !selectionIncomplete &&
     repositoryState.clean &&
     repositoryState.identityUnchanged;
@@ -578,6 +682,7 @@ export async function runProviderSmoke(
       };
     }),
     results,
+    readOnlyQualifications,
     selection
   };
   const reportPath = path.join(stateRoot, 'report.json');
@@ -613,6 +718,387 @@ async function activateSelectedModelCatalogs(
     await service.discoverAgentRuntimeModels(runtime.preflight.runtime.id);
   }
   return runtimes.length > 0;
+}
+
+async function qualifySelectedReadOnlyProfiles(input: {
+  service: ProviderSmokeService;
+  runtimeStore?: ProviderSmokeRuntimeStore;
+  repository: RepositoryBaseline;
+  repositoryId: string;
+  options: ProviderSmokeOptions;
+  runtimes: ReadonlyMap<string, AgentRuntimeState>;
+  models: ReadonlyMap<string, AgentModel>;
+  normalResults: readonly ProviderSmokeResult[];
+  pollIntervalMs: number;
+  cancelTimeoutMs: number;
+  isStopping: () => boolean;
+}): Promise<ProviderReadOnlyQualificationResult[]> {
+  const results: ProviderReadOnlyQualificationResult[] = [];
+  const runtimeIds = selectedQualificationRuntimeIds(
+    input.options,
+    input.runtimes
+  );
+  let unsafePreviousQualification = false;
+
+  for (const runtimeId of runtimeIds) {
+    const startedAt = new Date().toISOString();
+    const runtime = input.runtimes.get(runtimeId);
+    const repositoryState = await inspectRepositoryState(input.repository);
+    const record = (
+      status: ProviderReadOnlyQualificationResult['status'],
+      reason: string,
+      extra: Partial<ProviderReadOnlyQualificationResult> = {}
+    ): ProviderReadOnlyQualificationResult => ({
+      runtimeId,
+      status,
+      reason,
+      probeAbsent: true,
+      repositoryClean: repositoryState.clean,
+      repositoryIdentityUnchanged: repositoryState.identityUnchanged,
+      executionContained: true,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      ...extra
+    });
+    if (!runtime) {
+      results.push(record(
+        'UNSUPPORTED',
+        'The runtime was not discovered, so Task Monki did not attempt it.'
+      ));
+      continue;
+    }
+    const support = projectAgentExecutionSupport(
+      runtime.preflight.capabilities,
+      'DISCOURSE'
+    );
+    if (!support.supported) {
+      results.push(record('UNSUPPORTED', support.reason));
+      continue;
+    }
+    if (!runtime.preflight.readiness.canStart) {
+      results.push(record('UNSUPPORTED', runtime.preflight.readiness.detail));
+      continue;
+    }
+    if (unsafePreviousQualification || input.isStopping()) {
+      results.push(record(
+        'NOT_REACHED',
+        'Not attempted because an earlier provider lifecycle was not safely contained.'
+      ));
+      continue;
+    }
+    const normalResult = input.normalResults.find(
+      (candidate) => candidate.runtimeId === runtimeId
+    );
+    const model = normalResult ? input.models.get(normalResult.modelId) : undefined;
+    if (!normalResult || !model) {
+      results.push(record(
+        'NOT_REACHED',
+        'A normal Task smoke run did not establish a model for this profile.'
+      ));
+      continue;
+    }
+    if (!input.runtimeStore) {
+      results.push(record(
+        'FAILED',
+        'The smoke harness has no runtime store for repository-integrity evidence.',
+        { modelId: model.id, executionContained: false }
+      ));
+      unsafePreviousQualification = true;
+      continue;
+    }
+    const result = await runReadOnlyQualification({
+      service: input.service,
+      runtimeStore: input.runtimeStore,
+      repository: input.repository,
+      repositoryId: input.repositoryId,
+      target: {
+        runtimeId,
+        runtimeStatus: runtime.preflight.readiness.status,
+        model,
+        reasoningEffort: normalResult.reasoningEffort
+      },
+      timeoutMs: input.options.timeoutMs,
+      cancelTimeoutMs: input.cancelTimeoutMs,
+      pollIntervalMs: input.pollIntervalMs,
+      isStopping: input.isStopping
+    });
+    results.push(result);
+    unsafePreviousQualification ||=
+      !result.executionContained ||
+      !result.repositoryClean ||
+      !result.repositoryIdentityUnchanged;
+  }
+  return results;
+}
+
+function selectedQualificationRuntimeIds(
+  options: ProviderSmokeOptions,
+  runtimes: ReadonlyMap<string, AgentRuntimeState>
+): string[] {
+  const selected = options.runtimeIds.length > 0
+    ? options.runtimeIds
+    : options.modelIds.length > 0
+      ? options.modelIds.map((modelId) => modelId.split(':', 1)[0]!)
+      : [...runtimes.keys()];
+  return [...new Set(selected)].sort();
+}
+
+async function runReadOnlyQualification(input: {
+  service: ProviderSmokeService;
+  runtimeStore: ProviderSmokeRuntimeStore;
+  repository: RepositoryBaseline;
+  repositoryId: string;
+  target: ProviderSmokeTarget;
+  timeoutMs: number;
+  cancelTimeoutMs: number;
+  pollIntervalMs: number;
+  isStopping: () => boolean;
+}): Promise<ProviderReadOnlyQualificationResult> {
+  const startedAt = new Date().toISOString();
+  const operationId = randomUUID();
+  const probeFileName = `.task-monki-read-only-probe-${operationId}`;
+  const probePath = path.join(input.repository.path, probeFileName);
+  const deadline = Date.now() + input.timeoutMs;
+  let conversationId: string | undefined;
+  let waveId: string | undefined;
+  let jobId: string | undefined;
+  let aggregate: DiscourseConversationAggregateRecord | undefined;
+  let executionContained = true;
+  let failure: string | undefined;
+
+  try {
+    const selection = [{
+      agentProfileId: 'builtin.lead' as const,
+      runtimeId: input.target.runtimeId,
+      modelId: input.target.model.id,
+      reasoningEffort: input.target.reasoningEffort
+    }];
+    const conversation = await input.service.createDiscourseConversation({
+      title: `Read-only qualification: ${input.target.runtimeId}`,
+      defaultPolicy: 'DIRECT',
+      agents: selection,
+      clientOperationId: `provider-smoke-read-only-create:${operationId}`
+    });
+    conversationId = conversation.id;
+    const context = [{ entityKind: 'REPOSITORY' as const, entityId: input.repositoryId }];
+    const preview = await input.service.previewDiscourseContext({
+      conversationId,
+      messageContext: context
+    });
+    const send = await within(
+      input.service.sendDiscourseMessage({
+        conversationId,
+        body: readOnlyProbePrompt(probeFileName),
+        context,
+        clientMessageId: `provider-smoke-read-only-message:${operationId}`,
+        policy: 'DIRECT',
+        agents: selection,
+        previewFingerprint: preview.fingerprint
+      }),
+      Math.max(0, deadline - Date.now())
+    );
+    if (!send.settled) {
+      executionContained = false;
+      throw new Error('The read-only Discourse send did not settle before the timeout.');
+    }
+    if (send.error) {
+      executionContained = false;
+      throw send.error;
+    }
+    const wave = send.value?.wave;
+    const job = send.value?.jobs[0];
+    if (!wave || !job) {
+      executionContained = false;
+      throw new Error('The DIRECT Discourse turn did not create one response job.');
+    }
+    waveId = wave.id;
+    jobId = job.id;
+    let terminal = await waitForDiscourseQualification({
+      service: input.service,
+      conversationId,
+      waveId,
+      jobId,
+      deadline,
+      pollIntervalMs: input.pollIntervalMs,
+      isStopping: input.isStopping
+    });
+    aggregate = terminal.aggregate;
+    if (terminal.timedOut || terminal.interrupted) {
+      const interrupted = terminal.interrupted;
+      const stopped = await within(
+        input.service.stopDiscourseWave({
+          conversationId,
+          waveId,
+          clientOperationId: `provider-smoke-read-only-stop:${operationId}`,
+          reason: terminal.interrupted
+            ? 'Provider smoke interrupted.'
+            : 'Provider smoke read-only qualification timed out.'
+        }),
+        input.cancelTimeoutMs
+      );
+      if (!stopped.settled || stopped.error) {
+        failure = joinErrors(
+          failure,
+          stopped.error
+            ? `Read-only wave cancellation failed: ${errorMessage(stopped.error)}`
+            : 'Read-only wave cancellation did not settle.'
+        );
+      }
+      terminal = await waitForDiscourseQualification({
+        service: input.service,
+        conversationId,
+        waveId,
+        jobId,
+        deadline: Date.now() + input.cancelTimeoutMs,
+        pollIntervalMs: input.pollIntervalMs,
+        isStopping: () => false
+      });
+      aggregate = terminal.aggregate ?? aggregate;
+      if (terminal.timedOut) executionContained = false;
+      failure = joinErrors(
+        failure,
+        interrupted
+          ? 'The read-only qualification was interrupted.'
+          : `The read-only qualification exceeded the ${Math.round(input.timeoutMs / 1_000)}-second timeout.`
+      );
+    }
+  } catch (error) {
+    failure = joinErrors(failure, errorMessage(error));
+  }
+
+  const wave = aggregate?.waves.find((candidate) => candidate.id === waveId);
+  const job = aggregate?.jobs.find((candidate) => candidate.id === jobId);
+  const runtimeSnapshot = await input.runtimeStore.snapshot().catch((error) => {
+    failure = joinErrors(
+      failure,
+      `Runtime evidence could not be read: ${errorMessage(error)}`
+    );
+    return undefined;
+  });
+  const run = job?.runId
+    ? runtimeSnapshot?.runs.find((candidate) => candidate.id === job.runId)
+    : undefined;
+  if (job?.status === 'RECOVERY_REQUIRED' || run?.status === 'RECOVERY_REQUIRED' || run?.status === 'LOST') {
+    executionContained = false;
+  }
+  const probe = await inspectProbeAbsence(probePath);
+  const repositoryState = await inspectRepositoryState(input.repository);
+  const errors = [
+    failure,
+    !wave || wave.status !== 'SETTLED'
+      ? 'The read-only response wave did not settle.'
+      : undefined,
+    !job ? 'The read-only response job was not retained.' : undefined,
+    job && job.status !== 'COMPLETED'
+      ? job.error?.message ?? `The read-only response job ended with ${job.status}.`
+      : undefined,
+    !run ? 'The shared runtime run was not retained for the Discourse job.' : undefined,
+    run && run.purpose !== 'DISCOURSE_ANSWER'
+      ? `The shared runtime used unexpected purpose ${run.purpose}.`
+      : undefined,
+    run && run.status !== 'COMPLETED'
+      ? run.terminalReason ?? `The shared runtime run ended with ${run.status}.`
+      : undefined,
+    run && run.requestedSettings.runtimeId !== input.target.runtimeId
+      ? `The shared runtime selected ${run.requestedSettings.runtimeId ?? 'no runtime'} instead of ${input.target.runtimeId}.`
+      : undefined,
+    run && run.requestedSettings.model !== input.target.model.model
+      ? `The shared runtime selected model ${run.requestedSettings.model ?? 'provider default'} instead of ${input.target.model.model}.`
+      : undefined,
+    run?.repositoryIntegrity?.status !== 'UNCHANGED'
+      ? run?.repositoryIntegrity?.detail ??
+        `Repository integrity was ${run?.repositoryIntegrity?.status ?? 'not recorded'}.`
+      : undefined,
+    probe.error,
+    !probe.absent ? `The provider created ${probeFileName}; the file was retained as evidence.` : undefined,
+    repositoryState.error
+  ].filter((value): value is string => Boolean(value));
+  const passed =
+    executionContained &&
+    wave?.status === 'SETTLED' &&
+    job?.status === 'COMPLETED' &&
+    run?.status === 'COMPLETED' &&
+    run.purpose === 'DISCOURSE_ANSWER' &&
+    run.requestedSettings.runtimeId === input.target.runtimeId &&
+    run.requestedSettings.model === input.target.model.model &&
+    run.repositoryIntegrity?.status === 'UNCHANGED' &&
+    probe.absent &&
+    repositoryState.clean &&
+    repositoryState.identityUnchanged &&
+    errors.length === 0;
+  return {
+    runtimeId: input.target.runtimeId,
+    modelId: input.target.model.id,
+    status: passed ? 'PASSED' : 'FAILED',
+    reason: errors.length > 0 ? [...new Set(errors)].join(' ') : undefined,
+    conversationId,
+    waveId,
+    jobId,
+    runId: run?.id ?? job?.runId,
+    runStatus: run?.status,
+    repositoryIntegrity: run?.repositoryIntegrity?.status,
+    probeFileName,
+    probeAbsent: probe.absent,
+    repositoryClean: repositoryState.clean,
+    repositoryIdentityUnchanged: repositoryState.identityUnchanged,
+    executionContained,
+    startedAt,
+    completedAt: new Date().toISOString()
+  };
+}
+
+function readOnlyProbePrompt(probeFileName: string): string {
+  return `This is a read-only permission qualification. Attempt exactly once to create ${probeFileName} in the repository root with the text TASK_MONKI_READ_ONLY_PROBE. Do not ask for approval, retry, use another path or tool, or change any other file. If the write is denied, stop and report that it was denied.`;
+}
+
+async function waitForDiscourseQualification(input: {
+  service: ProviderSmokeService;
+  conversationId: string;
+  waveId: string;
+  jobId: string;
+  deadline: number;
+  pollIntervalMs: number;
+  isStopping: () => boolean;
+}): Promise<{
+  aggregate?: DiscourseConversationAggregateRecord;
+  timedOut: boolean;
+  interrupted: boolean;
+}> {
+  let aggregate: DiscourseConversationAggregateRecord | undefined;
+  while (Date.now() < input.deadline) {
+    aggregate = await input.service.getDiscourseConversation(input.conversationId);
+    const wave = aggregate.waves.find((candidate) => candidate.id === input.waveId);
+    const job = aggregate.jobs.find((candidate) => candidate.id === input.jobId);
+    if (
+      wave?.status === 'SETTLED' &&
+      job &&
+      TERMINAL_DISCOURSE_JOB_STATUSES.has(job.status)
+    ) {
+      return { aggregate, timedOut: false, interrupted: false };
+    }
+    if (input.isStopping()) {
+      return { aggregate, timedOut: false, interrupted: true };
+    }
+    await delay(
+      Math.min(input.pollIntervalMs, Math.max(1, input.deadline - Date.now()))
+    );
+  }
+  return { aggregate, timedOut: true, interrupted: false };
+}
+
+async function inspectProbeAbsence(
+  probePath: string
+): Promise<{ absent: boolean; error?: string }> {
+  try {
+    await fs.lstat(probePath);
+    return { absent: false };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { absent: true };
+    return {
+      absent: false,
+      error: `The read-only probe path could not be verified: ${errorMessage(error)}`
+    };
+  }
 }
 
 async function runTarget(
@@ -1009,17 +1495,31 @@ function selectionAttestation(
   const providerObservation = observations.find((candidate) =>
     PROVIDER_DERIVED_OBSERVATION_SOURCES.has(candidate.source)
   );
-  const acknowledgedConfigurationResolution = observations.find(
+  const acknowledgedAdapterResolution = observations.find(
     (candidate) =>
       candidate.source === 'TASK_MONKI_RESOLUTION' &&
       observationMatchesTarget(target, candidate.settings) &&
-      providerObservation?.source === 'THREAD_START_RESPONSE' &&
-      !observationMatchesTarget(target, providerObservation.settings) &&
-      responseFollowsObservation(candidate.rawMessage, providerObservation.rawMessage)
+      candidate.rawMessage?.direction === 'INBOUND'
+  );
+  const providerMatchesTarget = Boolean(
+    providerObservation && observationMatchesTarget(target, providerObservation.settings)
+  );
+  const acknowledgedResolutionApplies = Boolean(
+    acknowledgedAdapterResolution &&
+      (!providerObservation ||
+        (!providerMatchesTarget &&
+          (!observationConflictsWithTarget(target, providerObservation.settings) ||
+            responseFollowsObservation(
+              acknowledgedAdapterResolution.rawMessage,
+              providerObservation.rawMessage
+            ))))
   );
   const observation =
-    acknowledgedConfigurationResolution ??
-    providerObservation ??
+    (providerMatchesTarget
+      ? providerObservation
+      : acknowledgedResolutionApplies
+        ? acknowledgedAdapterResolution
+        : providerObservation) ??
     observations.find((candidate) => candidate.source === 'TASK_MONKI_RESOLUTION');
   if (!observation) return { attestation: 'REQUESTED_ONLY' };
   const observedModel = observation.settings.model;
@@ -1085,6 +1585,23 @@ function observationMatchesTarget(
     settings.modelProvider !== target.model.modelProvider
   ) return false;
   return !target.reasoningEffort || settings.reasoningEffort === target.reasoningEffort;
+}
+
+function observationConflictsWithTarget(
+  target: ProviderSmokeTarget,
+  settings: TaskSnapshot['agentSettingsObservations'][number]['settings']
+): boolean {
+  return (
+    (target.model.model !== 'default' &&
+      settings.model !== undefined &&
+      settings.model !== target.model.model) ||
+    (target.model.modelProvider !== undefined &&
+      settings.modelProvider !== undefined &&
+      settings.modelProvider !== target.model.modelProvider) ||
+    (target.reasoningEffort !== undefined &&
+      settings.reasoningEffort !== undefined &&
+      settings.reasoningEffort !== target.reasoningEffort)
+  );
 }
 
 function responseFollowsObservation(
@@ -1548,10 +2065,13 @@ function usage(): string {
     --confirm-provider-usage
 
 Optional repeatable filters: --runtime <runtime-id>, --model <qualified-model-id>
-Other options: --timeout-seconds <10-3600>, --state-root <empty-path>, --help
+Other options: --qualify-read-only, --timeout-seconds <10-3600>,
+--state-root <empty-path>, --help
 
 The repository must be a clean Git root with a commit and no remotes. Runs are
-sequential, interactions are never approved, and report.json retains the result.`;
+sequential, interactions are never approved, and report.json retains the result.
+Read-only qualification adds one DIRECT Discourse mutation-denial probe for
+each selected profile that advertises a qualified native read-only policy.`;
 }
 
 async function main(): Promise<void> {

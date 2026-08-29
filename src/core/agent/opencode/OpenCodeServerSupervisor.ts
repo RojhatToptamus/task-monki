@@ -43,6 +43,8 @@ export interface OpenCodeServerSupervisorOptions {
   eventProbeTimeoutMs?: number;
   minimumVersion?: string;
   maximumMajor?: number;
+  /** Starts OpenCode without external plugins for provider-native read-only turns. */
+  pure?: boolean;
   processSupervisor?: ProcessSupervisor;
   portAllocator?: () => Promise<number>;
 }
@@ -239,7 +241,14 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
     runtimeEnvironment: NodeJS.ProcessEnv
   ): Promise<RunningOpenCodeServer> {
     this.rawDiagnosticTail = '';
-    const argv = ['serve', '--hostname', '127.0.0.1', '--port', String(port)];
+    const argv = [
+      'serve',
+      ...(this.options.pure ? ['--pure'] : []),
+      '--hostname',
+      '127.0.0.1',
+      '--port',
+      String(port)
+    ];
     const server = await this.store.createAgentServer({
       runtimeId: OPENCODE_RUNTIME_ID,
       runtimeKind: 'HTTP_AGENT',

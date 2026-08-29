@@ -29,10 +29,21 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
         'OpenCode has native permission rules but no attested OS or network sandbox. Its provider, plugins, MCP servers, and tools share a credential-bearing process, so network is provider-controlled.',
       presets: [
         {
+          id: 'native-read-only',
+          label: 'Read only',
+          detail: 'OpenCode read, search, list, and language-service tools remain available. Its native policy denies edits, commands, child tasks, questions, external paths, and web tools. The provider process itself remains unconfined.',
+          sandbox: 'DANGER_FULL_ACCESS',
+          repositoryMutation: 'DENY',
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          networkAccess: 'REQUIRED'
+        },
+        {
           id: 'ask-for-approval',
           label: 'Ask for approval',
           detail: 'Commands, edits, and external-directory access require Task Monki approval. The OpenCode process itself remains unconfined and its network is provider-controlled.',
           sandbox: 'DANGER_FULL_ACCESS',
+          repositoryMutation: 'ASK',
           approvalPolicy: 'on-request',
           approvalsReviewer: 'user',
           networkAccess: 'REQUIRED'
@@ -42,6 +53,7 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
           label: 'Full access',
           detail: 'All native OpenCode tools may run without Task Monki approval; process network is provider-controlled.',
           sandbox: 'DANGER_FULL_ACCESS',
+          repositoryMutation: 'ALLOW',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
           networkAccess: 'REQUIRED'
@@ -49,8 +61,8 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       ]
     },
     promptRefinement: {
-      maturity: 'unsupported',
-      detail: 'OpenCode cannot attest the read-only and network-isolated boundary required for Task Monki prompt refinement.'
+      maturity: 'stable',
+      detail: 'Prompt refinement uses the shared read-only turn path. OpenCode denies mutation-capable native tools, and Task Monki verifies repository state after the turn. This is not an OS sandbox.'
     },
     modelCatalog: {
       maturity: 'stable',
@@ -90,12 +102,12 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       detail: 'OpenCode todo updates are retained as plan revisions.'
     },
     detachedReview: {
-      maturity: 'inferred',
-      detail: 'OpenCode output can inform a Git audit, but the runtime cannot attest an isolated read-only workspace.'
+      maturity: 'stable',
+      detail: 'Detached review uses the shared read-only turn path with native mutation denial and Task Monki repository comparison.'
     },
     review: {
-      maturity: 'unsupported',
-      detail: 'OpenCode has no native review primitive, and its provider-controlled full-access process cannot attest the read-only isolation required for Task Monki detached review.'
+      maturity: 'stable',
+      detail: 'OpenCode has no native review primitive. Task Monki supplies the review prompt through its shared read-only turn path and validates the result independently.'
     },
     subagents: {
       maturity: 'experimental',

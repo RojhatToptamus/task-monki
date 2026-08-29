@@ -1,4 +1,9 @@
-import type { AgentExecutionSettings } from '../../shared/agent';
+import type {
+  AgentExecutionSettings,
+  AgentReviewTarget,
+  AgentSessionRole
+} from '../../shared/agent';
+import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
 import type {
   AgentAttestedReadRoot,
   AgentExecutionContext,
@@ -17,6 +22,7 @@ export interface BuildAgentRuntimeExecutionContextInput {
   readRoots: AgentAttestedReadRoot[];
   modelSettings: AgentExecutionSettings;
   clientOperationId: string;
+  attachments?: readonly AgentTurnAttachment[];
 }
 
 export interface PrepareAgentRuntimeTurnInput {
@@ -34,6 +40,12 @@ export interface PrepareAgentRuntimeTurnInput {
   clientOperationId: string;
   createdAt: string;
   notBefore?: string;
+  role?: AgentSessionRole;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+  taskContext?: AgentRuntimeSessionRecord['taskContext'];
+  taskDetails?: AgentRuntimeRunRecord['taskDetails'];
+  taskReviewTarget?: AgentReviewTarget;
 }
 
 export interface PreparedAgentRuntimeTurn {
@@ -83,7 +95,8 @@ export interface AgentRuntimeCoordinator {
   prepareTurn(input: PrepareAgentRuntimeTurnInput): Promise<PreparedAgentRuntimeTurn>;
   startPreparedTurn(
     queueEntryId: string,
-    clientOperationId: string
+    clientOperationId: string,
+    attachments?: readonly AgentTurnAttachment[]
   ): Promise<AgentRuntimeRunRecord>;
   cancelQueuedTurn(
     runId: string,
@@ -95,5 +108,8 @@ export interface AgentRuntimeCoordinator {
     reason: string,
     clientOperationId: string
   ): Promise<AgentRuntimeRunRecord>;
+  /** Settles scheduler state and releases provider resources for a terminal turn. */
+  finishRuntimeTurn(runId: string): Promise<void>;
+  releaseRuntimeSession(sessionId: string): Promise<void>;
   subscribe(listener: (event: AgentRuntimeTurnEvent) => void): () => void;
 }

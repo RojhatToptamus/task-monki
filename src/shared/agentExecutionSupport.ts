@@ -1,7 +1,6 @@
 import type {
   AgentModel,
-  AgentRuntimeCapabilities,
-  AgentRuntimeId
+  AgentRuntimeCapabilities
 } from './agent';
 
 export type AgentExecutionOperation =
@@ -12,7 +11,6 @@ export type AgentExecutionOperation =
   | 'DISCOURSE';
 
 export interface AgentExecutionSupportContext {
-  sourceRuntimeId?: AgentRuntimeId;
   model?: Pick<AgentModel, 'inputModalities'>;
 }
 
@@ -37,18 +35,10 @@ export function projectAgentExecutionSupport(
         : unsupported('This agent cannot add instructions to an active turn.');
 
     case 'PROMPT_REFINEMENT':
-      return capabilities.promptRefinement.maturity !== 'unsupported'
-        ? supported()
-        : unsupported('This agent does not support prompt refinement.');
+      return readOnlyTurnSupport(capabilities, 'PROMPT_REFINEMENT');
 
-    case 'REVIEW': {
-      const nativeReview =
-        capabilities.review.maturity !== 'unsupported' &&
-        (!context.sourceRuntimeId || context.sourceRuntimeId === capabilities.runtimeId);
-      return nativeReview || capabilities.detachedReview.maturity === 'stable'
-        ? supported()
-        : unsupported('This agent does not support the current review workflow.');
-    }
+    case 'REVIEW':
+      return readOnlyTurnSupport(capabilities, 'REVIEW');
 
     case 'DESIGN': {
       const extensions = capabilities.extensions;
@@ -75,20 +65,47 @@ export function projectAgentExecutionSupport(
     }
 
     case 'DISCOURSE': {
-      const policySupported = capabilities.executionPolicy.presets.some(
-        (preset) =>
-          preset.sandbox === 'READ_ONLY' &&
-          preset.networkAccess === 'DISABLED' &&
-          preset.approvalPolicy.toLocaleLowerCase() === 'never'
-      );
-      return capabilities.extensions['task-monki.discourse']?.maturity === 'stable' &&
-        policySupported
-        ? supported()
-        : unsupported(
-            'This agent cannot confirm the read-only, offline access required by Discourse.'
-          );
+      return readOnlyTurnSupport(capabilities, 'DISCOURSE');
     }
   }
+}
+
+function readOnlyTurnSupport(
+  capabilities: AgentRuntimeCapabilities,
+  operation: Extract<AgentExecutionOperation, 'PROMPT_REFINEMENT' | 'REVIEW' | 'DISCOURSE'>
+): AgentExecutionSupport {
+  const qualified = capabilities.executionPolicy.presets.some(
+    (preset) =>
+      preset.repositoryMutation === 'DENY' &&
+      preset.approvalPolicy.toLocaleLowerCase() === 'never'
+  );
+  if (qualified) return supported();
+
+  const detail = readOnlyUnavailableDetail(capabilities, operation);
+  const reason = detail ??
+    'This agent profile has no qualified native policy that denies repository changes.';
+  return unsupported(
+    /normal tasks remain available\.?$/iu.test(reason)
+      ? reason
+      : `${reason.replace(/[.\s]+$/u, '')}. Normal Tasks remain available.`
+  );
+}
+
+function readOnlyUnavailableDetail(
+  capabilities: AgentRuntimeCapabilities,
+  operation: Extract<AgentExecutionOperation, 'PROMPT_REFINEMENT' | 'REVIEW' | 'DISCOURSE'>
+): string | undefined {
+  const capability = operation === 'PROMPT_REFINEMENT'
+    ? capabilities.promptRefinement
+    : operation === 'REVIEW'
+      ? capabilities.detachedReview
+      : capabilities.extensions['task-monki.read-only-turn']?.maturity === 'unsupported'
+        ? capabilities.extensions['task-monki.read-only-turn']
+        : capabilities.detachedReview;
+  const normalized = capability.maturity === 'unsupported'
+    ? capability.detail?.trim()
+    : undefined;
+  return normalized || undefined;
 }
 
 function supported(): AgentExecutionSupport {

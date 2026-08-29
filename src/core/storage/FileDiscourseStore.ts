@@ -2746,7 +2746,7 @@ function assertParticipantRevisionRecord(
     !revision.displayNameSnapshot.trim() ||
     !revision.runtimeId.trim() ||
     !revision.model.trim() ||
-    !revision.modelProvider.trim() ||
+    (revision.modelProvider !== undefined && !revision.modelProvider.trim()) ||
     !/^[a-f0-9]{64}$/u.test(revision.roleContractHash) ||
     !Number.isSafeInteger(revision.revision) ||
     revision.revision < 1 ||

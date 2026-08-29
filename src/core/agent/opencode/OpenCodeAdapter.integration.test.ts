@@ -28,6 +28,7 @@ import type {
 import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
+import type { AgentRuntimeTurnEvent } from '../AgentRuntimeCoordinator';
 import { AgentInteractionService } from '../AgentInteractionService';
 import {
   createOpenCodeMessageId,
@@ -45,7 +46,10 @@ import {
   OpenCodeAmbiguousMutationError,
   OpenCodeHttpError
 } from './OpenCodeHttpClient';
-import { openCodePermissionRules } from './OpenCodeInteractionMapper';
+import {
+  openCodePermissionRules,
+  openCodeReadOnlyPermissionRules
+} from './OpenCodeInteractionMapper';
 import type { OpenCodeMessage, OpenCodeSession } from './OpenCodeProtocol';
 import type {
   OpenCodeServerSupervisorOptions,
@@ -87,6 +91,465 @@ describe('OpenCodeAdapter', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('maps the shared read-only request to native denial without claiming confinement', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+
+    await expect(
+      fixture.adapter.resolveExecution({
+        settings: {
+          ...SETTINGS,
+          sandbox: 'READ_ONLY',
+          approvalPolicy: 'NEVER',
+          networkAccess: false
+        },
+        attachments: []
+      })
+    ).resolves.toMatchObject({
+      settings: {
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'never',
+        networkAccess: true
+      }
+    });
+    await fixture.adapter.shutdown();
+  });
+
+  it('runs an owner-neutral turn with exact native read-only rules and bounded output', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const context = await fixture.adapter.buildExecutionContext({
+      sessionId: 'runtime-session',
+      primaryCwd: fixture.worktree.worktreePath,
+      readRoots: [{
+        canonicalPath: fixture.worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: fixture.worktree.id
+      }],
+      modelSettings: SETTINGS,
+      clientOperationId: 'runtime-context'
+    });
+    const owner = {
+      kind: 'DISCOURSE' as const,
+      conversationId: 'conversation-1',
+      stableParticipantId: 'participant-1'
+    };
+    expect(context.modelSettings.approvalPolicy).toBe('NEVER');
+    const session = await fixture.runtimeStore.createSession({
+      id: 'runtime-session',
+      owner,
+      accessEpoch: createAgentSessionAccessEpoch({
+        owner,
+        sessionId: 'runtime-session',
+        epoch: 1,
+        runtimeId: 'opencode',
+        model: context.modelSettings.model!,
+        executionContext: context,
+        createdAt: new Date().toISOString()
+      }),
+      executionContext: context,
+      clientOperationId: 'runtime-session-create',
+      runtimeId: 'opencode',
+      role: 'PRIMARY',
+      relationshipState: 'ROOT',
+      status: 'NOT_MATERIALIZED',
+      materialized: false,
+      requestedSettings: context.modelSettings
+    });
+    let run = await fixture.runtimeStore.createRun({
+      id: 'runtime-run',
+      owner,
+      scope: {
+        kind: 'DISCOURSE',
+        conversationId: 'conversation-1',
+        waveId: 'wave-1',
+        jobId: 'job-1',
+        contextSnapshotId: 'snapshot-1',
+        attemptId: 'attempt-1'
+      },
+      sessionId: session.id,
+      sessionAccessEpoch: 1,
+      purpose: 'DISCOURSE_ANSWER',
+      generationKey: 'runtime-generation',
+      clientOperationId: 'runtime-run-create',
+      requestedSettings: context.modelSettings,
+      promptArtifactId: 'runtime-prompt',
+      outputArtifactId: 'runtime-output',
+      diagnosticArtifactId: 'runtime-diagnostic'
+    });
+    await Promise.all([
+      fixture.runtimeStore.createArtifact({
+        id: run.promptArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'PROMPT',
+        clientOperationId: 'runtime-prompt-create',
+        content: 'Inspect this repository.'
+      }),
+      fixture.runtimeStore.createArtifact({
+        id: run.outputArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'OUTPUT',
+        clientOperationId: 'runtime-output-create',
+        content: ''
+      }),
+      fixture.runtimeStore.createArtifact({
+        id: run.diagnosticArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'DIAGNOSTIC',
+        clientOperationId: 'runtime-diagnostic-create',
+        content: ''
+      })
+    ]);
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: new Date().toISOString()
+      },
+      'runtime-starting'
+    );
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const started = await fixture.adapter.startRuntimeTurn({
+      session,
+      run,
+      executionContext: context,
+      prompt: 'Inspect this repository.',
+      attachments: []
+    });
+    const providerSession = fixture.harness.sessions.get(started.providerSessionId)!;
+    expect(providerSession.permission).toEqual(openCodeReadOnlyPermissionRules());
+    await expect(fixture.runtimeStore.getAgentServer(started.serverInstanceId)).resolves.toMatchObject({
+      argv: expect.arrayContaining(['--pure'])
+    });
+
+    const assistant: OpenCodeMessage = {
+      info: {
+        id: 'msg_runtime_assistant',
+        sessionID: providerSession.id,
+        role: 'assistant',
+        parentID: started.providerTurnId,
+        finish: 'stop',
+        time: { created: Date.now(), completed: Date.now() }
+      },
+      parts: [{
+        id: 'prt_runtime_answer',
+        sessionID: providerSession.id,
+        messageID: 'msg_runtime_assistant',
+        type: 'text',
+        text: 'The repository is consistent.'
+      }]
+    };
+    fixture.harness.messages.get(providerSession.id)!.push(assistant);
+    fixture.harness.statuses[providerSession.id] = { type: 'idle' };
+    await fixture.harness.emit({
+      type: 'message.updated',
+      properties: { info: assistant.info }
+    });
+    await fixture.harness.emit({
+      type: 'session.idle',
+      properties: { sessionID: providerSession.id }
+    });
+
+    expect(await fixture.runtimeStore.readArtifact(run.outputArtifactId)).toBe(
+      'The repository is consistent.'
+    );
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'COMPLETED',
+      delivery: 'TERMINAL',
+      providerTurnId: started.providerTurnId
+    });
+    expect(await fixture.runtimeStore.getSession(session.id)).toMatchObject({
+      requestedSettings: { approvalPolicy: 'NEVER' },
+      observedSettings: { approvalPolicy: 'never' }
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: run.id, status: 'completed' })
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('fails a denied read-only permission request only after provider settlement', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    fixture.harness.settleAbort = true;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-edit',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(fixture.harness.statusReadCount).toBeGreaterThan(0);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'FAILED',
+      delivery: 'TERMINAL',
+      terminalReason: expect.stringContaining('request was denied')
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: fixture.run.id, status: 'failed' })
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('finishes a shared read-only cancellation only after OpenCode reports idle', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({
+      interruptCompletionTimeoutMs: 40
+    });
+    fixture.harness.settleAbort = true;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const session = (await fixture.runtimeStore.getSession(fixture.session.id))!;
+    let run = (await fixture.runtimeStore.getRun(fixture.run.id))!;
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      'runtime-denial-interrupting'
+    );
+
+    await fixture.adapter.interruptRuntimeTurn({ session, run });
+
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(fixture.harness.statusReadCount).toBeGreaterThan(0);
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'INTERRUPTED',
+      delivery: 'TERMINAL',
+      interruptDelivery: 'TERMINAL'
+    });
+    expect(await fixture.runtimeStore.getSession(session.id)).toMatchObject({
+      status: 'IDLE',
+      materialized: true
+    });
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: run.id, status: 'interrupted' })
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('stops the session process when a shared read-only cancellation never settles', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({
+      interruptCompletionTimeoutMs: 40
+    });
+    const oldClient = fixture.harness.sessionSupervisor.client!;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const session = (await fixture.runtimeStore.getSession(fixture.session.id))!;
+    let run = (await fixture.runtimeStore.getRun(fixture.run.id))!;
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      'runtime-denial-interrupting'
+    );
+
+    await fixture.adapter.interruptRuntimeTurn({ session, run });
+
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(fixture.harness.statusReadCount).toBeGreaterThan(0);
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(fixture.harness.stoppedStreams).toBe(1);
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'INTERRUPTED',
+      delivery: 'TERMINAL',
+      interruptDelivery: 'TERMINAL',
+      providerTerminalSource: 'OPENCODE_PROCESS_STOP',
+      terminalReason: expect.stringContaining('stopped the owning OpenCode session process')
+    });
+    expect(await fixture.runtimeStore.getSession(session.id)).toMatchObject({
+      status: 'NOT_LOADED'
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: run.id, status: 'interrupted' })
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'RECOVERY_REQUIRED' }));
+
+    await oldClient.emitLate({
+      type: 'session.idle',
+      properties: { sessionID: fixture.started.providerSessionId }
+    });
+    expect((await fixture.runtimeStore.getRun(run.id))?.status).toBe('INTERRUPTED');
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('does not cross the repository boundary when read-only cancellation cannot stop the process', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({
+      interruptCompletionTimeoutMs: 40
+    });
+    fixture.harness.sessionSupervisor.shutdownFailure = new Error(
+      'simulated session shutdown failure'
+    );
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const session = (await fixture.runtimeStore.getSession(fixture.session.id))!;
+    let run = (await fixture.runtimeStore.getRun(fixture.run.id))!;
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      'runtime-denial-interrupting'
+    );
+
+    await expect(
+      fixture.adapter.interruptRuntimeTurn({ session, run })
+    ).rejects.toMatchObject({ delivery: 'AMBIGUOUS' });
+
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'INTERRUPTING'
+    });
+    expect((await fixture.runtimeStore.getRun(run.id))?.repositoryIntegrity).toBeUndefined();
+    expect((await fixture.runtimeStore.getSession(session.id))?.status).not.toBe(
+      'NOT_LOADED'
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'RECOVERY_REQUIRED', runId: run.id })
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'TERMINAL' }));
+    fixture.harness.sessionSupervisor.shutdownFailure = undefined;
+    unsubscribe();
+    await expect(fixture.adapter.shutdown()).rejects.toThrow(
+      'OpenCode runtimes failed to shut down'
+    );
+  });
+
+  it('does not emit recovery when an inbound read-only quarantine cannot stop the process', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    fixture.harness.sessionSupervisor.shutdownFailure = new Error(
+      'simulated inbound session shutdown failure'
+    );
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-unconfirmed-quarantine',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([
+      fixture.started.providerSessionId
+    ]);
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'STARTING'
+    });
+    expect(
+      (await fixture.runtimeStore.getRun(fixture.run.id))?.repositoryIntegrity
+    ).toBeUndefined();
+    expect((await fixture.runtimeStore.getSession(fixture.session.id))?.status).not.toBe(
+      'NOT_LOADED'
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'RECOVERY_REQUIRED', runId: fixture.run.id })
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'TERMINAL' }));
+
+    fixture.harness.sessionSupervisor.shutdownFailure = undefined;
+    unsubscribe();
+    await expect(fixture.adapter.shutdown()).rejects.toThrow(
+      'OpenCode runtimes failed to shut down'
+    );
+  });
+
+  it('quarantines a read-only turn when abort does not reach provider settlement', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    const oldClient = fixture.harness.sessionSupervisor.client!;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-unsettled',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION'
+    });
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(fixture.harness.stoppedStreams).toBe(1);
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'TERMINAL' }));
+
+    await oldClient.emitLate({
+      type: 'session.idle',
+      properties: { sessionID: fixture.started.providerSessionId }
+    });
+    expect((await fixture.runtimeStore.getRun(fixture.run.id))?.status).toBe(
+      'RECOVERY_REQUIRED'
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('quarantines a read-only turn when the provider abort request fails', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    fixture.harness.failNextAbort = true;
+
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-abort-failed',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION'
+    });
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(fixture.harness.stoppedStreams).toBe(1);
+    await fixture.adapter.shutdown();
   });
 
   it('stops after one assistant response when OpenCode compares message IDs', async () => {
@@ -532,7 +995,8 @@ describe('OpenCodeAdapter', () => {
           modelProvider: 'anthropic',
           model: 'claude-test',
           reasoningEffort: 'high'
-        })
+        }),
+        rawMessage: expect.objectContaining({ direction: 'INBOUND' })
       })
     ]);
 
@@ -4572,6 +5036,113 @@ interface AdapterFixtureOptions {
   environment?: NodeJS.ProcessEnv;
 }
 
+async function createOwnerNeutralRuntimeFixture(options: AdapterFixtureOptions = {}) {
+  const fixture = await createFixture(options);
+  await fixture.adapter.initialize();
+  const context = await fixture.adapter.buildExecutionContext({
+    sessionId: 'runtime-session-denial',
+    primaryCwd: fixture.worktree.worktreePath,
+    readRoots: [{
+      canonicalPath: fixture.worktree.worktreePath,
+      kind: 'WORKTREE',
+      entityId: fixture.worktree.id
+    }],
+    modelSettings: SETTINGS,
+    clientOperationId: 'runtime-context-denial'
+  });
+  const owner = {
+    kind: 'DISCOURSE' as const,
+    conversationId: 'conversation-denial',
+    stableParticipantId: 'participant-denial'
+  };
+  const session = await fixture.runtimeStore.createSession({
+    id: 'runtime-session-denial',
+    owner,
+    accessEpoch: createAgentSessionAccessEpoch({
+      owner,
+      sessionId: 'runtime-session-denial',
+      epoch: 1,
+      runtimeId: 'opencode',
+      model: context.modelSettings.model!,
+      executionContext: context,
+      createdAt: new Date().toISOString()
+    }),
+    executionContext: context,
+    clientOperationId: 'runtime-session-denial-create',
+    runtimeId: 'opencode',
+    role: 'PRIMARY',
+    relationshipState: 'ROOT',
+    status: 'NOT_MATERIALIZED',
+    materialized: false,
+    requestedSettings: context.modelSettings
+  });
+  let run = await fixture.runtimeStore.createRun({
+    id: 'runtime-run-denial',
+    owner,
+    scope: {
+      kind: 'DISCOURSE',
+      conversationId: owner.conversationId,
+      waveId: 'wave-denial',
+      jobId: 'job-denial',
+      contextSnapshotId: 'snapshot-denial',
+      attemptId: 'attempt-denial'
+    },
+    sessionId: session.id,
+    sessionAccessEpoch: 1,
+    purpose: 'DISCOURSE_ANSWER',
+    generationKey: 'runtime-generation-denial',
+    clientOperationId: 'runtime-run-denial-create',
+    requestedSettings: context.modelSettings,
+    promptArtifactId: 'runtime-prompt-denial',
+    outputArtifactId: 'runtime-output-denial',
+    diagnosticArtifactId: 'runtime-diagnostic-denial'
+  });
+  await Promise.all([
+    fixture.runtimeStore.createArtifact({
+      id: run.promptArtifactId,
+      owner,
+      runId: run.id,
+      kind: 'PROMPT',
+      clientOperationId: 'runtime-prompt-denial-create',
+      content: 'Inspect without changing files.'
+    }),
+    fixture.runtimeStore.createArtifact({
+      id: run.outputArtifactId,
+      owner,
+      runId: run.id,
+      kind: 'OUTPUT',
+      clientOperationId: 'runtime-output-denial-create',
+      content: ''
+    }),
+    fixture.runtimeStore.createArtifact({
+      id: run.diagnosticArtifactId,
+      owner,
+      runId: run.id,
+      kind: 'DIAGNOSTIC',
+      clientOperationId: 'runtime-diagnostic-denial-create',
+      content: ''
+    })
+  ]);
+  run = await fixture.runtimeStore.updateRun(
+    run.id,
+    run.recordRevision,
+    {
+      status: 'STARTING',
+      delivery: 'SENDING',
+      startedAt: new Date().toISOString()
+    },
+    'runtime-denial-starting'
+  );
+  const started = await fixture.adapter.startRuntimeTurn({
+    session,
+    run,
+    executionContext: context,
+    prompt: 'Inspect without changing files.',
+    attachments: []
+  });
+  return { ...fixture, owner, session, run, context, started };
+}
+
 async function createFixture(options: AdapterFixtureOptions = {}): Promise<AdapterFixture> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-opencode-adapter-'));
   const appCwd = path.join(root, 'app');
@@ -4741,6 +5312,7 @@ async function createLocalSession(
   const operationId = `create:${id}`;
   const executionContext = {
     attestation: { status: 'ATTESTED' as const },
+    repositoryAccess: 'WRITE' as const,
     primaryCwd: worktree.worktreePath,
     readRoots: [{
       canonicalPath: worktree.worktreePath,
@@ -4861,8 +5433,11 @@ class FakeOpenCodeHarness {
   failNextPermissionPatchAfterAccept = false;
   failNextSessionDeleteBeforeAccept = false;
   ignorePermissionPatches = false;
+  settleAbort = false;
+  failNextAbort = false;
   stallAbort = false;
   stallMessageReads = false;
+  readonly abortedSessionIds: string[] = [];
   readonly abortDeadlineWindowsMs: number[] = [];
   readonly messageReadDeadlineWindowsMs: number[] = [];
   messageReadCount = 0;
@@ -4987,7 +5562,7 @@ class FakeOpenCodeSupervisor implements OpenCodeSessionSupervisor {
         runtimeKind: 'HTTP_AGENT',
         transport: 'HTTP_SSE',
         executable: this.options.runtime.executable,
-        argv: ['serve'],
+        argv: ['serve', ...(this.options.pure ? ['--pure'] : [])],
         runtimeVersion: this.options.runtime.version,
         runtimeResolution: this.options.runtime.diagnostics
       });
@@ -5168,6 +5743,15 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
       this.harness.questionReplies.push(body);
       data = true;
     } else if (requestPath.endsWith('/abort')) {
+      const sessionId = providerSessionId(requestPath);
+      this.harness.abortedSessionIds.push(sessionId);
+      if (this.harness.failNextAbort) {
+        this.harness.failNextAbort = false;
+        throw new OpenCodeAmbiguousMutationError(
+          'POST session/abort',
+          'simulated abort response loss'
+        );
+      }
       if (this.harness.stallAbort) {
         this.harness.abortDeadlineWindowsMs.push(remainingDeadlineMs(options));
         await rejectAtDeadline(
@@ -5177,6 +5761,9 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
             'simulated stalled abort'
           )
         );
+      }
+      if (this.harness.settleAbort) {
+        this.harness.statuses[sessionId] = { type: 'idle' };
       }
       data = true;
     } else {

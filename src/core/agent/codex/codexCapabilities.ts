@@ -38,6 +38,7 @@ export function codexCapabilities(input: {
           sandbox: 'READ_ONLY',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
+          repositoryMutation: 'DENY',
           networkAccess: 'DISABLED'
         },
         {
@@ -47,6 +48,7 @@ export function codexCapabilities(input: {
           sandbox: 'WORKSPACE_WRITE',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
+          repositoryMutation: 'ALLOW',
           networkAccess: 'DISABLED'
         },
         {
@@ -56,6 +58,7 @@ export function codexCapabilities(input: {
           sandbox: 'WORKSPACE_WRITE',
           approvalPolicy: 'on-request',
           approvalsReviewer: 'user',
+          repositoryMutation: 'ALLOW',
           networkAccess: 'OPTIONAL'
         },
         {
@@ -65,6 +68,7 @@ export function codexCapabilities(input: {
           sandbox: 'WORKSPACE_WRITE',
           approvalPolicy: 'on-request',
           approvalsReviewer: 'auto_review',
+          repositoryMutation: 'ALLOW',
           networkAccess: 'OPTIONAL'
         },
         {
@@ -74,11 +78,12 @@ export function codexCapabilities(input: {
           sandbox: 'DANGER_FULL_ACCESS',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
+          repositoryMutation: 'ALLOW',
           networkAccess: 'REQUIRED'
         }
       ]
     },
-    promptRefinement: stable('Uses a read-only ephemeral Codex execution.'),
+    promptRefinement: stable('Uses the shared read-only turn path in a short-lived Codex session.'),
     modelCatalog: stable('Discovered through model/list.'),
     reasoningEffort: stable('Supported efforts are supplied by each model catalog entry.'),
     persistentSessions: stable('Backed by App Server threads.'),
@@ -94,7 +99,7 @@ export function codexCapabilities(input: {
     detachedReview: stable(
       'Codex can run the provider-neutral review contract in an attested read-only session.'
     ),
-    review: stable('review/start supports inline or detached review work.'),
+    review: stable('Task Monki supplies the review contract through the shared read-only turn path.'),
     subagents: unsupported(
       'Task Monki permission profiles disable Codex multi-agent execution; unsolicited child activity remains telemetry only.'
     ),
@@ -105,10 +110,6 @@ export function codexCapabilities(input: {
     extensions: {
       [BROWSER_DEV_ISOLATION_CAPABILITY]: stable(
         'Codex attests the active permission profile, exact workspace roots, and disabled network/tool boundary.'
-      ),
-      'task-monki.prompt-refinement': stable('Uses a read-only ephemeral Codex execution.'),
-      'task-monki.discourse': stable(
-        'Runs attributable Discourse turns inside an attested read-only, offline permission scope.'
       ),
       'task-monki.design-instructions': stable(
         'Maps the shared Design instruction profile to Codex developer instructions.'
@@ -126,7 +127,6 @@ export function codexCapabilities(input: {
             designBrowserVerification.detail ??
               'The packaged Design browser runtime is unavailable.'
           ),
-      'codex.review.start': stable('Native review/start with inline or detached delivery.'),
       'codex.thread.goal': stable('Native persisted thread goal operations.'),
       'codex.permission.attestation': stable('Active permission profiles and workspace roots are attested by the runtime.'),
       'codex.collaboration': unsupported(

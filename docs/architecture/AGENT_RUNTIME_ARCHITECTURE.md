@@ -1,8 +1,8 @@
 # Agent Runtime Architecture
 
-Date: 2026-08-28
+Date: 2026-08-29
 
-Status: Provider milestone 1 is implemented. Later milestones are approved but not implemented.
+Status: Provider milestones 1 and 2 are implemented. The milestone 3 plan is final and ready to implement. Later milestones are approved but not implemented.
 
 This document is the provider architecture source of truth.
 It records current behavior and the approved target direction.
@@ -18,7 +18,7 @@ Discourse used another lifecycle and another runtime store.
 
 Provider milestone 1 removed this split.
 Task, Design, Discourse, and review now use one runtime coordinator and one runtime store.
-Prompt refinement remains a later workflow cutover.
+Provider milestone 2 moved review, prompt refinement, and Discourse to one shared read-only turn path.
 Each workflow still owns its product state and rules.
 
 Provider adapters translate these items:
@@ -64,19 +64,22 @@ It must not claim that a provider forgets bytes after delivery.
 5. Keep domain state in `FileTaskStore` and `FileDiscourseStore`.
 6. Use `AgentOrchestrator` as the shared runtime coordinator.
 7. Do not add another scoped-turn runtime lifecycle.
-8. Send one provider-neutral turn request from every workflow.
+8. Keep one provider-neutral turn model across the current workflow entry points.
 9. Let each adapter qualify and translate that request.
 10. Use normal turns for review and prompt refinement.
-11. Keep native review as an adapter detail when it gives equal semantics.
+11. Do not expose workflow-specific review or prompt-refinement methods on adapters.
 12. Use a new session with bounded Task Monki context when native fork is absent.
 13. Queue a later message when live steering is absent.
-14. Keep one attachment store and one exact per-turn attachment selection.
-15. Keep one `inspect_design` handler and one Design browser system.
-16. Keep the working Codex dynamic-tool transport.
-17. Add one packaged stdio MCP bridge for OpenCode and ACP Design sessions.
-18. Select workflow support by operations, model input types, and applied policy.
-19. Never select a workflow by provider name.
-20. Do not keep old development-store formats during this change.
+14. Keep `AttachmentFileStore` as the only Task Monki attachment byte owner.
+15. Store the exact workflow-selected attachment set on each runtime run before delivery.
+16. Keep attachment transport inside each provider adapter.
+17. Do not add a generic path fallback for OpenCode or ACP attachments.
+18. Keep one `inspect_design` handler and one Design browser system.
+19. Keep the working Codex dynamic-tool transport.
+20. Add one packaged stdio MCP bridge for OpenCode and ACP Design sessions.
+21. Select workflow support by operations, effective model input types, and applied policy.
+22. Never select a workflow by provider name.
+23. Do not keep old development-store formats during this change.
 
 ## Evidence method
 
@@ -90,10 +93,18 @@ The main repository commits were:
 - `0b75e09a`, which added the first Codex-only Design slice.
 - `5160c6b1`, which added the first Codex review path.
 - `b2d3edfb`, which added the current Design browser workflow.
+- `2779d246`, which added secure attachment storage and Codex delivery.
+- `598f25b0`, which refined trusted Codex attachment access.
+- `a5227164`, which added the shared provider runtime lifecycle.
 
 The order explains the current coupling.
 The registry came first.
 Discourse and Design then added separate Codex paths instead of extending one runtime owner.
+
+Attachment history shows a different result.
+The secure store, staging, adoption, and cleanup remain correct.
+The multi-provider work added transport blocks because shared policy was still Codex-shaped.
+Milestone 3 must change transport and run evidence, not attachment byte ownership.
 
 ### Main files inspected
 
@@ -108,14 +119,14 @@ Discourse and Design then added separate Codex paths instead of extending one ru
 | OpenCode | `src/core/agent/opencode/OpenCodeAdapter.ts`, `OpenCodeHttpClient.ts`, `OpenCodeServerSupervisor.ts` |
 | ACP | `src/core/agent/acp/AcpRuntimeAdapter.ts`, `AcpProtocol.ts`, `AcpRuntimeProfiles.ts`, `AcpPermissionPolicy.ts` |
 | Review | `src/core/agent/AgentOrchestrator.ts`, `src/core/review`, `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md` |
-| Prompt refinement | `src/core/prompt/PromptRefinementService.ts`, `src/core/agent/codex/CodexEphemeralReadOnlyRunner.ts` |
+| Prompt refinement | `src/core/prompt/PromptRefinementService.ts`, `src/core/app/TaskManagerService.ts` |
 | Design | `src/core/design/DesignUpdateCoordinator.ts`, `DesignSourceService.ts`, `DesignSkillPack.ts` |
 | Design browser | `src/core/design/AgentBrowserRuntime.ts`, `src/core/agent/journal/AgentProtocolRedaction.ts` |
 | Preview | `src/core/preview/PreviewManager.ts`, `PreviewSourcePreparer.ts`, `ManagedDesignStaticPreview.ts` |
-| Attachments | `src/core/storage/AttachmentFileStore.ts`, `src/core/agent/AgentAttachmentDelivery.ts`, `src/shared/attachments.ts` |
+| Attachments | `src/core/storage/AttachmentFileStore.ts`, `src/core/design/FileDesignDraftStore.ts`, `src/core/agent/AgentAttachmentDelivery.ts`, `src/shared/attachments.ts` |
 | Durable contracts | `src/shared/contracts.ts`, `src/shared/agentRuntime.ts`, `src/shared/design.ts`, `src/shared/agent.ts` |
 | Execution support | `src/shared/agentExecutionSupport.ts` and its core and renderer callers |
-| Renderer support | `src/renderer/model/designs.ts`, `src/renderer/model/discourse.ts`, `src/renderer/ui/AgentControlPanel.tsx`, `src/renderer/ui/SettingsView.tsx` |
+| Renderer support | `src/renderer/model/designs.ts`, `src/renderer/model/discourse.ts`, `src/renderer/ui/useTaskAttachments.ts`, `src/renderer/ui/AgentControlPanel.tsx`, `src/renderer/ui/SettingsView.tsx` |
 
 The investigation also read adapter, store, workflow, renderer, recovery, and protocol tests beside these files.
 
@@ -190,11 +201,13 @@ Codex keeps different request contracts for Task work and owner-neutral turns.
 Both contracts use the same private thread and turn transport.
 They persist provider state in the same runtime store.
 One resolver routes provider notifications by runtime owner.
-One server-loss sweep reconciles Task and Discourse runs.
-Discourse availability uses `projectAgentExecutionSupport`.
-The projection requires a stable Discourse extension and a read-only, offline, no-approval policy.
+One server-loss sweep reconciles all runs in the runtime store.
+Review, refinement, and Discourse availability use `projectAgentExecutionSupport`.
+The projection requires a qualified native mutation-denial policy with no approval exceptions.
+The provider process can still use its model transport and normal user permissions.
 `DiscourseRuntimeHost` also requires the common runtime operations.
-Only Codex meets these requirements today.
+Codex, OpenCode, and Cursor ACP meet these requirements.
+Grok ACP and Claude Agent ACP remain available for normal Tasks only.
 
 ### Current normal Task path
 
@@ -213,10 +226,12 @@ Only Codex meets these requirements today.
 1. `DiscourseRuntimeCoordinator` schedules a participant turn.
 2. `DiscourseContextSnapshotService` resolves exact context roots.
 3. The shared support projection selects a compatible runtime.
-4. The adapter builds its read-only and offline execution context.
-5. `AgentOrchestrator` prepares and starts the turn in `FileAgentRuntimeStore`.
-6. The shared runtime event path reports progress and terminal state.
-7. The coordinator turns terminal output into a Discourse message.
+4. The adapter builds its provider-native read-only execution context.
+5. `AgentOrchestrator` records the repository fingerprint.
+6. `AgentOrchestrator` prepares and starts the turn in `FileAgentRuntimeStore`.
+7. The shared runtime event path reports progress and terminal state.
+8. The orchestrator compares repository state before it accepts completion.
+9. The coordinator turns valid terminal output into a Discourse message.
 
 The Discourse scheduler, budget, prompt, and message logic are sound.
 They do not own a second provider lifecycle.
@@ -238,23 +253,22 @@ Core therefore creates a Codex Design.
 ### Current review path
 
 The review workflow can choose a runtime that differs from the implementation runtime.
-Codex supports native and detached review.
-Other adapters do not expose a stable detached review path.
+It creates a Task-owned review session and sends a normal read-only turn.
+The workflow owns its prompt, parser, Git target, budget, and review state.
+The adapter owns only its native permission and protocol mapping.
 
-The core review rules are provider-neutral.
-The current adapter contract makes review a special provider operation.
-That special operation is not required.
-A detached review is a normal read-only turn with a review instruction profile.
+`AgentOrchestrator` compares the repository before and after the turn.
+A changed or unreadable repository fails the review.
+Task Monki leaves detected changes in place as evidence.
 
 ### Current prompt-refinement path
 
-The shared adapter contract has an optional `refinePrompt` operation.
-Only Codex implements it.
-The implementation uses `CodexEphemeralReadOnlyRunner` directly.
+`PromptRefinementService` owns the exact-output prompt, parser, evidence checks, and fallback result.
+`TaskManagerService` creates one short-lived runtime session and normal read-only turn.
+It cancels through the common interrupt path and releases the session after settlement.
 
-Refinement is also a normal short turn.
-Its workflow owns the exact-output prompt and parser.
-The provider only needs normal instruction, attachment, and turn delivery.
+`AgentOrchestrator` compares the repository before and after the turn.
+The original request remains unchanged when the turn fails or changes repository state.
 
 ## Current provider and workflow matrix
 
@@ -267,9 +281,9 @@ This table describes current code, not provider protocol potential.
 | Queue next message | Yes | Yes | Yes | Yes | Yes |
 | Live steering | Yes | No | No | No | No |
 | Managed attachments | Yes | Blocked in adapter | Blocked in adapter | Blocked in adapter | Blocked in adapter |
-| Prompt refinement | Yes | No | No | No | No |
-| Review provider | Yes | No | No | No | No |
-| Discourse participant | Yes | No | No | No | No |
+| Prompt refinement | Yes | Yes, no attachments | No | Yes, no attachments | No |
+| Review provider | Yes | Yes, no attachments | No | Yes, no attachments | No |
+| Discourse participant | Yes | Yes | No | Yes | No |
 | Design | Yes | No | No | No | No |
 | Provider resume | Yes | Yes | Negotiated | Negotiated | Negotiated |
 | Native provider fork | Yes | Yes | No | No | No |
@@ -278,6 +292,9 @@ This table describes current code, not provider protocol potential.
 
 The user-facing fork alternative creates a new Task and worktree.
 It does not use native provider fork.
+
+Provider-neutral managed attachment delivery belongs to milestone 3.
+Milestone 2 does not widen file delivery for OpenCode or ACP profiles.
 
 ## Why current combinations fail
 
@@ -290,9 +307,9 @@ It does not use native provider fork.
 | ACP attachments | The adapter rejects them and sends one text block. | Missing adapter feature |
 | Attachment plus provider network | Shared code requires network-off execution. | Unnecessary Codex-shaped restriction |
 | Attachment plus full process access | Shared code rejects the run. | Unnecessary universal restriction |
-| Non-Codex Discourse | Only Codex declares stable Discourse support and maps the required execution policy. | Missing adapter feature |
-| Non-Codex review | Review uses a special adapter method and Codex isolation assumptions. | Workflow coupling and adapter gap |
-| Non-Codex refinement | Refinement calls a Codex-only ephemeral runner. | Historical workflow coupling |
+| Selected Codex attachment in a shared read-only turn | The current adapter grants the parent attachment directory. This exposes unselected sibling files. | Incorrect Codex path mapping |
+| Grok ACP read-only workflows | Plan mode still permits mutation through shell, MCP, or subagent work. | Provider policy limit |
+| Claude ACP read-only workflows | Its plan mode has not passed the packaged mutation qualification test. | Unqualified provider profile |
 | Preview recipe model selection | UI can select another runtime, while core always runs Codex. | Historical coupling |
 | Design provider-history cleanup | Design qualification expects provider deletion semantics. | Unnecessary restriction |
 
@@ -302,17 +319,17 @@ It does not use native provider fork.
 | --- | --- | --- |
 | App Server thread IDs, turn IDs, and resume cursors | Codex adapter | These values belong to the Codex protocol. |
 | App Server permission profiles | Codex adapter | This is Codex's strongest native execution policy. |
-| Additional readable paths | Codex adapter | Other providers grant file access differently. |
+| Additional readable paths | Codex adapter | Other providers do not need paths for current Task Monki attachment types. |
 | `localImage` input | Codex adapter | This is a native Codex content type. |
-| Thread fork on changed read roots | Codex adapter | Other providers need another session fallback. |
+| Thread fork on changed read roots or exact file grants | Codex adapter | Current OpenCode and ACP delivery is turn-local. |
 | Dynamic tool request and response | Codex adapter | This is one transport for a shared Task Monki tool. |
 | Codex developer instructions and skill inputs | Codex adapter | The instruction and skill content remains app-owned. |
-| Native Codex review mode | Codex adapter | It is an optional mapping of the shared review intent. |
+| Codex read-only permission profile | Codex adapter | It maps the shared read-only request to an attested Codex scope. |
 | Codex goals, plans, usage, and subagents | Codex adapter | These are provider telemetry, not workflow truth. |
 | Exact Design source and Ready requirements | Design workflow | They do not depend on Codex. |
 | Browser actions and screenshots | Design workflow | `AgentBrowserRuntime` already owns them. |
 | Design runtime hardcoding | Delete | No product rule requires it. |
-| Codex-only refinement runner | Delete | The shared runtime can run the same short turn. |
+| Codex-only prompt-refinement entry point | Deleted | The shared runtime runs prompt refinement. Preview recipe generation still uses its existing Codex ephemeral runner. |
 | Scoped Codex Discourse lifecycle | Delete | The shared runtime coordinator owns it after the cutover. |
 | Codex sandbox as attachment gate | Delete | Selection authorizes delivery to the provider. |
 | Provider-history deletion as Design gate | Delete | Task Monki cannot promise remote erasure. |
@@ -326,7 +343,11 @@ These limits are real and must remain visible.
 - OpenCode has no public live-steering operation.
 - Stable ACP has no native session-fork operation.
 - ACP resume and load depend on negotiated agent capabilities.
+- ACP image and embedded-resource inputs depend on negotiated prompt capabilities.
+- An ACP resource link does not deliver bytes.
 - The pinned ACP code does not yet implement current structured elicitation.
+- Codex has native image inputs but no generic text-file input.
+- OpenCode session history can retain resolved file-part content.
 - A model can reject image input even when its runtime supports images.
 - A provider can retain prompts, files, tool results, or screenshots after local cleanup.
 - Provider session deletion can remove a session view without erasing related files.
@@ -338,20 +359,20 @@ These limits must narrow an operation, not disable unrelated workflows.
 
 ## Target provider and workflow matrix
 
-This table describes the target after the planned adapter work.
-Every cell still requires a compatible installed runtime and model.
+This table describes the approved target.
+Every cell requires a compatible packaged runtime and selected model.
 
 | Workflow or operation | Codex | OpenCode | Grok ACP | Cursor ACP | Claude ACP |
 | --- | --- | --- | --- | --- | --- |
 | Text Task | Yes | Yes | Yes | Yes | Yes |
 | Stop active turn | Yes | Yes | Yes | Yes | Yes |
 | Active conversation | Live steer | Queue fallback | Queue fallback | Queue fallback | Queue fallback |
-| Text attachment | Yes | Native file part | Embedded content or exact path | Embedded content or exact path | Embedded content or exact path |
-| Image attachment | Model-gated | Model-gated | Negotiated and model-gated | Negotiated and model-gated | Negotiated and model-gated |
-| Prompt refinement | Shared short turn | Shared short turn | Shared short turn | Shared short turn | Shared short turn |
-| Review | Shared read-only turn | Shared read-only turn | Shared read-only turn | Shared read-only turn | Shared read-only turn |
-| Discourse | Shared read-only turn | Native-policy qualified | Native-policy qualified | Native-policy qualified | Native-policy qualified |
-| Design | Native tool transport | MCP bridge | MCP bridge | MCP bridge | MCP bridge |
+| Text attachment | Exact managed path after qualification; bounded inline fallback | `data:` file part | Embedded text resource | Bounded text block | Embedded text resource after qualification |
+| Image attachment | `localImage`, model-gated | `data:` file part, model-gated | No: profile advertises false | Image block, model-gated | Image block after qualification |
+| Prompt refinement | Shared short turn | Shared short turn | Disabled by read-only policy | Shared short turn | Disabled until qualified |
+| Review | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Disabled until qualified |
+| Discourse | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Disabled until qualified |
+| Design | Native tool transport | Milestone 4 | Milestone 4 | Milestone 4 | Milestone 4 |
 | Resume | Native | Native | Negotiated or new session | Negotiated or new session | Negotiated or new session |
 | Fork product state | New Task session | New Task session | New Task session | New Task session | New Task session |
 | Provider cleanup | Best effort | Best effort | Best effort | Best effort | Best effort |
@@ -362,10 +383,14 @@ Task Monki must also verify that the repository did not change.
 
 This rule does not claim OS confinement.
 If an installed profile cannot deny mutation, that profile cannot run a read-only workflow.
-Normal Task and Design work can still remain available.
+Normal Task work remains available.
+Later Design support has its own qualification rules.
 
 Design also needs a model that can consume image tool results.
 Each packaged adapter must pass the same real Design behavior tests before the UI enables it.
+
+The attachment rows describe milestone 3.
+They do not enable a read-only workflow or Design by themselves.
 
 ## Shared runtime boundary
 
@@ -393,17 +418,29 @@ The workflow owns prompts, queues, messages, checkpoints, source, and user-visib
 ### Target execution path
 
 1. The workflow builds one concrete turn request.
-2. The coordinator creates or finds its local session and stable operation ID.
-3. The selected adapter qualifies the model, access, content, and tool request.
-4. Core verifies the exact selected attachment records.
-5. The coordinator stores a pending run before provider delivery.
-6. The adapter creates, resumes, or replaces its provider session.
-7. The adapter maps instructions, attachments, permissions, and client tools.
-8. The coordinator records delivery progress and provider IDs.
-9. The adapter emits normalized events for that local run.
-10. The coordinator stores bounded items, interactions, usage, and terminal state.
-11. The workflow consumes the terminal result and verifies its own evidence.
-12. The coordinator revokes turn tools and releases idle provider resources.
+2. The coordinator resolves the owner and stable operation ID.
+3. Core resolves the selected IDs to path-free attachment metadata.
+4. The adapter qualifies the model, access, attachment metadata, and tool request.
+5. The coordinator creates or finds its local session.
+6. The coordinator stores a pending run and its attachment selection.
+7. The adapter calls the shared verifier and requests bytes only for its qualified inline mapping.
+8. The adapter builds and size-checks the complete provider payload.
+9. The coordinator checks cancellation and records `NOT_DELIVERED` when it stops here.
+10. The coordinator enters `SENDING` immediately before its existing adapter turn-submission call.
+11. The adapter sends the prepared prompt, instructions, attachments, permissions, and client tools.
+12. The coordinator records delivery progress and provider IDs.
+13. The adapter emits normalized events for that local run.
+14. The coordinator stores bounded items, interactions, usage, and terminal state.
+15. For a read-only turn, the coordinator compares the repository with its before-turn fingerprint.
+16. The workflow consumes the valid terminal result and verifies its own evidence.
+17. The coordinator revokes turn tools and releases idle provider resources.
+
+Milestone 3 does not move provider session materialization between the two current entry points.
+Normal Task can materialize it before step 10.
+The shared runtime entry point can materialize it inside step 11.
+Attachment mapping and size checks must finish before the existing turn-submission call.
+A proven session-setup failure that submits no prompt remains `NOT_DELIVERED`.
+A mapping error is a definite `NOT_DELIVERED` result.
 
 An error before delivery is retry-safe with the same operation ID.
 An error after possible delivery is ambiguous.
@@ -411,7 +448,7 @@ Task Monki reconciles it and never resends it automatically.
 
 ### One provider-neutral turn request
 
-Every workflow sends the same small request shape to the runtime coordinator.
+Every workflow uses the same small request concepts.
 The request contains these concepts:
 
 | Part | Purpose |
@@ -424,12 +461,21 @@ The request contains these concepts:
 | Workspace | Working directory and approved extra read paths |
 | Access request | Read or write intent, approval policy, and provider-tool network intent |
 | Model settings | Runtime-qualified provider, model, and reasoning values |
-| Attachments | Exact verified records selected for this turn |
+| Attachments | Exact attachment IDs selected by the workflow for this run |
 | Client tools | Exact app-owned tools granted to this run |
 | Resume context | Stored session identity or bounded Task Monki context |
 
 Do not put Preview, Git, Design revision, or Discourse round data in this request.
 Those values belong to their workflow owners.
+
+Milestone 3 does not rewrite the two current adapter turn entry points.
+Normal Task and Design use `StartAgentTurn`.
+Shared read-only workflows use `StartAgentRuntimeTurn`.
+Both already use the same runtime lifecycle and store.
+
+Widen their existing attachment descriptor and result contracts together.
+Each adapter must call one private attachment mapper from both entry points.
+Do not duplicate mapping or migrate unrelated lifecycle code in milestone 3.
 
 ### Adapter contract
 
@@ -437,7 +483,7 @@ Every adapter must provide these operations:
 
 - discover and qualify the installed runtime.
 - list runtime-qualified models and input types.
-- qualify one requested execution before provider mutation.
+- qualify one requested execution before turn submission.
 - create or attach a provider session.
 - start one turn.
 - stream normalized events.
@@ -459,9 +505,6 @@ Optional operations remain small:
 Do not add optional `review` or `refinePrompt` workflow implementations.
 The common turn intent covers both.
 
-An adapter can map review intent to a native review method.
-It must preserve the shared read-only and output contract.
-
 ### Execution qualification
 
 Do not build a large list of workflow flags.
@@ -472,13 +515,37 @@ Qualification verifies only current needs:
 
 - model input types.
 - read or write policy support.
+- provider-native repository mutation denial for read-only work.
 - exact extra path support.
 - attachment transport.
 - app-owned tool transport.
 - resume or new-session behavior.
 - current runtime readiness.
 
-Core does the final live verification before provider mutation.
+Attachment qualification receives a path-free descriptor.
+It contains the attachment ID, kind, media type, byte count, and hash.
+The adapter does not receive a managed path until core verifies the file.
+
+The existing `attachmentDelivery` capability stays small.
+It says whether the runtime has any qualified attachment path.
+`AgentModel.inputModalities` contains the effective runtime and model intersection.
+For example, Grok stays text-only while its ACP profile advertises `image: false`.
+The adapter uses the concrete attachment descriptors for size and media checks.
+Do not add transport capability flags to shared contracts.
+Do not mark delivery stable from a schema check alone.
+The packaged content-use test must pass first.
+
+Stable ACP reports image support for the agent, not for each model.
+Each ACP runtime profile therefore owns one small code-defined image qualification table.
+Its keys are the exact packaged runtime version and provider model ID.
+Add an entry only after that exact pair passes a real image content-use test.
+The adapter intersects this table with the negotiated ACP image capability.
+A dynamic catalog entry is image-capable only when its exact model ID is in the table.
+An unlisted model and Cursor `Auto` remain text-only.
+Do not add a persistent qualification cache or infer image support from a model name.
+
+Core does the final live verification before turn submission.
+For read-only work, core also compares repository state before it accepts completion.
 The renderer uses a safe projection of the same result.
 The renderer result never becomes security authority.
 
@@ -501,7 +568,7 @@ Use one schema cutover and reset old development stores.
 A session record needs these values:
 
 - local session ID.
-- domain owner kind and owner ID.
+- Task, Discourse participant, or prompt-refinement owner identity.
 - immutable runtime ID.
 - provider session ID and resume cursor when the provider supplies them.
 - working directory and approved extra roots.
@@ -524,13 +591,47 @@ A run record needs these values:
 - delivery phase.
 - provider turn or message ID when known.
 - terminal status.
-- exact attachment IDs and path-free submission evidence.
+- ordered path-free attachment selection stored before provider prompt submission.
+- path-free submission evidence stored at the adapter's transport-admission boundary.
 - exact app-owned tool grants.
+- repository fingerprints and integrity status for applicable read-only turns.
 - cancellation and reconciliation state.
 - bounded start and finish times.
 
 Provider protocol messages stay in the existing bounded redacted journal.
 Do not copy raw provider payloads into domain stores.
+
+The run selection contains attachment ID, ordinal, kind, media type, byte count, and hash.
+It is historical input evidence, not a second byte owner.
+The request fingerprint includes this ordered selection.
+An idempotent retry must use the same selection.
+
+`AgentExecutionContext.managedAttachments` has a different, narrower purpose.
+It is the path-free identity of files granted to a restricted provider session.
+In milestone 3, only a restricted Codex session with qualified exact-file access populates it.
+OpenCode, ACP, Codex inline delivery, and Codex full access keep it empty.
+`AgentRuntimeOwnership` includes this derived grant identity in the session access-epoch hash.
+Reuse is valid only when the grant identity matches.
+A different grant forks or replaces the provider thread and creates a new local Codex session with its own immutable access epoch.
+Do not mutate the access epoch of the existing local session.
+The field is not per-turn delivery evidence and never replaces the ordered run selection.
+
+Transport submission evidence must match the run selection exactly.
+It must contain no missing, extra, reordered, or changed attachment.
+
+Submission evidence uses a typed delivery correlation:
+
+- `provider-turn` for a native turn acknowledgement.
+- `provider-message` for a native message acknowledgement.
+- `client-request` when the protocol has no admission acknowledgement.
+
+ACP uses its JSON-RPC request ID as `client-request` correlation after the complete prompt is written to stdin.
+This evidence proves Task Monki's transport action.
+It does not prove that the provider or model read the content.
+
+Codex records submission after `turn/start` acknowledgement.
+OpenCode records it after `prompt_async` acknowledgement.
+ACP records it after the complete JSON-RPC prompt write.
 
 ### Recovery rules
 
@@ -569,9 +670,31 @@ String injection tests are not enough.
 `AttachmentFileStore` remains the only byte owner.
 The current staging, adoption, hash, retry, draft, delete, and quota rules remain.
 
-Every turn stores its exact attachment selection.
-The next turn starts with no inherited selection.
-An old attachment remains in history but is not sent again unless selected.
+Task Monki keeps one immutable managed copy for each owning Task.
+A duplicated Task or Design gets an independent copy and lifetime.
+Do not add a global blob pool or a copy for each provider run.
+
+Each workflow owns its selection rule:
+
+- A normal Task sends its task-level input files on each normal Task turn.
+- A Design sends only the references selected for that Design message.
+- A new Design message starts with no selected references.
+- Prompt refinement sends only its current staged draft files.
+- Review sends the Task input files selected by the current review flow.
+- Discourse has no attachment input in milestone 3.
+
+Prompt refinement keeps only safe attachment metadata in its workflow prompt and evidence.
+It does not put a managed path in that prompt.
+The runtime run owns the exact staged selection, and the adapter decides its transport.
+The refinement result derives `providedAsImage` from qualified submission evidence.
+It must not use filename relevance or another workflow heuristic to decide native image delivery.
+The refinement runner returns one transient `{ output, attachmentSubmissions }` value.
+`TaskManagerService` snapshots this path-free value from the terminal run before it deletes the ephemeral runtime records.
+`PromptRefinementService` validates its result from that value and never reads the runtime store directly.
+
+The runtime run stores the exact ordered selection before delivery.
+This run record is the delivery authority during retry and recovery.
+It does not change the workflow's product rules.
 
 Immediately before delivery, core must:
 
@@ -581,23 +704,124 @@ Immediately before delivery, core must:
 4. verify root containment and regular-file identity.
 5. verify size and SHA-256.
 6. verify the selected model input type.
-7. pass verified records to the selected adapter.
+7. compare the records with the stored run selection.
+8. return bytes from the same verified file handle only when the adapter needs inline content.
+9. map the verified result through one adapter-private mapper.
 
-The adapter selects the best native delivery:
+The adapter selects one explicit delivery method for each record:
 
-- Codex uses `localImage` for supported images and exact managed paths for text.
-- OpenCode uses native file parts without creating another managed copy.
-- ACP uses image blocks or embedded content when negotiated.
-- ACP can use an exact managed path when native content is unavailable.
+| Runtime or profile | Text | Image |
+| --- | --- | --- |
+| Codex App Server | Exact managed path when qualified; otherwise bounded inline text | `localImage` on every turn that selects the image |
+| OpenCode 1.18.21 | `data:text/plain` file part with the safe display name | `data:` file part with the admitted image media type |
+| Grok ACP 1.0.5 | Embedded text resource | Unsupported while `image: false` is negotiated |
+| Cursor ACP 2026.07.16 | Bounded text block with the safe display name | Native ACP image block for an exact profile-qualified model |
+| Claude Agent ACP | Embedded text resource after packaged qualification | Native ACP image block after packaged qualification |
 
-When a provider session cannot narrow old readable paths, create a new session.
-Seed it with bounded Task Monki conversation context.
+OpenCode receives a bounded base64 `data:` URL, not a managed `file:` URL.
+This avoids another filesystem read by an unconfined provider process.
+It also binds the provider input to the bytes that Task Monki verified.
+
+ACP does not use `resource_link` for attachment delivery.
+A resource link does not contain bytes or grant access.
+ACP also does not use attachment directories or exact-path fallback in milestone 3.
+Current text and image inputs do not need that machinery.
+
+The ACP adapter uses the negotiated prompt capabilities.
+It uses an embedded text resource when `embeddedContext` is true.
+It uses a bounded text block when embedded context is false.
+It uses an image block only when both ACP and the selected model accept images.
+It never sends an embedded blob for current Task Monki images.
+Each inline text input includes the safe name and an untrusted-data marker.
+
+The shared verifier reads an inline file and hashes it through one open handle.
+Do not verify the full file and then reopen it for encoding.
+Codex path delivery still performs its exact pre-send file check.
+Adapters must build and size-check the complete payload before the turn-submission call.
+
+Use a global 32 MiB limit for each raw ACP JSON-RPC frame.
+Use the same limit while OpenCode assembles each raw SSE line and event.
+The parser cannot classify attachment content before JSON parsing.
+Apply the same limit to every outbound request on those connections.
+This limit covers the current 20 MiB attachment quota and base64 overhead.
+Reject an oversized outbound payload before delivery.
+Reject any larger inbound frame before JSON parsing.
+
+OpenCode 1.18.21 stores resolved file parts and publishes them through SSE.
+An ACP agent can also echo an image or embedded resource in a session update.
+Sanitize these known content fields immediately after parsing.
+Do not pass their bytes into the journal, normalized events, or runtime store.
+After sanitization, apply the existing smaller journal and normalized-event limits.
+
+Use the same 32 MiB outbound limit for a Codex inline-text fallback.
+Apply a global 32 MiB Codex inbound line limit because App Server can echo user input.
+Redact the marked inline attachment block before journaling or event storage.
+
+Only Codex can use a managed attachment path in milestone 3.
+First, qualify individual file roots with the packaged App Server.
+Restricted Codex profiles grant the exact selected files, never their parent directory.
+Attachment paths stay separate from repository `readRoots`.
+If individual file roots fail, send bounded text inline in restricted mode.
+Do not add a parent directory or a temporary attachment copy.
+If `localImage` then requires a wider root, keep restricted-mode image delivery disabled.
+Full-access Codex can still use the selected managed path without a narrow grant.
+A restricted Codex inline fallback records `text-block` transport evidence.
+
+If the restricted exact-file grant changes, fork or replace that Codex thread before delivery.
+Seed a replacement with bounded Task Monki context.
 
 This action does not erase data that the provider already received.
 It only prevents Task Monki from granting the old path again.
 
 Submission evidence stays path-free.
-It records attachment ID, hash, size, transport, provider turn ID, and delivery time.
+It records attachment ID, hash, size, transport, delivery correlation, and delivery time.
+
+Use this small provider-neutral transport set:
+
+- `native-image`.
+- `native-file`.
+- `embedded-resource`.
+- `text-block`.
+- `managed-path`.
+
+The evidence validator must verify kind, media type, transport, order, and exact selection.
+
+### Attachment persistence and cleanup
+
+Staging remains draft-owned until adoption or discard.
+Task and Design records own adopted files until Task deletion.
+Archive keeps the files.
+Startup reconciliation removes abandoned staging and orphan Task directories.
+
+A definite pre-delivery failure can retry the same operation and managed file.
+An ambiguous delivery must not resend the attachment.
+Cancellation observed before prompt submission records `NOT_DELIVERED`.
+Cancellation stops work but cannot retract bytes that the provider admitted.
+Provider restart follows the same no-resend recovery rule.
+
+Do not add cancellation machinery around short local reads or encoding without measured need.
+Check the current cancellation fence before the existing turn-submission call.
+
+OpenCode and ACP encoding is turn-scoped.
+Release raw and base64 buffers after serialization and the protocol write complete.
+The pending request keeps only its small correlation and resolver state.
+Do not create adapter temporary files.
+Provider-owned history or temporary files remain the provider's responsibility.
+Task Monki session deletion is best effort and does not promise remote erasure.
+
+The protocol journal must not store attachment bytes, base64 data, data URLs, or managed paths.
+Extend the existing adapter journal redaction for outbound and echoed inbound fields.
+Keep only attachment ID, hash, size, media type, and transport metadata.
+
+### Attachment renderer behavior
+
+Reuse `useTaskAttachments` and the current Task and Design composers.
+Do not add a provider-specific picker or upload path.
+
+The existing support projection enables attachments only for a qualified runtime.
+The effective model input types control image selection.
+Concrete media and encoded-size failures use the adapter's clear unsupported reason.
+The renderer does not infer support from a provider name.
 
 ### Attachment security rule to remove
 
@@ -671,8 +895,19 @@ Task Monki must state this limit clearly.
 Keep native threads, resume, fork, permission profiles, additional readable roots, dynamic tools, skills, and interaction mapping.
 Keep current generation fences and no-resend recovery.
 
+Use the current managed-path transport for text only when the packaged profile qualifies it.
+Otherwise, use the bounded restricted-mode inline fallback defined above.
+Send every image selected for the current turn as `localImage`.
+Do not limit native image input to the first turn.
+
+Restricted profiles receive exact attachment file paths.
+Do not add an attachment parent directory to `readRoots`.
+Full-access mode keeps its honest native meaning.
+The user's network choice also remains unchanged.
+Selection controls what Task Monki sends, not what an unconfined process can discover.
+
 Thread fork copies provider history.
-It can narrow future file access.
+It can establish a different exact-file grant for future turns.
 It cannot revoke content already present in the copied history.
 
 ### OpenCode
@@ -680,6 +915,10 @@ It cannot revoke content already present in the copied history.
 Keep the authenticated loopback server, SSE stream, sessions, abort, question queue, permission rules, model variants, and native fork.
 
 Use native prompt `system`, `tools`, and file parts.
+Use bounded `data:` file parts for managed attachments.
+Map every admitted text file to `text/plain` and keep its safe display name.
+Use the admitted media type for an image.
+Do not send a managed `file:` URL.
 Register the app-owned MCP bridge only for Design sessions.
 
 Before Design enablement, test the packaged OpenCode version with external plugins disabled.
@@ -693,11 +932,25 @@ Keep a distinct registered runtime identity and launch profile for Grok, Cursor,
 Use stable ACP content blocks, cancellation, permission choices, and stdio MCP.
 Use resume or load only when negotiated.
 
+Add the exact typed embedded-resource shape from stable ACP v1.
+Use `task-monki-attachment:<attachment-id>` as its required resource URI.
+This opaque URI is path-free and is not resolvable as a local file.
+Include the safe display name in the marked untrusted text content, not in a local URI.
+The packaged content-use test must also prove that the agent accepts this opaque URI.
+Use no `resource_link`, attachment path, or additional directory for current attachments.
+
+Keep profile mapping inside the ACP adapter:
+
+- Grok uses embedded text and keeps images disabled.
+- Cursor uses bounded text blocks and image blocks only for profile-qualified runtime and model pairs.
+- Claude uses embedded text and image blocks only for profile-qualified runtime and model pairs after installation tests.
+
 Provider-specific model and mode extensions remain inside their profile mapping.
 Do not expose them as universal settings.
 
 Stable ACP does not provide session fork.
-Use the new-session fallback.
+Use the existing new-session fallback for normal session recovery.
+Attachment delivery does not add an ACP path-access epoch.
 
 ## Workflow end-to-end behavior
 
@@ -706,6 +959,7 @@ Use the new-session fallback.
 The Task workflow creates a write-capable turn request.
 The runtime coordinator starts or resumes the selected provider session.
 The adapter applies its native permission policy.
+The workflow selects all immutable task-level input files for each normal Task turn.
 Task Monki observes Git, tests, and delivery evidence independently.
 
 ### Active conversation
@@ -724,6 +978,7 @@ They send a read-only turn request to the common runtime coordinator.
 The adapter denies mutation through its native policy.
 Task Monki captures repository state before and after the turn.
 A detected mutation fails that participant turn.
+Task Monki leaves the detected changes in place as evidence.
 
 The provider process remains a trusted installed agent.
 Task Monki does not claim OS sandbox isolation unless the adapter proves it.
@@ -732,17 +987,19 @@ Task Monki does not claim OS sandbox isolation unless the adapter proves it.
 
 Review uses a new Task-owned runtime session and a read-only turn request.
 The workflow supplies the review prompt and required Git context.
-It validates repository state and review output.
-
-An adapter can use a native review method internally.
-The product result and safety rules stay the same.
+The current review flow selects the Task input files.
+The orchestrator validates repository state.
+The workflow validates review output and updates the review domain state.
 
 ### Prompt refinement
 
 Refinement uses one ephemeral runtime session and a bounded exact-output instruction.
 The workflow parses the final result and cleans the session.
+The orchestrator validates repository state before it returns the result.
 
-The selected attachments use the same attachment delivery contract.
+Refinement selects only the files in its staged composer draft.
+The composer keeps ownership of that draft after refinement.
+Later Task creation adopts the same immutable staging bytes.
 No Codex-specific runner remains.
 
 ### Design
@@ -763,6 +1020,9 @@ The workflow supplies:
 The adapter maps instructions, references, permissions, and tool transport.
 `DesignUpdateCoordinator` keeps all source and Ready rules.
 
+Each Design turn keeps its exact reference IDs.
+A later turn does not receive an earlier reference unless the user selects it again.
+
 Final source must still match the final verified candidate.
 The last Ready canvas stays safe during work and failure.
 
@@ -773,6 +1033,7 @@ The last Ready canvas stays safe during work and failure.
 - Keep Electron context isolation, renderer sandboxing, and typed IPC.
 - Reject arbitrary file paths from renderer and provider input.
 - Keep attachment admission, hashes, exact selection, and no-follow verification.
+- Keep attachment bytes and managed paths out of durable runtime records and journals.
 - Keep per-user managed storage and bounded staging cleanup.
 - Keep provider child environment allowlists and credential redaction.
 - Keep runtime generation fences and no-resend recovery.
@@ -789,6 +1050,7 @@ The last Ready canvas stays safe during work and failure.
 - Do not require Codex sandbox parity for every provider.
 - Do not force provider process network off when sending an attachment.
 - Do not reject selected attachments only because the provider process has user-level access.
+- Do not add a generic attachment path or directory fallback.
 - Do not require native session fork for workflow support.
 - Do not require live steering when a queue preserves the product behavior.
 - Do not require provider history deletion for Design.
@@ -815,10 +1077,13 @@ Provider milestone 1 removed these parts:
 - the separate Codex scoped run owner and transport.
 - duplicated renderer workflow support rules.
 
-Later milestones remove these parts:
+Provider milestone 2 removed these parts:
 
 - the Codex-only prompt-refinement runner path.
 - workflow-specific `refinePrompt` and detached-review capability gates.
+
+Later milestones remove these parts:
+
 - Design `CODEX_RUNTIME_ID` validation and creation defaults.
 - the universal attachment sandbox and network rule.
 - Codex product names in provider-neutral Design copy.
@@ -861,20 +1126,155 @@ Acceptance:
 
 ### Provider milestone 2: shared read-only workflows
 
+Status: implemented on 2026-08-29.
+
 1. Express review, refinement, and Discourse as common read-only turn requests.
-2. Map provider-native mutation denial in OpenCode and each ACP profile.
+2. Map provider-native mutation denial in Codex, OpenCode, and qualified ACP profiles.
 3. Add a repository comparison before and after each turn.
 4. Enable only profiles that pass real read-only behavior tests.
 5. Remove the special Codex refinement and review entry points.
 
+Current profile results:
+
+- Codex uses an attested read-only permission profile with network and external tools disabled.
+- OpenCode uses a dedicated `--pure` session and native deny rules.
+- Cursor ACP uses native Ask mode and rejects every permission request during the turn.
+- Grok ACP stays disabled because plan mode can still mutate through shell, MCP, or subagents.
+- Claude Agent ACP stays disabled because its plan mode has not passed the packaged mutation test.
+
+OpenCode and ACP processes still run with normal user permissions.
+Their native policies are not operating-system sandboxes.
+
+Acceptance:
+
+- Review, prompt refinement, and Discourse use `AgentOrchestrator` and `FileAgentRuntimeStore`.
+- Workflow prompts, parsing, budgets, and domain state remain with their existing owners.
+- The repository fingerprint is stored before provider delivery and compared after terminal output.
+- A changed or unverifiable repository fails the turn and keeps detected changes as evidence.
+- Cancellation, process loss, no-resend recovery, and late-event fences remain in the common lifecycle.
+- Refinement sessions release after completion, failure, or cancellation.
+- One failed Discourse participant does not erase successful sibling results.
+- The shared support projection shows unsupported profiles with one clear reason.
+- Normal Tasks remain available when a profile cannot run read-only work.
+
 ### Provider milestone 3: provider-neutral attachments
 
-1. Remove the universal Codex-shaped attachment policy.
-2. Add OpenCode native file-part delivery.
-3. Add ACP image and embedded-content delivery.
-4. Add exact-path fallback only when the provider needs it.
-5. Start a new session when old path grants cannot be narrowed.
-6. Keep one copy of each Task Monki attachment.
+Status: final implementation plan. Codex is the working baseline, but milestone 3 corrects its path grants, fallback, later-turn image delivery, and journal limits. The cross-provider change is not implemented.
+
+Goal: send the workflow-selected files through each provider's real prompt protocol.
+Keep one Task Monki byte owner and one runtime lifecycle.
+
+#### Implementation sequence
+
+1. Make the run selection authoritative.
+   - Add an ordered path-free attachment selection to `AgentRuntimeRunRecord`.
+   - Store it before provider prompt submission.
+   - Include it in the existing request fingerprint.
+   - Pass kind, media type, byte count, and hash to execution qualification.
+   - Reject an idempotent retry that changes the selection.
+   - Use one development-store schema cutover. Do not add a compatibility reader.
+2. Separate shared integrity from Codex transport.
+   - Keep storage resolution, no-follow open, regular-file checks, mode, size, and hash in `AgentAttachmentDelivery`.
+   - Add one bounded verifier that returns bytes from the same open handle for inline content.
+   - Keep the metadata-only pre-send check for Codex managed paths.
+   - Move the prompt manifest and `localImage` mapping into the Codex adapter.
+   - Delete the shared full-access and network gate.
+   - Remove attachment directories from shared `readRoots`.
+3. Correct Codex delivery.
+   - Qualify individual file roots and `localImage` access with the packaged App Server.
+   - Use an exact managed path for text when that test passes.
+   - Use bounded inline text in restricted mode when individual file roots fail.
+   - Send every currently selected image as `localImage`.
+   - Grant exact files in restricted profiles.
+   - Keep restricted images disabled if `localImage` needs a wider root.
+   - Fork or replace a restricted thread whenever its exact-file grant changes.
+   - Keep the selected full-access and network settings unchanged.
+   - Apply the 32 MiB cap and journal omission to any inline text fallback.
+4. Add OpenCode delivery.
+   - Build one native file part for each verified record.
+   - Use a bounded base64 `data:` URL and the safe display name.
+   - Map admitted text files to `text/plain`.
+   - Keep admitted image media types.
+   - Do not send a managed `file:` URL or create a temporary copy.
+   - Align SSE line and event limits with the 32 MiB wire cap.
+   - Sanitize echoed file-part data before journaling or event publication.
+5. Add ACP delivery.
+   - Add the typed stable-v1 embedded-resource content shape.
+   - Map Grok text to an embedded text resource.
+   - Map Cursor text to a bounded text block.
+   - Map qualified images to native ACP image blocks.
+   - Apply the same mapping to Claude after packaged qualification.
+   - Keep Grok images disabled while its profile advertises `image: false`.
+   - Keep the code-defined profile image qualification table keyed by exact packaged version and model ID.
+   - Treat unlisted models and Cursor `Auto` as text-only.
+   - Apply the 32 MiB cap to outbound prompts and inbound JSON-RPC frames.
+   - Sanitize echoed content bytes before journaling or event publication.
+   - Do not add resource-link, path, or additional-directory fallback.
+6. Complete evidence, recovery, and projection.
+   - Replace Codex-shaped submission names with the small transport set in this document.
+   - Replace the submission record's required provider turn ID with the typed delivery correlation.
+   - Require transport submission evidence to match the run selection exactly.
+   - Redact outbound payloads and echoed inbound file parts in the existing journals.
+   - Preserve current cancellation, no-resend, late-event, and process-loss behavior.
+   - Derive effective image input from both runtime transport and model support.
+   - Remove managed paths and image-relevance transport choices from prompt refinement.
+   - Derive refinement attachment evidence from the runtime run and its qualified submission evidence.
+   - Show one clear unsupported reason in the existing renderer projection.
+7. Qualify the packaged profiles.
+   - Extend the existing provider smoke harness.
+   - Test exact content use, not only protocol acceptance.
+   - Enable only the content path that passes for the installed profile and selected model.
+   - Add an ACP image table entry only for the exact runtime-version and model pair that passes.
+   - Update current operational documents after the behavior ships.
+
+#### Expected implementation surface
+
+| Owner | Existing modules to change |
+| --- | --- |
+| Durable selection and evidence | `src/shared/agentRuntime.ts`, `src/shared/attachments.ts`, `AgentRuntimeAdapter.ts`, `FileAgentRuntimeStore.ts`, `AgentRuntimeCoordinator.ts` |
+| Shared verification and access identity | `AgentAttachmentDelivery.ts`, `AgentRuntimeOwnership.ts`, `AgentOrchestrator.ts` |
+| Refinement selection and evidence | `PromptRefinementService.ts`, `TaskManagerService.ts` |
+| Codex mapping | `CodexAppServerAdapter.ts`, `CodexPermissionProfile.ts`, `CodexRpcClient.ts` |
+| OpenCode mapping | `OpenCodeAdapter.ts`, `OpenCodeHttpClient.ts`, OpenCode protocol types |
+| ACP mapping | `AcpRuntimeAdapter.ts`, `AcpProtocol.ts`, `AcpRpcClient.ts`, `AcpRuntimeProfiles.ts` |
+| Support projection | `agentExecutionSupport.ts` and its existing core and renderer consumers |
+| Packaged qualification | `providerSmoke.ts`, its tests, and `PROVIDER_SMOKE_TESTING.md` |
+
+Do not add a store, transport registry, attachment service, or workflow adapter.
+Do not change the shared composer or `AttachmentFileStore` ownership model.
+
+#### Milestone 3 acceptance criteria
+
+1. A runtime run stores its exact ordered attachment selection before provider prompt submission.
+2. Normal Task, Design, refinement, and review keep the selection rules in this document.
+   Refinement contains no managed path and derives image evidence from the runtime submission.
+3. Core rejects a stale, replaced, unselected, oversized, or unsupported file before prompt submission.
+4. A selected Codex file never grants its parent attachment directory or an unselected sibling.
+   Restricted text uses inline delivery if individual file roots fail qualification.
+   Restricted images stay disabled if `localImage` requires a wider root.
+5. Codex sends every enabled and qualified later-turn image as native image input.
+6. OpenCode sends verified text and images as bounded `data:` file parts.
+7. Grok sends verified text as embedded context and rejects images before prompt submission.
+8. Cursor sends verified text as a bounded text block.
+   It sends an image only when negotiated ACP support and its exact profile table entry both allow it.
+9. Claude attachment delivery remains disabled until its installed profile passes the same packaged tests.
+10. No ACP attachment uses `resource_link`, a managed path, or an added directory.
+11. Network and full-access choices do not cause a shared attachment rejection.
+12. A changed restricted Codex exact-file grant forks or replaces the provider thread and local session before delivery.
+    `managedAttachments` identifies only this session grant; the run selection remains the delivery authority.
+13. Native OpenCode and ACP attachments reuse the current session.
+14. Submission evidence matches the run selection and contains no path or bytes.
+15. Protocol journals contain no attachment bytes, base64 data, data URLs, or managed paths.
+   OpenCode and ACP wire readers accept admitted payloads up to 32 MiB and reject larger frames.
+16. A definite pre-delivery failure can retry without another managed copy.
+17. Cancellation before prompt submission records `NOT_DELIVERED`.
+   Cancellation after possible admission follows the no-resend rule.
+18. An ambiguous delivery, process loss, or late event never causes a resend.
+19. Task Monki-managed staging and Task-owned files keep their current discard, delete, restart, archive, and duplicate lifetimes.
+20. The renderer shows effective provider and model support without provider-name checks.
+    ACP image support comes from the adapter's negotiated capability and exact profile qualification.
+21. Existing Codex Design, normal Task, and milestone 2 read-only behavior still passes.
+22. Every enabled path passes a real packaged-provider content-use test.
 
 ### Provider milestone 4: provider-neutral Design
 
@@ -912,7 +1312,7 @@ Run the same suite against Codex, OpenCode, Grok ACP, Cursor ACP, and Claude ACP
 
 ### Workflow suite
 
-For every eligible provider, test:
+For every eligible provider and implemented milestone, test:
 
 - a normal Task with Git evidence.
 - a queued active-conversation message.
@@ -920,22 +1320,34 @@ For every eligible provider, test:
 - prompt refinement with exact output.
 - a read-only review and mutation detection.
 - a Discourse turn with bounded context.
-- Design creation and refinement.
+- Codex Design creation and refinement as a milestone 3 regression.
 - cancellation and restart.
 - deletion and cleanup.
 
 ### Attachment suite
 
-- one text file and one image.
-- different selections on consecutive turns.
-- no attachment after an attached turn.
-- queued and draft attachments.
+- store the ordered selection before provider prompt submission.
+- reject a retry that changes the selection.
+- one admitted text file and one admitted image.
+- one unique content question that proves the provider used each file.
+- different Design selections on consecutive Codex turns.
+- no Design reference after an attached Codex turn.
+- queued and draft Design references.
+- normal Task input files remain task-level context.
+- refinement uses its exact staged draft.
+- review uses its current Task input set.
 - retry without another managed copy.
-- hash or path race rejection.
-- model input mismatch.
-- resume with unchanged access.
-- new session when access cannot narrow.
-- path-free durable submission evidence.
+- hash, link, inode, mode, size, and path race rejection.
+- reject an unselected sibling before provider mapping.
+- model and runtime input mismatch.
+- encoded payload limit before provider prompt submission.
+- resume with unchanged Codex file access.
+- Codex fork or replacement whenever exact restricted file access changes.
+- native OpenCode and ACP content without session replacement.
+- exact path-free durable selection and submission evidence.
+- outbound and echoed inbound journal payload redaction.
+- cancellation, process loss, uncertain delivery, and late acknowledgement without resend.
+- draft, Task, duplicate, archive, restart, and delete cleanup.
 
 ### Design tool suite
 
@@ -956,23 +1368,83 @@ For every eligible provider, test:
 Run each installed provider through its packaged runtime.
 Mocks cannot prove instruction priority, native permissions, attachment parts, MCP behavior, or cleanup.
 
-At minimum, verify one normal Task and one read-only workflow for every provider.
-Verify one attachment turn for every supported content path.
+At minimum, verify one normal Task for every installed provider. Verify one
+read-only workflow for every installed profile that advertises read-only
+support, and record an explicit unsupported result for the other profiles.
+Verify one attachment turn for every enabled content path.
 Verify the full Design browser loop before enabling Design for that runtime.
+
+Milestone 3 requires these packaged checks:
+
+- Codex restricted text by the qualified exact-path result or its bounded inline fallback.
+- Codex full-access text by exact path.
+- Codex image by `localImage` when its selected access profile qualifies.
+- A Codex image selected on a later turn.
+- OpenCode 1.18.21 text and image `data:` file parts.
+- Grok 1.0.5 embedded text and an explicit unsupported image result.
+- Cursor 2026.07.16 text and a model-visible image for each exact model entered in its profile qualification table.
+- Cursor `Auto` and an unlisted Cursor model with a clear text-only result.
+- Claude text and image only after an installed packaged version is available.
+- one cancellation before provider prompt submission for each enabled runtime family.
+- one cancellation after possible provider admission for each enabled runtime family.
+- one provider restart or process-loss recovery without resend.
+- no-attachment normal Task regressions for every installed provider.
+- milestone 2 review, refinement, and Discourse regressions for qualified profiles.
+
+Inspect the native request or provider session as evidence for the transport.
+Ask about a unique file fact as evidence that the selected model consumed it.
+Do not accept a final answer alone as proof of the native transport.
+
+Record the packaged version, negotiated capabilities, selected model, payload size, and result.
+
+Run these repository checks for milestone 3:
+
+```sh
+npm run typecheck
+npm run check:architecture
+npm run test:agent-workflow
+npm test
+npm run test:renderer:dom
+npm run build
+npm run check:codex-protocol
+npm run dist:dir
+npm run verify:packaged-runtime
+npm run verify:packaged-owned-process
+npm run smoke:providers
+git diff --check
+```
+
+The smoke command must use its real-provider attachment mode.
+Mock-only results do not satisfy milestone 3.
 
 ## Unresolved provider limits
 
 These items need implementation-time conformance tests.
 They do not require another architecture decision.
 
-1. Confirm the packaged OpenCode file-part shape and storage behavior.
-2. Confirm OpenCode `--pure` and configuration precedence for the Design MCP bridge.
-3. Confirm image MCP results for each packaged ACP agent and selected model.
-4. Confirm a native read-only tool policy for each ACP profile.
-5. Confirm ACP resume and load behavior for each installed version.
-6. Decide whether to update the pinned ACP schema for structured elicitation.
-7. Record the exact provider-session deletion meaning for each adapter.
-8. Measure provider-side attachment and screenshot retention where documentation allows it.
+### Milestone 3 uncertainties
+
+1. Confirm that the packaged Codex App Server enforces an individual file as a readable root.
+2. Confirm whether Codex `localImage` uses readable roots.
+3. Confirm that a later Codex turn can replace any changed exact-file grant through the existing fork path.
+4. Confirm OpenCode 1.18.21 consumption of every admitted text extension through a `text/plain` data file part.
+5. Confirm image consumption for each packaged OpenCode model that reports image input.
+6. Confirm Cursor image consumption for each candidate model before adding its exact packaged-version and model ID to the profile table.
+7. Confirm Grok embedded-text consumption and provider-owned temporary-file cleanup.
+8. Confirm the largest accepted OpenCode and ACP request, up to Task Monki's 32 MiB cap.
+9. Install and qualify Claude Agent ACP before enabling either attachment kind.
+10. Measure provider-side attachment retention where the provider exposes it.
+
+Do not add a managed-path fallback when OpenCode or ACP inline delivery fails.
+Disable only the failed content kind, model, or encoded-size range with a clear reason.
+
+### Later milestone uncertainties
+
+1. Confirm OpenCode `--pure` and configuration precedence for the Design MCP bridge.
+2. Confirm image MCP results for each packaged ACP agent and selected model.
+3. Qualify Grok or Claude read-only support only after its packaged profile denies every repository mutation path.
+4. Record the exact provider-session deletion meaning for each adapter.
+5. Measure provider-side screenshot retention where documentation allows it.
 
 If a test fails, disable only the affected operation or model.
 Do not disable unrelated workflows for that provider.
@@ -981,7 +1453,7 @@ Do not disable unrelated workflows for that provider.
 
 ### T3 Code
 
-The inspected T3 Code revision was `018d7f2775daabd2ef07898af29586915a0b7f67`.
+The inspected T3 Code revision was `053affbed2659f90cd1b1efaaa7a75865c4131c7`.
 
 Useful patterns:
 
@@ -992,55 +1464,94 @@ Useful patterns:
 - app-owned MCP access uses short-lived session credentials.
 - idle providers and credentials have explicit cleanup.
 
-Do not copy one pattern.
-T3 Code has a large mandatory adapter contract.
-The same rollback method can mean native rollback, local transcript truncation, or no support.
+Do not copy its shared prompt path fallback.
+T3 adds attachment paths to shared prompt text and can also send native parts.
+This can deliver one file twice and hides transport outside the adapter.
+
+T3 also copies a pending upload when a thread claims it.
+Task Monki already has immutable staging and task ownership.
+Another copy adds disk writes without a current benefit.
+
+T3 has a large mandatory adapter contract.
 Task Monki must keep optional behavior explicit.
 
 ### OpenCode
 
-The inspected OpenCode revision was `df35e842f59bc115bb7c0479a8e11f017d443f2c`.
+The current inspected OpenCode revision was `dc4449df0d52199704ea4989a5a993ebbc605612`.
+Milestone 3 targets the installed `1.18.21` protocol.
 
 Useful patterns:
 
 - model input types qualify content delivery.
 - instructions and skills stay outside workflow code.
-- file parts and MCP resources use one message path.
+- file parts carry media type, safe name, and URL.
+- `data:` file parts deliver bytes without another Task Monki file.
 - cancellation settles active jobs and tools.
 - MCP lifecycle has one owner.
+
+OpenCode's managed `file:` path handler bypasses its current-directory check.
+Task Monki will use a verified `data:` file part instead.
 
 OpenCode is not a direct template for Task Monki.
 OpenCode owns its full model loop and transcript.
 Task Monki integrates several external agent runtimes with provider-owned sessions.
 
+### Continue
+
+The inspected Continue revision was `5522c6f44ca0ac3528b37244818fbfa39b5af470`.
+
+Continue keeps a small content union.
+Each provider converter owns its wire mapping.
+Its model capability has a real input-routing consumer.
+
+Task Monki will keep the same narrow principle.
+It will not copy Continue's LLM registry or model-name heuristics.
+
 ### Official protocol findings
 
-Codex App Server supports thread start, resume, fork, local images, skills, permissions, and dynamic client tools.
-ACP v1 supports content blocks, cancellation, session setup, and stdio MCP servers.
-Current ACP resume and content features remain capability-gated.
-OpenCode exposes sessions, prompt parts, abort, native fork, skills, and local MCP servers.
+Codex App Server accepts text, remote image, and `localImage` turn inputs.
+It has no generic native text-file input.
+It also supports thread start, resume, fork, interrupt, and restricted readable roots.
+
+ACP v1 makes text universal.
+It gates image and embedded-resource blocks through negotiated prompt capabilities.
+A resource link only names a resource that the agent can already access.
+
+The installed Cursor profile advertises image input but no embedded context.
+The installed Grok profile advertises embedded context but no image input.
+Current Claude Agent ACP source advertises both, but no packaged Claude profile is installed.
+
+OpenCode 1.18.21 accepts native file parts with `file:` or `data:` URLs.
+Provider-owned session history can retain the resolved content.
 
 These protocol features support one shared workflow layer with adapter-specific transport.
 
 ## Primary references
 
-- [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+- [Codex App Server](https://developers.openai.com/codex/app-server)
 - [ACP content](https://agentclientprotocol.com/protocol/v1/content)
+- [ACP initialization and capabilities](https://agentclientprotocol.com/protocol/v1/initialization)
 - [ACP session setup](https://agentclientprotocol.com/protocol/v1/session-setup)
 - [ACP prompt turns](https://agentclientprotocol.com/protocol/v1/prompt-turn)
 - [ACP cancellation](https://agentclientprotocol.com/protocol/v1/cancellation)
 - [ACP session delete](https://agentclientprotocol.com/protocol/v1/session-delete)
 - [OpenCode server](https://opencode.ai/docs/server/)
-- [OpenCode MCP servers](https://opencode.ai/docs/mcp-servers/)
-- [OpenCode skills](https://opencode.ai/docs/skills/)
-- [T3 Code provider source used](https://github.com/pingdotgg/t3code/tree/018d7f2775daabd2ef07898af29586915a0b7f67/apps/server/src/provider)
-- [OpenCode revision used](https://github.com/anomalyco/opencode/tree/df35e842f59bc115bb7c0479a8e11f017d443f2c)
-- [OpenCode prompt and file-part source used](https://github.com/anomalyco/opencode/blob/df35e842f59bc115bb7c0479a8e11f017d443f2c/packages/opencode/src/session/prompt.ts)
+- [OpenCode 1.18.21 file-part source](https://github.com/anomalyco/opencode/blob/v1.18.21/packages/opencode/src/session/prompt.ts)
+- [OpenCode current revision inspected](https://github.com/anomalyco/opencode/tree/dc4449df0d52199704ea4989a5a993ebbc605612)
+- [Cursor ACP](https://cursor.com/docs/cli/acp)
+- [Grok Build ACP source](https://github.com/xai-org/grok-build/blob/bc7f02eddd3d84085849dc19ed216f11c23b0571/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs)
+- [Claude Agent ACP source](https://github.com/agentclientprotocol/claude-agent-acp/tree/c3ff3438844f5249d6a7f5c297906e2cd3d5fa7f)
+- [T3 Code provider source used](https://github.com/pingdotgg/t3code/tree/053affbed2659f90cd1b1efaaa7a75865c4131c7/apps/server/src/provider)
+- [Continue source used](https://github.com/continuedev/continue/tree/5522c6f44ca0ac3528b37244818fbfa39b5af470)
 
 ## Final recommendation
 
-Keep the single runtime coordinator and runtime store from provider milestone 1.
-Next, add provider mappings for read-only turns, attachments, and the shared Design tool.
+Keep the single runtime coordinator and runtime store from provider milestones 1 and 2.
+Milestone 3 is ready to implement with the sequence and acceptance criteria above.
+Implement provider-neutral attachment delivery next.
+Then add the shared Design tool transport.
 
 This is the smallest clean path to broad provider support.
-It keeps lifecycle code in one place and preserves each workflow owner.
+It keeps lifecycle code in one place.
+It keeps file ownership in `AttachmentFileStore`.
+It keeps each wire transport inside its provider adapter.

@@ -2886,6 +2886,12 @@ button.tm-software-update:hover {
   color: var(--text);
 }
 
+.tm-agent-console__option:disabled {
+  background: transparent;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .app-shell[data-input-modality='keyboard'] .tm-agent-console__option:focus {
   background: var(--hover);
   color: var(--text);

@@ -48,6 +48,29 @@ export function openCodePermissionRules(
   ];
 }
 
+/**
+ * Provider-native policy for Task Monki read-only workflows. This policy does
+ * not confine the OpenCode process. It only denies mutation-capable OpenCode
+ * tools while leaving repository inspection available.
+ */
+export function openCodeReadOnlyPermissionRules(): OpenCodePermissionRule[] {
+  return [
+    { permission: '*', pattern: '*', action: 'deny' },
+    { permission: 'read', pattern: '*', action: 'allow' },
+    { permission: 'glob', pattern: '*', action: 'allow' },
+    { permission: 'grep', pattern: '*', action: 'allow' },
+    { permission: 'list', pattern: '*', action: 'allow' },
+    { permission: 'lsp', pattern: '*', action: 'allow' },
+    { permission: 'question', pattern: '*', action: 'deny' },
+    { permission: 'task', pattern: '*', action: 'deny' },
+    { permission: 'external_directory', pattern: '*', action: 'deny' },
+    { permission: 'edit', pattern: '*', action: 'deny' },
+    { permission: 'bash', pattern: '*', action: 'deny' },
+    { permission: 'webfetch', pattern: '*', action: 'deny' },
+    { permission: 'websearch', pattern: '*', action: 'deny' }
+  ];
+}
+
 /** OpenCode applies the last matching rule, so the desired suffix is effective. */
 export function openCodePermissionRulesEndWith(
   actual: readonly OpenCodePermissionRule[] | undefined,

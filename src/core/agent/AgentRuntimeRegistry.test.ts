@@ -108,6 +108,38 @@ describe('AgentRuntimeRegistry', () => {
     expect(incomplete.initialize).not.toHaveBeenCalled();
   });
 
+  it('rejects native mutation-denial claims without the shared turn lifecycle', async () => {
+    const incomplete = runtime('read-only-runtime');
+    const capabilities = unsupportedCapabilities('read-only-runtime');
+    capabilities.executionPolicy = {
+      defaultPresetId: 'read-only',
+      detail: 'Claims native mutation denial.',
+      presets: [
+        {
+          id: 'read-only',
+          label: 'Read only',
+          detail: 'Claims native mutation denial.',
+          sandbox: 'READ_ONLY',
+          repositoryMutation: 'DENY',
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          networkAccess: 'DISABLED'
+        }
+      ]
+    };
+    incomplete.capabilities = vi.fn().mockResolvedValue(capabilities);
+
+    const [failure] = await new AgentRuntimeRegistry(
+      [incomplete],
+      incomplete.descriptor.id
+    ).initializeAll();
+
+    expect(failure?.error.message).toContain(
+      'does not implement the shared read-only turn lifecycle'
+    );
+    expect(incomplete.initialize).not.toHaveBeenCalled();
+  });
+
   it('reports a surface isolation mismatch as an unsupported security policy', async () => {
     const adapter = runtime('opencode');
     const registry = new AgentRuntimeRegistry([adapter], 'opencode');
@@ -394,14 +426,15 @@ function unsupportedCapabilities(runtimeId: string): AgentRuntimeCapabilities {
 
 function testExecutionPolicy(): AgentRuntimeCapabilities['executionPolicy'] {
   return {
-    defaultPresetId: 'read-only',
+    defaultPresetId: 'standard',
     detail: 'Test policy.',
     presets: [
       {
-        id: 'read-only',
-        label: 'Read only',
-        detail: 'Test read-only policy.',
-        sandbox: 'READ_ONLY',
+        id: 'standard',
+        label: 'Standard',
+        detail: 'Test write-capable policy.',
+        sandbox: 'WORKSPACE_WRITE',
+        repositoryMutation: 'ALLOW',
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
         networkAccess: 'DISABLED'

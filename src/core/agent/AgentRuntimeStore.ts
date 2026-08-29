@@ -483,6 +483,7 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
         | 'terminalReason'
         | 'providerTerminalSource'
         | 'contextFreshnessAtCompletion'
+        | 'repositoryIntegrity'
         | 'finalArtifactId'
         | 'startedAt'
         | 'stopRequestedAt'
@@ -584,6 +585,12 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
     queueEntryCount: number;
   }>;
   purgeTask(taskId: string): Promise<{
+    sessionCount: number;
+    runCount: number;
+    artifactCount: number;
+    queueEntryCount: number;
+  }>;
+  purgePromptRefinement(requestId: string): Promise<{
     sessionCount: number;
     runCount: number;
     artifactCount: number;

@@ -1090,6 +1090,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         | 'terminalReason'
         | 'providerTerminalSource'
         | 'contextFreshnessAtCompletion'
+        | 'repositoryIntegrity'
         | 'finalArtifactId'
         | 'startedAt'
         | 'stopRequestedAt'
@@ -2506,65 +2507,11 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     queueEntryCount: number;
   }> {
     requireSafeId(conversationId, 'conversation id');
-    const result = await this.mutate((draft) => {
-      const ownsConversation = (owner: AgentOwnerScope | undefined) =>
-        owner?.kind === 'DISCOURSE' && owner.conversationId === conversationId;
-      const sessions = draft.sessions.filter((session) => ownsConversation(session.owner));
-      const sessionIds = new Set(sessions.map((session) => session.id));
-      const runs = draft.runs.filter(
-        (run) => ownsConversation(run.owner) || sessionIds.has(run.sessionId)
-      );
-      const runIds = new Set(runs.map((run) => run.id));
-      const queueEntries = draft.queueEntries.filter((entry) => runIds.has(entry.runId));
-      if (runs.some((run) => !isTerminalRuntimeStatus(run.status))) {
-        throw new Error(
-          'Agent runtime conversation cannot be purged while a run still needs settlement.'
-        );
-      }
-      if (
-        queueEntries.some(
-          (entry) => entry.status !== 'SETTLED' && entry.status !== 'CANCELED'
-        )
-      ) {
-        throw new Error(
-          'Agent runtime conversation cannot be purged while scheduler work is active.'
-        );
-      }
-      const artifacts = draft.artifacts.filter((artifact) => runIds.has(artifact.runId));
-      const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
-      const queueEntryIds = new Set(queueEntries.map((entry) => entry.id));
-      draft.sessions = draft.sessions.filter((session) => !sessionIds.has(session.id));
-      draft.runs = draft.runs.filter((run) => !runIds.has(run.id));
-      draft.queueEntries = draft.queueEntries.filter(
-        (entry) => !queueEntryIds.has(entry.id)
-      );
-      draft.artifacts = draft.artifacts.filter(
-        (artifact) => !artifactIds.has(artifact.id)
-      );
-      draft.telemetryRecords = draft.telemetryRecords.filter(
-        (record) =>
-          !ownsConversation(record.owner) &&
-          !(record.sessionId && sessionIds.has(record.sessionId)) &&
-          !(record.runId && runIds.has(record.runId))
-      );
-      purgeTypedRecords(draft, sessionIds, runIds, ownsConversation);
-      draft.events = draft.events.filter(
-        (event) =>
-          !ownsConversation(event.owner) &&
-          !(event.sessionId && sessionIds.has(event.sessionId)) &&
-          !(event.runId && runIds.has(event.runId)) &&
-          !(event.queueEntryId && queueEntryIds.has(event.queueEntryId)) &&
-          !(event.artifactId && artifactIds.has(event.artifactId))
-      );
-      return {
-        sessionCount: sessions.length,
-        runCount: runs.length,
-        artifactCount: artifacts.length,
-        queueEntryCount: queueEntries.length
-      };
-    }, true);
-    await this.cleanupUnreferencedArtifactFiles();
-    return result;
+    return this.purgeRuntimeOwner(
+      (owner) =>
+        owner?.kind === 'DISCOURSE' && owner.conversationId === conversationId,
+      'conversation'
+    );
   }
 
   async purgeTask(taskId: string): Promise<{
@@ -2574,25 +2521,56 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     queueEntryCount: number;
   }> {
     requireSafeId(taskId, 'task id');
+    return this.purgeRuntimeOwner(
+      (owner) => owner?.kind === 'TASK' && owner.taskId === taskId,
+      'task'
+    );
+  }
+
+  async purgePromptRefinement(requestId: string): Promise<{
+    sessionCount: number;
+    runCount: number;
+    artifactCount: number;
+    queueEntryCount: number;
+  }> {
+    requireSafeId(requestId, 'prompt-refinement request id');
+    return this.purgeRuntimeOwner(
+      (owner) =>
+        owner?.kind === 'PROMPT_REFINEMENT' && owner.requestId === requestId,
+      'prompt refinement'
+    );
+  }
+
+  private async purgeRuntimeOwner(
+    owns: (owner: AgentOwnerScope | undefined) => boolean,
+    label: string
+  ): Promise<{
+    sessionCount: number;
+    runCount: number;
+    artifactCount: number;
+    queueEntryCount: number;
+  }> {
     const result = await this.mutate((draft) => {
-      const ownsTask = (owner: AgentOwnerScope | undefined) =>
-        owner?.kind === 'TASK' && owner.taskId === taskId;
-      const sessions = draft.sessions.filter((session) => ownsTask(session.owner));
+      const sessions = draft.sessions.filter((session) => owns(session.owner));
       const sessionIds = new Set(sessions.map((session) => session.id));
       const runs = draft.runs.filter(
-        (run) => ownsTask(run.owner) || sessionIds.has(run.sessionId)
+        (run) => owns(run.owner) || sessionIds.has(run.sessionId)
       );
       const runIds = new Set(runs.map((run) => run.id));
       const queueEntries = draft.queueEntries.filter((entry) => runIds.has(entry.runId));
       if (runs.some((run) => !isTerminalRuntimeStatus(run.status))) {
-        throw new Error('Agent runtime task cannot be purged while a run needs settlement.');
+        throw new Error(
+          `Agent runtime ${label} cannot be purged while a run still needs settlement.`
+        );
       }
       if (
         queueEntries.some(
           (entry) => entry.status !== 'SETTLED' && entry.status !== 'CANCELED'
         )
       ) {
-        throw new Error('Agent runtime task cannot be purged while scheduler work is active.');
+        throw new Error(
+          `Agent runtime ${label} cannot be purged while scheduler work is active.`
+        );
       }
       const artifacts = draft.artifacts.filter((artifact) => runIds.has(artifact.runId));
       const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
@@ -2607,14 +2585,14 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       );
       draft.telemetryRecords = draft.telemetryRecords.filter(
         (record) =>
-          !ownsTask(record.owner) &&
+          !owns(record.owner) &&
           !(record.sessionId && sessionIds.has(record.sessionId)) &&
           !(record.runId && runIds.has(record.runId))
       );
-      purgeTypedRecords(draft, sessionIds, runIds, ownsTask);
+      purgeTypedRecords(draft, sessionIds, runIds, owns);
       draft.events = draft.events.filter(
         (event) =>
-          !ownsTask(event.owner) &&
+          !owns(event.owner) &&
           !(event.sessionId && sessionIds.has(event.sessionId)) &&
           !(event.runId && runIds.has(event.runId)) &&
           !(event.queueEntryId && queueEntryIds.has(event.queueEntryId)) &&
@@ -5068,6 +5046,23 @@ function assertRuntimeRunLifecycle(run: AgentRuntimeRunRecord): void {
   }
   if (run.status === 'INTERRUPTING' && !run.stopRequestedAt) {
     throw new Error('Interrupting agent runtime work requires durable stop intent.');
+  }
+  if (run.repositoryIntegrity) {
+    if (
+      run.repositoryIntegrity.beforeFingerprint !== undefined &&
+      !HASH.test(run.repositoryIntegrity.beforeFingerprint)
+    ) {
+      throw new Error('Read-only repository evidence requires a valid before fingerprint.');
+    }
+    if (
+      run.repositoryIntegrity.afterFingerprint !== undefined &&
+      !HASH.test(run.repositoryIntegrity.afterFingerprint)
+    ) {
+      throw new Error('Read-only repository evidence requires a valid after fingerprint.');
+    }
+    if (run.repositoryIntegrity.checkedAt !== undefined) {
+      requireTimestamp(run.repositoryIntegrity.checkedAt);
+    }
   }
 }
 

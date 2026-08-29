@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentInteractionService } from '../AgentInteractionService';
+import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
 import type {
@@ -131,6 +132,7 @@ async function createTestAgentSession(
     executionContext: {
       attestation: { status: 'ATTESTED' },
       primaryCwd: input.worktree.worktreePath,
+      repositoryAccess: 'WRITE',
       readRoots: [{
         canonicalPath: input.worktree.worktreePath,
         kind: 'WORKTREE',
@@ -263,6 +265,320 @@ function createTestAgentServer(
 }
 
 describe('AcpRuntimeAdapter end-to-end', () => {
+  it('fences unconfirmed shared read-only cancellation before recovery is visible', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-read-only-runtime-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'read-only-agent.cjs');
+    const messageLog = path.join(directory, 'messages.jsonl');
+    await fs.writeFile(agentScript, readOnlyRuntimeAgentSource(messageLog), {
+      mode: 0o600
+    });
+    const runtimeId = 'test-acp-read-only-runtime';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      readOnlyTurnPolicy: {
+        modeId: 'ask',
+        policyId: 'test-acp/ask-read-only@v1',
+        detail: 'Test Ask mode denies repository mutation.'
+      },
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const fixture = runtimeFixture(store);
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 1_000,
+      interruptCompletionTimeoutMs: 25,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const owner = {
+      kind: 'PROMPT_REFINEMENT' as const,
+      requestId: randomUUID()
+    };
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider'
+    };
+    const context = await adapter.buildExecutionContext({
+      sessionId,
+      primaryCwd: directory,
+      readRoots: [{ canonicalPath: directory, kind: 'EMPTY_MANAGED' }],
+      modelSettings: settings,
+      clientOperationId: `read-only-context:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await fixture.runtimeStore.prepareRuntimeTurn({
+      session: {
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId,
+          model: 'default',
+          executionContext: context
+        }),
+        executionContext: context,
+        clientOperationId: `read-only-session:${sessionId}`,
+        runtimeId,
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: context.modelSettings
+      },
+      run: {
+        id: runId,
+        owner,
+        scope: { kind: 'PROMPT_REFINEMENT', requestId: owner.requestId },
+        sessionId,
+        sessionAccessEpoch: 1,
+        purpose: 'PROMPT_REFINEMENT',
+        generationKey: `read-only:${runId}`,
+        clientOperationId: `read-only-run:${runId}`,
+        requestedSettings: context.modelSettings,
+        promptArtifactId: `prompt-${runId}`,
+        outputArtifactId: `output-${runId}`,
+        diagnosticArtifactId: `diagnostic-${runId}`
+      },
+      prompt: 'Refine this prompt without changing files.',
+      priority: 'TASK_FOREGROUND',
+      queueOperationId: `read-only-queue:${runId}`
+    });
+    const events: import('../AgentRuntimeCoordinator').AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = adapter.onRuntimeTurnEvent((event) => events.push(event));
+    try {
+      await adapter.initialize();
+      const startingRun = await fixture.runtimeStore.updateRun(
+        prepared.run.id,
+        prepared.run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: new Date().toISOString()
+        },
+        `read-only-starting:${runId}`
+      );
+      await adapter.startRuntimeTurn({
+        session: prepared.session,
+        run: startingRun,
+        executionContext: context,
+        prompt: 'Refine this prompt without changing files.',
+        attachments: []
+      });
+      const completed = await waitFor(async () => {
+        const run = await fixture.runtimeStore.getRun(runId);
+        return run?.status === 'COMPLETED' ? run : undefined;
+      });
+      await expect(fixture.runtimeStore.readArtifact(completed.outputArtifactId)).resolves.toBe(
+        'Read-only answer.'
+      );
+      await expect(
+        fixture.runtimeStore.readArtifact(completed.diagnosticArtifactId)
+      ).resolves.toContain('denied an ACP permission request');
+      await waitFor(async () =>
+        events.some((event) => event.type === 'TERMINAL' && event.runId === runId)
+          ? true
+          : undefined
+      );
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'DELTA', runId, text: 'Read-only answer.' }),
+          expect.objectContaining({ type: 'TERMINAL', runId, status: 'completed' })
+        ])
+      );
+      const messages = await readProtocolMessagesFromLog(messageLog);
+      expect(messages.findIndex((message) => message.method === 'session/set_mode')).toBeLessThan(
+        messages.findIndex((message) => message.method === 'session/prompt')
+      );
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          id: 'permission-1',
+          result: {
+            outcome: { outcome: 'selected', optionId: 'reject-once' }
+          }
+        })
+      );
+
+      const cancellationSessionId = randomUUID();
+      const cancellationRunId = randomUUID();
+      const cancellationOwner = {
+        kind: 'PROMPT_REFINEMENT' as const,
+        requestId: randomUUID()
+      };
+      const cancellationPrompt =
+        'wait for cancellation without returning a terminal response';
+      const cancellationContext = await adapter.buildExecutionContext({
+        sessionId: cancellationSessionId,
+        primaryCwd: directory,
+        readRoots: [{ canonicalPath: directory, kind: 'EMPTY_MANAGED' }],
+        modelSettings: settings,
+        clientOperationId: `read-only-context:${cancellationSessionId}`,
+        attachments: []
+      });
+      const cancellationPrepared = await fixture.runtimeStore.prepareRuntimeTurn({
+        session: {
+          id: cancellationSessionId,
+          owner: cancellationOwner,
+          accessEpoch: createAgentSessionAccessEpoch({
+            owner: cancellationOwner,
+            sessionId: cancellationSessionId,
+            epoch: 1,
+            runtimeId,
+            model: 'default',
+            executionContext: cancellationContext
+          }),
+          executionContext: cancellationContext,
+          clientOperationId: `read-only-session:${cancellationSessionId}`,
+          runtimeId,
+          role: 'PRIMARY',
+          relationshipState: 'ROOT',
+          status: 'NOT_MATERIALIZED',
+          materialized: false,
+          requestedSettings: cancellationContext.modelSettings
+        },
+        run: {
+          id: cancellationRunId,
+          owner: cancellationOwner,
+          scope: {
+            kind: 'PROMPT_REFINEMENT',
+            requestId: cancellationOwner.requestId
+          },
+          sessionId: cancellationSessionId,
+          sessionAccessEpoch: 1,
+          purpose: 'PROMPT_REFINEMENT',
+          generationKey: `read-only:${cancellationRunId}`,
+          clientOperationId: `read-only-run:${cancellationRunId}`,
+          requestedSettings: cancellationContext.modelSettings,
+          promptArtifactId: `prompt-${cancellationRunId}`,
+          outputArtifactId: `output-${cancellationRunId}`,
+          diagnosticArtifactId: `diagnostic-${cancellationRunId}`
+        },
+        prompt: cancellationPrompt,
+        priority: 'TASK_FOREGROUND',
+        queueOperationId: `read-only-queue:${cancellationRunId}`
+      });
+      const cancellationStarting = await fixture.runtimeStore.updateRun(
+        cancellationPrepared.run.id,
+        cancellationPrepared.run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: new Date().toISOString()
+        },
+        `read-only-starting:${cancellationRunId}`
+      );
+      const currentSession = await fixture.runtimeStore.getSession(
+        cancellationSessionId
+      );
+      if (!currentSession) throw new Error('Expected the shared ACP session to exist.');
+      await adapter.startRuntimeTurn({
+        session: currentSession,
+        run: cancellationStarting,
+        executionContext: cancellationContext,
+        prompt: cancellationPrompt,
+        attachments: []
+      });
+      const acknowledged = await waitFor(async () => {
+        const run = await fixture.runtimeStore.getRun(cancellationRunId);
+        return run?.status === 'RUNNING' && run.providerTurnId ? run : undefined;
+      });
+      const activeSession = await fixture.runtimeStore.getSession(
+        cancellationSessionId
+      );
+      if (!activeSession) throw new Error('Expected the active shared ACP session to exist.');
+      const interrupting = await fixture.runtimeStore.updateRun(
+        acknowledged.id,
+        acknowledged.recordRevision,
+        {
+          status: 'INTERRUPTING',
+          interruptDelivery: 'SENDING',
+          stopRequestedAt: new Date().toISOString()
+        },
+        `read-only-interrupting:${cancellationRunId}`
+      );
+
+      const runtimeInternals = adapter as unknown as {
+        quarantineRuntimeGeneration(reason: string, drainInbound: boolean): Promise<void>;
+      };
+      const quarantineRuntimeGeneration =
+        runtimeInternals.quarantineRuntimeGeneration.bind(runtimeInternals);
+      let quarantineEntered = false;
+      let releaseQuarantine = () => {};
+      const quarantineGate = new Promise<void>((resolve) => {
+        releaseQuarantine = resolve;
+      });
+      const quarantineSpy = vi
+        .spyOn(runtimeInternals, 'quarantineRuntimeGeneration')
+        .mockImplementation(async (reason, drainInbound) => {
+          quarantineEntered = true;
+          await quarantineGate;
+          await quarantineRuntimeGeneration(reason, drainInbound);
+        });
+      try {
+        await adapter.interruptRuntimeTurn({
+          session: activeSession,
+          run: interrupting
+        });
+        await waitFor(async () => (quarantineEntered ? true : undefined));
+        expect(
+          events.some(
+            (event) =>
+              event.type === 'RECOVERY_REQUIRED' && event.runId === cancellationRunId
+          )
+        ).toBe(false);
+
+        releaseQuarantine();
+        const recovered = await waitFor(async () => {
+          const [run, snapshot] = await Promise.all([
+            fixture.runtimeStore.getRun(cancellationRunId),
+            fixture.runtimeStore.snapshot()
+          ]);
+          const processStopped = !snapshot.servers.some((server) =>
+            ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(
+              server.status
+            )
+          );
+          const recoveryEmitted = events.some(
+            (event) =>
+              event.type === 'RECOVERY_REQUIRED' && event.runId === cancellationRunId
+          );
+          return run?.status === 'RECOVERY_REQUIRED' &&
+            processStopped &&
+            recoveryEmitted
+            ? run
+            : undefined;
+        });
+        expect(recovered.interruptDelivery).toBe('AMBIGUOUS');
+      } finally {
+        releaseQuarantine();
+        quarantineSpy.mockRestore();
+      }
+    } finally {
+      unsubscribe();
+      await adapter.shutdown();
+    }
+  });
+
   it.each([
     {
       catalog: 'missing',
@@ -3825,6 +4141,16 @@ async function readProtocolMessages(
     .map((line) => JSON.parse(JSON.parse(line).raw) as Record<string, unknown>);
 }
 
+async function readProtocolMessagesFromLog(
+  messageLog: string
+): Promise<Array<Record<string, unknown>>> {
+  return (await fs.readFile(messageLog, 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 async function createPermissionHarness(input: {
   runtimeId: string;
   approvalPolicy: 'on-request' | 'auto-accept-edits' | 'never';
@@ -4253,6 +4579,84 @@ input.on('line', (line) => {
     return;
   }
   send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
+}
+
+function readOnlyRuntimeAgentSource(messageLog: string): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+const record = (message) => fs.appendFileSync(
+  ${JSON.stringify(messageLog)},
+  JSON.stringify(message) + '\\n'
+);
+let promptId;
+let nextSessionId = 0;
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  record(message);
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {}, sessionCapabilities: { close: {} } },
+      agentInfo: { name: 'read-only-runtime-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    nextSessionId += 1;
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: 'read-only-runtime-session-' + nextSessionId,
+      modes: {
+        currentModeId: 'agent',
+        availableModes: [
+          { id: 'agent', name: 'Agent' },
+          { id: 'ask', name: 'Ask' }
+        ]
+      }
+    }});
+    return;
+  }
+  if (message.method === 'session/set_mode') {
+    send({ jsonrpc: '2.0', id: message.id, result: {} });
+    return;
+  }
+  if (message.method === 'session/prompt') {
+    promptId = message.id;
+    if (JSON.stringify(message.params.prompt).includes('wait for cancellation')) {
+      return;
+    }
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: message.params.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'answer-1',
+        content: { type: 'text', text: 'Read-only answer.' }
+      }
+    }});
+    send({ jsonrpc: '2.0', id: 'permission-1', method: 'session/request_permission', params: {
+      sessionId: message.params.sessionId,
+      toolCall: { toolCallId: 'write-1', kind: 'edit', title: 'Edit a file' },
+      options: [
+        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'reject-once', name: 'Reject once', kind: 'reject_once' }
+      ]
+    }});
+    return;
+  }
+  if (message.id === 'permission-1' && message.result) {
+    send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
+    return;
+  }
+  if (message.method === 'session/cancel') {
+    return;
+  }
+  if (message.method === 'session/close') {
+    send({ jsonrpc: '2.0', id: message.id, result: {} });
+  }
 });
 `;
 }

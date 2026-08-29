@@ -3257,6 +3257,7 @@ async function createTestAgentSession(
     requestedSettings,
     executionContext: {
       attestation: { status: 'ATTESTED' },
+      repositoryAccess: 'WRITE',
       primaryCwd: input.worktree.worktreePath,
       readRoots: [{
         canonicalPath: input.worktree.worktreePath,

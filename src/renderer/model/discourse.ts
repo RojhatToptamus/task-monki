@@ -297,7 +297,7 @@ export function discourseAgentSelectionFromCurrentRevision(
     (candidate) =>
       candidate.runtimeId === revision.runtimeId &&
       candidate.model === revision.model &&
-      (candidate.modelProvider ?? candidate.runtimeId) === revision.modelProvider
+      candidate.modelProvider === revision.modelProvider
   );
   return {
     agentProfileId,

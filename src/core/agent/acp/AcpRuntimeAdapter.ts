@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import type {
   AgentCommandApprovalDecision,
   AgentExecutionSettings,
@@ -17,17 +18,23 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../../shared/contracts';
-import { AGENT_RUNTIME_LIMITS } from '../../../shared/agentRuntime';
+import {
+  AGENT_RUNTIME_LIMITS,
+  type AgentExecutionContext,
+  type AgentRuntimeRunRecord,
+  type AgentRuntimeSessionRecord
+} from '../../../shared/agentRuntime';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
 import type {
-  AgentProviderRuntimeStore,
+  AgentRuntimeStore,
   TaskAgentRuntimeAccess
 } from '../AgentRuntimeStore';
 import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
+  AgentRuntimeDeliveryError,
   type AgentInteractionResponse,
   type AgentReconciliationResult,
   type AgentRuntimeAdapter,
@@ -37,8 +44,14 @@ import {
   type InterruptAgentTurn,
   type ResolveAgentExecution,
   type ResolvedAgentExecution,
+  type StartAgentRuntimeTurn,
+  type StartedAgentRuntimeTurn,
   type StartAgentTurn
 } from '../AgentRuntimeAdapter';
+import type {
+  AgentRuntimeTurnEvent,
+  BuildAgentRuntimeExecutionContextInput
+} from '../AgentRuntimeCoordinator';
 import {
   REDACTED_CREDENTIAL,
   redactCredentialText,
@@ -57,10 +70,6 @@ import {
   type AgentTurnAttachment
 } from '../AgentAttachmentDelivery';
 import { interactionTerminalStatus } from '../AgentInteractionPolicy';
-import {
-  agentReviewStatusFromResult,
-  parseAgentReviewResult
-} from '../../review/AgentReviewContract';
 import {
   ACP_MAX_MESSAGE_BYTES,
   flattenSelectOptions,
@@ -201,6 +210,17 @@ interface AcpRunStreamBuffer {
   timer?: NodeJS.Timeout;
 }
 
+interface AcpRuntimeOutputBuffer {
+  chunks: string[];
+  byteCount: number;
+  firstSequence: number;
+  lastSequence: number;
+  serverInstanceId: string;
+  credentialCarry: string;
+  truncated: boolean;
+  timer?: NodeJS.Timeout;
+}
+
 interface BufferedAcpCredentialCarry {
   text: string;
   messageId: string;
@@ -217,6 +237,11 @@ interface AppliedAcpSessionSettings {
    * define that response as an authoritative settings observation.
    */
   finalMutationResponse?: AgentProtocolMessageReference;
+}
+
+interface ActiveAcpRuntimeTarget {
+  session: AgentRuntimeSessionRecord;
+  run: AgentRuntimeRunRecord;
 }
 
 type BufferedAcpStartupEvent =
@@ -280,6 +305,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private provisionalProviderSessionIds = new Map<string, string>();
   private replayingProviderSessionIds = new Set<string>();
   private streamBuffers = new Map<string, AcpRunStreamBuffer>();
+  private runtimeOutputBuffers = new Map<string, AcpRuntimeOutputBuffer>();
+  private activeRuntimePromptRunIds = new Set<string>();
+  private readonly runtimeTurnListeners = new Set<
+    (event: AgentRuntimeTurnEvent) => void
+  >();
   private readonly interruptCompletionTimeoutMs: number;
   private configuredExecutable?: string;
   private runtimeReconfigurationPending = false;
@@ -294,7 +324,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   constructor(
     private readonly taskRuntime: TaskAgentRuntimeAccess,
-    private readonly providerRuntime: AgentProviderRuntimeStore,
+    private readonly providerRuntime: AgentRuntimeStore,
     private readonly appEvents: AppEventBus,
     readonly profile: AcpRuntimeProfile,
     private readonly options: AcpRuntimeAdapterOptions
@@ -383,6 +413,53 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await this.ensureClient();
     }
     return structuredClone(this.models);
+  }
+
+  async buildExecutionContext(
+    input: BuildAgentRuntimeExecutionContextInput
+  ): Promise<AgentExecutionContext> {
+    assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments ?? []);
+    const policy = requireAcpReadOnlyTurnPolicy(this.profile);
+    const primaryCwd = path.resolve(input.primaryCwd);
+    const readRoots = input.readRoots
+      .map((root) => ({ ...root, canonicalPath: path.resolve(root.canonicalPath) }))
+      .sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath));
+    const modelSettings = acpReadOnlyExecutionSettings(
+      this.profile,
+      input.modelSettings
+    );
+    assertAcpExecutionPolicy(this.profile, modelSettings);
+    return {
+      attestation: { status: 'ATTESTED' },
+      primaryCwd,
+      repositoryAccess: 'READ_ONLY',
+      readRoots,
+      managedAttachments: [],
+      permissionProfileHash: acpReadOnlyProfileHash({
+        runtimeId: this.descriptor.id,
+        sessionId: input.sessionId,
+        policyId: policy.policyId,
+        primaryCwd,
+        readRoots,
+        modelSettings
+      }),
+      modelSettings,
+      externalTools: {
+        // The ACP process needs provider network access. No web, MCP, app, or
+        // client tool is exposed by Task Monki for this turn.
+        network: true,
+        webSearch: 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: input.clientOperationId
+    };
+  }
+
+  onRuntimeTurnEvent(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
+    this.runtimeTurnListeners.add(listener);
+    return () => this.runtimeTurnListeners.delete(listener);
   }
 
   async discoverModels(): Promise<void> {
@@ -673,14 +750,18 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
     assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments);
-    assertAcpExecutionPolicy(this.profile, input.settings);
+    const requestedSettings = normalizeAcpReadOnlyExecutionSettings(
+      this.profile,
+      input.settings
+    );
+    assertAcpExecutionPolicy(this.profile, requestedSettings);
     if (
-      (input.settings.model &&
-        !isSafeProviderIdentifier(input.settings.model, this.sensitiveValues)) ||
-      (input.settings.modelProvider &&
-        !isSafeProviderIdentifier(input.settings.modelProvider, this.sensitiveValues)) ||
-      (input.settings.reasoningEffort &&
-        !isSafeProviderIdentifier(input.settings.reasoningEffort, this.sensitiveValues))
+      (requestedSettings.model &&
+        !isSafeProviderIdentifier(requestedSettings.model, this.sensitiveValues)) ||
+      (requestedSettings.modelProvider &&
+        !isSafeProviderIdentifier(requestedSettings.modelProvider, this.sensitiveValues)) ||
+      (requestedSettings.reasoningEffort &&
+        !isSafeProviderIdentifier(requestedSettings.reasoningEffort, this.sensitiveValues))
     ) {
       throw new Error(
         'ACP rejected a model selection whose operational identifier matches a runtime credential.'
@@ -697,8 +778,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       // or malformed provider catalog can never become an executable fallback.
       await this.ensureClient();
     }
-    const requestedModel = input.settings.model;
-    const requestedProvider = input.settings.modelProvider;
+    const requestedModel = requestedSettings.model;
+    const requestedProvider = requestedSettings.modelProvider;
     const extensionCatalogContract =
       modelExtension?.initializeResponseMetaField && this.profileModelState
         ? modelExtension
@@ -755,14 +836,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       // native values instead of rejecting a valid provider-specific choice.
       model = {
         ...model,
-        id: `${this.descriptor.id}:${input.settings.modelProvider ?? this.profile.defaultModelProvider}/${requestedModel}`,
+        id: `${this.descriptor.id}:${requestedSettings.modelProvider ?? this.profile.defaultModelProvider}/${requestedModel}`,
         model: requestedModel,
         displayName: requestedModel,
         isDefault: false,
         native: { source: 'explicit-runtime-setting' }
       };
     }
-    const reasoningEffort = input.settings.reasoningEffort;
+    const reasoningEffort = requestedSettings.reasoningEffort;
     if (
       reasoningEffort &&
       (authoritativeCatalog || model.supportedReasoningEfforts.length > 0) &&
@@ -772,15 +853,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         `${this.descriptor.displayName} model ${model.model} does not advertise reasoning effort ${reasoningEffort}.`
       );
     }
-    const settings: AgentExecutionSettings = {
-      ...input.settings,
+    const settings = normalizeAcpReadOnlyExecutionSettings(this.profile, {
+      ...requestedSettings,
       runtimeId: this.descriptor.id,
       model: model.model,
       modelProvider: authoritativeCatalog
         ? model.modelProvider
-        : input.settings.modelProvider ?? model.modelProvider,
+        : requestedSettings.modelProvider ?? model.modelProvider,
       reasoningEffort
-    };
+    });
     return { settings, model };
   }
 
@@ -815,13 +896,28 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       });
     }
 
+    const created = await this.createNativeSession(input.worktreePath);
+    return this.completeCreatedSession(
+      local,
+      created.state,
+      input.settings,
+      created.client,
+      created.raw
+    );
+  }
+
+  private async createNativeSession(cwd: string): Promise<{
+    client: AcpRpcClient;
+    state: AcpNativeSessionState;
+    raw: AgentProtocolMessageReference;
+  }> {
     const client = await this.ensureClient();
     let response: AcpRpcResult<unknown>;
     try {
       response = await this.requestBoundedMutation(
         client,
         'session/new',
-        { cwd: input.worktreePath, mcpServers: [] },
+        { cwd, mcpServers: [] },
         'The provider may have created a session, but its identity was not confirmed.'
       );
     } catch (cause) {
@@ -829,11 +925,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       this.setSessionFailurePreflight(error);
       throw error;
     }
-    let setup: ReturnType<typeof parseNewSessionResponse>;
-    let models: AcpNativeSessionState['models'];
+    let state: AcpNativeSessionState;
     try {
-      setup = parseNewSessionResponse(response.result);
-      models = this.parseSessionModels(response.result);
+      const setup = parseNewSessionResponse(response.result);
+      state = normalizeAcpOperationalSession({
+        sessionId: setup.sessionId,
+        modes: setup.modes ?? null,
+        models: this.parseSessionModels(response.result),
+        configOptions: setup.configOptions ?? []
+      });
     } catch (cause) {
       const error = new AcpSessionContractError(
         'session/new',
@@ -846,13 +946,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       this.setSessionFailurePreflight(error);
       throw error;
     }
-    let state: AcpNativeSessionState = {
-      sessionId: setup.sessionId,
-      modes: setup.modes ?? null,
-      models,
-      configOptions: setup.configOptions ?? []
-    };
-    state = normalizeAcpOperationalSession(state);
     if (!isSafeProviderIdentifier(state.sessionId, this.sensitiveValues)) {
       const error = new AcpSessionContractError(
         'session/new',
@@ -866,7 +959,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       throw error;
     }
     this.nativeSessions.set(state.sessionId, state);
-    return this.completeCreatedSession(local, state, input.settings, client, response.raw);
+    return { client, state, raw: response.raw };
   }
 
   private async completeCreatedSession(
@@ -994,62 +1087,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       return stored;
     }
 
-    const client = await this.ensureClient();
-    const capabilities = this.initializeResponse?.agentCapabilities;
-    const method = capabilities?.sessionCapabilities?.resume
-      ? 'session/resume'
-      : capabilities?.loadSession
-        ? 'session/load'
-        : undefined;
-    if (!method) {
-      throw new AgentProviderSessionMissingError(
-        'session/attach',
-        `${this.descriptor.displayName} advertised neither ACP session/resume nor session/load.`
-      );
-    }
-    let response: AcpRpcResult<unknown>;
-    if (method === 'session/load') this.replayingProviderSessionIds.add(providerSessionId);
-    try {
-      response = await this.requestBoundedMutation(client, method, {
-        sessionId: providerSessionId,
-        cwd: session.worktreePath,
-        mcpServers: []
-      }, `The outcome of loading provider session ${providerSessionId} could not be confirmed.`);
-    } catch (cause) {
-      const error = mapMutationError(method, cause);
-      this.setSessionFailurePreflight(error);
-      throw error;
-    } finally {
-      // session/load streams historical session/update records before its
-      // response. Drain already-enqueued updates while the replay guard is set
-      // so history cannot be mistaken for output from an ambiguous live run.
-      await this.inboundQueue;
-      this.replayingProviderSessionIds.delete(providerSessionId);
-    }
-    let setup: ReturnType<typeof parseSessionSetupResponse>;
-    let models: AcpNativeSessionState['models'];
-    try {
-      setup = parseSessionSetupResponse(response.result);
-      models = this.parseSessionModels(response.result);
-    } catch (cause) {
-      const error = new AcpSessionContractError(
-        method,
-        `${this.descriptor.displayName} returned an invalid ACP ${method} response: ${errorMessage(cause)}`
-      );
-      await this.quarantineRuntimeAfterAmbiguousMutation(
-        method,
-        `Provider session ${providerSessionId} could not be authoritatively loaded from the response.`
-      );
-      this.setSessionFailurePreflight(error);
-      throw error;
-    }
-    const state = normalizeAcpOperationalSession({
-      sessionId: providerSessionId,
-      modes: setup.modes ?? null,
-      models,
-      configOptions: setup.configOptions ?? []
-    });
-    this.nativeSessions.set(providerSessionId, state);
+    const loaded = await this.loadNativeSession(providerSessionId, session.worktreePath);
+    const { state, response } = loaded;
     const observedSettings = this.projectObservedSettings(
       state,
       session.requestedSettings
@@ -1073,12 +1112,84 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     return stored;
   }
 
+  private async loadNativeSession(
+    providerSessionId: string,
+    cwd: string
+  ): Promise<{
+    client: AcpRpcClient;
+    state: AcpNativeSessionState;
+    method: 'session/resume' | 'session/load';
+    response: AcpRpcResult<unknown>;
+  }> {
+    const client = await this.ensureClient();
+    const capabilities = this.initializeResponse?.agentCapabilities;
+    const method = capabilities?.sessionCapabilities?.resume
+      ? 'session/resume'
+      : capabilities?.loadSession
+        ? 'session/load'
+        : undefined;
+    if (!method) {
+      throw new AgentProviderSessionMissingError(
+        'session/attach',
+        `${this.descriptor.displayName} advertised neither ACP session/resume nor session/load.`
+      );
+    }
+    let response: AcpRpcResult<unknown>;
+    if (method === 'session/load') this.replayingProviderSessionIds.add(providerSessionId);
+    try {
+      response = await this.requestBoundedMutation(
+        client,
+        method,
+        { sessionId: providerSessionId, cwd, mcpServers: [] },
+        `The outcome of loading provider session ${providerSessionId} could not be confirmed.`
+      );
+    } catch (cause) {
+      const error = mapMutationError(method, cause);
+      this.setSessionFailurePreflight(error);
+      throw error;
+    } finally {
+      // session/load streams historical session/update records before its
+      // response. Drain already-enqueued updates while the replay guard is set
+      // so history cannot be mistaken for output from a live run.
+      await this.inboundQueue;
+      this.replayingProviderSessionIds.delete(providerSessionId);
+    }
+    let state: AcpNativeSessionState;
+    try {
+      const setup = parseSessionSetupResponse(response.result);
+      state = normalizeAcpOperationalSession({
+        sessionId: providerSessionId,
+        modes: setup.modes ?? null,
+        models: this.parseSessionModels(response.result),
+        configOptions: setup.configOptions ?? []
+      });
+    } catch (cause) {
+      const error = new AcpSessionContractError(
+        method,
+        `${this.descriptor.displayName} returned an invalid ACP ${method} response: ${errorMessage(cause)}`
+      );
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        method,
+        `Provider session ${providerSessionId} could not be authoritatively loaded from the response.`
+      );
+      this.setSessionFailurePreflight(error);
+      throw error;
+    }
+    this.nativeSessions.set(providerSessionId, state);
+    return { client, state, method, response };
+  }
+
   async releaseSession(ref: AgentSessionRef): Promise<void> {
     await this.waitForRuntimeQuarantine();
     // A terminal run projection can become visible before its serialized
     // inbound handler finishes the corresponding session update. Drain that
     // queue so release state cannot be overwritten by a late terminal write.
     await this.inboundQueue;
+    const runtimeSession = await this.providerRuntime.getSession(ref.localSessionId);
+    if (runtimeSession && isAcpReadOnlyRuntimeSession(runtimeSession, this.profile)) {
+      await this.releaseRuntimeSession(runtimeSession, ref.providerSessionId);
+      return;
+    }
     const session = await this.requireSession(ref.localSessionId);
     this.assertSessionOwnership(session);
     const snapshot = await this.taskRuntime.snapshot();
@@ -1152,6 +1263,62 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.stopUnusedRuntimeProcess();
   }
 
+  private async releaseRuntimeSession(
+    initialSession: AgentRuntimeSessionRecord,
+    requestedProviderSessionId?: string
+  ): Promise<void> {
+    const activeRun = await this.providerRuntime.getActiveRunForSession(initialSession.id);
+    if (activeRun) {
+      throw new Error(
+        `Cannot release ACP runtime session ${initialSession.id} while run ${activeRun.id} is ${activeRun.status}.`
+      );
+    }
+    const providerSessionId =
+      requestedProviderSessionId ?? initialSession.providerSessionId;
+    const client = this.supervisor?.currentClient;
+    const supportsClose = Boolean(
+      this.initializeResponse?.agentCapabilities.sessionCapabilities?.close
+    );
+    if (
+      providerSessionId &&
+      client &&
+      supportsClose &&
+      this.nativeSessions.has(providerSessionId)
+    ) {
+      try {
+        await this.requestBoundedMutation(
+          client,
+          'session/close',
+          { sessionId: providerSessionId },
+          `The outcome of closing provider session ${providerSessionId} could not be confirmed.`
+        );
+      } catch (cause) {
+        throw runtimeDeliveryErrorForAcp('session/close', cause);
+      }
+    }
+    if (providerSessionId) {
+      this.nativeSessions.delete(providerSessionId);
+      this.replayingProviderSessionIds.delete(providerSessionId);
+    }
+    const session =
+      (await this.providerRuntime.getSession(initialSession.id)) ?? initialSession;
+    await this.updateRuntimeSession(
+      session.id,
+      {
+        status: 'NOT_LOADED'
+      },
+      acpRuntimeOperationId(
+        'runtime/session-release',
+        session.id,
+        providerSessionId,
+        session.recordRevision
+      )
+    );
+    this.refreshModels();
+    this.emitRuntimeUpdate();
+    await this.stopUnusedRuntimeProcess();
+  }
+
   async releaseTask(taskId: string): Promise<void> {
     const snapshot = await this.taskRuntime.snapshot();
     const sessions = snapshot.agentSessions.filter(
@@ -1175,6 +1342,272 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         .filter((run) => run.sessionId === session.id)
         .map((run) => ({ id: run.id, providerTurnId: run.providerTurnId, status: run.status }))
     };
+  }
+
+  async startRuntimeTurn(
+    input: StartAgentRuntimeTurn
+  ): Promise<StartedAgentRuntimeTurn> {
+    await this.waitForRuntimeQuarantine();
+    assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments);
+    const policy = requireAcpReadOnlyTurnPolicy(this.profile);
+    if (
+      input.run.sessionId !== input.session.id ||
+      input.session.runtimeId !== this.descriptor.id ||
+      !isAcpReadOnlyRuntimeSession(input.session, this.profile) ||
+      input.executionContext.attestation.status !== 'ATTESTED' ||
+      input.executionContext.repositoryAccess !== 'READ_ONLY' ||
+      input.executionContext.managedAttachments.length > 0 ||
+      !input.executionContext.externalTools.network ||
+      input.executionContext.externalTools.webSearch !== 'disabled' ||
+      input.executionContext.externalTools.mcpServers ||
+      input.executionContext.externalTools.apps ||
+      input.executionContext.externalTools.dynamicTools
+    ) {
+      throw new Error('ACP runtime turn ownership does not match its durable session.');
+    }
+    const expectedSettings = acpReadOnlyExecutionSettings(
+      this.profile,
+      input.executionContext.modelSettings
+    );
+    const expectedHash = acpReadOnlyProfileHash({
+      runtimeId: this.descriptor.id,
+      sessionId: input.session.id,
+      policyId: policy.policyId,
+      primaryCwd: input.executionContext.primaryCwd,
+      readRoots: input.executionContext.readRoots,
+      modelSettings: expectedSettings
+    });
+    if (expectedHash !== input.executionContext.permissionProfileHash) {
+      throw new Error('ACP read-only policy does not match the attested execution context.');
+    }
+    const materialized = await this.materializeRuntimeSession(
+      input.session,
+      expectedSettings
+    );
+    const server = this.supervisor?.currentServer;
+    if (!server || materialized.client.serverInstanceId !== server.id) {
+      throw new AgentRuntimeDeliveryError(
+        'NOT_DELIVERED',
+        'The ACP process changed before the read-only prompt could start.'
+      );
+    }
+
+    this.activePromptRunIds.add(input.run.id);
+    this.activeRuntimePromptRunIds.add(input.run.id);
+    let started: ReturnType<AcpRpcClient['startMutation']> extends Promise<infer Value>
+      ? Value
+      : never;
+    try {
+      started = await materialized.client.startMutation<unknown>(
+        'session/prompt',
+        {
+          sessionId: materialized.state.sessionId,
+          prompt: [acpTextBlock(input.prompt)]
+        },
+        { timeoutMs: null }
+      );
+    } catch (cause) {
+      this.activePromptRunIds.delete(input.run.id);
+      this.activeRuntimePromptRunIds.delete(input.run.id);
+      throw runtimeDeliveryErrorForAcp('session/prompt', cause);
+    }
+    void started.response.catch(() => undefined);
+    const providerTurnId = `${server.id}:${String(started.requestId)}`;
+    const startedAt = new Date().toISOString();
+    try {
+      const currentSession =
+        (await this.providerRuntime.getSession(input.session.id)) ?? materialized.session;
+      await this.providerRuntime.updateSession(
+        currentSession.id,
+        currentSession.recordRevision,
+        {
+          providerSessionId: materialized.state.sessionId,
+          status: 'ACTIVE',
+          materialized: true,
+          requestedSettings: expectedSettings,
+          observedSettings: this.projectObservedSettings(
+            materialized.state,
+            expectedSettings
+          ),
+          lastAttachedAt: startedAt
+        },
+        `acp-runtime-session-active:${input.run.id}`
+      );
+      const currentRun = (await this.providerRuntime.getRun(input.run.id)) ?? input.run;
+      await this.providerRuntime.updateRun(
+        currentRun.id,
+        currentRun.recordRevision,
+        {
+          serverInstanceId: server.id,
+          providerTurnId,
+          status: 'RUNNING',
+          delivery: 'ACKNOWLEDGED',
+          lastEventAt: startedAt
+        },
+        `acp-runtime-turn-acknowledged:${input.run.id}`
+      );
+      await this.supervisor?.markRunning();
+    } catch (cause) {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/prompt',
+        `ACP accepted read-only prompt ${providerTurnId}, but Task Monki could not persist its ownership.`
+      );
+      throw new AgentRuntimeDeliveryError(
+        'AMBIGUOUS',
+        `ACP accepted prompt ${providerTurnId}, but Task Monki could not persist its acknowledgement: ${errorMessage(cause)}`,
+        { cause }
+      );
+    }
+    void started.response.then(
+      (response) =>
+        this.enqueueInbound(() => this.finalizeRuntimePrompt(input.run.id, response)),
+      (error) =>
+        this.enqueueInbound(() => this.failRuntimePrompt(input.run.id, error))
+    );
+    return {
+      serverInstanceId: server.id,
+      providerSessionId: materialized.state.sessionId,
+      providerTurnId,
+      startedAt
+    };
+  }
+
+  async interruptRuntimeTurn(input: {
+    session: AgentRuntimeSessionRecord;
+    run: AgentRuntimeRunRecord;
+  }): Promise<void> {
+    if (
+      input.run.sessionId !== input.session.id ||
+      !input.session.providerSessionId ||
+      !input.run.providerTurnId ||
+      !this.activeRuntimePromptRunIds.has(input.run.id)
+    ) {
+      throw new AgentRuntimeDeliveryError(
+        'NOT_DELIVERED',
+        'ACP interruption requires the current acknowledged read-only turn.'
+      );
+    }
+    const client = this.supervisor?.currentClient;
+    const server = this.supervisor?.currentServer;
+    if (!client || !server || server.id !== input.run.serverInstanceId) {
+      throw new AgentRuntimeDeliveryError(
+        'AMBIGUOUS',
+        'The ACP process that owns this turn is no longer available.'
+      );
+    }
+    try {
+      await client.notify('session/cancel', {
+        sessionId: input.session.providerSessionId
+      });
+    } catch (cause) {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/cancel',
+        `Cancellation delivery could not be confirmed for read-only run ${input.run.id}.`
+      );
+      throw new AgentRuntimeDeliveryError(
+        'AMBIGUOUS',
+        `ACP cancellation delivery is ambiguous: ${errorMessage(cause)}`,
+        { cause }
+      );
+    }
+    this.armRuntimeInterruptDeadline(input.run.id, input.run.providerTurnId);
+  }
+
+  private async materializeRuntimeSession(
+    initialSession: AgentRuntimeSessionRecord,
+    settings: AgentExecutionSettings
+  ): Promise<{
+    client: AcpRpcClient;
+    session: AgentRuntimeSessionRecord;
+    state: AcpNativeSessionState;
+  }> {
+    let session =
+      (await this.providerRuntime.getSession(initialSession.id)) ?? initialSession;
+    let client: AcpRpcClient;
+    let state: AcpNativeSessionState;
+    let providerCreated = false;
+    if (session.providerSessionId && this.nativeSessions.has(session.providerSessionId)) {
+      client = await this.ensureClient();
+      state = this.nativeSessions.get(session.providerSessionId)!;
+    } else if (session.providerSessionId && this.canLoadNativeSession()) {
+      const loaded = await this.loadNativeSession(
+        session.providerSessionId,
+        session.executionContext.primaryCwd
+      );
+      client = loaded.client;
+      state = loaded.state;
+    } else {
+      const created = await this.createNativeSession(
+        session.executionContext.primaryCwd
+      );
+      client = created.client;
+      state = created.state;
+      providerCreated = true;
+    }
+    try {
+      if (
+        session.providerSessionId !== state.sessionId ||
+        session.status === 'NOT_MATERIALIZED'
+      ) {
+        session = await this.providerRuntime.updateSession(
+          session.id,
+          session.recordRevision,
+          {
+            providerSessionId: state.sessionId,
+            status: 'NOT_LOADED',
+            materialized: false,
+            requestedSettings: settings,
+            observedSettings: this.projectObservedSettings(state, settings),
+            lastAttachedAt: new Date().toISOString()
+          },
+          `acp-runtime-session-ownership:${session.id}:${state.sessionId}`
+        );
+      }
+    } catch (cause) {
+      if (providerCreated) {
+        await this.quarantineRuntimeAfterAmbiguousMutation(
+          'session/new',
+          `Provider session ${state.sessionId} was created, but its owner was not persisted.`
+        );
+      }
+      throw new AgentRuntimeDeliveryError(
+        providerCreated ? 'AMBIGUOUS' : 'NOT_DELIVERED',
+        `Task Monki could not persist ACP session ownership: ${errorMessage(cause)}`,
+        { cause }
+      );
+    }
+
+    const applied = await this.applyRequestedNativeSettings(client, state, settings);
+    state = applied.state;
+    const policy = requireAcpReadOnlyTurnPolicy(this.profile);
+    if (state.modes?.currentModeId !== policy.modeId) {
+      throw new Error(
+        `${this.descriptor.displayName} did not apply its required ${policy.modeId} read-only mode.`
+      );
+    }
+    session =
+      (await this.providerRuntime.getSession(session.id)) ?? session;
+    session = await this.providerRuntime.updateSession(
+      session.id,
+      session.recordRevision,
+      {
+        providerSessionId: state.sessionId,
+        status: 'IDLE',
+        materialized: true,
+        requestedSettings: settings,
+        observedSettings: this.projectObservedSettings(state, settings),
+        lastAttachedAt: new Date().toISOString()
+      },
+      `acp-runtime-session-read-only:${session.id}:${policy.policyId}`
+    );
+    this.setOperationalPreflight(state);
+    this.emitRuntimeUpdate();
+    return { client, session, state };
+  }
+
+  private canLoadNativeSession(): boolean {
+    const capabilities = this.initializeResponse?.agentCapabilities;
+    return Boolean(capabilities?.sessionCapabilities?.resume || capabilities?.loadSession);
   }
 
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
@@ -1520,12 +1953,71 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async reconcile(): Promise<AgentReconciliationResult> {
+    const recoveryRequiredSessionIds = new Set<string>();
+    const reconciledSessionIds = new Set<string>();
+    const runtimeRuns = await this.providerRuntime.getRunsRequiringRecovery({
+      runtimeId: this.descriptor.id
+    });
+    const runtimeSessionIds = new Set<string>();
+    for (let run of runtimeRuns) {
+      const session = await this.providerRuntime.getSession(run.sessionId);
+      if (!session || !isAcpReadOnlyRuntimeSession(session, this.profile)) continue;
+      runtimeSessionIds.add(session.id);
+      if (
+        run.status === 'RECOVERY_REQUIRED' &&
+        run.recoveryState === 'REQUIRES_USER_ACTION'
+      ) {
+        recoveryRequiredSessionIds.add(run.sessionId);
+        continue;
+      }
+      if (
+        run.serverInstanceId === this.supervisor?.currentServer?.id &&
+        this.activeRuntimePromptRunIds.has(run.id)
+      ) {
+        reconciledSessionIds.add(run.sessionId);
+        continue;
+      }
+      const reason =
+        'ACP has no prompt-status read method. Task Monki will not replay an ambiguous read-only prompt.';
+      run = await this.updateRuntimeRun(
+        run.id,
+        {
+          status: 'RECOVERY_REQUIRED',
+          delivery: run.delivery === 'SENDING' ? 'AMBIGUOUS' : run.delivery,
+          recoveryState: 'REQUIRES_USER_ACTION',
+          terminalReason: reason,
+          lastEventAt: new Date().toISOString()
+        },
+        acpRuntimeOperationId(
+          'runtime/reconciled',
+          run.id,
+          run.status,
+          run.serverInstanceId
+        )
+      );
+      const currentSession = await this.providerRuntime.getSession(run.sessionId);
+      if (currentSession && currentSession.status !== 'NOT_LOADED') {
+        await this.updateRuntimeSession(
+          currentSession.id,
+          { status: 'NOT_LOADED' },
+          acpRuntimeOperationId('runtime/session-reconciled', currentSession.id, run.id)
+        );
+      }
+      recoveryRequiredSessionIds.add(run.sessionId);
+      this.emitRuntimeTurnEvent({
+        type: 'RECOVERY_REQUIRED',
+        runId: run.id,
+        providerTurnId: run.providerTurnId,
+        reason,
+        observedAt: new Date().toISOString()
+      });
+    }
+
     const runs = await this.taskRuntime.getRunsRequiringRecovery({
       runtimeId: this.descriptor.id
     });
-    const recoveryRequiredSessionIds = new Set<string>();
-    const reconciledSessionIds = new Set<string>();
     for (const run of runs) {
+      if (runtimeSessionIds.has(run.sessionId)) continue;
       if (
         run.status === 'RECOVERY_REQUIRED' &&
         run.recoveryState === 'REQUIRES_USER_ACTION'
@@ -1617,6 +2109,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       failures.push(cause);
       resetSafe = false;
     }
+    for (const runId of [...this.runtimeOutputBuffers.keys()]) {
+      try {
+        await this.flushRuntimeOutput(runId, true);
+      } catch (cause) {
+        failures.push(cause);
+        resetSafe = false;
+      }
+    }
     if (resetSafe && !this.supervisor?.safetyFenceReason) {
       this.resetAfterConfirmedShutdown();
     }
@@ -1638,6 +2138,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     this.nativeSessions.clear();
     this.provisionalProviderSessionIds.clear();
     this.replayingProviderSessionIds.clear();
+    this.activeRuntimePromptRunIds.clear();
+    for (const runId of [...this.runtimeOutputBuffers.keys()]) {
+      this.discardRuntimeOutputBuffer(runId);
+    }
     this.initialized = false;
     this.runtimeReconfigurationPending = false;
     this.refreshModels();
@@ -2648,6 +3152,16 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await this.recordProtocolIncident(errorMessage(cause), raw);
       return;
     }
+    const runtimeTarget = await this.findActiveRuntimeTarget(notification.sessionId);
+    if (runtimeTarget && this.isCurrentClientEvent(client, generation, raw)) {
+      await this.handleRuntimeNotification(runtimeTarget, notification.update, raw);
+      return;
+    }
+    if (await this.isKnownRuntimeSession(notification.sessionId)) {
+      // Generic runtime sessions are fenced by their active-run set. Ignore
+      // replayed or late updates instead of allowing them into the Task path.
+      return;
+    }
     const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       notification.sessionId
@@ -2730,6 +3244,23 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await this.recordProtocolIncident(errorMessage(cause), raw);
       if (!this.isCurrentClientEvent(client, generation, raw)) return;
       await client.respondError(request.id, -32602, errorMessage(cause));
+      return;
+    }
+    const runtimeTarget = await this.findActiveRuntimeTarget(permission.sessionId);
+    if (runtimeTarget && this.isCurrentClientEvent(client, generation, raw)) {
+      await this.denyRuntimePermission({
+        client,
+        generation,
+        request,
+        raw,
+        run: runtimeTarget.run,
+        options: permission.options
+      });
+      return;
+    }
+    if (await this.isKnownRuntimeSession(permission.sessionId)) {
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
+      await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
       return;
     }
     const session = await this.taskRuntime.getAgentSessionByProviderId(
@@ -2841,6 +3372,605 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       return;
     }
     this.emitInteractionUpdate(interaction);
+  }
+
+  private async findActiveRuntimeTarget(
+    providerSessionId: string
+  ): Promise<ActiveAcpRuntimeTarget | undefined> {
+    if (this.replayingProviderSessionIds.has(providerSessionId)) return undefined;
+    const session = await this.providerRuntime.getSessionByProviderId(
+      providerSessionId,
+      this.descriptor.id
+    );
+    if (!session || !isAcpReadOnlyRuntimeSession(session, this.profile)) {
+      return undefined;
+    }
+    const run = await this.providerRuntime.getActiveRunForSession(session.id);
+    if (!run || !this.activeRuntimePromptRunIds.has(run.id)) return undefined;
+    const server = this.supervisor?.currentServer;
+    if (
+      !server ||
+      (run.serverInstanceId !== undefined && run.serverInstanceId !== server.id)
+    ) {
+      return undefined;
+    }
+    return { session, run };
+  }
+
+  private async isKnownRuntimeSession(providerSessionId: string): Promise<boolean> {
+    const session = await this.providerRuntime.getSessionByProviderId(
+      providerSessionId,
+      this.descriptor.id
+    );
+    return Boolean(
+      session && isAcpReadOnlyRuntimeSession(session, this.profile)
+    );
+  }
+
+  private async handleRuntimeNotification(
+    target: ActiveAcpRuntimeTarget,
+    update: AcpSessionUpdate,
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
+    if (!this.activeRuntimePromptRunIds.has(target.run.id)) return;
+    switch (update.sessionUpdate) {
+      case 'agent_message_chunk': {
+        const text = textFromAcpContent(update.content);
+        if (text !== undefined) {
+          await this.bufferRuntimeOutput(target.run, text, raw);
+        }
+        return;
+      }
+      case 'current_mode_update': {
+        if (typeof update.currentModeId !== 'string') return;
+        const providerSessionId = target.session.providerSessionId;
+        const current = providerSessionId
+          ? this.nativeSessions.get(providerSessionId)
+          : undefined;
+        if (current?.modes) {
+          this.nativeSessions.set(current.sessionId, {
+            ...current,
+            modes: { ...current.modes, currentModeId: update.currentModeId }
+          });
+        }
+        const policy = requireAcpReadOnlyTurnPolicy(this.profile);
+        if (update.currentModeId === policy.modeId) return;
+        const reason =
+          `${this.descriptor.displayName} left required read-only mode ${policy.modeId} during the turn. ` +
+          'Task Monki stopped the provider process and will not continue this turn.';
+        await this.appendRuntimeDiagnostic(target.run, reason, raw.sequence);
+        await this.quarantineRuntimeGeneration(reason, false);
+        return;
+      }
+      default:
+        // The bounded protocol journal remains the evidence for usage, plans,
+        // read tools, and provider extensions. Shared read-only workflows need
+        // only normalized text and terminal state in the common store.
+        return;
+    }
+  }
+
+  private async denyRuntimePermission(input: {
+    client: AcpRpcClient;
+    generation: number;
+    request: AcpJsonRpcRequest;
+    raw: AgentProtocolMessageReference;
+    run: AgentRuntimeRunRecord;
+    options: readonly AcpPermissionOption[];
+  }): Promise<void> {
+    if (!this.isCurrentClientEvent(input.client, input.generation, input.raw)) return;
+    const safeRejectOptions = input.options.filter(
+      (option) =>
+        option.kind === 'reject_once' &&
+        isSafeProviderIdentifier(option.optionId, this.sensitiveValues)
+    );
+    const reject = safeRejectOptions.length === 1 ? safeRejectOptions[0] : undefined;
+    let journaled = false;
+    let responseRaw: AgentProtocolMessageReference;
+    try {
+      responseRaw = await input.client.respond(
+        input.request.id,
+        reject
+          ? {
+              outcome: {
+                outcome: 'selected',
+                optionId: reject.optionId
+              }
+            }
+          : { outcome: { outcome: 'cancelled' } },
+        async () => {
+          journaled = true;
+        }
+      );
+    } catch (cause) {
+      const reason =
+        'Task Monki denied an ACP permission request during a read-only turn, ' +
+        `but response delivery is ambiguous${journaled ? ' after journaling' : ''}: ${this.redactProviderText(errorMessage(cause))}`;
+      await this.markRuntimeRecoveryRequired(input.run.id, reason);
+      await this.quarantineRuntimeGeneration(reason, false);
+      return;
+    }
+    const reason = reject
+      ? 'Task Monki denied an ACP permission request with the provider\'s one-time rejection option.'
+      : 'Task Monki denied an ACP permission request by cancelling it because no unique safe one-time rejection option was available.';
+    await this.appendRuntimeDiagnostic(input.run, reason, input.raw.sequence);
+    await this.providerRuntime.recordTelemetry({
+      id: acpProtocolOperationId(
+        'runtime/permission-denied',
+        input.raw,
+        input.run.id,
+        responseRaw.sequence
+      ),
+      kind: 'PROTOCOL_REFERENCE',
+      owner: input.run.owner,
+      sessionId: input.run.sessionId,
+      runId: input.run.id,
+      serverInstanceId: input.raw.serverInstanceId,
+      clientOperationId: acpProtocolOperationId(
+        'runtime/permission-denied-telemetry',
+        input.raw,
+        input.run.id
+      ),
+      payload: {
+        denied: true,
+        outcome: reject ? 'reject_once' : 'cancelled',
+        requestRaw: input.raw,
+        responseRaw
+      },
+      observedAt: new Date().toISOString()
+    });
+  }
+
+  private async bufferRuntimeOutput(
+    run: AgentRuntimeRunRecord,
+    providerText: string,
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
+    let buffer = this.runtimeOutputBuffers.get(run.id);
+    if (!buffer) {
+      const artifact = await this.providerRuntime.getArtifact(run.outputArtifactId);
+      buffer = {
+        chunks: [],
+        byteCount: 0,
+        firstSequence: raw.sequence,
+        lastSequence: raw.sequence,
+        serverInstanceId: raw.serverInstanceId,
+        credentialCarry: '',
+        truncated: Boolean(
+          artifact && artifact.byteCount >= AGENT_RUNTIME_LIMITS.maxArtifactBytes
+        )
+      };
+      this.runtimeOutputBuffers.set(run.id, buffer);
+    }
+    if (buffer.serverInstanceId !== raw.serverInstanceId || buffer.truncated) return;
+    const redacted = redactAcpStreamChunk(
+      buffer.credentialCarry,
+      providerText,
+      this.sensitiveValues
+    );
+    buffer.credentialCarry = redacted.carry;
+    buffer.lastSequence = raw.sequence;
+    if (redacted.text) {
+      const artifact = await this.providerRuntime.getArtifact(run.outputArtifactId);
+      const persistedBytes = artifact?.byteCount ?? 0;
+      const available = Math.max(
+        0,
+        AGENT_RUNTIME_LIMITS.maxArtifactBytes - persistedBytes - buffer.byteCount
+      );
+      const accepted = utf8Prefix(redacted.text, available);
+      if (accepted) {
+        buffer.chunks.push(accepted);
+        buffer.byteCount += Buffer.byteLength(accepted, 'utf8');
+      }
+      if (accepted !== redacted.text) {
+        buffer.truncated = true;
+        buffer.credentialCarry = '';
+        await this.appendRuntimeDiagnostic(
+          run,
+          `ACP output exceeded the ${AGENT_RUNTIME_LIMITS.maxArtifactBytes}-byte runtime artifact limit and was truncated.`,
+          raw.sequence
+        );
+      }
+    }
+    if (buffer.byteCount >= STREAM_OUTPUT_FLUSH_BYTES) {
+      await this.flushRuntimeOutput(run.id, false);
+    } else {
+      this.scheduleRuntimeOutputFlush(run.id, buffer);
+    }
+  }
+
+  private scheduleRuntimeOutputFlush(
+    runId: string,
+    buffer: AcpRuntimeOutputBuffer
+  ): void {
+    if (buffer.timer || buffer.byteCount === 0) return;
+    const timer = setTimeout(() => {
+      if (buffer.timer === timer) buffer.timer = undefined;
+      this.enqueueInbound(() => this.flushRuntimeOutput(runId, false));
+    }, STREAM_OUTPUT_FLUSH_INTERVAL_MS);
+    timer.unref();
+    buffer.timer = timer;
+  }
+
+  private async flushRuntimeOutput(runId: string, terminal: boolean): Promise<void> {
+    const buffer = this.runtimeOutputBuffers.get(runId);
+    if (!buffer) return;
+    if (buffer.timer) clearTimeout(buffer.timer);
+    buffer.timer = undefined;
+    if (terminal && buffer.credentialCarry) {
+      const run = await this.providerRuntime.getRun(runId);
+      if (run) {
+        const artifact = await this.providerRuntime.getArtifact(run.outputArtifactId);
+        const available = Math.max(
+          0,
+          AGENT_RUNTIME_LIMITS.maxArtifactBytes -
+            (artifact?.byteCount ?? 0) -
+            buffer.byteCount
+        );
+        const marker = utf8Prefix(REDACTED_CREDENTIAL, available);
+        if (marker) {
+          buffer.chunks.push(marker);
+          buffer.byteCount += Buffer.byteLength(marker, 'utf8');
+        }
+      }
+      buffer.credentialCarry = '';
+    }
+    const text = buffer.chunks.join('');
+    if (!text) {
+      if (terminal || buffer.truncated) this.discardRuntimeOutputBuffer(runId);
+      return;
+    }
+    const run = await this.providerRuntime.getRun(runId);
+    if (!run || !this.activeRuntimePromptRunIds.has(runId)) {
+      this.discardRuntimeOutputBuffer(runId);
+      return;
+    }
+    if (!run.providerTurnId && !terminal) {
+      this.scheduleRuntimeOutputFlush(runId, buffer);
+      return;
+    }
+    try {
+      await this.providerRuntime.appendArtifact(
+        run.outputArtifactId,
+        text,
+        acpRuntimeOperationId(
+          'runtime/output',
+          run.id,
+          buffer.serverInstanceId,
+          buffer.firstSequence,
+          buffer.lastSequence,
+          text
+        )
+      );
+    } catch (cause) {
+      const reason =
+        cause instanceof AgentRuntimeArtifactMutationAmbiguousError
+          ? 'Task Monki cannot prove whether ACP output was persisted. It will not append the same bytes again.'
+          : `Task Monki could not persist ACP output: ${this.redactProviderText(errorMessage(cause))}`;
+      this.discardRuntimeOutputBuffer(runId);
+      await this.markRuntimeRecoveryRequired(run.id, reason);
+      await this.quarantineRuntimeGeneration(reason, false);
+      return;
+    }
+    buffer.chunks = [];
+    buffer.byteCount = 0;
+    buffer.firstSequence = buffer.lastSequence + 1;
+    await this.updateRuntimeRun(
+      run.id,
+      { lastEventAt: new Date().toISOString() },
+      acpRuntimeOperationId(
+        'runtime/output-observed',
+        run.id,
+        buffer.serverInstanceId,
+        buffer.lastSequence
+      )
+    );
+    for (const segment of splitUtf8Text(text, STREAM_TEXT_SEGMENT_BYTES)) {
+      this.emitRuntimeTurnEvent({
+        type: 'DELTA',
+        runId: run.id,
+        providerTurnId: run.providerTurnId!,
+        text: segment,
+        observedAt: new Date().toISOString()
+      });
+    }
+    if (terminal || buffer.truncated) this.discardRuntimeOutputBuffer(runId);
+  }
+
+  private discardRuntimeOutputBuffer(runId: string): void {
+    const buffer = this.runtimeOutputBuffers.get(runId);
+    if (buffer?.timer) clearTimeout(buffer.timer);
+    this.runtimeOutputBuffers.delete(runId);
+  }
+
+  private async appendRuntimeDiagnostic(
+    run: AgentRuntimeRunRecord,
+    diagnostic: string,
+    sequence: number | string
+  ): Promise<void> {
+    const artifact = await this.providerRuntime.getArtifact(run.diagnosticArtifactId);
+    if (!artifact || artifact.byteCount >= AGENT_RUNTIME_LIMITS.maxArtifactBytes) return;
+    const prefix = artifact.byteCount > 0 ? '\n' : '';
+    const text = utf8Prefix(
+      `${prefix}${this.redactProviderText(diagnostic)}`,
+      AGENT_RUNTIME_LIMITS.maxArtifactBytes - artifact.byteCount
+    );
+    if (!text) return;
+    await this.providerRuntime.appendArtifact(
+      artifact.id,
+      text,
+      acpRuntimeOperationId('runtime/diagnostic', run.id, sequence, text)
+    );
+  }
+
+  private async finalizeRuntimePrompt(
+    runId: string,
+    response: AcpRpcResult<unknown>
+  ): Promise<void> {
+    if (!this.activeRuntimePromptRunIds.has(runId)) return;
+    let prompt: ReturnType<typeof parsePromptResponse>;
+    try {
+      prompt = parsePromptResponse(response.result);
+    } catch (cause) {
+      await this.flushRuntimeOutput(runId, true);
+      await this.settleRuntimeRun(
+        runId,
+        'failed',
+        `ACP prompt response violated the negotiated schema: ${this.redactProviderText(errorMessage(cause))}`,
+        response.raw
+      );
+      return;
+    }
+    await this.flushRuntimeOutput(runId, true);
+    const run = await this.providerRuntime.getRun(runId);
+    if (!run || !this.activeRuntimePromptRunIds.has(runId)) return;
+    const output = await this.providerRuntime.readArtifact(run.outputArtifactId);
+    const mapped =
+      run.status === 'INTERRUPTING'
+        ? 'interrupted'
+        : mapAcpStopReason(prompt.stopReason);
+    const profileFailure =
+      this.profile.terminalFailureMessage &&
+      output.trim() === this.profile.terminalFailureMessage.exactText
+        ? this.profile.terminalFailureMessage.diagnostic
+        : undefined;
+    const noOutput = mapped === 'completed' && output.trim().length === 0;
+    const status = profileFailure || noOutput ? 'failed' : mapped;
+    const error =
+      profileFailure ??
+      (noOutput
+        ? `${this.descriptor.displayName} completed the read-only turn without a response.`
+        : mapped === 'failed'
+          ? `ACP ended the read-only turn with ${prompt.stopReason}.`
+          : undefined);
+    await this.settleRuntimeRun(runId, status, error, response.raw);
+  }
+
+  private async failRuntimePrompt(runId: string, cause: unknown): Promise<void> {
+    if (!this.activeRuntimePromptRunIds.has(runId)) return;
+    if (cause instanceof AcpAmbiguousMutationError) {
+      await this.markRuntimeRecoveryRequired(
+        runId,
+        `ACP read-only prompt outcome is ambiguous and will not be replayed: ${this.redactProviderText(cause.message)}`
+      );
+      return;
+    }
+    await this.flushRuntimeOutput(runId, true);
+    await this.settleRuntimeRun(
+      runId,
+      'failed',
+      `ACP read-only prompt failed: ${this.redactProviderText(errorMessage(cause))}`
+    );
+  }
+
+  private async settleRuntimeRun(
+    runId: string,
+    status: 'completed' | 'interrupted' | 'failed',
+    error?: string,
+    raw?: AgentProtocolMessageReference
+  ): Promise<void> {
+    let run = await this.providerRuntime.getRun(runId);
+    if (!run || isTerminalRuntimeStatus(run.status)) {
+      this.clearRuntimeTurnState(runId, run?.providerTurnId);
+      return;
+    }
+    const completedAt = new Date().toISOString();
+    const terminalStatus =
+      status === 'completed'
+        ? 'COMPLETED'
+        : status === 'interrupted'
+          ? 'INTERRUPTED'
+          : 'FAILED';
+    run = await this.updateRuntimeRun(
+      run.id,
+      {
+        status: terminalStatus,
+        delivery: 'TERMINAL',
+        ...(run.interruptDelivery ? { interruptDelivery: 'TERMINAL' as const } : {}),
+        recoveryState: 'NONE',
+        terminalReason: error,
+        providerTerminalSource: 'ACP_PROMPT_RESPONSE',
+        ...(raw ? { providerTerminalRawMessage: raw } : {}),
+        lastEventAt: completedAt,
+        endedAt: completedAt
+      },
+      acpRuntimeOperationId(
+        'runtime/terminal',
+        run.id,
+        run.providerTurnId,
+        terminalStatus,
+        raw?.sequence
+      )
+    );
+    const session = await this.providerRuntime.getSession(run.sessionId);
+    if (session) {
+      await this.updateRuntimeSession(
+        session.id,
+        {
+          status: status === 'failed' ? 'SYSTEM_ERROR' : 'IDLE',
+          materialized: true,
+          lastAttachedAt: completedAt
+        },
+        acpRuntimeOperationId('runtime/session-terminal', session.id, run.id)
+      );
+    }
+    const providerTurnId = run.providerTurnId;
+    this.clearRuntimeTurnState(run.id, providerTurnId);
+    if (providerTurnId) {
+      this.emitRuntimeTurnEvent({
+        type: 'TERMINAL',
+        runId: run.id,
+        providerTurnId,
+        status,
+        ...(error ? { error: this.redactProviderText(error) } : {}),
+        completedAt
+      });
+    }
+    this.schedulePendingRuntimeReset();
+  }
+
+  private async markRuntimeRecoveryRequired(
+    runId: string,
+    reason: string,
+    emitEvent = true
+  ): Promise<void> {
+    const run = await this.providerRuntime.getRun(runId);
+    if (!run || isTerminalRuntimeStatus(run.status) || run.status === 'RECOVERY_REQUIRED') {
+      return;
+    }
+    const observedAt = new Date().toISOString();
+    const updated = await this.updateRuntimeRun(
+      run.id,
+      {
+        status: 'RECOVERY_REQUIRED',
+        delivery: run.delivery === 'SENDING' ? 'AMBIGUOUS' : run.delivery,
+        ...(run.status === 'INTERRUPTING'
+          ? { interruptDelivery: 'AMBIGUOUS' as const }
+          : {}),
+        recoveryState: 'REQUIRES_USER_ACTION',
+        terminalReason: this.redactProviderText(reason),
+        lastEventAt: observedAt
+      },
+      acpRuntimeOperationId('runtime/recovery-required', run.id, reason)
+    );
+    const session = await this.providerRuntime.getSession(updated.sessionId);
+    if (session && session.status !== 'NOT_LOADED') {
+      await this.updateRuntimeSession(
+        session.id,
+        { status: 'NOT_LOADED' },
+        acpRuntimeOperationId('runtime/session-recovery', session.id, updated.id)
+      );
+    }
+    const providerTurnId = updated.providerTurnId;
+    this.clearRuntimeTurnState(updated.id, providerTurnId);
+    if (emitEvent) {
+      this.emitRuntimeTurnEvent({
+        type: 'RECOVERY_REQUIRED',
+        runId: updated.id,
+        providerTurnId,
+        reason: this.redactProviderText(reason),
+        observedAt
+      });
+    }
+  }
+
+  private clearRuntimeTurnState(runId: string, providerTurnId?: string): void {
+    this.activeRuntimePromptRunIds.delete(runId);
+    this.activePromptRunIds.delete(runId);
+    this.discardRuntimeOutputBuffer(runId);
+    this.clearInterruptDeadline(runId);
+    if (providerTurnId) this.clearInterruptDeadline(providerTurnId);
+  }
+
+  private async updateRuntimeSession(
+    sessionId: string,
+    update: Parameters<AgentRuntimeStore['updateSession']>[2],
+    operationId: string
+  ): Promise<AgentRuntimeSessionRecord> {
+    let session = await this.providerRuntime.getSession(sessionId);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (!session) throw new Error(`Agent runtime session not found: ${sessionId}`);
+      try {
+        return await this.providerRuntime.updateSession(
+          session.id,
+          session.recordRevision,
+          update,
+          `${operationId}:${attempt}`
+        );
+      } catch (cause) {
+        const latest = await this.providerRuntime.getSession(sessionId);
+        if (!latest || latest.recordRevision === session.recordRevision || attempt === 3) {
+          throw cause;
+        }
+        session = latest;
+      }
+    }
+    throw new Error(`Agent runtime session update failed: ${sessionId}`);
+  }
+
+  private async updateRuntimeRun(
+    runId: string,
+    update: Parameters<AgentRuntimeStore['updateRun']>[2],
+    operationId: string
+  ): Promise<AgentRuntimeRunRecord> {
+    let run = await this.providerRuntime.getRun(runId);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (!run) throw new Error(`Agent runtime run not found: ${runId}`);
+      try {
+        return await this.providerRuntime.updateRun(
+          run.id,
+          run.recordRevision,
+          update,
+          `${operationId}:${attempt}`
+        );
+      } catch (cause) {
+        const latest = await this.providerRuntime.getRun(runId);
+        if (!latest || latest.recordRevision === run.recordRevision || attempt === 3) {
+          throw cause;
+        }
+        run = latest;
+      }
+    }
+    throw new Error(`Agent runtime run update failed: ${runId}`);
+  }
+
+  private armRuntimeInterruptDeadline(
+    runId: string,
+    providerTurnId: string
+  ): void {
+    this.clearInterruptDeadline(runId);
+    const timer = setTimeout(() => {
+      this.interruptTimers.delete(runId);
+      this.enqueueInbound(async () => {
+        const run = await this.providerRuntime.getRun(runId);
+        if (
+          !run ||
+          run.providerTurnId !== providerTurnId ||
+          run.status !== 'INTERRUPTING'
+        ) {
+          return;
+        }
+        const reason =
+          'ACP acknowledged cancellation but did not confirm a terminal read-only turn before the deadline.';
+        try {
+          await this.quarantineRuntimeGeneration(reason, false);
+        } catch (cause) {
+          await this.markRuntimeRecoveryRequired(
+            run.id,
+            `${reason} Task Monki could not confirm that the ACP process stopped: ${errorMessage(cause)}`,
+            false
+          );
+          return;
+        }
+        await this.markRuntimeRecoveryRequired(run.id, reason);
+      });
+    }, this.interruptCompletionTimeoutMs);
+    timer.unref();
+    this.interruptTimers.set(runId, timer);
+  }
+
+  private emitRuntimeTurnEvent(event: AgentRuntimeTurnEvent): void {
+    for (const listener of this.runtimeTurnListeners) listener(event);
   }
 
   private async respondToAutomaticPermission(input: {
@@ -3582,7 +4712,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           : terminal === 'interrupted'
             ? 'AGENT_RUN_INTERRUPTED'
             : 'AGENT_RUN_FAILED';
-      const reviewResult = run.mode === 'REVIEW' ? parseAgentReviewResult(finalMessage) : undefined;
       await this.taskRuntime.updateRun(run.id, {
         finalMessage: finalMessage || undefined,
         providerTerminalRawMessage: response.raw
@@ -3602,8 +4731,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             terminalReason: prompt.stopReason,
             ...(failureDiagnostic ? { error: failureDiagnostic } : {}),
             finalArtifactId: finalArtifact.id,
-            agentReviewStatus: agentReviewStatusFromResult(reviewResult),
-            agentReviewResult: reviewResult
+            agentReviewStatus: 'NOT_RUN'
           }
         }),
         PROMPT_OWNED_RUN_STATUSES,
@@ -4125,13 +5253,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     } catch (cause) {
       shutdownFailure = cause;
     }
-    // Foreground mutations can safely wait for all work that was queued at the
-    // fence. An inbound callback cannot await its own queue tail; in that case
-    // generation invalidation provides the same logical drain and the callback
-    // must unwind before later queued work can execute.
-    if (drainInboundBeforeReplacement) await inboundAtFence;
-    await this.handleRuntimeLoss(server.id, reason);
-    await this.reconcile();
     const safetyFenceReason = supervisor.safetyFenceReason;
     if (shutdownFailure || safetyFenceReason || supervisor.currentClient) {
       const failureDetail = shutdownFailure
@@ -4152,6 +5273,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         cause: shutdownFailure
       });
     }
+    // Foreground mutations can safely wait for all work that was queued at the
+    // fence. An inbound callback cannot await its own queue tail; in that case
+    // generation invalidation provides the same logical drain and the callback
+    // must unwind before later queued work can execute.
+    if (drainInboundBeforeReplacement) await inboundAtFence;
+    await this.handleRuntimeLoss(server.id, reason);
+    await this.reconcile();
     if (this.supervisor === supervisor) this.supervisor = undefined;
   }
 
@@ -4173,6 +5301,31 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     reason = this.redactProviderText(reason);
     const loadedProviderSessionIds = new Set(this.nativeSessions.keys());
     const provisionalLocalSessionIds = new Set(this.provisionalProviderSessionIds.keys());
+    const runtimeSnapshot = await this.providerRuntime.snapshot();
+    const runtimeSessions = runtimeSnapshot.sessions.filter(
+      (session) =>
+        session.runtimeId === this.descriptor.id &&
+        isAcpReadOnlyRuntimeSession(session, this.profile)
+    );
+    const runtimeSessionIds = new Set(runtimeSessions.map((session) => session.id));
+    const runtimeRuns = runtimeSnapshot.runs.filter(
+      (run) =>
+        runtimeSessionIds.has(run.sessionId) &&
+        run.serverInstanceId === serverInstanceId &&
+        ACTIVE_RUN_STATUSES.includes(run.status)
+    );
+    for (const run of runtimeRuns) {
+      try {
+        await this.flushRuntimeOutput(run.id, true);
+      } catch {
+        // Recovery below remains authoritative if buffered output cannot be
+        // persisted during process loss.
+      }
+      await this.markRuntimeRecoveryRequired(
+        run.id,
+        `${reason} Prompt outcome is ambiguous and will not be replayed.`
+      );
+    }
     this.preflightState = {
       ...this.preflightState,
       readiness: createRuntimeReadiness(
@@ -4197,12 +5350,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     };
     this.nativeSessions.clear();
     this.activePromptRunIds.clear();
+    this.activeRuntimePromptRunIds.clear();
     this.initializeResponse = undefined;
     this.invalidateBoundClient();
     const snapshot = await this.taskRuntime.snapshot();
     const affectedRuns = snapshot.runs.filter(
       (candidate) =>
         candidate.runtimeId === this.descriptor.id &&
+        !runtimeSessionIds.has(candidate.sessionId) &&
         candidate.serverInstanceId === serverInstanceId &&
         ACTIVE_RUN_STATUSES.includes(candidate.status)
     );
@@ -4252,6 +5407,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     for (const session of snapshot.agentSessions.filter(
       (candidate) =>
         candidate.runtimeId === this.descriptor.id &&
+        !runtimeSessionIds.has(candidate.id) &&
         (provisionalLocalSessionIds.has(candidate.id) ||
           (candidate.providerSessionId !== undefined &&
             loadedProviderSessionIds.has(candidate.providerSessionId)))
@@ -4263,6 +5419,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           acpRuntimeOperationId('session/runtime-lost-idle', session.id, serverInstanceId)
         );
       }
+    }
+    for (const runtimeSession of runtimeSessions) {
+      const current = await this.providerRuntime.getSession(runtimeSession.id);
+      if (!current || current.status === 'NOT_LOADED') continue;
+      await this.updateRuntimeSession(
+        current.id,
+        { status: 'NOT_LOADED' },
+        acpRuntimeOperationId(
+          'runtime/session-lost-idle',
+          current.id,
+          serverInstanceId
+        )
+      );
     }
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) =>
@@ -4996,10 +6165,22 @@ export function assertAcpExecutionPolicy(
   }
   const approvalPolicy = settings.approvalPolicy ?? 'on-request';
   const supportedApprovalPolicies = profile.approvalPolicies ?? ['on-request'];
-  if (!supportedApprovalPolicies.some((candidate) => candidate === approvalPolicy)) {
+  if (
+    approvalPolicy !== 'NEVER' &&
+    !supportedApprovalPolicies.some((candidate) => candidate === approvalPolicy)
+  ) {
     throw new Error(
       `${profile.descriptor.displayName} does not support ACP approval policy ${approvalPolicy}.`
     );
+  }
+  if (approvalPolicy === 'NEVER') {
+    const policy = requireAcpReadOnlyTurnPolicy(profile);
+    const native = settings.runtimeOptions?.[profile.descriptor.id];
+    if (!isRecord(native) || native.modeId !== policy.modeId) {
+      throw new Error(
+        `${profile.descriptor.displayName} read-only execution requires native mode ${policy.modeId}.`
+      );
+    }
   }
   if (settings.approvalsReviewer !== 'user') {
     throw new Error(
@@ -5015,6 +6196,93 @@ export function assertAcpExecutionPolicy(
       `${profile.descriptor.displayName} runtime options cannot contain credentials or opaque _meta. Authenticate through the provider CLI instead.`
     );
   }
+}
+
+export function requireAcpReadOnlyTurnPolicy(
+  profile: AcpRuntimeProfile
+): NonNullable<AcpRuntimeProfile['readOnlyTurnPolicy']> {
+  if (!profile.readOnlyTurnPolicy) {
+    throw new Error(
+      profile.readOnlyTurnUnavailableReason ??
+        `${profile.descriptor.displayName} has no qualified native read-only policy.`
+    );
+  }
+  return profile.readOnlyTurnPolicy;
+}
+
+export function normalizeAcpReadOnlyExecutionSettings(
+  profile: AcpRuntimeProfile,
+  settings: AgentExecutionSettings
+): AgentExecutionSettings {
+  return settings.approvalPolicy === 'NEVER' || settings.sandbox === 'READ_ONLY'
+    ? acpReadOnlyExecutionSettings(profile, settings)
+    : settings;
+}
+
+function acpReadOnlyExecutionSettings(
+  profile: AcpRuntimeProfile,
+  settings: AgentExecutionSettings
+): AgentExecutionSettings {
+  const policy = requireAcpReadOnlyTurnPolicy(profile);
+  const native = settings.runtimeOptions?.[profile.descriptor.id];
+  const nativeRecord = isRecord(native) ? native : {};
+  return {
+    ...settings,
+    runtimeId: profile.descriptor.id,
+    sandbox: 'DANGER_FULL_ACCESS',
+    networkAccess: true,
+    approvalPolicy: 'NEVER',
+    approvalsReviewer: 'user',
+    runtimeOptions: {
+      ...settings.runtimeOptions,
+      [profile.descriptor.id]: {
+        ...nativeRecord,
+        modeId: policy.modeId
+      }
+    }
+  };
+}
+
+function acpReadOnlyProfileHash(input: {
+  runtimeId: string;
+  sessionId: string;
+  policyId: string;
+  primaryCwd: string;
+  readRoots: readonly { canonicalPath: string; kind: string; entityId?: string }[];
+  modelSettings: AgentExecutionSettings;
+}): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        formatVersion: 1,
+        runtimeId: input.runtimeId,
+        sessionId: input.sessionId,
+        policyId: input.policyId,
+        primaryCwd: path.resolve(input.primaryCwd),
+        readRoots: input.readRoots
+          .map((root) => ({ ...root, canonicalPath: path.resolve(root.canonicalPath) }))
+          .sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath)),
+        modelSettings: input.modelSettings,
+        clientTools: []
+      })
+    )
+    .digest('hex');
+}
+
+function runtimeDeliveryErrorForAcp(
+  operation: string,
+  cause: unknown
+): AgentRuntimeDeliveryError {
+  const delivery =
+    cause instanceof AcpAmbiguousMutationError ||
+    cause instanceof AgentMutationAmbiguousError
+      ? 'AMBIGUOUS'
+      : 'NOT_DELIVERED';
+  return new AgentRuntimeDeliveryError(
+    delivery,
+    `${operation} failed: ${errorMessage(cause)}`,
+    { cause }
+  );
 }
 
 export function assertAcpManagedAttachmentsUnsupported(
@@ -5178,6 +6446,11 @@ function splitUtf8Text(value: string, maxBytes: number): string[] {
     rest = rest.slice(part.length);
   }
   return parts;
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  if (maxBytes <= 0 || !value) return '';
+  return splitUtf8Text(value, maxBytes)[0] ?? '';
 }
 
 function appendBufferedText(
@@ -5439,6 +6712,27 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isTerminalRuntimeStatus(status: AgentRuntimeRunRecord['status']): boolean {
+  return ['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(status);
+}
+
+function isAcpReadOnlyRuntimeSession(
+  session: AgentRuntimeSessionRecord,
+  profile: AcpRuntimeProfile
+): boolean {
+  const policy = profile.readOnlyTurnPolicy;
+  if (!policy || session.runtimeId !== profile.descriptor.id) return false;
+  const native = session.executionContext.modelSettings.runtimeOptions?.[
+    profile.descriptor.id
+  ];
+  return (
+    session.executionContext.repositoryAccess === 'READ_ONLY' &&
+    session.executionContext.modelSettings.approvalPolicy === 'NEVER' &&
+    isRecord(native) &&
+    native.modeId === policy.modeId
+  );
 }
 
 function errorMessage(value: unknown): string {

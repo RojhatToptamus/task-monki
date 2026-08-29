@@ -2675,6 +2675,7 @@ async function createRun(
     requestedSettings,
     executionContext: {
       attestation: { status: 'ATTESTED' },
+      repositoryAccess: 'WRITE',
       primaryCwd: state.worktree.worktreePath,
       readRoots: [
         {

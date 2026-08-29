@@ -10,6 +10,7 @@ import {
   defaultAcpModel
 } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
+import { normalizeAcpReadOnlyExecutionSettings } from './AcpRuntimeAdapter';
 
 describe('ACP runtime profiles', () => {
   it('defines unique first-class runtime identities', () => {
@@ -197,19 +198,29 @@ describe('ACP runtime profiles', () => {
         id: 'ask-for-approval',
         label: 'Ask for approval',
         sandbox: 'DANGER_FULL_ACCESS',
-        approvalPolicy: 'on-request'
+        approvalPolicy: 'on-request',
+        repositoryMutation: 'ASK'
       }),
       expect.objectContaining({
         id: 'auto-accept-edits',
         label: 'Auto-accept edits',
         sandbox: 'DANGER_FULL_ACCESS',
-        approvalPolicy: 'auto-accept-edits'
+        approvalPolicy: 'auto-accept-edits',
+        repositoryMutation: 'ALLOW'
       }),
       expect.objectContaining({
         id: 'full-access',
         label: 'Full access',
         sandbox: 'DANGER_FULL_ACCESS',
-        approvalPolicy: 'never'
+        approvalPolicy: 'never',
+        repositoryMutation: 'ALLOW'
+      }),
+      expect.objectContaining({
+        id: 'native-read-only',
+        label: 'Read-only',
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'NEVER',
+        repositoryMutation: 'DENY'
       })
     ]);
     expect(policy.detail).toContain('does not provide an enforceable process sandbox');
@@ -228,6 +239,76 @@ describe('ACP runtime profiles', () => {
     expect(acpCapabilities(TEST_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
     ]);
+  });
+
+  it('qualifies only Cursor for shared read-only workflows', () => {
+    expect(CURSOR_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      modeId: 'ask',
+      policyId: 'cursor-agent-acp/ask-read-only@v1'
+    });
+    expect(acpCapabilities(CURSOR_ACP_PROFILE)).toMatchObject({
+      promptRefinement: { maturity: 'stable' },
+      detachedReview: { maturity: 'stable' },
+      extensions: {
+        'task-monki.read-only-turn': { maturity: 'stable' }
+      }
+    });
+    for (const profile of [GROK_ACP_PROFILE, CLAUDE_AGENT_ACP_PROFILE]) {
+      expect(profile.readOnlyTurnPolicy).toBeUndefined();
+      expect(profile.readOnlyTurnUnavailableReason).toBeTruthy();
+      expect(acpCapabilities(profile)).toMatchObject({
+        promptRefinement: {
+          maturity: 'unsupported',
+          detail: profile.readOnlyTurnUnavailableReason
+        },
+        detachedReview: {
+          maturity: 'unsupported',
+          detail: profile.readOnlyTurnUnavailableReason
+        }
+      });
+      expect(
+        acpCapabilities(profile).executionPolicy.presets.some(
+          (preset) => preset.repositoryMutation === 'DENY'
+        )
+      ).toBe(false);
+    }
+  });
+
+  it('maps provider-neutral read-only resolution to Cursor Ask without changing normal Tasks', () => {
+    expect(
+      normalizeAcpReadOnlyExecutionSettings(CURSOR_ACP_PROFILE, {
+        runtimeId: CURSOR_ACP_PROFILE.descriptor.id,
+        sandbox: 'READ_ONLY',
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user',
+        networkAccess: false
+      })
+    ).toMatchObject({
+      sandbox: 'DANGER_FULL_ACCESS',
+      approvalPolicy: 'NEVER',
+      approvalsReviewer: 'user',
+      networkAccess: true,
+      runtimeOptions: {
+        'cursor-agent-acp': { modeId: 'ask' }
+      }
+    });
+    const normal = {
+      runtimeId: CURSOR_ACP_PROFILE.descriptor.id,
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user' as const,
+      networkAccess: true
+    };
+    expect(normalizeAcpReadOnlyExecutionSettings(CURSOR_ACP_PROFILE, normal)).toBe(
+      normal
+    );
+    expect(() =>
+      normalizeAcpReadOnlyExecutionSettings(GROK_ACP_PROFILE, {
+        ...normal,
+        runtimeId: GROK_ACP_PROFILE.descriptor.id,
+        sandbox: 'READ_ONLY'
+      })
+    ).toThrow(GROK_ACP_PROFILE.readOnlyTurnUnavailableReason);
   });
 
   it('gates provider-owned remembered permission choices to Cursor and Grok', () => {

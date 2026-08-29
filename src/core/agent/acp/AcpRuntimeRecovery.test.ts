@@ -65,6 +65,7 @@ async function createRuntimeSession(
   const executionContext = {
     attestation: { status: 'ATTESTED' as const },
     primaryCwd: worktree.worktreePath,
+    repositoryAccess: 'WRITE' as const,
     readRoots: [{
       canonicalPath: worktree.worktreePath,
       kind: 'WORKTREE' as const,

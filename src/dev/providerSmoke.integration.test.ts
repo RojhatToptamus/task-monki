@@ -4,6 +4,15 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentModel, AgentRuntimeCatalog } from '../shared/agent';
 import type {
+  AgentRuntimeRunRecord,
+  AgentRuntimeStoreState
+} from '../shared/agentRuntime';
+import type {
+  DiscourseAgentJobRecord,
+  DiscourseConversationAggregateRecord,
+  DiscourseResponseWaveRecord
+} from '../shared/discourse';
+import type {
   CancelRunRequest,
   CreateTaskRequest,
   GitSnapshotRecord,
@@ -54,6 +63,7 @@ describe('parseProviderSmokeArguments', () => {
         'codex:openai/gpt-test',
         '--timeout-seconds',
         '45',
+        '--qualify-read-only',
         '--confirm-throwaway',
         '--confirm-provider-usage'
       ])
@@ -63,7 +73,8 @@ describe('parseProviderSmokeArguments', () => {
       modelIds: ['codex:openai/gpt-test'],
       timeoutMs: 45_000,
       confirmThrowaway: true,
-      confirmProviderUsage: true
+      confirmProviderUsage: true,
+      qualifyReadOnly: true
     });
   });
 
@@ -193,6 +204,104 @@ describe('runProviderSmoke', () => {
     ]);
     expect(report.authoritative).toBe(true);
     expect(providerSmokeSucceeded(report)).toBe(true);
+    expect(service.readOnlySendCount).toBe(0);
+    expect(report.readOnlyQualifications).toEqual([]);
+  });
+
+  it('qualifies a supported profile through one DIRECT read-only Discourse turn', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/read-only');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('codex', 'READY', true, [candidate])])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+
+    expect(service.readOnlySendCount).toBe(1);
+    expect(report.readOnlyQualifications).toEqual([
+      expect.objectContaining({
+        runtimeId: 'codex',
+        modelId: candidate.id,
+        status: 'PASSED',
+        repositoryIntegrity: 'UNCHANGED',
+        probeAbsent: true,
+        repositoryClean: true,
+        repositoryIdentityUnchanged: true,
+        executionContained: true
+      })
+    ]);
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('reports an unsupported profile without sending a qualification turn', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('grok-acp:xai/grok-build');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('grok-acp', 'READY', true, [candidate])])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+
+    expect(service.readOnlySendCount).toBe(0);
+    expect(report.readOnlyQualifications).toEqual([
+      expect.objectContaining({
+        runtimeId: 'grok-acp',
+        status: 'UNSUPPORTED',
+        reason: expect.stringContaining('no qualified native policy')
+      })
+    ]);
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('requires shared runtime integrity evidence even when the independent Git check is clean', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/read-only-changed');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('codex', 'READY', true, [candidate])])],
+      readOnlyIntegrity: 'CHANGED'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+
+    expect(report.readOnlyQualifications[0]).toMatchObject({
+      status: 'FAILED',
+      repositoryIntegrity: 'CHANGED',
+      probeAbsent: true,
+      repositoryClean: true
+    });
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('retains a created probe as failure evidence and stops with the source repository dirty', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/read-only-mutation');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('codex', 'READY', true, [candidate])])],
+      mutateReadOnlyProbe: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+    const qualification = report.readOnlyQualifications[0]!;
+
+    expect(qualification).toMatchObject({
+      status: 'FAILED',
+      probeAbsent: false,
+      repositoryClean: false,
+      repositoryIdentityUnchanged: true
+    });
+    await expect(
+      fs.readFile(path.join(repositoryPath, qualification.probeFileName!), 'utf8')
+    ).resolves.toBe('TASK_MONKI_READ_ONLY_PROBE');
+    expect(report.completionStatus).toBe('STOPPED_EARLY');
+    expect(report.authoritative).toBe(false);
   });
 
   it('activates an explicitly selected runtime catalog once before queuing models', async () => {
@@ -285,6 +394,76 @@ describe('runProviderSmoke', () => {
       observedModelProvider: 'anthropic',
       observedModel: 'claude-test',
       observedReasoningEffort: 'low'
+    });
+  });
+
+  it('accepts an acknowledged exact prompt resolution when provider evidence omits reasoning', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'opencode:anthropic/claude-test',
+      ['high', 'low'],
+      'high'
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      observation: 'acknowledged-prompt'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      selectionAttestation: 'ADAPTER_RESOLVED',
+      observationSource: 'TASK_MONKI_RESOLUTION',
+      observedModelProvider: 'anthropic',
+      observedModel: 'claude-test',
+      observedReasoningEffort: 'low'
+    });
+  });
+
+  it('does not use an unacknowledged prompt resolution to fill missing provider evidence', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'opencode:anthropic/claude-test',
+      ['high', 'low'],
+      'high'
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      observation: 'unacknowledged-prompt'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'UNATTESTED',
+      selectionAttestation: 'REQUESTED_ONLY',
+      observationSource: 'RECOVERY_RESUME_RESPONSE',
+      observedModelProvider: 'anthropic',
+      observedModel: 'claude-test',
+      observedReasoningEffort: undefined
+    });
+  });
+
+  it('keeps later conflicting provider evidence authoritative over an acknowledged prompt', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'opencode:anthropic/claude-test',
+      ['high', 'low'],
+      'high'
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      observation: 'acknowledged-prompt-then-conflict'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      selectionAttestation: 'OBSERVED_MISMATCH',
+      observationSource: 'MODEL_REROUTED_NOTIFICATION',
+      observedModel: 'different-model'
     });
   });
 
@@ -656,11 +835,17 @@ function runtime(
       capabilities: explicitModelDiscovery
         ? {
             modelCatalog: { activation: 'EXPLICIT' },
-            executionPolicy: runtimeId === 'codex' ? smokeExecutionPolicy() : undefined
+            executionPolicy:
+              runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
+            extensions: {},
+            detachedReview: { maturity: 'unsupported' }
           }
         : {
             modelCatalog: {},
-            executionPolicy: runtimeId === 'codex' ? smokeExecutionPolicy() : undefined
+            executionPolicy:
+              runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
+            extensions: {},
+            detachedReview: { maturity: 'unsupported' }
           }
     },
     models,
@@ -678,10 +863,24 @@ function smokeExecutionPolicy() {
         sandbox: 'WORKSPACE_WRITE' as const,
         approvalPolicy: 'never' as const,
         approvalsReviewer: 'user' as const,
-        networkAccess: 'DISABLED' as const
+        networkAccess: 'DISABLED' as const,
+        repositoryMutation: 'ALLOW' as const
+      },
+      {
+        id: 'read-only',
+        label: 'Read only',
+        sandbox: 'READ_ONLY' as const,
+        approvalPolicy: 'never' as const,
+        approvalsReviewer: 'user' as const,
+        networkAccess: 'DISABLED' as const,
+        repositoryMutation: 'DENY' as const
       }
     ]
   };
+}
+
+function unsupportedExecutionPolicy() {
+  return { defaultPresetId: 'normal', presets: [] };
 }
 
 function catalogWith(runtimes: ReturnType<typeof runtime>[]): AgentRuntimeCatalog {
@@ -701,6 +900,9 @@ interface FakeProviderBehavior {
     | 'adapter'
     | 'provider-then-adapter'
     | 'acp-post-configuration'
+    | 'acknowledged-prompt'
+    | 'unacknowledged-prompt'
+    | 'acknowledged-prompt-then-conflict'
     | 'none';
   interactionStatus?: 'RESOLVED';
   gitStatus?: 'CLEAN' | 'DIRTY';
@@ -714,6 +916,8 @@ interface FakeProviderBehavior {
   cancelTerminalStatus?: 'INTERRUPTED' | 'RECOVERY_REQUIRED' | 'LOST';
   hangCancel?: boolean;
   onStart?: () => Promise<void>;
+  readOnlyIntegrity?: 'UNCHANGED' | 'CHANGED' | 'UNVERIFIABLE';
+  mutateReadOnlyProbe?: boolean;
 }
 
 class FakeProviderSmokeService implements ProviderSmokeService {
@@ -729,6 +933,10 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     status: RunRecord['status'];
   }> = [];
   readonly startedModels: Array<{ model?: string; reasoningEffort?: string }> = [];
+  readOnlySendCount = 0;
+  readOnlyProbeFileName?: string;
+  private discourseAggregate?: DiscourseConversationAggregateRecord;
+  private readonly runtimeRuns: AgentRuntimeRunRecord[] = [];
 
   constructor(
     private readonly repositoryPath: string,
@@ -772,6 +980,85 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     };
     this.snapshot.repositories = [repository];
     return structuredClone(repository);
+  }
+
+  async createDiscourseConversation(input: Parameters<
+    NonNullable<ProviderSmokeService['createDiscourseConversation']>
+  >[0]) {
+    this.discourseAggregate = {
+      waves: [],
+      jobs: []
+    } as unknown as DiscourseConversationAggregateRecord;
+    return { id: 'conversation-read-only', title: input.title } as never;
+  }
+
+  async previewDiscourseContext() {
+    return { fingerprint: 'read-only-preview' } as never;
+  }
+
+  async sendDiscourseMessage(input: Parameters<
+    NonNullable<ProviderSmokeService['sendDiscourseMessage']>
+  >[0]) {
+    this.readOnlySendCount += 1;
+    const probe = input.body.match(/\.task-monki-read-only-probe-[a-f0-9-]+/u)?.[0];
+    if (!probe) throw new Error('Read-only qualification prompt omitted its probe path.');
+    this.readOnlyProbeFileName = probe;
+    if (this.behavior.mutateReadOnlyProbe) {
+      await fs.writeFile(path.join(this.repositoryPath, probe), 'TASK_MONKI_READ_ONLY_PROBE');
+    }
+    const now = new Date().toISOString();
+    const wave = {
+      id: 'wave-read-only',
+      conversationId: input.conversationId,
+      triggerMessageId: 'message-read-only',
+      policy: 'DIRECT' as const,
+      status: 'SETTLED' as const,
+      outcome: 'COMPLETE' as const
+    } as DiscourseResponseWaveRecord;
+    const job = {
+      id: 'job-read-only',
+      conversationId: input.conversationId,
+      waveId: wave.id,
+      role: 'ANSWER' as const,
+      runId: 'runtime-run-read-only',
+      status: 'COMPLETED' as const
+    } as DiscourseAgentJobRecord;
+    this.discourseAggregate = {
+      ...this.discourseAggregate!,
+      waves: [wave],
+      jobs: [job]
+    };
+    const selected = input.agents[0]!;
+    const selectedModel = selected.modelId?.split('/').at(-1);
+    this.runtimeRuns.push({
+      id: job.runId!,
+      purpose: 'DISCOURSE_ANSWER',
+      status: 'COMPLETED',
+      requestedSettings: {
+        runtimeId: selected.runtimeId,
+        model: selectedModel,
+        reasoningEffort: selected.reasoningEffort
+      },
+      repositoryIntegrity: {
+        status: this.behavior.readOnlyIntegrity ?? 'UNCHANGED',
+        checkedAt: now
+      }
+    } as AgentRuntimeRunRecord);
+    return { wave, jobs: [job] } as never;
+  }
+
+  async getDiscourseConversation() {
+    if (!this.discourseAggregate) throw new Error('Fake Discourse conversation is missing.');
+    return structuredClone(this.discourseAggregate);
+  }
+
+  async stopDiscourseWave() {
+    if (!this.discourseAggregate) throw new Error('Fake Discourse conversation is missing.');
+    return structuredClone(this.discourseAggregate.waves[0]!);
+  }
+
+  async runtimeSnapshot(): Promise<AgentRuntimeStoreState> {
+    return { runs: structuredClone(this.runtimeRuns) } as AgentRuntimeStoreState;
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
@@ -832,31 +1119,11 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     if ((this.behavior.observation ?? 'provider') !== 'none') {
       const acpPostConfiguration =
         this.behavior.observation === 'acp-post-configuration';
-      this.snapshot.agentSettingsObservations.push({
-        id: `observation-${run.id}`,
-        taskId: task.id,
-        iterationId: run.iterationId,
-        sessionId: run.sessionId,
-        runId: run.id,
-        runtimeId: run.runtimeId,
-        source:
-          this.behavior.observation === 'adapter'
-            ? ('TASK_MONKI_RESOLUTION' as never)
-            : acpPostConfiguration
-              ? 'THREAD_START_RESPONSE'
-              : 'THREAD_SETTINGS_NOTIFICATION',
-        settings: acpPostConfiguration
-          ? { ...task.agentSettings, model: 'grok-composer-2.5-fast' }
-          : task.agentSettings,
-        ...(acpPostConfiguration
-          ? { rawMessage: protocolReference(run, 2, now) }
-          : {}),
-        observedAt: now
-      });
-      if (
-        this.behavior.observation === 'provider-then-adapter' ||
-        acpPostConfiguration
-      ) {
+      const promptResolution =
+        this.behavior.observation === 'acknowledged-prompt' ||
+        this.behavior.observation === 'unacknowledged-prompt' ||
+        this.behavior.observation === 'acknowledged-prompt-then-conflict';
+      if (promptResolution) {
         this.snapshot.agentSettingsObservations.push({
           id: `adapter-observation-${run.id}`,
           taskId: task.id,
@@ -866,11 +1133,72 @@ class FakeProviderSmokeService implements ProviderSmokeService {
           runtimeId: run.runtimeId,
           source: 'TASK_MONKI_RESOLUTION' as never,
           settings: task.agentSettings,
-          ...(acpPostConfiguration
-            ? { rawMessage: protocolReference(run, 4, now) }
-            : {}),
+          ...(this.behavior.observation === 'unacknowledged-prompt'
+            ? {}
+            : { rawMessage: protocolReference(run, 2, now) }),
+          observedAt: now
+        });
+        const { reasoningEffort: _reasoningEffort, ...providerSettings } =
+          task.agentSettings;
+        this.snapshot.agentSettingsObservations.push({
+          id: `provider-observation-${run.id}`,
+          taskId: task.id,
+          iterationId: run.iterationId,
+          sessionId: run.sessionId,
+          runId: run.id,
+          runtimeId: run.runtimeId,
+          source:
+            this.behavior.observation === 'acknowledged-prompt-then-conflict'
+              ? 'MODEL_REROUTED_NOTIFICATION'
+              : 'RECOVERY_RESUME_RESPONSE',
+          settings:
+            this.behavior.observation === 'acknowledged-prompt-then-conflict'
+              ? { ...providerSettings, model: 'different-model' }
+              : providerSettings,
+          rawMessage: protocolReference(run, 4, now),
           observedAt: new Date(Date.parse(now) + 1).toISOString()
         });
+      } else {
+        this.snapshot.agentSettingsObservations.push({
+          id: `observation-${run.id}`,
+          taskId: task.id,
+          iterationId: run.iterationId,
+          sessionId: run.sessionId,
+          runId: run.id,
+          runtimeId: run.runtimeId,
+          source:
+            this.behavior.observation === 'adapter'
+              ? ('TASK_MONKI_RESOLUTION' as never)
+              : acpPostConfiguration
+                ? 'THREAD_START_RESPONSE'
+                : 'THREAD_SETTINGS_NOTIFICATION',
+          settings: acpPostConfiguration
+            ? { ...task.agentSettings, model: 'grok-composer-2.5-fast' }
+            : task.agentSettings,
+          ...(acpPostConfiguration
+            ? { rawMessage: protocolReference(run, 2, now) }
+            : {}),
+          observedAt: now
+        });
+        if (
+          this.behavior.observation === 'provider-then-adapter' ||
+          acpPostConfiguration
+        ) {
+          this.snapshot.agentSettingsObservations.push({
+            id: `adapter-observation-${run.id}`,
+            taskId: task.id,
+            iterationId: run.iterationId,
+            sessionId: run.sessionId,
+            runId: run.id,
+            runtimeId: run.runtimeId,
+            source: 'TASK_MONKI_RESOLUTION' as never,
+            settings: task.agentSettings,
+            ...(acpPostConfiguration
+              ? { rawMessage: protocolReference(run, 4, now) }
+              : {}),
+            observedAt: new Date(Date.parse(now) + 1).toISOString()
+          });
+        }
       }
     }
     if (this.behavior.interactionStatus) {
@@ -1061,11 +1389,13 @@ async function runHarness(
       timeoutMs: 5_000,
       confirmThrowaway: true,
       confirmProviderUsage: true,
+      qualifyReadOnly: false,
       help: false,
       ...optionOverrides
     },
     {
       createService: () => service,
+      runtimeStore: { snapshot: () => service.runtimeSnapshot() },
       pollIntervalMs: 2,
       cancelTimeoutMs: 1_000,
       ...dependencyOverrides

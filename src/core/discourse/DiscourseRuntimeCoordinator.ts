@@ -16,7 +16,7 @@ import type {
   StructuredDiscourseError
 } from '../../shared/discourse';
 import { DISCOURSE_LIMITS, isEligibleDiscourseConcern } from '../../shared/discourse';
-import { assertDiscourseExecutionContext } from '../agent/AgentRuntimeOwnership';
+import { assertReadOnlyExecutionContext } from '../agent/AgentRuntimeOwnership';
 import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
 import type { AgentRuntimeCoordinator } from '../agent/AgentRuntimeCoordinator';
 import {
@@ -165,7 +165,7 @@ export class DiscourseRuntimeCoordinator {
   private async prepareJobUnlocked(
     input: PrepareDiscourseJobInput
   ): Promise<PreparedDiscourseJob> {
-    assertDiscourseExecutionContext(input.executionContext);
+    assertReadOnlyExecutionContext(input.executionContext);
     const aggregate = await this.discourse.getConversation(input.conversationId);
     if (aggregate.conversation.status !== 'OPEN') {
       throw new Error('Archived discourse conversations cannot prepare agent work.');
@@ -879,6 +879,28 @@ export class DiscourseRuntimeCoordinator {
     completedAt: string,
     operationId: string
   ): Promise<{ job: DiscourseAgentJobRecord; mayProject: boolean }> {
+    if (
+      run.status === 'COMPLETED' &&
+      run.repositoryIntegrity?.status !== 'UNCHANGED'
+    ) {
+      await this.markJobRecovery(
+        job.conversationId,
+        job.id,
+        run.repositoryIntegrity?.detail ??
+          'Task Monki has not verified that the repository stayed unchanged during this read-only turn.',
+        `${operationId}:unverified-repository`
+      );
+      await this.settleRuntimeAfterTerminal(session, run, completedAt, operationId);
+      return {
+        job: requireJob(
+          (await this.discourse.getConversation(job.conversationId)).jobs,
+          job.id,
+          job.waveId
+        ),
+        mayProject: false
+      };
+    }
+
     if (
       job.runId !== run.id ||
       !runtimeRunMatchesExactJobAttempt(run, job.conversationId, job)
@@ -1843,6 +1865,26 @@ export class DiscourseRuntimeCoordinator {
         continue;
       }
 
+      if (
+        run.status === 'COMPLETED' &&
+        run.repositoryIntegrity?.status !== 'UNCHANGED'
+      ) {
+        await this.markJobRecovery(
+          conversationId,
+          job.id,
+          'Task Monki has not verified that the repository stayed unchanged during this read-only turn.',
+          `recover-unverified-repository:${run.id}`
+        );
+        await this.settleRuntimeAfterTerminal(
+          session,
+          run,
+          run.endedAt ?? run.lastEventAt ?? this.now(),
+          `recover-unverified-repository:${run.id}`
+        );
+        recoveryRequiredJobIds.add(job.id);
+        continue;
+      }
+
       if (run.status === 'COMPLETED' && job.status === 'COMPLETED') {
         await this.settleRuntimeAfterTerminal(
           session,
@@ -2068,7 +2110,12 @@ export class DiscourseRuntimeCoordinator {
         !isRuntimeTerminal(candidate.status) &&
         !['NOT_SENT', 'NOT_DELIVERED'].includes(candidate.delivery)
     );
-    if (currentSession.status !== 'IDLE' && !sessionStillOwnsProviderWork) {
+    if (
+      !sessionStillOwnsProviderWork &&
+      !['IDLE', 'NOT_LOADED', 'SYSTEM_ERROR', 'ARCHIVED', 'DELETED'].includes(
+        currentSession.status
+      )
+    ) {
       await this.runtime.updateSession(
         currentSession.id,
         currentSession.recordRevision,
@@ -2085,6 +2132,9 @@ export class DiscourseRuntimeCoordinator {
         entry.recordRevision,
         `${operationId}:queue-terminal`
       );
+    }
+    if (!sessionStillOwnsProviderWork && currentSession.status !== 'NOT_LOADED') {
+      await this.agents.finishRuntimeTurn(run.id);
     }
   }
 

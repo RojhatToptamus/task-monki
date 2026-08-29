@@ -16,6 +16,7 @@ import {
   selectSettingsModels
 } from './SettingsView';
 import { AgentModelSetting } from './AgentModelSelector';
+import { runtimeExecutionUnavailableReason } from '../model/runtimeReadiness';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
 const softwareUpdateState: SoftwareUpdateState = {
@@ -301,6 +302,89 @@ describe('SettingsView', () => {
     expect(selected.selectedPromptRefinementModel?.id).toBe(providerModel.id);
     expect(selected.reviewRuntimeId).toBe('provider-runtime');
     expect(selected.selectedReviewModel?.id).toBe(providerModel.id);
+  });
+
+  it('preserves an unavailable configured workflow provider until the user changes it', () => {
+    const selected = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      promptRefinementRuntimeId: 'opencode',
+      reviewRuntimeId: 'opencode'
+    });
+
+    expect(selected.promptRefinementRuntimeId).toBe('opencode');
+    expect(selected.reviewRuntimeId).toBe('opencode');
+    expect(selected.selectedPromptRefinementModel).toBeUndefined();
+    expect(selected.selectedReviewModel).toBeUndefined();
+  });
+
+  it('keeps an unsupported workflow provider visible with its reason', () => {
+    const providerModel: AgentModel = {
+      ...codexModel,
+      id: 'provider-runtime:provider/model',
+      runtimeId: 'provider-runtime',
+      modelProvider: 'provider',
+      model: 'model',
+      displayName: 'Provider model'
+    };
+    const providerRuntime: AgentRuntimeState = {
+      preflight: {
+        runtime: {
+          id: 'provider-runtime',
+          displayName: 'Provider runtime',
+          kind: 'HTTP_AGENT',
+          transport: 'HTTP_SSE',
+          lifecycleScope: 'APPLICATION'
+        },
+        readiness: createRuntimeReadiness('READY', 'Ready'),
+        capabilities: {
+          ...codexCapabilities(),
+          runtimeId: 'provider-runtime',
+          executionPolicy: {
+            defaultPresetId: 'write',
+            detail: 'Write access only.',
+            presets: [
+              {
+                id: 'write',
+                label: 'Write',
+                detail: 'Write access.',
+                sandbox: 'WORKSPACE_WRITE',
+                repositoryMutation: 'ALLOW',
+                approvalPolicy: 'never',
+                approvalsReviewer: 'user',
+                networkAccess: 'DISABLED'
+              }
+            ]
+          },
+          promptRefinement: {
+            maturity: 'unsupported',
+            detail: 'This profile cannot deny shell changes.'
+          }
+        }
+      },
+      models: [providerModel],
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+
+    const html = renderToStaticMarkup(
+      <AgentModelSetting
+        label="Prompt refinement"
+        runtimeId="codex"
+        modelId={codexModel.id}
+        models={[codexModel, providerModel]}
+        runtimes={[runtimes[0]!, providerRuntime]}
+        runtimeUnavailableReason={(runtime) =>
+          runtimeExecutionUnavailableReason(runtime, 'PROMPT_REFINEMENT')
+        }
+        onSelectionChange={() => undefined}
+      />
+    );
+
+    expect(html).toContain(
+      'This profile cannot deny shell changes. Normal Tasks remain available.'
+    );
+    expect(html).toMatch(
+      /<button[^>]*disabled=""[^>]*><span>Provider model<\/span>/u
+    );
   });
 
   it('renders intentional agent catalog loading and empty states', () => {

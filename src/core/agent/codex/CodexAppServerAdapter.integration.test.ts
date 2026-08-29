@@ -39,95 +39,6 @@ import {
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
-  it('uses the active Codex executable and enabled external tools for attachment refinement', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refinement-runtime-'));
-    const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = createCodexAdapter(store, new AppEventBus(), {
-      cwd: dir,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-      toolSettings: {
-        webSearchMode: 'live',
-        mcpServers: 'all',
-        apps: 'enabled'
-      },
-      runtimeResolver: async () => ({
-        executable,
-        source: 'vscode-extension-bundle',
-        version: '0.150.0-alpha.8',
-        compatibility: {
-          launch: {
-            argv: ['app-server', '--stdio'],
-            transport: 'STDIO',
-            form: 'stdio-flag'
-          },
-          requiredMethods: []
-        },
-        diagnostics: []
-      })
-    });
-    const refine = vi.fn(async () => ({
-      prompt: 'Refined request.',
-      titleSuggestion: 'Refined request',
-      source: 'model' as const,
-      evidence: {
-        repositoryInspection: 'none' as const,
-        repositoryFilesInspected: [],
-        attachmentIdsInspected: [],
-        attachmentIdsReferenced: []
-      }
-    }));
-    Object.assign(adapter as unknown as { promptRefiner: { refine: typeof refine } }, {
-      promptRefiner: { refine }
-    });
-
-    try {
-      await adapter.initialize();
-      const refinementModel = (await adapter.listModels())[0]!;
-      await adapter.refinePrompt({
-        requestId: 'refinement-runtime-test',
-        repositoryPath: dir,
-        input: 'Refine this request.',
-        settings: {
-          runtimeId: 'codex',
-          model: refinementModel.model,
-          reasoningEffort: 'low',
-          sandbox: 'READ_ONLY',
-          networkAccess: false,
-          approvalPolicy: 'never',
-          approvalsReviewer: 'user'
-        },
-        refinementModel,
-        attachments: [{
-          attachmentId: 'attachment-1',
-          ordinal: 0,
-          displayName: 'context.txt',
-          kind: 'text',
-          mediaType: 'text/plain',
-          byteCount: 7,
-          sha256: 'a'.repeat(64),
-          path: path.join(dir, 'context.txt'),
-          verifiedAt: new Date().toISOString()
-        }]
-      });
-
-      expect(refine).toHaveBeenCalledWith(
-        expect.objectContaining({
-          codexExecutable: executable,
-          toolSettings: {
-            webSearchMode: 'live',
-            mcpServers: 'all',
-            apps: 'enabled'
-          },
-          attachments: [expect.objectContaining({ attachmentId: 'attachment-1' })]
-        })
-      );
-    } finally {
-      await adapter.shutdown();
-    }
-  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
-
   it('runs a scoped Discourse turn without fabricating task-owned state', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
     const executable = await writeFakeCodexExecutable(dir, 'scoped');
@@ -255,7 +166,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         session,
         run: starting,
         executionContext,
-        prompt: 'Question the proposed architecture.'
+        prompt: 'Question the proposed architecture.',
+        attachments: []
       });
       const afterResponse = await runtime.getRun(run.id);
       if (afterResponse?.status === 'STARTING') {
@@ -272,6 +184,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         );
       }
       await terminal;
+      await new Promise((resolve) => setTimeout(resolve, 75));
 
       await expect(runtime.getRun(run.id)).resolves.toMatchObject({
         status: 'COMPLETED',
@@ -281,7 +194,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       await expect(runtime.readArtifact(run.outputArtifactId)).resolves.toBe(
         'Fake task completed.'
       );
-      expect(observedEvents).toContain('DELTA');
+      expect(observedEvents.filter((event) => event === 'DELTA')).toHaveLength(2);
+      expect(observedEvents.filter((event) => event === 'TERMINAL')).toHaveLength(1);
       expect(observedEvents.at(-1)).toBe('TERMINAL');
       const runtimeSnapshot = await runtime.snapshot();
       const journal = await fs.readFile(
@@ -324,10 +238,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
   it.each([
     {
-      name: 'requires recovery when an acknowledged scoped interrupt never becomes terminal',
+      name: 'confirms a scoped interruption by stopping Codex when no terminal arrives',
       mode: 'scoped-interrupt-no-terminal',
       action: 'interrupt',
-      terminalStatus: 'RECOVERY_REQUIRED'
+      terminalStatus: 'INTERRUPTED'
     },
     {
       name: 'persists a scoped interruption that races with the acknowledgement checkpoint',
@@ -464,7 +378,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         session,
         run,
         executionContext,
-        prompt: 'Keep this response active until it is interrupted.'
+        prompt: 'Keep this response active until it is interrupted.',
+        attachments: []
       });
       session = (await runtime.getSession(session.id))!;
       session = await runtime.updateSession(
@@ -536,24 +451,195 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
               recoveryState: 'REQUIRES_USER_ACTION',
               providerTerminalSource: 'PROVIDER_PROCESS_LOSS'
             }
-          : terminalStatus === 'RECOVERY_REQUIRED'
-          ? {
-              status: 'RECOVERY_REQUIRED',
-              delivery: 'ACKNOWLEDGED',
-              interruptDelivery: 'AMBIGUOUS',
-              recoveryState: 'REQUIRES_USER_ACTION',
-              terminalReason: expect.stringContaining('did not confirm a terminal turn')
-            }
           : {
               status: 'INTERRUPTED',
               delivery: 'TERMINAL',
               interruptDelivery: 'TERMINAL',
               recoveryState: 'NONE',
-              providerTerminalSource: 'TURN_COMPLETED_NOTIFICATION'
+              providerTerminalSource:
+                mode === 'scoped-interrupt-no-terminal'
+                  ? 'CONFIRMED_STOP_AFTER_RUNTIME_INTERRUPT'
+                  : 'TURN_COMPLETED_NOTIFICATION'
             }
       );
     } finally {
       await adapter.shutdown();
+      await runtime.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it.each([
+    {
+      name: 'fails only after Codex confirms the turn stopped when a request arrives before the local start acknowledgement',
+      mode: 'scoped-unexpected-request-before-ack',
+      expectedStatus: 'FAILED',
+      expectedSource: 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST',
+      terminationFailure: false
+    },
+    {
+      name: 'fails only after Codex confirms the turn stopped when a request arrives after acknowledgement',
+      mode: 'scoped-unexpected-request-after-ack',
+      expectedStatus: 'FAILED',
+      expectedSource: 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST',
+      terminationFailure: false
+    },
+    {
+      name: 'fails after a confirmed local process stop when interrupt delivery is ambiguous',
+      mode: 'scoped-unexpected-request-ambiguous-stop',
+      expectedStatus: 'FAILED',
+      expectedSource: 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST',
+      terminationFailure: false
+    },
+    {
+      name: 'stops Codex before failing an acknowledged unexpected request with no terminal event',
+      mode: 'scoped-unexpected-request-no-terminal',
+      expectedStatus: 'FAILED',
+      expectedSource: 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST',
+      terminationFailure: false
+    },
+    {
+      name: 'requires recovery when neither an ambiguous interrupt nor local termination confirms the stop',
+      mode: 'scoped-unexpected-request-ambiguous-stop',
+      expectedStatus: 'RECOVERY_REQUIRED',
+      expectedSource: 'UNEXPECTED_SERVER_REQUEST',
+      terminationFailure: true
+    }
+  ] as const)('$name', async ({
+    mode,
+    expectedStatus,
+    expectedSource,
+    terminationFailure
+  }) => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-scoped-unexpected-request-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, mode);
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const store = new FileTaskStore(path.join(dir, 'task-store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    await runtime.init();
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      interruptRequestTimeoutMs: 40,
+      interruptCompletionTimeoutMs: 100,
+      restartDelaysMs: [],
+      runtimeStore: runtime
+    });
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
+    let terminate: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await orchestrator.initialize();
+      if (terminationFailure) {
+        const supervisor = (
+          adapter as unknown as { supervisor: CodexAppServerSupervisor }
+        ).supervisor;
+        terminate = vi
+          .spyOn(supervisor, 'terminateUnresponsive')
+          .mockRejectedValue(new Error('injected unconfirmed process stop'));
+      }
+      const owner = {
+        kind: 'DISCOURSE' as const,
+        conversationId: `conversation-${mode}`,
+        stableParticipantId: 'participant-unexpected-request'
+      };
+      const sessionId = `session-${mode}`;
+      const executionContext = await orchestrator.buildExecutionContext('codex', {
+        sessionId,
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'openai',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: `unexpected-request-context-${mode}`
+      });
+      const prepared = await orchestrator.prepareTurn({
+        sessionId,
+        runId: `run-${mode}`,
+        owner,
+        scope: {
+          kind: 'DISCOURSE',
+          conversationId: owner.conversationId,
+          waveId: 'wave-unexpected-request',
+          jobId: 'job-unexpected-request',
+          contextSnapshotId: 'context-unexpected-request',
+          attemptId: 'attempt-unexpected-request'
+        },
+        runtimeId: 'codex',
+        model: 'fake-model',
+        purpose: 'DISCOURSE_ANSWER',
+        generationKey: `generation-${mode}`,
+        executionContext,
+        prompt: 'Inspect this repository without changing it.',
+        priority: 'DISCOURSE_BACKGROUND',
+        clientOperationId: `unexpected-request-run-${mode}`,
+        createdAt: new Date().toISOString()
+      });
+
+      await orchestrator.startPreparedTurnNow(
+        prepared.queueEntry.id,
+        `unexpected-request-start-${mode}`
+      );
+      let settled = await runtime.getRun(prepared.run.id);
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        if (settled?.status === expectedStatus) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        settled = await runtime.getRun(prepared.run.id);
+      }
+
+      expect(settled).toMatchObject({
+        status: expectedStatus,
+        providerTurnId: 'turn-1',
+        providerTerminalSource: expectedSource,
+        terminalReason: expect.stringContaining(
+          'Codex requested item/commandExecution/requestApproval during a read-only turn.'
+        )
+      });
+      if (expectedStatus === 'FAILED') {
+        expect(settled).toMatchObject({
+          delivery: 'TERMINAL',
+          interruptDelivery: 'TERMINAL',
+          recoveryState: 'NONE',
+          endedAt: expect.any(String)
+        });
+      } else {
+        expect(settled).toMatchObject({
+          delivery: 'ACKNOWLEDGED',
+          interruptDelivery: 'AMBIGUOUS',
+          recoveryState: 'REQUIRES_USER_ACTION'
+        });
+        expect(settled).not.toHaveProperty('endedAt');
+      }
+      const diagnostic = await runtime.readArtifact(prepared.run.diagnosticArtifactId);
+      expect(diagnostic).toContain(
+        'Codex requested item/commandExecution/requestApproval during a read-only turn.'
+      );
+      expect(Buffer.byteLength(diagnostic, 'utf8')).toBeLessThan(1_024);
+      const server = (await runtime.snapshot()).servers[0]!;
+      const outbound = readOutboundMessages(
+        await fs.readFile(server.protocolJournalPath, 'utf8')
+      );
+      expect(outbound.find((message) => message.id === 201 && !message.method)).toMatchObject({
+        error: {
+          code: -32000,
+          message: 'Read-only turns cannot request approvals, tools, or user input.'
+        }
+      });
+      expect(outbound.map((message) => message.method)).toContain('turn/interrupt');
+    } finally {
+      terminate?.mockRestore();
+      await orchestrator.shutdown();
       await runtime.close();
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -4390,363 +4476,6 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   });
 
-  it('keeps the review response turn for item correlation when turn started differs', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-retarget-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-turn-start-mismatch'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-
-    const reviewRun = await orchestrator.startReview({
-      task,
-      iteration,
-      worktree,
-      sourceRun,
-      target: { type: 'UNCOMMITTED_CHANGES' },
-      settings: task.agentSettings
-    });
-    const item = await waitForAgentItem(store, reviewRun.id, 'review-message');
-    expect(item.type).toBe('AGENT_MESSAGE');
-    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
-      'review-response-turn'
-    );
-
-    await orchestrator.interruptRun(reviewRun.id);
-
-    const server = (await store.snapshot()).agentServers[0];
-    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-    const interruptTurnIds = readOutboundMessages(journal)
-      .filter((message) => message.method === 'turn/interrupt')
-      .map((message) => (message.params as { turnId: string }).turnId);
-    expect(interruptTurnIds).toEqual([
-      'review-response-turn',
-      'review-active-turn'
-    ]);
-    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
-      'review-active-turn'
-    );
-
-    await orchestrator.shutdown();
-  });
-
-  it('passes review config to the provider fork and starts review inline there', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-effort-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-interrupt-no-active'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-      designSkillRoot
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir, {
-      withTextAttachment: true,
-      linkedWorktree: true
-    });
-    const canonicalReviewAttachmentPath = (await store.verifyTaskAttachments(task.id))[0]!
-      .absolutePath;
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-
-    const reviewSettings = {
-      ...task.agentSettings,
-      reasoningEffort: 'low',
-      sandbox: 'READ_ONLY' as const
-    };
-    const reviewRun = await orchestrator.startReview({
-      task,
-      iteration,
-      worktree,
-      sourceRun,
-      target: { type: 'UNCOMMITTED_CHANGES' },
-      settings: reviewSettings
-    });
-
-    const snapshot = await store.snapshot();
-    const reviewSession = snapshot.agentSessions.find(
-      (session) => session.id === reviewRun.sessionId
-    );
-    const reviewObservation = snapshot.agentSettingsObservations.find(
-      (observation) =>
-        observation.sessionId === reviewRun.sessionId &&
-        observation.source === 'THREAD_FORK_RESPONSE'
-    );
-    expect(reviewSession?.requestedSettings.reasoningEffort).toBe('low');
-    expect(reviewObservation?.settings.reasoningEffort).toBe('low');
-    expect((await store.getRun(reviewRun.id))?.attachmentSubmissions).toEqual([
-      expect.objectContaining({
-        kind: 'text',
-        submittedAs: 'prompt-file-reference',
-        providerTurnId: expect.any(String),
-        submittedAt: expect.any(String)
-      })
-    ]);
-
-    const server = snapshot.agentServers[0];
-    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-    const messages = readOutboundMessages(journal);
-    const sourceThread = messages.find((message) => message.method === 'thread/start');
-    const sourceConfig = (
-      sourceThread?.params as {
-        config?: {
-          default_permissions?: string;
-          permissions?: Record<
-            string,
-            { filesystem?: Record<string, 'read' | 'write'> }
-          >;
-        };
-      }
-    )?.config;
-    expect(
-      sourceConfig?.default_permissions
-        ? sourceConfig.permissions?.[sourceConfig.default_permissions]?.filesystem?.[
-            designSkillRoot
-          ]
-        : undefined
-    ).toBeUndefined();
-    const reviewFork = messages.find((message) => message.method === 'thread/fork');
-    expect((reviewFork?.params as { cwd?: string } | undefined)?.cwd).toBe(
-      worktree.worktreePath
-    );
-    expect(
-      (
-        reviewFork?.params as {
-          config?: { model_reasoning_effort?: string } | null;
-        }
-      )?.config?.model_reasoning_effort
-    ).toBe('low');
-    const reviewConfig = (
-      reviewFork?.params as {
-        config?: {
-          default_permissions?: string;
-          allow_login_shell?: boolean;
-          shell_environment_policy?: {
-            inherit?: string;
-            set?: Record<string, string>;
-          };
-          permissions?: Record<
-            string,
-            { filesystem?: Record<string, 'read' | 'write'> }
-          >;
-        } | null;
-      }
-    )?.config;
-    const reviewProfileId = reviewConfig?.default_permissions;
-    const canonicalCommonDir = await fs.realpath(
-      path.join(dir, 'repository', '.git')
-    );
-    expect(
-      reviewProfileId
-        ? reviewConfig?.permissions?.[reviewProfileId]?.filesystem
-        : undefined
-    ).toMatchObject({
-      [worktree.worktreePath]: 'read',
-      [canonicalCommonDir]: 'read'
-    });
-    expect(
-      reviewProfileId
-        ? reviewConfig?.permissions?.[reviewProfileId]?.filesystem?.[
-            designSkillRoot
-          ]
-        : undefined
-    ).toBeUndefined();
-    expect(reviewConfig?.allow_login_shell).toBe(false);
-    expect(reviewConfig?.shell_environment_policy).toMatchObject({
-      inherit: 'all',
-      set: {
-        HOME: worktree.worktreePath,
-        XDG_CONFIG_HOME: path.join(worktree.worktreePath, '.config'),
-        GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-        GIT_CONFIG_SYSTEM: process.platform === 'win32' ? 'NUL' : '/dev/null',
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_COUNT: '1',
-        GIT_CONFIG_KEY_0: 'core.excludesFile',
-        GIT_CONFIG_VALUE_0: process.platform === 'win32' ? 'NUL' : '/dev/null'
-      }
-    });
-    const reviewPath = reviewConfig?.shell_environment_policy?.set?.PATH;
-    expect(reviewPath).toEqual(expect.any(String));
-    if (process.platform === 'darwin') {
-      expect(reviewPath?.split(path.delimiter)[0]).not.toBe('/usr/bin');
-    }
-    const reviewInstructions = (
-      reviewFork?.params as { developerInstructions?: string } | undefined
-    )?.developerInstructions;
-    expect(readAttachmentManifestPaths(reviewInstructions)).toContain(
-      canonicalReviewAttachmentPath
-    );
-    expect(reviewInstructions).not.toContain('Task Monki Design skills:');
-    const reviewStart = messages.find((message) => message.method === 'review/start');
-    expect(
-      (reviewStart?.params as { threadId?: string; delivery?: string } | undefined)
-        ?.threadId
-    ).toBe('thread-review');
-    expect(
-      (reviewStart?.params as { delivery?: string } | undefined)?.delivery
-    ).toBe('inline');
-
-    await orchestrator.interruptRun(reviewRun.id);
-    await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
-    await orchestrator.shutdown();
-  });
-
-  it('fails a linked-worktree review before provider launch when Git metadata is missing', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-missing-git-metadata-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-interrupt-no-active'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: []
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter);
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir, {
-      linkedWorktree: true
-    });
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-    await fs.unlink(path.join(worktree.worktreePath, '.git'));
-
-    await expect(
-      orchestrator.startReview({
-        task,
-        iteration,
-        worktree,
-        sourceRun,
-        target: { type: 'UNCOMMITTED_CHANGES' },
-        settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
-      })
-    ).rejects.toThrow('Cannot resolve trusted Git metadata for agent session');
-
-    const server = (await store.snapshot()).agentServers[0];
-    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-    const methods = readOutboundMessages(journal).map(
-      (message) => message.method
-    );
-    expect(methods).not.toContain('thread/fork');
-    expect(methods).not.toContain('review/start');
-    await orchestrator.shutdown();
-  });
-
-  it('blocks review/start when a browser-dev review fork reports unsafe settings', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-boundary-')
-    );
-    const executable = await writeFakeCodexExecutable(dir, 'unsafe-review-fork');
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-      enforceBrowserDevBoundary: true
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-      allowNetworkAccess: false
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const safeSettings = {
-      ...task.agentSettings,
-      approvalPolicy: 'never',
-      approvalsReviewer: 'user' as const
-    };
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: safeSettings
-    });
-    await sourceTerminal;
-
-    await expect(
-      orchestrator.startReview({
-        task,
-        iteration,
-        worktree,
-        sourceRun: (await store.getRun(sourceRun.id))!,
-        target: { type: 'UNCOMMITTED_CHANGES' },
-        settings: safeSettings
-      })
-    ).rejects.toThrow('Review fork observed settings is unsafe');
-
-    const snapshot = await store.snapshot();
-    const journal = await fs.readFile(
-      snapshot.agentServers[0]!.protocolJournalPath,
-      'utf8'
-    );
-    const methods = readOutboundMethods(journal);
-    expect(methods).toContain('thread/fork');
-    expect(methods).not.toContain('review/start');
-    expect(snapshot.runs.find((run) => run.mode === 'REVIEW')).toMatchObject({
-      status: 'FAILED'
-    });
-    await orchestrator.shutdown();
-  });
-
   it('stops Codex and ignores buffered commands after unsafe live settings are observed', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-live-settings-boundary-')
@@ -4957,362 +4686,6 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       'Recovery resume observed settings is unsafe'
     );
   });
-
-  it('retains review attachments when persistence fails after review/start acknowledgement', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-post-ack-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-interrupt-no-active'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir, {
-      withTextAttachment: true
-    });
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-
-    const runtime = runtimeForTaskStore(store);
-    const updateRun = runtime.updateRun.bind(runtime);
-    let rejectedAcknowledgement = false;
-    vi.spyOn(runtime, 'updateRun').mockImplementation(async (
-      runId,
-      expectedRevision,
-      patch,
-      operationId
-    ) => {
-      if (
-        !rejectedAcknowledgement &&
-        patch.status === 'RUNNING' &&
-        patch.attachmentSubmissions !== undefined
-      ) {
-        rejectedAcknowledgement = true;
-        throw new Error('injected review persistence failure');
-      }
-      return updateRun(runId, expectedRevision, patch, operationId);
-    });
-
-    await expect(
-      orchestrator.startReview({
-        task,
-        iteration,
-        worktree,
-        sourceRun,
-        target: { type: 'UNCOMMITTED_CHANGES' },
-        settings: { ...task.agentSettings, reasoningEffort: 'low' }
-      })
-    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
-
-    const snapshot = await store.snapshot();
-    const reviewRun = snapshot.runs.find((candidate) => candidate.mode === 'REVIEW');
-    expect(reviewRun?.status).toBe('RECOVERY_REQUIRED');
-    const journal = await fs.readFile(snapshot.agentServers[0]!.protocolJournalPath, 'utf8');
-    const reviewFork = readOutboundMessages(journal)
-      .filter((message) => message.method === 'thread/fork')
-      .find((message) =>
-        Boolean(
-          (message.params as { developerInstructions?: string } | undefined)
-            ?.developerInstructions
-        )
-      );
-    const instructions = (
-      reviewFork?.params as { developerInstructions?: string } | undefined
-    )?.developerInstructions;
-    const deliveryPath = readAttachmentManifestPaths(instructions)[0];
-    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
-
-    await orchestrator.shutdown();
-    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
-  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
-
-  it('retains the acknowledged review fork when its observation cannot be persisted', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-fork-post-ack-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-interrupt-no-active'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir, {
-      withTextAttachment: true
-    });
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-
-    const runtime = runtimeForTaskStore(store);
-    const recordObservation = runtime.recordSettingsObservation.bind(runtime);
-    let rejectedForkObservation = false;
-    vi.spyOn(runtime, 'recordSettingsObservation').mockImplementation(
-      async (record) => {
-        if (
-          !rejectedForkObservation &&
-          record.source === 'THREAD_FORK_RESPONSE'
-        ) {
-          rejectedForkObservation = true;
-          throw new Error('injected fork observation persistence failure');
-        }
-        return recordObservation(record);
-      }
-    );
-
-    await expect(
-      orchestrator.startReview({
-        task,
-        iteration,
-        worktree,
-        sourceRun,
-        target: { type: 'UNCOMMITTED_CHANGES' },
-        settings: { ...task.agentSettings, reasoningEffort: 'low' }
-      })
-    ).rejects.toMatchObject({
-      operation: 'thread/fork'
-    });
-
-    const snapshot = await store.snapshot();
-    const reviewRun = snapshot.runs.find((candidate) => candidate.mode === 'REVIEW');
-    const reviewSession = snapshot.agentSessions.find(
-      (candidate) => candidate.id === reviewRun?.sessionId
-    );
-    expect(reviewRun?.status).toBe('RECOVERY_REQUIRED');
-    expect(reviewSession).toMatchObject({
-      providerSessionId: 'thread-review',
-      providerSessionTreeId: 'session-tree-1',
-      materialized: true
-    });
-
-    const journal = await fs.readFile(snapshot.agentServers[0]!.protocolJournalPath, 'utf8');
-    const messages = readOutboundMessages(journal);
-    const reviewFork = messages
-      .filter((message) => message.method === 'thread/fork')
-      .find((message) =>
-        Boolean(
-          (message.params as { developerInstructions?: string } | undefined)
-            ?.developerInstructions
-        )
-      );
-    expect(reviewFork).toBeDefined();
-    expect(messages.some((message) => message.method === 'review/start')).toBe(false);
-    const instructions = (
-      reviewFork?.params as { developerInstructions?: string } | undefined
-    )?.developerInstructions;
-    const deliveryPath = readAttachmentManifestPaths(instructions)[0];
-    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
-
-    await orchestrator.shutdown();
-    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
-  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
-
-  it('recovers when stopping a detached review with a stale provider turn id', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-interrupt-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-interrupt-mismatch'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-
-    const reviewRun = await orchestrator.startReview({
-      task,
-      iteration,
-      worktree,
-      sourceRun,
-      target: { type: 'UNCOMMITTED_CHANGES' },
-      settings: task.agentSettings
-    });
-    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
-      'review-response-turn'
-    );
-
-    await orchestrator.interruptRun(reviewRun.id);
-
-    const server = (await store.snapshot()).agentServers[0];
-    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-    const interruptTurnIds = readOutboundMessages(journal)
-      .filter((message) => message.method === 'turn/interrupt')
-      .map((message) => (message.params as { turnId: string }).turnId);
-    expect(interruptTurnIds).toEqual([
-      'review-response-turn',
-      'review-active-turn'
-    ]);
-    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
-      'review-active-turn'
-    );
-
-    await orchestrator.shutdown();
-  });
-
-  it('locally stops a detached review when the provider never confirms the interrupt', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-interrupt-timeout-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-interrupt-ambiguous-no-terminal'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-      interruptRequestTimeoutMs: 40,
-      interruptCompletionTimeoutMs: 40
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-    const reviewRun = await orchestrator.startReview({
-      task,
-      iteration,
-      worktree,
-      sourceRun,
-      target: { type: 'UNCOMMITTED_CHANGES' },
-      settings: task.agentSettings
-    });
-
-    await orchestrator.interruptRun(reviewRun.id);
-    const interrupted = await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
-    const storedTask = await store.getTask(task.id);
-
-    expect(interrupted.recoveryState).toBe('NONE');
-    expect(interrupted.terminalReason).toContain('did not emit a terminal event');
-    expect(storedTask?.projection.agentReview?.status).toBe('CANCELED');
-    expect(storedTask?.projection.agentRun).toBe('COMPLETED');
-    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
-      'AGENT_MUTATION_AMBIGUOUS'
-    );
-    await orchestrator.shutdown();
-  });
-
-  it('locally stops a detached review when the provider has no active turn', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-review-interrupt-idle-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'review-interrupt-no-active'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: [],
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter, {
-    });
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
-    const sourceRun = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await sourceTerminal;
-    const reviewRun = await orchestrator.startReview({
-      task,
-      iteration,
-      worktree,
-      sourceRun,
-      target: { type: 'UNCOMMITTED_CHANGES' },
-      settings: task.agentSettings
-    });
-
-    await orchestrator.interruptRun(reviewRun.id);
-    const interrupted = await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
-    const storedTask = await store.getTask(task.id);
-    const storedSession = (await store.snapshot()).agentSessions.find(
-      (session) => session.id === interrupted.sessionId
-    );
-
-    expect(interrupted.recoveryState).toBe('NONE');
-    expect(interrupted.terminalReason).toContain('no active turn to interrupt');
-    expect(storedSession?.status).toBe('IDLE');
-    expect(storedTask?.projection.agentReview?.status).toBe('CANCELED');
-    expect(storedTask?.projection.agentRun).toBe('COMPLETED');
-    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
-      'AGENT_MUTATION_AMBIGUOUS'
-    );
-
-    await orchestrator.shutdown();
-  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('keeps an ambiguous implementation interrupt in the cancel path until the provider terminal event arrives', async () => {
     const dir = await fs.mkdtemp(
@@ -5573,6 +4946,7 @@ async function createTestAgentSession(
     requestedSettings: settings,
     executionContext: {
       attestation: { status: 'ATTESTED' },
+      repositoryAccess: 'WRITE',
       primaryCwd: input.worktree.worktreePath,
       readRoots: [
         {
@@ -5699,7 +5073,7 @@ function appendTestProtocolMessage(
 async function createTaskContext(
   store: FileTaskStore,
   dir: string,
-  options: { withTextAttachment?: boolean; linkedWorktree?: boolean } = {}
+  options: { withTextAttachment?: boolean } = {}
 ) {
   const repositoryDir = path.join(dir, 'repository');
   await fs.mkdir(repositoryDir, { recursive: true });
@@ -5718,19 +5092,6 @@ async function createTaskContext(
   await git(repositoryDir, ['add', 'README.md']);
   await git(repositoryDir, ['commit', '-m', 'Initial adapter fixture']);
   const baseSha = (await git(repositoryDir, ['rev-parse', 'HEAD'])).trim();
-  const worktreePath = options.linkedWorktree
-    ? path.join(dir, 'review worktree')
-    : repositoryDir;
-  if (options.linkedWorktree) {
-    await git(repositoryDir, [
-      'worktree',
-      'add',
-      '-b',
-      'codex/fake-review-worktree',
-      worktreePath,
-      baseSha
-    ]);
-  }
   let attachmentDraftId: string | undefined;
   if (options.withTextAttachment) {
     const draft = await store.createAttachmentDraft();
@@ -5757,7 +5118,7 @@ async function createTaskContext(
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task,
     branchName: 'codex/fake-approval',
-    worktreePath,
+    worktreePath: repositoryDir,
     baseSha
   });
   return { task, iteration, worktree };
@@ -5983,6 +5344,7 @@ function readOutboundMessages(
   id?: string | number;
   params?: unknown;
   result?: unknown;
+  error?: unknown;
 }> {
   return journal
     .trim()
@@ -5995,6 +5357,7 @@ function readOutboundMessages(
       id?: string | number;
       params?: unknown;
       result?: unknown;
+      error?: unknown;
     });
 }
 
@@ -6022,6 +5385,10 @@ function fakeCodexScript(
     | 'scoped'
     | 'scoped-interrupt-no-terminal'
     | 'scoped-interrupt-terminal-race'
+    | 'scoped-unexpected-request-before-ack'
+    | 'scoped-unexpected-request-after-ack'
+    | 'scoped-unexpected-request-ambiguous-stop'
+    | 'scoped-unexpected-request-no-terminal'
     | 'credential-telemetry'
     | 'empty-models'
     | 'ack-only'
@@ -6042,7 +5409,6 @@ function fakeCodexScript(
     | 'exit'
     | 'clear'
     | 'subagent'
-    | 'unsafe-review-fork'
     | 'unsafe-live-settings'
     | 'design-browser'
     | 'profile-rebind'
@@ -6050,10 +5416,6 @@ function fakeCodexScript(
     | 'profile-mismatch-create'
     | 'profile-drift'
     | 'unsafe-recovery-resume'
-    | 'review-turn-start-mismatch'
-    | 'review-interrupt-mismatch'
-    | 'review-interrupt-ambiguous-no-terminal'
-    | 'review-interrupt-no-active'
     | 'interrupt-ambiguous-then-terminal'
     | 'interrupt-ambiguous-no-terminal' = 'normal'
 ): string {
@@ -6075,15 +5437,11 @@ const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
 const mode = ${JSON.stringify(mode)};
-const reviewMode = mode === 'review-turn-start-mismatch' || mode === 'review-interrupt-mismatch';
-const reviewInterruptTimeoutMode = mode === 'review-interrupt-ambiguous-no-terminal';
-const reviewInterruptNoActiveMode = mode === 'review-interrupt-no-active';
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
+const scopedMode = mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode.startsWith('scoped-unexpected-request-');
 const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent' || mode === 'stale-generation';
 const userInputMode = mode === 'user-input' || mode === 'user-input-answer-exit' || mode === 'user-input-clear' || mode === 'user-input-exit';
 let goalContinuationStarted = false;
-const reviewResponseTurnId = 'review-response-turn';
-const reviewActiveTurnId = 'review-active-turn';
 const turn = (status, error = null) => ({
   id: 'turn-1',
   items: [],
@@ -6174,7 +5532,7 @@ const threadResponse = (request = {}) => {
   instructionSources: [],
   approvalPolicy: request.approvalPolicy ?? (approvalMode ? 'on-request' : 'never'),
   approvalsReviewer: request.approvalsReviewer ?? 'user',
-  sandbox: mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' ? {
+  sandbox: scopedMode ? {
     type: 'readOnly',
     networkAccess: false
   } : {
@@ -6612,9 +5970,6 @@ rl.on('line', (line) => {
               ? { ...thread(), id: 'thread-rebound' }
               : reviewThread()
         };
-        if (mode === 'unsafe-review-fork') {
-          response.sandbox = { type: 'dangerFullAccess' };
-        }
         send({ id: message.id, result: response });
       }
       break;
@@ -6658,41 +6013,9 @@ rl.on('line', (line) => {
       break;
     case 'review/start':
       send({ id: message.id, result: {
-        turn: { ...turn('inProgress'), id: reviewResponseTurnId },
+        turn: turn('inProgress'),
         reviewThreadId: 'thread-review'
       } });
-      if (mode === 'review-turn-start-mismatch') {
-        setTimeout(() => {
-          send({ method: 'turn/started', params: {
-            threadId: 'thread-review',
-            turn: { ...turn('inProgress'), id: reviewActiveTurnId }
-          } });
-          send({ method: 'item/started', params: {
-            threadId: 'thread-review',
-            turnId: reviewResponseTurnId,
-            startedAtMs: Date.now(),
-            item: {
-              type: 'agentMessage',
-              id: 'review-message',
-              text: '',
-              phase: null,
-              memoryCitation: null
-            }
-          } });
-          send({ method: 'item/completed', params: {
-            threadId: 'thread-review',
-            turnId: reviewResponseTurnId,
-            completedAtMs: Date.now(),
-            item: {
-              type: 'agentMessage',
-              id: 'review-message',
-              text: 'Review is inspecting the current diff.',
-              phase: null,
-              memoryCitation: null
-            }
-          } });
-        }, 10);
-      }
       break;
     case 'turn/start':
       turnStartAttempts += 1;
@@ -6723,11 +6046,44 @@ rl.on('line', (line) => {
       ) {
         process.exit(17);
       }
+      const unexpectedReadOnlyRequest = () => send({
+        method: 'item/commandExecution/requestApproval',
+        id: 201,
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'unexpected-command',
+          startedAtMs: Date.now(),
+          reason: 'Unexpected mutation request',
+          command: 'touch should-not-run',
+          cwd: message.params.cwd,
+          commandActions: []
+        }
+      });
+      if (
+        mode === 'scoped-unexpected-request-before-ack' &&
+        currentProfileId !== 'task_monki_capability_probe'
+      ) {
+        unexpectedReadOnlyRequest();
+        setTimeout(() => send({ id: message.id, result: {
+          turn: turn('inProgress')
+        } }), 10);
+        return;
+      }
       send({ id: message.id, result: {
         turn: mode === 'profile-rebind'
           ? { ...turn('inProgress'), id: 'turn-' + turnStartAttempts }
           : turn('inProgress')
       } });
+      if (
+        currentProfileId !== 'task_monki_capability_probe' &&
+        (mode === 'scoped-unexpected-request-after-ack' ||
+          mode === 'scoped-unexpected-request-ambiguous-stop' ||
+          mode === 'scoped-unexpected-request-no-terminal')
+      ) {
+        setTimeout(unexpectedReadOnlyRequest, 20);
+        return;
+      }
       if (mode === 'ack-only') return;
       setTimeout(() => {
         send({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('inProgress') } });
@@ -6739,7 +6095,7 @@ rl.on('line', (line) => {
             approvalsReviewer: message.params.approvalsReviewer ?? 'user',
             sandboxPolicy: mode === 'unsafe-live-settings'
               ? { type: 'dangerFullAccess' }
-              : mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race'
+              : scopedMode
                 ? { type: 'readOnly', networkAccess: false }
               : message.params.sandboxPolicy ?? {
                   type: 'workspaceWrite',
@@ -7158,6 +6514,32 @@ rl.on('line', (line) => {
             threadId: 'thread-1',
             turn: turn('completed')
           } });
+          if (mode === 'scoped') {
+            setTimeout(() => {
+              send({ method: 'item/agentMessage/delta', params: {
+                threadId: 'thread-1',
+                turnId: 'turn-1',
+                itemId: 'late-item',
+                delta: 'Late output must be ignored.'
+              } });
+              send({ method: 'item/completed', params: {
+                threadId: 'thread-1',
+                turnId: 'turn-1',
+                completedAtMs: Date.now(),
+                item: {
+                  type: 'agentMessage',
+                  id: 'late-item',
+                  text: 'Late output must be ignored.',
+                  phase: null,
+                  memoryCitation: null
+                }
+              } });
+              send({ method: 'turn/completed', params: {
+                threadId: 'thread-1',
+                turn: turn('failed', { message: 'Late conflicting terminal.' })
+              } });
+            }, 20);
+          }
         };
         if (mode === 'credential-telemetry') {
           setTimeout(finishAgentMessage, 120);
@@ -7205,24 +6587,21 @@ rl.on('line', (line) => {
         }
         break;
       }
-      if (reviewInterruptTimeoutMode && message.params.threadId === 'thread-review') {
-        break;
-      }
-      if (reviewInterruptNoActiveMode && message.params.threadId === 'thread-review') {
-        send({ id: message.id, error: {
-          code: -32600,
-          message: 'no active turn to interrupt'
+      if (mode.startsWith('scoped-unexpected-request-')) {
+        if (
+          mode === 'scoped-unexpected-request-ambiguous-stop' &&
+          currentProfileId !== 'task_monki_capability_probe'
+        ) break;
+        send({ id: message.id, result: {} });
+        if (
+          mode === 'scoped-unexpected-request-no-terminal' &&
+          currentProfileId !== 'task_monki_capability_probe'
+        ) break;
+        send({ method: 'turn/completed', params: {
+          threadId: 'thread-1',
+          turn: turn('interrupted')
         } });
         break;
-      }
-      if (reviewMode && message.params.threadId === 'thread-review') {
-        if (message.params.turnId !== reviewActiveTurnId) {
-          send({ id: message.id, error: {
-            code: -32602,
-            message: 'expected active turn id ' + message.params.turnId + ' but found ' + reviewActiveTurnId
-          } });
-          break;
-        }
       }
       send({ id: message.id, result: {} });
       if (mode === 'scoped-interrupt-terminal-race') {

@@ -35,6 +35,7 @@ interface AgentModelSelectorProps {
   selectionUnavailableMessage?: string;
   showRuntimeLabel?: boolean;
   access?: ReactNode;
+  runtimeUnavailableReason?(runtime: AgentRuntimeState): string | undefined;
   onDiscoverModels?(runtimeId: string): Promise<void>;
   onDiscoveryStatusChange?(status: ModelDiscoveryStatus): void;
   onSelectionChange(runtimeId: string, modelId: string): void;
@@ -68,6 +69,7 @@ export function AgentModelSelector({
   selectionUnavailableMessage = 'Choose an available provider and model.',
   showRuntimeLabel = true,
   access,
+  runtimeUnavailableReason,
   onDiscoverModels,
   onDiscoveryStatusChange,
   onSelectionChange,
@@ -91,6 +93,9 @@ export function AgentModelSelector({
   const selectedRuntime = runtimes.find(
     (runtime) => runtime.preflight.runtime.id === runtimeId
   );
+  const selectedRuntimeUnavailableReason = selectedRuntime
+    ? runtimeUnavailableReason?.(selectedRuntime)
+    : undefined;
   const runtimeModels = selectedRuntime
     ? models.filter((model) => model.runtimeId === runtimeId)
     : [];
@@ -215,6 +220,7 @@ export function AgentModelSelector({
   };
 
   const choose = async (runtime: AgentRuntimeState, model?: AgentModel) => {
+    if (runtimeUnavailableReason?.(runtime)) return;
     const nextRuntimeId = runtime.preflight.runtime.id;
     const nextModelId = model?.id ?? '';
     onSelectionChange(nextRuntimeId, nextModelId);
@@ -252,6 +258,7 @@ export function AgentModelSelector({
           className={`tm-agent-console__trigger ${
             (discovery?.runtimeId === runtimeId && discovery.status === 'failed') ||
             selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED' ||
+            selectedRuntimeUnavailableReason ||
             selectionUnavailable
               ? 'tm-agent-console__trigger--error'
               : ''
@@ -263,7 +270,7 @@ export function AgentModelSelector({
           aria-busy={discovery?.runtimeId === runtimeId && discovery.status === 'loading'}
           aria-invalid={selectionUnavailable || undefined}
           aria-describedby={selectionUnavailable && showSelectionError ? selectionErrorId : undefined}
-          title={triggerSummary}
+          title={selectedRuntimeUnavailableReason ?? triggerSummary}
           disabled={disabled || runtimes.length === 0}
           onClick={() => setOpen((current) => !current)}
           onKeyDown={(event) => {
@@ -312,6 +319,7 @@ export function AgentModelSelector({
                 (!model.hidden || model.id === modelId)
             );
             const readiness = runtimeReadinessView(runtime);
+            const unavailableReason = runtimeUnavailableReason?.(runtime);
             const runtimeDiscovery =
               discovery?.runtimeId === candidateRuntimeId ? discovery : undefined;
             const needsDiscovery = Boolean(
@@ -327,10 +335,13 @@ export function AgentModelSelector({
               >
                 <div className="tm-agent-console__group-title" id={groupId}>
                   <span>{runtime.preflight.runtime.displayName}</span>
-                  {!runtime.preflight.readiness.canStart ? (
-                    <span>{readiness.label}</span>
+                  {unavailableReason || !runtime.preflight.readiness.canStart ? (
+                    <span>{unavailableReason ? 'Unavailable' : readiness.label}</span>
                   ) : null}
                 </div>
+                {unavailableReason ? (
+                  <div className="tm-agent-console__empty">{unavailableReason}</div>
+                ) : null}
                 {candidateModels.map((model) => {
                   const selected = model.id === modelId && candidateRuntimeId === runtimeId;
                   return (
@@ -339,6 +350,7 @@ export function AgentModelSelector({
                       role="menuitemradio"
                       aria-checked={selected}
                       className="tm-agent-console__option"
+                      disabled={Boolean(unavailableReason)}
                       key={model.id}
                       onClick={() => void choose(runtime, model)}
                     >
@@ -361,6 +373,7 @@ export function AgentModelSelector({
                       role="menuitemradio"
                       aria-checked={candidateRuntimeId === runtimeId}
                       className="tm-agent-console__option"
+                      disabled={Boolean(unavailableReason)}
                       onClick={() => void choose(runtime)}
                     >
                       <span>Provider default</span>
@@ -381,6 +394,7 @@ export function AgentModelSelector({
                     <button
                       type="button"
                       role="menuitem"
+                      disabled={Boolean(unavailableReason)}
                       className={`tm-agent-console__catalog-action ${
                         runtimeDiscovery?.status === 'failed' ||
                         runtime.preflight.readiness.checks.modelCatalog === 'FAILED'
@@ -501,6 +515,7 @@ export function AgentModelSetting({
   reasoningEffort,
   models,
   runtimes,
+  runtimeUnavailableReason,
   onDiscoverModels,
   onSelectionChange,
   onReasoningEffortChange
@@ -512,6 +527,7 @@ export function AgentModelSetting({
   reasoningEffort?: string;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
+  runtimeUnavailableReason?(runtime: AgentRuntimeState): string | undefined;
   onDiscoverModels?(runtimeId: string): Promise<void>;
   onSelectionChange(runtimeId: string, modelId: string): void;
   onReasoningEffortChange?(value: string): void;
@@ -530,6 +546,7 @@ export function AgentModelSetting({
         reasoningEffort={reasoningEffort}
         models={models}
         runtimes={runtimes}
+        runtimeUnavailableReason={runtimeUnavailableReason}
         onDiscoverModels={onDiscoverModels}
         onSelectionChange={onSelectionChange}
         onReasoningEffortChange={onReasoningEffortChange}

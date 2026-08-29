@@ -46,7 +46,6 @@ import type {
 } from '../../shared/designCanvas';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
-import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
@@ -91,6 +90,7 @@ import {
   resolveSelectedRepositoryId
 } from '../model/repositories';
 import { appendUniqueNotification } from '../model/notifications';
+import { selectConfiguredRuntimeForOperation } from '../model/runtimeReadiness';
 import {
   focusedPanelWidth,
   focusedWorkspaceHistoryCollapsed,
@@ -1755,45 +1755,25 @@ export function App() {
       designRuntimeCatalog
     ]
   );
-  const readyPromptRefinementRuntimes = enabledRuntimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      projectAgentExecutionSupport(
-        runtime.preflight.capabilities,
-        'PROMPT_REFINEMENT'
-      ).supported
-  );
   const configuredPromptRefinementRuntimeId =
     appSettings.promptRefinementRuntimeId ?? appSettings.defaultRuntimeId;
-  const promptRefinementRuntime =
-    readyPromptRefinementRuntimes.find(
-      (runtime) =>
-        runtime.preflight.runtime.id === configuredPromptRefinementRuntimeId
-    ) ?? readyPromptRefinementRuntimes[0];
-  const readyReviewRuntimes = enabledRuntimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      projectAgentExecutionSupport(
-        runtime.preflight.capabilities,
-        'REVIEW',
-        { sourceRuntimeId: selectedTask?.runtimeId }
-      ).supported
+  const promptRefinementSelection = selectConfiguredRuntimeForOperation(
+    enabledRuntimes,
+    configuredPromptRefinementRuntimeId,
+    'PROMPT_REFINEMENT'
   );
+  const promptRefinementRuntime = promptRefinementSelection.runtime;
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
-  const reviewRuntime =
-    readyReviewRuntimes.find(
-      (runtime) => runtime.preflight.runtime.id === configuredReviewRuntimeId
-    ) ??
-    readyReviewRuntimes.find(
-      (runtime) => runtime.preflight.runtime.id === selectedTask?.runtimeId
-    ) ??
-    readyReviewRuntimes[0];
-  const refineDisabledReason = promptRefinementRuntime
-    ? undefined
-    : 'No ready agent runtime supports isolated prompt refinement.';
+  const reviewSelection = selectConfiguredRuntimeForOperation(
+    enabledRuntimes,
+    configuredReviewRuntimeId,
+    'REVIEW'
+  );
+  const reviewRuntime = reviewSelection.runtime;
+  const refineDisabledReason = promptRefinementSelection.unavailableReason;
   const reviewDisabledReason = selectedTask && !reviewRuntime
-    ? 'No ready agent runtime supports review for this task.'
+    ? reviewSelection.unavailableReason
     : undefined;
   const selectedTaskRuntimeState = selectedTask
     ? runtimeCatalog?.runtimes.find(

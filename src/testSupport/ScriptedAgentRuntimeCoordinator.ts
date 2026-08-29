@@ -29,6 +29,8 @@ interface ScriptedRuntimeStartResult {
 export class ScriptedAgentRuntimeCoordinator implements AgentRuntimeCoordinator {
   readonly calls: ScriptedRuntimeStartCall[] = [];
   readonly interruptCalls: string[] = [];
+  readonly finishedRunIds: string[] = [];
+  readonly releasedSessionIds: string[] = [];
   ambiguousInterrupt = false;
   notDeliveredInterrupt = false;
   startHook?: (
@@ -51,6 +53,7 @@ export class ScriptedAgentRuntimeCoordinator implements AgentRuntimeCoordinator 
     if (!this.hasRuntime(runtimeId)) throw new Error(`Unknown runtime: ${runtimeId}`);
     return {
       attestation: { status: 'ATTESTED' as const },
+      repositoryAccess: 'READ_ONLY' as const,
       primaryCwd: input.primaryCwd,
       readRoots: input.readRoots,
       managedAttachments: [],
@@ -323,6 +326,18 @@ export class ScriptedAgentRuntimeCoordinator implements AgentRuntimeCoordinator 
   subscribe(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  async finishRuntimeTurn(runId: string): Promise<void> {
+    const run = await this.runtime.getRun(runId);
+    if (!run || !isRuntimeTerminal(run.status)) return;
+    this.finishedRunIds.push(run.id);
+    await this.releaseRuntimeSession(run.sessionId);
+  }
+
+  releaseRuntimeSession(sessionId: string): Promise<void> {
+    this.releasedSessionIds.push(sessionId);
+    return Promise.resolve();
   }
 
   emit(event: AgentRuntimeTurnEvent): void {

@@ -431,9 +431,7 @@ async function validateAdapterContract(adapter: AgentRuntimeAdapter): Promise<vo
     { capability: 'activeTurnSteering', method: 'steerTurn' },
     { capability: 'turnInterruption', method: 'interruptTurn' },
     { capability: 'sessionFork', method: 'forkSession' },
-    { capability: 'review', method: 'startReview' },
-    { capability: 'goals', method: 'syncGoal' },
-    { capability: 'promptRefinement', method: 'refinePrompt' }
+    { capability: 'goals', method: 'syncGoal' }
   ];
   for (const entry of requiredMethods) {
     const capability = capabilities[entry.capability];
@@ -448,6 +446,19 @@ async function validateAdapterContract(adapter: AgentRuntimeAdapter): Promise<vo
         `Runtime ${adapter.descriptor.id} declares ${entry.capability} but does not implement ${String(entry.method)}.`
       );
     }
+  }
+  if (
+    capabilities.executionPolicy.presets.some(
+      (preset) => preset.repositoryMutation === 'DENY'
+    ) &&
+    (!adapter.buildExecutionContext ||
+      !adapter.startRuntimeTurn ||
+      !adapter.interruptRuntimeTurn ||
+      !adapter.onRuntimeTurnEvent)
+  ) {
+    throw new Error(
+      `Runtime ${adapter.descriptor.id} declares native mutation denial but does not implement the shared read-only turn lifecycle.`
+    );
   }
   if (
     capabilities.sessionControls?.maturity === 'stable' &&
@@ -488,6 +499,7 @@ async function safeCapabilities(
           sandbox: 'READ_ONLY',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
+          repositoryMutation: 'ALLOW',
           networkAccess: 'DISABLED'
         }
       ],

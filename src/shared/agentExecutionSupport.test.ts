@@ -22,21 +22,65 @@ describe('projectAgentExecutionSupport', () => {
     ).toEqual({ supported: true });
   });
 
-  it('does not treat native review as a cross-runtime review operation', () => {
+  it('uses the shared read-only policy for review without coupling it to the source runtime', () => {
     const capabilities = supportedCapabilities({
       detachedReview: { maturity: 'unsupported' }
     });
 
-    expect(
-      projectAgentExecutionSupport(capabilities, 'REVIEW', {
-        sourceRuntimeId: capabilities.runtimeId
-      }).supported
-    ).toBe(true);
-    expect(
-      projectAgentExecutionSupport(capabilities, 'REVIEW', {
-        sourceRuntimeId: 'another-runtime'
-      }).supported
-    ).toBe(false);
+    expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
+      supported: true
+    });
+  });
+
+  it('explains the exact unqualified read-only profile without disabling normal Tasks', () => {
+    const capabilities = supportedCapabilities({
+      executionPolicy: {
+        defaultPresetId: 'write',
+        detail: 'Write access only.',
+        presets: [
+          {
+            id: 'write',
+            label: 'Write',
+            detail: 'Write access.',
+            sandbox: 'WORKSPACE_WRITE',
+            repositoryMutation: 'ALLOW',
+            approvalPolicy: 'never',
+            approvalsReviewer: 'user',
+            networkAccess: 'DISABLED'
+          }
+        ]
+      },
+      promptRefinement: {
+        maturity: 'unsupported',
+        detail: 'This profile cannot deny shell changes during refinement.'
+      },
+      detachedReview: {
+        maturity: 'unsupported',
+        detail: 'This profile has not passed the review mutation test.'
+      },
+      extensions: {
+        'task-monki.read-only-turn': {
+          maturity: 'unsupported',
+          detail: 'This profile can still mutate through child agents.'
+        }
+      }
+    });
+
+    expect(projectAgentExecutionSupport(capabilities, 'PROMPT_REFINEMENT')).toEqual({
+      supported: false,
+      reason:
+        'This profile cannot deny shell changes during refinement. Normal Tasks remain available.'
+    });
+    expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
+      supported: false,
+      reason:
+        'This profile has not passed the review mutation test. Normal Tasks remain available.'
+    });
+    expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
+      supported: false,
+      reason:
+        'This profile can still mutate through child agents. Normal Tasks remain available.'
+    });
   });
 
   it('requires the complete current Design and Discourse contracts', () => {
@@ -65,6 +109,7 @@ describe('projectAgentExecutionSupport', () => {
                 label: 'Write',
                 detail: 'Write access.',
                 sandbox: 'WORKSPACE_WRITE',
+                repositoryMutation: 'ALLOW',
                 approvalPolicy: 'never',
                 approvalsReviewer: 'user',
                 networkAccess: 'DISABLED'
@@ -93,6 +138,7 @@ function supportedCapabilities(
           label: 'Read only',
           detail: 'Read-only execution.',
           sandbox: 'READ_ONLY',
+          repositoryMutation: 'DENY',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
           networkAccess: 'DISABLED'
@@ -120,7 +166,6 @@ function supportedCapabilities(
     attachmentDelivery: stable,
     runtimeRecovery: stable,
     extensions: {
-      'task-monki.discourse': stable,
       'task-monki.design-instructions': stable,
       'task-monki.design-skill-access': stable,
       'task-monki.design-browser-verification': stable

@@ -1,10 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { AgentModel } from '../../shared/agent';
+import type { AgentExecutionSettings, AgentModel } from '../../shared/agent';
 import {
-  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
-  DEFAULT_PROMPT_REFINEMENT_MODEL,
-  type CodexExternalToolSettings,
   type PromptRefinementEvidence,
   type RefinePromptResponse
 } from '../../shared/contracts';
@@ -13,17 +10,6 @@ import {
   verifyAgentTurnAttachments,
   type AgentTurnAttachment
 } from '../agent/AgentAttachmentDelivery';
-import {
-  buildCodexEphemeralReadOnlyCommand,
-  CodexEphemeralRunError,
-  startCodexEphemeralReadOnlyRun,
-  type CodexEphemeralReadOnlyRun
-} from '../agent/codex/CodexEphemeralReadOnlyRunner';
-import { codexExternalToolConfigOverrides } from '../agent/codex/CodexToolConfig';
-
-const REFINEMENT_REASONING_EFFORT = 'low';
-const REFINEMENT_TIMEOUT_MS = 90_000;
-const REFINEMENT_CONFIG_OVERRIDES = ['features.plugins=false'] as const;
 const MAX_REFINED_PROMPT_CHARS = 60_000;
 const MAX_EVIDENCE_ITEMS = 64;
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/u;
@@ -34,31 +20,34 @@ export interface PromptRefinementInput {
   input: string;
   title?: string;
   refinementModel: AgentModel;
+  settings: AgentExecutionSettings;
   targetModel?: AgentModel;
   attachments?: readonly AgentTurnAttachment[];
-  codexExecutable?: string;
-  toolSettings?: CodexExternalToolSettings;
-  failClosedMcpDiscovery?: boolean;
 }
 
 export interface PromptRefinementRunRequest {
+  requestId: string;
   repositoryPath: string;
   instruction: string;
-  model: string;
-  imagePaths: readonly string[];
-  additionalDirectories: readonly string[];
-  codexExecutable?: string;
-  toolSettings?: CodexExternalToolSettings;
-  failClosedMcpDiscovery?: boolean;
+  refinementModel: AgentModel;
+  settings: AgentExecutionSettings;
+  attachments: readonly AgentTurnAttachment[];
+}
+
+export interface PromptRefinementRun {
+  result: Promise<string>;
+  cancel(): Promise<void>;
 }
 
 export type PromptRefinementRunner = (
   request: PromptRefinementRunRequest
-) => Promise<CodexEphemeralReadOnlyRun>;
+) => Promise<PromptRefinementRun>;
 
 interface ActiveRefinement {
   canceled: boolean;
-  run?: CodexEphemeralReadOnlyRun;
+  starting?: Promise<PromptRefinementRun>;
+  run?: PromptRefinementRun;
+  cancellation?: Promise<void>;
 }
 
 export class PromptRefinementCanceledError extends Error {
@@ -86,7 +75,7 @@ export class PromptRefinementService {
   private terminationFence?: PromptRefinementTerminationUnconfirmedError;
   private readonly active = new Map<string, ActiveRefinement>();
 
-  constructor(private readonly runModel: PromptRefinementRunner = runCodexRefinement) {}
+  constructor(private readonly runModel: PromptRefinementRunner) {}
 
   async refine(input: PromptRefinementInput): Promise<RefinePromptResponse> {
     const requestId = requireRequestId(input.requestId);
@@ -122,18 +111,8 @@ export class PromptRefinementService {
           providedAsImage
         };
       });
-      const imagePaths = attachments
-        .filter((attachment) => nativeImageIds.has(attachment.attachmentId))
-        .map((attachment) => attachment.path);
-      const additionalDirectories = [
-        ...new Set(
-          attachmentContext
-            .map((attachment) => attachment.readOnlyPath)
-            .filter((value): value is string => value !== undefined)
-            .map((value) => path.dirname(value))
-        )
-      ];
-      const run = await this.runModel({
+      const starting = this.runModel({
+        requestId,
         repositoryPath: input.repositoryPath,
         instruction: buildPromptRefinementInstruction({
           userRequest,
@@ -142,16 +121,15 @@ export class PromptRefinementService {
           targetModel: input.targetModel,
           attachments: attachmentContext
         }),
-        model: input.refinementModel.model,
-        imagePaths,
-        additionalDirectories,
-        codexExecutable: input.codexExecutable,
-        toolSettings: input.toolSettings,
-        failClosedMcpDiscovery: input.failClosedMcpDiscovery
+        refinementModel: input.refinementModel,
+        settings: input.settings,
+        attachments
       });
+      active.starting = starting;
+      const run = await starting;
       active.run = run;
       if (active.canceled) {
-        await run.cancel();
+        await this.cancelActive(active);
         await run.result.catch(() => undefined);
         throw new PromptRefinementCanceledError();
       }
@@ -200,74 +178,34 @@ export class PromptRefinementService {
     const active = this.active.get(requireRequestId(requestId));
     if (!active) return;
     active.canceled = true;
-    if (!active.run) return;
     try {
-      await active.run.cancel();
+      await this.cancelActive(active);
     } catch (cause) {
-      const error = new PromptRefinementTerminationUnconfirmedError(cause);
+      const error =
+        cause instanceof PromptRefinementTerminationUnconfirmedError
+          ? cause
+          : new PromptRefinementTerminationUnconfirmedError(cause);
       this.terminationFence = error;
       throw error;
     }
   }
-}
 
-export function buildRefinementCommand(
-  repositoryPath: string,
-  model = DEFAULT_PROMPT_REFINEMENT_MODEL,
-  configOverrides: readonly string[] = codexExternalToolConfigOverrides(
-    DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
-  ),
-  executable = 'codex'
-): {
-  executable: string;
-  argv: string[];
-} {
-  if (!repositoryPath.trim()) throw new Error('Repository path is required.');
-  const selectedModel = model.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL;
-  return buildCodexEphemeralReadOnlyCommand({
-    cwd: repositoryPath,
-    model: selectedModel,
-    reasoningEffort: REFINEMENT_REASONING_EFFORT,
-    configOverrides: [...configOverrides, ...REFINEMENT_CONFIG_OVERRIDES],
-    executable
-  });
-}
-
-async function runCodexRefinement({
-  repositoryPath,
-  instruction,
-  model,
-  imagePaths,
-  additionalDirectories,
-  codexExecutable,
-  toolSettings,
-  failClosedMcpDiscovery
-}: PromptRefinementRunRequest): Promise<CodexEphemeralReadOnlyRun> {
-  const run = await startCodexEphemeralReadOnlyRun({
-    cwd: repositoryPath,
-    instruction,
-    model: model.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL,
-    reasoningEffort: REFINEMENT_REASONING_EFFORT,
-    timeoutMs: REFINEMENT_TIMEOUT_MS,
-    codexExecutable,
-    toolSettings,
-    failClosedMcpDiscovery,
-    imagePaths,
-    additionalDirectories,
-    additionalConfigOverrides: REFINEMENT_CONFIG_OVERRIDES
-  });
-  return {
-    cancel: () => run.cancel(),
-    result: run.result.catch((cause) => {
-      if (
-        cause instanceof CodexEphemeralRunError &&
-        cause.code === 'TERMINATION_UNCONFIRMED'
-      ) {
-        throw new PromptRefinementTerminationUnconfirmedError(cause);
+  private cancelActive(active: ActiveRefinement): Promise<void> {
+    if (active.cancellation) return active.cancellation;
+    active.cancellation = (async () => {
+      let run = active.run;
+      if (!run && active.starting) {
+        try {
+          run = await active.starting;
+        } catch {
+          // Setup failed before it returned a process-owning run.
+          return;
+        }
       }
-      throw cause;
-    })
-  };
+      await run?.cancel();
+    })();
+    return active.cancellation;
+  }
 }
 
 async function parseModelRefinement(input: {
@@ -424,20 +362,6 @@ function refinementFailureWarning(cause: unknown): string {
   const unchanged = 'The original request was kept unchanged.';
   if (cause instanceof PromptRefinementResponseValidationError) {
     return `The refinement model returned a response Task Monki could not validate. ${unchanged}`;
-  }
-  if (cause instanceof CodexEphemeralRunError) {
-    switch (cause.code) {
-      case 'TIMED_OUT':
-        return `Prompt refinement timed out before the model finished. ${unchanged}`;
-      case 'NO_FINAL_MESSAGE':
-        return `The refinement model finished without returning a usable prompt. ${unchanged}`;
-      case 'PROCESS_FAILED':
-        return `The refinement model process failed before producing a prompt. ${unchanged}`;
-      case 'CANCELED':
-        return `Prompt refinement was canceled before completion. ${unchanged}`;
-      case 'TERMINATION_UNCONFIRMED':
-        return `The refinement process could not be stopped safely. ${unchanged}`;
-    }
   }
   return `Prompt refinement could not be completed reliably. ${unchanged}`;
 }

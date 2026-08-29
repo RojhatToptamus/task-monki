@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentRuntimeState } from '../../shared/contracts';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
-import { runtimeReadinessView } from './runtimeReadiness';
+import {
+  runtimeExecutionUnavailableReason,
+  runtimeReadinessView,
+  selectConfiguredRuntimeForOperation
+} from './runtimeReadiness';
 
 describe('runtimeReadinessView', () => {
   it('keeps a discovered on-demand runtime startable without calling it ready', () => {
@@ -110,6 +114,73 @@ describe('runtimeReadinessView', () => {
       optionSuffix: ' (unavailable)'
     });
   });
+
+  it('does not replace an unavailable configured workflow runtime with another provider', () => {
+    const configured = state(createRuntimeReadiness('READY', 'Ready'));
+    configured.preflight.runtime = {
+      ...configured.preflight.runtime,
+      id: 'configured',
+      displayName: 'Configured'
+    };
+    configured.preflight.capabilities = {
+      ...configured.preflight.capabilities,
+      runtimeId: 'configured',
+      executionPolicy: {
+        defaultPresetId: 'write',
+        detail: 'Write access only.',
+        presets: [
+          {
+            id: 'write',
+            label: 'Write',
+            detail: 'Write access.',
+            sandbox: 'WORKSPACE_WRITE',
+            repositoryMutation: 'ALLOW',
+            approvalPolicy: 'never',
+            approvalsReviewer: 'user',
+            networkAccess: 'DISABLED'
+          }
+        ]
+      },
+      promptRefinement: {
+        maturity: 'unsupported',
+        detail: 'Configured cannot deny repository changes.'
+      }
+    };
+    const fallback = state(createRuntimeReadiness('READY', 'Ready'));
+    fallback.preflight.runtime = {
+      ...fallback.preflight.runtime,
+      id: 'fallback',
+      displayName: 'Fallback'
+    };
+    fallback.preflight.capabilities = {
+      ...fallback.preflight.capabilities,
+      runtimeId: 'fallback'
+    };
+
+    expect(
+      selectConfiguredRuntimeForOperation(
+        [configured, fallback],
+        'configured',
+        'PROMPT_REFINEMENT'
+      )
+    ).toEqual({
+      unavailableReason:
+        'Configured cannot deny repository changes. Normal Tasks remain available.'
+    });
+  });
+
+  it('uses typed runtime readiness detail before workflow capability support', () => {
+    const runtime = state(
+      createRuntimeReadiness(
+        'AUTHENTICATION_REQUIRED',
+        'Sign in before starting this workflow.'
+      )
+    );
+
+    expect(runtimeExecutionUnavailableReason(runtime, 'REVIEW')).toBe(
+      'Sign in before starting this workflow.'
+    );
+  });
 });
 
 function state(
@@ -135,6 +206,7 @@ function state(
               label: 'Test',
               detail: 'Test',
               sandbox: 'READ_ONLY',
+              repositoryMutation: 'DENY',
               approvalPolicy: 'never',
               approvalsReviewer: 'user',
               networkAccess: 'DISABLED'

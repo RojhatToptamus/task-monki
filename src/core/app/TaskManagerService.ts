@@ -116,6 +116,11 @@ import {
 } from '../../shared/contracts';
 import { CODEX_RUNTIME_ID, type AgentRuntimeId } from '../../shared/agent';
 import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
+import {
+  PromptRefinementTerminationUnconfirmedError,
+  PromptRefinementService,
+  type PromptRefinementRunRequest
+} from '../prompt/PromptRefinementService';
 import type {
   AppendHumanDiscourseMessageRequest,
   ConfirmDiscourseWaveContextRequest,
@@ -234,6 +239,7 @@ interface TaskActionWork {
 export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
+  private readonly promptRefiner: PromptRefinementService;
   private readonly runtimeRegistry: AgentRuntimeRegistry;
   private readonly agentRuntimeStore: AgentRuntimeStore;
   private readonly taskRuntime: TaskAgentRuntimeAccess;
@@ -399,6 +405,9 @@ export class TaskManagerService {
         allowNetworkAccess: options.allowAgentNetworkAccess,
         providerStartupDisabledReason: options.agentProviderStartupDisabledReason
       }
+    );
+    this.promptRefiner = new PromptRefinementService((request) =>
+      this.startPromptRefinementRuntimeTurn(request)
     );
     if (options.discourseStore) {
       this.discourseHost = new DiscourseRuntimeHost({
@@ -1840,11 +1849,6 @@ export class TaskManagerService {
       'PROMPT_REFINEMENT'
     );
     if (!refinementSupport.supported) throw new Error(refinementSupport.reason);
-    if (!adapter.refinePrompt) {
-      throw new Error(
-        `${adapter.descriptor.displayName} does not expose native prompt refinement.`
-      );
-    }
     const attachments = input.attachmentDraftId
       ? toAgentTurnAttachments(
           await this.store.verifyAttachmentDraft(input.attachmentDraftId)
@@ -1867,16 +1871,16 @@ export class TaskManagerService {
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       },
-      attachments: []
+      attachments
     });
     const targetModel = await this.resolvePromptRefinementTargetModel(input);
-    const refined = await adapter.refinePrompt({
+    const refined = await this.promptRefiner.refine({
       requestId: input.requestId?.trim() || randomUUID(),
       repositoryPath: repository.path,
       input: input.input,
       title: input.title,
-      settings: refinementExecution.settings,
       refinementModel: refinementExecution.model,
+      settings: refinementExecution.settings,
       targetModel,
       attachments
     });
@@ -1891,13 +1895,146 @@ export class TaskManagerService {
 
   cancelPromptRefinement(input: CancelPromptRefinementRequest): Promise<void> {
     return this.withRuntimeOperation(async () => {
-      const runtimeId =
-        input.runtimeId ??
-        this.appSettings.promptRefinementRuntimeId ??
-        this.appSettings.defaultRuntimeId;
-      const adapter = this.runtimeRegistry.require(runtimeId);
-      await adapter.cancelPromptRefinement?.(input.requestId);
+      await this.promptRefiner.cancel(input.requestId);
     });
+  }
+
+  private async startPromptRefinementRuntimeTurn(
+    input: PromptRefinementRunRequest
+  ) {
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const operationId = `prompt-refinement:${input.requestId}`;
+    const executionContext = await this.agents.buildExecutionContext(
+      input.refinementModel.runtimeId,
+      {
+        sessionId,
+        primaryCwd: input.repositoryPath,
+        readRoots: [
+          {
+            canonicalPath: input.repositoryPath,
+            kind: 'REPOSITORY'
+          }
+        ],
+        modelSettings: input.settings,
+        clientOperationId: operationId,
+        attachments: input.attachments
+      }
+    );
+    const prepared = await this.agents.prepareTurn({
+      sessionId,
+      runId,
+      owner: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
+      scope: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
+      runtimeId: input.refinementModel.runtimeId,
+      model: input.refinementModel.model,
+      purpose: 'PROMPT_REFINEMENT',
+      generationKey: input.requestId,
+      executionContext,
+      prompt: input.instruction,
+      priority: 'TASK_FOREGROUND',
+      clientOperationId: operationId,
+      createdAt: new Date().toISOString()
+    });
+    try {
+      const started = await this.agents.startPreparedTurnNow(
+        prepared.queueEntry.id,
+        `${operationId}:start`,
+        input.attachments
+      );
+      if (started.status === 'RECOVERY_REQUIRED') {
+        throw new PromptRefinementTerminationUnconfirmedError(
+          new Error(
+            started.terminalReason ?? 'The provider start result requires recovery.'
+          )
+        );
+      }
+      if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(started.status)) {
+        throw new Error(
+          started.terminalReason ?? `Prompt refinement ended with ${started.status}.`
+        );
+      }
+    } catch (cause) {
+      if (cause instanceof PromptRefinementTerminationUnconfirmedError) throw cause;
+      const run = await this.agentRuntimeStore.getRun(runId).catch(() => undefined);
+      if (!run || !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) {
+        throw new PromptRefinementTerminationUnconfirmedError(cause);
+      }
+      try {
+        await this.agents.finishRuntimeTurn(runId);
+      } catch (cleanupCause) {
+        throw new PromptRefinementTerminationUnconfirmedError(cleanupCause);
+      }
+      if (await this.agentRuntimeStore.getRun(runId).catch(() => undefined)) {
+        throw new PromptRefinementTerminationUnconfirmedError(cause);
+      }
+      throw cause;
+    }
+
+    const stopAndConfirm = async (reason: string, suffix: string) => {
+      const stopped = await this.agents.interruptTurn(
+        runId,
+        reason,
+        `${operationId}:${suffix}`
+      );
+      if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(stopped.status)) {
+        return;
+      }
+      if (stopped.status === 'RECOVERY_REQUIRED') {
+        throw new PromptRefinementTerminationUnconfirmedError(
+          new Error(stopped.terminalReason ?? 'The provider stop result is uncertain.')
+        );
+      }
+      if (
+        stopped.status === 'INTERRUPTING' &&
+        stopped.interruptDelivery === 'AMBIGUOUS'
+      ) {
+        throw new PromptRefinementTerminationUnconfirmedError(
+          new Error(
+            stopped.terminalReason ??
+              'The provider accepted work, but Task Monki could not confirm that it stopped.'
+          )
+        );
+      }
+      try {
+        const terminal = await this.agents.waitForRuntimeTurn(runId, 15_000);
+        if (!['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(terminal.run.status)) {
+          throw new Error(`Prompt refinement stop ended with ${terminal.run.status}.`);
+        }
+      } catch (cause) {
+        throw new PromptRefinementTerminationUnconfirmedError(cause);
+      }
+    };
+
+    const result = this.agents
+      .waitForRuntimeTurn(runId, 90_000)
+      .then(({ run, output }) => {
+        if (run.status !== 'COMPLETED') {
+          throw new Error(
+            run.terminalReason ?? `Prompt refinement ended with ${run.status}.`
+          );
+        }
+        return output;
+      })
+      .catch(async (error: unknown) => {
+        const run = await this.agentRuntimeStore.getRun(runId);
+        if (
+          run &&
+          !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)
+        ) {
+          await stopAndConfirm(
+            'Prompt refinement timed out or was canceled.',
+            'stop'
+          );
+        }
+        throw error;
+      })
+      .finally(() => this.agents.finishRuntimeTurn(runId));
+
+    return {
+      result,
+      cancel: () => stopAndConfirm('Prompt refinement was canceled.', 'cancel')
+    };
   }
 
   private async resolvePromptRefinementTargetModel(input: RefinePromptRequest) {
@@ -2033,7 +2170,11 @@ export class TaskManagerService {
         await this.assertAgentRuntimeAvailable();
         let task = await this.requireTask(input.taskId);
         this.assertNormalTask(task, 'Agent work');
-        const mode = input.mode ?? 'IMPLEMENTATION';
+        // IPC input is untrusted even though the TypeScript contract excludes review.
+        const mode = (input.mode ?? 'IMPLEMENTATION') as AgentRunMode;
+        if (mode === 'REVIEW') {
+          throw new Error('Start a code review with the review action.');
+        }
         if (task.currentRunId) {
           if (isImplementationRunMode(mode)) {
             await this.awaitPostRunEvidence(task.currentRunId);
@@ -2063,7 +2204,7 @@ export class TaskManagerService {
   private async startPreparedRun(input: {
     task: Task;
     worktree: WorktreeRecord;
-    mode?: AgentRunMode;
+    mode?: Exclude<AgentRunMode, 'REVIEW'>;
     settings?: AgentExecutionSettings;
   }): Promise<RunRecord> {
     await this.assertAgentRuntimeAvailable();
@@ -2078,7 +2219,7 @@ export class TaskManagerService {
     }
     const snapshot = await this.refreshEvidenceInternal({ taskId: task.id });
     const mode = input.mode ?? 'IMPLEMENTATION';
-    const readOnlyMode = mode === 'ANALYSIS' || mode === 'REVIEW';
+    const readOnlyMode = mode === 'ANALYSIS';
     const settings = mergeRunSettings({
       readOnly: readOnlyMode,
       settings: [task.agentSettings, input.settings]
@@ -2523,8 +2664,7 @@ export class TaskManagerService {
         const reviewAdapter = this.runtimeRegistry.require(reviewRuntimeId);
         const reviewSupport = projectAgentExecutionSupport(
           await reviewAdapter.capabilities(),
-          'REVIEW',
-          { sourceRuntimeId: run.runtimeId }
+          'REVIEW'
         );
         if (!reviewSupport.supported) throw new Error(reviewSupport.reason);
         const useConfiguredReviewModel = reviewRuntimeId === configuredReviewRuntimeId;

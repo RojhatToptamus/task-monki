@@ -30,6 +30,8 @@ export interface AgentExecutionPolicyPreset {
   sandbox: NonNullable<AgentExecutionSettings['sandbox']>;
   approvalPolicy: string;
   approvalsReviewer: AgentApprovalsReviewer;
+  /** Provider-native policy for repository mutation. This is not an OS sandbox claim. */
+  repositoryMutation: 'DENY' | 'ASK' | 'ALLOW';
   networkAccess: 'DISABLED' | 'OPTIONAL' | 'REQUIRED';
 }
 

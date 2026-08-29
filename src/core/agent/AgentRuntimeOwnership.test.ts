@@ -4,7 +4,7 @@ import type { AgentExecutionContext, AgentOwnerScope } from '../../shared/agentR
 import {
   assertAccessEpochMatches,
   assertAgentRunScope,
-  assertDiscourseExecutionContext,
+  assertReadOnlyExecutionContext,
   createAgentSessionAccessEpoch
 } from './AgentRuntimeOwnership';
 
@@ -100,20 +100,19 @@ describe('AgentRuntimeOwnership', () => {
     ).toThrow('does not match');
   });
 
-  it('requires discourse to be read-only, offline, tool-free, and fully attested', () => {
-    expect(() => assertDiscourseExecutionContext(executionContext())).not.toThrow();
+  it('requires shared read-only turns to deny mutation, approvals, and external tools', () => {
+    expect(() => assertReadOnlyExecutionContext(executionContext())).not.toThrow();
     for (const unsafe of [
-      { externalTools: { ...executionContext().externalTools, network: true } },
       { externalTools: { ...executionContext().externalTools, apps: true } },
-      { modelSettings: { ...executionContext().modelSettings, sandbox: 'WORKSPACE_WRITE' as const } },
+      { repositoryAccess: 'WRITE' as const },
       { modelSettings: { ...executionContext().modelSettings, approvalPolicy: 'ON_REQUEST' as const } }
     ]) {
       expect(() =>
-        assertDiscourseExecutionContext({ ...executionContext(), ...unsafe })
+        assertReadOnlyExecutionContext({ ...executionContext(), ...unsafe })
       ).toThrow();
     }
     expect(() =>
-      assertDiscourseExecutionContext({
+      assertReadOnlyExecutionContext({
         ...executionContext(),
         attestation: {
           status: 'INHERITED_UNATTESTED',
@@ -140,6 +139,7 @@ function epoch(context: AgentExecutionContext) {
 function executionContext(): AgentExecutionContext {
   return {
     attestation: { status: 'ATTESTED' },
+    repositoryAccess: 'READ_ONLY',
     primaryCwd: absolute('primary'),
     readRoots: [
       { canonicalPath: absolute('secondary'), kind: 'REPOSITORY', entityId: 'repository-2' },
