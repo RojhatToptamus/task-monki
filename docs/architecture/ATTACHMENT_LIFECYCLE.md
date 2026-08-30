@@ -202,8 +202,9 @@ Delivery is selected by the owning runtime:
   qualified PNG images to Composer 2.5 as native ACP image blocks. Other
   versions, models, and image formats remain text-only. Cursor `Auto` remains
   text-only.
-- Claude ACP attachments stay disabled. No bridge is installed to run the
-  packaged content-use tests.
+- Claude Agent ACP uses an embedded text resource. Version 0.70.0 sends
+  qualified PNG images to Sonnet as native ACP image blocks. Other versions,
+  models, and image formats remain unqualified.
 
 The selected model and runtime must have qualified effective image support.
 ACP negotiation is the default transport fact. An exact provider-local row can

@@ -18,6 +18,7 @@ describe('TaskManagerService shutdown coordination', () => {
       activeControlActions: Set<Promise<unknown>>;
       previewEnabled: boolean;
       store: { close(): Promise<void> };
+      promptRefiner: { beginShutdown(): Promise<void> };
       agents: { shutdown(): Promise<void> };
       designToolBridge: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
@@ -28,6 +29,11 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.activeControlActions = new Set();
     internals.previewEnabled = true;
     internals.store = { close: () => Promise.resolve() };
+    internals.promptRefiner = {
+      async beginShutdown() {
+        events.push('prompt-refinement-shutdown');
+      }
+    };
     internals.agents = {
       async shutdown() {
         events.push('agent-started');
@@ -51,6 +57,7 @@ describe('TaskManagerService shutdown coordination', () => {
     const shutdown = service.shutdown();
     await previewStarted;
     expect(events).toEqual([
+      'prompt-refinement-shutdown',
       'agent-started',
       'design-tool-shutdown',
       'preview-started'
@@ -58,6 +65,7 @@ describe('TaskManagerService shutdown coordination', () => {
     releasePreview();
     await shutdown;
     expect(events).toEqual([
+      'prompt-refinement-shutdown',
       'agent-started',
       'design-tool-shutdown',
       'preview-started',
@@ -327,6 +335,7 @@ function initializeRuntimeLifecycle(service: TaskManagerService): void {
       close: () => Promise.resolve()
     },
     postRunEvidenceTasks: new Map<string, Promise<void>>(),
+    promptRefiner: { beginShutdown: () => Promise.resolve() },
     disposeAgentEventListener: () => undefined
   });
 }

@@ -228,6 +228,19 @@ describe('DesignUpdateCoordinator', () => {
     });
   });
 
+  it('retries transient browser cleanup before settling a completed turn', async () => {
+    const harness = await createHarness();
+    const run = await startAndCompleteCurrentTurn(harness);
+    harness.browser.closeRun.mockRejectedValueOnce(new Error('transient close failure'));
+
+    await harness.coordinator.handleRunTerminal(run.id);
+
+    expect(harness.browser.closeRun).toHaveBeenCalledTimes(2);
+    expect((await harness.store.getDesignDetail(harness.designId)).turns[0]?.outcome).toBe(
+      'READY'
+    );
+  });
+
   it('uses runtime interruption for the active message and cancels queued messages locally', async () => {
     const interruptRun = vi.fn(async () => undefined);
     const harness = await createHarness({ interruptRun });
@@ -577,6 +590,9 @@ interface CoordinatorHarness {
     cutoverManagedDesignCandidate: ReturnType<typeof vi.fn>;
     stopManagedDesignCandidate: ReturnType<typeof vi.fn>;
   };
+  browser: {
+    closeRun: ReturnType<typeof vi.fn>;
+  };
   ensureDesignWorktree: ReturnType<typeof vi.fn>;
 }
 
@@ -745,24 +761,25 @@ async function createHarness(
     ),
     stopManagedDesignCandidate: vi.fn(async () => undefined)
   };
+  const browser = {
+    attest: vi.fn(async () => undefined),
+    recover: vi.fn(async () => undefined),
+    openCandidate: vi.fn(async () => ({
+      snapshot: 'page',
+      console: '(no output)',
+      errors: '(no output)'
+    })),
+    inspect: vi.fn(async () => ({ text: 'page' })),
+    abortRun: vi.fn(),
+    closeRun: vi.fn(async () => undefined),
+    shutdown: vi.fn(async () => undefined)
+  };
   const coordinator = new DesignUpdateCoordinator({
     store,
     agents,
     previews: previews as unknown as PreviewManager,
     source: source as unknown as DesignSourceService,
-    browser: {
-      attest: vi.fn(async () => undefined),
-      recover: vi.fn(async () => undefined),
-      openCandidate: vi.fn(async () => ({
-        snapshot: 'page',
-        console: '(no output)',
-        errors: '(no output)'
-      })),
-      inspect: vi.fn(async () => ({ text: 'page' })),
-      abortRun: vi.fn(),
-      closeRun: vi.fn(async () => undefined),
-      shutdown: vi.fn(async () => undefined)
-    },
+    browser,
     fence: {
       async begin() {
         return { async commit() {}, async rollback() {} };
@@ -782,6 +799,7 @@ async function createHarness(
     startTurn,
     source,
     previews,
+    browser,
     ensureDesignWorktree
   };
   harnesses.push(harness);

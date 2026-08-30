@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
 import { PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION } from '../preview/generation/PreviewRecipeGenerationSupport';
 import {
@@ -100,5 +100,31 @@ routes:
       'EMPTY'
     ]);
     unsubscribe();
+  });
+
+  it('does not start the Codex-only generator when Codex is disabled', async () => {
+    const runAgent = vi.fn(async () => ({
+      result: Promise.resolve('unused'),
+      cancel: async () => {}
+    }));
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-disabled-codex',
+      previewEnabled: true,
+      previewRecipeGenerator: new PreviewRecipeGenerationService(runAgent)
+    });
+    const task = await scenario.createTask({ title: 'Generate Preview recipe' });
+    await scenario.service.prepareWorktree({ taskId: task.id });
+    const internals = scenario.service as unknown as {
+      appSettings: { disabledRuntimeIds: string[] };
+    };
+    internals.appSettings = {
+      ...internals.appSettings,
+      disabledRuntimeIds: ['codex']
+    };
+
+    await expect(
+      scenario.service.generatePreviewRecipe({ taskId: task.id })
+    ).rejects.toThrow('Codex is disabled');
+    expect(runAgent).not.toHaveBeenCalled();
   });
 });

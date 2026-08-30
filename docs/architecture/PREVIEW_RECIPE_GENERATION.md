@@ -105,6 +105,9 @@ Monki creates a bounded temporary JSON evidence bundle containing safe text
 from the task worktree and runs the ephemeral Codex process against that
 temporary directory with:
 
+- the Preview generator's app-owned Codex model, independent of the selected
+  prompt-refinement provider and model;
+
 - approval mode `never`;
 - read-only sandboxing;
 - the compatible Codex executable already selected by App Server runtime

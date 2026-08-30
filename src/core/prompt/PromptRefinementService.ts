@@ -75,10 +75,13 @@ class PromptRefinementResponseValidationError extends Error {
 export class PromptRefinementService {
   private terminationFence?: PromptRefinementTerminationUnconfirmedError;
   private readonly active = new Map<string, ActiveRefinement>();
+  private accepting = true;
+  private shutdownWork?: Promise<void>;
 
   constructor(private readonly runModel: PromptRefinementRunner) {}
 
   async refine(input: PromptRefinementInput): Promise<RefinePromptResponse> {
+    if (!this.accepting) throw new Error('Prompt refinement is shutting down.');
     const requestId = requireRequestId(input.requestId);
     const userRequest = input.input.trim();
     if (!userRequest) throw new Error('Prompt text is required.');
@@ -171,6 +174,25 @@ export class PromptRefinementService {
       this.terminationFence = error;
       throw error;
     }
+  }
+
+  beginShutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    this.accepting = false;
+    const work = Promise.allSettled(
+      [...this.active.keys()].map((requestId) => this.cancel(requestId))
+    ).then((results) => {
+      const failures = results.flatMap((result) =>
+        result.status === 'rejected'
+          ? [result.reason instanceof Error ? result.reason : new Error(String(result.reason))]
+          : []
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Prompt refinement shutdown cleanup is incomplete.');
+      }
+    });
+    this.shutdownWork = work;
+    return work;
   }
 
   private cancelActive(active: ActiveRefinement): Promise<void> {

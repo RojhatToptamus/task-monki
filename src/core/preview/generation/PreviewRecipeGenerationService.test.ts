@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { DEFAULT_PROMPT_REFINEMENT_MODEL } from '../../../shared/contracts';
 import { CodexEphemeralRunError } from '../../agent/codex/CodexEphemeralReadOnlyRunner';
 import {
   PreviewRecipeGenerationService,
@@ -19,9 +20,10 @@ describe('PreviewRecipeGenerationService', () => {
   it('keeps a valid evidence-backed draft transient until exact acceptance', async () => {
     const root = await previewWorktree();
     let evidenceBundle = '';
-    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
+    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction, model }) => {
       evidenceBundle = await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8');
       expect(instruction).toContain('Do not run the application');
+      expect(model).toBe(DEFAULT_PROMPT_REFINEMENT_MODEL);
       return {
         result: Promise.resolve(agentDraft()),
         cancel: async () => {}
@@ -30,8 +32,7 @@ describe('PreviewRecipeGenerationService', () => {
 
     const generated = await service.generate({
       taskId: 'task-1',
-      worktreePath: root,
-      model: 'gpt-test'
+      worktreePath: root
     });
 
     expect(generated.status).toBe('READY');

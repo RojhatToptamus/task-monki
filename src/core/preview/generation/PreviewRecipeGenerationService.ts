@@ -93,7 +93,6 @@ export class PreviewRecipeGenerationService {
   generate(input: {
     taskId: string;
     worktreePath: string;
-    model?: string;
     codexExecutable?: string;
     onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
   }): Promise<PreviewRecipeGenerationSnapshot> {
@@ -102,13 +101,6 @@ export class PreviewRecipeGenerationService {
     }
     const active = this.operations.get(input.taskId);
     if (active?.settled) return active.settled;
-    if (
-      input.model !== undefined &&
-      (!input.model.trim() || Buffer.byteLength(input.model, 'utf8') > 160 || /[\0\r\n]/.test(input.model))
-    ) {
-      return Promise.reject(new Error('The selected Preview generation model is invalid.'));
-    }
-
     const operation: ActiveGeneration = {
       id: randomUUID(),
       canceled: false
@@ -222,7 +214,6 @@ export class PreviewRecipeGenerationService {
     input: {
       taskId: string;
       worktreePath: string;
-      model?: string;
       codexExecutable?: string;
       onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
       startedAt: string;
@@ -249,7 +240,7 @@ export class PreviewRecipeGenerationService {
         instruction: buildPreviewRecipeGenerationInstruction({
           evidenceFileName: evidence.fileName
         }),
-        model: input.model?.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL,
+        model: DEFAULT_PROMPT_REFINEMENT_MODEL,
         codexExecutable: input.codexExecutable
       });
       operation.run = run;

@@ -294,9 +294,9 @@ This table describes current code, not provider protocol potential.
 | Queue next message | Yes | Yes | Yes | Yes | Yes |
 | Live steering | Yes | No | No | No | No |
 | Managed attachments | Text and image | Text and model-gated image | Text and exact-qualified Grok 4.6 PNG image | Text and exact-qualified Composer 2.5 PNG image | Text and exact-qualified Sonnet PNG image |
-| Prompt refinement | Yes | Yes | No | Yes | Yes; profile-wide |
-| Review provider | Yes | Yes | No | Yes | Yes; profile-wide |
-| Discourse participant | Yes | Yes | No | Yes | Yes; profile-wide |
+| Prompt refinement | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | Yes; profile-wide |
+| Review provider | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | Yes; profile-wide |
+| Discourse participant | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | Yes; profile-wide |
 | Design | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Every connected catalog model that reports image input | Grok Build 1.0.13 with Grok 4.6 at low reasoning | Composer 2.5 on Cursor 2026.08.25-3e8eec8 | Claude Agent ACP 0.70.0 with Sonnet |
 | Provider resume | Yes | Yes | Negotiated | Negotiated | Yes for Claude Agent ACP 0.70.0 |
 | Native provider fork | Yes | Yes | No | No | No |
@@ -377,9 +377,9 @@ Every enabled cell still requires a compatible packaged runtime and selected mod
 | Active conversation | Live steer | Queue fallback | Queue fallback | Queue fallback | Queue fallback |
 | Text attachment | Exact managed path after qualification; bounded inline fallback | `data:` file part | Embedded text resource | Bounded text block | Embedded text resource |
 | Image attachment | `localImage`, model-gated | `data:` file part, model-gated | Native PNG block for the exact Grok 1.0.13 and Grok 4.6 pair | Native PNG block for the exact Cursor 2026.08.25-3e8eec8 and Composer 2.5 pair | Native image block for Claude Agent ACP 0.70.0 with Sonnet |
-| Prompt refinement | Shared short turn | Shared short turn | Disabled by read-only policy | Shared short turn | Shared short turn; profile-wide |
-| Review | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile-wide |
-| Discourse | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile-wide |
+| Prompt refinement | Shared short turn | Shared short turn | Shared short turn; Grok Build 1.0.13 on macOS | Shared short turn | Shared short turn; profile-wide |
+| Review | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Shared read-only turn; profile-wide |
+| Discourse | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Shared read-only turn; profile-wide |
 | Design | Native tool transport; exact Codex 0.151.0-alpha.7.2 and GPT-5.6-Luna | Packaged MCP bridge; connected catalog models that report image input | Packaged MCP bridge; exact Grok Build 1.0.13 and Grok 4.6 pair | Packaged MCP bridge; exact Cursor and Composer pair | Packaged MCP bridge; exact Claude Agent ACP 0.70.0 and Sonnet |
 | Resume | Native | Native | Negotiated or new session | Negotiated or new session | Negotiated or new session |
 | Fork product state | New Task session | New Task session | New Task session | New Task session | New Task session |
@@ -1686,12 +1686,12 @@ git diff --check
 The smoke command must use its real-provider attachment mode.
 Mock-only results do not satisfy milestone 3.
 
-## Unresolved provider limits
+## Current provider limits
 
-These items need implementation-time conformance tests.
+These limits come from the current qualification results.
 They do not require another architecture decision.
 
-### Milestone 3 remaining provider limits
+### Qualified attachment limits
 
 1. OpenCode 1.18.25 image delivery is enabled only when its model catalog reports image input.
    MiMo V2.5 passed the current packaged content-use test.
@@ -1713,7 +1713,7 @@ They do not require another architecture decision.
 Do not add a managed-path fallback when OpenCode or ACP inline delivery fails.
 Disable only the failed content kind, model, or encoded-size range with a clear reason.
 
-### Later milestone uncertainties
+### Future requalification
 
 1. Repeat technical Design qualification before enabling a new or changed Codex or ACP runtime and model.
    Requalify OpenCode when its shared Design transport changes.

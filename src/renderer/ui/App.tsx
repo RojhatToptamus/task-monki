@@ -2020,11 +2020,7 @@ export function App() {
 
   const generatePreviewRecipe = async (taskId: string) => {
     try {
-      const refinementModel = selectModel(enabledRuntimeModels, appSettings.promptRefinementModel);
-      const state = await taskManagerApi.generatePreviewRecipe({
-        taskId,
-        model: refinementModel?.model
-      });
+      const state = await taskManagerApi.generatePreviewRecipe({ taskId });
       setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
       return state;
     } catch (caught) {

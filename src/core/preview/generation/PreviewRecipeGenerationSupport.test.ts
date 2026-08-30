@@ -38,6 +38,7 @@ describe('Preview recipe generation support', () => {
     expect(instruction).toContain('target: local rather than silently choosing either endpoint');
     expect(instruction).toContain('Do not model NEXT_PUBLIC values as private inputs');
     expect(instruction).toContain('insufficient-evidence');
-    expect(instruction).toContain('Every evidence path must exist');
+    expect(instruction).toContain('exact relative path from the evidence bundle files array');
+    expect(instruction).toContain('Do not cite repository-evidence.json');
   });
 });

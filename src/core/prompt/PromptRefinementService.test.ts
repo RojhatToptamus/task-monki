@@ -313,6 +313,37 @@ describe('PromptRefinementService', () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
+  it('cancels active work and rejects new refinements during shutdown', async () => {
+    let rejectResult: (cause: unknown) => void = () => undefined;
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const cancel = vi.fn(async () => rejectResult(new Error('canceled')));
+    const service = new PromptRefinementService(async () => {
+      markStarted();
+      return {
+        cancel,
+        result: new Promise<never>((_resolve, reject) => {
+          rejectResult = reject;
+        })
+      };
+    });
+    const refining = service.refine(refinementInput({ requestId: 'active-at-shutdown' }));
+    const canceled = expect(refining).rejects.toBeInstanceOf(PromptRefinementCanceledError);
+    await started;
+
+    const firstShutdown = service.beginShutdown();
+    expect(service.beginShutdown()).toBe(firstShutdown);
+    await firstShutdown;
+    await canceled;
+
+    expect(cancel).toHaveBeenCalledOnce();
+    await expect(
+      service.refine(refinementInput({ requestId: 'after-shutdown' }))
+    ).rejects.toThrow('Prompt refinement is shutting down');
+  });
+
   it('fails closed after process termination becomes unconfirmed', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
     let launches = 0;

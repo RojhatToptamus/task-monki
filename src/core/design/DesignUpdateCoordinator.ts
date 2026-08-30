@@ -127,7 +127,7 @@ export class DesignUpdateCoordinator {
     if (this.terminalAdmissionClosed) return Promise.resolve();
     const work = this.options.store.getRun(runId).then(async (run) => {
       if (!run || run.mode !== 'DESIGN') return;
-      await this.options.browser.closeRun(run.id).catch(() => undefined);
+      await this.closeBrowserRun(run.id);
       return this.withDesignLock(run.taskId, () => this.settleRunUnlocked(run.id));
     });
     this.terminalAdmissions.add(work);
@@ -206,7 +206,7 @@ export class DesignUpdateCoordinator {
         throw new Error('The active Design turn lost its agent run.');
       }
       if (ACTIVE_RUN_STATUSES.has(run.status)) {
-        await this.options.browser.closeRun(run.id).catch(() => undefined);
+        await this.closeBrowserRun(run.id);
         await this.stopOpenedCandidate(turn).catch(() => undefined);
         await this.options.agents.interruptRun(run.id);
         this.emitUpdated(designId, {
@@ -556,7 +556,7 @@ export class DesignUpdateCoordinator {
     }
     if (ACTIVE_RUN_STATUSES.has(run.status)) return;
     if (run.status !== 'COMPLETED') {
-      await this.options.browser.closeRun(run.id).catch(() => undefined);
+      await this.closeBrowserRun(run.id);
       await this.stopOpenedCandidate(turn).catch(() => undefined);
       await this.settleTerminalFailure(run.taskId, turn.id, run);
       this.emitUpdated(run.taskId, { reason: 'run-failed', runId });
@@ -822,7 +822,7 @@ export class DesignUpdateCoordinator {
             checkpoint: captured.checkpoint
           });
 
-    await this.options.browser.closeRun(run.id).catch(() => undefined);
+    await this.closeBrowserRun(run.id);
     let generation = await this.reusableOpenedGeneration(turn, source);
     if (!generation) {
       await this.stopOpenedCandidate(turn).catch(() => undefined);
@@ -857,7 +857,7 @@ export class DesignUpdateCoordinator {
       return { text: formatBrowserObservation(observation) };
     } catch (error) {
       await lease.close().catch(() => undefined);
-      await this.options.browser.closeRun(run.id).catch(() => undefined);
+      await this.closeBrowserRun(run.id);
       if (generation.id !== turn.finalOpenedCandidate?.previewGenerationId) {
         await this.options.previews.stopManagedDesignCandidate(generation.id).catch(() => undefined);
       }
@@ -1030,6 +1030,16 @@ export class DesignUpdateCoordinator {
   private assertAccepting(): void {
     if (!this.accepting || this.shuttingDown) {
       throw new Error('Design updates are not accepting work.');
+    }
+  }
+
+  private async closeBrowserRun(runId: string): Promise<void> {
+    try {
+      await this.options.browser.closeRun(runId);
+    } catch {
+      // The browser owner keeps failed cleanup state so one bounded retry can
+      // finish a transient daemon or filesystem failure in this process.
+      await this.options.browser.closeRun(runId).catch(() => undefined);
     }
   }
 

@@ -879,7 +879,6 @@ export interface GetPreviewRecipeGenerationRequest {
 
 export interface GeneratePreviewRecipeRequest {
   taskId: string;
-  model?: string;
 }
 
 export interface ValidatePreviewRecipeDraftRequest {

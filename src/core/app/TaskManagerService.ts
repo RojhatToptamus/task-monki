@@ -115,7 +115,7 @@ import {
   isImplementationRunMode,
   normalizePullRequestTitle,
 } from '../../shared/contracts';
-import type { AgentRuntimeId } from '../../shared/agent';
+import { CODEX_RUNTIME_ID, type AgentRuntimeId } from '../../shared/agent';
 import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import {
   PromptRefinementTerminationUnconfirmedError,
@@ -2795,6 +2795,7 @@ export class TaskManagerService {
     if (this.lifecycleState === 'STOPPED') return Promise.resolve();
     this.lifecycleState = 'SHUTTING_DOWN';
     const runtimeDrain = this.runtimeOperations.close();
+    const promptRefinementShutdown = this.promptRefiner.beginShutdown();
     const pendingInitialization = this.initWork;
     const pendingTaskActions = [...this.taskActionLocks.values()].map(
       ({ work }) => work
@@ -2807,7 +2808,8 @@ export class TaskManagerService {
       pendingTaskActions,
       pendingControlActions,
       pendingRuntimeLifecycle,
-      pendingRuntimeOperations
+      pendingRuntimeOperations,
+      promptRefinementShutdown
     )
       .finally(() => {
         this.lifecycleState = 'STOPPED';
@@ -2822,14 +2824,16 @@ export class TaskManagerService {
     pendingTaskActions: Promise<unknown>[],
     pendingControlActions: Promise<unknown>[],
     pendingRuntimeLifecycle: Promise<void>,
-    pendingRuntimeOperations: Promise<void>[]
+    pendingRuntimeOperations: Promise<void>[],
+    promptRefinementShutdown: Promise<void>
   ): Promise<void> {
     await Promise.allSettled([
       pendingInitialization ?? Promise.resolve(),
       ...pendingTaskActions,
       ...pendingControlActions,
       pendingRuntimeLifecycle,
-      ...pendingRuntimeOperations
+      ...pendingRuntimeOperations,
+      promptRefinementShutdown
     ]);
     await this.discourseHost?.beginShutdown();
     const [designResult] = await Promise.allSettled([
@@ -2929,6 +2933,7 @@ export class TaskManagerService {
   ): Promise<PreviewRecipeGenerationSnapshot> {
     this.assertPreviewEnabled();
     this.assertAgentProviderAvailable();
+    this.assertRuntimeEnabled(CODEX_RUNTIME_ID);
     await this.requireNormalTask(input.taskId, 'Preview recipe generation');
     const context = await this.withTaskAction(
       input.taskId,
@@ -2939,7 +2944,6 @@ export class TaskManagerService {
       this.previewRecipeGenerator.generate({
         taskId: input.taskId,
         worktreePath: context.worktree.worktreePath,
-        model: input.model,
         codexExecutable: this.codexAdapter?.currentRuntimeExecutable ?? this.codexExecutable,
         onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
       })

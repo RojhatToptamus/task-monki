@@ -282,7 +282,7 @@ export function buildPreviewRecipeGenerationInstruction(
       2
     ),
     '',
-    'Every evidence path must exist in the evidence bundle. Keep all report entries concise and omit empty speculation.',
+    'Every evidence path must be an exact relative path from the evidence bundle files array. Do not cite repository-evidence.json, frameworkCapabilities, publicEnvironment, or another metadata key as a path. Keep all report entries concise and omit empty speculation.',
     'The YAML must be complete, minimal, readable, and below 64 KiB. Use short comments only for non-obvious fields.',
     '',
     'Current machine-readable authoring contract:',
