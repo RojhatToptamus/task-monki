@@ -50,7 +50,13 @@ describe('OpenCodeProtocol', () => {
               status: 'active',
               capabilities: {
                 reasoning: true,
-                input: { text: true, image: true, pdf: true }
+                input: {
+                  text: true,
+                  image: true,
+                  pdf: true,
+                  audio: false,
+                  video: 'false'
+                }
               },
               variants: { low: {}, high: {} },
               limit: { context: 200_000 }

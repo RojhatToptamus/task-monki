@@ -17,6 +17,11 @@ export interface AgentCapability {
   detail?: string;
 }
 
+export interface AgentDesignCapability extends AgentCapability {
+  /** Design-only default. It does not change the model default for normal Tasks. */
+  defaultReasoningEffort?: string;
+}
+
 export interface AgentModelCatalogCapability extends AgentCapability {
   /** Catalog activation is allowed only in direct response to a user selection. */
   activation?: 'EXPLICIT';
@@ -841,8 +846,8 @@ export interface AgentModel {
   serviceTiers: string[];
   defaultServiceTier?: string;
   inputModalities: string[];
-  /** Exact provider-version/model qualification for the full Design workflow. */
-  designSupport?: AgentCapability;
+  /** Provider-owned model support for the full Design workflow. */
+  designSupport?: AgentDesignCapability;
   isDefault: boolean;
   /** Lossless runtime-native model metadata that does not fit common selectors. */
   native?: AgentJsonValue;

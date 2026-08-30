@@ -87,6 +87,45 @@ describe('mounted Design workspace', () => {
     });
   });
 
+  it('uses the selected model Design reasoning default in the creation form', async () => {
+    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const model: AgentModel = {
+      ...designModel,
+      supportedReasoningEfforts: ['low', 'high'],
+      defaultReasoningEffort: 'high',
+      designSupport: {
+        maturity: 'stable',
+        defaultReasoningEffort: 'low'
+      }
+    };
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          designs: [],
+          selectedDesignId: undefined,
+          project: undefined,
+          models: [model],
+          defaultAgentSettings: {
+            runtimeId: 'codex',
+            model: model.model,
+            reasoningEffort: 'high'
+          },
+          onCreateBlankDesign
+        })}
+      />
+    );
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
+      target: { value: 'Build a calm project portfolio.' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
+
+    await waitFor(() => expect(onCreateBlankDesign).toHaveBeenCalledOnce());
+    expect(onCreateBlankDesign).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoningEffort: 'low' })
+    );
+  });
+
   it('keeps an unqualified model visible but creates only with a qualified model', async () => {
     const reason = 'This exact provider version and model failed Design verification.';
     const unqualifiedModel: AgentModel = {
@@ -135,6 +174,15 @@ describe('mounted Design workspace', () => {
 
   it('keeps the blank brief ready when Design models load after the form mounts', async () => {
     const onCreateBlankDesign = vi.fn(async () => undefined);
+    const delayedModel: AgentModel = {
+      ...designModel,
+      supportedReasoningEfforts: ['low', 'high'],
+      defaultReasoningEffort: 'high',
+      designSupport: {
+        maturity: 'stable',
+        defaultReasoningEffort: 'low'
+      }
+    };
     const initial = workspaceProps({
       designs: [],
       selectedDesignId: undefined,
@@ -155,7 +203,7 @@ describe('mounted Design workspace', () => {
     view.rerender(
       <DesignsWorkspace
         {...initial}
-        models={[designModel]}
+        models={[delayedModel]}
         runtimes={[designRuntime]}
       />
     );
@@ -169,7 +217,7 @@ describe('mounted Design workspace', () => {
         expect.objectContaining({
           brief: 'Build after the agent catalog is ready.',
           model: 'gpt-5.6-luna',
-          reasoningEffort: 'medium'
+          reasoningEffort: 'low'
         })
       )
     );

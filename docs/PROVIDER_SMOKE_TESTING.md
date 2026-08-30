@@ -78,8 +78,9 @@ Task Monki attempts the turn only for a profile that advertises a native
 read-only policy. The probe qualifies that policy. The report gives the reason
 for each unsupported profile.
 Normal Tasks remain available for an unsupported read-only profile.
-Grok ACP and Claude Agent ACP are unsupported in this release. The command
-does not send a read-only qualification turn to these profiles.
+Grok ACP is unsupported for read-only work in this release. The command does
+not send a read-only qualification turn to Grok. Claude Agent ACP is enabled
+for the qualified profile and selected model.
 
 A qualification passes only when all these conditions are true:
 

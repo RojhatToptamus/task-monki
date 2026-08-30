@@ -302,13 +302,13 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
-  it('qualifies only the exact packaged OpenCode Design runtime, provider, and model', async () => {
+  it('enables Design for connected catalog models that report image input', async () => {
     const runtime = {
       ...fakeRuntime(),
-      version: '1.18.25',
+      version: '1.99.0',
       diagnostics: {
         ...fakeRuntime().diagnostics,
-        selectedVersion: '1.18.25'
+        selectedVersion: '1.99.0'
       }
     };
     const bridge = fakeDesignToolBridge();
@@ -320,7 +320,7 @@ describe('OpenCodeAdapter', () => {
     const catalog = {
       connected: ['opencode', 'openai'],
       default: {
-        opencode: 'mimo-v2.5-free',
+        opencode: 'catalog-image-model',
         openai: 'gpt-5.6-luna'
       },
       all: [
@@ -328,17 +328,17 @@ describe('OpenCodeAdapter', () => {
           id: 'opencode',
           name: 'OpenCode',
           models: {
-            'mimo-v2.5-free': {
-              id: 'mimo-v2.5-free',
-              name: 'MiMo V2.5 Free',
+            'catalog-image-model': {
+              id: 'catalog-image-model',
+              name: 'Catalog image model',
               status: 'active',
               capabilities: { input: { text: true, image: true } }
             },
-            'gpt-5.6-luna': {
-              id: 'gpt-5.6-luna',
-              name: 'Wrong-provider Luna',
+            'catalog-text-model': {
+              id: 'catalog-text-model',
+              name: 'Catalog text model',
               status: 'active',
-              capabilities: { input: { text: true, image: true } }
+              capabilities: { input: { text: true, image: false } }
             }
           }
         },
@@ -352,11 +352,12 @@ describe('OpenCodeAdapter', () => {
               status: 'active',
               capabilities: { input: { text: true, image: true } }
             },
-            unqualified: {
-              id: 'unqualified',
-              name: 'Unqualified',
+            'second-image-model': {
+              id: 'second-image-model',
+              name: 'Second image model',
               status: 'active',
-              capabilities: { input: { text: true, image: true } }
+              capabilities: { input: { text: true, image: true } },
+              cost: { input: 0, output: 0 }
             }
           }
         }
@@ -377,69 +378,77 @@ describe('OpenCodeAdapter', () => {
     expect(await fixture.adapter.listModels()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          modelProvider: 'openai',
-          model: 'gpt-5.6-luna',
+          modelProvider: 'opencode',
+          model: 'catalog-image-model',
           designSupport: {
             maturity: 'stable',
-            detail: expect.stringContaining('passed the packaged Design')
-          }
-        }),
-        expect.objectContaining({
-          modelProvider: 'opencode',
-          model: 'mimo-v2.5-free',
-          designSupport: {
-            maturity: 'unsupported',
-            detail: expect.stringContaining('has not passed')
-          }
-        }),
-        expect.objectContaining({
-          modelProvider: 'opencode',
-          model: 'gpt-5.6-luna',
-          designSupport: {
-            maturity: 'unsupported',
-            detail: expect.stringContaining('has not passed')
+            detail: expect.stringContaining('reports image input support')
           }
         }),
         expect.objectContaining({
           modelProvider: 'openai',
-          model: 'unqualified',
+          model: 'second-image-model',
+          designSupport: {
+            maturity: 'stable',
+            detail: expect.stringContaining('reports image input support')
+          }
+        }),
+        expect.objectContaining({
+          modelProvider: 'opencode',
+          model: 'catalog-text-model',
           designSupport: {
             maturity: 'unsupported',
-            detail: expect.stringContaining('has not passed')
+            detail: expect.stringContaining('reports no image input support')
           }
         })
       ])
     );
     await fixture.adapter.shutdown();
+  });
 
-    const unknownVersion = await createFixture({
-      runtimeResolver: async () => ({
-        ...runtime,
-        version: '1.18.26',
-        diagnostics: {
-          ...runtime.diagnostics,
-          selectedVersion: '1.18.26'
-        }
-      }),
+  it('rejects Design before provider mutation when the worktree catalog loses image support', async () => {
+    const fixture = await createFixture({
       designSkillRoot: path.resolve('resources/design-skills'),
       designClientToolBridge: fakeDesignToolBridge().api
     });
-    unknownVersion.harness.catalogs.set(
-      path.resolve(unknownVersion.appCwd),
-      catalog
-    );
-    unknownVersion.harness.catalogs.set(
-      path.resolve(unknownVersion.worktree.worktreePath),
-      catalog
-    );
-    await unknownVersion.adapter.initialize();
-    expect(
-      (await unknownVersion.adapter.listModels()).find(
-        (model) =>
-          model.modelProvider === 'openai' && model.model === 'gpt-5.6-luna'
-      )?.designSupport
-    ).toMatchObject({ maturity: 'unsupported' });
-    await unknownVersion.adapter.shutdown();
+    await fixture.adapter.initialize();
+    fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), {
+      connected: ['anthropic'],
+      default: { anthropic: 'claude-test' },
+      all: [{
+        id: 'anthropic',
+        name: 'Anthropic',
+        models: {
+          'claude-test': {
+            id: 'claude-test',
+            name: 'Claude Test',
+            status: 'active',
+            capabilities: { input: { text: true } },
+            variants: { high: {} }
+          }
+        }
+      }]
+    });
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(
+      fixture.adapter.startTurn({
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: 'Create and verify the Design.',
+        authoritativeGoal: 'Create and verify the Design.',
+        settings: SETTINGS
+      })
+    ).rejects.toThrow('reports no image input support');
+    expect(fixture.harness.promptBodies).toHaveLength(0);
+    expect(fixture.harness.sessions.size).toBe(0);
+    await fixture.adapter.shutdown();
   });
 
   it('revokes the Design grant before cancellation reaches OpenCode', async () => {

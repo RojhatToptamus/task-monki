@@ -427,6 +427,16 @@ describe('ACP runtime profiles', () => {
         modelId: 'grok-4.6'
       })
     ).toMatchObject({
+      maturity: 'stable',
+      defaultReasoningEffort: 'low'
+    });
+    expect(
+      acpDesignSupport({
+        profile: GROK_ACP_PROFILE,
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.5'
+      })
+    ).toMatchObject({
       maturity: 'unsupported',
       detail: expect.stringContaining('has not passed')
     });

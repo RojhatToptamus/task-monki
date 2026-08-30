@@ -347,7 +347,7 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
       Object.values(provider.models).map((model): AgentModel => {
         const modelId = model.id;
         const modalities = Object.entries(model.capabilities?.input ?? { text: true })
-          .filter(([, supported]) => supported)
+          .filter(([, supported]) => supported === true)
           .map(([modality]) => modality);
         const variants = Object.keys(model.variants ?? {});
         return {

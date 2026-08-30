@@ -827,8 +827,14 @@ function BlankDesignForm({
   );
   const [runtimeId, setRuntimeId] = useState(initialRuntimeId);
   const [modelId, setModelId] = useState(initialModel?.id ?? '');
-  const [reasoningEffort, setReasoningEffort] = useState(
-    resolveReasoningEffort(initialModel, defaultAgentSettings?.reasoningEffort) ?? ''
+  const [reasoningEffort, setReasoningEffort] = useState<string | undefined>(() =>
+    initialModel
+      ? resolveReasoningEffort(
+          initialModel,
+          initialModel.designSupport?.defaultReasoningEffort ??
+            defaultAgentSettings?.reasoningEffort
+        )
+      : undefined
   );
   const [submitting, setSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
@@ -856,7 +862,9 @@ function BlankDesignForm({
   const selectedReasoningEffort =
     resolveReasoningEffort(
       selectedModel,
-      reasoningEffort || defaultAgentSettings?.reasoningEffort
+      reasoningEffort ??
+        selectedModel?.designSupport?.defaultReasoningEffort ??
+        defaultAgentSettings?.reasoningEffort
     ) ?? '';
   const selectedRuntime = runtimes.find(
     (runtime) => runtime.preflight.runtime.id === selectedRuntimeId
@@ -1037,7 +1045,11 @@ function BlankDesignForm({
                     (model) =>
                       model.runtimeId === nextRuntimeId && model.id === nextModelId
                   );
-                  setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+                  setReasoningEffort(
+                    nextModel?.designSupport?.defaultReasoningEffort ??
+                      nextModel?.defaultReasoningEffort ??
+                      ''
+                  );
                 }}
                 onReasoningEffortChange={setReasoningEffort}
               />

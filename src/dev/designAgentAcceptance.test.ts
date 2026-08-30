@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentItemRecord, AgentItemType } from '../shared/agent';
 import {
   assertNoDirectAssetInspection,
+  isInFlightInspectDesignWait,
   observedBrowserOperations,
   parseFocusedDesignAgentScenario,
   resolveDesignAgentCandidateModel
@@ -88,6 +89,45 @@ describe('Design agent visual-fact qualification', () => {
         })
       ])
     ).toEqual(['screenshot']);
+  });
+
+  it('accepts a status-less active Grok wait call as cancellation admission evidence', () => {
+    expect(
+      isInFlightInspectDesignWait('grok-acp', {
+        ...item('MCP_TOOL_CALL', {
+          title: 'task-monki-design-tools__inspect_design',
+          rawInput: {
+            tool_name: 'task-monki-design-tools__inspect_design',
+            tool_input: {
+              operation: 'act',
+              action: 'wait',
+              milliseconds: 2_000
+            }
+          }
+        }),
+        status: 'UNKNOWN'
+      })
+    ).toBe(true);
+  });
+
+  it('does not treat a status-less Grok wait result as an in-flight call', () => {
+    expect(
+      isInFlightInspectDesignWait('grok-acp', {
+        ...item('MCP_TOOL_CALL', {
+          title: 'task-monki-design-tools__inspect_design',
+          rawInput: {
+            tool_name: 'task-monki-design-tools__inspect_design',
+            tool_input: {
+              operation: 'act',
+              action: 'wait',
+              milliseconds: 2_000
+            }
+          },
+          rawOutput: { type: 'MCP' }
+        }),
+        status: 'UNKNOWN'
+      })
+    ).toBe(false);
   });
 
   it('reads browser operations only from each runtime\'s exact identity', () => {

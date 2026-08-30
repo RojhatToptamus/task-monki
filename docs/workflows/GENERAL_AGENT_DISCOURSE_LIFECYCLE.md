@@ -370,13 +370,14 @@ The renderer is not the security boundary.
 Codex uses an attested App Server read-only profile.
 OpenCode uses a dedicated `--pure` session and native deny rules.
 Cursor ACP uses native Ask mode and rejects every permission request.
-These three profiles can participate in Discourse.
+Claude Agent ACP uses native plan mode and rejects every permission request.
+These four profiles can participate in Discourse.
 
 OpenCode and Cursor still run with normal user permissions.
 Their policies are not operating-system sandboxes.
-Grok plan mode still permits mutation through shell, MCP, or subagent work.
-Claude plan mode has not passed the packaged mutation test.
-Grok and Claude remain unavailable for Discourse, but normal Tasks remain available.
+Grok plan mode and custom agent profiles can still expose mutating configured
+MCP tools. Grok remains unavailable for Discourse. Normal Grok Tasks and the
+qualified Grok Design pair remain available.
 
 Before delivery, `AgentOrchestrator` records repository state for every context root.
 After terminal output, it compares the current state with that record.

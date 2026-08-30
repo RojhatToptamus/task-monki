@@ -178,9 +178,6 @@ const MAX_TRACKED_ASSISTANT_USAGE_RUNS = 2_048;
 const MAX_INBOUND_RESYNC_MS = 15_000;
 const MAX_RUNTIME_DELTA_BYTES = 64 * 1024;
 const OPENCODE_DESIGN_MCP_TIMEOUT_MS = 120_000;
-const QUALIFIED_OPENCODE_DESIGN_RUNTIME_VERSION = '1.18.25';
-const QUALIFIED_OPENCODE_DESIGN_PROVIDER = 'openai';
-const QUALIFIED_OPENCODE_DESIGN_MODEL = 'gpt-5.6-luna';
 const OPENCODE_CATALOG_EVENTS = new Set([
   'models-dev.refreshed',
   'catalog.updated',
@@ -1277,11 +1274,23 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const projectCatalog = parseOpenCodeProviderCatalog(
         (await running.client.get<unknown>('/provider')).data
       );
+      const projectModels = mapOpenCodeModels(projectCatalog).map(
+        withOpenCodeDesignSupport
+      );
       const selectedModel = this.resolveExecutionFromModels(
         { settings, attachments },
-        this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
+        this.safePublishedModels(projectModels),
         `worktree catalog for ${session.worktreePath}`
       );
+      if (
+        input.mode === 'DESIGN' &&
+        selectedModel.model.designSupport?.maturity !== 'stable'
+      ) {
+        throw new Error(
+          selectedModel.model.designSupport?.detail ??
+            'OpenCode reports that the selected model cannot accept images required by Design Mode.'
+        );
+      }
       if (!session.providerSessionId) {
         session = await this.createSession({
           runtimeId: this.descriptor.id,
@@ -2265,9 +2274,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     catalog: ReturnType<typeof parseOpenCodeProviderCatalog>,
     runtime: ResolvedOpenCodeRuntime
   ): void {
-    this.operationalModels = mapOpenCodeModels(catalog).map((model) =>
-      withOpenCodeDesignSupport(model, runtime.version)
-    );
+    this.operationalModels = mapOpenCodeModels(catalog).map(withOpenCodeDesignSupport);
     this.models = this.safePublishedModels(this.operationalModels);
     const safeProviderIds = new Set(
       catalog.providers
@@ -6580,24 +6587,20 @@ function deferredOpenCodeModel(
   };
 }
 
-function withOpenCodeDesignSupport(
-  model: AgentModel,
-  runtimeVersion: string
-): AgentModel {
-  const designQualified =
-    runtimeVersion === QUALIFIED_OPENCODE_DESIGN_RUNTIME_VERSION &&
-    model.modelProvider === QUALIFIED_OPENCODE_DESIGN_PROVIDER &&
-    model.model === QUALIFIED_OPENCODE_DESIGN_MODEL;
+function withOpenCodeDesignSupport(model: AgentModel): AgentModel {
+  const acceptsImages = model.inputModalities.some(
+    (modality) => modality.toLowerCase() === 'image'
+  );
   return {
     ...model,
-    designSupport: designQualified
+    designSupport: acceptsImages
       ? {
           maturity: 'stable',
-          detail: `OpenCode ${QUALIFIED_OPENCODE_DESIGN_RUNTIME_VERSION} with ${QUALIFIED_OPENCODE_DESIGN_PROVIDER}/${QUALIFIED_OPENCODE_DESIGN_MODEL} passed the packaged Design instruction, skill, MCP image-result, browser, candidate, and cleanup qualification.`
+          detail: 'The connected OpenCode model catalog reports image input support required by Design Mode.'
         }
       : {
           maturity: 'unsupported',
-          detail: `OpenCode ${runtimeVersion} model ${model.modelProvider ?? 'unknown'}/${model.model} has not passed the required packaged Design technical qualification.`
+          detail: `The connected OpenCode model catalog reports no image input support for ${model.modelProvider ?? 'unknown'}/${model.model}. Design Mode requires image input.`
         }
   };
 }

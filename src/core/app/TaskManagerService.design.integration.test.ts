@@ -280,6 +280,46 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(scenario.service.listDesigns()).resolves.toEqual([]);
   });
 
+  it('uses a qualified model Design reasoning default', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-reasoning-default',
+      previewEnabled: true,
+      designMode: true
+    });
+    vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
+      {
+        id: 'codex:openai/design-low-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
+        model: 'design-low-model',
+        displayName: 'Design low model',
+        hidden: false,
+        supportedReasoningEfforts: ['low', 'high'],
+        defaultReasoningEffort: 'high',
+        serviceTiers: [],
+        inputModalities: ['text', 'image'],
+        designSupport: {
+          maturity: 'stable',
+          defaultReasoningEffort: 'low'
+        },
+        isDefault: true
+      }
+    ]);
+
+    const detail = await scenario.service.createBlankDesign({
+      brief: 'Create a compact status page.',
+      creationToken: 'design-reasoning-default',
+      runtimeId: 'codex',
+      model: 'design-low-model'
+    });
+
+    const stored = (await scenario.store.snapshot()).tasks.find(
+      (task) => task.id === detail.design.id
+    );
+    expect(stored?.agentSettings.reasoningEffort).toBe('low');
+    expect(scenario.agent.startedTurns[0]?.settings?.reasoningEffort).toBe('low');
+  });
+
   it('lets the Design acceptance harness run an unqualified exact model across turn rechecks', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-model-candidate-qualification',

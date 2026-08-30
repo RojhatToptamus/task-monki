@@ -1,4 +1,5 @@
 import type {
+  AgentDesignCapability,
   AgentModel,
   AgentRuntimeCapabilities,
   AgentRuntimeDescriptor,
@@ -100,6 +101,8 @@ export interface AcpImageInputQualification {
 export interface AcpDesignQualification {
   runtimeVersion: string;
   modelId: string;
+  /** Optional Design-only default proven by the exact packaged qualification. */
+  defaultReasoningEffort?: string;
 }
 
 export interface AcpImageInputSupport {
@@ -197,7 +200,7 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   // its documented global allow/deny rules and the unconfined agent process.
   approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
   readOnlyTurnUnavailableReason:
-    'Grok plan mode blocks edit tools, but it can still run mutating shell, MCP, or subagent work. This does not deny repository mutation.',
+    'Grok plan mode and custom agent profiles can still expose mutating configured MCP tools. This does not deny repository mutation.',
   allowRememberedPermissions: true,
   attachmentTextTransport: 'embedded-resource',
   imageInputQualifications: [
@@ -208,7 +211,13 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
       mediaTypes: ['image/png']
     }
   ],
-  designQualifications: [],
+  designQualifications: [
+    {
+      runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+      modelId: 'grok-4.6',
+      defaultReasoningEffort: 'low'
+    }
+  ],
   environmentPolicy: {
     contractId: 'task-monki/grok-acp-environment@v1',
     allowedKeys: [
@@ -595,7 +604,7 @@ export function acpDesignSupport(input: {
   profile: AcpRuntimeProfile;
   runtimeVersion?: string;
   modelId: string;
-}): import('../../../shared/agent').AgentCapability {
+}): AgentDesignCapability {
   const qualification = input.runtimeVersion
     ? input.profile.designQualifications?.find(
         (candidate) =>
@@ -606,7 +615,10 @@ export function acpDesignSupport(input: {
   return qualification
     ? {
         maturity: 'stable',
-        detail: `${input.profile.descriptor.displayName} ${qualification.runtimeVersion} with ${qualification.modelId} passed the packaged Design instruction, skill, MCP image-result, browser, candidate, and cleanup qualification.`
+        detail: `${input.profile.descriptor.displayName} ${qualification.runtimeVersion} with ${qualification.modelId} passed the packaged Design instruction, skill, MCP image-result, browser, candidate, and cleanup qualification.`,
+        ...(qualification.defaultReasoningEffort
+          ? { defaultReasoningEffort: qualification.defaultReasoningEffort }
+          : {})
       }
     : {
         maturity: 'unsupported',

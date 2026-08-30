@@ -24,9 +24,11 @@ Provider milestone 3 added provider-neutral selection and evidence.
 Each adapter still owns its native attachment transport.
 Provider milestone 4 made Design provider-neutral.
 It added one app-owned `inspect_design` contract and one packaged MCP bridge for OpenCode and ACP.
-Exact runtime, model provider where applicable, and model qualification controls which providers can run Design.
-This qualification is a technical product gate.
-It is not a score for one generated design.
+Codex and ACP use exact runtime and model qualification for Design.
+OpenCode uses its qualified shared Design transport and live model catalog.
+An OpenCode model must report image input.
+These rules are technical product gates.
+They are not scores for one generated design.
 
 Provider adapters translate these items:
 
@@ -215,7 +217,8 @@ The provider process can still use its model transport and normal user permissio
 `DiscourseRuntimeHost` also requires the common runtime operations.
 Codex, OpenCode, Cursor ACP, and Claude Agent ACP 0.70.0 meet these requirements.
 The Claude read-only policy was qualified with Sonnet.
-Grok ACP remains available for normal Tasks only.
+Grok ACP read-only workflows remain disabled.
+Normal Tasks and the exact qualified Grok Design pair remain available.
 
 ### Current normal Task path
 
@@ -250,7 +253,9 @@ They do not own a second provider lifecycle.
 Its source, Git, Preview, browser, candidate, and Ready work is provider-neutral.
 
 Design creation stores the selected runtime, model provider where applicable, and exact model.
-The shared support projection enables Design only when that exact runtime version, model provider where applicable, and model passed technical qualification.
+The shared support projection uses the rule owned by each adapter.
+Codex and ACP require an exact qualified runtime and model.
+OpenCode requires its qualified shared transport and a connected model that reports image input.
 Each adapter applies the app-owned instructions and skills through its native protocol.
 
 Codex maps `inspect_design` to its native dynamic-tool call.
@@ -291,7 +296,7 @@ This table describes current code, not provider protocol potential.
 | Prompt refinement | Yes | Yes | No | Yes | Yes; profile-wide |
 | Review provider | Yes | Yes | No | Yes | Yes; profile-wide |
 | Discourse participant | Yes | Yes | No | Yes | Yes; profile-wide |
-| Design | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | OpenCode 1.18.25 with `openai/gpt-5.6-luna` | No current qualified pair | Composer 2.5 on Cursor 2026.08.25-3e8eec8 | Claude Agent ACP 0.70.0 with Sonnet |
+| Design | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Every connected catalog model that reports image input | Grok Build 1.0.13 with Grok 4.6 at low reasoning | Composer 2.5 on Cursor 2026.08.25-3e8eec8 | Claude Agent ACP 0.70.0 with Sonnet |
 | Provider resume | Yes | Yes | Negotiated | Negotiated | Yes for Claude Agent ACP 0.70.0 |
 | Native provider fork | Yes | Yes | No | No | No |
 | User-facing fork alternative | Yes | Yes | Yes | Yes | Yes |
@@ -308,13 +313,11 @@ The Design row requires technical product qualification, not only a working tool
 
 | Current failure | Root cause | Classification |
 | --- | --- | --- |
-| An unlisted Design runtime, provider, and model combination | The exact combination has not passed technical Design qualification. | Product qualification |
+| An unlisted Codex or ACP Design runtime, provider, and model combination | The exact combination has not passed technical Design qualification. | Product qualification |
 | Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna Design | The old pair has no current technical qualification. Its generated backdrop defect was not a transport failure. | Unsupported exact pair |
-| OpenCode 1.18.25 with MiMo V2.5 Design | Two runs proved the transport but did not use the required Design skills and browser flow reliably. | Exact model behavior |
-| Grok Build 1.0.13 with Grok 4.6 Design | Three active runs, including an explicit high-reasoning run, did not produce durable Ready within 900 seconds. | Bounded completion failure |
 | OpenCode image attachment with a text-only model | The adapter rejects it before submission. | Model input limit |
 | ACP image attachment without an exact qualification entry | The adapter rejects it before submission. | Profile and model limit |
-| Grok ACP read-only workflows | Plan mode still permits mutation through shell, MCP, or subagent work. | Provider policy limit |
+| Grok ACP read-only workflows | Plan mode and custom agent profiles can still expose mutating configured MCP tools. | Provider policy limit |
 | Claude ACP default, Haiku, or Opus image and Design use | Only exact model `sonnet` passed image and Design qualification. Opus was not tested. | Unqualified exact model |
 
 ## Codex-specific dependency classification
@@ -376,7 +379,7 @@ Every enabled cell still requires a compatible packaged runtime and selected mod
 | Prompt refinement | Shared short turn | Shared short turn | Disabled by read-only policy | Shared short turn | Shared short turn; profile-wide |
 | Review | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile-wide |
 | Discourse | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile-wide |
-| Design | Native tool transport; exact Codex 0.151.0-alpha.7.2 and GPT-5.6-Luna | Packaged MCP bridge; exact OpenCode 1.18.25 and `openai/gpt-5.6-luna` | Packaged MCP bridge; no current qualified pair | Packaged MCP bridge; exact Cursor and Composer pair | Packaged MCP bridge; exact Claude Agent ACP 0.70.0 and Sonnet |
+| Design | Native tool transport; exact Codex 0.151.0-alpha.7.2 and GPT-5.6-Luna | Packaged MCP bridge; connected catalog models that report image input | Packaged MCP bridge; exact Grok Build 1.0.13 and Grok 4.6 pair | Packaged MCP bridge; exact Cursor and Composer pair | Packaged MCP bridge; exact Claude Agent ACP 0.70.0 and Sonnet |
 | Resume | Native | Native | Negotiated or new session | Negotiated or new session | Negotiated or new session |
 | Fork product state | New Task session | New Task session | New Task session | New Task session | New Task session |
 | Provider cleanup | Best effort | Best effort | Best effort | Best effort | Best effort |
@@ -392,7 +395,9 @@ Design support has separate technical qualification.
 It uses the milestone 3 effective image capability as its image prerequisite.
 This capability includes negotiated support and narrow tested provider-local exceptions.
 A normal attachment image pass does not prove that `inspect_design` image results work.
-Each provider profile, packaged version, and model must pass a real Design test before the UI enables it.
+Codex and ACP require an exact packaged version and model test before the UI enables Design.
+OpenCode qualifies the shared Design transport and uses its connected model catalog for image support.
+OpenCode does not use model price or free status as a capability signal.
 The test must prove skills, native tools, image-result use, candidate identity, Ready, Stop, and cleanup.
 Representative form, menu, responsive, motion, copy, and no-change tasks remain regression evidence.
 One generated defect or visual miss does not disable working infrastructure.
@@ -567,8 +572,9 @@ Other Grok versions and models remain text-only.
 Milestone 4 reuses this effective image capability.
 It adds no second image compatibility table or override registry.
 Design qualification remains separate because `inspect_design` returns images through tool-result transport.
-The Design gate proves technical behavior for an exact runtime, model provider where applicable, and model combination.
-It does not grade one generated design.
+Codex and ACP prove this behavior for an exact runtime and model.
+OpenCode proved the shared transport and uses its live model image capability.
+The Design gate does not grade one generated design.
 
 Core does the final live verification before turn submission.
 For read-only work, core also compares repository state before it accepts completion.
@@ -990,7 +996,10 @@ The packaged OpenCode 1.18.25 tests established these rules:
 - Direct provider `xai` was not connected.
   The static `github-copilot/grok-4.6` and `xai/grok-4.6` entries therefore did not qualify as usable OpenCode routes.
 - `OpenCode 1.18.25` with `openai/gpt-5.6-luna` passed the complete packaged Design gate at medium reasoning.
-  Other providers and models remain Design-unqualified.
+- Task Monki enables Design for each connected OpenCode model whose live catalog reports image input.
+  It rechecks the worktree catalog before prompt delivery.
+  A text-only model stays disabled with a clear reason.
+  Model price and free status do not affect this decision.
 
 Task Monki revokes the active Design grant before it waits for an uncertain OpenCode shutdown.
 
@@ -1023,6 +1032,8 @@ Task Monki still revokes the short-lived Design credential when the turn ends.
 
 The packaged Grok 1.0.13 profile accepted the same stdio descriptor.
 Its session-close operation stopped the MCP child.
+Grok Design uses low reasoning by default for the exact qualified pair.
+Normal Grok Tasks keep the provider model default.
 
 Claude Agent ACP 0.70.0 advertises session resume and close.
 It receives the same Design MCP descriptor on new and resumed sessions.
@@ -1262,7 +1273,8 @@ Current profile results:
 - Codex uses an attested read-only permission profile with network and external tools disabled.
 - OpenCode uses a dedicated `--pure` session and native deny rules.
 - Cursor ACP uses native Ask mode and rejects every permission request during the turn.
-- Grok ACP stays disabled because plan mode can still mutate through shell, MCP, or subagents.
+- Grok ACP stays disabled because plan mode and custom profiles can still expose
+  mutating configured MCP tools.
 - Claude Agent ACP 0.70.0 uses native plan mode.
   The packaged mutation test selected Sonnet.
   Task Monki rejected permission requests, and the repository remained unchanged after the mutation attempt.
@@ -1435,8 +1447,10 @@ Status: implemented on 2026-08-30.
 4. Codex keeps its native tool path.
 5. One packaged stdio MCP bridge serves OpenCode and ACP Design sessions.
 6. Design support reuses the milestone 3 effective image capability.
-7. The model projection stores separate exact Design qualification.
-8. Core rechecks that qualification before every source-changing Design turn.
+7. Codex and ACP model projections store exact Design qualification.
+   OpenCode projects Design support from the connected model catalog.
+8. Core rechecks Design support before every source-changing Design turn.
+   OpenCode also rechecks its worktree catalog before prompt delivery.
 9. The renderer shows the exact unsupported reason for every other combination.
 
 The current packaged results are:
@@ -1444,11 +1458,11 @@ The current packaged results are:
 | Exact provider pair | Technical result | Regression and quality evidence | Product status |
 | --- | --- | --- | --- |
 | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Passed instructions, skills, native tools, image results, fresh candidates, Ready, Stop, and cleanup. | Passed form, menu and keyboard, responsive, motion, correction, copy-only, no-change, and cancellation tests. One earlier run misread `TM-7Q4` as `K7M4`; a repeat read it correctly. | Enabled. The visual miss was model-output variation, not a bridge failure. |
-| OpenCode 1.18.25 with `openai/gpt-5.6-luna` | Passed instructions, eight app-owned skills, MCP image results, exact and fresh candidates, Ready, Stop, and cleanup. | An earlier focused menu run passed. The complete run passed form, menu and keyboard, responsive, motion and reduced motion, correction, `TM-7Q4`, copy-only, no-change, cancellation, and Ready preservation. | Enabled for this exact runtime, provider, and model. |
+| OpenCode 1.18.25 with `openai/gpt-5.6-luna` | Passed instructions, eight app-owned skills, MCP image results, exact and fresh candidates, Ready, Stop, and cleanup. | An earlier focused menu run passed. The complete run passed form, menu and keyboard, responsive, motion and reduced motion, correction, `TM-7Q4`, copy-only, no-change, cancellation, and Ready preservation. | This qualifies the shared OpenCode Design path. Connected catalog models are enabled when they report image input. |
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Passed the complete technical gate. | Passed all nine regression scenarios. A later menu regression passed after Task Monki omitted the unadvertised additional-directories field. It read eight app-owned skills and used MCP and browser tools. | Enabled. |
 | Claude Agent ACP 0.70.0 with Sonnet | Passed the complete technical gate. | Passed form, menu and keyboard, responsive, motion, fresh correction, `TM-7Q4`, copy-only, no-change, cancellation, and cleanup across focused runs. | Enabled for exact model `sonnet`. |
-| OpenCode 1.18.25 with `opencode/mimo-v2.5-free` | HTTP, MCP, Preview, candidate, screenshots, and Ready worked. | Two runs failed reliable skill and browser use. The first read no Design skill. The second omitted browser verification and used invalid bare element references. | This exact pair remains disabled for Design. |
-| Grok Build 1.0.13 with Grok 4.6 | Skills, MCP, screenshots, candidates, correction, and cleanup worked. Provider events continued without an adapter stall. | Three runs stayed active for 900 seconds and did not settle durable Ready. The explicit high-reasoning run spent 833 seconds in 41 provider model calls. | Disabled for Design because it repeatedly exceeded the product time bound. |
+| OpenCode 1.18.25 with `opencode/mimo-v2.5-free` | HTTP, MCP, Preview, candidate, screenshots, and Ready worked. | Two runs did not use the required skills and browser flow reliably. | This is model-quality evidence. It does not override the live catalog capability. |
+| Grok Build 1.0.13 with Grok 4.6 | Passed skills, MCP image results, exact and fresh candidates, Ready, Stop, and cleanup at low reasoning. | Passed form states, menu and keyboard behavior, wide and narrow layouts, motion frames, correction, `TM-7Q4`, copy-only, no-change, cancellation, and Ready preservation. The focused menu took 213 seconds. The motion and recovery chain took 511 seconds. Earlier high-reasoning runs did not settle within 900 seconds. | Enabled at low reasoning. Read-only workflows remain disabled because configured MCP tools can still expose mutation. |
 | Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna | Native tool transport worked. | A generated menu kept a pointer-blocking backdrop. | Unsupported. The source defect was model behavior, not a transport failure. |
 
 A transport probe alone never enables Design.
@@ -1519,9 +1533,9 @@ The final real-provider results are:
 | Exact provider pair | Current result | Disabled behavior and reason |
 | --- | --- | --- |
 | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Normal Task, read-only mutation denial, text, PNG, and Design qualification passed. | Other Codex runtime and model pairs stay Design-unqualified. |
-| OpenCode 1.18.25 with `openai/gpt-5.6-luna` | The complete packaged Design qualification passed at medium reasoning. | Other OpenCode provider and model pairs stay Design-unqualified. |
-| OpenCode 1.18.25 with MiMo V2.5 | Normal Task, read-only mutation denial, text, and image checks passed. Design transport also worked. | This exact pair stays Design-disabled because two runs did not use the required skills and browser flow reliably. |
-| Grok Build 1.0.13 with Grok 4.6 | Normal Task, text, and PNG checks passed. The report records its false image capability advertisement. Design transport and cleanup worked. | Read-only turns stay disabled because plan mode can mutate through shell, MCP, or subagents. Design stays disabled because three runs did not settle within 900 seconds. |
+| OpenCode 1.18.25 with `openai/gpt-5.6-luna` | The complete packaged Design qualification passed at medium reasoning. | The live connected catalog now decides model image support. |
+| OpenCode 1.18.25 with MiMo V2.5 | Normal Task, read-only mutation denial, text, image, and Design transport checks passed. | Its earlier weak Design behavior remains quality evidence, not an availability override. |
+| Grok Build 1.0.13 with Grok 4.6 | Normal Task, text, PNG, and Design checks passed. The report records its false image capability advertisement. Design defaults to low reasoning. | Read-only turns stay disabled because plan mode and custom profiles can expose mutating configured MCP tools. Other Grok versions and models stay Design-unqualified. |
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Normal Task, read-only mutation denial, text, PNG, and all nine Design regression scenarios passed. | No enabled workflow failed qualification. |
 | Claude Agent ACP 0.70.0 with Sonnet | Normal Task, read-only mutation denial, text, PNG, Design qualification, and cleanup passed. | Default and Haiku stay image- and Design-unqualified. Opus was not tested. |
 
@@ -1551,7 +1565,8 @@ For every eligible provider and implemented milestone, test:
 - prompt refinement with exact output.
 - a read-only review and mutation detection.
 - a Discourse turn with bounded context.
-- Design creation and refinement for each qualified exact pair.
+- Design creation and refinement for each qualified Codex or ACP pair.
+- Design creation and refinement for the qualified OpenCode transport with a connected image-capable model.
 - cancellation and restart.
 - deletion and cleanup.
 
@@ -1594,7 +1609,8 @@ For every eligible provider and implemented milestone, test:
 - provider restart during a tool call.
 - last Ready preservation on every failure.
 - native text and image result delivery for each enabled transport.
-- exact provider profile, packaged version, and model qualification.
+- exact provider profile and model qualification for Codex and ACP.
+- qualified OpenCode transport with a connected image-capable catalog model.
 - one unique visual fact that proves that the model consumed the image result.
 - one unqualified combination with a clear unsupported reason.
 
@@ -1607,7 +1623,8 @@ At minimum, verify one normal Task for every installed provider. Verify one
 read-only workflow for every installed profile that advertises read-only
 support, and record an explicit unsupported result for the other profiles.
 Verify one attachment turn for every enabled content path.
-Verify the technical Design browser loop for each candidate provider profile, packaged version, and model.
+Verify the technical Design browser loop for each candidate Codex or ACP profile, packaged version, and model.
+For OpenCode, verify each changed packaged transport with a connected image-capable model.
 The loop must include a real `inspect_design` image result.
 The provider must deliver the native image result, and the model must consume it.
 Inspect the native tool-result transport as delivery evidence.
@@ -1693,7 +1710,8 @@ Disable only the failed content kind, model, or encoded-size range with a clear 
 
 ### Later milestone uncertainties
 
-1. Repeat technical Design qualification before enabling any new or changed runtime, model provider, and model combination.
+1. Repeat technical Design qualification before enabling a new or changed Codex or ACP runtime and model.
+   Requalify OpenCode when its shared Design transport changes.
 2. Qualify Claude default, Haiku, or Opus only when a product need selects that exact model.
 3. Qualify Grok read-only support only after its packaged profile denies every repository mutation path.
 4. Record the exact provider-session deletion meaning for each adapter.
@@ -1831,11 +1849,13 @@ Keep the single runtime coordinator and runtime store from provider milestones 1
 Provider milestone 3 now uses the same byte owner and runtime lifecycle.
 Provider milestone 4 now uses the same Design workflow, Preview, browser, and source owners.
 Provider milestone 5 keeps these owners and closes the verified cleanup gaps.
-Keep Design qualification as one exact technical gate in the shared support projection.
+Keep one Design support result in the shared projection.
+Codex and ACP use exact qualification.
+OpenCode combines its qualified transport with the live catalog image capability.
 Do not create a second quality score or qualification system.
 Use representative generated designs as regression evidence, not as the sole support gate.
 Treat milestones 1 through 5 as the current provider baseline.
-Require exact real-provider qualification before enabling a new provider, version, model, or workflow.
+Require real-provider qualification before enabling a new provider or workflow.
 
 This is the smallest clean path to broad provider support.
 It keeps lifecycle code in one place.

@@ -1973,6 +1973,13 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       defaultModelProvider: 'xai',
       defaultModel: 'grok-build',
       sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
+      designQualifications: [
+        {
+          runtimeVersion: process.version,
+          modelId: 'grok-4.5',
+          defaultReasoningEffort: 'low'
+        }
+      ],
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
@@ -2005,6 +2012,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           description: 'Frontier [REDACTED]',
           supportedReasoningEfforts: ['high', 'medium', 'low'],
           defaultReasoningEffort: 'high',
+          designSupport: {
+            maturity: 'stable',
+            defaultReasoningEffort: 'low',
+            detail: expect.stringContaining('passed the packaged Design')
+          },
           isDefault: true,
           native: expect.objectContaining({
             advertisedReasoningEfforts: ['high', 'medium', 'low'],

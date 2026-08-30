@@ -654,23 +654,9 @@ async function cancelAndVerifyLastReady(
   let admittedWait = false;
   while (!admittedWait) {
     const items = await store.getAgentItemsForRun(turn.runId);
-    admittedWait = items.some((item) => {
-      if (
-        !['DYNAMIC_TOOL_CALL', 'MCP_TOOL_CALL'].includes(item.type) ||
-        !['STARTED', 'IN_PROGRESS'].includes(item.status) ||
-        !isInspectDesignToolCall(baseline.task.runtimeId, item)
-      ) {
-        return false;
-      }
-      const argumentsValue = inspectDesignArguments(
-        item.payload as Record<string, unknown>
-      );
-      return (
-        argumentsValue?.operation === 'act' &&
-        argumentsValue.action === 'wait' &&
-        argumentsValue.milliseconds === 2_000
-      );
-    });
+    admittedWait = items.some((item) =>
+      isInFlightInspectDesignWait(baseline.task.runtimeId, item)
+    );
     if (admittedWait) break;
     const current = await service.getDesign(designId);
     const currentTurn = current.turns.find((candidate) => candidate.id === turn.id);
@@ -979,6 +965,35 @@ export function observedBrowserOperations(
     const action = argumentsValue.action;
     return [typeof action === 'string' ? `act:${action}` : 'act'];
   });
+}
+
+export function isInFlightInspectDesignWait(
+  runtimeId: string,
+  item: AgentItemRecord
+): boolean {
+  // Some ACP agents omit the status on the initial tool-call event. A later
+  // result adds rawOutput, so an UNKNOWN item is in flight only without output.
+  if (
+    !['DYNAMIC_TOOL_CALL', 'MCP_TOOL_CALL'].includes(item.type) ||
+    !['STARTED', 'IN_PROGRESS', 'UNKNOWN'].includes(item.status) ||
+    !isInspectDesignToolCall(runtimeId, item)
+  ) {
+    return false;
+  }
+  const payload = item.payload as Record<string, unknown>;
+  if (
+    'rawOutput' in payload ||
+    payload.status === 'completed' ||
+    payload.status === 'failed'
+  ) {
+    return false;
+  }
+  const argumentsValue = inspectDesignArguments(payload);
+  return (
+    argumentsValue?.operation === 'act' &&
+    argumentsValue.action === 'wait' &&
+    argumentsValue.milliseconds === 2_000
+  );
 }
 
 function isInspectDesignToolCall(

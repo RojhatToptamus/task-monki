@@ -4491,7 +4491,21 @@ async function prepareDesignCreationExecution(
   );
   const runtimeSupport = projectAgentExecutionSupport(capabilities, 'DESIGN');
   if (!runtimeSupport.supported) throw new Error(runtimeSupport.reason);
-  const resolved = await adapter.resolveExecution({ settings, attachments });
+  let resolved = await adapter.resolveExecution({ settings, attachments });
+  const designDefaultReasoningEffort =
+    resolved.model.designSupport?.defaultReasoningEffort;
+  if (
+    requestedSettings.reasoningEffort === undefined &&
+    designDefaultReasoningEffort
+  ) {
+    resolved = await adapter.resolveExecution({
+      settings: {
+        ...settings,
+        reasoningEffort: designDefaultReasoningEffort
+      },
+      attachments
+    });
+  }
   assertResolvedExecutionRuntime(adapter, resolved);
   const requestedModel = requestedSettings.model?.trim();
   if (requestedModel && resolved.model.model !== requestedModel) {
