@@ -263,6 +263,7 @@ export class TaskManagerService {
   private readonly previewEnabled: boolean;
   private readonly previewReconcile: boolean;
   private readonly browserDevAgentBoundary: boolean;
+  private readonly allowCandidateDesignModels: boolean;
   private readonly runtimeExecutableOverrides: Readonly<Record<string, string | undefined>>;
   private readonly runtimeOperations = new RuntimeOperationGate();
   private readonly postRunEvidenceTasks = new Map<string, Promise<void>>();
@@ -328,10 +329,13 @@ export class TaskManagerService {
       designToolMcpExecutablePath?: string;
       designToolMcpServerPath?: string;
       designToolCredentialRoot?: string;
+      /** Development qualification only; tests an unqualified model and its image-result path. */
+      allowCandidateDesignModels?: boolean;
     } = {}
   ) {
     agentCwd = options.agentCwd ?? (agentCwd || process.cwd());
     this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
+    this.allowCandidateDesignModels = options.allowCandidateDesignModels === true;
     this.agentProviderStartupDisabledReason =
       options.agentProviderStartupDisabledReason;
     this.runtimeExecutableOverrides = builtInRuntimeExecutableOverrides(
@@ -447,7 +451,8 @@ export class TaskManagerService {
       this.runtimeRegistry,
       {
         allowNetworkAccess: options.allowAgentNetworkAccess,
-        providerStartupDisabledReason: options.agentProviderStartupDisabledReason
+        providerStartupDisabledReason: options.agentProviderStartupDisabledReason,
+        allowCandidateDesignModels: this.allowCandidateDesignModels
       }
     );
     this.promptRefiner = new PromptRefinementService((request) =>
@@ -1633,7 +1638,8 @@ export class TaskManagerService {
           modelProvider: input.modelProvider,
           reasoningEffort: input.reasoningEffort
         },
-        attachments
+        attachments,
+        this.allowCandidateDesignModels
       );
       const repositoryInput = await source.prepareBlankRepository({
         creationToken: input.creationToken
@@ -4239,7 +4245,12 @@ export class TaskManagerService {
     const adapter = this.runtimeRegistry.require(task.runtimeId);
     this.assertRuntimeEnabled(task.runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
-    await prepareDesignCreationExecution(adapter, task.agentSettings, attachments);
+    await prepareDesignCreationExecution(
+      adapter,
+      task.agentSettings,
+      attachments,
+      this.allowCandidateDesignModels
+    );
   }
 
   private emitDesignUpdate(designId: string, payload: unknown): void {
@@ -4469,7 +4480,8 @@ async function prepareDesignCreationExecution(
   attachments: readonly Pick<
     AgentAttachmentSelection,
     'kind' | 'mediaType' | 'byteCount' | 'sha256'
-  >[]
+  >[],
+  allowCandidateDesignModel = false
 ) {
   const { capabilities, settings } = await prepareAgentExecutionSettings(
     adapter,
@@ -4497,7 +4509,8 @@ async function prepareDesignCreationExecution(
     );
   }
   const modelSupport = projectAgentExecutionSupport(capabilities, 'DESIGN', {
-    model: resolved.model
+    model: resolved.model,
+    allowCandidateDesignModel
   });
   if (!modelSupport.supported) throw new Error(modelSupport.reason);
   return resolved;

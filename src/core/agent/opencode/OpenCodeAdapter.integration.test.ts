@@ -302,7 +302,7 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
-  it('keeps OpenCode Design unavailable without a complete packaged qualification', async () => {
+  it('keeps OpenCode Design unavailable without a packaged technical qualification', async () => {
     const runtime = {
       ...fakeRuntime(),
       version: '1.18.25',

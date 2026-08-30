@@ -197,6 +197,8 @@ const MAX_STARTUP_EVENT_BYTES = 4 * 1024 * 1024;
 const ACP_DESIGN_MCP_SERVER_NAME = 'task-monki-design-tools';
 const CURSOR_DESIGN_TOOL_TITLE = `${ACP_DESIGN_MCP_SERVER_NAME}: ${INSPECT_DESIGN_TOOL_NAME}`;
 const GROK_DESIGN_TOOL_NAME = `${ACP_DESIGN_MCP_SERVER_NAME}__${INSPECT_DESIGN_TOOL_NAME}`;
+const CLAUDE_DESIGN_TOOL_TITLE =
+  `mcp__${ACP_DESIGN_MCP_SERVER_NAME}__${INSPECT_DESIGN_TOOL_NAME}`;
 
 interface BufferedAcpTextSegment {
   text: string;
@@ -453,6 +455,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   async listModels(): Promise<AgentModel[]> {
     if (!this.initialized) await this.initialize();
     await this.ensureResolvedRuntime();
+    this.refreshModels();
     const modelExtension = this.profile.sessionModelExtension;
     if (modelExtension?.initializeResponseMetaField && !this.profileModelState) {
       await this.ensureClient();
@@ -508,7 +511,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   async discoverModels(): Promise<void> {
     const contract = this.profile.parameterizedModelCatalog;
-    if (!contract || this.parameterizedModelCatalog) return;
+    if (!contract) {
+      if (!this.initialized) await this.initialize();
+      await this.ensureClient();
+      return;
+    }
+    if (this.parameterizedModelCatalog) return;
     if (!this.parameterizedModelDiscovery) {
       this.parameterizedModelDiscovery = this.discoverParameterizedModels(contract)
         .finally(() => {
@@ -613,7 +621,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       Boolean(
         (this.profile.sessionModelExtension?.initializeResponseMetaField &&
           this.profileModelState) ||
-          (this.profile.parameterizedModelCatalog && this.parameterizedModelCatalog)
+          (this.profile.parameterizedModelCatalog && this.parameterizedModelCatalog) ||
+          this.profileQualifiedModels().length > 0
       );
     const authenticationAdvertised = initialize.authMethods.length > 0;
     this.preflightState = {
@@ -1040,6 +1049,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference;
   }> {
     const client = await this.ensureClient();
+    const additionalDirectories = this.designAdditionalDirectories(design);
     const mcpServers = design
       ? [await this.prepareDesignMcpServer(design)]
       : [];
@@ -1048,7 +1058,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       response = await this.requestBoundedMutation(
         client,
         'session/new',
-        { cwd, mcpServers },
+        {
+          cwd,
+          mcpServers,
+          ...(additionalDirectories ? { additionalDirectories } : {})
+        },
         'The provider may have created a session, but its identity was not confirmed.'
       );
     } catch (cause) {
@@ -1271,6 +1285,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         `${this.descriptor.displayName} advertised neither ACP session/resume nor session/load.`
       );
     }
+    const additionalDirectories = this.designAdditionalDirectories(design);
     const mcpServers = design
       ? [await this.prepareDesignMcpServer(design)]
       : [];
@@ -1280,7 +1295,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       response = await this.requestBoundedMutation(
         client,
         method,
-        { sessionId: providerSessionId, cwd, mcpServers },
+        {
+          sessionId: providerSessionId,
+          cwd,
+          mcpServers,
+          ...(additionalDirectories ? { additionalDirectories } : {})
+        },
         `The outcome of loading provider session ${providerSessionId} could not be confirmed.`
       );
     } catch (cause) {
@@ -4716,7 +4736,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       sessionId: run.sessionId,
       providerItemId: update.toolCallId,
       type:
-        run.mode === 'DESIGN' && isTaskMonkiInspectDesignToolCall(toolCall)
+        run.mode === 'DESIGN' &&
+        isTaskMonkiInspectDesignToolCall(this.descriptor.id, toolCall)
           ? 'MCP_TOOL_CALL'
           : mapAcpToolKind(toolCall.kind),
       status: mapAcpToolStatus(toolCall.status),
@@ -5943,6 +5964,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         }
       : undefined;
     const capabilities = acpCapabilities(this.profile, negotiated);
+    const designSkillAccessFailure = this.designSkillAccessFailure();
     return {
       ...capabilities,
       extensions: {
@@ -5958,16 +5980,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
                 this.designSkillFailure ??
                 'The app-owned Design skill pack has not been validated yet.'
             },
-        'task-monki.design-skill-access': this.designSkillPack
+        'task-monki.design-skill-access': !designSkillAccessFailure
           ? {
               maturity: 'stable' as const,
-              detail: 'The validated app-owned skill catalog gives exact skill files to the Design agent.'
+              detail:
+                'The validated app-owned skill catalog gives exact skill files to the Design agent. ACP additional directories are used only when negotiated.'
             }
           : {
               maturity: 'unsupported' as const,
-              detail:
-                this.designSkillFailure ??
-                'The app-owned Design skill pack has not been validated yet.'
+              detail: designSkillAccessFailure
             },
         'task-monki.design-browser-verification': this.options.designClientToolBridge
           ? {
@@ -6000,6 +6021,54 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       this.designSkillPack = undefined;
       this.designSkillFailure = errorMessage(cause);
     }
+  }
+
+  private designAdditionalDirectories(
+    design: AcpDesignSessionContext | undefined
+  ): string[] | undefined {
+    if (!design) return undefined;
+    const advertised = Boolean(
+      this.initializeResponse?.agentCapabilities.sessionCapabilities
+        ?.additionalDirectories
+    );
+    if (!advertised) {
+      if (this.profile.designSkillAdditionalDirectoryRequired) {
+        throw new Error(
+          `${this.descriptor.displayName} did not advertise the additional-directories capability required by its qualified Design skill path.`
+        );
+      }
+      return undefined;
+    }
+    return [this.requireDesignSkillPack().rootPath];
+  }
+
+  private designSkillAccessFailure(): string | undefined {
+    if (!this.designSkillPack) {
+      return (
+        this.designSkillFailure ??
+        'The app-owned Design skill pack has not been validated yet.'
+      );
+    }
+    if (
+      this.profile.designSkillAdditionalDirectoryRequired &&
+      this.initializeResponse &&
+      !this.initializeResponse.agentCapabilities.sessionCapabilities
+        ?.additionalDirectories
+    ) {
+      return `${this.descriptor.displayName} did not advertise the additional-directories capability required by its qualified Design skill path.`;
+    }
+    return undefined;
+  }
+
+  private requireDesignSkillPack(): DesignSkillPack {
+    if (!this.designSkillPack) {
+      throw new Error(
+        `Task Monki cannot start Design work because its skill pack is unavailable. ${
+          this.designSkillFailure ?? 'The skill pack has not been validated.'
+        }`
+      );
+    }
+    return this.designSkillPack;
   }
 
   private designSessionContextForCreate(
@@ -6099,7 +6168,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       run.mode === 'DESIGN' &&
       run.serverInstanceId === providerGeneration &&
       grant?.providerGeneration === providerGeneration &&
-      isTaskMonkiInspectDesignToolCall(toolCall)
+      isTaskMonkiInspectDesignToolCall(this.descriptor.id, toolCall)
     );
   }
 
@@ -6293,8 +6362,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       return;
     }
     // Stable ACP model selectors remain scoped to the provider session that
-    // advertised them. Only an explicit provider catalog contract may populate
-    // the application model picker before session creation.
+    // advertised them. An exact packaged qualification may expose a known
+    // model before session creation; every session still has to advertise and
+    // accept that model selector before Task Monki sends the prompt.
+    const qualifiedModels = this.profileQualifiedModels();
     this.models = [
       {
         ...defaultAcpModel(
@@ -6306,8 +6377,49 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           runtimeVersion: this.resolvedRuntime?.version,
           modelId: this.profile.defaultModel
         })
-      }
+      },
+      ...qualifiedModels
     ];
+  }
+
+  private profileQualifiedModels(): AgentModel[] {
+    if (this.profile.sessionModelExtension || this.profile.parameterizedModelCatalog) {
+      return [];
+    }
+    const runtimeVersion = this.resolvedRuntime?.version;
+    if (!runtimeVersion) return [];
+    const modelIds = new Set(
+      [
+        ...(this.profile.imageInputQualifications ?? []),
+        ...(this.profile.designQualifications ?? [])
+      ]
+        .filter((qualification) => qualification.runtimeVersion === runtimeVersion)
+        .map((qualification) => qualification.modelId)
+        .filter((modelId) => modelId !== this.profile.defaultModel)
+    );
+    return [...modelIds].sort().map((modelId) => ({
+      id: `${this.descriptor.id}:${this.profile.defaultModelProvider}/${modelId}`,
+      runtimeId: this.descriptor.id,
+      modelProvider: this.profile.defaultModelProvider,
+      model: modelId,
+      displayName: modelId,
+      description:
+        'Exact packaged model qualification; the provider session validates this selection before prompt delivery.',
+      hidden: false,
+      supportedReasoningEfforts: [],
+      serviceTiers: [],
+      inputModalities: this.modelInputModalities(modelId),
+      designSupport: acpDesignSupport({
+        profile: this.profile,
+        runtimeVersion,
+        modelId
+      }),
+      isDefault: false,
+      native: {
+        source: 'profile-qualified-model',
+        runtimeVersion
+      }
+    }));
   }
 
   private modelInputModalities(modelId: string): string[] {
@@ -6453,20 +6565,30 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 }
 
 export function isTaskMonkiInspectDesignToolCall(
-  toolCall: Pick<AcpToolCallUpdate, 'title' | 'rawInput'>
+  runtimeId: string,
+  toolCall: Pick<AcpToolCallUpdate, 'title' | 'rawInput' | '_meta'>
 ): boolean {
   const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : undefined;
   if (!rawInput) return false;
   const title = toolCall.title?.trim();
   const isCursorTool =
+    runtimeId === 'cursor-agent-acp' &&
     rawInput.providerIdentifier === ACP_DESIGN_MCP_SERVER_NAME &&
     rawInput.toolName === INSPECT_DESIGN_TOOL_NAME &&
     isRecord(rawInput.args);
+  const claudeCode = isRecord(toolCall._meta?.claudeCode)
+    ? toolCall._meta.claudeCode
+    : undefined;
   return (
     (title === CURSOR_DESIGN_TOOL_TITLE && isCursorTool) ||
-    (title === GROK_DESIGN_TOOL_NAME &&
+    (runtimeId === 'grok-acp' &&
+      title === GROK_DESIGN_TOOL_NAME &&
       rawInput.tool_name === GROK_DESIGN_TOOL_NAME &&
-      isRecord(rawInput.tool_input))
+      isRecord(rawInput.tool_input)) ||
+    (runtimeId === 'claude-agent-acp' &&
+      title === CLAUDE_DESIGN_TOOL_TITLE &&
+      claudeCode?.toolName === CLAUDE_DESIGN_TOOL_TITLE &&
+      typeof rawInput.operation === 'string')
   );
 }
 

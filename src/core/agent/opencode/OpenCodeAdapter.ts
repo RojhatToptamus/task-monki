@@ -6585,7 +6585,7 @@ function withOpenCodeDesignSupport(
     ...model,
     designSupport: {
       maturity: 'unsupported',
-      detail: `OpenCode ${runtimeVersion} model ${model.modelProvider ?? 'unknown'}/${model.model} has not passed the full packaged Design qualification.`
+      detail: `OpenCode ${runtimeVersion} model ${model.modelProvider ?? 'unknown'}/${model.model} has not passed the required packaged Design technical qualification.`
     }
   };
 }

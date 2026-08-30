@@ -12,6 +12,8 @@ export type AgentExecutionOperation =
 
 export interface AgentExecutionSupportContext {
   model?: Pick<AgentModel, 'inputModalities' | 'designSupport'>;
+  /** Lets the explicit Design qualification harness test an unqualified candidate model and its image-result path. */
+  allowCandidateDesignModel?: boolean;
 }
 
 export type AgentExecutionSupport =
@@ -63,19 +65,21 @@ export function projectAgentExecutionSupport(
           'The configured agent cannot apply Design instructions and skills safely, verify the rendered result, protect Design references, or support Stop.'
         );
       }
-      if (
-        context.model &&
-        !context.model.inputModalities.some(
-          (modality) => modality.toLocaleLowerCase() === 'image'
-        )
-      ) {
-        return unsupported('Design Mode requires a model that supports images.');
-      }
-      if (context.model && context.model.designSupport?.maturity !== 'stable') {
-        return unsupported(
-          context.model?.designSupport?.detail?.trim() ||
-            'This provider version and model have not passed the full Design Mode qualification.'
-        );
+      if (!context.allowCandidateDesignModel) {
+        if (
+          context.model &&
+          !context.model.inputModalities.some(
+            (modality) => modality.toLocaleLowerCase() === 'image'
+          )
+        ) {
+          return unsupported('Design Mode requires a model that supports images.');
+        }
+        if (context.model && context.model.designSupport?.maturity !== 'stable') {
+          return unsupported(
+            context.model?.designSupport?.detail?.trim() ||
+              'This provider version and model have not passed the required Design Mode technical qualification.'
+          );
+        }
       }
       return supported();
     }

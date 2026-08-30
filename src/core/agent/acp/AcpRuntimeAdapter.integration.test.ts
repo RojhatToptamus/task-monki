@@ -12,7 +12,8 @@ import {
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import {
   AgentMutationAmbiguousError,
-  AgentRuntimeDeliveryError
+  AgentRuntimeDeliveryError,
+  type StartAgentTurn
 } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
 import type {
@@ -309,7 +310,7 @@ async function createManagedTextAttachment(input: {
 describe('AcpRuntimeAdapter end-to-end', () => {
   it('trusts only exact Task Monki Design MCP identities', () => {
     expect(
-      isTaskMonkiInspectDesignToolCall({
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
         title: 'task-monki-design-tools: inspect_design',
         rawInput: {
           providerIdentifier: 'task-monki-design-tools',
@@ -319,7 +320,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       })
     ).toBe(true);
     expect(
-      isTaskMonkiInspectDesignToolCall({
+      isTaskMonkiInspectDesignToolCall('grok-acp', {
         title: 'task-monki-design-tools__inspect_design',
         rawInput: {
           tool_name: 'task-monki-design-tools__inspect_design',
@@ -328,7 +329,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       })
     ).toBe(true);
     expect(
-      isTaskMonkiInspectDesignToolCall({
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'mcp__task-monki-design-tools__inspect_design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
+        }
+      })
+    ).toBe(true);
+    expect(
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
         title: 'task-monki-design-tools-inspect_design: inspect_design',
         rawInput: {
           providerIdentifier: 'task-monki-design-tools',
@@ -338,12 +350,51 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       })
     ).toBe(false);
     expect(
-      isTaskMonkiInspectDesignToolCall({
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'Inspect the current Design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'mcp__another-server__inspect_design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'mcp__task-monki-design-tools__inspect_design',
+        rawInput: { command: 'unexpected mutation' }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
         title: 'malicious_inspect_design',
         rawInput: {
           providerIdentifier: 'another-server',
           toolName: 'inspect_design',
           args: { command: 'unexpected mutation' }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
+        title: 'mcp__task-monki-design-tools__inspect_design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
         }
       })
     ).toBe(false);
@@ -931,6 +982,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const sessionCreates = messages.filter((message) => message.method === 'session/new');
       expect(sessionCreates).toHaveLength(1);
       expect(sessionCreates[0]?.params).toMatchObject({ mcpServers: [] });
+      expect(sessionCreates[0]?.params).not.toHaveProperty('additionalDirectories');
       const prompts = messages.filter((message) => message.method === 'session/prompt');
       expect(prompts).toHaveLength(2);
       expect(JSON.stringify(prompts[0])).toContain('normal turn attachment content');
@@ -949,27 +1001,61 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     }
   });
 
-  it.each(['resume', 'load'] as const)(
-    'binds the Design MCP server across session/%s and revokes it before terminal storage reads',
-    async (resumeMethod) => {
+  it.each([
+    {
+      resumeMethod: 'resume' as const,
+      advertiseAdditionalDirectories: true,
+      requireAdditionalDirectories: false
+    },
+    {
+      resumeMethod: 'load' as const,
+      advertiseAdditionalDirectories: true,
+      requireAdditionalDirectories: false
+    },
+    {
+      resumeMethod: 'resume' as const,
+      advertiseAdditionalDirectories: false,
+      requireAdditionalDirectories: false
+    },
+    {
+      resumeMethod: 'resume' as const,
+      advertiseAdditionalDirectories: false,
+      requireAdditionalDirectories: true
+    }
+  ])(
+    'binds Design across session/$resumeMethod with additional directories advertised=$advertiseAdditionalDirectories required=$requireAdditionalDirectories',
+    async ({
+      resumeMethod,
+      advertiseAdditionalDirectories,
+      requireAdditionalDirectories
+    }) => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-acp-design-mcp-')
     );
     temporaryDirectories.push(directory);
     const messageLog = path.join(directory, 'design-messages.jsonl');
     const agentScript = path.join(directory, 'design-agent.cjs');
+    const designSkillRoot = path.resolve('resources/design-skills');
     await fs.writeFile(
       agentScript,
-      attachmentDeliveryAgentSource(messageLog, resumeMethod, true),
+      attachmentDeliveryAgentSource(
+        messageLog,
+        resumeMethod,
+        true,
+        advertiseAdditionalDirectories
+      ),
       {
       mode: 0o600
       }
     );
-    const runtimeId = 'test-acp-design-mcp';
+    const runtimeId = 'cursor-agent-acp';
     const profile: AcpRuntimeProfile = {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
       approvalPolicies: ['on-request', 'never'],
+      designSkillAdditionalDirectoryRequired: requireAdditionalDirectories
+        ? true
+        : undefined,
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
@@ -991,7 +1077,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
-      designSkillRoot: path.resolve('resources/design-skills'),
+      designSkillRoot,
       designClientToolBridge: {
         createSessionGrant,
         activateGrant,
@@ -1063,7 +1149,8 @@ describe('AcpRuntimeAdapter end-to-end', () => {
 
     try {
       await adapter.initialize();
-      await adapter.startTurn({
+      await adapter.discoverModels();
+      const start: StartAgentTurn = {
         localRunId: run.id,
         session: { localSessionId: session.id },
         mode: 'DESIGN',
@@ -1072,7 +1159,25 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         authoritativeGoal: task.prompt,
         settings,
         attachments: []
-      });
+      };
+      if (requireAdditionalDirectories && !advertiseAdditionalDirectories) {
+        expect(
+          (await adapter.capabilities()).extensions[
+            'task-monki.design-skill-access'
+          ]
+        ).toMatchObject({
+          maturity: 'unsupported',
+          detail: expect.stringContaining(
+            'additional-directories capability required'
+          )
+        });
+        await expect(adapter.startTurn(start)).rejects.toThrow(
+          'did not advertise the additional-directories capability required by its qualified Design skill path'
+        );
+        expect(createSessionGrant).not.toHaveBeenCalled();
+        return;
+      }
+      await adapter.startTurn(start);
       const completed = await waitFor(async () => {
         const current = await getTestRun(store, run.id);
         return current?.status === 'COMPLETED' ? current : undefined;
@@ -1109,6 +1214,13 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           ])
         }]
       });
+      if (advertiseAdditionalDirectories) {
+        expect(sessionNew?.params).toMatchObject({
+          additionalDirectories: [designSkillRoot]
+        });
+      } else {
+        expect(sessionNew?.params).not.toHaveProperty('additionalDirectories');
+      }
       expect(createSessionGrant).toHaveBeenCalledWith({
         runtimeId,
         sessionId: session.id,
@@ -1214,13 +1326,19 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         return current?.status === 'COMPLETED' ? current : undefined;
       });
       const resumedMessages = await readProtocolMessagesFromLog(messageLog);
-      expect(
-        resumedMessages.find(
-          (message) => message.method === `session/${resumeMethod}`
-        )?.params
-      ).toMatchObject({
+      const resumedParams = resumedMessages.find(
+        (message) => message.method === `session/${resumeMethod}`
+      )?.params;
+      expect(resumedParams).toMatchObject({
         mcpServers: [expect.objectContaining({ name: 'task-monki-design-tools' })]
       });
+      if (advertiseAdditionalDirectories) {
+        expect(resumedParams).toMatchObject({
+          additionalDirectories: [designSkillRoot]
+        });
+      } else {
+        expect(resumedParams).not.toHaveProperty('additionalDirectories');
+      }
 
       await adapter.releaseSession({ localSessionId: session.id });
       expect(releaseSessionGrant).toHaveBeenCalledTimes(2);
@@ -1489,6 +1607,15 @@ describe('AcpRuntimeAdapter end-to-end', () => {
 
     try {
       await adapter.initialize();
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default', isDefault: true }),
+        expect.objectContaining({
+          model: 'provider-specific-model',
+          modelProvider: 'test-provider',
+          designSupport: expect.objectContaining({ maturity: 'stable' }),
+          native: expect.objectContaining({ source: 'profile-qualified-model' })
+        })
+      ]);
       await expect(
         adapter.resolveExecution({ settings, attachments: [] })
       ).resolves.toMatchObject({
@@ -1500,7 +1627,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           model: 'provider-specific-model',
           modelProvider: 'test-provider',
           designSupport: { maturity: 'stable' },
-          native: { source: 'explicit-runtime-setting' }
+          native: { source: 'profile-qualified-model' }
         }
       });
       expect((await store.snapshot()).agentServers).toEqual([]);
@@ -5470,7 +5597,8 @@ input.on('line', (line) => {
 function attachmentDeliveryAgentSource(
   messageLog: string,
   resumeMethod: 'resume' | 'load' = 'resume',
-  emitInspectDesign = false
+  emitInspectDesign = false,
+  advertiseAdditionalDirectories = false
 ): string {
   return `
 const fs = require('node:fs');
@@ -5487,8 +5615,11 @@ input.on('line', (line) => {
       agentCapabilities: {
         promptCapabilities: {},
         ${resumeMethod === 'resume'
-          ? 'sessionCapabilities: { resume: {} }'
+          ? `sessionCapabilities: { resume: {}${advertiseAdditionalDirectories ? ', additionalDirectories: {}' : ''} }`
           : 'loadSession: true'}
+        ${resumeMethod === 'load' && advertiseAdditionalDirectories
+          ? ', sessionCapabilities: { additionalDirectories: {} }'
+          : ''}
       },
       agentInfo: { name: 'attachment-delivery-agent', version: '1.0.0' }
     }});

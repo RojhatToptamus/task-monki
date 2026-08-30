@@ -82,8 +82,10 @@ export interface AcpRuntimeProfile {
   attachmentDeliveryUnavailableReason?: string;
   /** Exact runtime/model pairs proven to consume native ACP image blocks. */
   imageInputQualifications?: readonly AcpImageInputQualification[];
-  /** Exact runtime/model pairs proven to complete the full Design browser loop. */
+  /** Exact runtime/model pairs proven to support the required Design infrastructure in packaged runs. */
   designQualifications?: readonly AcpDesignQualification[];
+  /** The qualified Design path needs ACP additional-directories access to the app-owned skill root. */
+  designSkillAdditionalDirectoryRequired?: true;
 }
 
 export interface AcpImageInputQualification {
@@ -306,13 +308,28 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   },
   defaultModelProvider: 'anthropic',
   defaultModel: 'default',
-  approvalPolicies: ['on-request'],
-  readOnlyTurnUnavailableReason:
-    'Claude Agent ACP plan mode has not passed the required packaged-runtime mutation test on this Task Monki build.',
-  attachmentDeliveryUnavailableReason:
-    'Claude Agent ACP attachments are unavailable until an installed runtime passes Task Monki content-use qualification.',
-  imageInputQualifications: [],
-  designQualifications: [],
+  approvalPolicies: ['on-request', 'never'],
+  readOnlyTurnPolicy: {
+    modeId: 'plan',
+    policyId: 'claude-agent-acp/plan-read-only@v1',
+    detail:
+      'Claude Agent ACP plan mode denies tool execution. Task Monki also rejects every permission request and compares repository state after the turn.'
+  },
+  attachmentTextTransport: 'embedded-resource',
+  imageInputQualifications: [
+    {
+      runtimeVersion: '0.70.0',
+      modelId: 'sonnet',
+      mediaTypes: ['image/png']
+    }
+  ],
+  designQualifications: [
+    {
+      runtimeVersion: '0.70.0',
+      modelId: 'sonnet'
+    }
+  ],
+  designSkillAdditionalDirectoryRequired: true,
   environmentPolicy: {
     contractId: 'task-monki/claude-agent-acp-environment@v1',
     allowedKeys: [
@@ -369,6 +386,11 @@ export function acpCapabilities(
     ? 'Enabled only when advertised by the connected ACP agent.'
     : 'Pending ACP initialize capability negotiation.';
   const approvalPolicies = profile.approvalPolicies ?? ['on-request'];
+  const hasQualifiedModelSelections = Boolean(
+    !profile.sessionModelExtension &&
+      !profile.parameterizedModelCatalog &&
+      (profile.imageInputQualifications?.length || profile.designQualifications?.length)
+  );
   const normalExecutionPresets = approvalPolicies.map((approvalPolicy) => {
     switch (approvalPolicy) {
       case 'on-request':
@@ -449,12 +471,16 @@ export function acpCapabilities(
     readOnlyTurns: readOnlyCapability,
     modelCatalog: {
       maturity: 'inferred',
-      ...(profile.parameterizedModelCatalog ? { activation: 'EXPLICIT' as const } : {}),
+      ...(profile.parameterizedModelCatalog || hasQualifiedModelSelections
+        ? { activation: 'EXPLICIT' as const }
+        : {}),
       detail: profile.sessionModelExtension
         ? `${profile.descriptor.displayName} session models use the explicit ${profile.sessionModelExtension.contractId} provider extension; stable ACP model-category config selectors remain a separate path.`
         : profile.parameterizedModelCatalog
           ? `Models are loaded on demand through the explicit ${profile.parameterizedModelCatalog.contractId} provider extension and revalidated by every new session.`
-        : 'ACP has no global model-list method; model-category config selectors are preserved after session setup.'
+          : hasQualifiedModelSelections
+            ? 'Exact packaged model selections are shown before session creation. The connected provider session must advertise and accept the selected model before prompt delivery.'
+            : 'ACP has no global model-list method; model-category config selectors are preserved after session setup.'
     },
     activeTurnSteering: {
       maturity: 'unsupported',
@@ -580,11 +606,11 @@ export function acpDesignSupport(input: {
   return qualification
     ? {
         maturity: 'stable',
-        detail: `${input.profile.descriptor.displayName} ${qualification.runtimeVersion} with ${qualification.modelId} passed the packaged Design instruction, skill, MCP image-result, browser, and cleanup qualification.`
+        detail: `${input.profile.descriptor.displayName} ${qualification.runtimeVersion} with ${qualification.modelId} passed the packaged Design instruction, skill, MCP image-result, browser, candidate, and cleanup qualification.`
       }
     : {
         maturity: 'unsupported',
-        detail: `${input.profile.descriptor.displayName} ${input.runtimeVersion ?? 'unknown version'} model ${input.modelId} has not passed the full packaged Design qualification.`
+        detail: `${input.profile.descriptor.displayName} ${input.runtimeVersion ?? 'unknown version'} model ${input.modelId} has not passed the required packaged Design technical qualification.`
       };
 }
 

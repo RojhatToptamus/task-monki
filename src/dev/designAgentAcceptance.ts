@@ -26,6 +26,12 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const POLL_MS = 250;
 const MAX_SOURCE_FILES = 256;
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+const FOCUSED_SCENARIOS = [
+  'form-invalid-corrected-success',
+  'menu-dialog-keyboard',
+  'responsive-wide-narrow',
+  'hover-motion-frames'
+] as const;
 const VISUAL_FACT_ASSET = 'assets/visual-check.png';
 const VISUAL_FACT = 'TM-7Q4';
 const VISUAL_FACT_PNG_BASE64 =
@@ -65,6 +71,46 @@ interface AcceptanceReport {
   temporaryRootRemoved: true;
 }
 
+type FocusedScenario = (typeof FOCUSED_SCENARIOS)[number];
+
+export function resolveDesignAgentCandidateModel(
+  models: readonly AgentModel[],
+  input: {
+    runtimeId: string;
+    model: string;
+    modelProvider?: string;
+  }
+): { selectedModel?: AgentModel; modelProvider?: string } {
+  const matches = models.filter(
+    (candidate) =>
+      candidate.model === input.model &&
+      (!input.modelProvider || candidate.modelProvider === input.modelProvider)
+  );
+  if (!input.modelProvider && matches.length > 1) {
+    throw new Error(
+      `${input.runtimeId} exposes ${input.model} through more than one provider. Set TASK_MONKI_DESIGN_AGENT_MODEL_PROVIDER.`
+    );
+  }
+  const selectedModel = matches[0];
+  return {
+    selectedModel,
+    modelProvider: selectedModel?.modelProvider ?? input.modelProvider
+  };
+}
+
+export function parseFocusedDesignAgentScenario(
+  value: string | undefined
+): FocusedScenario | undefined {
+  const scenario = optionalText(value);
+  if (!scenario) return undefined;
+  if ((FOCUSED_SCENARIOS as readonly string[]).includes(scenario)) {
+    return scenario as FocusedScenario;
+  }
+  throw new Error(
+    `Unknown Design agent scenario: ${scenario}. Expected ${FOCUSED_SCENARIOS.join(', ')}.`
+  );
+}
+
 async function main(): Promise<void> {
   const timeoutMs = positiveInteger(
     process.env.TASK_MONKI_DESIGN_AGENT_TIMEOUT_MS,
@@ -73,11 +119,19 @@ async function main(): Promise<void> {
   const runtimeId =
     optionalText(process.env.TASK_MONKI_DESIGN_AGENT_RUNTIME_ID) ?? 'codex';
   const model = optionalText(process.env.TASK_MONKI_DESIGN_AGENT_MODEL);
+  if (!model) {
+    throw new Error(
+      'TASK_MONKI_DESIGN_AGENT_MODEL is required for exact Design qualification.'
+    );
+  }
   const requestedModelProvider = optionalText(
     process.env.TASK_MONKI_DESIGN_AGENT_MODEL_PROVIDER
   );
   const reasoningEffort = optionalText(
     process.env.TASK_MONKI_DESIGN_AGENT_REASONING_EFFORT
+  );
+  const focusedScenario = parseFocusedDesignAgentScenario(
+    process.env.TASK_MONKI_DESIGN_AGENT_SCENARIO
   );
   const keepFailedRoot =
     process.env.TASK_MONKI_DESIGN_AGENT_KEEP_FAILED_ROOT === '1';
@@ -102,7 +156,14 @@ async function main(): Promise<void> {
     const matchesRequestedModel = (candidate: AgentModel) =>
       candidate.model === model &&
       (!requestedModelProvider || candidate.modelProvider === requestedModelProvider);
-    if (model && !runtime?.models.some(matchesRequestedModel)) {
+    const modelCatalogNeedsActivation = Boolean(
+      runtime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
+        runtime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
+    );
+    if (
+      modelCatalogNeedsActivation ||
+      (model && !runtime?.models.some(matchesRequestedModel))
+    ) {
       await service.discoverAgentRuntimeModels(runtimeId);
       capabilities = await service.getAgentRuntimeCatalog();
       runtime = capabilities.runtimes.find(
@@ -115,21 +176,14 @@ async function main(): Promise<void> {
       );
     }
     runtimeVersion = runtime.preflight.runtimeVersion;
-    const selectedModels = model
-      ? runtime.models.filter(matchesRequestedModel)
-      : [];
-    if (model && selectedModels.length === 0) {
-      throw new Error(
-        `${runtimeId} does not expose ${requestedModelProvider ? `${requestedModelProvider}/` : ''}${model}.`
-      );
-    }
-    if (model && !requestedModelProvider && selectedModels.length > 1) {
-      throw new Error(
-        `${runtimeId} exposes ${model} through more than one provider. Set TASK_MONKI_DESIGN_AGENT_MODEL_PROVIDER.`
-      );
-    }
-    const selectedModel = selectedModels[0];
-    modelProvider = selectedModel?.modelProvider ?? requestedModelProvider;
+    const selection = model
+      ? resolveDesignAgentCandidateModel(runtime.models, {
+          runtimeId,
+          model,
+          modelProvider: requestedModelProvider
+        })
+      : { modelProvider: requestedModelProvider };
+    modelProvider = selection.modelProvider;
     if (
       runtime.preflight.capabilities.extensions['task-monki.design-skill-access']
         ?.maturity !== 'stable'
@@ -143,238 +197,236 @@ async function main(): Promise<void> {
     ) {
       throw new Error(`${runtimeId} does not report Design browser verification.`);
     }
-    if (
-      model &&
-      selectedModel?.designSupport?.maturity !== 'stable'
-    ) {
-      throw new Error(
-        selectedModel?.designSupport?.detail?.trim() ||
-          `${runtimeId} model ${model} has not passed the full Design qualification.`
-      );
+    if (!focusedScenario || focusedScenario === 'form-invalid-corrected-success') {
+      const interactive = await createAndWait(service, store, {
+        name: 'form-invalid-corrected-success',
+        runtimeId,
+        modelProvider,
+        brief: [
+          'Create a responsive workshop-interest page for a neighborhood garden.',
+          'Include one short email form with a required email field and submit button.',
+          'Use client-side validation with a specific invalid-email error and a clear success state.',
+          'Keep keyboard access and visible focus. Use no network service, persistence, or fake delay.',
+          'During rendered verification, submit an invalid value, use the browser fill action to enter a valid email, click submit, and inspect the success state.',
+          'Use realistic local content and one complete visual direction. Do not ask setup questions.'
+        ].join(' '),
+        model,
+        reasoningEffort,
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        requiredSkills: ['browser-verification'],
+        browser: {
+          openAtLeast: 1,
+          actions: ['fill', 'click']
+        },
+        sourceChecks: [
+          ['uses a semantic form', /<form\b/iu],
+          ['uses associated labels', /<label\b[^>]*for=/iu],
+          ['implements client-side behavior', /addEventListener|onsubmit/iu],
+          ['provides visible keyboard focus', /:focus(?:-visible)?/iu],
+          ['provides accessible status or error links', /aria-live|aria-describedby/iu],
+          [
+            'does not add browser persistence',
+            /^(?![\s\S]*(localStorage|sessionStorage))[\s\S]*$/iu
+          ]
+        ]
+      });
+      scenarios.push(interactive.result);
     }
 
-    const interactive = await createAndWait(service, store, {
-      name: 'form-invalid-corrected-success',
-      runtimeId,
-      modelProvider,
-      brief: [
-        'Create a responsive workshop-interest page for a neighborhood garden.',
-        'Include one short email form with a required email field and submit button.',
-        'Use client-side validation with a specific invalid-email error and a clear success state.',
-        'Keep keyboard access and visible focus. Use no network service, persistence, or fake delay.',
-        'During rendered verification, submit an invalid value, use the browser fill action to enter a valid email, click submit, and inspect the success state.',
-        'Use realistic local content and one complete visual direction. Do not ask setup questions.'
-      ].join(' '),
-      model,
-      reasoningEffort,
-      timeoutMs,
-      expectedQuestionRounds: 0,
-      expectedSkills: [
-        'browser-verification',
-        'interaction-states-review',
-        'accessibility-review'
-      ],
-      browser: {
-        openAtLeast: 1,
-        actions: ['fill', 'click']
-      },
-      sourceChecks: [
-        ['uses a semantic form', /<form\b/iu],
-        ['uses associated labels', /<label\b[^>]*for=/iu],
-        ['implements client-side behavior', /addEventListener|onsubmit/iu],
-        ['provides visible keyboard focus', /:focus(?:-visible)?/iu],
-        ['provides accessible status or error links', /aria-live|aria-describedby/iu],
-        ['does not add browser persistence', /^(?![\s\S]*(localStorage|sessionStorage))[\s\S]*$/iu]
-      ]
-    });
-    scenarios.push(interactive.result);
+    if (!focusedScenario || focusedScenario === 'menu-dialog-keyboard') {
+      const menu = await createAndWait(service, store, {
+        name: 'menu-dialog-keyboard',
+        runtimeId,
+        modelProvider,
+        brief: [
+          'Create a simple class-information page for a local ceramics studio.',
+          'Include a keyboard-accessible Help menu and a modal class-details dialog.',
+          'Give both controls visible focus and correct open, close, and Escape behavior.',
+          'During rendered verification, use a click to open a control, use the keyboard to open or move through the other control, press Escape, and inspect focus and closing behavior.',
+          'Use realistic local content and no network service. Build one complete direction without setup questions.'
+        ].join(' '),
+        model,
+        reasoningEffort,
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        requiredSkills: ['browser-verification'],
+        browser: {
+          openAtLeast: 1,
+          actions: ['click', 'key']
+        },
+        sourceChecks: [
+          ['uses a dialog', /<dialog\b|role=["']dialog/iu],
+          ['provides visible keyboard focus', /:focus(?:-visible)?/iu],
+          ['implements keyboard behavior', /keydown|Escape/iu]
+        ]
+      });
+      scenarios.push(menu.result);
+    }
 
-    const menu = await createAndWait(service, store, {
-      name: 'menu-dialog-keyboard',
-      runtimeId,
-      modelProvider,
-      brief: [
-        'Create a simple class-information page for a local ceramics studio.',
-        'Include a keyboard-accessible Help menu and a modal class-details dialog.',
-        'Give both controls visible focus and correct open, close, and Escape behavior.',
-        'During rendered verification, use a click to open a control, use the keyboard to open or move through the other control, press Escape, and inspect focus and closing behavior.',
-        'Use realistic local content and no network service. Build one complete direction without setup questions.'
-      ].join(' '),
-      model,
-      reasoningEffort,
-      timeoutMs,
-      expectedQuestionRounds: 0,
-      expectedSkills: [
-        'browser-verification',
-        'interaction-states-review',
-        'accessibility-review'
-      ],
-      browser: {
-        openAtLeast: 1,
-        actions: ['click', 'key']
-      },
-      sourceChecks: [
-        ['uses a dialog', /<dialog\b|role=["']dialog/iu],
-        ['provides visible keyboard focus', /:focus(?:-visible)?/iu],
-        ['implements keyboard behavior', /keydown|Escape/iu]
-      ]
-    });
-    scenarios.push(menu.result);
+    if (!focusedScenario || focusedScenario === 'responsive-wide-narrow') {
+      const responsive = await createAndWait(service, store, {
+        name: 'responsive-wide-narrow',
+        runtimeId,
+        modelProvider,
+        brief: [
+          'Create a responsive class-listing page for a neighborhood art school.',
+          'The wide layout must use its space well, and the narrow layout must remain clear without clipping or horizontal scroll.',
+          'During rendered verification, inspect and capture the initial wide layout, set a narrow mobile viewport, and inspect and capture the narrow layout.',
+          'Use realistic local content and no network service. Build one complete direction without setup questions.'
+        ].join(' '),
+        model,
+        reasoningEffort,
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        requiredSkills: ['browser-verification'],
+        browser: {
+          openAtLeast: 1,
+          screenshotsAtLeast: 2,
+          viewportsAtLeast: 1
+        },
+        sourceChecks: [
+          ['defines a narrow layout', /@media[\s\S]*(max-width|width\s*<)/iu],
+          [
+            'prevents horizontal overflow',
+            /overflow-x|grid-template-columns|flex-wrap/iu
+          ]
+        ]
+      });
+      scenarios.push(responsive.result);
+    }
 
-    const responsive = await createAndWait(service, store, {
-      name: 'responsive-wide-narrow',
-      runtimeId,
-      modelProvider,
-      brief: [
-        'Create a responsive class-listing page for a neighborhood art school.',
-        'The wide layout must use its space well, and the narrow layout must remain clear without clipping or horizontal scroll.',
-        'During rendered verification, inspect and capture the initial wide layout, set a narrow mobile viewport, and inspect and capture the narrow layout.',
-        'Use realistic local content and no network service. Build one complete direction without setup questions.'
-      ].join(' '),
-      model,
-      reasoningEffort,
-      timeoutMs,
-      expectedQuestionRounds: 0,
-      expectedSkills: ['browser-verification'],
-      browser: {
-        openAtLeast: 1,
-        screenshotsAtLeast: 2,
-        viewportsAtLeast: 1
-      },
-      sourceChecks: [
-        ['defines a narrow layout', /@media[\s\S]*(max-width|width\s*<)/iu],
-        ['prevents horizontal overflow', /overflow-x|grid-template-columns|flex-wrap/iu]
-      ]
-    });
-    scenarios.push(responsive.result);
+    if (!focusedScenario || focusedScenario === 'hover-motion-frames') {
+      const motion = await createAndWait(service, store, {
+        name: 'hover-motion-frames',
+        runtimeId,
+        modelProvider,
+        brief: [
+          'Create a focused workshop page for a local printmaking studio.',
+          'Include one primary workshop card with an exact "See details" button.',
+          'Add a meaningful hover transition to the card using movement and opacity without clipping or layout shift. Support reduced motion.',
+          'During rendered verification, capture the resting state, use the browser hover action, and capture enough relevant intermediate or settled states across the transition to judge movement, opacity, easing, clipping, and layout stability.',
+          'Also set reduced-motion media on the final candidate and inspect the result. A rejected browser operation does not count. Do not use a fixed frame count.',
+          'Use realistic local content and no network service. Build one complete direction without setup questions.'
+        ].join(' '),
+        model,
+        reasoningEffort,
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        requiredSkills: ['browser-verification'],
+        browser: {
+          openAtLeast: 1,
+          screenshotsAtLeast: 2,
+          actions: ['hover'],
+          operations: ['set_media']
+        },
+        sourceChecks: [
+          ['uses the required details label', /See details/u],
+          [
+            'includes a hover transition',
+            /:hover[\s\S]*transition|transition[\s\S]*:hover/iu
+          ],
+          ['supports reduced motion', /prefers-reduced-motion/iu]
+        ]
+      });
+      scenarios.push(motion.result);
 
-    const motion = await createAndWait(service, store, {
-      name: 'hover-motion-frames',
-      runtimeId,
-      modelProvider,
-      brief: [
-        'Create a focused workshop page for a local printmaking studio.',
-        'Include one primary workshop card with an exact "See details" button.',
-        'Add a meaningful hover transition to the card using movement and opacity without clipping or layout shift. Support reduced motion.',
-        'During rendered verification, capture the resting state, use the browser hover action, and capture enough relevant intermediate or settled states across the transition to judge movement, opacity, easing, clipping, and layout stability.',
-        'Also set reduced-motion media on the final candidate and inspect the result. A rejected browser operation does not count. Do not use a fixed frame count.',
-        'Use realistic local content and no network service. Build one complete direction without setup questions.'
-      ].join(' '),
-      model,
-      reasoningEffort,
-      timeoutMs,
-      expectedQuestionRounds: 0,
-      expectedSkills: ['browser-verification', 'interaction-states-review'],
-      browser: {
-        openAtLeast: 1,
-        screenshotsAtLeast: 2,
-        actions: ['hover'],
-        operations: ['set_media']
-      },
-      sourceChecks: [
-        ['uses the required details label', /See details/u],
-        ['includes a hover transition', /:hover[\s\S]*transition|transition[\s\S]*:hover/iu],
-        ['supports reduced motion', /prefers-reduced-motion/iu]
-      ]
-    });
-    scenarios.push(motion.result);
-
-    await addRenderedDefect(motion.detail);
-    const correction = await submitAndWait(service, store, motion.detail.design.id, {
-      name: 'rendered-defect-fresh-candidate-correction',
-      message: [
-        'Before editing, open the current exact candidate and inspect it at a normal viewport.',
-        'Find and correct the visible rendered defect in the current page. The current source contains one erroneous rule that causes it; remove that root cause instead of adding a compensating override. Do not assume the source alone proves the result.',
-        'After the correction, open and visually verify a fresh candidate before you finish.',
-        'Preserve the page direction, controls, motion, responsive behavior, and content.'
-      ].join(' '),
-      timeoutMs,
-      expectedQuestionRounds: 0,
-      acceptedOutcomes: ['READY', 'NO_CHANGE'],
-      browser: {
-        openAtLeast: 2,
-        screenshotsAtLeast: 1
-      },
-      sourceChecks: [
-        ['preserves reduced motion', /prefers-reduced-motion/iu]
-      ],
-      sourceRejectChecks: [
-        ['removes the injected rendered defect', /task-monki-rendered-defect/iu]
-      ]
-    });
-    scenarios.push(correction.result);
-
-    await addVisualFactCandidate(correction.detail);
-    const visualFact = await submitAndWait(
-      service,
-      store,
-      correction.detail.design.id,
-      {
-        name: 'inspect-design-image-result-consumed',
+      await addRenderedDefect(motion.detail);
+      const correction = await submitAndWait(service, store, motion.detail.design.id, {
+        name: 'rendered-defect-fresh-candidate-correction',
         message: [
-          'Open the current exact candidate and take a screenshot.',
-          'The navy visual-check image contains a short code that is not present in the HTML, CSS, or JavaScript.',
-          'Use the inspect_design image result to read that code.',
-          'Replace only the text "Waiting for visual code" with the exact code from the image.',
-          'Do not inspect the PNG through a file, shell, or image tool.'
+          'Before editing, open the current exact candidate and inspect it at a normal viewport.',
+          'Find and correct the visible rendered defect in the current page. The current source contains one erroneous rule that causes it; remove that root cause instead of adding a compensating override. Do not assume the source alone proves the result.',
+          'After the correction, open and visually verify a fresh candidate before you finish.',
+          'Preserve the page direction, controls, motion, responsive behavior, and content.'
         ].join(' '),
         timeoutMs,
         expectedQuestionRounds: 0,
-        browser: { openAtLeast: 1, screenshotsAtLeast: 1 },
-        forbiddenAssetToolAccess: VISUAL_FACT_ASSET,
+        acceptedOutcomes: ['READY', 'NO_CHANGE'],
+        browser: {
+          openAtLeast: 2,
+          screenshotsAtLeast: 1
+        },
         sourceChecks: [
-          [
-            'uses the unique fact from the inspect_design image result',
-            new RegExp(
-              `id=["']verification-answer["'][^>]*>\\s*${VISUAL_FACT}\\s*<`,
-              'iu'
-            )
-          ]
+          ['preserves reduced motion', /prefers-reduced-motion/iu]
+        ],
+        sourceRejectChecks: [
+          ['removes the injected rendered defect', /task-monki-rendered-defect/iu]
         ]
-      }
-    );
-    scenarios.push(visualFact.result);
+      });
+      scenarios.push(correction.result);
 
-    const copyOnly = await submitAndWait(service, store, motion.detail.design.id, {
-      name: 'copy-only-base-browser-check',
-      message: [
-        'Change only the short "See details" button label to "Studio details".',
-        'The replacement fits the existing control. Preserve all layout, behavior, motion, and other copy.',
-        'Use the required base browser check. This copy-only change does not need a screenshot sweep.'
-      ].join(' '),
-      timeoutMs,
-      expectedQuestionRounds: 0,
-      browser: { openAtLeast: 1, screenshotsAtMost: 0 },
-      sourceChecks: [
-        ['uses the new short label', /Studio details/u],
-        ['preserves reduced motion', /prefers-reduced-motion/iu]
-      ]
-    });
-    scenarios.push(copyOnly.result);
-
-    const noChange = await submitAndWait(service, store, motion.detail.design.id, {
-      name: 'ready-no-change-skips-browser',
-      message: 'Keep the current Design exactly as it is. Do not change any source file.',
-      timeoutMs,
-      expectedQuestionRounds: 0,
-      expectedOutcome: 'NO_CHANGE',
-      browser: { noBrowser: true },
-      sourceChecks: [
-        ['keeps the copy-only label', /Studio details/u],
-        ['keeps reduced-motion support', /prefers-reduced-motion/iu]
-      ]
-    });
-    scenarios.push(noChange.result);
-
-    scenarios.push(
-      await cancelAndVerifyLastReady(
+      await addVisualFactCandidate(correction.detail);
+      const visualFact = await submitAndWait(
         service,
         store,
-        motion.detail.design.id,
-        timeoutMs
-      )
-    );
+        correction.detail.design.id,
+        {
+          name: 'inspect-design-image-result-consumed',
+          message: [
+            'Open the current exact candidate and take a screenshot.',
+            'The navy visual-check image contains a short code that is not present in the HTML, CSS, or JavaScript.',
+            'Use the inspect_design image result to read that code.',
+            'Replace only the text "Waiting for visual code" with the exact code from the image.',
+            'Do not inspect the PNG through a file, shell, or image tool.'
+          ].join(' '),
+          timeoutMs,
+          expectedQuestionRounds: 0,
+          browser: { openAtLeast: 1, screenshotsAtLeast: 1 },
+          forbiddenAssetToolAccess: VISUAL_FACT_ASSET,
+          sourceChecks: [
+            [
+              'uses the unique fact from the inspect_design image result',
+              new RegExp(
+                `id=["']verification-answer["'][^>]*>\\s*${VISUAL_FACT}\\s*<`,
+                'iu'
+              )
+            ]
+          ]
+        }
+      );
+      scenarios.push(visualFact.result);
 
+      const copyOnly = await submitAndWait(service, store, motion.detail.design.id, {
+        name: 'copy-only-base-browser-check',
+        message: [
+          'Change only the short "See details" button label to "Studio details".',
+          'The replacement fits the existing control. Preserve all layout, behavior, motion, and other copy.',
+          'Use the required base browser check. This copy-only change does not need a screenshot sweep.'
+        ].join(' '),
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        browser: { openAtLeast: 1, screenshotsAtMost: 0 },
+        sourceChecks: [
+          ['uses the new short label', /Studio details/u],
+          ['preserves reduced motion', /prefers-reduced-motion/iu]
+        ]
+      });
+      scenarios.push(copyOnly.result);
+
+      const noChange = await submitAndWait(service, store, motion.detail.design.id, {
+        name: 'ready-no-change-skips-browser',
+        message: 'Keep the current Design exactly as it is. Do not change any source file.',
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        expectedOutcome: 'NO_CHANGE',
+        browser: { noBrowser: true },
+        sourceChecks: [
+          ['keeps the copy-only label', /Studio details/u],
+          ['keeps reduced-motion support', /prefers-reduced-motion/iu]
+        ]
+      });
+      scenarios.push(noChange.result);
+
+      scenarios.push(
+        await cancelAndVerifyLastReady(
+          service,
+          store,
+          motion.detail.design.id,
+          timeoutMs
+        )
+      );
+    }
   } catch (error) {
     failure = error;
   } finally {
@@ -457,6 +509,7 @@ function createService(root: string, store: FileTaskStore): TaskManagerService {
       worktreeRoot: path.join(root, 'normal-worktrees'),
       previewEnabled: true,
       previewReconcile: false,
+      allowCandidateDesignModels: true,
       previewRoot: path.join(root, 'preview-runtime'),
       previewLauncherPath: packagedResourcesRoot
         ? path.join(packagedResourcesRoot, 'native-preview-launcher.mjs')
@@ -508,7 +561,7 @@ async function createAndWait(
     reasoningEffort?: string;
     timeoutMs: number;
     expectedQuestionRounds: number;
-    expectedSkills?: string[];
+    requiredSkills?: string[];
     answerQuestions?: (questions: readonly AgentUserInputQuestion[]) => Record<string, string[]>;
     sourceChecks: Array<readonly [string, RegExp]>;
     sourceRejectChecks?: Array<readonly [string, RegExp]>;
@@ -541,7 +594,7 @@ async function submitAndWait(
     message: string;
     timeoutMs: number;
     expectedQuestionRounds: number;
-    expectedSkills?: string[];
+    requiredSkills?: string[];
     sourceChecks: Array<readonly [string, RegExp]>;
     sourceRejectChecks?: Array<readonly [string, RegExp]>;
     browser?: BrowserExpectations;
@@ -598,7 +651,7 @@ async function cancelAndVerifyLastReady(
       if (
         !['DYNAMIC_TOOL_CALL', 'MCP_TOOL_CALL'].includes(item.type) ||
         !['STARTED', 'IN_PROGRESS'].includes(item.status) ||
-        !isInspectDesignToolCall(item)
+        !isInspectDesignToolCall(baseline.task.runtimeId, item)
       ) {
         return false;
       }
@@ -673,7 +726,7 @@ async function waitAndInspect(
     name: string;
     timeoutMs: number;
     expectedQuestionRounds: number;
-    expectedSkills?: string[];
+    requiredSkills?: string[];
     answerQuestions?: (questions: readonly AgentUserInputQuestion[]) => Record<string, string[]>;
     sourceChecks: Array<readonly [string, RegExp]>;
     sourceRejectChecks?: Array<readonly [string, RegExp]>;
@@ -774,20 +827,21 @@ async function waitAndInspect(
   if (input.forbiddenAssetToolAccess) {
     assertNoDirectAssetInspection(
       input.name,
+      detail.task.runtimeId,
       runItems,
       input.forbiddenAssetToolAccess
     );
   }
-  const browserOperations = observedBrowserOperations(runItems);
+  const browserOperations = observedBrowserOperations(detail.task.runtimeId, runItems);
   assertBrowserExpectations(
     input.name,
     browserOperations,
     input.browser ?? { openAtLeast: 1 }
   );
   const skillsRead = observedSkills(runItems);
-  for (const skill of input.expectedSkills ?? []) {
+  for (const skill of input.requiredSkills ?? []) {
     if (!skillsRead.includes(skill)) {
-      throw new Error(`${input.name} did not read the expected ${skill} skill.`);
+      throw new Error(`${input.name} did not read the required ${skill} skill.`);
     }
   }
 
@@ -877,13 +931,14 @@ function assertNoForbiddenToolFlow(name: string, items: readonly AgentItemRecord
 
 export function assertNoDirectAssetInspection(
   name: string,
+  runtimeId: string,
   items: readonly AgentItemRecord[],
   assetPath: string
 ): void {
   const directAccess = items.find((item) => {
     if (
       ['MCP_TOOL_CALL', 'DYNAMIC_TOOL_CALL'].includes(item.type) &&
-      isInspectDesignToolCall(item)
+      isInspectDesignToolCall(runtimeId, item)
     ) {
       return false;
     }
@@ -896,12 +951,15 @@ export function assertNoDirectAssetInspection(
   }
 }
 
-export function observedBrowserOperations(items: readonly AgentItemRecord[]): string[] {
+export function observedBrowserOperations(
+  runtimeId: string,
+  items: readonly AgentItemRecord[]
+): string[] {
   return items.flatMap((item) => {
     if (
       !['DYNAMIC_TOOL_CALL', 'MCP_TOOL_CALL'].includes(item.type) ||
       item.status !== 'COMPLETED' ||
-      !isInspectDesignToolCall(item)
+      !isInspectDesignToolCall(runtimeId, item)
     ) {
       return [];
     }
@@ -916,7 +974,10 @@ export function observedBrowserOperations(items: readonly AgentItemRecord[]): st
   });
 }
 
-function isInspectDesignToolCall(item: AgentItemRecord): boolean {
+function isInspectDesignToolCall(
+  runtimeId: string,
+  item: AgentItemRecord
+): boolean {
   if (!isRecord(item.payload)) return false;
   if (item.type === 'DYNAMIC_TOOL_CALL') {
     return (
@@ -926,9 +987,10 @@ function isInspectDesignToolCall(item: AgentItemRecord): boolean {
   }
   if (item.type !== 'MCP_TOOL_CALL') return false;
   if (item.payload.tool === OPENCODE_DESIGN_TOOL_NAME) return true;
-  return isTaskMonkiInspectDesignToolCall({
+  return isTaskMonkiInspectDesignToolCall(runtimeId, {
     title: typeof item.payload.title === 'string' ? item.payload.title : undefined,
-    rawInput: item.payload.rawInput
+    rawInput: item.payload.rawInput,
+    _meta: isRecord(item.payload._meta) ? item.payload._meta : undefined
   });
 }
 

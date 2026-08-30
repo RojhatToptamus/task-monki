@@ -1232,7 +1232,9 @@ function expectedAttachmentSubmissions(
     ? 'provider-turn'
     : target.runtimeId === 'opencode'
       ? 'provider-message'
-      : ['grok-acp', 'cursor-agent-acp'].includes(target.runtimeId)
+      : ['grok-acp', 'cursor-agent-acp', 'claude-agent-acp'].includes(
+            target.runtimeId
+          )
         ? 'client-request'
         : undefined;
   if (!correlationKind) return undefined;
@@ -1246,7 +1248,7 @@ function expectedAttachmentSubmissions(
           : 'native-image'
         : target.runtimeId === 'opencode'
           ? 'native-file'
-          : target.runtimeId === 'grok-acp'
+          : ['grok-acp', 'claude-agent-acp'].includes(target.runtimeId)
             ? 'embedded-resource'
             : target.runtimeId === 'cursor-agent-acp'
               ? 'text-block'

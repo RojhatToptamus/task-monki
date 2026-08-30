@@ -280,6 +280,61 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(scenario.service.listDesigns()).resolves.toEqual([]);
   });
 
+  it('lets the Design acceptance harness run an unqualified exact model across turn rechecks', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-model-candidate-qualification',
+      previewEnabled: true,
+      designMode: true,
+      allowCandidateDesignModels: true
+    });
+    vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
+      {
+        id: 'codex:openai/candidate-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
+        model: 'candidate-model',
+        displayName: 'Candidate model',
+        hidden: false,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+        inputModalities: ['text'],
+        designSupport: {
+          maturity: 'unsupported',
+          detail: 'This exact model still needs Design qualification.'
+        },
+        isDefault: true
+      }
+    ]);
+
+    let detail = await scenario.service.createBlankDesign({
+      brief: 'Create a compact status page.',
+      creationToken: 'design-model-candidate-qualification',
+      runtimeId: 'codex',
+      model: 'candidate-model'
+    });
+    expect(scenario.agent.startedTurns).toHaveLength(1);
+    expect(scenario.agent.startedTurns[0]!.settings!.model).toBe('candidate-model');
+
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-model-candidate-qualification-queued',
+      message: 'Make the page more spacious.',
+      referenceIds: []
+    });
+    expect(detail.turns.at(-1)?.runId).toBeUndefined();
+
+    await scenario.completeRun(detail.turns[0]!.runId!, 'The first page is ready.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.turns.at(-1)?.runId !== undefined
+    );
+    expect(detail.turns.at(-1)?.failureReason).toBeUndefined();
+    expect(scenario.agent.startedTurns).toHaveLength(2);
+    expect(scenario.agent.startedTurns[1]!.settings!.model).toBe('candidate-model');
+  });
+
   it('does not accept a later Design turn after exact model qualification is withdrawn', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-model-qualification-drift',

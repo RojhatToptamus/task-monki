@@ -250,17 +250,26 @@ describe('ACP attachment delivery', () => {
     ).rejects.toThrow('no verified compatibility exception');
   });
 
-  it('keeps Claude attachments disabled without packaged qualification', async () => {
+  it('maps Claude text through its advertised embedded-resource transport', async () => {
     const text = await managedAttachment('notes.txt', 'content');
-    await expect(
-      prepareAcpAttachmentDelivery({
-        profile: CLAUDE_AGENT_ACP_PROFILE,
-        initialize: initialize({ embeddedContext: true }),
-        model: model(['text']),
-        prompt: 'Read it.',
-        attachments: [text]
+    const delivery = await prepareAcpAttachmentDelivery({
+      profile: CLAUDE_AGENT_ACP_PROFILE,
+      initialize: initialize({ embeddedContext: true }),
+      model: model(['text']),
+      prompt: 'Read it.',
+      attachments: [text]
+    });
+    expect(delivery.prompt).toEqual([
+      { type: 'text', text: 'Read it.' },
+      expect.objectContaining({
+        type: 'resource',
+        resource: expect.objectContaining({
+          uri: expect.stringMatching(/^task-monki-attachment:/u),
+          mimeType: 'text/plain',
+          text: expect.stringContaining('content')
+        })
       })
-    ).rejects.toThrow('content-use qualification');
+    ]);
   });
 });
 

@@ -164,6 +164,33 @@ describe('projectAgentExecutionSupport', () => {
       ).supported
     ).toBe(false);
   });
+
+  it('lets the explicit qualification harness bypass only candidate model and image gates', () => {
+    const candidateModel = {
+      inputModalities: ['text'],
+      designSupport: {
+        maturity: 'unsupported' as const,
+        detail: 'This exact model has not passed Design qualification.'
+      }
+    };
+
+    expect(
+      projectAgentExecutionSupport(supportedCapabilities(), 'DESIGN', {
+        model: candidateModel,
+        allowCandidateDesignModel: true
+      })
+    ).toEqual({ supported: true });
+    expect(
+      projectAgentExecutionSupport(
+        supportedCapabilities({ turnInterruption: { maturity: 'unsupported' } }),
+        'DESIGN',
+        {
+          model: candidateModel,
+          allowCandidateDesignModel: true
+        }
+      ).supported
+    ).toBe(false);
+  });
 });
 
 function supportedCapabilities(

@@ -252,6 +252,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     private readonly options: {
       allowNetworkAccess?: boolean;
       providerStartupDisabledReason?: string;
+      allowCandidateDesignModels?: boolean;
     } = {}
   ) {
     this.runtimes =
@@ -2426,7 +2427,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       const support = projectAgentExecutionSupport(
         await adapter.capabilities(),
         'DESIGN',
-        { model: resolved.model }
+        {
+          model: resolved.model,
+          allowCandidateDesignModel: this.options.allowCandidateDesignModels
+        }
       );
       if (!support.supported) throw new Error(support.reason);
     }

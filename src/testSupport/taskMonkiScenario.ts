@@ -64,6 +64,7 @@ export interface ScenarioOptions {
   previewOciEnv?: NodeJS.ProcessEnv;
   previewRecipeGenerator?: PreviewRecipeGenerationService;
   designMode?: boolean;
+  allowCandidateDesignModels?: boolean;
 }
 
 interface CreateScenarioTaskInput {
@@ -316,6 +317,7 @@ export async function createTaskMonkiScenario(
       previewOciExecutablePath: options.previewOciExecutablePath,
       previewOciContextName: options.previewOciContextName,
       previewOciEnv: options.previewOciEnv,
+      allowCandidateDesignModels: options.allowCandidateDesignModels,
       ...(options.designMode
         ? {
             designRepositoryRoot,

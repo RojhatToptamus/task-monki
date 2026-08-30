@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { AgentItemRecord, AgentItemType } from '../shared/agent';
 import {
   assertNoDirectAssetInspection,
-  observedBrowserOperations
+  observedBrowserOperations,
+  parseFocusedDesignAgentScenario,
+  resolveDesignAgentCandidateModel
 } from './designAgentAcceptance';
 
 const ASSET_PATH = 'assets/visual-check.png';
@@ -10,13 +12,13 @@ const ASSET_PATH = 'assets/visual-check.png';
 describe('Design agent visual-fact qualification', () => {
   it('rejects direct ACP and OpenCode asset reads but permits inspect_design input', () => {
     expect(() =>
-      assertNoDirectAssetInspection('ACP', [
+      assertNoDirectAssetInspection('ACP', 'cursor-agent-acp', [
         item('OTHER', { rawInput: { path: ASSET_PATH } })
       ], ASSET_PATH)
     ).toThrow(`ACP inspected ${ASSET_PATH} outside the inspect_design image result.`);
 
     expect(() =>
-      assertNoDirectAssetInspection('OpenCode', [
+      assertNoDirectAssetInspection('OpenCode', 'opencode', [
         item('OTHER', { state: { input: { filePath: ASSET_PATH } } })
       ], ASSET_PATH)
     ).toThrow(
@@ -24,7 +26,7 @@ describe('Design agent visual-fact qualification', () => {
     );
 
     expect(() =>
-      assertNoDirectAssetInspection('spoofed inspect_design', [
+      assertNoDirectAssetInspection('spoofed inspect_design', 'cursor-agent-acp', [
         item('OTHER', {
           title: 'inspect_design',
           rawInput: { path: ASSET_PATH }
@@ -35,7 +37,7 @@ describe('Design agent visual-fact qualification', () => {
     );
 
     expect(() =>
-      assertNoDirectAssetInspection('inspect_design', [
+      assertNoDirectAssetInspection('inspect_design', 'cursor-agent-acp', [
         item('MCP_TOOL_CALL', {
           title: 'task-monki-design-tools: inspect_design',
           rawInput: {
@@ -48,7 +50,7 @@ describe('Design agent visual-fact qualification', () => {
     ).not.toThrow();
 
     expect(() =>
-      assertNoDirectAssetInspection('suffix spoof', [
+      assertNoDirectAssetInspection('suffix spoof', 'cursor-agent-acp', [
         item('MCP_TOOL_CALL', {
           title: 'untrusted: inspect_design',
           rawInput: { path: ASSET_PATH }
@@ -61,7 +63,7 @@ describe('Design agent visual-fact qualification', () => {
 
   it('reads browser operations from the ACP MCP argument envelope', () => {
     expect(
-      observedBrowserOperations([
+      observedBrowserOperations('cursor-agent-acp', [
         item('MCP_TOOL_CALL', {
           title: 'task-monki-design-tools: inspect_design',
           rawInput: {
@@ -76,7 +78,7 @@ describe('Design agent visual-fact qualification', () => {
 
   it('reads browser operations from the Grok MCP tool-input envelope', () => {
     expect(
-      observedBrowserOperations([
+      observedBrowserOperations('grok-acp', [
         item('MCP_TOOL_CALL', {
           title: 'task-monki-design-tools__inspect_design',
           rawInput: {
@@ -88,14 +90,18 @@ describe('Design agent visual-fact qualification', () => {
     ).toEqual(['screenshot']);
   });
 
-  it('reads browser operations only from exact Codex and OpenCode tool identities', () => {
+  it('reads browser operations only from each runtime\'s exact identity', () => {
     expect(
-      observedBrowserOperations([
+      observedBrowserOperations('codex', [
         item('DYNAMIC_TOOL_CALL', {
           type: 'dynamicToolCall',
           tool: 'inspect_design',
           arguments: { operation: 'observe' }
-        }),
+        })
+      ])
+    ).toEqual(['observe']);
+    expect(
+      observedBrowserOperations('opencode', [
         item('MCP_TOOL_CALL', {
           tool: 'task_monki_design_inspect_design',
           state: { input: { operation: 'act', action: 'click' } }
@@ -105,7 +111,59 @@ describe('Design agent visual-fact qualification', () => {
           state: { input: { operation: 'screenshot' } }
         })
       ])
-    ).toEqual(['observe', 'act:click']);
+    ).toEqual(['act:click']);
+    expect(
+      observedBrowserOperations('claude-agent-acp', [
+        item('MCP_TOOL_CALL', {
+          title: 'mcp__task-monki-design-tools__inspect_design',
+          rawInput: { operation: 'screenshot' },
+          _meta: {
+            claudeCode: {
+              toolName: 'mcp__task-monki-design-tools__inspect_design'
+            }
+          }
+        })
+      ])
+    ).toEqual(['screenshot']);
+    expect(
+      observedBrowserOperations('cursor-agent-acp', [
+        item('MCP_TOOL_CALL', {
+          title: 'mcp__task-monki-design-tools__inspect_design',
+          rawInput: { operation: 'screenshot' },
+          _meta: {
+            claudeCode: {
+              toolName: 'mcp__task-monki-design-tools__inspect_design'
+            }
+          }
+        })
+      ])
+    ).toEqual([]);
+  });
+});
+
+describe('Design agent scenario selection', () => {
+  it('selects the focused menu scenario without changing the default full run', () => {
+    expect(parseFocusedDesignAgentScenario(undefined)).toBeUndefined();
+    expect(parseFocusedDesignAgentScenario('  ')).toBeUndefined();
+    expect(parseFocusedDesignAgentScenario(' menu-dialog-keyboard ')).toBe(
+      'menu-dialog-keyboard'
+    );
+    expect(parseFocusedDesignAgentScenario('responsive-wide-narrow')).toBe(
+      'responsive-wide-narrow'
+    );
+    expect(() => parseFocusedDesignAgentScenario('unknown')).toThrow(
+      'Unknown Design agent scenario: unknown.'
+    );
+  });
+
+  it('passes an explicit model through when it is only discoverable after session setup', () => {
+    expect(
+      resolveDesignAgentCandidateModel([], {
+        runtimeId: 'claude-agent-acp',
+        model: 'sonnet',
+        modelProvider: 'anthropic'
+      })
+    ).toEqual({ selectedModel: undefined, modelProvider: 'anthropic' });
   });
 });
 

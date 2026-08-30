@@ -176,14 +176,20 @@ describe('ACP runtime profiles', () => {
       ]
     });
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
-      expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
+      expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' }),
+      expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' }),
+      expect.objectContaining({
+        id: 'native-read-only',
+        approvalPolicy: 'NEVER',
+        repositoryMutation: 'DENY'
+      })
     ]);
     expect(acpCapabilities(TEST_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
     ]);
   });
 
-  it('qualifies only Cursor for shared read-only workflows', () => {
+  it('qualifies only the provider profiles with proven native read-only modes', () => {
     expect(CURSOR_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
       modeId: 'ask',
       policyId: 'cursor-agent-acp/ask-read-only@v1'
@@ -191,7 +197,14 @@ describe('ACP runtime profiles', () => {
     expect(acpCapabilities(CURSOR_ACP_PROFILE)).toMatchObject({
       readOnlyTurns: { maturity: 'stable' }
     });
-    for (const profile of [GROK_ACP_PROFILE, CLAUDE_AGENT_ACP_PROFILE]) {
+    expect(CLAUDE_AGENT_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      modeId: 'plan',
+      policyId: 'claude-agent-acp/plan-read-only@v1'
+    });
+    expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE)).toMatchObject({
+      readOnlyTurns: { maturity: 'stable' }
+    });
+    for (const profile of [GROK_ACP_PROFILE]) {
       expect(profile.readOnlyTurnPolicy).toBeUndefined();
       expect(profile.readOnlyTurnUnavailableReason).toBeTruthy();
       expect(acpCapabilities(profile)).toMatchObject({
@@ -284,6 +297,14 @@ describe('ACP runtime profiles', () => {
         modelId: 'composer-2.5'
       })
     ).toEqual(['text', 'image']);
+    expect(
+      acpModelInputModalities({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        promptCapabilities: { image: true },
+        runtimeVersion: '0.70.0',
+        modelId: 'sonnet'
+      })
+    ).toEqual(['text', 'image']);
     for (const input of [
       { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'default', image: true },
       { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'other', image: true },
@@ -350,7 +371,7 @@ describe('ACP runtime profiles', () => {
     }
     expect(GROK_ACP_PROFILE.attachmentTextTransport).toBe('embedded-resource');
     expect(CURSOR_ACP_PROFILE.attachmentTextTransport).toBe('text-block');
-    expect(CLAUDE_AGENT_ACP_PROFILE.attachmentTextTransport).toBeUndefined();
+    expect(CLAUDE_AGENT_ACP_PROFILE.attachmentTextTransport).toBe('embedded-resource');
     expect(
       acpCapabilities(GROK_ACP_PROFILE, {
         prompt: { embeddedContext: true }
@@ -365,11 +386,10 @@ describe('ACP runtime profiles', () => {
       'stable'
     );
     expect(
-      acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).attachmentDelivery
-    ).toMatchObject({
-      maturity: 'unsupported',
-      detail: expect.stringContaining('content-use qualification')
-    });
+      acpCapabilities(CLAUDE_AGENT_ACP_PROFILE, {
+        prompt: { embeddedContext: true }
+      }).attachmentDelivery
+    ).toMatchObject({ maturity: 'stable' });
   });
 
   it('qualifies Design only for exact ACP version and model pairs', () => {
@@ -380,6 +400,16 @@ describe('ACP runtime profiles', () => {
         modelId: 'composer-2.5'
       })
     ).toMatchObject({ maturity: 'stable' });
+    expect(
+      acpDesignSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'sonnet'
+      })
+    ).toMatchObject({ maturity: 'stable' });
+    expect(
+      CLAUDE_AGENT_ACP_PROFILE.designSkillAdditionalDirectoryRequired
+    ).toBe(true);
     expect(
       acpDesignSupport({
         profile: CURSOR_ACP_PROFILE,
@@ -395,6 +425,16 @@ describe('ACP runtime profiles', () => {
         profile: GROK_ACP_PROFILE,
         runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
         modelId: 'grok-4.6'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
+    });
+    expect(
+      acpDesignSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'haiku'
       })
     ).toMatchObject({
       maturity: 'unsupported',

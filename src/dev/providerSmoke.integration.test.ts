@@ -274,6 +274,56 @@ describe('runProviderSmoke', () => {
     expect(report.authoritative).toBe(true);
   });
 
+  it('expects Claude ACP text and image submissions through its native transports', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'claude-agent-acp:anthropic/sonnet',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [
+        catalogWith([
+          runtime(
+            'claude-agent-acp',
+            'READY',
+            true,
+            [candidate],
+            false,
+            { maturity: 'stable' },
+            {
+              kind: 'ACP_AGENT',
+              runtimeVersion: '0.70.0',
+              advertisedImageInput: true
+            }
+          )
+        ])
+      ]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        submissions: [
+          expect.objectContaining({
+            transport: 'embedded-resource',
+            correlation: { kind: 'client-request', id: expect.any(String) }
+          }),
+          expect.objectContaining({
+            transport: 'native-image',
+            correlation: { kind: 'client-request', id: expect.any(String) }
+          })
+        ]
+      }
+    });
+  });
+
   it('reports a verified ACP image path that contradicts the advertised capability', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model(
@@ -1899,7 +1949,9 @@ function fakeAttachmentTransport(
 ): AttachmentSubmissionRecord['transport'] {
   if (kind === 'image') return runtimeId === 'opencode' ? 'native-file' : 'native-image';
   if (runtimeId === 'opencode') return 'native-file';
-  if (runtimeId === 'grok-acp') return 'embedded-resource';
+  if (runtimeId === 'grok-acp' || runtimeId === 'claude-agent-acp') {
+    return 'embedded-resource';
+  }
   if (runtimeId === 'cursor-agent-acp') return 'text-block';
   return 'managed-path';
 }

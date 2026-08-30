@@ -9,7 +9,7 @@ import {
 } from './CodexEventMapper';
 
 describe('Codex event mapping', () => {
-  it('keeps Codex Design unavailable without a complete packaged qualification', () => {
+  it('qualifies Codex Design only for the exact packaged runtime and model', () => {
     const model = {
       id: 'gpt-5.6-luna',
       model: 'gpt-5.6-luna',
@@ -26,6 +26,13 @@ describe('Codex event mapping', () => {
     expect(mapModel(model as never, '0.150.0-alpha.12.2').designSupport).toMatchObject({
       maturity: 'unsupported',
       detail: expect.stringContaining('has not passed')
+    });
+    expect(mapModel(model as never, '0.151.0-alpha.7.2').designSupport).toMatchObject({
+      maturity: 'stable',
+      detail: expect.stringContaining('passed the packaged Design')
+    });
+    expect(mapModel(model as never, '0.151.0-alpha.7.1').designSupport).toMatchObject({
+      maturity: 'unsupported'
     });
     expect(mapModel(model as never, '0.150.0-alpha.12.3').designSupport).toMatchObject({
       maturity: 'unsupported',

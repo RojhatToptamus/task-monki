@@ -64,6 +64,7 @@ Use the exact operation shape:
 
 - Open: `{"operation":"open_candidate"}`
 - Viewport: `{"operation":"set_viewport","width":390,"height":844}`
+- Media: `{"operation":"set_media","colorScheme":"light","reducedMotion":true}`
 - Fill: `{"operation":"act","action":"fill","ref":"@e4","value":"name@example.com"}`
 - Click: `{"operation":"act","action":"click","ref":"@e5"}`
 - Hover: `{"operation":"act","action":"hover","ref":"@e6"}`
