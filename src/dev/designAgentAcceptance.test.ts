@@ -188,6 +188,31 @@ describe('Design agent visual-fact qualification', () => {
       ])
     ).toEqual([]);
   });
+
+  it('records the exact media scheme used for Design verification', () => {
+    expect(
+      observedBrowserOperations('codex', [
+        item('DYNAMIC_TOOL_CALL', {
+          type: 'dynamicToolCall',
+          tool: 'inspect_design',
+          arguments: {
+            operation: 'set_media',
+            colorScheme: 'light',
+            reducedMotion: false
+          }
+        }),
+        item('DYNAMIC_TOOL_CALL', {
+          type: 'dynamicToolCall',
+          tool: 'inspect_design',
+          arguments: {
+            operation: 'set_media',
+            colorScheme: 'dark',
+            reducedMotion: true
+          }
+        })
+      ])
+    ).toEqual(['set_media:light', 'set_media:dark']);
+  });
 });
 
 describe('Design agent scenario selection', () => {
@@ -199,6 +224,9 @@ describe('Design agent scenario selection', () => {
     );
     expect(parseFocusedDesignAgentScenario('responsive-wide-narrow')).toBe(
       'responsive-wide-narrow'
+    );
+    expect(parseFocusedDesignAgentScenario('theme-errors-interaction')).toBe(
+      'theme-errors-interaction'
     );
     expect(() => parseFocusedDesignAgentScenario('unknown')).toThrow(
       'Unknown Design agent scenario: unknown.'

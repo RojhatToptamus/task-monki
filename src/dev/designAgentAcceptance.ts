@@ -31,6 +31,7 @@ const FOCUSED_SCENARIOS = [
   'form-invalid-corrected-success',
   'menu-dialog-keyboard',
   'responsive-wide-narrow',
+  'theme-errors-interaction',
   'hover-motion-frames'
 ] as const;
 const VISUAL_FACT_ASSET = 'assets/visual-check.png';
@@ -56,6 +57,7 @@ interface BrowserExpectations {
   screenshotsAtLeast?: number;
   screenshotsAtMost?: number;
   viewportsAtLeast?: number;
+  mediaSchemes?: Array<'light' | 'dark'>;
   actions?: string[];
   operations?: string[];
   noBrowser?: boolean;
@@ -295,6 +297,72 @@ async function main(): Promise<void> {
         ]
       });
       scenarios.push(responsive.result);
+    }
+
+    if (!focusedScenario || focusedScenario === 'theme-errors-interaction') {
+      const stateful = await createAndWait(service, store, {
+        name: 'theme-accessibility-interaction-state',
+        runtimeId,
+        modelProvider,
+        brief: [
+          'Create a compact settings page for a neighborhood workshop.',
+          'Include one disclosure control that changes visible content and keeps aria-expanded accurate.',
+          'Provide intentional light and dark color schemes, visible keyboard focus, and reduced-motion support.',
+          'During rendered verification, set light media and capture it, set dark media and capture it, exercise the disclosure, and run the bounded accessibility audit.',
+          'Use realistic local content and no network service. Build one complete direction without setup questions.'
+        ].join(' '),
+        model,
+        reasoningEffort,
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        requiredSkills: [
+          'browser-verification',
+          'interaction-states-review',
+          'accessibility-review'
+        ],
+        browser: {
+          openAtLeast: 1,
+          screenshotsAtLeast: 2,
+          mediaSchemes: ['light', 'dark'],
+          actions: ['click'],
+          operations: ['accessibility']
+        },
+        sourceChecks: [
+          ['supports dark media', /prefers-color-scheme\s*:\s*dark/iu],
+          ['tracks disclosure state', /aria-expanded/iu],
+          ['provides visible keyboard focus', /:focus(?:-visible)?/iu],
+          ['supports reduced motion', /prefers-reduced-motion/iu]
+        ]
+      });
+      scenarios.push(stateful.result);
+
+      await addBrowserEvidenceDefects(stateful.detail);
+      const recovered = await submitAndWait(service, store, stateful.detail.design.id, {
+        name: 'missing-asset-client-error-recovery',
+        message: [
+          'Open the current exact candidate before changing source.',
+          'Use its rendered snapshot, console, and runtime errors to find the broken local asset and client error.',
+          'Remove both root causes. Preserve the light and dark themes, keyboard focus, reduced motion, and disclosure behavior.',
+          'After the correction, open and verify a fresh candidate. Exercise the disclosure again and use one screenshot if visual judgment helps.'
+        ].join(' '),
+        timeoutMs,
+        expectedQuestionRounds: 0,
+        acceptedOutcomes: ['READY', 'NO_CHANGE'],
+        browser: {
+          openAtLeast: 2,
+          screenshotsAtLeast: 1,
+          actions: ['click']
+        },
+        sourceChecks: [
+          ['preserves dark media', /prefers-color-scheme\s*:\s*dark/iu],
+          ['preserves disclosure state', /aria-expanded/iu]
+        ],
+        sourceRejectChecks: [
+          ['removes the missing local asset', /task-monki-missing-asset/iu],
+          ['removes the client error', /task-monki-client-error/iu]
+        ]
+      });
+      scenarios.push(recovered.result);
     }
 
     if (!focusedScenario || focusedScenario === 'hover-motion-frames') {
@@ -961,6 +1029,14 @@ export function observedBrowserOperations(
     if (!argumentsValue) return [];
     const operation = argumentsValue.operation;
     if (typeof operation !== 'string') return [];
+    if (operation === 'set_media') {
+      const colorScheme = argumentsValue.colorScheme;
+      return [
+        colorScheme === 'light' || colorScheme === 'dark'
+          ? `set_media:${colorScheme}`
+          : operation
+      ];
+    }
     if (operation !== 'act') return [operation];
     const action = argumentsValue.action;
     return [typeof action === 'string' ? `act:${action}` : 'act'];
@@ -1066,13 +1142,18 @@ function assertBrowserExpectations(
   if (expected.viewportsAtLeast !== undefined) {
     assertOperationCount(name, operations, 'set_viewport', expected.viewportsAtLeast);
   }
+  for (const colorScheme of expected.mediaSchemes ?? []) {
+    if (!operations.includes(`set_media:${colorScheme}`)) {
+      throw new Error(`${name} did not inspect ${colorScheme} media.`);
+    }
+  }
   for (const action of expected.actions ?? []) {
     if (!operations.includes(`act:${action}`)) {
       throw new Error(`${name} did not exercise the ${action} browser action.`);
     }
   }
   for (const operation of expected.operations ?? []) {
-    if (!operations.includes(operation)) {
+    if (countOperation(operations, operation) === 0) {
       throw new Error(`${name} did not use the ${operation} browser operation.`);
     }
   }
@@ -1093,7 +1174,9 @@ function assertOperationCount(
 }
 
 function countOperation(operations: readonly string[], operation: string): number {
-  return operations.filter((candidate) => candidate === operation).length;
+  return operations.filter(
+    (candidate) => candidate === operation || candidate.startsWith(`${operation}:`)
+  ).length;
 }
 
 function toolInvocationText(item: AgentItemRecord): string {
@@ -1192,10 +1275,38 @@ async function addRenderedDefect(detail: DesignDetailSnapshot): Promise<void> {
     [
       '',
       '<style id="task-monki-rendered-defect">',
-      'body { opacity: 0 !important; }',
+      'body { min-width: 1800px !important; }',
       '</style>',
       ''
     ].join('\n'),
+    'utf8'
+  );
+}
+
+async function addBrowserEvidenceDefects(
+  detail: DesignDetailSnapshot
+): Promise<void> {
+  const worktree = requireWorktree(detail);
+  const indexPath = path.join(worktree, 'index.html');
+  const appPath = path.join(worktree, 'app.js');
+  const index = await fs.readFile(indexPath, 'utf8');
+  if (!index.includes('</body>')) {
+    throw new Error('Design acceptance cannot add its browser defects without </body>.');
+  }
+  await fs.writeFile(
+    indexPath,
+    index.replace(
+      '</body>',
+      [
+        '  <img src="./assets/task-monki-missing-asset.png" alt="Missing test asset">',
+        '</body>'
+      ].join('\n')
+    ),
+    'utf8'
+  );
+  await fs.appendFile(
+    appPath,
+    '\nthrow new Error("task-monki-client-error");\n',
     'utf8'
   );
 }

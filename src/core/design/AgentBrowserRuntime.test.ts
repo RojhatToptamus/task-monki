@@ -238,6 +238,88 @@ describe('AgentBrowserRuntime', () => {
     }
   });
 
+  it('rejects an oversized screenshot before it reads the image into memory', async () => {
+    const root = await fixtureRoot();
+    const { runtime, calls } = await openScreenshotRuntime(
+      root,
+      async (outputPath) => {
+        await fs.writeFile(outputPath, Buffer.alloc(0));
+        await fs.truncate(outputPath, 5 * 1024 * 1024 + 1);
+        await fs.chmod(outputPath, 0o000);
+      }
+    );
+
+    await expect(
+      runtime.inspect(runId, { operation: 'screenshot' })
+    ).rejects.toThrow('exceeds the allowed size');
+    const screenshotPath = calls
+      .find((argv) => argv[1] === 'screenshot')
+      ?.find((value) => value.endsWith('.png'));
+    expect(screenshotPath).toBeDefined();
+    await expect(fs.lstat(screenshotPath!)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await runtime.closeRun(runId);
+  });
+
+  it('removes a screenshot whose PNG dimensions exceed the limit', async () => {
+    const root = await fixtureRoot();
+    const invalidPng = Buffer.from(png);
+    invalidPng.writeUInt32BE(5_121, 16);
+    const { runtime, calls } = await openScreenshotRuntime(
+      root,
+      (outputPath) => fs.writeFile(outputPath, invalidPng)
+    );
+
+    await expect(
+      runtime.inspect(runId, { operation: 'screenshot' })
+    ).rejects.toThrow('dimensions are outside the allowed bounds');
+    const screenshotPath = calls
+      .find((argv) => argv[1] === 'screenshot')
+      ?.find((value) => value.endsWith('.png'));
+    expect(screenshotPath).toBeDefined();
+    await expect(fs.lstat(screenshotPath!)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await runtime.closeRun(runId);
+  });
+
+  it('does not capture beyond the aggregate screenshot byte limit', async () => {
+    const root = await fixtureRoot();
+    const fourMegabytePng = Buffer.alloc(4 * 1024 * 1024);
+    png.copy(fourMegabytePng);
+    const { runtime, calls } = await openScreenshotRuntime(
+      root,
+      (outputPath) => fs.writeFile(outputPath, fourMegabytePng)
+    );
+
+    for (let index = 0; index < 8; index += 1) {
+      await runtime.inspect(runId, { operation: 'screenshot' });
+    }
+    await expect(
+      runtime.inspect(runId, { operation: 'screenshot' })
+    ).rejects.toThrow('temporary screenshot limit');
+    expect(calls.filter((argv) => argv[1] === 'screenshot')).toHaveLength(8);
+
+    await runtime.closeRun(runId);
+  });
+
+  it('does not launch another browser capture after the screenshot count limit', async () => {
+    const root = await fixtureRoot();
+    const { runtime, calls } = await openScreenshotRuntime(
+      root,
+      (outputPath) => fs.writeFile(outputPath, png)
+    );
+
+    for (let index = 0; index < 64; index += 1) {
+      await runtime.inspect(runId, { operation: 'screenshot' });
+    }
+    await expect(
+      runtime.inspect(runId, { operation: 'screenshot' })
+    ).rejects.toThrow('temporary screenshot limit');
+    expect(calls.filter((argv) => argv[1] === 'screenshot')).toHaveLength(64);
+
+    await runtime.closeRun(runId);
+  });
+
   it('fails startup recovery when an owned browser cannot be closed', async () => {
     const root = await fixtureRoot();
     let rejectClose = false;
@@ -333,4 +415,44 @@ function daemonPidPath(environment: NodeJS.ProcessEnv | undefined): string {
   const session = environment?.AGENT_BROWSER_SESSION;
   if (!socketRoot || !session) throw new Error('Missing daemon ownership paths.');
   return path.join(socketRoot, 'namespaces', session, 'run', `${session}.pid`);
+}
+
+async function openScreenshotRuntime(
+  root: string,
+  capture: (outputPath: string) => Promise<unknown>
+): Promise<{ runtime: AgentBrowserRuntime; calls: string[][] }> {
+  const calls: string[][] = [];
+  const execute = vi.fn(async (
+    _executable: string,
+    argv: string[],
+    options?: { env?: NodeJS.ProcessEnv }
+  ) => {
+    calls.push(argv);
+    if (argv[0] === '--version') return { stdout: 'agent-browser 0.34.0\n', stderr: '' };
+    if (argv[1] === 'open') {
+      const pidPath = daemonPidPath(options?.env);
+      await fs.mkdir(path.dirname(pidPath), { recursive: true });
+      await fs.writeFile(pidPath, String(process.pid));
+    }
+    if (argv[1] === 'snapshot') return json('button [ref=e1]');
+    if (argv[1] === 'screenshot') {
+      const outputPath = argv.find((value) => value.endsWith('.png'));
+      if (!outputPath) throw new Error('Missing screenshot path.');
+      await capture(outputPath);
+      return json('captured');
+    }
+    if (argv[1] === 'close' && !argv.includes('--all')) {
+      await fs.unlink(daemonPidPath(options?.env));
+    }
+    return json('(no output)');
+  });
+  const runtime = await runtimeFixture(root, execute);
+  await runtime.openCandidate({
+    designId,
+    runId,
+    generationId: 'candidate-1',
+    origin: 'http://tm-1234567890abcdef1234567890abcdef.localhost:41000/',
+    lease: { proxyUrl: 'http://127.0.0.1:42000', async close() {} }
+  });
+  return { runtime, calls };
 }

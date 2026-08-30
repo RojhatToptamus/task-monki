@@ -1383,7 +1383,7 @@
 
 .tm-design-canvas__viewport {
   position: relative;
-  width: 100%;
+  width: min(1280px, 100%);
   min-width: 280px;
   min-height: 100%;
   overflow: hidden;

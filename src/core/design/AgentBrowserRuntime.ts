@@ -490,6 +490,13 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     operation: Extract<InspectDesignOperation, { operation: 'screenshot' }>
   ): Promise<DesignBrowserToolResult> {
     if (operation.ref) requireCurrentRef(operation.ref, session.refs);
+    const usage = this.imageUsage.get(session.runId) ?? { bytes: 0, count: 0 };
+    if (
+      usage.count >= MAX_RUN_SCREENSHOTS ||
+      usage.bytes >= MAX_RUN_IMAGE_BYTES
+    ) {
+      throw new Error('This Design Run reached its temporary screenshot limit.');
+    }
     const screenshotPath = path.join(session.root, `screenshot-${randomUUID()}.png`);
     const args = operation.ref
       ? ['screenshot', operation.ref, screenshotPath]
@@ -497,16 +504,23 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     if (operation.fullPage) args.push('--full');
     try {
       await this.runCli(session.environment, args, session.controller.signal);
-      const bytes = await fs.readFile(screenshotPath);
-      if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+      const screenshot = await fs.lstat(screenshotPath);
+      if (screenshot.isSymbolicLink() || !screenshot.isFile()) {
+        throw new Error('Design browser returned an invalid screenshot file.');
+      }
+      if (screenshot.size === 0 || screenshot.size > MAX_IMAGE_BYTES) {
         throw new Error('Design screenshot exceeds the allowed size.');
       }
-      const usage = this.imageUsage.get(session.runId) ?? { bytes: 0, count: 0 };
-      if (
-        usage.count >= MAX_RUN_SCREENSHOTS ||
-        usage.bytes + bytes.byteLength > MAX_RUN_IMAGE_BYTES
-      ) {
+      if (usage.bytes + screenshot.size > MAX_RUN_IMAGE_BYTES) {
         throw new Error('This Design Run reached its temporary screenshot limit.');
+      }
+      const bytes = await fs.readFile(screenshotPath);
+      if (
+        bytes.byteLength !== screenshot.size ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > MAX_IMAGE_BYTES
+      ) {
+        throw new Error('Design screenshot exceeds the allowed size.');
       }
       const { width, height } = pngDimensions(bytes);
       this.imageUsage.set(session.runId, {

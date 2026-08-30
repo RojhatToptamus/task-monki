@@ -1385,11 +1385,18 @@ describe('mounted Design workspace', () => {
     expect(screen.getByText('v1').getAttribute('aria-current')).toBe('true');
     expect(screen.getByRole('button', { name: 'Desktop' }).getAttribute('aria-pressed'))
       .toBe('true');
+    expect(view.container.querySelector('.tm-design-canvas__viewport')?.getAttribute('data-device'))
+      .toBe('desktop');
     fireEvent.click(screen.getByRole('button', { name: 'Tablet' }));
     expect(screen.getByRole('button', { name: 'Tablet' }).getAttribute('aria-pressed'))
       .toBe('true');
     expect(view.container.querySelector('.tm-design-canvas__viewport')?.getAttribute('data-device'))
       .toBe('tablet');
+    fireEvent.click(screen.getByRole('button', { name: 'Phone' }));
+    expect(screen.getByRole('button', { name: 'Phone' }).getAttribute('aria-pressed'))
+      .toBe('true');
+    expect(view.container.querySelector('.tm-design-canvas__viewport')?.getAttribute('data-device'))
+      .toBe('phone');
     fireEvent.click(screen.getByRole('button', { name: 'Reload preview' }));
     expect(onRefreshCanvas).toHaveBeenCalledWith({
       designId: 'design-1',
