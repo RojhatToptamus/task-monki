@@ -178,6 +178,9 @@ const MAX_TRACKED_ASSISTANT_USAGE_RUNS = 2_048;
 const MAX_INBOUND_RESYNC_MS = 15_000;
 const MAX_RUNTIME_DELTA_BYTES = 64 * 1024;
 const OPENCODE_DESIGN_MCP_TIMEOUT_MS = 120_000;
+const QUALIFIED_OPENCODE_DESIGN_RUNTIME_VERSION = '1.18.25';
+const QUALIFIED_OPENCODE_DESIGN_PROVIDER = 'openai';
+const QUALIFIED_OPENCODE_DESIGN_MODEL = 'gpt-5.6-luna';
 const OPENCODE_CATALOG_EVENTS = new Set([
   'models-dev.refreshed',
   'catalog.updated',
@@ -6581,12 +6584,21 @@ function withOpenCodeDesignSupport(
   model: AgentModel,
   runtimeVersion: string
 ): AgentModel {
+  const designQualified =
+    runtimeVersion === QUALIFIED_OPENCODE_DESIGN_RUNTIME_VERSION &&
+    model.modelProvider === QUALIFIED_OPENCODE_DESIGN_PROVIDER &&
+    model.model === QUALIFIED_OPENCODE_DESIGN_MODEL;
   return {
     ...model,
-    designSupport: {
-      maturity: 'unsupported',
-      detail: `OpenCode ${runtimeVersion} model ${model.modelProvider ?? 'unknown'}/${model.model} has not passed the required packaged Design technical qualification.`
-    }
+    designSupport: designQualified
+      ? {
+          maturity: 'stable',
+          detail: `OpenCode ${QUALIFIED_OPENCODE_DESIGN_RUNTIME_VERSION} with ${QUALIFIED_OPENCODE_DESIGN_PROVIDER}/${QUALIFIED_OPENCODE_DESIGN_MODEL} passed the packaged Design instruction, skill, MCP image-result, browser, candidate, and cleanup qualification.`
+        }
+      : {
+          maturity: 'unsupported',
+          detail: `OpenCode ${runtimeVersion} model ${model.modelProvider ?? 'unknown'}/${model.model} has not passed the required packaged Design technical qualification.`
+        }
   };
 }
 

@@ -24,7 +24,7 @@ Provider milestone 3 added provider-neutral selection and evidence.
 Each adapter still owns its native attachment transport.
 Provider milestone 4 made Design provider-neutral.
 It added one app-owned `inspect_design` contract and one packaged MCP bridge for OpenCode and ACP.
-Exact runtime and model qualification controls which providers can run Design.
+Exact runtime, model provider where applicable, and model qualification controls which providers can run Design.
 This qualification is a technical product gate.
 It is not a score for one generated design.
 
@@ -249,8 +249,8 @@ They do not own a second provider lifecycle.
 `DesignUpdateCoordinator` uses the normal Task orchestrator.
 Its source, Git, Preview, browser, candidate, and Ready work is provider-neutral.
 
-Design creation stores the selected runtime and exact model.
-The shared support projection enables Design only when that exact runtime version and model passed technical qualification.
+Design creation stores the selected runtime, model provider where applicable, and exact model.
+The shared support projection enables Design only when that exact runtime version, model provider where applicable, and model passed technical qualification.
 Each adapter applies the app-owned instructions and skills through its native protocol.
 
 Codex maps `inspect_design` to its native dynamic-tool call.
@@ -288,10 +288,10 @@ This table describes current code, not provider protocol potential.
 | Queue next message | Yes | Yes | Yes | Yes | Yes |
 | Live steering | Yes | No | No | No | No |
 | Managed attachments | Text and image | Text and model-gated image | Text and exact-qualified Grok 4.6 PNG image | Text and exact-qualified Composer 2.5 PNG image | Text and exact-qualified Sonnet PNG image |
-| Prompt refinement | Yes | Yes | No | Yes | Yes; profile qualified with Sonnet |
-| Review provider | Yes | Yes | No | Yes | Yes; profile qualified with Sonnet |
-| Discourse participant | Yes | Yes | No | Yes | Yes; profile qualified with Sonnet |
-| Design | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | No current qualified pair | No current qualified pair | Composer 2.5 on Cursor 2026.08.25-3e8eec8 | Claude Agent ACP 0.70.0 with Sonnet |
+| Prompt refinement | Yes | Yes | No | Yes | Yes; profile-wide |
+| Review provider | Yes | Yes | No | Yes | Yes; profile-wide |
+| Discourse participant | Yes | Yes | No | Yes | Yes; profile-wide |
+| Design | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | OpenCode 1.18.25 with `openai/gpt-5.6-luna` | No current qualified pair | Composer 2.5 on Cursor 2026.08.25-3e8eec8 | Claude Agent ACP 0.70.0 with Sonnet |
 | Provider resume | Yes | Yes | Negotiated | Negotiated | Yes for Claude Agent ACP 0.70.0 |
 | Native provider fork | Yes | Yes | No | No | No |
 | User-facing fork alternative | Yes | Yes | Yes | Yes | Yes |
@@ -308,10 +308,10 @@ The Design row requires technical product qualification, not only a working tool
 
 | Current failure | Root cause | Classification |
 | --- | --- | --- |
-| An unlisted Design runtime and model pair | The exact pair has not passed technical Design qualification. | Product qualification |
+| An unlisted Design runtime, provider, and model combination | The exact combination has not passed technical Design qualification. | Product qualification |
 | Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna Design | The old pair has no current technical qualification. Its generated backdrop defect was not a transport failure. | Unsupported exact pair |
 | OpenCode 1.18.25 with MiMo V2.5 Design | Two runs proved the transport but did not use the required Design skills and browser flow reliably. | Exact model behavior |
-| Grok Build 1.0.13 with Grok 4.6 Design | Two active runs did not produce durable Ready within 900 seconds. | Bounded completion failure |
+| Grok Build 1.0.13 with Grok 4.6 Design | Three active runs, including an explicit high-reasoning run, did not produce durable Ready within 900 seconds. | Bounded completion failure |
 | OpenCode image attachment with a text-only model | The adapter rejects it before submission. | Model input limit |
 | ACP image attachment without an exact qualification entry | The adapter rejects it before submission. | Profile and model limit |
 | Grok ACP read-only workflows | Plan mode still permits mutation through shell, MCP, or subagent work. | Provider policy limit |
@@ -373,10 +373,10 @@ Every enabled cell still requires a compatible packaged runtime and selected mod
 | Active conversation | Live steer | Queue fallback | Queue fallback | Queue fallback | Queue fallback |
 | Text attachment | Exact managed path after qualification; bounded inline fallback | `data:` file part | Embedded text resource | Bounded text block | Embedded text resource |
 | Image attachment | `localImage`, model-gated | `data:` file part, model-gated | Native PNG block for the exact Grok 1.0.13 and Grok 4.6 pair | Native PNG block for the exact Cursor 2026.08.25-3e8eec8 and Composer 2.5 pair | Native image block for Claude Agent ACP 0.70.0 with Sonnet |
-| Prompt refinement | Shared short turn | Shared short turn | Disabled by read-only policy | Shared short turn | Shared short turn; profile qualified with Sonnet |
-| Review | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile qualified with Sonnet |
-| Discourse | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile qualified with Sonnet |
-| Design | Native tool transport; exact Codex 0.151.0-alpha.7.2 and GPT-5.6-Luna | Packaged MCP bridge; no current qualified pair | Packaged MCP bridge; no current qualified pair | Packaged MCP bridge; exact Cursor and Composer pair | Packaged MCP bridge; exact Claude Agent ACP 0.70.0 and Sonnet |
+| Prompt refinement | Shared short turn | Shared short turn | Disabled by read-only policy | Shared short turn | Shared short turn; profile-wide |
+| Review | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile-wide |
+| Discourse | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Shared read-only turn; profile-wide |
+| Design | Native tool transport; exact Codex 0.151.0-alpha.7.2 and GPT-5.6-Luna | Packaged MCP bridge; exact OpenCode 1.18.25 and `openai/gpt-5.6-luna` | Packaged MCP bridge; no current qualified pair | Packaged MCP bridge; exact Cursor and Composer pair | Packaged MCP bridge; exact Claude Agent ACP 0.70.0 and Sonnet |
 | Resume | Native | Native | Negotiated or new session | Negotiated or new session | Negotiated or new session |
 | Fork product state | New Task session | New Task session | New Task session | New Task session | New Task session |
 | Provider cleanup | Best effort | Best effort | Best effort | Best effort | Best effort |
@@ -567,7 +567,7 @@ Other Grok versions and models remain text-only.
 Milestone 4 reuses this effective image capability.
 It adds no second image compatibility table or override registry.
 Design qualification remains separate because `inspect_design` returns images through tool-result transport.
-The Design gate proves technical behavior for an exact runtime and model pair.
+The Design gate proves technical behavior for an exact runtime, model provider where applicable, and model combination.
 It does not grade one generated design.
 
 Core does the final live verification before turn submission.
@@ -982,6 +982,15 @@ The packaged OpenCode 1.18.25 tests established these rules:
 - Task Monki registers the bridge through the native `POST /mcp` endpoint.
 - Task Monki disconnects the bridge through `POST /mcp/:name/disconnect` when the Design session ends.
 - OpenCode stops the MCP child when it disconnects the server or stops its supervisor.
+- A complete packaged prompt run proved `openai/gpt-5.6-luna` operational.
+- Task Monki builds the live OpenCode catalog from the server `/provider` response.
+  That response can mark a stored credential as connected even when its provider is not operational.
+  In this installation, GitHub Copilot appeared in that response, but native model discovery and prompt delivery returned `Provider not found`.
+  Task Monki does not add a second CLI catalog; a stale entry can remain visible until prompt failure or a catalog refresh.
+- Direct provider `xai` was not connected.
+  The static `github-copilot/grok-4.6` and `xai/grok-4.6` entries therefore did not qualify as usable OpenCode routes.
+- `OpenCode 1.18.25` with `openai/gpt-5.6-luna` passed the complete packaged Design gate at medium reasoning.
+  Other providers and models remain Design-unqualified.
 
 Task Monki revokes the active Design grant before it waits for an uncertain OpenCode shutdown.
 
@@ -1256,7 +1265,7 @@ Current profile results:
 - Grok ACP stays disabled because plan mode can still mutate through shell, MCP, or subagents.
 - Claude Agent ACP 0.70.0 uses native plan mode.
   The packaged mutation test selected Sonnet.
-  It rejects tool use and passed the harmless mutation test with the repository unchanged.
+  Task Monki rejected permission requests, and the repository remained unchanged after the mutation attempt.
 
 OpenCode and ACP processes still run with normal user permissions.
 Their native policies are not operating-system sandboxes.
@@ -1420,7 +1429,7 @@ Do not change the shared composer or `AttachmentFileStore` ownership model.
 
 Status: implemented on 2026-08-30.
 
-1. Design creation and persistence store the selected runtime and exact model.
+1. Design creation and persistence store the selected runtime, model provider where applicable, and exact model.
 2. Each adapter maps the shared instruction and skill bundle to its native protocol.
 3. One shared `inspect_design` contract now serves every adapter.
 4. Codex keeps its native tool path.
@@ -1435,10 +1444,11 @@ The current packaged results are:
 | Exact provider pair | Technical result | Regression and quality evidence | Product status |
 | --- | --- | --- | --- |
 | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Passed instructions, skills, native tools, image results, fresh candidates, Ready, Stop, and cleanup. | Passed form, menu and keyboard, responsive, motion, correction, copy-only, no-change, and cancellation tests. One earlier run misread `TM-7Q4` as `K7M4`; a repeat read it correctly. | Enabled. The visual miss was model-output variation, not a bridge failure. |
+| OpenCode 1.18.25 with `openai/gpt-5.6-luna` | Passed instructions, eight app-owned skills, MCP image results, exact and fresh candidates, Ready, Stop, and cleanup. | An earlier focused menu run passed. The complete run passed form, menu and keyboard, responsive, motion and reduced motion, correction, `TM-7Q4`, copy-only, no-change, cancellation, and Ready preservation. | Enabled for this exact runtime, provider, and model. |
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Passed the complete technical gate. | Passed all nine regression scenarios. A later menu regression passed after Task Monki omitted the unadvertised additional-directories field. It read eight app-owned skills and used MCP and browser tools. | Enabled. |
 | Claude Agent ACP 0.70.0 with Sonnet | Passed the complete technical gate. | Passed form, menu and keyboard, responsive, motion, fresh correction, `TM-7Q4`, copy-only, no-change, cancellation, and cleanup across focused runs. | Enabled for exact model `sonnet`. |
-| OpenCode 1.18.25 with `opencode/mimo-v2.5-free` | HTTP, MCP, Preview, candidate, screenshots, and Ready worked. | Two runs failed reliable skill and browser use. The first read no Design skill. The second omitted browser verification and used invalid bare element references. | Disabled for Design. |
-| Grok Build 1.0.13 with Grok 4.6 | Skills, MCP, screenshots, candidates, correction, and cleanup worked. Provider events continued without an adapter stall. | Two runs stayed active for 900 seconds and did not settle durable Ready. | Disabled for Design because it repeatedly exceeded the product time bound. |
+| OpenCode 1.18.25 with `opencode/mimo-v2.5-free` | HTTP, MCP, Preview, candidate, screenshots, and Ready worked. | Two runs failed reliable skill and browser use. The first read no Design skill. The second omitted browser verification and used invalid bare element references. | This exact pair remains disabled for Design. |
+| Grok Build 1.0.13 with Grok 4.6 | Skills, MCP, screenshots, candidates, correction, and cleanup worked. Provider events continued without an adapter stall. | Three runs stayed active for 900 seconds and did not settle durable Ready. The explicit high-reasoning run spent 833 seconds in 41 provider model calls. | Disabled for Design because it repeatedly exceeded the product time bound. |
 | Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna | Native tool transport worked. | A generated menu kept a pointer-blocking backdrop. | Unsupported. The source defect was model behavior, not a transport failure. |
 
 A transport probe alone never enables Design.
@@ -1448,10 +1458,11 @@ Representative design tasks remain regression and quality evidence.
 One generated defect or visual miss does not globally disable working infrastructure.
 A repeatable failure to finish within a product time bound can keep a pair disabled.
 
-Run the shared acceptance harness with the exact runtime and model:
+Run the shared acceptance harness with the exact runtime, model provider where applicable, and model:
 
 ```sh
 TASK_MONKI_DESIGN_AGENT_RUNTIME_ID=<runtime-id> \
+TASK_MONKI_DESIGN_AGENT_MODEL_PROVIDER=<provider-id> \
 TASK_MONKI_DESIGN_AGENT_MODEL=<model-id> \
 npm run test:design-agent
 ```
@@ -1508,8 +1519,9 @@ The final real-provider results are:
 | Exact provider pair | Current result | Disabled behavior and reason |
 | --- | --- | --- |
 | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Normal Task, read-only mutation denial, text, PNG, and Design qualification passed. | Other Codex runtime and model pairs stay Design-unqualified. |
-| OpenCode 1.18.25 with MiMo V2.5 | Normal Task, read-only mutation denial, text, and image checks passed. Design transport also worked. | Design stays disabled because two runs did not use the required skills and browser flow reliably. |
-| Grok Build 1.0.13 with Grok 4.6 | Normal Task, text, and PNG checks passed. The report records its false image capability advertisement. Design transport and cleanup worked. | Read-only turns stay disabled because plan mode can mutate through shell, MCP, or subagents. Design stays disabled because two runs did not settle within 900 seconds. |
+| OpenCode 1.18.25 with `openai/gpt-5.6-luna` | The complete packaged Design qualification passed at medium reasoning. | Other OpenCode provider and model pairs stay Design-unqualified. |
+| OpenCode 1.18.25 with MiMo V2.5 | Normal Task, read-only mutation denial, text, and image checks passed. Design transport also worked. | This exact pair stays Design-disabled because two runs did not use the required skills and browser flow reliably. |
+| Grok Build 1.0.13 with Grok 4.6 | Normal Task, text, and PNG checks passed. The report records its false image capability advertisement. Design transport and cleanup worked. | Read-only turns stay disabled because plan mode can mutate through shell, MCP, or subagents. Design stays disabled because three runs did not settle within 900 seconds. |
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Normal Task, read-only mutation denial, text, PNG, and all nine Design regression scenarios passed. | No enabled workflow failed qualification. |
 | Claude Agent ACP 0.70.0 with Sonnet | Normal Task, read-only mutation denial, text, PNG, Design qualification, and cleanup passed. | Default and Haiku stay image- and Design-unqualified. Opus was not tested. |
 
@@ -1681,7 +1693,7 @@ Disable only the failed content kind, model, or encoded-size range with a clear 
 
 ### Later milestone uncertainties
 
-1. Repeat technical Design qualification before enabling any new or changed runtime and model pair.
+1. Repeat technical Design qualification before enabling any new or changed runtime, model provider, and model combination.
 2. Qualify Claude default, Haiku, or Opus only when a product need selects that exact model.
 3. Qualify Grok read-only support only after its packaged profile denies every repository mutation path.
 4. Record the exact provider-session deletion meaning for each adapter.

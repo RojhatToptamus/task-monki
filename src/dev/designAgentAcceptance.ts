@@ -20,6 +20,7 @@ import {
   resolveDesignBrowserSocketRoot
 } from '../core/design/AgentBrowserRuntimePath';
 import { INSPECT_DESIGN_TOOL_NAME } from '../core/design/DesignClientToolContract';
+import { MemoryAppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
@@ -147,7 +148,7 @@ async function main(): Promise<void> {
 
   try {
     store = new FileTaskStore(path.join(root, 'store'));
-    service = createService(root, store);
+    service = createService(root, store, runtimeId);
     await service.init();
     let capabilities = await service.getAgentRuntimeCatalog();
     let runtime = capabilities.runtimes.find(
@@ -466,7 +467,11 @@ async function main(): Promise<void> {
   console.log(`[design-agent] ${JSON.stringify(report, null, 2)}`);
 }
 
-function createService(root: string, store: FileTaskStore): TaskManagerService {
+function createService(
+  root: string,
+  store: FileTaskStore,
+  defaultRuntimeId: string
+): TaskManagerService {
   const packagedResourcesRoot = optionalText(
     process.env.TASK_MONKI_DESIGN_PACKAGED_RESOURCES_ROOT
   );
@@ -506,6 +511,8 @@ function createService(root: string, store: FileTaskStore): TaskManagerService {
     undefined,
     {
       agentCwd: root,
+      defaultAgentRuntimeId: defaultRuntimeId,
+      appSettingsStore: new MemoryAppSettingsStore({ defaultRuntimeId }),
       worktreeRoot: path.join(root, 'normal-worktrees'),
       previewEnabled: true,
       previewReconcile: false,
@@ -981,12 +988,18 @@ function isInspectDesignToolCall(
   if (!isRecord(item.payload)) return false;
   if (item.type === 'DYNAMIC_TOOL_CALL') {
     return (
+      runtimeId === 'codex' &&
       item.payload.type === 'dynamicToolCall' &&
       item.payload.tool === INSPECT_DESIGN_TOOL_NAME
     );
   }
   if (item.type !== 'MCP_TOOL_CALL') return false;
-  if (item.payload.tool === OPENCODE_DESIGN_TOOL_NAME) return true;
+  if (
+    runtimeId === 'opencode' &&
+    item.payload.tool === OPENCODE_DESIGN_TOOL_NAME
+  ) {
+    return true;
+  }
   return isTaskMonkiInspectDesignToolCall(runtimeId, {
     title: typeof item.payload.title === 'string' ? item.payload.title : undefined,
     rawInput: item.payload.rawInput,

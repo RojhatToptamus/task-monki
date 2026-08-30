@@ -127,6 +127,15 @@ describe('Design agent visual-fact qualification', () => {
     ).toEqual(['screenshot']);
     expect(
       observedBrowserOperations('cursor-agent-acp', [
+        item('DYNAMIC_TOOL_CALL', {
+          type: 'dynamicToolCall',
+          tool: 'inspect_design',
+          arguments: { operation: 'observe' }
+        }),
+        item('MCP_TOOL_CALL', {
+          tool: 'task_monki_design_inspect_design',
+          state: { input: { operation: 'screenshot' } }
+        }),
         item('MCP_TOOL_CALL', {
           title: 'mcp__task-monki-design-tools__inspect_design',
           rawInput: { operation: 'screenshot' },

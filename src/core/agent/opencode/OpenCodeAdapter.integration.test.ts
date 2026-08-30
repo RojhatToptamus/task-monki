@@ -302,7 +302,7 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
-  it('keeps OpenCode Design unavailable without a packaged technical qualification', async () => {
+  it('qualifies only the exact packaged OpenCode Design runtime, provider, and model', async () => {
     const runtime = {
       ...fakeRuntime(),
       version: '1.18.25',
@@ -318,26 +318,49 @@ describe('OpenCodeAdapter', () => {
       designClientToolBridge: bridge.api
     });
     const catalog = {
-      connected: ['opencode'],
-      default: { opencode: 'mimo-v2.5-free' },
-      all: [{
-        id: 'opencode',
-        name: 'OpenCode',
-        models: {
-          'mimo-v2.5-free': {
-            id: 'mimo-v2.5-free',
-            name: 'MiMo V2.5 Free',
-            status: 'active',
-            capabilities: { input: { text: true, image: true } }
-          },
-          unqualified: {
-            id: 'unqualified',
-            name: 'Unqualified',
-            status: 'active',
-            capabilities: { input: { text: true, image: true } }
+      connected: ['opencode', 'openai'],
+      default: {
+        opencode: 'mimo-v2.5-free',
+        openai: 'gpt-5.6-luna'
+      },
+      all: [
+        {
+          id: 'opencode',
+          name: 'OpenCode',
+          models: {
+            'mimo-v2.5-free': {
+              id: 'mimo-v2.5-free',
+              name: 'MiMo V2.5 Free',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            },
+            'gpt-5.6-luna': {
+              id: 'gpt-5.6-luna',
+              name: 'Wrong-provider Luna',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            }
+          }
+        },
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          models: {
+            'gpt-5.6-luna': {
+              id: 'gpt-5.6-luna',
+              name: 'GPT-5.6 Luna',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            },
+            unqualified: {
+              id: 'unqualified',
+              name: 'Unqualified',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            }
           }
         }
-      }]
+      ]
     };
     fixture.harness.catalogs.set(path.resolve(fixture.appCwd), catalog);
     fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), catalog);
@@ -354,6 +377,14 @@ describe('OpenCodeAdapter', () => {
     expect(await fixture.adapter.listModels()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
+          modelProvider: 'openai',
+          model: 'gpt-5.6-luna',
+          designSupport: {
+            maturity: 'stable',
+            detail: expect.stringContaining('passed the packaged Design')
+          }
+        }),
+        expect.objectContaining({
           modelProvider: 'opencode',
           model: 'mimo-v2.5-free',
           designSupport: {
@@ -363,6 +394,14 @@ describe('OpenCodeAdapter', () => {
         }),
         expect.objectContaining({
           modelProvider: 'opencode',
+          model: 'gpt-5.6-luna',
+          designSupport: {
+            maturity: 'unsupported',
+            detail: expect.stringContaining('has not passed')
+          }
+        }),
+        expect.objectContaining({
+          modelProvider: 'openai',
           model: 'unqualified',
           designSupport: {
             maturity: 'unsupported',
@@ -396,7 +435,8 @@ describe('OpenCodeAdapter', () => {
     await unknownVersion.adapter.initialize();
     expect(
       (await unknownVersion.adapter.listModels()).find(
-        (model) => model.model === 'mimo-v2.5-free'
+        (model) =>
+          model.modelProvider === 'openai' && model.model === 'gpt-5.6-luna'
       )?.designSupport
     ).toMatchObject({ maturity: 'unsupported' });
     await unknownVersion.adapter.shutdown();
