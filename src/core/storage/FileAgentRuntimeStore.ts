@@ -41,6 +41,7 @@ import {
 import {
   assertAccessEpochMatches,
   assertAgentOwnerScope,
+  assertAgentRuntimePurposeScope,
   assertAgentRunScope,
   createAgentSessionAccessEpoch
 } from '../agent/AgentRuntimeOwnership';
@@ -2612,6 +2613,26 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     );
   }
 
+  async purgePreviewRecipeGeneration(
+    taskId: string,
+    generationId: string
+  ): Promise<{
+    sessionCount: number;
+    runCount: number;
+    artifactCount: number;
+    queueEntryCount: number;
+  }> {
+    requireSafeId(taskId, 'preview-recipe task id');
+    requireSafeId(generationId, 'preview-recipe generation id');
+    return this.purgeRuntimeOwner(
+      (owner) =>
+        owner?.kind === 'PREVIEW_RECIPE_GENERATION' &&
+        owner.taskId === taskId &&
+        owner.generationId === generationId,
+      'preview-recipe generation'
+    );
+  }
+
   private async purgeRuntimeOwner(
     owns: (owner: AgentOwnerScope | undefined) => boolean,
     label: string
@@ -3123,6 +3144,7 @@ function insertRuntimeRun(
   }
   assertAgentOwnerScope(input.owner);
   assertAgentRunScope(input.scope, input.owner);
+  assertAgentRuntimePurposeScope(input.purpose, input.scope);
   const session = requireSession(draft, input.sessionId);
   if (
     agentOwnerScopeKey(session.owner) !== agentOwnerScopeKey(input.owner) ||
@@ -3558,7 +3580,7 @@ function validateState(state: AgentRuntimeStoreState): void {
         throw new Error('Task agent runtime session context is invalid.');
       }
     } else if (session.taskContext !== undefined) {
-      throw new Error('Discourse agent runtime sessions cannot carry Task context.');
+      throw new Error('Non-Task agent runtime sessions cannot carry Task context.');
     }
     if (session.providerSessionId !== undefined) {
       providerSessionIds.add(
@@ -3582,6 +3604,7 @@ function validateState(state: AgentRuntimeStoreState): void {
   for (const run of state.runs) {
     assertAgentOwnerScope(run.owner);
     assertAgentRunScope(run.scope, run.owner);
+    assertAgentRuntimePurposeScope(run.purpose, run.scope);
     const session = sessions.get(run.sessionId);
     if (
       !session ||

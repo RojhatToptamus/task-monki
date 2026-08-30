@@ -1233,6 +1233,75 @@ describe('FileAgentRuntimeStore', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('purges only the exact settled Preview recipe generation', async () => {
+    const fixture = await storeFixture();
+    const createGeneration = async (generationId: string) => {
+      const owner: AgentOwnerScope = {
+        kind: 'PREVIEW_RECIPE_GENERATION',
+        taskId: 'task-1',
+        generationId
+      };
+      const scope: AgentRunScope = { ...owner };
+      const session = await fixture.store.createSession(
+        sessionInput(
+          `${generationId}-session`,
+          owner,
+          `create-${generationId}-session`
+        )
+      );
+      const run = await fixture.store.createRun({
+        ...runInput(
+          `${generationId}-run`,
+          session,
+          scope,
+          `create-${generationId}-run`
+        ),
+        purpose: 'PREVIEW_RECIPE_GENERATION'
+      });
+      const artifact = await fixture.store.createArtifact({
+        id: run.outputArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'OUTPUT',
+        clientOperationId: `create-${generationId}-output`,
+        content: `Preview recipe ${generationId}`
+      });
+      await fixture.store.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          status: 'FAILED',
+          delivery: 'NOT_DELIVERED',
+          terminalReason: 'Synthetic terminal generation.',
+          endedAt: '2026-07-13T00:00:20.000Z'
+        },
+        `finish-${generationId}`
+      );
+      return { artifact, run, session };
+    };
+    const target = await createGeneration('generation-1');
+    const retained = await createGeneration('generation-2');
+
+    await expect(
+      fixture.store.purgePreviewRecipeGeneration('task-1', 'generation-1')
+    ).resolves.toEqual({
+      sessionCount: 1,
+      runCount: 1,
+      artifactCount: 1,
+      queueEntryCount: 0
+    });
+    await expect(fixture.store.getSession(target.session.id)).resolves.toBeUndefined();
+    await expect(fixture.store.getRun(target.run.id)).resolves.toBeUndefined();
+    await expect(fixture.store.getSession(retained.session.id)).resolves.toBeDefined();
+    await expect(fixture.store.getRun(retained.run.id)).resolves.toBeDefined();
+    await expect(
+      fs.stat(path.join(fixture.root, 'artifacts', target.artifact.storageKey))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fs.stat(path.join(fixture.root, 'artifacts', retained.artifact.storageKey))
+    ).resolves.toBeDefined();
+  });
+
   it('repairs pre-publish crashes and forces restart after a post-rename failure', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-runtime-crash-'));
     let fileSyncs = 0;

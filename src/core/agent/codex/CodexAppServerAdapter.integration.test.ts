@@ -42,7 +42,43 @@ import {
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
-  it('runs a scoped Discourse turn without fabricating task-owned state', async () => {
+  it.each([
+    {
+      workflow: 'Discourse',
+      owner: {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-1',
+        stableParticipantId: 'participant-1'
+      },
+      scope: {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-1',
+        waveId: 'wave-1',
+        jobId: 'job-1',
+        contextSnapshotId: 'context-1',
+        attemptId: 'attempt-1'
+      },
+      purpose: 'DISCOURSE_ANSWER' as const
+    },
+    {
+      workflow: 'Preview recipe generation',
+      owner: {
+        kind: 'PREVIEW_RECIPE_GENERATION' as const,
+        taskId: 'task-1',
+        generationId: 'generation-1'
+      },
+      scope: {
+        kind: 'PREVIEW_RECIPE_GENERATION' as const,
+        taskId: 'task-1',
+        generationId: 'generation-1'
+      },
+      purpose: 'PREVIEW_RECIPE_GENERATION' as const
+    }
+  ])('runs a scoped $workflow turn without fabricating task-owned state', async ({
+    owner,
+    scope,
+    purpose
+  }) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
     const executable = await writeFakeCodexExecutable(dir, 'scoped');
     const workspacePath = path.join(dir, 'read-only-workspace');
@@ -69,11 +105,6 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     try {
       await adapter.initialize();
-      const owner = {
-        kind: 'DISCOURSE' as const,
-        conversationId: 'conversation-1',
-        stableParticipantId: 'participant-1'
-      };
       const sessionId = 'scoped-session-1';
       const executionContext = await adapter.buildExecutionContext({
         sessionId,
@@ -115,17 +146,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       const run = await runtime.createRun({
         id: 'scoped-run-1',
         owner,
-        scope: {
-          kind: 'DISCOURSE',
-          conversationId: owner.conversationId,
-          waveId: 'wave-1',
-          jobId: 'job-1',
-          contextSnapshotId: 'context-1',
-          attemptId: 'attempt-1'
-        },
+        scope,
         sessionId: session.id,
         sessionAccessEpoch: session.accessEpoch.epoch,
-        purpose: 'DISCOURSE_ANSWER',
+        purpose,
         generationKey: 'generation-1',
         clientOperationId: 'create-scoped-run',
         requestedSettings: executionContext.modelSettings,

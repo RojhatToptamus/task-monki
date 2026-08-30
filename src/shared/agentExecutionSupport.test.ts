@@ -12,6 +12,9 @@ describe('projectAgentExecutionSupport', () => {
     expect(projectAgentExecutionSupport(capabilities, 'PROMPT_REFINEMENT')).toEqual({
       supported: true
     });
+    expect(
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+    ).toEqual({ supported: true });
     expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
       supported: true
     });
@@ -33,7 +36,12 @@ describe('projectAgentExecutionSupport', () => {
       }
     });
 
-    for (const operation of ['PROMPT_REFINEMENT', 'REVIEW', 'DISCOURSE'] as const) {
+    for (const operation of [
+      'PROMPT_REFINEMENT',
+      'PREVIEW_RECIPE_GENERATION',
+      'REVIEW',
+      'DISCOURSE'
+    ] as const) {
       expect(projectAgentExecutionSupport(capabilities, operation)).toEqual({
         supported: false,
         reason:

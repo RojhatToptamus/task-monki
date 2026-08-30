@@ -1150,6 +1150,9 @@ export interface UpdateAppSettingsRequest {
   promptRefinementModel?: string | null;
   promptRefinementRuntimeId?: import('./agent').AgentRuntimeId | null;
   promptRefinementModelProvider?: import('./agent').AgentModelProviderId | null;
+  previewRecipeGenerationModel?: string | null;
+  previewRecipeGenerationRuntimeId?: import('./agent').AgentRuntimeId | null;
+  previewRecipeGenerationModelProvider?: import('./agent').AgentModelProviderId | null;
   reviewModel?: string | null;
   reviewRuntimeId?: import('./agent').AgentRuntimeId | null;
   reviewModelProvider?: import('./agent').AgentModelProviderId | null;

@@ -117,6 +117,11 @@ import {
 } from '../../shared/contracts';
 import { CODEX_RUNTIME_ID, type AgentRuntimeId } from '../../shared/agent';
 import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
+import type {
+  AgentOwnerScope,
+  AgentRunScope,
+  AgentRuntimePurpose
+} from '../../shared/agentRuntime';
 import {
   PromptRefinementTerminationUnconfirmedError,
   PromptRefinementService,
@@ -178,7 +183,11 @@ import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetServic
 import { PreviewManager, type PreviewTaskContext } from '../preview/PreviewManager';
 import { createPreviewManager } from '../preview/createPreviewManager';
 import type { DesignCanvasCutoverFence } from '../preview/DesignCanvasCutoverFence';
-import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
+import {
+  PreviewRecipeGenerationRunError,
+  PreviewRecipeGenerationService,
+  type PreviewRecipeGenerationRunRequest
+} from '../preview/generation/PreviewRecipeGenerationService';
 import type {
   PreviewUrlHost,
   ResolvedPreviewRoute
@@ -355,8 +364,6 @@ export class TaskManagerService {
     this.openTargets = new OpenTargetService(options.openTargetHost);
     this.previewEnabled = options.previewEnabled === true;
     this.previewReconcile = options.previewReconcile !== false;
-    this.previewRecipeGenerator =
-      options.previewRecipeGenerator ?? new PreviewRecipeGenerationService();
     this.previews =
       options.previewManager ??
       createPreviewManager(store, events, {
@@ -455,6 +462,12 @@ export class TaskManagerService {
         allowCandidateDesignModels: this.allowCandidateDesignModels
       }
     );
+    this.previewRecipeGenerator =
+      options.previewRecipeGenerator ??
+      new PreviewRecipeGenerationService(
+        (request) => this.startPreviewRecipeGenerationRuntimeTurn(request),
+        path.join(store.getStorageRoot(), 'preview-recipe-evidence')
+      );
     this.promptRefiner = new PromptRefinementService((request) =>
       this.startPromptRefinementRuntimeTurn(request)
     );
@@ -619,6 +632,19 @@ export class TaskManagerService {
       new Set(this.appSettings.disabledRuntimeIds)
     );
     this.assertInitializing();
+    if (this.previewEnabled) {
+      const runtimeState = await this.agentRuntimeStore.snapshot();
+      await this.previewRecipeGenerator.recoverEvidence(
+        new Set(
+          runtimeState.runs.flatMap((run) =>
+            run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
+              ? [run.owner.generationId]
+              : []
+          )
+        )
+      );
+      this.assertInitializing();
+    }
     await this.discourseHost?.initialize();
     this.assertInitializing();
     if (this.agentProviderStartupDisabledReason) return;
@@ -919,6 +945,7 @@ export class TaskManagerService {
     for (const runtimeId of [
       input.defaultRuntimeId,
       input.promptRefinementRuntimeId,
+      input.previewRecipeGenerationRuntimeId,
       input.reviewRuntimeId
     ]) {
       if (runtimeId) {
@@ -937,6 +964,17 @@ export class TaskManagerService {
       const support = projectAgentExecutionSupport(
         capabilities,
         'PROMPT_REFINEMENT'
+      );
+      if (!support.supported) throw new Error(support.reason);
+    }
+    if (input.previewRecipeGenerationRuntimeId) {
+      const adapter = this.runtimeRegistry.require(
+        input.previewRecipeGenerationRuntimeId
+      );
+      const capabilities = await adapter.capabilities();
+      const support = projectAgentExecutionSupport(
+        capabilities,
+        'PREVIEW_RECIPE_GENERATION'
       );
       if (!support.supported) throw new Error(support.reason);
     }
@@ -1967,72 +2005,198 @@ export class TaskManagerService {
   private async startPromptRefinementRuntimeTurn(
     input: PromptRefinementRunRequest
   ) {
+    return this.startEphemeralReadOnlyRuntimeTurn({
+      owner: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
+      scope: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
+      runtimeId: input.refinementModel.runtimeId,
+      model: input.refinementModel.model,
+      settings: input.settings,
+      primaryCwd: input.repositoryPath,
+      readRootKind: 'REPOSITORY',
+      purpose: 'PROMPT_REFINEMENT',
+      generationKey: input.requestId,
+      operationId: `prompt-refinement:${input.requestId}`,
+      instruction: input.instruction,
+      attachments: input.attachments,
+      timeoutMs: 90_000,
+      label: 'Prompt refinement',
+      terminationError: (cause) =>
+        new PromptRefinementTerminationUnconfirmedError(cause),
+      isTerminationError: (cause) =>
+        cause instanceof PromptRefinementTerminationUnconfirmedError
+    });
+  }
+
+  private async startPreviewRecipeGenerationRuntimeTurn(
+    input: PreviewRecipeGenerationRunRequest
+  ) {
+    this.assertAgentProviderAvailable();
+    const runtimeId =
+      this.appSettings.previewRecipeGenerationRuntimeId ??
+      this.appSettings.defaultRuntimeId;
+    this.assertRuntimeEnabled(runtimeId);
+    const adapter = this.runtimeRegistry.require(runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    const support = projectAgentExecutionSupport(
+      await adapter.capabilities(),
+      'PREVIEW_RECIPE_GENERATION'
+    );
+    if (!support.supported) throw new PreviewRecipeGenerationRunError(
+      'UNAVAILABLE',
+      support.reason
+    );
+    let execution;
+    try {
+      execution = await adapter.resolveExecution({
+        settings: {
+          runtimeId,
+          model: this.appSettings.previewRecipeGenerationModel,
+          modelProvider: this.appSettings.previewRecipeGenerationModelProvider,
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user'
+        },
+        attachments: []
+      });
+      assertResolvedExecutionRuntime(adapter, execution);
+    } catch (cause) {
+      throw new PreviewRecipeGenerationRunError(
+        'UNAVAILABLE',
+        cause instanceof Error ? cause.message : 'The selected Preview agent is unavailable.',
+        { cause }
+      );
+    }
+    const turn = await this.startEphemeralReadOnlyRuntimeTurn({
+      owner: {
+        kind: 'PREVIEW_RECIPE_GENERATION',
+        taskId: input.taskId,
+        generationId: input.generationId
+      },
+      scope: {
+        kind: 'PREVIEW_RECIPE_GENERATION',
+        taskId: input.taskId,
+        generationId: input.generationId
+      },
+      runtimeId,
+      model: execution.model.model,
+      settings: execution.settings,
+      primaryCwd: input.cwd,
+      readRootKind: 'EMPTY_MANAGED',
+      purpose: 'PREVIEW_RECIPE_GENERATION',
+      generationKey: input.generationId,
+      operationId: `preview-recipe-generation:${input.taskId}:${input.generationId}`,
+      instruction: input.instruction,
+      attachments: [],
+      timeoutMs: 120_000,
+      label: 'Preview recipe generation',
+      terminationError: (cause) =>
+        new PreviewRecipeGenerationRunError(
+          'TERMINATION_UNCONFIRMED',
+          'Task Monki could not confirm that Preview recipe generation stopped.',
+          { cause }
+        ),
+      isTerminationError: (cause) =>
+        cause instanceof PreviewRecipeGenerationRunError &&
+        cause.code === 'TERMINATION_UNCONFIRMED'
+    });
+    return {
+      result: turn.result.then(({ output }) => output).catch((cause) => {
+        if (cause instanceof PreviewRecipeGenerationRunError) throw cause;
+        const timedOut =
+          cause instanceof Error && /timed out/iu.test(cause.message);
+        throw new PreviewRecipeGenerationRunError(
+          timedOut ? 'TIMED_OUT' : 'UNAVAILABLE',
+          timedOut
+            ? 'The selected Preview agent did not finish within two minutes.'
+            : cause instanceof Error
+              ? cause.message
+              : 'The selected Preview agent could not produce a draft.',
+          { cause }
+        );
+      }),
+      cancel: turn.cancel
+    };
+  }
+
+  private async startEphemeralReadOnlyRuntimeTurn(input: {
+    owner: AgentOwnerScope;
+    scope: AgentRunScope;
+    runtimeId: AgentRuntimeId;
+    model: string;
+    settings: AgentExecutionSettings;
+    primaryCwd: string;
+    readRootKind: 'REPOSITORY' | 'EMPTY_MANAGED';
+    purpose: AgentRuntimePurpose;
+    generationKey: string;
+    operationId: string;
+    instruction: string;
+    attachments: readonly AgentTurnAttachment[];
+    timeoutMs: number;
+    label: string;
+    terminationError(cause: unknown): Error;
+    isTerminationError(cause: unknown): boolean;
+  }) {
     const sessionId = randomUUID();
     const runId = randomUUID();
-    const operationId = `prompt-refinement:${input.requestId}`;
     const executionContext = await this.agents.buildExecutionContext(
-      input.refinementModel.runtimeId,
+      input.runtimeId,
       {
         sessionId,
-        primaryCwd: input.repositoryPath,
+        primaryCwd: input.primaryCwd,
         readRoots: [
           {
-            canonicalPath: input.repositoryPath,
-            kind: 'REPOSITORY'
+            canonicalPath: input.primaryCwd,
+            kind: input.readRootKind
           }
         ],
         modelSettings: input.settings,
-        clientOperationId: operationId,
+        clientOperationId: input.operationId,
         attachments: input.attachments
       }
     );
     const prepared = await this.agents.prepareTurn({
       sessionId,
       runId,
-      owner: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
-      scope: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
-      runtimeId: input.refinementModel.runtimeId,
-      model: input.refinementModel.model,
-      purpose: 'PROMPT_REFINEMENT',
-      generationKey: input.requestId,
+      owner: input.owner,
+      scope: input.scope,
+      runtimeId: input.runtimeId,
+      model: input.model,
+      purpose: input.purpose,
+      generationKey: input.generationKey,
       executionContext,
       prompt: input.instruction,
       priority: 'TASK_FOREGROUND',
-      clientOperationId: operationId,
+      clientOperationId: input.operationId,
       createdAt: new Date().toISOString(),
       attachmentSelection: toAgentAttachmentSelection(input.attachments)
     });
     try {
       const started = await this.agents.startPreparedTurnNow(
         prepared.queueEntry.id,
-        `${operationId}:start`,
+        `${input.operationId}:start`,
         input.attachments
       );
       if (started.status === 'RECOVERY_REQUIRED') {
-        throw new PromptRefinementTerminationUnconfirmedError(
+        throw input.terminationError(
           new Error(
             started.terminalReason ?? 'The provider start result requires recovery.'
           )
         );
       }
-      if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(started.status)) {
-        throw new Error(
-          started.terminalReason ?? `Prompt refinement ended with ${started.status}.`
-        );
-      }
     } catch (cause) {
-      if (cause instanceof PromptRefinementTerminationUnconfirmedError) throw cause;
+      if (input.isTerminationError(cause)) throw cause;
       const run = await this.agentRuntimeStore.getRun(runId).catch(() => undefined);
       if (!run || !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) {
-        throw new PromptRefinementTerminationUnconfirmedError(cause);
+        throw input.terminationError(cause);
       }
       try {
         await this.agents.finishRuntimeTurn(runId);
       } catch (cleanupCause) {
-        throw new PromptRefinementTerminationUnconfirmedError(cleanupCause);
+        throw input.terminationError(cleanupCause);
       }
       if (await this.agentRuntimeStore.getRun(runId).catch(() => undefined)) {
-        throw new PromptRefinementTerminationUnconfirmedError(cause);
+        throw input.terminationError(cause);
       }
       throw cause;
     }
@@ -2041,13 +2205,13 @@ export class TaskManagerService {
       const stopped = await this.agents.interruptTurn(
         runId,
         reason,
-        `${operationId}:${suffix}`
+        `${input.operationId}:${suffix}`
       );
       if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(stopped.status)) {
         return;
       }
       if (stopped.status === 'RECOVERY_REQUIRED') {
-        throw new PromptRefinementTerminationUnconfirmedError(
+        throw input.terminationError(
           new Error(stopped.terminalReason ?? 'The provider stop result is uncertain.')
         );
       }
@@ -2055,7 +2219,7 @@ export class TaskManagerService {
         stopped.status === 'INTERRUPTING' &&
         stopped.interruptDelivery === 'AMBIGUOUS'
       ) {
-        throw new PromptRefinementTerminationUnconfirmedError(
+        throw input.terminationError(
           new Error(
             stopped.terminalReason ??
               'The provider accepted work, but Task Monki could not confirm that it stopped.'
@@ -2065,19 +2229,24 @@ export class TaskManagerService {
       try {
         const terminal = await this.agents.waitForRuntimeTurn(runId, 15_000);
         if (!['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(terminal.run.status)) {
-          throw new Error(`Prompt refinement stop ended with ${terminal.run.status}.`);
+          throw new Error(`${input.label} stop ended with ${terminal.run.status}.`);
         }
       } catch (cause) {
-        throw new PromptRefinementTerminationUnconfirmedError(cause);
+        throw input.terminationError(cause);
       }
+    };
+    let stopWork: Promise<void> | undefined;
+    const stopAndConfirmOnce = (reason: string, suffix: string) => {
+      stopWork ??= stopAndConfirm(reason, suffix);
+      return stopWork;
     };
 
     const result = this.agents
-      .waitForRuntimeTurn(runId, 90_000)
+      .waitForRuntimeTurn(runId, input.timeoutMs)
       .then(({ run, output }) => {
         if (run.status !== 'COMPLETED') {
           throw new Error(
-            run.terminalReason ?? `Prompt refinement ended with ${run.status}.`
+            run.terminalReason ?? `${input.label} ended with ${run.status}.`
           );
         }
         return {
@@ -2091,8 +2260,8 @@ export class TaskManagerService {
           run &&
           !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)
         ) {
-          await stopAndConfirm(
-            'Prompt refinement timed out or was canceled.',
+          await stopAndConfirmOnce(
+            `${input.label} timed out or was canceled.`,
             'stop'
           );
         }
@@ -2102,7 +2271,7 @@ export class TaskManagerService {
 
     return {
       result,
-      cancel: () => stopAndConfirm('Prompt refinement was canceled.', 'cancel')
+      cancel: () => stopAndConfirmOnce(`${input.label} was canceled.`, 'cancel')
     };
   }
 
@@ -2608,6 +2777,7 @@ export class TaskManagerService {
     for (const [purpose, runtimeId] of [
       ['default task', prospective.defaultRuntimeId],
       ['prompt refinement', prospective.promptRefinementRuntimeId],
+      ['preview recipe generation', prospective.previewRecipeGenerationRuntimeId],
       ['review', prospective.reviewRuntimeId]
     ] as const) {
       if (!runtimeId) continue;
@@ -2796,6 +2966,7 @@ export class TaskManagerService {
     this.lifecycleState = 'SHUTTING_DOWN';
     const runtimeDrain = this.runtimeOperations.close();
     const promptRefinementShutdown = this.promptRefiner.beginShutdown();
+    const previewRecipeGenerationShutdown = this.previewRecipeGenerator.shutdown();
     const pendingInitialization = this.initWork;
     const pendingTaskActions = [...this.taskActionLocks.values()].map(
       ({ work }) => work
@@ -2809,7 +2980,8 @@ export class TaskManagerService {
       pendingControlActions,
       pendingRuntimeLifecycle,
       pendingRuntimeOperations,
-      promptRefinementShutdown
+      promptRefinementShutdown,
+      previewRecipeGenerationShutdown
     )
       .finally(() => {
         this.lifecycleState = 'STOPPED';
@@ -2825,16 +2997,23 @@ export class TaskManagerService {
     pendingControlActions: Promise<unknown>[],
     pendingRuntimeLifecycle: Promise<void>,
     pendingRuntimeOperations: Promise<void>[],
-    promptRefinementShutdown: Promise<void>
+    promptRefinementShutdown: Promise<void>,
+    previewRecipeGenerationShutdown: Promise<void>
   ): Promise<void> {
-    await Promise.allSettled([
+    const drainResults = await Promise.allSettled([
       pendingInitialization ?? Promise.resolve(),
       ...pendingTaskActions,
       ...pendingControlActions,
       pendingRuntimeLifecycle,
       ...pendingRuntimeOperations,
-      promptRefinementShutdown
+      promptRefinementShutdown,
+      previewRecipeGenerationShutdown
     ]);
+    const previewGenerationDrain = drainResults.at(-1);
+    const drainFailure =
+      previewGenerationDrain?.status === 'rejected'
+        ? previewGenerationDrain
+        : undefined;
     await this.discourseHost?.beginShutdown();
     const [designResult] = await Promise.allSettled([
       this.designUpdates?.beginShutdown()
@@ -2882,17 +3061,16 @@ export class TaskManagerService {
     if (storeCloseResult.status === 'rejected') {
       throw storeCloseResult.reason;
     }
+    if (drainFailure) {
+      throw drainFailure.reason;
+    }
   }
 
   private async shutdownAgentOwners(): Promise<void> {
-    const [agentResult, previewRecipeGenerationResult] = await Promise.allSettled([
-      this.agents.shutdown(),
-      this.previewRecipeGenerator.shutdown()
+    const [agentResult] = await Promise.allSettled([
+      this.agents.shutdown()
     ]);
     if (agentResult.status === 'rejected') throw agentResult.reason;
-    if (previewRecipeGenerationResult.status === 'rejected') {
-      throw previewRecipeGenerationResult.reason;
-    }
   }
 
   private requireDiscourseService(): DiscourseService {
@@ -2933,21 +3111,22 @@ export class TaskManagerService {
   ): Promise<PreviewRecipeGenerationSnapshot> {
     this.assertPreviewEnabled();
     this.assertAgentProviderAvailable();
-    this.assertRuntimeEnabled(CODEX_RUNTIME_ID);
     await this.requireNormalTask(input.taskId, 'Preview recipe generation');
     const context = await this.withTaskAction(
       input.taskId,
       'Preview recipe generation preparation',
       () => this.requirePreviewContext(input.taskId)
     );
-    return this.withControlAction(() =>
-      this.previewRecipeGenerator.generate({
+    return this.withControlAction(async () => {
+      if (this.previewRecipeGenerator.get(input.taskId).status !== 'GENERATING') {
+        await this.assertNoUnsettledPreviewRecipeGeneration(input.taskId);
+      }
+      return this.previewRecipeGenerator.generate({
         taskId: input.taskId,
         worktreePath: context.worktree.worktreePath,
-        codexExecutable: this.codexAdapter?.currentRuntimeExecutable ?? this.codexExecutable,
         onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
-      })
-    );
+      });
+    });
   }
 
   async validatePreviewRecipeDraft(
@@ -3024,6 +3203,32 @@ export class TaskManagerService {
       payload: state,
       at: new Date().toISOString()
     });
+  }
+
+  private async assertNoUnsettledPreviewRecipeGeneration(
+    taskId: string
+  ): Promise<void> {
+    const snapshot = await this.agentRuntimeStore.snapshot();
+    const matchingRuns = snapshot.runs.filter(
+      (run) =>
+        run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
+        run.owner.taskId === taskId
+    );
+    for (const run of matchingRuns) {
+      if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) {
+        await this.agents.finishRuntimeTurn(run.id);
+      }
+    }
+    const remaining = (await this.agentRuntimeStore.snapshot()).runs.some(
+      (run) =>
+        run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
+        run.owner.taskId === taskId
+    );
+    if (remaining) {
+      throw new Error(
+        'Preview recipe generation is still recovering. Restart Task Monki before you try again or delete this task.'
+      );
+    }
   }
 
   approvePreviewPlan(
@@ -3563,6 +3768,7 @@ export class TaskManagerService {
         // resource ledger intact if any process or workspace identity is ambiguous.
         await this.previews.stopTask(task.id);
         await this.previewRecipeGenerator.discard(task.id);
+        await this.assertNoUnsettledPreviewRecipeGeneration(task.id);
         await this.agents.releaseTask(task.id);
 
         let removedWorktree = false;

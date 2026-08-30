@@ -237,7 +237,7 @@ describe('SettingsView', () => {
   it('does not offer a model for an unavailable purpose runtime', () => {
     const html = renderToStaticMarkup(
       <AgentModelSetting
-        label="Prompt refinement"
+        label="Preview generation"
         runtimeId="codex"
         modelId={codexModel.id}
         models={[codexModel]}
@@ -254,7 +254,7 @@ describe('SettingsView', () => {
     expect(html.match(/disabled=""/gu)).toHaveLength(1);
   });
 
-  it('selects refinement and review models from any capable enabled runtime', () => {
+  it('selects read-only workflow models from any capable enabled runtime', () => {
     const providerModel: AgentModel = {
       ...codexModel,
       id: 'provider-runtime:provider/model',
@@ -290,6 +290,9 @@ describe('SettingsView', () => {
         promptRefinementRuntimeId: 'provider-runtime',
         promptRefinementModel: 'model',
         promptRefinementModelProvider: 'provider',
+        previewRecipeGenerationRuntimeId: 'provider-runtime',
+        previewRecipeGenerationModel: 'model',
+        previewRecipeGenerationModelProvider: 'provider',
         reviewRuntimeId: 'provider-runtime',
         reviewModel: 'model',
         reviewModelProvider: 'provider'
@@ -298,6 +301,8 @@ describe('SettingsView', () => {
 
     expect(selected.promptRefinementRuntimeId).toBe('provider-runtime');
     expect(selected.selectedPromptRefinementModel?.id).toBe(providerModel.id);
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('provider-runtime');
+    expect(selected.selectedPreviewRecipeGenerationModel?.id).toBe(providerModel.id);
     expect(selected.reviewRuntimeId).toBe('provider-runtime');
     expect(selected.selectedReviewModel?.id).toBe(providerModel.id);
   });
@@ -306,13 +311,79 @@ describe('SettingsView', () => {
     const selected = selectSettingsModels([codexModel], runtimes, {
       ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
       promptRefinementRuntimeId: 'opencode',
+      previewRecipeGenerationRuntimeId: 'opencode',
       reviewRuntimeId: 'opencode'
     });
 
     expect(selected.promptRefinementRuntimeId).toBe('opencode');
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('opencode');
     expect(selected.reviewRuntimeId).toBe('opencode');
     expect(selected.selectedPromptRefinementModel).toBeUndefined();
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
     expect(selected.selectedReviewModel).toBeUndefined();
+  });
+
+  it('shows the actual default Preview provider instead of silently selecting another provider', () => {
+    const writeOnlyCodex: AgentRuntimeState = {
+      ...runtimes[0]!,
+      preflight: {
+        ...runtimes[0]!.preflight,
+        capabilities: {
+          ...runtimes[0]!.preflight.capabilities,
+          executionPolicy: {
+            defaultPresetId: 'write',
+            detail: 'Write access only.',
+            presets: [
+              {
+                id: 'write',
+                label: 'Write',
+                detail: 'Write access.',
+                sandbox: 'WORKSPACE_WRITE',
+                approvalPolicy: 'never',
+                approvalsReviewer: 'user',
+                networkAccess: 'DISABLED',
+                repositoryMutation: 'ALLOW'
+              }
+            ]
+          }
+        }
+      }
+    };
+    const alternateModel: AgentModel = {
+      ...codexModel,
+      id: 'alternate:provider/model',
+      runtimeId: 'alternate',
+      modelProvider: 'provider',
+      model: 'model',
+      displayName: 'Alternate model'
+    };
+    const alternateRuntime: AgentRuntimeState = {
+      preflight: {
+        runtime: {
+          id: 'alternate',
+          displayName: 'Alternate',
+          kind: 'HTTP_AGENT',
+          transport: 'HTTP_SSE',
+          lifecycleScope: 'APPLICATION'
+        },
+        readiness: createRuntimeReadiness('READY', 'Ready'),
+        capabilities: {
+          ...codexCapabilities(),
+          runtimeId: 'alternate'
+        }
+      },
+      models: [alternateModel],
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+
+    const selected = selectSettingsModels(
+      [codexModel, alternateModel],
+      [writeOnlyCodex, alternateRuntime],
+      DEFAULT_TASK_MANAGER_APP_SETTINGS
+    );
+
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('codex');
+    expect(selected.selectedPreviewRecipeGenerationModel?.id).toBe(codexModel.id);
   });
 
   it('keeps an unsupported workflow provider visible with its reason', () => {
@@ -365,13 +436,13 @@ describe('SettingsView', () => {
 
     const html = renderToStaticMarkup(
       <AgentModelSetting
-        label="Prompt refinement"
+        label="Preview generation"
         runtimeId="codex"
         modelId={codexModel.id}
         models={[codexModel, providerModel]}
         runtimes={[runtimes[0]!, providerRuntime]}
         runtimeUnavailableReason={(runtime) =>
-          runtimeExecutionUnavailableReason(runtime, 'PROMPT_REFINEMENT')
+          runtimeExecutionUnavailableReason(runtime, 'PREVIEW_RECIPE_GENERATION')
         }
         onSelectionChange={() => undefined}
       />

@@ -1,10 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {
-  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
-  DEFAULT_PROMPT_REFINEMENT_MODEL,
   type PreviewAttachmentPlan,
   type PreviewEnvironmentValue,
   type PreviewExecutionPlan,
@@ -14,11 +13,6 @@ import {
   type PreviewPublicEnvironmentDecision,
   type PreviewRecipeValidation
 } from '../../../shared/contracts';
-import {
-  CodexEphemeralRunError,
-  startCodexEphemeralReadOnlyRun,
-  type CodexEphemeralReadOnlyRun
-} from '../../agent/codex/CodexEphemeralReadOnlyRunner';
 import {
   MAX_PREVIEW_RECIPE_BYTES,
   PREVIEW_RECIPE_PATH,
@@ -30,32 +24,57 @@ import {
   PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION
 } from './PreviewRecipeGenerationSupport';
 import type { PreviewFrameworkCapabilities } from './PreviewFrameworkCapabilities';
-import { preparePreviewRecipeEvidenceBundle } from './PreviewRecipeEvidenceBundle';
+import {
+  preparePreviewRecipeEvidenceBundle,
+  recoverPreviewRecipeEvidenceRoot
+} from './PreviewRecipeEvidenceBundle';
 import type {
   PreviewPublicEnvironmentCandidate,
   PreviewPublicEnvironmentEvidence
 } from './PreviewPublicEnvironmentEvidence';
 
-const GENERATION_TIMEOUT_MS = 120_000;
 const MAX_REPORT_ITEMS = 40;
 const MAX_REPORT_TEXT_BYTES = 1_200;
 const SECRET_ENV_KEY = /(?:^|_)(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|PRIVATE_KEY|CREDENTIALS?)(?:_|$)/i;
 
 export interface PreviewRecipeGenerationRunRequest {
+  taskId: string;
+  generationId: string;
   cwd: string;
   instruction: string;
-  model: string;
-  codexExecutable?: string;
+}
+
+export interface PreviewRecipeGenerationRun {
+  result: Promise<string>;
+  cancel(): Promise<void>;
 }
 
 export type PreviewRecipeGenerationRunner = (
   request: PreviewRecipeGenerationRunRequest
-) => Promise<CodexEphemeralReadOnlyRun>;
+) => Promise<PreviewRecipeGenerationRun>;
+
+export class PreviewRecipeGenerationRunError extends Error {
+  constructor(
+    readonly code:
+      | 'CANCELED'
+      | 'TIMED_OUT'
+      | 'TERMINATION_UNCONFIRMED'
+      | 'UNAVAILABLE',
+    message: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'PreviewRecipeGenerationRunError';
+  }
+}
 
 interface ActiveGeneration {
   id: string;
   canceled: boolean;
-  run?: CodexEphemeralReadOnlyRun;
+  abortController: AbortController;
+  cancellationError?: unknown;
+  cancellationWork?: Promise<void>;
+  run?: PreviewRecipeGenerationRun;
   settled?: Promise<PreviewRecipeGenerationSnapshot>;
 }
 
@@ -74,6 +93,10 @@ interface DraftValidationAuthority {
 
 class InvalidAgentGenerationError extends Error {}
 
+class PreviewRecipeAlreadyExistsError extends Error {}
+
+class PreviewRecipeEvidenceChangedError extends Error {}
+
 export class PreviewRecipeGenerationService {
   private readonly states = new Map<string, PreviewRecipeGenerationSnapshot>();
   private readonly operations = new Map<string, ActiveGeneration>();
@@ -81,8 +104,19 @@ export class PreviewRecipeGenerationService {
   private shuttingDown = false;
 
   constructor(
-    private readonly runAgent: PreviewRecipeGenerationRunner = runPreviewRecipeAgent
+    private readonly runAgent: PreviewRecipeGenerationRunner,
+    private readonly evidenceRoot = path.join(
+      os.tmpdir(),
+      `task-monki-preview-recipe-evidence-${process.pid}`
+    )
   ) {}
+
+  recoverEvidence(retainedGenerationIds: ReadonlySet<string> = new Set()): Promise<void> {
+    return recoverPreviewRecipeEvidenceRoot(
+      this.evidenceRoot,
+      retainedGenerationIds
+    );
+  }
 
   get(taskId: string): PreviewRecipeGenerationSnapshot {
     return structuredClone(
@@ -93,7 +127,6 @@ export class PreviewRecipeGenerationService {
   generate(input: {
     taskId: string;
     worktreePath: string;
-    codexExecutable?: string;
     onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
   }): Promise<PreviewRecipeGenerationSnapshot> {
     if (this.shuttingDown) {
@@ -103,7 +136,8 @@ export class PreviewRecipeGenerationService {
     if (active?.settled) return active.settled;
     const operation: ActiveGeneration = {
       id: randomUUID(),
-      canceled: false
+      canceled: false,
+      abortController: new AbortController()
     };
     this.operations.set(input.taskId, operation);
     const startedAt = new Date().toISOString();
@@ -180,30 +214,48 @@ export class PreviewRecipeGenerationService {
   ): Promise<PreviewRecipeGenerationSnapshot> {
     const operation = this.operations.get(taskId);
     if (operation) {
-      operation.canceled = true;
-      await operation.run?.cancel().catch(() => undefined);
+      try {
+        await this.requestCancellation(operation);
+      } catch (cause) {
+        operation.cancellationError = cause;
+      }
     }
-    const empty = { taskId, status: 'EMPTY' as const };
-    this.states.delete(taskId);
-    this.clearDraftAuthority(taskId);
-    onUpdate?.(structuredClone(empty));
-    await operation?.settled?.catch(() => undefined);
-    return empty;
+    const settled = operation?.settled
+      ? await operation.settled
+      : ({ taskId, status: 'EMPTY' } as const);
+    if (operation?.cancellationError) throw operation.cancellationError;
+    if (!operation) {
+      this.states.delete(taskId);
+      this.clearDraftAuthority(taskId);
+      onUpdate?.(structuredClone(settled));
+    }
+    return settled;
   }
 
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     const operations = [...this.operations.values()];
-    for (const operation of operations) {
-      operation.canceled = true;
-    }
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       operations.map(async (operation) => {
-        await operation.run?.cancel();
+        try {
+          await this.requestCancellation(operation);
+        } catch (cause) {
+          operation.cancellationError = cause;
+        }
         await operation.settled;
+        if (operation.cancellationError) throw operation.cancellationError;
       })
     );
+    const failures = results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        'Preview recipe generation shutdown cleanup is incomplete.'
+      );
+    }
     this.operations.clear();
     this.states.clear();
     this.draftValidationAuthority.clear();
@@ -214,16 +266,20 @@ export class PreviewRecipeGenerationService {
     input: {
       taskId: string;
       worktreePath: string;
-      codexExecutable?: string;
       onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
       startedAt: string;
     }
   ): Promise<PreviewRecipeGenerationSnapshot> {
     const previousDraft = this.states.get(input.taskId)?.draft;
     let evidence: Awaited<ReturnType<typeof preparePreviewRecipeEvidenceBundle>> | undefined;
+    let retainEvidence = false;
     try {
       await assertPreviewRecipeMissing(input.worktreePath);
-      evidence = await preparePreviewRecipeEvidenceBundle(input.worktreePath);
+      evidence = await preparePreviewRecipeEvidenceBundle(input.worktreePath, {
+        rootDirectory: this.evidenceRoot,
+        generationId: operation.id,
+        signal: operation.abortController.signal
+      });
       this.assertCurrent(input.taskId, operation);
       this.publish(
         {
@@ -235,17 +291,39 @@ export class PreviewRecipeGenerationService {
         },
         input.onUpdate
       );
+      const evidenceHash = await hashFile(
+        path.join(evidence.directoryPath, evidence.fileName)
+      );
       const run = await this.runAgent({
+        taskId: input.taskId,
+        generationId: operation.id,
         cwd: evidence.directoryPath,
         instruction: buildPreviewRecipeGenerationInstruction({
           evidenceFileName: evidence.fileName
-        }),
-        model: DEFAULT_PROMPT_REFINEMENT_MODEL,
-        codexExecutable: input.codexExecutable
+        })
       });
       operation.run = run;
-      if (operation.canceled) await run.cancel();
+      if (operation.canceled) {
+        try {
+          await this.cancelStartedRun(operation);
+        } catch (cause) {
+          operation.cancellationError = cause;
+          throw cause;
+        }
+      }
       const output = await run.result;
+      operation.run = undefined;
+      let currentEvidenceHash: string;
+      try {
+        currentEvidenceHash = await hashFile(
+          path.join(evidence.directoryPath, evidence.fileName)
+        );
+      } catch {
+        throw new PreviewRecipeEvidenceChangedError();
+      }
+      if (evidenceHash !== currentEvidenceHash) {
+        throw new PreviewRecipeEvidenceChangedError();
+      }
       this.assertCurrent(input.taskId, operation);
       this.publish(
         {
@@ -264,8 +342,10 @@ export class PreviewRecipeGenerationService {
           evidence.includedPaths,
           evidence.publicEnvironment
         );
-      } catch {
-        throw new InvalidAgentGenerationError();
+      } catch (cause) {
+        throw new InvalidAgentGenerationError('The response envelope is invalid.', {
+          cause
+        });
       }
       parsed.report.omissions = uniqueBoundedStrings([
         ...evidence.safeOmissions,
@@ -330,9 +410,10 @@ export class PreviewRecipeGenerationService {
       });
       return finished;
     } catch (error) {
-      if (operation.canceled) {
+      if (operation.canceled && !operation.cancellationError) {
         const current = this.operations.get(input.taskId);
         if (current !== operation) return this.get(input.taskId);
+        this.clearDraftAuthority(input.taskId);
         return this.finish(
           input.taskId,
           operation,
@@ -340,7 +421,16 @@ export class PreviewRecipeGenerationService {
           input.onUpdate
         );
       }
-      const classified = classifyGenerationFailure(error);
+      if (
+        operation.cancellationError ||
+        (error instanceof PreviewRecipeGenerationRunError &&
+          error.code === 'TERMINATION_UNCONFIRMED')
+      ) {
+        retainEvidence = true;
+      }
+      const classified = classifyGenerationFailure(
+        operation.cancellationError ?? error
+      );
       return this.finish(
         input.taskId,
         operation,
@@ -354,7 +444,7 @@ export class PreviewRecipeGenerationService {
         input.onUpdate
       );
     } finally {
-      await evidence?.dispose().catch(() => undefined);
+      if (!retainEvidence) await evidence?.dispose().catch(() => undefined);
       if (this.operations.get(input.taskId) === operation) {
         this.operations.delete(input.taskId);
       }
@@ -363,7 +453,10 @@ export class PreviewRecipeGenerationService {
 
   private assertCurrent(taskId: string, operation: ActiveGeneration): void {
     if (operation.canceled || this.operations.get(taskId) !== operation) {
-      throw new CodexEphemeralRunError('CANCELED', 'The agent generation was canceled.');
+      throw new PreviewRecipeGenerationRunError(
+        'CANCELED',
+        'Preview recipe generation was canceled.'
+      );
     }
   }
 
@@ -393,21 +486,21 @@ export class PreviewRecipeGenerationService {
       if (entry.taskId === taskId) this.draftValidationAuthority.delete(draftId);
     }
   }
-}
 
-async function runPreviewRecipeAgent(
-  request: PreviewRecipeGenerationRunRequest
-): Promise<CodexEphemeralReadOnlyRun> {
-  return startCodexEphemeralReadOnlyRun({
-    cwd: request.cwd,
-    instruction: request.instruction,
-    model: request.model,
-    reasoningEffort: 'medium',
-    timeoutMs: GENERATION_TIMEOUT_MS,
-    codexExecutable: request.codexExecutable,
-    toolSettings: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
-    failClosedMcpDiscovery: true
-  });
+  private requestCancellation(operation: ActiveGeneration): Promise<void> {
+    operation.canceled = true;
+    operation.abortController.abort();
+    return this.cancelStartedRun(operation);
+  }
+
+  private cancelStartedRun(operation: ActiveGeneration): Promise<void> {
+    if (!operation.run) return Promise.resolve();
+    operation.cancellationWork ??= operation.run.cancel().catch((cause) => {
+      operation.cancellationError = cause;
+      throw cause;
+    });
+    return operation.cancellationWork;
+  }
 }
 
 export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidation {
@@ -716,11 +809,7 @@ function parseAgentGeneration(
   includedPaths: ReadonlySet<string>,
   publicEnvironment: PreviewPublicEnvironmentEvidence
 ): ParsedAgentGeneration {
-  const normalized = output
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '');
-  const value = JSON.parse(normalized) as Record<string, unknown>;
+  const value = parseFinalGenerationObject(output);
   const allowed = new Set([
     'schemaVersion',
     'status',
@@ -774,6 +863,40 @@ function parseAgentGeneration(
     yaml: status === 'draft' ? (value.yaml as string) : undefined,
     report
   };
+}
+
+function parseFinalGenerationObject(output: string): Record<string, unknown> {
+  const normalized = stripJsonFence(output.trim());
+  try {
+    return JSON.parse(normalized) as Record<string, unknown>;
+  } catch (directError) {
+    // Some ACP agents send a separate progress message before their final
+    // response. ACP does not require a message ID or message separator, so the
+    // shared runtime cannot always separate that message from the final
+    // response. Accept only one complete JSON object after a short text
+    // prefix. Do not accept trailing commentary or an earlier JSON container.
+    const start = normalized.indexOf('{');
+    if (start > 0) {
+      const prefix = normalized.slice(0, start);
+      if (prefix.length <= 4_096 && !/[{}[\]]/.test(prefix)) {
+        try {
+          return JSON.parse(stripJsonFence(normalized.slice(start).trim())) as Record<
+            string,
+            unknown
+          >;
+        } catch {
+          // The complete suffix must be the final JSON object.
+        }
+      }
+    }
+    throw directError;
+  }
+}
+
+function stripJsonFence(value: string): string {
+  return value
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '');
 }
 
 function normalizePublicEnvironmentDecisions(
@@ -887,13 +1010,44 @@ function looksLikeSecret(value: string): boolean {
 }
 
 function classifyGenerationFailure(error: unknown): {
-  code: 'AGENT_UNAVAILABLE' | 'GENERATION_TIMED_OUT' | 'INVALID_AGENT_OUTPUT';
+  code:
+    | 'AGENT_UNAVAILABLE'
+    | 'GENERATION_TIMED_OUT'
+    | 'INVALID_AGENT_OUTPUT'
+    | 'RECIPE_EXISTS'
+    | 'CANCELLATION_UNCONFIRMED';
   message: string;
 } {
-  if (error instanceof CodexEphemeralRunError && error.code === 'TIMED_OUT') {
+  if (
+    error instanceof PreviewRecipeGenerationRunError &&
+    error.code === 'TIMED_OUT'
+  ) {
     return {
       code: 'GENERATION_TIMED_OUT',
       message: 'The agent did not finish the Preview recipe within two minutes.'
+    };
+  }
+  if (
+    error instanceof PreviewRecipeGenerationRunError &&
+    error.code === 'TERMINATION_UNCONFIRMED'
+  ) {
+    return {
+      code: 'CANCELLATION_UNCONFIRMED',
+      message:
+        'Task Monki could not confirm that Preview recipe generation stopped. Restart the app before you try again.'
+    };
+  }
+  if (error instanceof PreviewRecipeAlreadyExistsError) {
+    return {
+      code: 'RECIPE_EXISTS',
+      message: 'A Preview recipe already exists. Check it instead of generating a replacement.'
+    };
+  }
+  if (error instanceof PreviewRecipeEvidenceChangedError) {
+    return {
+      code: 'INVALID_AGENT_OUTPUT',
+      message:
+        'The provider changed its read-only Preview evidence. Task Monki rejected the result.'
     };
   }
   if (error instanceof InvalidAgentGenerationError) {
@@ -902,10 +1056,29 @@ function classifyGenerationFailure(error: unknown): {
       message: 'The agent response did not match the Preview generation contract.'
     };
   }
+  if (error instanceof PreviewRecipeGenerationRunError) {
+    return {
+      code: 'AGENT_UNAVAILABLE',
+      message: error.message
+    };
+  }
+  if (error instanceof Error && error.name === 'AbortError') {
+    return {
+      code: 'AGENT_UNAVAILABLE',
+      message: 'Preview recipe generation was canceled.'
+    };
+  }
   return {
     code: 'AGENT_UNAVAILABLE',
-    message: 'The Preview recipe agent could not produce a draft.'
+    message:
+      error instanceof Error && error.message.trim()
+        ? error.message
+        : 'The Preview recipe agent could not produce a draft.'
   };
+}
+
+async function hashFile(filePath: string): Promise<string> {
+  return createHash('sha256').update(await fs.readFile(filePath)).digest('hex');
 }
 
 async function writeNewPreviewRecipe(worktreePath: string, yaml: string): Promise<void> {
@@ -960,5 +1133,7 @@ async function assertPreviewRecipeMissing(worktreePath: string): Promise<void> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
-  throw new Error('A Preview recipe already exists. Check it instead of generating a replacement.');
+  throw new PreviewRecipeAlreadyExistsError(
+    'A Preview recipe already exists. Check it instead of generating a replacement.'
+  );
 }

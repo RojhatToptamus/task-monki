@@ -19,6 +19,8 @@ Discourse used another lifecycle and another runtime store.
 Provider milestone 1 removed this split.
 Task, Design, Discourse, and review now use one runtime coordinator and one runtime store.
 Provider milestone 2 moved review, prompt refinement, and Discourse to one shared read-only turn path.
+Preview recipe generation now uses the same transient read-only turn path with
+the provider and model selected in Settings.
 Each workflow still owns its product state and rules.
 Provider milestone 3 added provider-neutral selection and evidence.
 Each adapter still owns its native attachment transport.
@@ -337,7 +339,7 @@ The Design row requires technical product qualification, not only a working tool
 | Exact Design source and Ready requirements | Design workflow | They do not depend on Codex. |
 | Browser actions and screenshots | Design workflow | `AgentBrowserRuntime` already owns them. |
 | Design runtime hardcoding | Delete | No product rule requires it. |
-| Codex-only prompt-refinement entry point | Deleted | The shared runtime runs prompt refinement. Preview recipe generation still uses its existing Codex ephemeral runner. |
+| Codex-only prompt-refinement and Preview recipe entry points | Deleted | The shared runtime runs both bounded read-only workflows through the provider and model selected in Settings. |
 | Scoped Codex Discourse lifecycle | Delete | The shared runtime coordinator owns it after the cutover. |
 | Codex sandbox as attachment gate | Delete | Selection authorizes delivery to the provider. |
 | Provider-history deletion as Design gate | Delete | Task Monki cannot promise remote erasure. |
@@ -380,6 +382,7 @@ Every enabled cell still requires a compatible packaged runtime and selected mod
 | Prompt refinement | Shared short turn | Shared short turn | Shared short turn; Grok Build 1.0.13 on macOS | Shared short turn | Shared short turn; profile-wide |
 | Review | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Shared read-only turn; profile-wide |
 | Discourse | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Shared read-only turn; profile-wide |
+| Preview recipe generation | Shared transient read-only turn | Shared transient read-only turn | Shared transient read-only turn | Shared transient read-only turn | Shared transient read-only turn |
 | Design | Native tool transport; exact Codex 0.151.0-alpha.7.2 and GPT-5.6-Luna | Packaged MCP bridge; connected catalog models that report image input | Packaged MCP bridge; exact Grok Build 1.0.13 and Grok 4.6 pair | Packaged MCP bridge; exact Cursor and Composer pair | Packaged MCP bridge; exact Claude Agent ACP 0.70.0 and Sonnet |
 | Resume | Native | Native | Negotiated or new session | Negotiated or new session | Negotiated or new session |
 | Fork product state | New Task session | New Task session | New Task session | New Task session | New Task session |

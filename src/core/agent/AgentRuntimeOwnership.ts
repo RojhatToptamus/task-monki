@@ -6,6 +6,7 @@ import {
   agentRunScopeBelongsToOwner,
   type AgentExecutionContext,
   type AgentOwnerScope,
+  type AgentRuntimePurpose,
   type AgentRunScope,
   type AgentSessionAccessEpoch
 } from '../../shared/agentRuntime';
@@ -58,6 +59,11 @@ export function assertAgentOwnerScope(scope: AgentOwnerScope): void {
     assertBoundedIdentifier(scope.requestId, 'prompt-refinement request id');
     return;
   }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    assertBoundedIdentifier(scope.taskId, 'preview-recipe task id');
+    assertBoundedIdentifier(scope.generationId, 'preview-recipe generation id');
+    return;
+  }
   assertBoundedIdentifier(scope.conversationId, 'conversation owner id');
   assertBoundedIdentifier(scope.stableParticipantId, 'participant owner id');
 }
@@ -80,11 +86,30 @@ export function assertAgentRunScope(
     assertBoundedIdentifier(scope.requestId, 'prompt-refinement request id');
     return;
   }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    assertBoundedIdentifier(scope.taskId, 'preview-recipe task id');
+    assertBoundedIdentifier(scope.generationId, 'preview-recipe generation id');
+    return;
+  }
   assertBoundedIdentifier(scope.conversationId, 'discourse conversation id');
   assertBoundedIdentifier(scope.waveId, 'discourse wave id');
   assertBoundedIdentifier(scope.jobId, 'discourse job id');
   assertBoundedIdentifier(scope.contextSnapshotId, 'discourse context snapshot id');
   assertBoundedIdentifier(scope.attemptId, 'discourse attempt id');
+}
+
+export function assertAgentRuntimePurposeScope(
+  purpose: AgentRuntimePurpose,
+  scope: AgentRunScope
+): void {
+  if (
+    (purpose === 'PREVIEW_RECIPE_GENERATION') !==
+    (scope.kind === 'PREVIEW_RECIPE_GENERATION')
+  ) {
+    throw new Error(
+      'Preview recipe generation purpose does not match its transient run scope.'
+    );
+  }
 }
 
 export function assertAccessEpochMatches(input: {

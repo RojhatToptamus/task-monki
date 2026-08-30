@@ -233,7 +233,7 @@ export interface PreviewGatewaySettings {
   port: number | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 11 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 12 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -251,6 +251,9 @@ export interface TaskManagerAppSettings {
   promptRefinementModel?: string;
   promptRefinementRuntimeId?: AgentRuntimeId;
   promptRefinementModelProvider?: AgentModelProviderId;
+  previewRecipeGenerationModel?: string;
+  previewRecipeGenerationRuntimeId?: AgentRuntimeId;
+  previewRecipeGenerationModelProvider?: AgentModelProviderId;
   reviewModel?: string;
   reviewRuntimeId?: AgentRuntimeId;
   reviewModelProvider?: AgentModelProviderId;
@@ -274,8 +277,6 @@ export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSe
   codexExecutablePath: null,
   ghExecutablePath: null
 };
-
-export const DEFAULT_PROMPT_REFINEMENT_MODEL = 'gpt-5.3-codex-spark';
 
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,

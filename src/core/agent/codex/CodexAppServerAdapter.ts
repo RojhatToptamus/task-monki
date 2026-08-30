@@ -4287,7 +4287,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
             delivery: 'TERMINAL',
             ...(run.interruptDelivery ? { interruptDelivery: 'TERMINAL' as const } : {}),
             recoveryState: 'NONE',
-            ...(status === 'COMPLETED'
+            ...(status === 'COMPLETED' && run.scope.kind === 'DISCOURSE'
               ? { contextFreshnessAtCompletion: 'UNKNOWN' as const }
               : {}),
             terminalReason:
@@ -6832,6 +6832,7 @@ function isSharedReadOnlyRuntimePurpose(
   return (
     purpose === 'TASK_REVIEW' ||
     purpose === 'PROMPT_REFINEMENT' ||
+    purpose === 'PREVIEW_RECIPE_GENERATION' ||
     purpose.startsWith('DISCOURSE_')
   );
 }

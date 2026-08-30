@@ -286,8 +286,11 @@ mode or follow-up behavior.
 
 ## Local preview control plane
 
-Preview is a separate Task Monki-owned domain, not a Codex turn, agent run mode,
-workflow transition, or provider-evidence stream. Its manager, graph, native
+Preview execution is a separate Task Monki-owned domain. It is not an agent run
+mode, workflow transition, or provider-evidence stream. When a recipe is
+missing, Task Monki can use one transient shared read-only agent turn to propose
+YAML. The provider output does not become Preview evidence and does not change
+Preview authority. The Preview manager, graph, native
 launcher, managed OCI and Compose runtimes, encrypted vault, loopback gateway,
 store records, stop-only reconciliation, and renderer projection have their own
 authority and shutdown boundaries.

@@ -41,6 +41,7 @@ export interface PreviewPanelProps {
   executionReadiness?: PreviewExecutionReadiness;
   resolution?: ResolvePreviewResult;
   recipeGeneration?: PreviewRecipeGenerationSnapshot;
+  recipeGenerationDisabledReason?: string;
   onResolve(taskId: string, scenarioId?: string): Promise<void>;
   onSetLocalBinding(
     taskId: string,

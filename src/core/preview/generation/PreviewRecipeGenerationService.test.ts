@@ -2,9 +2,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_PROMPT_REFINEMENT_MODEL } from '../../../shared/contracts';
-import { CodexEphemeralRunError } from '../../agent/codex/CodexEphemeralReadOnlyRunner';
 import {
+  PreviewRecipeGenerationRunError,
   PreviewRecipeGenerationService,
   validatePreviewRecipeDraft
 } from './PreviewRecipeGenerationService';
@@ -20,10 +19,9 @@ describe('PreviewRecipeGenerationService', () => {
   it('keeps a valid evidence-backed draft transient until exact acceptance', async () => {
     const root = await previewWorktree();
     let evidenceBundle = '';
-    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction, model }) => {
+    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
       evidenceBundle = await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8');
       expect(instruction).toContain('Do not run the application');
-      expect(model).toBe(DEFAULT_PROMPT_REFINEMENT_MODEL);
       return {
         result: Promise.resolve(agentDraft()),
         cancel: async () => {}
@@ -53,6 +51,34 @@ describe('PreviewRecipeGenerationService', () => {
     );
     expect(await fs.readdir(path.join(root, '.taskmonki'))).toEqual(['preview.yaml']);
     expect(service.completeAcceptance('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
+  });
+
+  it('rejects a result when the provider changes its bounded read-only evidence', async () => {
+    const root = await previewWorktree();
+    const evidenceRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'preview-evidence-integrity-test-')
+    );
+    roots.push(evidenceRoot);
+    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
+      await fs.appendFile(
+        path.join(cwd, 'repository-evidence.json'),
+        '\nchanged by provider\n',
+        'utf8'
+      );
+      return {
+        result: Promise.resolve(agentDraft()),
+        cancel: async () => {}
+      };
+    }, evidenceRoot);
+
+    await expect(
+      service.generate({ taskId: 'task-evidence-change', worktreePath: root })
+    ).resolves.toMatchObject({
+      status: 'FAILED',
+      failureCode: 'INVALID_AGENT_OUTPUT',
+      message: expect.stringContaining('changed its read-only Preview evidence')
+    });
+    expect(await fs.readdir(evidenceRoot)).toEqual([]);
   });
 
   it('never overwrites a manual recipe that appears while a draft is reviewed', async () => {
@@ -129,6 +155,41 @@ describe('PreviewRecipeGenerationService', () => {
       'Choose the application command and listening port.'
     ]);
     await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
+  });
+
+  it('accepts a final generation object after a separate ACP progress message', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(
+        `Inspecting repository-evidence.json to prepare the recipe.${agentDraft()}`
+      ),
+      cancel: async () => {}
+    }));
+
+    await expect(
+      service.generate({ taskId: 'task-acp-progress', worktreePath: root })
+    ).resolves.toMatchObject({ status: 'READY' });
+  });
+
+  it('rejects trailing commentary and more than one generation object', async () => {
+    const root = await previewWorktree();
+    for (const [taskId, output] of [
+      ['task-trailing', `${agentDraft()}\nDone.`],
+      ['task-multiple', `${agentDraft()}\n${agentDraft()}`],
+      ['task-long-prefix', `${'Working. '.repeat(600)}\n${agentDraft()}`]
+    ] as const) {
+      const service = new PreviewRecipeGenerationService(async () => ({
+        result: Promise.resolve(output),
+        cancel: async () => {}
+      }));
+
+      await expect(
+        service.generate({ taskId, worktreePath: root })
+      ).resolves.toMatchObject({
+        status: 'FAILED',
+        failureCode: 'INVALID_AGENT_OUTPUT'
+      });
+    }
   });
 
   it('turns trusted Next.js fixed-port and HTTPS analysis into an actionable draft', async () => {
@@ -233,6 +294,43 @@ describe('PreviewRecipeGenerationService', () => {
       yaml: inconsistentEdit,
       worktreePath: root
     })).rejects.toThrow('does not match the Preview recipe');
+  });
+
+  it('accepts an omitted public value only when attachmentId is absent', async () => {
+    const root = await nextWorktreeWithPublicApi();
+    const omitted = JSON.parse(nextAgentDraft('[npm, run, dev]', '')) as Record<string, unknown>;
+    omitted.publicEnvironmentDecisions = [{
+      candidateId: 'next-public:NEXT_PUBLIC_API_URL',
+      key: 'NEXT_PUBLIC_API_URL',
+      decision: 'OMIT',
+      reason: 'The Preview does not need the optional external API.'
+    }];
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(JSON.stringify(omitted)),
+      cancel: async () => {}
+    }));
+
+    await expect(
+      service.generate({ taskId: 'task-omit', worktreePath: root })
+    ).resolves.toMatchObject({ status: 'READY' });
+
+    omitted.publicEnvironmentDecisions = [{
+      candidateId: 'next-public:NEXT_PUBLIC_API_URL',
+      key: 'NEXT_PUBLIC_API_URL',
+      decision: 'OMIT',
+      reason: 'The Preview does not need the optional external API.',
+      attachmentId: null
+    }];
+    const invalid = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(JSON.stringify(omitted)),
+      cancel: async () => {}
+    }));
+    await expect(
+      invalid.generate({ taskId: 'task-omit-invalid', worktreePath: root })
+    ).resolves.toMatchObject({
+      status: 'FAILED',
+      failureCode: 'INVALID_AGENT_OUTPUT'
+    });
   });
 
   it('rejects missing or YAML-inconsistent public environment decisions', async () => {
@@ -409,7 +507,7 @@ routes:
       signalStarted = resolve;
     });
     let rejectResult!: (error: Error) => void;
-    let canceled = false;
+    let cancelCount = 0;
     const result = new Promise<string>((_resolve, reject) => {
       rejectResult = reject;
     });
@@ -418,19 +516,66 @@ routes:
       return {
         result,
         cancel: async () => {
-          canceled = true;
-          rejectResult(new CodexEphemeralRunError('CANCELED', 'canceled'));
+          cancelCount += 1;
+          rejectResult(
+            new PreviewRecipeGenerationRunError('CANCELED', 'canceled')
+          );
         }
       };
     });
 
     const generation = service.generate({ taskId: 'task-1', worktreePath: root });
     await started;
-    await service.shutdown();
+    const discard = service.discard('task-1');
+    await Promise.all([discard, service.shutdown()]);
 
-    expect(canceled).toBe(true);
+    expect(cancelCount).toBe(1);
     expect((await generation).status).toBe('EMPTY');
     expect(service.get('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
+  });
+
+  it('keeps recovery evidence when cancellation races provider startup and cannot be confirmed', async () => {
+    const root = await previewWorktree();
+    const evidenceRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'preview-cancel-recovery-test-')
+    );
+    roots.push(evidenceRoot);
+    let signalRunnerStarted!: () => void;
+    const runnerStarted = new Promise<void>((resolve) => {
+      signalRunnerStarted = resolve;
+    });
+    let releaseRunner!: () => void;
+    const runnerRelease = new Promise<void>((resolve) => {
+      releaseRunner = resolve;
+    });
+    const service = new PreviewRecipeGenerationService(async () => {
+      signalRunnerStarted();
+      await runnerRelease;
+      return {
+        result: new Promise<string>(() => {}),
+        cancel: async () => {
+          throw new PreviewRecipeGenerationRunError(
+            'TERMINATION_UNCONFIRMED',
+            'The provider stop result is uncertain.'
+          );
+        }
+      };
+    }, evidenceRoot);
+
+    const generation = service.generate({ taskId: 'task-1', worktreePath: root });
+    await runnerStarted;
+    const discard = service.discard('task-1');
+    releaseRunner();
+
+    await expect(discard).rejects.toThrow('provider stop result is uncertain');
+    await expect(generation).resolves.toMatchObject({
+      status: 'FAILED',
+      failureCode: 'CANCELLATION_UNCONFIRMED'
+    });
+    expect(await fs.readdir(evidenceRoot)).toHaveLength(1);
+
+    await service.recoverEvidence();
+    expect(await fs.readdir(evidenceRoot)).toEqual([]);
   });
 });
 
@@ -442,7 +587,11 @@ async function previewWorktree(): Promise<string> {
     JSON.stringify({ scripts: { dev: 'node server.mjs' } }),
     'utf8'
   );
-  await fs.writeFile(path.join(root, 'server.mjs'), 'console.log("server")\n', 'utf8');
+  await fs.writeFile(
+    path.join(root, 'server.mjs'),
+    'import http from "node:http"; http.createServer().listen(Number(process.env.PORT));\n',
+    'utf8'
+  );
   await fs.writeFile(path.join(root, '.env.local'), 'API_TOKEN=plaintext-canary\n', 'utf8');
   return root;
 }
@@ -513,9 +662,9 @@ routes:
     summary: 'Runs the proven Node entry point behind one stable route.',
     evidence: [
       { path: 'package.json', finding: 'The dev script runs node server.mjs.' },
-      { path: 'server.mjs', finding: 'The repository contains the declared entry point.' }
+      { path: 'server.mjs', finding: 'The server listens on the injected PORT value.' }
     ],
-    assumptions: ['The application reads the generated PORT environment variable.'],
+    assumptions: [],
     omissions: ['No health endpoint was evidenced.'],
     unresolvedDecisions: [],
     publicEnvironmentDecisions: []

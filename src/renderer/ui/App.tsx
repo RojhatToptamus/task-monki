@@ -1775,6 +1775,13 @@ export function App() {
     'PROMPT_REFINEMENT'
   );
   const promptRefinementRuntime = promptRefinementSelection.runtime;
+  const configuredPreviewRecipeGenerationRuntimeId =
+    appSettings.previewRecipeGenerationRuntimeId ?? appSettings.defaultRuntimeId;
+  const previewRecipeGenerationSelection = selectConfiguredRuntimeForOperation(
+    enabledRuntimes,
+    configuredPreviewRecipeGenerationRuntimeId,
+    'PREVIEW_RECIPE_GENERATION'
+  );
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
   const reviewSelection = selectConfiguredRuntimeForOperation(
@@ -2989,6 +2996,9 @@ export function App() {
             subagentObservations={selectedSubagentObservations}
             runtimeState={selectedTaskRuntimeState}
             reviewDisabledReason={reviewDisabledReason}
+            previewRecipeGenerationDisabledReason={
+              previewRecipeGenerationSelection.unavailableReason
+            }
             server={taskDetail.agentServers.find(
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}

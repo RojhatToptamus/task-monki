@@ -127,8 +127,10 @@ prepare a transient agent draft from sanitized bounded evidence. The complete
 YAML and structured generation report stay reviewable until explicit
 acceptance. Acceptance exclusively creates only the recipe and then returns to
 this same loader/resolver path; it cannot approve or start Preview. Agent
-generation has no durable task-store record and no parallel parser or runtime
-lifecycle. See [Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
+generation has no durable task-store record, second Preview parser, or second
+Preview execution lifecycle. It uses the shared agent runtime only for its
+transient read-only turn. See
+[Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
 
 For the bounded Next.js/npm profile, trusted authoring facts include a safely
 reduced root lockfile record. A compatible draft must declare one exact generic

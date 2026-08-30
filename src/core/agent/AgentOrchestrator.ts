@@ -99,6 +99,7 @@ function isReadOnlyRuntimePurpose(
   return (
     purpose === 'TASK_REVIEW' ||
     purpose === 'PROMPT_REFINEMENT' ||
+    purpose === 'PREVIEW_RECIPE_GENERATION' ||
     purpose.startsWith('DISCOURSE_')
   );
 }
@@ -805,6 +806,16 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           )
         );
     }
+    if (released && run.owner.kind === 'PREVIEW_RECIPE_GENERATION') {
+      await this.runtimeStore
+        .purgePreviewRecipeGeneration(run.owner.taskId, run.owner.generationId)
+        .catch((error) =>
+          this.appendRuntimeDiagnostic(
+            run,
+            `Task Monki could not clean up Preview recipe generation records: ${errorMessage(error)}`
+          )
+        );
+    }
   }
 
   private async releaseRuntimeSessionNow(sessionId: string): Promise<void> {
@@ -1357,6 +1368,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       runtimeIdsToInitialize
     );
     await this.runtimeTurnEventQueue;
+    await this.stopAbandonedPreviewRecipeGenerations();
+    await this.runtimeTurnEventQueue;
     await this.reconcileSettledReadOnlyTurns();
     if (this.options.allowNetworkAccess === false) {
       const requiredFailure = initializationFailures.find((failure) =>
@@ -1430,8 +1443,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         run.owner.kind === 'TASK' &&
         run.purpose === 'TASK_REVIEW' &&
         !publishedTaskRuntimeOperations.has(taskProjectionOperationId);
-      const promptRefinementNeedsCleanup =
-        run.owner.kind === 'PROMPT_REFINEMENT' && terminal;
+      const transientTurnNeedsCleanup =
+        terminal &&
+        (run.owner.kind === 'PROMPT_REFINEMENT' ||
+          run.owner.kind === 'PREVIEW_RECIPE_GENERATION');
       const queueEntry = snapshot.queueEntries.find(
         (candidate) => candidate.runId === run.id
       );
@@ -1448,7 +1463,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         !(
           run.repositoryIntegrity?.status === 'PENDING' ||
           taskProjectionNeedsReconciliation ||
-          promptRefinementNeedsCleanup ||
+          transientTurnNeedsCleanup ||
           terminalQueueNeedsSettlement
         )
       ) {
@@ -1489,7 +1504,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         }
       }
       if (event.type === 'TERMINAL') {
-        if (run.owner.kind === 'PROMPT_REFINEMENT') {
+        if (
+          run.owner.kind === 'PROMPT_REFINEMENT' ||
+          run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
+        ) {
           await this.finishRuntimeTurn(run.id);
         } else if (run.owner.kind === 'TASK' && run.purpose === 'TASK_REVIEW') {
           if (!needsEventProcessing && terminalQueueNeedsSettlement) {
@@ -1503,6 +1521,49 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         }
       }
     }
+  }
+
+  private async stopAbandonedPreviewRecipeGenerations(): Promise<void> {
+    const snapshot = await this.runtimeStore.snapshot();
+    const abandoned = snapshot.runs.filter(
+      (run) =>
+        run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
+        !isTerminalRuntimeRun(run.status)
+    );
+    await Promise.allSettled(
+      abandoned.map(async (run) => {
+        try {
+          const stopped = await this.interruptTurn(
+            run.id,
+            'Task Monki restarted before Preview recipe generation finished.',
+            `startup-preview-recipe-stop:${run.id}`
+          );
+          if (isTerminalRuntimeRun(stopped.status)) {
+            await this.finishRuntimeTurn(stopped.id);
+            return;
+          }
+          if (
+            stopped.status === 'RECOVERY_REQUIRED' ||
+            (stopped.status === 'INTERRUPTING' &&
+              stopped.interruptDelivery === 'AMBIGUOUS')
+          ) {
+            return;
+          }
+          const terminal = await this.waitForRuntimeTurn(run.id, 15_000);
+          if (isTerminalRuntimeRun(terminal.run.status)) {
+            await this.finishRuntimeTurn(run.id);
+          }
+        } catch (error) {
+          const current = await this.runtimeStore.getRun(run.id).catch(() => undefined);
+          if (current) {
+            await this.appendRuntimeDiagnostic(
+              current,
+              `Task Monki could not stop abandoned Preview recipe generation: ${errorMessage(error)}`
+            ).catch(() => undefined);
+          }
+        }
+      })
+    );
   }
 
   async getRuntimeCatalog(

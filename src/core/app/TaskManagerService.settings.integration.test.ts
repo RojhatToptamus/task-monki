@@ -598,6 +598,15 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     await store.init();
 
     await expect(
+      service.updateAppSettings({ previewRecipeGenerationRuntimeId: 'opencode' })
+    ).resolves.toMatchObject({ previewRecipeGenerationRuntimeId: 'opencode' });
+    await expect(
+      service.updateAppSettings({ disabledRuntimeIds: ['opencode'] })
+    ).rejects.toThrow(
+      'cannot be disabled while it is the preview recipe generation runtime'
+    );
+    await service.updateAppSettings({ previewRecipeGenerationRuntimeId: null });
+    await expect(
       service.updateAppSettings({ disabledRuntimeIds: ['opencode'] })
     ).resolves.toMatchObject({ disabledRuntimeIds: ['opencode'] });
     await expect(

@@ -6,6 +6,7 @@ import type {
 export type AgentExecutionOperation =
   | 'ACTIVE_TURN_STEERING'
   | 'PROMPT_REFINEMENT'
+  | 'PREVIEW_RECIPE_GENERATION'
   | 'REVIEW'
   | 'DESIGN'
   | 'DISCOURSE';
@@ -37,6 +38,9 @@ export function projectAgentExecutionSupport(
         : unsupported('This agent cannot add instructions to an active turn.');
 
     case 'PROMPT_REFINEMENT':
+      return readOnlyTurnSupport(capabilities);
+
+    case 'PREVIEW_RECIPE_GENERATION':
       return readOnlyTurnSupport(capabilities);
 
     case 'REVIEW':

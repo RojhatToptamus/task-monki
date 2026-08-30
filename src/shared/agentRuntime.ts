@@ -60,10 +60,15 @@ export const AGENT_SCHEDULER_POLICY = {
   optimisticLeaseRetries: 8
 } as const;
 
-/** Durable participant/task owner. It never fabricates a task for discourse. */
+/** Exact workflow owner. Transient operations use their own non-Task scope. */
 export type AgentOwnerScope =
   | { kind: 'TASK'; taskId: string }
   | { kind: 'PROMPT_REFINEMENT'; requestId: string }
+  | {
+      kind: 'PREVIEW_RECIPE_GENERATION';
+      taskId: string;
+      generationId: string;
+    }
   | {
       kind: 'DISCOURSE';
       conversationId: string;
@@ -89,6 +94,11 @@ export type AgentRunScope =
   | {
       kind: 'PROMPT_REFINEMENT';
       requestId: string;
+    }
+  | {
+      kind: 'PREVIEW_RECIPE_GENERATION';
+      taskId: string;
+      generationId: string;
     };
 
 export interface AgentAttestedReadRoot {
@@ -193,6 +203,7 @@ export type AgentRuntimePurpose =
   | 'TASK_COMPACTION'
   | 'PROVIDER_SUBAGENT'
   | 'PROMPT_REFINEMENT'
+  | 'PREVIEW_RECIPE_GENERATION'
   | 'DISCOURSE_ANSWER'
   | 'DISCOURSE_CRITIQUE'
   | 'DISCOURSE_CORRECT'
@@ -530,6 +541,9 @@ export function agentOwnerScopeKey(scope: AgentOwnerScope): string {
   if (scope.kind === 'PROMPT_REFINEMENT') {
     return `prompt-refinement:${scope.requestId}`;
   }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    return `preview-recipe-generation:${scope.taskId}:${scope.generationId}`;
+  }
   return `discourse:${scope.conversationId}:${scope.stableParticipantId}`;
 }
 
@@ -542,6 +556,13 @@ export function agentRunScopeBelongsToOwner(
   }
   if (scope.kind === 'PROMPT_REFINEMENT') {
     return owner.kind === 'PROMPT_REFINEMENT' && owner.requestId === scope.requestId;
+  }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    return (
+      owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
+      owner.taskId === scope.taskId &&
+      owner.generationId === scope.generationId
+    );
   }
   return owner.kind === 'DISCOURSE' && owner.conversationId === scope.conversationId;
 }

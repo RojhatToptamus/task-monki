@@ -2,8 +2,15 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  type AgentModel,
+  type AgentRuntimeState,
   type TaskManagerAppSettings
 } from '../../shared/agent';
+import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../../core/agent/codex/codexCapabilities';
 import { SettingsView, type SettingsViewProps } from './SettingsView';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
@@ -24,7 +31,9 @@ function renderSettings({
   updateState = softwareUpdateState,
   onCheckForSoftwareUpdates = vi.fn(async () => undefined),
   onDownloadSoftwareUpdate = vi.fn(async () => undefined),
-  onInstallSoftwareUpdate = vi.fn(async () => undefined)
+  onInstallSoftwareUpdate = vi.fn(async () => undefined),
+  models = [],
+  runtimes = []
 }: {
   appSettings?: TaskManagerAppSettings;
   onSetTheme?: SettingsViewProps['onSetTheme'];
@@ -34,6 +43,8 @@ function renderSettings({
   onCheckForSoftwareUpdates?: SettingsViewProps['onCheckForSoftwareUpdates'];
   onDownloadSoftwareUpdate?: SettingsViewProps['onDownloadSoftwareUpdate'];
   onInstallSoftwareUpdate?: SettingsViewProps['onInstallSoftwareUpdate'];
+  models?: AgentModel[];
+  runtimes?: AgentRuntimeState[];
 } = {}) {
   render(
     <SettingsView
@@ -53,8 +64,8 @@ function renderSettings({
       onTestExternalTool={async () => {
         throw new Error('not called');
       }}
-      models={[]}
-      runtimes={[]}
+      models={models}
+      runtimes={runtimes}
     />
   );
   return {
@@ -66,6 +77,54 @@ function renderSettings({
     onInstallSoftwareUpdate
   };
 }
+
+const previewModel: AgentModel = {
+  id: 'codex:preview-model',
+  runtimeId: 'codex',
+  modelProvider: 'openai',
+  model: 'preview-model',
+  displayName: 'Preview model',
+  hidden: false,
+  isDefault: true,
+  supportedReasoningEfforts: [],
+  serviceTiers: [],
+  inputModalities: ['text']
+};
+
+const readyCodexRuntime: AgentRuntimeState = {
+  preflight: {
+    runtime: CODEX_RUNTIME_DESCRIPTOR,
+    readiness: createRuntimeReadiness('READY', 'Ready'),
+    capabilities: codexCapabilities()
+  },
+  models: [previewModel],
+  refreshedAt: '2026-08-31T00:00:00.000Z'
+};
+
+describe('Model settings', () => {
+  it('stores the Preview generation runtime and model together', () => {
+    const onSetAppSettings = vi.fn();
+    renderSettings({
+      onSetAppSettings,
+      models: [previewModel],
+      runtimes: [readyCodexRuntime]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Preview generation: Codex · Preview model'
+      })
+    );
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Preview model/u }));
+
+    expect(onSetAppSettings).toHaveBeenCalledWith({
+      previewRecipeGenerationRuntimeId: 'codex',
+      previewRecipeGenerationModel: 'preview-model',
+      previewRecipeGenerationModelProvider: 'openai'
+    });
+  });
+});
 
 describe('Update settings', () => {
   it('checks for updates when no update is active', () => {

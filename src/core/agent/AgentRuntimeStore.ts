@@ -613,5 +613,14 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
     artifactCount: number;
     queueEntryCount: number;
   }>;
+  purgePreviewRecipeGeneration(
+    taskId: string,
+    generationId: string
+  ): Promise<{
+    sessionCount: number;
+    runCount: number;
+    artifactCount: number;
+    queueEntryCount: number;
+  }>;
   setShutdownLatched(latched: boolean, operationId: string): Promise<void>;
 }

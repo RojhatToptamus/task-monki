@@ -212,14 +212,16 @@ export function PreviewRecipeGenerationModal({
             <button type="button" className="outline-button" disabled={busy} onClick={onClose}>
               Close
             </button>
-            {state.draft ? (
+            {state.draft || generating ? (
               <button
                 type="button"
                 className="tm-preview-recipe-review__discard"
                 disabled={busy}
                 onClick={() => void discard()}
               >
-                {discarding ? 'Discarding…' : 'Discard'}
+                {discarding
+                  ? generating ? 'Stopping…' : 'Discarding…'
+                  : generating ? 'Stop' : 'Discard'}
               </button>
             ) : null}
           </div>
@@ -307,7 +309,7 @@ function generationStageDetail(stage?: PreviewRecipeGenerationSnapshot['stage'])
     return 'Reading only the bounded evidence bundle and mapping proven commands, ports, and readiness.';
   }
   if (stage === 'VALIDATING_DRAFT') {
-    return 'The existing Preview parser is checking the complete generated YAML.';
+    return 'Task Monki is checking the YAML and its Preview runtime constraints.';
   }
   return 'Likely secret-bearing, binary, generated, and oversized files are excluded before inspection.';
 }
