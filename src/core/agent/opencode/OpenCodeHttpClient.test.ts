@@ -127,6 +127,152 @@ describe('OpenCodeHttpClient', () => {
     expect(rows.join('\n')).not.toContain('aW1hZ2UtYnl0ZXM=');
   });
 
+  it('omits MCP image-result bytes from SSE delivery and the protocol journal', async () => {
+    const encoded = Buffer.from('inspect-design-image-bytes').toString('base64');
+    const nativeOutput = JSON.stringify({
+      content: [
+        { type: 'text', text: 'The card is visible.' },
+        { type: 'image', data: encoded, mimeType: 'image/png' }
+      ]
+    });
+    const rows: string[] = [];
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async () =>
+        new Response(`data: ${JSON.stringify({
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'prt_mcp',
+              sessionID: 'ses_1',
+              messageID: 'msg_1',
+              type: 'tool',
+              tool: 'task_monki_design_inspect_design',
+              state: {
+                status: 'completed',
+                input: { operation: 'screenshot' },
+                output: nativeOutput,
+                metadata: {
+                  content: [
+                    { type: 'text', text: 'The card is visible.' },
+                    { type: 'image', data: encoded, mimeType: 'image/png' }
+                  ]
+                }
+              }
+            }
+          }
+        })}\n\n`, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' }
+        })
+      ),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+    let stream: ReturnType<OpenCodeHttpClient['startEventStream']>;
+    let delivered: unknown;
+    stream = client.startEventStream({
+      onEvent: async (value) => {
+        delivered = value;
+        stream.stop();
+      },
+      onDisconnect: async () => undefined,
+      onReconnect: async () => undefined
+    });
+
+    await stream.settled;
+
+    expect(JSON.stringify(delivered)).toContain('[Task Monki provider bytes omitted]');
+    expect(JSON.stringify(delivered)).not.toContain(encoded);
+    expect(rows.join('\n')).not.toContain(encoded);
+  });
+
+  it('omits native MCP image-result bytes from recovered message history', async () => {
+    const encoded = Buffer.from('recovered-inspect-design-image').toString('base64');
+    const rows: string[] = [];
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async () =>
+        new Response(JSON.stringify([{
+          info: { id: 'msg_1', sessionID: 'ses_1', role: 'assistant' },
+          parts: [{
+            id: 'prt_mcp',
+            sessionID: 'ses_1',
+            messageID: 'msg_1',
+            type: 'tool',
+            tool: 'task_monki_design_inspect_design',
+            state: {
+              status: 'completed',
+              output: JSON.stringify({
+                content: [
+                  { type: 'text', text: 'The card is visible.' },
+                  { type: 'image', data: encoded, mimeType: 'image/png' }
+                ]
+              })
+            }
+          }]
+        }]), { status: 200 })
+      ),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+
+    const result = await client.get<unknown[]>('/session/ses_1/message');
+
+    expect(JSON.stringify(result.data)).toContain('[Task Monki provider bytes omitted]');
+    expect(JSON.stringify(result.data)).not.toContain(encoded);
+    expect(rows.join('\n')).not.toContain(encoded);
+  });
+
+  it('redacts request-scoped MCP credentials from registration journals', async () => {
+    const credential = 'temporary-design-session-credential';
+    const endpoint = 'http://127.0.0.1:43123/design-tool';
+    const grantFile = '/managed/design-tool-credentials/grant/turn-grant';
+    const rows: string[] = [];
+    let outboundBody = '';
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async (_url, init) => {
+        outboundBody = String(init?.body ?? '');
+        return new Response(JSON.stringify({ status: 'connected' }), { status: 200 });
+      }),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+
+    await client.post('/mcp', {
+      name: 'task_monki_design',
+      config: {
+        environment: {
+          TASK_MONKI_DESIGN_TOOL_ENDPOINT: endpoint,
+          TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: credential,
+          TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: grantFile
+        }
+      }
+    }, { sensitiveValues: [endpoint, credential, grantFile] });
+
+    expect(outboundBody).toContain(credential);
+    expect(rows.join('\n')).not.toContain(credential);
+    expect(rows.join('\n')).not.toContain(endpoint);
+    expect(rows.join('\n')).not.toContain(grantFile);
+    expect(rows.join('\n')).toContain('[REDACTED]');
+  });
+
   it('omits echoed file data from HTTP failure diagnostics', async () => {
     const encoded = Buffer.from('private attachment bytes').toString('base64');
     const dataUrl = `data:text/plain;base64,${encoded}`;

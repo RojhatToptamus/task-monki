@@ -436,9 +436,11 @@ async function seedDesignScenarios(ctx: SeedContext): Promise<void> {
       request: {
         brief: definition.brief,
         creationToken,
+        runtimeId: 'codex',
         model: DEFAULT_AGENT_SETTINGS.model,
         reasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort
       },
+      agentSettings: { ...DEFAULT_AGENT_SETTINGS, runtimeId: 'codex' },
       repository
     });
     if (definition.slug === 'design-starting') {

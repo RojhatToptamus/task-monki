@@ -22,6 +22,15 @@ import { toAgentAttachmentSelectionFromRecords } from '../agent/AgentAttachmentD
 
 const COMMIT = 'a'.repeat(40);
 const EXECUTION_DIGEST = 'b'.repeat(64);
+const DESIGN_AGENT_SETTINGS = {
+  runtimeId: 'codex',
+  model: 'gpt-5.5',
+  reasoningEffort: 'high',
+  sandbox: 'WORKSPACE_WRITE',
+  networkAccess: false,
+  approvalPolicy: 'never',
+  approvalsReviewer: 'user'
+} satisfies AgentExecutionSettings;
 
 const runtimeFixtures = new Set<FileAgentRuntimeStore>();
 const runtimeByTaskStore = new WeakMap<
@@ -35,7 +44,7 @@ afterEach(async () => {
 });
 
 describe('FileTaskStore Design ownership', () => {
-  it('creates an idempotent Codex-owned Design bundle and excludes it from boards', async () => {
+  it('creates an idempotent runtime-owned Design bundle and excludes it from boards', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-store-'));
     const store = new FileTaskStore(dir);
     const draft = await store.createAttachmentDraft();
@@ -55,14 +64,23 @@ describe('FileTaskStore Design ownership', () => {
       brief:
         '  Create a calm dashboard for monitoring a small greenhouse with clear status.  ',
       creationToken: 'design-request-0001',
+      runtimeId: 'codex',
       model: '  gpt-5.5  ',
       reasoningEffort: ' high ',
       attachmentDraftId: draft.id
     };
     const repository = managedRepository(dir);
 
-    const created = await store.createDesignBundle({ request, repository });
-    const retry = await store.createDesignBundle({ request, repository });
+    const created = await store.createDesignBundle({
+      request,
+      agentSettings: DESIGN_AGENT_SETTINGS,
+      repository
+    });
+    const retry = await store.createDesignBundle({
+      request,
+      agentSettings: DESIGN_AGENT_SETTINGS,
+      repository
+    });
 
     expect(retry).toEqual(created);
     expect(created.task).toMatchObject({
@@ -141,17 +159,66 @@ describe('FileTaskStore Design ownership', () => {
     await expect(
       store.createDesignBundle({
         request: { ...request, brief: 'A different request' },
+        agentSettings: DESIGN_AGENT_SETTINGS,
+        repository
+      })
+    ).rejects.toThrow('already used for a different request');
+    await expect(
+      store.createDesignBundle({
+        request: { ...request, runtimeId: 'another-runtime' },
+        agentSettings: { ...DESIGN_AGENT_SETTINGS, runtimeId: 'another-runtime' },
         repository
       })
     ).rejects.toThrow('already used for a different request');
     await store.close();
   });
 
+  it('persists provider-resolved Design settings without rewriting their policy', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-provider-store-'));
+    const store = new FileTaskStore(dir);
+    const agentSettings: AgentExecutionSettings = {
+      runtimeId: 'opencode',
+      model: 'provider/model',
+      reasoningEffort: 'medium',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
+    };
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create a compact product page.',
+        creationToken: 'design-provider-settings',
+        runtimeId: 'opencode',
+        model: 'provider/model',
+        reasoningEffort: 'medium'
+      },
+      agentSettings,
+      repository: managedRepository(dir)
+    });
+
+    expect(created.task).toMatchObject({
+      runtimeId: 'opencode',
+      agentSettings
+    });
+    await store.close();
+    const reopened = new FileTaskStore(dir);
+    await expect(reopened.getDesignDetail(created.task.id)).resolves.toMatchObject({
+      task: { runtimeId: 'opencode', agentSettings }
+    });
+    await reopened.close();
+  });
+
   it('stores inline turns as an idempotent FIFO message queue', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-message-'));
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create the initial page.', creationToken: 'design-request-0002' },
+      request: {
+        brief: 'Create the initial page.',
+        creationToken: 'design-request-0002',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.settleDesignTurn({
@@ -225,8 +292,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
-        creationToken: 'design-reference-create'
+        creationToken: 'design-reference-create',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.settleDesignTurn({
@@ -396,8 +465,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
-        creationToken: 'design-turn-files-create'
+        creationToken: 'design-turn-files-create',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     const reusableDraft = await store.createAttachmentDraft();
@@ -479,7 +550,12 @@ describe('FileTaskStore Design ownership', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-paging-'));
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create the initial page.', creationToken: 'design-paging-create' },
+      request: {
+        brief: 'Create the initial page.',
+        creationToken: 'design-paging-create',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     for (let index = 1; index <= 55; index += 1) {
@@ -537,8 +613,10 @@ describe('FileTaskStore Design ownership', () => {
           request: {
             brief: 'Create a page from the supplied reference.',
             creationToken: 'design-request-create-rollback',
+            runtimeId: 'codex',
             attachmentDraftId: draft.id
           },
+          agentSettings: DESIGN_AGENT_SETTINGS,
           repository
         })
       ).rejects.toThrow('Design creation persistence failure');
@@ -564,8 +642,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create a page.',
-        creationToken: 'design-reference-rollback-create'
+        creationToken: 'design-reference-rollback-create',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     const draft = await store.createAttachmentDraft();
@@ -609,8 +689,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
-        creationToken: 'design-request-turn-rollback'
+        creationToken: 'design-request-turn-rollback',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.settleDesignTurn({
@@ -659,21 +741,26 @@ describe('FileTaskStore Design ownership', () => {
     await store.close();
   });
 
-  it('rejects a persisted Design that weakens its restricted execution settings', async () => {
+  it('rejects a persisted Design whose execution settings name another runtime', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-policy-'));
     const storePath = path.join(dir, 'store.json');
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create a safe page.', creationToken: 'design-request-0004' },
+      request: {
+        brief: 'Create a safe page.',
+        creationToken: 'design-request-0004',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.close();
 
     const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      tasks: Array<{ id: string; agentSettings: { approvalPolicy?: string } }>;
+      tasks: Array<{ id: string; agentSettings: { runtimeId?: string } }>;
     };
-    persisted.tasks.find((task) => task.id === created.task.id)!.agentSettings.approvalPolicy =
-      'on-request';
+    persisted.tasks.find((task) => task.id === created.task.id)!.agentSettings.runtimeId =
+      'another-runtime';
     await fs.writeFile(storePath, `${JSON.stringify(persisted)}\n`, 'utf8');
 
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
@@ -686,7 +773,12 @@ describe('FileTaskStore Design ownership', () => {
     const storePath = path.join(dir, 'store.json');
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create a safe page.', creationToken: 'design-request-lineage' },
+      request: {
+        brief: 'Create a safe page.',
+        creationToken: 'design-request-lineage',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.close();
@@ -733,8 +825,10 @@ describe('FileTaskStore Design ownership', () => {
       request: {
         brief: 'Build a compact launch page.',
         creationToken: 'design-request-0003',
+        runtimeId: 'codex',
         attachmentDraftId: attachmentDraft.id
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({

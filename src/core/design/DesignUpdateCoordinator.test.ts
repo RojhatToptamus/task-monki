@@ -66,9 +66,95 @@ describe('DesignUpdateCoordinator', () => {
         generationId: detail.turns[0]?.finalOpenedCandidate?.previewGenerationId,
         routeId: 'main'
       },
-      detail: 'Codex is checking this working preview. It is not Ready yet.'
+      detail: 'The Design agent is checking this working preview. It is not Ready yet.'
     });
     expect(detail.revisions).toEqual([]);
+  });
+
+  it('replaces an opened candidate after its Preview passes through normal cleanup', async () => {
+    const harness = await createHarness();
+    harness.coordinator.open();
+    await harness.coordinator.dispatch(harness.designId);
+    const current = requireCurrentRun(await harness.store.getDesignDetail(harness.designId));
+    await harness.scriptedRuntime.transitionRun(
+      current.id,
+      { status: 'RUNNING' },
+      `design-test-run-running:${current.id}`
+    );
+
+    await harness.coordinator.inspectDesign({
+      runId: current.id,
+      operation: { operation: 'open_candidate' }
+    });
+    const firstDetail = await harness.store.getDesignDetail(harness.designId);
+    const firstOpened = firstDetail.turns[0]?.finalOpenedCandidate;
+    if (!firstOpened) throw new Error('Expected the first opened Design candidate.');
+
+    harness.previews.stopManagedDesignCandidate.mockImplementationOnce(
+      async (generationId: string) => {
+        const generation = await harness.store.getPreviewGeneration(generationId);
+        if (!generation) throw new Error('Expected the opened Preview generation.');
+        await harness.store.savePreviewGeneration({
+          ...generation,
+          state: 'STOPPING'
+        });
+        return harness.store.savePreviewGeneration({
+          ...generation,
+          routes: generation.routes.map((route) => ({
+            ...route,
+            state: 'DETACHED' as const
+          })),
+          routingState: 'RETIRED',
+          state: 'STOPPED'
+        });
+      }
+    );
+    const replacementCheckpoint: DesignSourceCheckpoint = {
+      repositoryId: firstOpened.source.repositoryId,
+      worktreeId: firstOpened.source.worktreeId,
+      branchName: firstOpened.source.branchName,
+      expectedParentCommit: firstOpened.source.expectedParentCommit,
+      treeSha: 'd'.repeat(40)
+    };
+    harness.source.captureCandidate.mockResolvedValue({
+      kind: 'CAPTURED',
+      checkpoint: replacementCheckpoint
+    });
+    harness.source.prepareCandidateCommit.mockResolvedValue({
+      ...replacementCheckpoint,
+      candidateCommitSha: 'e'.repeat(40)
+    });
+
+    await expect(
+      harness.coordinator.inspectDesign({
+        runId: current.id,
+        operation: { operation: 'open_candidate' }
+      })
+    ).resolves.toMatchObject({ text: expect.stringContaining('page') });
+
+    const replaced = await harness.store.getPreviewGeneration(
+      firstOpened.previewGenerationId
+    );
+    const finalDetail = await harness.store.getDesignDetail(harness.designId);
+    const finalOpened = finalDetail.turns[0]?.finalOpenedCandidate;
+    expect(replaced).toMatchObject({ state: 'STOPPED', routingState: 'RETIRED' });
+    expect(finalOpened).toMatchObject({
+      source: {
+        expectedParentCommit: firstOpened.source.expectedParentCommit,
+        treeSha: 'd'.repeat(40),
+        candidateCommitSha: 'e'.repeat(40)
+      }
+    });
+    expect(finalOpened?.previewGenerationId).not.toBe(
+      firstOpened.previewGenerationId
+    );
+    await expect(
+      harness.store.getPreviewGeneration(finalOpened!.previewGenerationId)
+    ).resolves.toMatchObject({
+      state: 'READY',
+      routingState: 'CANDIDATE',
+      source: { type: 'EXACT_COMMIT', commitSha: 'e'.repeat(40) }
+    });
   });
 
   it('serializes duplicate dispatches around one durable generation-key Run', async () => {
@@ -489,6 +575,7 @@ interface CoordinatorHarness {
     openManagedDesignBrowserLease: ReturnType<typeof vi.fn>;
     publishManagedDesignCandidateCanvas: ReturnType<typeof vi.fn>;
     cutoverManagedDesignCandidate: ReturnType<typeof vi.fn>;
+    stopManagedDesignCandidate: ReturnType<typeof vi.fn>;
   };
   ensureDesignWorktree: ReturnType<typeof vi.fn>;
 }
@@ -505,7 +592,17 @@ async function createHarness(
   const created = await store.createDesignBundle({
     request: {
       brief: 'Create a compact launch page.',
-      creationToken: `design-coordinator-${randomUUID()}`
+      creationToken: `design-coordinator-${randomUUID()}`,
+      runtimeId: 'codex'
+    },
+    agentSettings: {
+      runtimeId: 'codex',
+      model: 'scenario-model',
+      reasoningEffort: 'low',
+      sandbox: 'WORKSPACE_WRITE',
+      networkAccess: false,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
     },
     repository: managedRepository(dir)
   });

@@ -2041,6 +2041,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
           outputArtifactId: `output-${input.id}`,
           diagnosticArtifactId: `diagnostic-${input.id}`,
           instructionProfile: input.instructionProfile,
+          clientToolGrants: input.clientToolGrants,
           attachmentSelection: input.attachmentSelection,
           taskDetails: {
             retryOfRunId: input.retryOfRunId,

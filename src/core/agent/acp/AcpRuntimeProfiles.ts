@@ -82,6 +82,8 @@ export interface AcpRuntimeProfile {
   attachmentDeliveryUnavailableReason?: string;
   /** Exact runtime/model pairs proven to consume native ACP image blocks. */
   imageInputQualifications?: readonly AcpImageInputQualification[];
+  /** Exact runtime/model pairs proven to complete the full Design browser loop. */
+  designQualifications?: readonly AcpDesignQualification[];
   /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
   extensions: Readonly<
     Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
@@ -95,6 +97,11 @@ export interface AcpImageInputQualification {
   allowWhenNotAdvertised?: true;
   /** Provider/model formats allowed through this exact qualified path. */
   mediaTypes: readonly [string, ...string[]];
+}
+
+export interface AcpDesignQualification {
+  runtimeVersion: string;
+  modelId: string;
 }
 
 export interface AcpImageInputSupport {
@@ -203,6 +210,7 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
       mediaTypes: ['image/png']
     }
   ],
+  designQualifications: [],
   environmentPolicy: {
     contractId: 'task-monki/grok-acp-environment@v1',
     allowedKeys: [
@@ -279,6 +287,12 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
       mediaTypes: ['image/png']
     }
   ],
+  designQualifications: [
+    {
+      runtimeVersion: '2026.08.25-3e8eec8',
+      modelId: 'composer-2.5'
+    }
+  ],
   environmentPolicy: {
     contractId: 'task-monki/cursor-agent-acp-environment@v1',
     allowedKeys: [
@@ -327,6 +341,7 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   attachmentDeliveryUnavailableReason:
     'Claude Agent ACP attachments are unavailable until an installed runtime passes Task Monki content-use qualification.',
   imageInputQualifications: [],
+  designQualifications: [],
   environmentPolicy: {
     contractId: 'task-monki/claude-agent-acp-environment@v1',
     allowedKeys: [
@@ -542,7 +557,7 @@ export function acpCapabilities(
     },
     dynamicTools: {
       maturity: 'unsupported',
-      detail: 'Task Monki exposes no client tools to ACP agents.'
+      detail: 'Task Monki exposes no general client tools to ACP agents. The run-bound inspect_design MCP bridge is the only Design-session exception.'
     },
     attachmentDelivery: acpAttachmentCapability(profile, negotiated?.prompt),
     runtimeRecovery: {
@@ -682,6 +697,29 @@ export function acpImageInputSupport(input: {
     capabilityDrift: false,
     unavailableReason
   };
+}
+
+export function acpDesignSupport(input: {
+  profile: AcpRuntimeProfile;
+  runtimeVersion?: string;
+  modelId: string;
+}): import('../../../shared/agent').AgentCapability {
+  const qualification = input.runtimeVersion
+    ? input.profile.designQualifications?.find(
+        (candidate) =>
+          candidate.runtimeVersion === input.runtimeVersion &&
+          candidate.modelId === input.modelId
+      )
+    : undefined;
+  return qualification
+    ? {
+        maturity: 'stable',
+        detail: `${input.profile.descriptor.displayName} ${qualification.runtimeVersion} with ${qualification.modelId} passed the packaged Design instruction, skill, MCP image-result, browser, and cleanup qualification.`
+      }
+    : {
+        maturity: 'unsupported',
+        detail: `${input.profile.descriptor.displayName} ${input.runtimeVersion ?? 'unknown version'} model ${input.modelId} has not passed the full packaged Design qualification.`
+      };
 }
 
 export function defaultAcpModel(

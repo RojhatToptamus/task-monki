@@ -81,9 +81,56 @@ describe('mounted Design workspace', () => {
     expect(onCreateBlankDesign).toHaveBeenCalledWith({
       brief: 'Build a calm project portfolio.',
       creationToken: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/u),
+      runtimeId: 'codex',
       model: 'gpt-5.6-luna',
       reasoningEffort: 'medium'
     });
+  });
+
+  it('keeps an unqualified model visible but creates only with a qualified model', async () => {
+    const reason = 'This exact provider version and model failed Design verification.';
+    const unqualifiedModel: AgentModel = {
+      ...designModel,
+      id: 'codex:unqualified',
+      model: 'unqualified',
+      displayName: 'Unqualified',
+      isDefault: true,
+      designSupport: { maturity: 'unsupported', detail: reason }
+    };
+    const onCreateBlankDesign = vi.fn(async () => undefined);
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          designs: [],
+          selectedDesignId: undefined,
+          project: undefined,
+          models: [unqualifiedModel, { ...designModel, isDefault: false }],
+          defaultAgentSettings: {
+            runtimeId: 'codex',
+            model: 'unqualified',
+            reasoningEffort: 'medium'
+          },
+          onCreateBlankDesign
+        })}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Design: Codex · Luna/ }));
+    const unavailableOption = screen.getByRole('menuitemradio', {
+      name: `Unqualified Unavailable ${reason}`
+    });
+    expect(unavailableOption).toHaveProperty('disabled', true);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
+      target: { value: 'Build with the qualified model.' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
+
+    await waitFor(() =>
+      expect(onCreateBlankDesign).toHaveBeenCalledWith(
+        expect.objectContaining({ runtimeId: 'codex', model: 'gpt-5.6-luna' })
+      )
+    );
   });
 
   it('keeps the blank brief ready when Design models load after the form mounts', async () => {
@@ -396,6 +443,102 @@ describe('mounted Design workspace', () => {
       'Increase the title contrast.',
       [],
       undefined
+    );
+  });
+
+  it('keeps an existing Design readable when its exact model is no longer qualified', () => {
+    const reason = 'This exact provider version and model failed Design verification.';
+    const onSubmitRefinement = vi.fn(async () => undefined);
+    render(
+      <DesignsWorkspace
+        {...workspaceProps({
+          models: [{
+            ...designModel,
+            designSupport: { maturity: 'unsupported', detail: reason }
+          }],
+          onSubmitRefinement
+        })}
+      />
+    );
+
+    expect(screen.getByText('Build a calm project portfolio.')).toBeTruthy();
+    expect(screen.getByText(reason)).toBeTruthy();
+    const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
+    expect(composer).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Send' })).toHaveProperty(
+      'disabled',
+      true
+    );
+    expect(onSubmitRefinement).not.toHaveBeenCalled();
+  });
+
+  it('loads an explicit provider model catalog when an existing Design reopens', async () => {
+    const onDiscoverAgentRuntimeModels = vi.fn(async () => undefined);
+    const explicitRuntime: AgentRuntimeState = {
+      ...designRuntime,
+      preflight: {
+        ...designRuntime.preflight,
+        readiness: {
+          ...designRuntime.preflight.readiness,
+          checks: {
+            ...designRuntime.preflight.readiness.checks,
+            modelCatalog: 'UNKNOWN'
+          }
+        },
+        capabilities: {
+          ...designRuntime.preflight.capabilities,
+          modelCatalog: {
+            ...designRuntime.preflight.capabilities.modelCatalog,
+            activation: 'EXPLICIT'
+          }
+        }
+      },
+      models: []
+    };
+    const props = workspaceProps({
+      models: [],
+      runtimes: [explicitRuntime],
+      onDiscoverAgentRuntimeModels
+    });
+    const view = render(<DesignsWorkspace {...props} />);
+
+    await waitFor(() =>
+      expect(onDiscoverAgentRuntimeModels).toHaveBeenCalledWith('codex')
+    );
+    expect(screen.getByText('Build a calm project portfolio.')).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Refine this Design' })).toHaveProperty(
+      'disabled',
+      true
+    );
+
+    view.rerender(
+      <DesignsWorkspace
+        {...props}
+        runtimes={[{ ...explicitRuntime }]}
+      />
+    );
+    expect(onDiscoverAgentRuntimeModels).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <DesignsWorkspace
+        {...props}
+        models={[designModel]}
+        runtimes={[explicitRuntime]}
+      />
+    );
+    expect(screen.getByRole('textbox', { name: 'Refine this Design' })).toHaveProperty(
+      'disabled',
+      false
+    );
+
+    view.rerender(
+      <DesignsWorkspace
+        {...props}
+        runtimes={[{ ...explicitRuntime }]}
+      />
+    );
+    await waitFor(() =>
+      expect(onDiscoverAgentRuntimeModels).toHaveBeenCalledTimes(2)
     );
   });
 
@@ -1444,7 +1587,15 @@ function designProject(
   return {
     schemaVersion: TASK_STORE_SCHEMA_VERSION,
     design: designListItem(),
-    task: { id: 'design-1', kind: 'DESIGN' } as DesignProjectDetail['task'],
+    task: {
+      id: 'design-1',
+      kind: 'DESIGN',
+      runtimeId: 'codex',
+      agentSettings: {
+        model: 'gpt-5.6-luna',
+        reasoningEffort: 'medium'
+      }
+    } as DesignProjectDetail['task'],
     repository: {
       id: 'repository-1',
       kind: 'DESIGN_MANAGED'
@@ -1552,6 +1703,7 @@ const designModel: AgentModel = {
   defaultReasoningEffort: 'medium',
   serviceTiers: [],
   inputModalities: ['text', 'image'],
+  designSupport: { maturity: 'stable' },
   isDefault: true
 };
 

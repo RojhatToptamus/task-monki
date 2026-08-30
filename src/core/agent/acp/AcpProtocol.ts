@@ -72,6 +72,14 @@ export interface AcpMcpCapabilities {
   _meta?: Record<string, unknown> | null;
 }
 
+/** Stable ACP stdio MCP descriptor used by session/new, load, and resume. */
+export interface AcpStdioMcpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Array<{ name: string; value: string }>;
+}
+
 export interface AcpSessionCapabilities {
   list?: Record<string, unknown> | null;
   delete?: Record<string, unknown> | null;

@@ -136,6 +136,7 @@ import {
 } from '../core/process/ownedProcess';
 import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
 import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
+import { resolveDesignToolMcpServerPath } from '../core/design/DesignClientToolBridge';
 import {
   resolveDesignBrowserRuntimePaths,
   resolveDesignBrowserSocketRoot
@@ -1232,6 +1233,16 @@ void app.whenReady().then(async () => {
             ),
             designBrowserSocketRoot: resolveDesignBrowserSocketRoot(userDataDir),
             designBrowserRequireCodeSignature: app.isPackaged,
+            designToolMcpExecutablePath: process.execPath,
+            designToolMcpServerPath: resolveDesignToolMcpServerPath({
+              isPackaged: app.isPackaged,
+              resourcesPath: process.resourcesPath,
+              appPath: app.getAppPath()
+            }),
+            designToolCredentialRoot: path.join(
+              userDataDir,
+              'design-tool-credentials'
+            ),
             designCanvasFence: designCanvasHost
           }
         : {})

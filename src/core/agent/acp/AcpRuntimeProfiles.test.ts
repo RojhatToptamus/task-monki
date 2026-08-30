@@ -7,6 +7,7 @@ import {
   GROK_SESSION_MODEL_EXTENSION,
   CLAUDE_AGENT_ACP_PROFILE,
   acpCapabilities,
+  acpDesignSupport,
   acpImageInputSupport,
   acpModelInputModalities,
   defaultAcpModel
@@ -437,6 +438,36 @@ describe('ACP runtime profiles', () => {
     ).toMatchObject({
       maturity: 'unsupported',
       detail: expect.stringContaining('content-use qualification')
+    });
+  });
+
+  it('qualifies Design only for exact ACP version and model pairs', () => {
+    expect(
+      acpDesignSupport({
+        profile: CURSOR_ACP_PROFILE,
+        runtimeVersion: '2026.08.25-3e8eec8',
+        modelId: 'composer-2.5'
+      })
+    ).toMatchObject({ maturity: 'stable' });
+    expect(
+      acpDesignSupport({
+        profile: CURSOR_ACP_PROFILE,
+        runtimeVersion: 'other-version',
+        modelId: 'composer-2.5'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
+    });
+    expect(
+      acpDesignSupport({
+        profile: GROK_ACP_PROFILE,
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.6'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
     });
   });
 });

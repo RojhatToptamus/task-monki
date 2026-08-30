@@ -117,8 +117,6 @@ import type {
 } from '../../../shared/agent';
 import { isImplementationRunMode } from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
-import type { ThreadSourceKind } from './protocol/generated/v2/ThreadSourceKind';
-import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
 import { normalizeCodexExternalToolSettings } from './CodexToolConfig';
 import {
   resolveAgentGitExecutablePath,
@@ -187,6 +185,11 @@ import {
   type DesignBrowserToolResult,
   type InspectDesignOperation
 } from '../../design/AgentBrowserRuntime';
+import {
+  INSPECT_DESIGN_TOOL_DEFINITION,
+  INSPECT_DESIGN_TOOL_NAME,
+  safeDesignClientToolFailure
+} from '../../design/DesignClientToolContract';
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -219,8 +222,6 @@ const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
 const RECOVERY_CONTINUATION_WAIT_MS = 1_000;
-const DESIGN_BROWSER_TOOL_NAME = 'inspect_design';
-
 export type CodexDesignBrowserToolHandler = (input: {
   runId: string;
   operation: InspectDesignOperation;
@@ -1865,100 +1866,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
   }
 
-  async deleteDesignTaskThreads(taskId: string): Promise<void> {
-    const snapshot = await this.taskRuntime.snapshot();
-    const task = await this.taskStore.getTask(taskId);
-    if (task?.kind !== 'DESIGN') {
-      throw new Error('Design not found for Codex thread cleanup.');
-    }
-    const sessions = snapshot.agentSessions.filter(
-      (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
-    );
-    if (
-      snapshot.runs.some(
-        (run) => run.taskId === taskId && ACTIVE_RUN_STATES.includes(run.status)
-      )
-    ) {
-      throw new Error('Stop the active Design Run before deleting its Codex threads.');
-    }
-    const treeIds = new Set(
-      sessions.flatMap((session) =>
-        session.providerSessionTreeId ? [session.providerSessionTreeId] : []
-      )
-    );
-    const explicitIds = new Set(
-      sessions.flatMap((session) =>
-        session.providerSessionId ? [session.providerSessionId] : []
-      )
-    );
-    if (treeIds.size === 0 && explicitIds.size === 0) {
-      await this.releaseTask(taskId);
-      return;
-    }
-    const ownedWorktreePaths = new Set(
-      await Promise.all(
-        sessions.map((session) => canonicalPath(session.worktreePath))
-      )
-    );
-    const client = await this.ensureClient();
-    const listOwned = async (): Promise<Thread[]> => {
-      const all = await listAllCodexThreads(client);
-      const selected = all.filter(
-        (thread) => treeIds.has(thread.sessionId) || explicitIds.has(thread.id)
-      );
-      const canonicalThreadPaths = new Map(
-        await Promise.all(
-          selected.map(async (thread) => [thread.id, await canonicalPath(thread.cwd)] as const)
-        )
-      );
-      for (const treeId of treeIds) {
-        const tree = selected.filter((thread) => thread.sessionId === treeId);
-        if (
-          tree.length > 0 &&
-          !tree.some(
-            (thread) =>
-              explicitIds.has(thread.id) &&
-              ownedWorktreePaths.has(canonicalThreadPaths.get(thread.id)!)
-          )
-        ) {
-          throw new Error('Codex thread tree does not match the Design worktree.');
-        }
-      }
-      if (
-        selected.some(
-          (thread) =>
-            !treeIds.has(thread.sessionId) &&
-            !ownedWorktreePaths.has(canonicalThreadPaths.get(thread.id)!)
-        )
-      ) {
-        throw new Error('Codex thread does not match the Design worktree.');
-      }
-      return selected;
-    };
-    let owned = await listOwned();
-    const byId = new Map(owned.map((thread) => [thread.id, thread]));
-    owned = owned.sort(
-      (left, right) => threadDepth(right, byId) - threadDepth(left, byId)
-    );
-    for (const thread of owned) {
-      try {
-        await client.requestMutation('thread/delete', { threadId: thread.id });
-      } catch (error) {
-        const remaining = await listOwned();
-        if (remaining.some((candidate) => candidate.id === thread.id)) throw error;
-      }
-    }
-    for (const session of sessions) {
-      this.activePermissionProfiles.delete(session.id);
-      this.recoveryRunBySession.delete(session.id);
-      this.unmaterializedThreadAttestations.delete(session.id);
-    }
-  }
-
-  deleteTaskProviderHistory(taskId: string): Promise<void> {
-    return this.deleteDesignTaskThreads(taskId);
-  }
-
   async syncGoal(input: SyncAgentGoal): Promise<AgentGoalSnapshotRecord> {
     const session = await this.requireSession(input.session.localSessionId);
     const providerSessionId =
@@ -2932,7 +2839,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       models.push(...response.data);
       cursor = response.nextCursor;
     } while (cursor);
-    this.models = models.map(mapModel);
+    this.models = models.map((model) =>
+      mapModel(model, this.supervisor.currentServer?.runtimeVersion)
+    );
   }
 
   private async handleNotification(
@@ -3580,7 +3489,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     if (
       request.method !== 'item/tool/call' ||
       request.params.namespace !== null ||
-      request.params.tool !== DESIGN_BROWSER_TOOL_NAME
+      request.params.tool !== INSPECT_DESIGN_TOOL_NAME
     ) {
       return false;
     }
@@ -3711,7 +3620,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       });
       response = successfulDesignToolResponse(result);
     } catch (error) {
-      response = failedDesignToolResponse(safeDesignToolFailure(error));
+      response = failedDesignToolResponse(safeDesignClientToolFailure(error));
     }
     try {
       if (!this.isCurrentClientEvent(input.client, input.raw)) return;
@@ -3728,7 +3637,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           {
             callId: input.callId,
             namespace: null,
-            tool: DESIGN_BROWSER_TOOL_NAME,
+            tool: INSPECT_DESIGN_TOOL_NAME,
             arguments: input.operation
           },
           input.operation,
@@ -6780,164 +6689,8 @@ function codexRuntimeOperationId(action: string, ...identity: unknown[]): string
 
 const INSPECT_DESIGN_TOOL_SPEC: DynamicToolSpec = {
   type: 'function',
-  name: DESIGN_BROWSER_TOOL_NAME,
-  description:
-    'Open and inspect the exact current Design candidate. Use only the operations needed for this change.',
-  inputSchema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['operation'],
-    properties: {
-      operation: {
-        type: 'string',
-        description:
-          'Choose one bridge operation. Browser actions use operation "act" plus an action.',
-        enum: [
-          'open_candidate',
-          'observe',
-          'act',
-          'set_viewport',
-          'set_media',
-          'screenshot',
-          'accessibility'
-        ]
-      },
-      action: {
-        type: 'string',
-        description: 'Required only when operation is "act".',
-        enum: [
-          'click',
-          'double_click',
-          'hover',
-          'focus',
-          'fill',
-          'type',
-          'key',
-          'select',
-          'check',
-          'uncheck',
-          'scroll',
-          'scroll_into_view',
-          'drag',
-          'wait'
-        ]
-      },
-      ref: {
-        type: 'string',
-        description: 'A current snapshot reference including its @ prefix, for example @e4.',
-        pattern: '^@e[1-9][0-9]{0,4}$'
-      },
-      targetRef: {
-        type: 'string',
-        description: 'A second current snapshot reference including its @ prefix.',
-        pattern: '^@e[1-9][0-9]{0,4}$'
-      },
-      value: { type: 'string', maxLength: 4096 },
-      values: {
-        type: 'array',
-        minItems: 1,
-        maxItems: 20,
-        items: { type: 'string', maxLength: 4096 }
-      },
-      direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
-      amount: { type: 'integer', minimum: 1, maximum: 2000 },
-      milliseconds: { type: 'integer', minimum: 0, maximum: 2000 },
-      width: {
-        type: 'integer',
-        description: 'Required only for set_viewport.',
-        minimum: 320,
-        maximum: 2560
-      },
-      height: {
-        type: 'integer',
-        description: 'Required only for set_viewport.',
-        minimum: 320,
-        maximum: 2000
-      },
-      colorScheme: {
-        type: 'string',
-        enum: ['light', 'dark']
-      },
-      reducedMotion: { type: 'boolean' },
-      fullPage: { type: 'boolean' }
-    },
-    oneOf: [
-      {
-        title: 'Open the exact current candidate',
-        properties: { operation: { const: 'open_candidate' } },
-        required: ['operation']
-      },
-      {
-        title: 'Refresh the snapshot, console, and runtime errors',
-        properties: { operation: { const: 'observe' } },
-        required: ['operation']
-      },
-      {
-        title: 'Perform one browser action, then observe',
-        properties: {
-          operation: { const: 'act' },
-          action: {
-            enum: [
-              'click',
-              'double_click',
-              'hover',
-              'focus',
-              'fill',
-              'type',
-              'key',
-              'select',
-              'check',
-              'uncheck',
-              'scroll',
-              'scroll_into_view',
-              'drag',
-              'wait'
-            ]
-          },
-          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          targetRef: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          value: { type: 'string' },
-          values: { type: 'array' },
-          direction: { enum: ['up', 'down', 'left', 'right'] },
-          amount: { type: 'integer' },
-          milliseconds: { type: 'integer' }
-        },
-        required: ['operation', 'action']
-      },
-      {
-        title: 'Set the viewport, then observe',
-        properties: {
-          operation: { const: 'set_viewport' },
-          width: { type: 'integer' },
-          height: { type: 'integer' }
-        },
-        required: ['operation', 'width', 'height']
-      },
-      {
-        title: 'Set color and motion media, then observe',
-        properties: {
-          operation: { const: 'set_media' },
-          colorScheme: { enum: ['light', 'dark'] },
-          reducedMotion: { type: 'boolean' }
-        },
-        required: ['operation', 'colorScheme', 'reducedMotion']
-      },
-      {
-        title: 'Capture a transient screenshot',
-        properties: {
-          operation: { const: 'screenshot' },
-          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          fullPage: { type: 'boolean' }
-        },
-        required: ['operation']
-      },
-      {
-        title: 'Run the bounded accessibility audit',
-        properties: { operation: { const: 'accessibility' } },
-        required: ['operation']
-      }
-    ]
-  } as JsonValue
+  ...INSPECT_DESIGN_TOOL_DEFINITION,
+  inputSchema: INSPECT_DESIGN_TOOL_DEFINITION.inputSchema as JsonValue
 };
 
 function withDynamicTools<T extends object>(
@@ -6971,19 +6724,6 @@ function failedDesignToolResponse(message: string): DynamicToolCallResponse {
     success: false,
     contentItems: [{ type: 'inputText', text: message.slice(0, 1_000) }]
   };
-}
-
-function safeDesignToolFailure(error: unknown): string {
-  const message = errorMessage(error).trim();
-  if (
-    message.length > 0 &&
-    message.length <= 1_000 &&
-    !message.includes('/') &&
-    !message.includes('\\')
-  ) {
-    return message;
-  }
-  return 'The Design browser operation failed. Correct the source or open a fresh candidate.';
 }
 
 function designToolItemPayload(
@@ -7390,75 +7130,6 @@ function mapThreadToSubagentStatus(
     case 'notLoaded':
       return undefined;
   }
-}
-
-const ALL_CODEX_THREAD_SOURCES: readonly ThreadSourceKind[] = [
-  'cli',
-  'vscode',
-  'exec',
-  'appServer',
-  'subAgent',
-  'subAgentReview',
-  'subAgentCompact',
-  'subAgentThreadSpawn',
-  'subAgentOther',
-  'unknown'
-];
-
-async function listAllCodexThreads(client: CodexRpcClient): Promise<Thread[]> {
-  const threads = [
-    ...(await listCodexThreads(client, false)),
-    ...(await listCodexThreads(client, true))
-  ];
-  return [...new Map(threads.map((thread) => [thread.id, thread])).values()];
-}
-
-async function listCodexThreads(
-  client: CodexRpcClient,
-  archived: boolean
-): Promise<Thread[]> {
-  const threads: Thread[] = [];
-  const seenCursors = new Set<string>();
-  let cursor: string | null = null;
-  for (let page = 0; page < 100; page += 1) {
-    const response: ThreadListResponse = await client.request('thread/list', {
-      cursor,
-      limit: 100,
-      sortKey: 'updated_at',
-      sortDirection: 'desc',
-      sourceKinds: [...ALL_CODEX_THREAD_SOURCES],
-      archived,
-      useStateDbOnly: false
-    });
-    threads.push(...response.data);
-    if (!response.nextCursor) break;
-    if (seenCursors.has(response.nextCursor)) {
-      throw new Error('Codex thread pagination repeated a cursor.');
-    }
-    seenCursors.add(response.nextCursor);
-    cursor = response.nextCursor;
-    if (page === 99) {
-      throw new Error('Codex thread cleanup exceeded its safe page limit.');
-    }
-  }
-  return threads;
-}
-
-function threadDepth(thread: Thread, threads: ReadonlyMap<string, Thread>): number {
-  let depth = 0;
-  let parentId = thread.forkedFromId ?? thread.parentThreadId;
-  const visited = new Set([thread.id]);
-  while (parentId && !visited.has(parentId)) {
-    visited.add(parentId);
-    depth += 1;
-    const parent = threads.get(parentId);
-    parentId = parent?.forkedFromId ?? parent?.parentThreadId ?? null;
-  }
-  return depth;
-}
-
-async function canonicalPath(input: string): Promise<string> {
-  return fs.realpath(input).catch(() => path.resolve(input));
 }
 
 function hashString(value: string): string {

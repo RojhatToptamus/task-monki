@@ -39,6 +39,8 @@ export interface CreateAgentSession {
   iterationId: string;
   worktreeId: string;
   worktreePath: string;
+  mode?: AgentRunMode;
+  instructionProfile?: AgentInstructionProfile;
   settings: AgentExecutionSettings;
   /**
    * Storage-verified task attachments used to qualify the initial session.
@@ -212,8 +214,6 @@ export interface AgentRuntimeAdapter {
   respondToInteraction(input: AgentInteractionResponse): Promise<void>;
   /** Release runtime-owned processes/streams for a task after Task Monki proves no work is active. */
   releaseTask?(taskId: string): Promise<void>;
-  /** Permanently delete provider history owned by a task. Unsupported runtimes must fail closed. */
-  deleteTaskProviderHistory?(taskId: string): Promise<void>;
   reconcile(): Promise<AgentReconciliationResult>;
   shutdown(): Promise<void>;
 }

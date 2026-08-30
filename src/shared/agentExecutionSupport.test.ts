@@ -17,7 +17,10 @@ describe('projectAgentExecutionSupport', () => {
     });
     expect(
       projectAgentExecutionSupport(capabilities, 'DESIGN', {
-        model: { inputModalities: ['text', 'image'] }
+        model: {
+          inputModalities: ['text', 'image'],
+          designSupport: { maturity: 'stable' }
+        }
       })
     ).toEqual({ supported: true });
   });
@@ -88,15 +91,58 @@ describe('projectAgentExecutionSupport', () => {
 
     expect(
       projectAgentExecutionSupport(capabilities, 'DESIGN', {
-        model: { inputModalities: ['text'] }
+        model: {
+          inputModalities: ['text'],
+          designSupport: { maturity: 'stable' }
+        }
       }).supported
     ).toBe(false);
+    expect(
+      projectAgentExecutionSupport(capabilities, 'DESIGN', {
+        model: {
+          inputModalities: ['text', 'image'],
+          designSupport: {
+            maturity: 'unsupported',
+            detail: 'This exact model has not passed Design qualification.'
+          }
+        }
+      })
+    ).toEqual({
+      supported: false,
+      reason: 'This exact model has not passed Design qualification.'
+    });
     expect(
       projectAgentExecutionSupport(
         supportedCapabilities({ attachmentDelivery: { maturity: 'unsupported' } }),
         'DESIGN'
       ).supported
     ).toBe(false);
+    expect(
+      projectAgentExecutionSupport(
+        supportedCapabilities({
+          executionPolicy: {
+            defaultPresetId: 'read-only',
+            detail: 'Read-only execution only.',
+            presets: [
+              {
+                id: 'read-only',
+                label: 'Read only',
+                detail: 'Read-only execution.',
+                sandbox: 'READ_ONLY',
+                repositoryMutation: 'DENY',
+                approvalPolicy: 'never',
+                approvalsReviewer: 'user',
+                networkAccess: 'DISABLED'
+              }
+            ]
+          }
+        }),
+        'DESIGN'
+      )
+    ).toEqual({
+      supported: false,
+      reason: 'This agent has no approval-free write policy for autonomous Design work.'
+    });
     expect(
       projectAgentExecutionSupport(
         supportedCapabilities({
@@ -139,6 +185,16 @@ function supportedCapabilities(
           detail: 'Read-only execution.',
           sandbox: 'READ_ONLY',
           repositoryMutation: 'DENY',
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          networkAccess: 'DISABLED'
+        },
+        {
+          id: 'write',
+          label: 'Write',
+          detail: 'Autonomous write access.',
+          sandbox: 'WORKSPACE_WRITE',
+          repositoryMutation: 'ALLOW',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
           networkAccess: 'DISABLED'

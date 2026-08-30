@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   mapOpenCodeModels,
+  mapOpenCodePartType,
   mapOpenCodeTodoSteps,
   normalizeOpenCodeEvent,
   openCodeErrorDiagnostic,
@@ -9,6 +10,16 @@ import {
 } from './OpenCodeProtocol';
 
 describe('OpenCodeProtocol', () => {
+  it('maps the app-owned Design MCP tool to provider-neutral MCP telemetry', () => {
+    expect(mapOpenCodePartType({
+      id: 'part-1',
+      sessionID: 'session-1',
+      messageID: 'message-1',
+      type: 'tool',
+      tool: 'task_monki_design_inspect_design'
+    })).toBe('MCP_TOOL_CALL');
+  });
+
   it('strictly parses native session permission rules', () => {
     expect(parseOpenCodePermissionRules([
       { permission: 'edit', pattern: '*', action: 'ask' }

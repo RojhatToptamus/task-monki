@@ -21,6 +21,34 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService Design vertical slice', () => {
+  it('uses the provider approval-free write policy for Design work', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-autonomous-policy',
+      previewEnabled: true,
+      designMode: true
+    });
+    const capabilities = codexCapabilities();
+    vi.spyOn(scenario.agent, 'capabilities').mockResolvedValue({
+      ...capabilities,
+      executionPolicy: {
+        ...capabilities.executionPolicy,
+        defaultPresetId: 'ask-for-approval'
+      }
+    });
+
+    const detail = await scenario.service.createBlankDesign({
+      brief: 'Create a small product page.',
+      creationToken: 'design-autonomous-policy-create',
+      runtimeId: 'codex'
+    });
+
+    expect(detail.task.agentSettings).toMatchObject({
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'never',
+      networkAccess: false
+    });
+  });
+
   it('shows a checked candidate while the last Ready route stays available', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-canvas-progress',
@@ -30,7 +58,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small product page.',
-      creationToken: 'design-canvas-progress-create'
+      creationToken: 'design-canvas-progress-create',
+      runtimeId: 'codex'
     });
     const worktreePath = requireWorktreePath(detail);
     expect(
@@ -196,10 +225,159 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(
       scenario.service.createBlankDesign({
         brief: 'Create a compact status page.',
-        creationToken: 'design-skills-unavailable'
+        creationToken: 'design-skills-unavailable',
+        runtimeId: 'codex'
       })
     ).rejects.toThrow('cannot apply Design instructions and skills safely');
     await expect(scenario.service.listDesigns()).resolves.toEqual([]);
+  });
+
+  it('fails before repository creation when the selected model is not Design-qualified', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-model-unqualified',
+      previewEnabled: true,
+      designMode: true
+    });
+    vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
+      {
+        id: 'codex:openai/unqualified-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
+        model: 'unqualified-model',
+        displayName: 'Unqualified model',
+        hidden: false,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+        inputModalities: ['text', 'image'],
+        designSupport: {
+          maturity: 'unsupported',
+          detail: 'This exact provider version and model did not pass Design verification.'
+        },
+        isDefault: true
+      }
+    ]);
+    const prepareBlankRepository = vi.spyOn(
+      (
+        scenario.service as unknown as {
+          designSource: { prepareBlankRepository(input: unknown): Promise<unknown> };
+        }
+      ).designSource,
+      'prepareBlankRepository'
+    );
+
+    await expect(
+      scenario.service.createBlankDesign({
+        brief: 'Create a compact status page.',
+        creationToken: 'design-model-unqualified',
+        runtimeId: 'codex',
+        model: 'unqualified-model'
+      })
+    ).rejects.toThrow(
+      'This exact provider version and model did not pass Design verification.'
+    );
+    expect(prepareBlankRepository).not.toHaveBeenCalled();
+    await expect(scenario.service.listDesigns()).resolves.toEqual([]);
+  });
+
+  it('does not accept a later Design turn after exact model qualification is withdrawn', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-model-qualification-drift',
+      previewEnabled: true,
+      designMode: true
+    });
+    const detail = await scenario.service.createBlankDesign({
+      brief: 'Create a compact status page.',
+      creationToken: 'design-model-qualification-drift',
+      runtimeId: 'codex',
+      model: 'scenario-model'
+    });
+    vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
+      {
+        id: 'codex:openai/scenario-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
+        model: 'scenario-model',
+        displayName: 'Scenario model',
+        hidden: false,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+        inputModalities: ['text', 'image'],
+        designSupport: {
+          maturity: 'unsupported',
+          detail: 'This model qualification is no longer valid.'
+        },
+        isDefault: true
+      }
+    ]);
+
+    await expect(
+      scenario.service.submitDesignTurn({
+        designId: detail.design.id,
+        clientMessageId: 'design-model-qualification-drift-turn',
+        message: 'Make the page more spacious.',
+        referenceIds: []
+      })
+    ).rejects.toThrow('This model qualification is no longer valid.');
+    expect((await scenario.service.getDesign(detail.design.id)).turns).toHaveLength(1);
+  });
+
+  it('does not dispatch a queued Design turn after exact model qualification is withdrawn', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-queued-qualification-drift',
+      previewEnabled: true,
+      designMode: true
+    });
+    let detail = await scenario.service.createBlankDesign({
+      brief: 'Create a compact status page.',
+      creationToken: 'design-queued-qualification-drift',
+      runtimeId: 'codex',
+      model: 'scenario-model'
+    });
+    const queuedInput = {
+      designId: detail.design.id,
+      clientMessageId: 'design-queued-qualification-drift-turn',
+      message: 'Make the page more spacious.',
+      referenceIds: []
+    };
+    detail = await scenario.service.submitDesignTurn(queuedInput);
+    expect(detail.turns.at(-1)?.outcome).toBeUndefined();
+    expect(detail.turns.at(-1)?.runId).toBeUndefined();
+    vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
+      {
+        id: 'codex:openai/scenario-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
+        model: 'scenario-model',
+        displayName: 'Scenario model',
+        hidden: false,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+        inputModalities: ['text', 'image'],
+        designSupport: {
+          maturity: 'unsupported',
+          detail: 'This queued model qualification is no longer valid.'
+        },
+        isDefault: true
+      }
+    ]);
+
+    const retry = await scenario.service.submitDesignTurn(queuedInput);
+    expect(retry.turns).toHaveLength(2);
+    expect(retry.turns.at(-1)?.id).toBe(detail.turns.at(-1)?.id);
+
+    await scenario.completeRun(detail.turns[0]!.runId!, 'The first page is ready.');
+    detail = await waitForDesign(
+      scenario,
+      detail.design.id,
+      (candidate) => candidate.turns.at(-1)?.outcome === 'FAILED'
+    );
+    expect(detail.turns.at(-1)?.failureReason).toContain(
+      'This queued model qualification is no longer valid.'
+    );
+    expect(scenario.agent.startedTurns).toHaveLength(1);
   });
 
   it('delivers adopted references with the first Design turn and preserves them on reopen', async () => {
@@ -220,6 +398,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
         defaultReasoningEffort: 'medium',
         serviceTiers: [],
         inputModalities: ['text', 'image'],
+        designSupport: { maturity: 'stable' },
         isDefault: true
       }
     ]);
@@ -249,6 +428,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     const createInput = {
       brief: 'Create a product page from the supplied direction.',
       creationToken: 'design-initial-references-create',
+      runtimeId: 'codex',
       model: 'scenario-model',
       reasoningEffort: 'medium',
       attachmentDraftId: draft.id
@@ -294,7 +474,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small status page with a clear launch button.',
-      creationToken: 'design-vertical-create'
+      creationToken: 'design-vertical-create',
+      runtimeId: 'codex'
     });
     expect(detail.task.kind).toBe('DESIGN');
     expect(detail.currentRun?.mode).toBe('DESIGN');
@@ -414,6 +595,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small editorial page.',
       creationToken: 'design-reference-service-create',
+      runtimeId: 'codex',
       model: 'scenario-model',
       reasoningEffort: 'medium'
     });
@@ -564,6 +746,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a compact reporting page.',
       creationToken: 'design-long-create',
+      runtimeId: 'codex',
       model: 'scenario-model',
       reasoningEffort: 'medium'
     });
@@ -601,6 +784,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       'Make the queued update more spacious.'
     );
 
+    const resolveExecution = vi.spyOn(scenario.agent, 'resolveExecution');
     const queuedInput = {
       designId: detail.design.id,
       clientMessageId: 'design-long-queued',
@@ -610,6 +794,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     };
     detail = await scenario.service.submitDesignTurn(queuedInput);
     const retry = await scenario.service.submitDesignTurn(queuedInput);
+    expect(resolveExecution).toHaveBeenCalledTimes(1);
     expect(scenario.agent.startedTurns).toHaveLength(1);
     expect(retry.turns).toHaveLength(detail.turns.length);
     expect(detail.turns.at(-1)).toMatchObject({ order: 2 });
@@ -676,7 +861,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
 
     let source = await scenario.service.createBlankDesign({
       brief: 'Create a compact product page.',
-      creationToken: 'design-ready-actions-create'
+      creationToken: 'design-ready-actions-create',
+      runtimeId: 'codex'
     });
     const sourceWorktreePath = requireWorktreePath(source);
     await fs.writeFile(
@@ -854,7 +1040,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
 
     const detail = await scenario.service.createBlankDesign({
       brief: 'Create a compact reporting page.',
-      creationToken: 'design-adopted-draft-create'
+      creationToken: 'design-adopted-draft-create',
+      runtimeId: 'codex'
     });
     const attachmentDraft = await scenario.service.stageTaskAttachmentBatch({
       attachments: [{
@@ -918,7 +1105,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
 
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small status page.',
-      creationToken: 'design-restart-delete'
+      creationToken: 'design-restart-delete',
+      runtimeId: 'codex'
     });
     await fs.writeFile(
       path.join(requireWorktreePath(detail), 'index.html'),

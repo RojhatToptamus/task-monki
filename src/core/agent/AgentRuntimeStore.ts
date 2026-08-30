@@ -272,6 +272,7 @@ export interface CreateTaskRuntimeRunInput {
   continuedFromRunId?: string;
   reviewTarget?: import('../../shared/agent').AgentReviewTarget;
   instructionProfile?: import('../../shared/agent').AgentInstructionProfile;
+  clientToolGrants?: string[];
   attachmentSelection?: AgentAttachmentSelection[];
   operationId: string;
 }

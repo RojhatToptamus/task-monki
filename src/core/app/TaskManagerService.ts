@@ -115,7 +115,7 @@ import {
   isImplementationRunMode,
   normalizePullRequestTitle,
 } from '../../shared/contracts';
-import { CODEX_RUNTIME_ID, type AgentRuntimeId } from '../../shared/agent';
+import type { AgentRuntimeId } from '../../shared/agent';
 import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import {
   PromptRefinementTerminationUnconfirmedError,
@@ -224,6 +224,7 @@ import {
   AgentBrowserRuntime,
   type DesignBrowserOwner
 } from '../design/AgentBrowserRuntime';
+import { DesignClientToolBridge } from '../design/DesignClientToolBridge';
 
 type TaskManagerLifecycleState =
   | 'NEW'
@@ -251,6 +252,7 @@ export class TaskManagerService {
   private readonly designSource?: DesignSourceService;
   private readonly designUpdates?: DesignUpdateCoordinator;
   private readonly designBrowser?: DesignBrowserOwner;
+  private readonly designToolBridge?: DesignClientToolBridge;
   private readonly designDrafts?: FileDesignDraftStore;
   private readonly github: GitHubService;
   private readonly appSettingsStore: AppSettingsStorage;
@@ -323,6 +325,9 @@ export class TaskManagerService {
       designBrowserScratchRoot?: string;
       designBrowserSocketRoot?: string;
       designBrowserRequireCodeSignature?: boolean;
+      designToolMcpExecutablePath?: string;
+      designToolMcpServerPath?: string;
+      designToolCredentialRoot?: string;
     } = {}
   ) {
     agentCwd = options.agentCwd ?? (agentCwd || process.cwd());
@@ -382,6 +387,43 @@ export class TaskManagerService {
       );
     this.taskRuntime = taskRuntime;
     store.bindAgentRuntime(taskRuntime);
+    const designOwners =
+      options.designRepositoryRoot &&
+      options.designWorktreeRoot &&
+      options.designCanvasFence
+        ? {
+            repositoryRoot: options.designRepositoryRoot,
+            worktreeRoot: options.designWorktreeRoot,
+            canvasFence: options.designCanvasFence
+          }
+        : undefined;
+    if (
+      !designOwners &&
+      (options.designRepositoryRoot ||
+        options.designWorktreeRoot ||
+        options.designCanvasFence)
+    ) {
+      throw new Error(
+        'Design Mode requires managed repository, worktree, and canvas owners together.'
+      );
+    }
+    this.designToolBridge =
+      designOwners && !options.agentRuntimeAdapters
+        ? new DesignClientToolBridge({
+            executablePath: options.designToolMcpExecutablePath ?? process.execPath,
+            serverPath:
+              options.designToolMcpServerPath ??
+              path.join(
+                process.cwd(),
+                'src/core/design/runtime/design-tool-mcp-server.mjs'
+              ),
+            scratchRoot:
+              options.designToolCredentialRoot ??
+              path.join(store.getStorageRoot(), 'design-tool-credentials'),
+            runtimeStore: this.agentRuntimeStore,
+            handler: (input) => this.inspectDesignForAgent(input)
+          })
+        : undefined;
     const runtimeAdapters = options.agentRuntimeAdapters ??
       createBuiltInAgentRuntimes(store, taskRuntime, this.agentRuntimeStore, events, {
         cwd: agentCwd,
@@ -390,7 +432,8 @@ export class TaskManagerService {
         acpExecutablePaths: options.acpExecutablePaths,
         browserDevBoundary: this.browserDevAgentBoundary,
         codexToolSettings: this.appSettings.codexExternalTools,
-        designSkillRoot: options.designSkillRoot
+        designSkillRoot: options.designSkillRoot,
+        designToolBridge: this.designToolBridge
       });
     this.codexAdapter = findCodexRuntimeAdapter(runtimeAdapters);
     this.runtimeRegistry = new AgentRuntimeRegistry(
@@ -429,24 +472,15 @@ export class TaskManagerService {
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
         path.join(os.tmpdir(), 'task-monki-worktrees')
     );
-    if (options.designRepositoryRoot || options.designWorktreeRoot || options.designCanvasFence) {
-      if (
-        !options.designRepositoryRoot ||
-        !options.designWorktreeRoot ||
-        !options.designCanvasFence
-      ) {
-        throw new Error(
-          'Design Mode requires managed repository, worktree, and canvas owners together.'
-        );
-      }
-      this.designWorktrees = new WorktreeService(options.designWorktreeRoot);
+    if (designOwners) {
+      this.designWorktrees = new WorktreeService(designOwners.worktreeRoot);
       this.designSource = new DesignSourceService({
-        repositoryRoot: options.designRepositoryRoot,
-        worktreeRoot: options.designWorktreeRoot
+        repositoryRoot: designOwners.repositoryRoot,
+        worktreeRoot: designOwners.worktreeRoot
       });
       this.designDrafts = new FileDesignDraftStore(
         options.designDraftRoot ??
-          path.join(path.dirname(options.designRepositoryRoot), 'design-drafts')
+          path.join(path.dirname(designOwners.repositoryRoot), 'design-drafts')
       );
       this.designBrowser =
         options.designBrowserRuntime ??
@@ -463,7 +497,7 @@ export class TaskManagerService {
         previews: this.previews,
         source: this.designSource,
         browser: this.designBrowser,
-        fence: options.designCanvasFence,
+        fence: designOwners.canvasFence,
         events: this.events,
         refreshGitEvidence: (designId) => this.refreshDesignGitEvidence(designId),
         ensurePostRunEvidence: (runId) => this.ensurePostRunEvidence(runId),
@@ -520,6 +554,8 @@ export class TaskManagerService {
       );
     }
     await this.agentRuntimeStore.init();
+    this.assertInitializing();
+    await this.designToolBridge?.recover();
     this.assertInitializing();
     await this.store.init();
     this.assertInitializing();
@@ -1579,14 +1615,33 @@ export class TaskManagerService {
     }
 
     const designUpdates = await this.requireDesignUpdates();
+    const adapter = this.runtimeRegistry.require(input.runtimeId);
+    this.assertRuntimeEnabled(input.runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
     const source = this.requireDesignSource();
-    const create = async () => {
+    const create = async (
+      attachments: readonly Pick<
+        AgentAttachmentSelection,
+        'kind' | 'mediaType' | 'byteCount' | 'sha256'
+      >[]
+    ) => {
+      const execution = await prepareDesignCreationExecution(
+        adapter,
+        {
+          runtimeId: input.runtimeId,
+          model: input.model,
+          modelProvider: input.modelProvider,
+          reasoningEffort: input.reasoningEffort
+        },
+        attachments
+      );
       const repositoryInput = await source.prepareBlankRepository({
         creationToken: input.creationToken
       });
       try {
         return await this.store.createDesignBundle({
           request: input,
+          agentSettings: execution.settings,
           repository: repositoryInput
         });
       } catch (error) {
@@ -1598,8 +1653,11 @@ export class TaskManagerService {
       }
     };
     const bundle = input.attachmentDraftId
-      ? await this.withAttachmentDraft(input.attachmentDraftId, create)
-      : await create();
+      ? await this.withAttachmentDraft(input.attachmentDraftId, async () => {
+          const draft = await this.store.listAttachmentDraft(input.attachmentDraftId!);
+          return create(draft.attachments);
+        })
+      : await create([]);
     await this.ensureDesignWorktree(bundle.task.id);
     await designUpdates.dispatch(bundle.task.id).catch(() => undefined);
     this.emitDesignUpdate(bundle.task.id, { reason: 'created' });
@@ -1612,15 +1670,27 @@ export class TaskManagerService {
     return this.withTaskAction(input.designId, 'Design update', () =>
       this.withRuntimeOperation(async () => {
         const designUpdates = await this.requireDesignUpdates();
+        const retry = await this.store.resolveInlineDesignTurnRetry(input);
+        if (retry) {
+          await designUpdates.dispatch(input.designId).catch(() => undefined);
+          return this.getDesign(input.designId);
+        }
+        const task = await this.requireDesignTask(input.designId, 'Design update');
         const accept = async () => {
-          const retry = await this.store.resolveInlineDesignTurnRetry(input);
-          if (!retry && input.attachmentDraftId) {
-            const task = await this.requireDesignTask(input.designId, 'Design update');
+          let attachments: readonly Pick<
+            AgentAttachmentSelection,
+            'kind' | 'mediaType' | 'byteCount' | 'sha256'
+          >[] = [];
+          if (input.attachmentDraftId) {
             const draft = await this.requireDesignDrafts().get(input.designId);
             if (draft?.attachmentDraftId !== input.attachmentDraftId) {
               throw new Error('The attached files do not belong to this Design draft.');
             }
-            await this.validateDesignAttachmentDraft(task, input.attachmentDraftId);
+            attachments = (
+              await this.validateDesignAttachmentDraft(task, input.attachmentDraftId)
+            ).attachments;
+          } else {
+            await this.assertDesignTaskSupported(task, attachments);
           }
           await this.store.createInlineDesignTurn(input);
         };
@@ -1654,19 +1724,7 @@ export class TaskManagerService {
           await this.requireDesignUpdates();
           const task = await this.requireDesignTask(input.designId, 'Reference addition');
           const draft = await this.store.listAttachmentDraft(input.attachmentDraftId);
-          const adapter = this.runtimeRegistry.require(task.runtimeId);
-          const settings = await prepareTaskCreationSettings(
-            adapter,
-            task.agentSettings,
-            draft.attachments
-          );
-          if (
-            settings.networkAccess !== false ||
-            settings.sandbox !== 'WORKSPACE_WRITE' ||
-            settings.approvalPolicy !== 'never'
-          ) {
-            throw new Error('Design references require the restricted Design permission profile.');
-          }
+          await this.assertDesignTaskSupported(task, draft.attachments);
           await this.store.addDesignReferences(input);
           this.emitDesignUpdate(input.designId, { reason: 'references-added' });
           return this.getDesign(input.designId);
@@ -2774,6 +2832,9 @@ export class TaskManagerService {
     const [agentResult] = await Promise.allSettled([
       this.shutdownAgentOwners()
     ]);
+    const [designToolResult] = await Promise.allSettled([
+      this.designToolBridge?.shutdown()
+    ]);
     const [postRunEvidenceResult] = await Promise.allSettled([
       this.drainPostRunEvidence()
     ]);
@@ -2798,6 +2859,9 @@ export class TaskManagerService {
     }
     if (agentResult.status === 'rejected') {
       throw agentResult.reason;
+    }
+    if (designToolResult.status === 'rejected') {
+      throw designToolResult.reason;
     }
     if (postRunEvidenceResult.status === 'rejected') {
       throw postRunEvidenceResult.reason;
@@ -3554,7 +3618,7 @@ export class TaskManagerService {
 
     await this.previews.stopTask(task.id);
     await this.previewRecipeGenerator.discard(task.id);
-    await this.agents.deleteTaskProviderHistory(task);
+    await this.agents.releaseTask(task.id);
 
     let removedWorktree = false;
     for (const worktree of snapshot.worktrees.filter(
@@ -4093,19 +4157,7 @@ export class TaskManagerService {
         413
       );
     }
-    const adapter = this.runtimeRegistry.require(task.runtimeId);
-    const settings = await prepareTaskCreationSettings(
-      adapter,
-      task.agentSettings,
-      draft.attachments
-    );
-    if (
-      settings.networkAccess !== false ||
-      settings.sandbox !== 'WORKSPACE_WRITE' ||
-      settings.approvalPolicy !== 'never'
-    ) {
-      throw new Error('Design references require the restricted Design permission profile.');
-    }
+    await this.assertDesignTaskSupported(task, draft.attachments);
     return draft;
   }
 
@@ -4171,16 +4223,23 @@ export class TaskManagerService {
   private async requireDesignUpdates(): Promise<DesignUpdateCoordinator> {
     this.assertPreviewEnabled();
     this.assertAgentProviderAvailable();
-    this.assertRuntimeEnabled(CODEX_RUNTIME_ID);
     if (!this.designUpdates) {
       throw new Error('Design Mode is not configured in this Task Monki host.');
     }
-    const support = projectAgentExecutionSupport(
-      await this.runtimeRegistry.require(CODEX_RUNTIME_ID).capabilities(),
-      'DESIGN'
-    );
-    if (!support.supported) throw new Error(support.reason);
     return this.designUpdates;
+  }
+
+  private async assertDesignTaskSupported(
+    task: Task,
+    attachments: readonly Pick<
+      AgentAttachmentSelection,
+      'kind' | 'mediaType' | 'byteCount' | 'sha256'
+    >[]
+  ): Promise<void> {
+    const adapter = this.runtimeRegistry.require(task.runtimeId);
+    this.assertRuntimeEnabled(task.runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    await prepareDesignCreationExecution(adapter, task.agentSettings, attachments);
   }
 
   private emitDesignUpdate(designId: string, payload: unknown): void {
@@ -4389,14 +4448,96 @@ async function prepareTaskCreationSettings(
     'kind' | 'mediaType' | 'byteCount' | 'sha256'
   >[]
 ): Promise<AgentExecutionSettings> {
+  const { capabilities, settings } = await prepareAgentExecutionSettings(
+    adapter,
+    requestedSettings,
+    attachments
+  );
+  if (attachments.length === 0) {
+    // Task capture is local and must remain available while a runtime is
+    // offline. Model/catalog resolution is definitive at turn start.
+    return settings;
+  }
+  const resolved = await adapter.resolveExecution({ settings, attachments });
+  assertResolvedExecutionRuntime(adapter, resolved);
+  return resolved.settings;
+}
+
+async function prepareDesignCreationExecution(
+  adapter: AgentRuntimeAdapter,
+  requestedSettings: AgentExecutionSettings,
+  attachments: readonly Pick<
+    AgentAttachmentSelection,
+    'kind' | 'mediaType' | 'byteCount' | 'sha256'
+  >[]
+) {
+  const { capabilities, settings } = await prepareAgentExecutionSettings(
+    adapter,
+    requestedSettings,
+    attachments,
+    'AUTONOMOUS_WRITE'
+  );
+  const runtimeSupport = projectAgentExecutionSupport(capabilities, 'DESIGN');
+  if (!runtimeSupport.supported) throw new Error(runtimeSupport.reason);
+  const resolved = await adapter.resolveExecution({ settings, attachments });
+  assertResolvedExecutionRuntime(adapter, resolved);
+  const requestedModel = requestedSettings.model?.trim();
+  if (requestedModel && resolved.model.model !== requestedModel) {
+    throw new Error(
+      `${adapter.descriptor.displayName} did not resolve the selected Design model.`
+    );
+  }
+  const requestedModelProvider = requestedSettings.modelProvider?.trim();
+  if (
+    requestedModelProvider &&
+    resolved.model.modelProvider !== requestedModelProvider
+  ) {
+    throw new Error(
+      `${adapter.descriptor.displayName} did not resolve the selected Design model provider.`
+    );
+  }
+  const modelSupport = projectAgentExecutionSupport(capabilities, 'DESIGN', {
+    model: resolved.model
+  });
+  if (!modelSupport.supported) throw new Error(modelSupport.reason);
+  return resolved;
+}
+
+async function prepareAgentExecutionSettings(
+  adapter: AgentRuntimeAdapter,
+  requestedSettings: AgentExecutionSettings,
+  attachments: readonly Pick<
+    AgentAttachmentSelection,
+    'kind' | 'mediaType' | 'byteCount' | 'sha256'
+  >[],
+  presetKind: 'DEFAULT' | 'AUTONOMOUS_WRITE' = 'DEFAULT'
+): Promise<{
+  capabilities: Awaited<ReturnType<AgentRuntimeAdapter['capabilities']>>;
+  settings: AgentExecutionSettings;
+}> {
+  if (
+    requestedSettings.runtimeId !== undefined &&
+    requestedSettings.runtimeId !== adapter.descriptor.id
+  ) {
+    throw new Error('Agent runtime and execution settings runtime must match.');
+  }
   const capabilities = await adapter.capabilities();
   const policy = capabilities.executionPolicy;
-  const preset = policy.presets.find(
-    (candidate) => candidate.id === policy.defaultPresetId
-  );
+  const preset =
+    presetKind === 'AUTONOMOUS_WRITE'
+      ? policy.presets.find(
+          (candidate) =>
+            candidate.repositoryMutation === 'ALLOW' &&
+            candidate.approvalPolicy.toLocaleLowerCase() === 'never'
+        )
+      : policy.presets.find(
+          (candidate) => candidate.id === policy.defaultPresetId
+        );
   if (!preset) {
     throw new Error(
-      `${adapter.descriptor.displayName} does not expose a valid default execution policy.`
+      presetKind === 'AUTONOMOUS_WRITE'
+        ? `${adapter.descriptor.displayName} does not expose an approval-free write policy required by Design Mode.`
+        : `${adapter.descriptor.displayName} does not expose a valid default execution policy.`
     );
   }
   if (
@@ -4410,20 +4551,25 @@ async function prepareTaskCreationSettings(
   const explicitSettings = Object.fromEntries(
     Object.entries(requestedSettings).filter(([, value]) => value !== undefined)
   ) as AgentExecutionSettings;
-  const settings: AgentExecutionSettings = {
+  const presetSettings: AgentExecutionSettings = {
     sandbox: preset.sandbox,
     approvalPolicy: preset.approvalPolicy,
     approvalsReviewer: preset.approvalsReviewer,
-    networkAccess: preset.networkAccess === 'REQUIRED',
-    ...explicitSettings,
+    networkAccess: preset.networkAccess === 'REQUIRED'
+  };
+  const settings: AgentExecutionSettings = {
+    ...(presetKind === 'AUTONOMOUS_WRITE'
+      ? { ...explicitSettings, ...presetSettings }
+      : { ...presetSettings, ...explicitSettings }),
     runtimeId: adapter.descriptor.id
   };
-  if (attachments.length === 0) {
-    // Task capture is local and must remain available while a runtime is
-    // offline. Model/catalog resolution is definitive at turn start.
-    return settings;
-  }
-  const resolved = await adapter.resolveExecution({ settings, attachments });
+  return { capabilities, settings };
+}
+
+function assertResolvedExecutionRuntime(
+  adapter: AgentRuntimeAdapter,
+  resolved: Awaited<ReturnType<AgentRuntimeAdapter['resolveExecution']>>
+): void {
   if (
     resolved.settings.runtimeId !== adapter.descriptor.id ||
     resolved.model.runtimeId !== adapter.descriptor.id
@@ -4432,7 +4578,6 @@ async function prepareTaskCreationSettings(
       `${adapter.descriptor.displayName} returned execution settings for another runtime.`
     );
   }
-  return resolved.settings;
 }
 
 function explicitExecutableForCodexRuntime(

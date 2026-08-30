@@ -76,6 +76,7 @@ import {
   eligibleDesignRuntimeCatalog,
   mergeDesignConversationPage,
   mergeDesignDetailHistory,
+  qualifiedDesignModels,
   type DesignCanvasExternalLinkRequest
 } from '../model/designs';
 import {
@@ -770,7 +771,13 @@ export function App() {
     async (
       input: Pick<
         CreateBlankDesignRequest,
-        'brief' | 'creationToken' | 'model' | 'reasoningEffort' | 'attachmentDraftId'
+        | 'brief'
+        | 'creationToken'
+        | 'runtimeId'
+        | 'model'
+        | 'modelProvider'
+        | 'reasoningEffort'
+        | 'attachmentDraftId'
       >
     ) => {
       const brief = input.brief.trim();
@@ -778,7 +785,9 @@ export function App() {
         const detail = await taskManagerApi.createBlankDesign({
           brief,
           creationToken: input.creationToken,
+          runtimeId: input.runtimeId,
           model: input.model,
+          modelProvider: input.modelProvider,
           reasoningEffort: input.reasoningEffort,
           ...(input.attachmentDraftId
             ? { attachmentDraftId: input.attachmentDraftId }
@@ -1741,7 +1750,10 @@ export function App() {
     () =>
       designRuntimeCatalog
         ? resolveModelExecutionSettings(
-            designRuntimeCatalog.models,
+            qualifiedDesignModels(
+              designRuntimeCatalog.runtimes,
+              designRuntimeCatalog.models
+            ),
             appSettings.defaultModel,
             appSettings.defaultReasoningEffort,
             designRuntimeCatalog.defaultRuntimeId,

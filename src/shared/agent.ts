@@ -859,6 +859,8 @@ export interface AgentModel {
   serviceTiers: string[];
   defaultServiceTier?: string;
   inputModalities: string[];
+  /** Exact provider-version/model qualification for the full Design workflow. */
+  designSupport?: AgentCapability;
   isDefault: boolean;
   /** Lossless runtime-native model metadata that does not fit common selectors. */
   native?: AgentJsonValue;

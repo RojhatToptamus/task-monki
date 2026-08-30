@@ -87,6 +87,36 @@ describe('ACP permission safety intersection', () => {
     expect(policy.allowedActions).toEqual(['DECLINE', 'CANCEL']);
   });
 
+  it('allows only the exact one-time choice for the authenticated inspect_design bridge', async () => {
+    const { session, run } = await ownership();
+    const toolCall = {
+      toolCallId: 'tool-inspect-design',
+      kind: 'other' as const,
+      title: 'task-monki-design-tools-inspect_design: inspect_design'
+    };
+    const policy = materializeAcpPermission({
+      toolCall,
+      options,
+      session,
+      run,
+      trustedAppTool: 'inspect_design'
+    });
+
+    expect(policy.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
+    expect(policy.request.providerOptions?.map((option) => option.id)).toEqual([
+      'yes-once',
+      'no-once'
+    ]);
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'never',
+        toolCall,
+        options,
+        materialized: policy
+      })
+    ).toBe(options[0]);
+  });
+
   it('rejects file scope outside the owned worktree', async () => {
     const { session, run } = await ownership();
     const policy = materializeAcpPermission({

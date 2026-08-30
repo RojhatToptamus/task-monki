@@ -22,7 +22,7 @@ import type { ThreadStatus } from './protocol/generated/v2/ThreadStatus';
 import type { Turn } from './protocol/generated/v2/Turn';
 import { CODEX_RUNTIME_ID } from '../../../shared/agent';
 
-export function mapModel(model: Model): AgentModel {
+export function mapModel(model: Model, runtimeVersion?: string): AgentModel {
   return {
     id: `${CODEX_RUNTIME_ID}:${model.id}`,
     runtimeId: CODEX_RUNTIME_ID,
@@ -37,6 +37,10 @@ export function mapModel(model: Model): AgentModel {
     serviceTiers: model.serviceTiers.map((tier) => tier.id),
     defaultServiceTier: model.defaultServiceTier ?? undefined,
     inputModalities: model.inputModalities,
+    designSupport: {
+      maturity: 'unsupported',
+      detail: `Codex ${runtimeVersion ?? 'unknown version'} model ${model.model} has not passed the full packaged Design qualification.`
+    },
     isDefault: model.isDefault
   };
 }

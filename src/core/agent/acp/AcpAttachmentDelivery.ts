@@ -21,6 +21,7 @@ import {
 const ATTACHMENT_TEXT_BEGIN = '[TASK_MONKI_ATTACHMENT_BEGIN]';
 const ATTACHMENT_TEXT_END = '[TASK_MONKI_ATTACHMENT_END]';
 const REDACTED_ATTACHMENT_CONTENT = '[REDACTED TASK MONKI ATTACHMENT CONTENT]';
+const REDACTED_DESIGN_TOOL_VALUE = '[REDACTED TASK MONKI DESIGN TOOL VALUE]';
 
 export interface PreparedAcpAttachmentDelivery {
   prompt: AcpContentBlock[];
@@ -207,6 +208,13 @@ function sanitizeValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeValue);
   if (!isRecord(value)) {
     return typeof value === 'string' ? redactMarkedAttachmentText(value) : value;
+  }
+  if (
+    typeof value.name === 'string' &&
+    value.name.startsWith('TASK_MONKI_DESIGN_TOOL_') &&
+    typeof value.value === 'string'
+  ) {
+    return { ...value, value: REDACTED_DESIGN_TOOL_VALUE };
   }
   if (value.type === 'image' && typeof value.data === 'string') {
     return { ...value, data: REDACTED_ATTACHMENT_CONTENT };

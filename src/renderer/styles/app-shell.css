@@ -2921,6 +2921,14 @@ button.tm-software-update:hover {
   font: 10px/1 var(--font-mono);
 }
 
+.tm-agent-console__option-detail {
+  grid-column: 1 / -1;
+  color: inherit;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
 .tm-agent-console__check {
   display: inline-flex;
   color: var(--text-soft);

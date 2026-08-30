@@ -1,8 +1,8 @@
 # Agent Runtime Architecture
 
-Date: 2026-08-29
+Date: 2026-08-30
 
-Status: Provider milestones 1, 2, and 3 are implemented. Later milestones are approved but not implemented.
+Status: Provider milestones 1 through 4 are implemented. Milestone 5 is approved but not implemented.
 
 This document is the provider architecture source of truth.
 It records current behavior and the approved target direction.
@@ -22,6 +22,9 @@ Provider milestone 2 moved review, prompt refinement, and Discourse to one share
 Each workflow still owns its product state and rules.
 Provider milestone 3 added provider-neutral selection and evidence.
 Each adapter still owns its native attachment transport.
+Provider milestone 4 made Design provider-neutral.
+It added one app-owned `inspect_design` contract and one packaged MCP bridge for OpenCode and ACP.
+Exact runtime and model qualification controls which providers can run Design.
 
 Provider adapters translate these items:
 
@@ -122,7 +125,7 @@ Milestone 3 changed transport and run evidence without changing attachment byte 
 | ACP | `src/core/agent/acp/AcpRuntimeAdapter.ts`, `AcpProtocol.ts`, `AcpRuntimeProfiles.ts`, `AcpPermissionPolicy.ts` |
 | Review | `src/core/agent/AgentOrchestrator.ts`, `src/core/review`, `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md` |
 | Prompt refinement | `src/core/prompt/PromptRefinementService.ts`, `src/core/app/TaskManagerService.ts` |
-| Design | `src/core/design/DesignUpdateCoordinator.ts`, `DesignSourceService.ts`, `DesignSkillPack.ts` |
+| Design | `src/core/design/DesignUpdateCoordinator.ts`, `DesignSourceService.ts`, `DesignSkillPack.ts`, `DesignClientToolBridge.ts`, `DesignClientToolContract.ts`, `runtime/design-tool-mcp-server.mjs` |
 | Design browser | `src/core/design/AgentBrowserRuntime.ts`, `src/core/agent/journal/AgentProtocolRedaction.ts` |
 | Preview | `src/core/preview/PreviewManager.ts`, `PreviewSourcePreparer.ts`, `ManagedDesignStaticPreview.ts` |
 | Attachments | `src/core/storage/AttachmentFileStore.ts`, `src/core/design/FileDesignDraftStore.ts`, `src/core/agent/AgentAttachmentDelivery.ts`, `src/shared/attachments.ts` |
@@ -240,17 +243,16 @@ They do not own a second provider lifecycle.
 
 ### Current Design path
 
-`DesignUpdateCoordinator` already uses the normal Task orchestrator.
+`DesignUpdateCoordinator` uses the normal Task orchestrator.
 Its source, Git, Preview, browser, candidate, and Ready work is provider-neutral.
 
-However, Design creation and validation hardcode `CODEX_RUNTIME_ID`.
-`TaskManagerService.requireDesignUpdates()` also requires Codex extensions.
-Only `CodexAppServerAdapter` receives the Design tool handler.
+Design creation stores the selected runtime and exact model.
+The shared support projection enables Design only when that runtime version and model passed the full packaged qualification.
+Each adapter applies the app-owned instructions and skills through its native protocol.
 
-The renderer appears provider-neutral.
-It can show a runtime that passes capability filters.
-The create request does not contain the selected runtime.
-Core therefore creates a Codex Design.
+Codex maps `inspect_design` to its native dynamic-tool call.
+OpenCode and ACP map the same contract to the packaged stdio MCP bridge.
+`DesignClientToolBridge` checks the current session, run, worktree, and provider generation before it calls the one Design handler.
 
 ### Current review path
 
@@ -286,7 +288,7 @@ This table describes current code, not provider protocol potential.
 | Prompt refinement | Yes | Yes | No | Yes, with the exact-qualified image path | No |
 | Review provider | Yes | Yes | No | Yes, with the exact-qualified image path | No |
 | Discourse participant | Yes | Yes | No | Yes | No |
-| Design | Yes | No | No | No | No |
+| Design | No current qualified pair | No current qualified pair | No current qualified pair | Composer 2.5 on Cursor 2026.08.25 only | No |
 | Provider resume | Yes | Yes | Negotiated | Negotiated | Negotiated |
 | Native provider fork | Yes | Yes | No | No | No |
 | User-facing fork alternative | Yes | Yes | Yes | Yes | Yes |
@@ -296,21 +298,23 @@ The user-facing fork alternative creates a new Task and worktree.
 It does not use native provider fork.
 
 Provider-neutral managed attachment delivery is implemented in milestone 3.
+Provider-neutral Design transport is implemented in milestone 4.
+The Design row requires a complete product qualification, not only a working tool transport.
 
 ## Why current combinations fail
 
 | Current failure | Root cause | Classification |
 | --- | --- | --- |
-| Non-Codex Design creation | The request, service, store, and validation require Codex. | Historical coupling and unnecessary restriction |
-| Non-Codex `inspect_design` | Tool registration exists only inside the Codex adapter. | Adapter transport responsibility |
-| Non-Codex Design instructions | Only Codex maps the app-owned instruction and skill pack. | Adapter responsibility |
+| An unlisted Design runtime and model pair | The exact pair has not passed the full packaged Design acceptance suite. | Product qualification |
+| Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna Design | The menu and dialog scenario produced a blocking backdrop and did not correct it. | Failed full Design qualification |
+| OpenCode 1.18.25 with MiMo V2.5 Design | The corrected run did not load the app-owned Design skills reliably. | Failed full Design qualification |
+| Grok Build 1.0.13 with Grok 4.6 Design | The menu and dialog scenario did not settle within the 15-minute limit. | Failed full Design qualification |
+| Claude ACP Design | No Claude ACP bridge is installed, so the full packaged test cannot run. | Unqualified provider profile |
 | OpenCode image attachment with a text-only model | The adapter rejects it before submission. | Model input limit |
 | ACP image attachment without an exact qualification entry | The adapter rejects it before submission. | Profile and model limit |
 | Claude ACP attachments | No installed profile has passed content-use qualification. | Unqualified provider profile |
 | Grok ACP read-only workflows | Plan mode still permits mutation through shell, MCP, or subagent work. | Provider policy limit |
 | Claude ACP read-only workflows | Its plan mode has not passed the packaged mutation qualification test. | Unqualified provider profile |
-| Preview recipe model selection | UI can select another runtime, while core always runs Codex. | Historical coupling |
-| Design provider-history cleanup | Design qualification expects provider deletion semantics. | Unnecessary restriction |
 
 ## Codex-specific dependency classification
 
@@ -356,10 +360,10 @@ These limits are real and must remain visible.
 
 These limits must narrow an operation, not disable unrelated workflows.
 
-## Target provider and workflow matrix
+## Provider and workflow direction
 
-This table describes the approved target.
-Every cell requires a compatible packaged runtime and selected model.
+This table describes the implemented shared paths and the remaining qualified limits.
+Every enabled cell still requires a compatible packaged runtime and selected model.
 
 | Workflow or operation | Codex | OpenCode | Grok ACP | Cursor ACP | Claude ACP |
 | --- | --- | --- | --- | --- | --- |
@@ -371,7 +375,7 @@ Every cell requires a compatible packaged runtime and selected model.
 | Prompt refinement | Shared short turn | Shared short turn | Disabled by read-only policy | Shared short turn | Disabled until qualified |
 | Review | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Disabled until qualified |
 | Discourse | Shared read-only turn | Shared read-only turn | Disabled by read-only policy | Shared read-only turn | Disabled until qualified |
-| Design | Native tool transport | Milestone 4 | Milestone 4 | Milestone 4 | Milestone 4 |
+| Design | Native tool transport; no current qualified pair | Packaged MCP bridge; no current qualified pair | Packaged MCP bridge; no current qualified pair | Packaged MCP bridge; exact qualified pair only | Packaged MCP bridge after installation and qualification |
 | Resume | Native | Native | Negotiated or new session | Negotiated or new session | Negotiated or new session |
 | Fork product state | New Task session | New Task session | New Task session | New Task session | New Task session |
 | Provider cleanup | Best effort | Best effort | Best effort | Best effort | Best effort |
@@ -383,7 +387,7 @@ Task Monki must also verify that the repository did not change.
 This rule does not claim OS confinement.
 If an installed profile cannot deny mutation, that profile cannot run a read-only workflow.
 Normal Task work remains available.
-Later Design support has separate behavior qualification.
+Design support has separate behavior qualification.
 It uses the milestone 3 effective image capability as its image prerequisite.
 This capability includes negotiated support and narrow tested provider-local exceptions.
 A normal attachment image pass does not prove that `inspect_design` image results work.
@@ -550,8 +554,8 @@ The adapter must report the mismatch as capability drift.
 Grok Build 1.0.13 with Grok 4.6 is the only current exception.
 Other Grok versions and models remain text-only.
 
-Milestone 4 must reuse this effective image capability.
-It must not add another image compatibility table or override registry.
+Milestone 4 reuses this effective image capability.
+It adds no second image compatibility table or override registry.
 Design qualification remains separate because `inspect_design` returns images through tool-result transport.
 
 Core does the final live verification before turn submission.
@@ -897,8 +901,10 @@ The MCP bridge exposes only `inspect_design`.
 It forwards an authenticated call to the one Task Monki handler.
 It must not implement browser automation.
 
-The bridge uses a short-lived session credential.
-Task Monki revokes it on turn completion, cancellation, process loss, release, shutdown, and restart.
+The bridge uses one session credential for the provider-owned MCP process.
+It also uses one short-lived credential for the active Design turn.
+Task Monki revokes the turn credential on completion, cancellation, process loss, shutdown, and restart.
+It removes the session credential when the provider session or process is released.
 The bridge accepts no path, URL, Task ID, Run ID, or browser configuration from the model.
 
 The current screenshot rules remain:
@@ -908,6 +914,13 @@ The current screenshot rules remain:
 - output count and bytes stay bounded.
 - local scratch files are deleted after response creation.
 - screenshots never become attachments, assets, revisions, or Preview records.
+
+The browser namespace stays available during one active verification session.
+On close and recovery, Task Monki first uses the pinned runtime's `close --all` operation.
+Version 0.34.0 keeps its detached daemon after this operation.
+Task Monki then uses the runtime's configuration-restart path with a short idle timeout.
+It waits for the run-owned daemon PID file to disappear before it removes the socket directory.
+Each run owns a unique namespace, so cleanup affects only that run.
 
 Each transport must preserve the bounded text and image result blocks.
 It must not convert an `inspect_design` image into a user attachment.
@@ -949,8 +962,19 @@ Use the admitted media type for an image.
 Do not send a managed `file:` URL.
 Register the app-owned MCP bridge only for Design sessions.
 
-Before Design enablement, test the packaged OpenCode version with external plugins disabled.
-Also test exact config precedence and MCP cleanup.
+The packaged OpenCode 1.18.25 tests established these rules:
+
+- `--pure` disables external plugins. It does not disable MCP, instructions, skills, or configuration.
+- OpenCode loads configuration in this order: global, `OPENCODE_CONFIG`, project, directory, inline, organization, managed, and macOS preferences.
+- Task Monki must not merge the Design bridge into provider configuration.
+- Task Monki registers the bridge through the native `POST /mcp` endpoint.
+- Task Monki disconnects the bridge through `POST /mcp/:name/disconnect` when the Design session ends.
+- OpenCode stops the MCP child when it disconnects the server or stops its supervisor.
+
+Task Monki revokes the active Design grant before it waits for an uncertain OpenCode shutdown.
+
+An uncertain registration or disconnect quarantines that server generation.
+Task Monki does not retry an uncertain MCP mutation on the same generation.
 
 ### ACP profiles
 
@@ -959,6 +983,29 @@ Keep a distinct registered runtime identity and launch profile for Grok, Cursor,
 
 Use stable ACP content blocks, cancellation, permission choices, and stdio MCP.
 Use resume or load only when negotiated.
+
+The ACP adapter supplies the same stdio MCP descriptor on `session/new`,
+`session/load`, and `session/resume` for a Design session.
+Normal Task and read-only sessions receive no Design MCP server.
+
+The packaged Cursor 2026.08.25-3e8eec8 test accepted a stdio MCP server.
+Its capability record advertised only HTTP and SSE MCP transport.
+Task Monki records this mismatch as provider evidence.
+Cursor has no supported session-close operation in this profile.
+Therefore, its MCP child can remain until the shared Cursor process exits.
+Task Monki still revokes the short-lived Design credential when the turn ends.
+
+The packaged Grok 1.0.13 profile accepted the same stdio descriptor.
+Its session-close operation stopped the MCP child.
+
+The adapter trusts only the exact MCP tool identities observed in the packaged agents.
+Cursor reports `task-monki-design-tools: inspect_design` with exact provider,
+tool, and argument fields before it sends a sparse permission request.
+The permission display title is not authority by itself.
+The adapter trusts it only after correlation with that exact prior item.
+Grok reports `task-monki-design-tools__inspect_design` with its exact tool-name field.
+A suffix match or an unrelated MCP server cannot receive automatic permission.
+ACP shutdown and quarantine revoke every active Design grant before the shared process stops.
 
 Add the exact typed embedded-resource shape from stable ACP v1.
 Use `task-monki-attachment:<attachment-id>` as its required resource URI.
@@ -1118,10 +1165,15 @@ Provider milestone 3 removed these parts:
 - Codex-shaped attachment submission evidence.
 - workflow-level attachment transport choices.
 
-Later milestones remove these parts:
+Provider milestone 4 removed these parts:
 
 - Design `CODEX_RUNTIME_ID` validation and creation defaults.
 - Codex product names in provider-neutral Design copy.
+- Codex-only Design instruction and tool ownership.
+- provider-history deletion as a Design support requirement.
+
+Later milestones remove these parts:
+
 - capability extensions that exist only to repeat method presence.
 
 Do not remove protocol journals, generation fences, attachment verification, or Preview isolation.
@@ -1332,15 +1384,41 @@ Do not change the shared composer or `AttachmentFileStore` ownership model.
 
 ### Provider milestone 4: provider-neutral Design
 
-1. Add `runtimeId` to Design creation and persistence.
-2. Add the shared instruction and skill bundle to each adapter.
-3. Extract the current `inspect_design` tool contract from Codex.
-4. Add the one packaged stdio MCP bridge.
-5. Register it through OpenCode and ACP session creation.
-6. Reuse the milestone 3 effective image capability and its narrow tested exceptions.
-7. Run the complete Design suite for each exact provider profile, packaged version, and model.
-8. Require a real `inspect_design` image result that the model uses to inspect or correct a candidate.
-9. Enable only the exact combination that passes. Show one clear reason for every other combination.
+Status: implemented on 2026-08-30.
+
+1. Design creation and persistence store the selected runtime and exact model.
+2. Each adapter maps the shared instruction and skill bundle to its native protocol.
+3. One shared `inspect_design` contract now serves every adapter.
+4. Codex keeps its native tool path.
+5. One packaged stdio MCP bridge serves OpenCode and ACP Design sessions.
+6. Design support reuses the milestone 3 effective image capability.
+7. The model projection stores separate exact Design qualification.
+8. Core rechecks that qualification before every source-changing Design turn.
+9. The renderer shows the exact unsupported reason for every other combination.
+
+The full packaged results are:
+
+| Exact provider pair | Full Design result | Evidence and enabled status |
+| --- | --- | --- |
+| Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Passed all 9 scenarios in the final packaged run. | Enabled. It consumed the `TM-7Q4` screenshot fact, verified a fresh corrected candidate, canceled an active inspect wait, preserved Ready, and left no run daemon. |
+| Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna | Failed the menu and dialog scenario. | Disabled. The generated backdrop blocked pointer input, and the model did not correct it. |
+| OpenCode 1.18.25 with MiMo V2.5 | Failed instruction and skill reliability. | Disabled. The corrected run reached Ready but read no app-owned Design skills. |
+| Grok Build 1.0.13 with Grok 4.6 | Failed the menu and dialog scenario. | Disabled. The form passed, but the next scenario did not settle within 15 minutes. Its separate image-result transport probe passed. |
+| Claude Agent ACP 0.70.0 | Not tested. | Disabled because the bridge is not installed. |
+
+A transport probe alone never enables Design.
+The complete test must prove source capture, browser correction, Ready cutover, image-result use, cancellation, and cleanup.
+
+Run the shared acceptance harness with the exact runtime and model:
+
+```sh
+TASK_MONKI_DESIGN_AGENT_RUNTIME_ID=<runtime-id> \
+TASK_MONKI_DESIGN_AGENT_MODEL=<model-id> \
+npm run test:design-agent
+```
+
+The harness reads both Codex dynamic-tool items and provider MCP-tool items.
+Its report records the selected runtime, packaged version, model, and browser operations.
 
 ### Provider milestone 5: hardening and cleanup
 
@@ -1514,10 +1592,9 @@ Disable only the failed content kind, model, or encoded-size range with a clear 
 
 ### Later milestone uncertainties
 
-1. Confirm OpenCode `--pure` and configuration precedence for the Design MCP bridge.
-2. Qualify `inspect_design` image results for each exact packaged provider version and selected model.
-   Include native transport evidence and a unique visual fact in each test.
-3. Qualify Grok or Claude read-only support only after its packaged profile denies every repository mutation path.
+1. Repeat the full Design qualification before enabling any new or changed runtime and model pair.
+2. Install and qualify Claude Agent ACP before enabling its attachments, read-only work, or Design.
+3. Qualify Grok read-only support only after its packaged profile denies every repository mutation path.
 4. Record the exact provider-session deletion meaning for each adapter.
 5. Measure provider-side screenshot retention where documentation allows it.
 
@@ -1618,6 +1695,9 @@ These protocol features support one shared workflow layer with adapter-specific 
 - [ACP session delete](https://agentclientprotocol.com/protocol/v1/session-delete)
 - [OpenCode server](https://opencode.ai/docs/server/)
 - [OpenCode attachments](https://opencode.ai/v2/docs/attachments)
+- [OpenCode 1.18.25 configuration source](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/config/config.ts)
+- [OpenCode 1.18.25 MCP source](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/mcp/index.ts)
+- [OpenCode 1.18.25 prompt request source](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/session/llm/request.ts)
 - [OpenCode 1.18.25 file-part source](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/session/prompt.ts)
 - [OpenCode 1.18.25 model transform](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/provider/transform.ts)
 - [Cursor ACP](https://cursor.com/docs/cli/acp)
@@ -1635,7 +1715,8 @@ These protocol features support one shared workflow layer with adapter-specific 
 
 Keep the single runtime coordinator and runtime store from provider milestones 1 and 2.
 Provider milestone 3 now uses the same byte owner and runtime lifecycle.
-Implement the shared Design tool transport next.
+Provider milestone 4 now uses the same Design workflow, Preview, browser, and source owners.
+Implement only the documented hardening and cleanup in milestone 5 next.
 
 This is the smallest clean path to broad provider support.
 It keeps lifecycle code in one place.

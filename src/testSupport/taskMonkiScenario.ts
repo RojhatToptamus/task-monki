@@ -572,6 +572,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         defaultReasoningEffort: 'low',
         serviceTiers: [],
         inputModalities: ['text', 'image'],
+        designSupport: { maturity: 'stable' },
         isDefault: true
       }
     ]);
@@ -829,10 +830,6 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   respondToInteraction(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  deleteTaskProviderHistory(): Promise<void> {
     return Promise.resolve();
   }
 

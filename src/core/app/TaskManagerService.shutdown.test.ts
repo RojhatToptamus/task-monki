@@ -19,6 +19,7 @@ describe('TaskManagerService shutdown coordination', () => {
       previewEnabled: boolean;
       store: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
+      designToolBridge: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
     };
@@ -30,6 +31,11 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.agents = {
       async shutdown() {
         events.push('agent-started');
+      }
+    };
+    internals.designToolBridge = {
+      async shutdown() {
+        events.push('design-tool-shutdown');
       }
     };
     internals.previews = {
@@ -44,11 +50,16 @@ describe('TaskManagerService shutdown coordination', () => {
 
     const shutdown = service.shutdown();
     await previewStarted;
-    expect(events).toEqual(['agent-started', 'preview-started']);
+    expect(events).toEqual([
+      'agent-started',
+      'design-tool-shutdown',
+      'preview-started'
+    ]);
     releasePreview();
     await shutdown;
     expect(events).toEqual([
       'agent-started',
+      'design-tool-shutdown',
       'preview-started',
       'preview-finished'
     ]);

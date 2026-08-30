@@ -30,7 +30,10 @@ import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from '../AgentRuntimeStore';
 import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import type { AcpNativeSessionState } from './AcpNativeSession';
-import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
+import {
+  AcpRuntimeAdapter,
+  isTaskMonkiInspectDesignToolCall
+} from './AcpRuntimeAdapter';
 import type { AcpSessionConfigOption, AcpSessionUpdate } from './AcpProtocol';
 import type { AcpRpcClient } from './AcpRpcClient';
 import {
@@ -192,6 +195,7 @@ interface CreateTestRunInput {
   requestedSettings?: AgentExecutionSettings;
   beforeGitSnapshotId?: string;
   attachmentSelection?: AgentAttachmentSelection[];
+  clientToolGrants?: string[];
 }
 
 async function createTestRun(
@@ -211,6 +215,9 @@ async function createTestRun(
     requestedSettings: input.requestedSettings ?? input.session.requestedSettings,
     ...(input.attachmentSelection
       ? { attachmentSelection: input.attachmentSelection }
+      : {}),
+    ...(input.clientToolGrants
+      ? { clientToolGrants: input.clientToolGrants }
       : {}),
     ...(input.beforeGitSnapshotId
       ? { beforeGitSnapshotId: input.beforeGitSnapshotId }
@@ -300,6 +307,141 @@ async function createManagedTextAttachment(input: {
 }
 
 describe('AcpRuntimeAdapter end-to-end', () => {
+  it('trusts only exact Task Monki Design MCP identities', () => {
+    expect(
+      isTaskMonkiInspectDesignToolCall({
+        title: 'task-monki-design-tools: inspect_design',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      })
+    ).toBe(true);
+    expect(
+      isTaskMonkiInspectDesignToolCall({
+        title: 'task-monki-design-tools__inspect_design',
+        rawInput: {
+          tool_name: 'task-monki-design-tools__inspect_design',
+          tool_input: { operation: 'screenshot' }
+        }
+      })
+    ).toBe(true);
+    expect(
+      isTaskMonkiInspectDesignToolCall({
+        title: 'task-monki-design-tools-inspect_design: inspect_design',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall({
+        title: 'malicious_inspect_design',
+        rawInput: {
+          providerIdentifier: 'another-server',
+          toolName: 'inspect_design',
+          args: { command: 'unexpected mutation' }
+        }
+      })
+    ).toBe(false);
+  });
+
+  it('does not rewrite an interrupt intent already persisted by the orchestrator', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-existing-interrupt-')
+    );
+    temporaryDirectories.push(directory);
+    const runtimeId = 'test-acp-existing-interrupt';
+    const store = createTestStore(path.join(directory, 'store'));
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider'
+    };
+    const task = await store.createTask({
+      title: 'ACP interrupt',
+      prompt: 'Wait until canceled.',
+      repositoryId: (await addTestRepository(store, directory)).id,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-existing-interrupt',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const run = await createTestRun(store, {
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: settings
+    });
+    const providerTurnId = 'server-existing-interrupt:17';
+    const runtime = runtimeFixture(store).runtime;
+    vi.spyOn(runtime, 'getAgentSession').mockResolvedValue({
+      ...session,
+      providerSessionId: 'provider-session-existing-interrupt'
+    });
+    vi.spyOn(runtime, 'getRunByProviderTurnId').mockResolvedValue({
+      ...run,
+      status: 'INTERRUPTING',
+      providerTurnId,
+      serverInstanceId: 'server-existing-interrupt'
+    });
+    const updateRun = vi.spyOn(runtime, 'updateRun');
+    const notify = vi.fn(async () => undefined);
+    const shutdown = vi.fn(async () => undefined);
+    const adapter = createTestAdapter(store, new AppEventBus(), {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId }
+    }, {
+      cwd: directory,
+      interruptCompletionTimeoutMs: 60_000
+    });
+    const internals = adapter as unknown as {
+      supervisor?: {
+        currentClient: AcpRpcClient;
+        currentServer: { id: string };
+        safetyFenceReason?: string;
+        shutdown(): Promise<void>;
+      };
+    };
+    internals.supervisor = {
+      currentClient: { notify } as unknown as AcpRpcClient,
+      currentServer: { id: 'server-existing-interrupt' },
+      shutdown
+    };
+
+    try {
+      await adapter.interruptTurn({
+        session: {
+          localSessionId: session.id,
+          providerSessionId: 'provider-session-existing-interrupt'
+        },
+        providerTurnId
+      });
+
+      expect(notify).toHaveBeenCalledWith('session/cancel', {
+        sessionId: 'provider-session-existing-interrupt'
+      });
+      expect(updateRun).not.toHaveBeenCalled();
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
   it('fences unconfirmed shared read-only cancellation before recovery is visible', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-acp-read-only-runtime-')
@@ -786,7 +928,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       });
 
       const messages = await readProtocolMessagesFromLog(messageLog);
-      expect(messages.filter((message) => message.method === 'session/new')).toHaveLength(1);
+      const sessionCreates = messages.filter((message) => message.method === 'session/new');
+      expect(sessionCreates).toHaveLength(1);
+      expect(sessionCreates[0]?.params).toMatchObject({ mcpServers: [] });
       const prompts = messages.filter((message) => message.method === 'session/prompt');
       expect(prompts).toHaveLength(2);
       expect(JSON.stringify(prompts[0])).toContain('normal turn attachment content');
@@ -804,6 +948,288 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       await adapter.shutdown();
     }
   });
+
+  it.each(['resume', 'load'] as const)(
+    'binds the Design MCP server across session/%s and revokes it before terminal storage reads',
+    async (resumeMethod) => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-design-mcp-')
+    );
+    temporaryDirectories.push(directory);
+    const messageLog = path.join(directory, 'design-messages.jsonl');
+    const agentScript = path.join(directory, 'design-agent.cjs');
+    await fs.writeFile(
+      agentScript,
+      attachmentDeliveryAgentSource(messageLog, resumeMethod, true),
+      {
+      mode: 0o600
+      }
+    );
+    const runtimeId = 'test-acp-design-mcp';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      approvalPolicies: ['on-request', 'never'],
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const createSessionGrant = vi.fn(async () => ({
+      id: 'design-grant',
+      launch: {
+        executablePath: '/packaged/electron',
+        argv: ['/packaged/design-tool-mcp-server.mjs'],
+        environment: {
+          ELECTRON_RUN_AS_NODE: '1',
+          TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'design-session-secret'
+        }
+      }
+    }));
+    const activateGrant = vi.fn(async () => undefined);
+    const revokeGrant = vi.fn(async () => undefined);
+    const releaseSessionGrant = vi.fn(async () => undefined);
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 1_000,
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: {
+        createSessionGrant,
+        activateGrant,
+        revokeGrant,
+        releaseSessionGrant
+      },
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
+    };
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create a small page.',
+        creationToken: 'acp-design-mcp-creation',
+        runtimeId,
+        model: settings.model
+      },
+      agentSettings: settings,
+      repository: {
+        id: randomUUID(),
+        name: 'ACP Design MCP',
+        path: directory,
+        headSha: 'a'.repeat(40),
+        branch: 'main',
+        checkedAt: new Date().toISOString()
+      }
+    });
+    const task = created.task;
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-design-mcp',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const run = await createTestRun(store, {
+      task,
+      session,
+      mode: 'DESIGN',
+      prompt: task.prompt,
+      requestedSettings: settings,
+      generationKey: created.turn.id,
+      clientToolGrants: ['inspect_design']
+    });
+
+    try {
+      await adapter.initialize();
+      await adapter.startTurn({
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: task.prompt,
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: []
+      });
+      const completed = await waitFor(async () => {
+        const current = await getTestRun(store, run.id);
+        return current?.status === 'COMPLETED' ? current : undefined;
+      });
+      expect(
+        (await store.snapshot()).agentItems.find(
+          (item) => item.runId === run.id && item.providerItemId === 'inspect-design-1'
+        )
+      ).toMatchObject({
+        type: 'MCP_TOOL_CALL',
+        status: 'COMPLETED',
+        payload: {
+          title: 'task-monki-design-tools: inspect_design',
+          rawInput: {
+            providerIdentifier: 'task-monki-design-tools',
+            toolName: 'inspect_design',
+            args: { operation: 'screenshot' }
+          }
+        }
+      });
+      const messages = await readProtocolMessagesFromLog(messageLog);
+      const sessionNew = messages.find((message) => message.method === 'session/new');
+      expect(sessionNew?.params).toMatchObject({
+        mcpServers: [{
+          name: 'task-monki-design-tools',
+          command: '/packaged/electron',
+          args: ['/packaged/design-tool-mcp-server.mjs'],
+          env: expect.arrayContaining([
+            { name: 'ELECTRON_RUN_AS_NODE', value: '1' },
+            {
+              name: 'TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL',
+              value: 'design-session-secret'
+            }
+          ])
+        }]
+      });
+      expect(createSessionGrant).toHaveBeenCalledWith({
+        runtimeId,
+        sessionId: session.id,
+        worktreeId: worktree.id,
+        providerGeneration: expect.any(String)
+      });
+      expect(activateGrant).toHaveBeenCalledWith({
+        grantId: 'design-grant',
+        authority: {
+          runtimeId,
+          sessionId: session.id,
+          runId: run.id,
+          worktreeId: worktree.id,
+          providerGeneration: completed.serverInstanceId
+        }
+      });
+      const firstPrompt = messages.find(
+        (message) => message.method === 'session/prompt'
+      );
+      expect(JSON.stringify(firstPrompt?.params)).toContain(
+        'Task Monki Design agent'
+      );
+      expect(JSON.stringify(firstPrompt?.params)).toContain(
+        'Task Monki Design skills:'
+      );
+      expect(revokeGrant).toHaveBeenCalledWith('design-grant');
+
+      const server = (await store.snapshot()).agentServers.find(
+        (candidate) => candidate.id === completed.serverInstanceId
+      );
+      expect(server).toBeDefined();
+      expect(await fs.readFile(server!.protocolJournalPath, 'utf8')).not.toContain(
+        'design-session-secret'
+      );
+
+      const terminalReadFailureRun = {
+        ...completed,
+        id: randomUUID(),
+        status: 'RUNNING' as const
+      };
+      const terminalRaw = await appendTestProtocolMessage(
+        store,
+        completed.serverInstanceId!,
+        'INBOUND',
+        JSON.stringify({ id: 'terminal-read-failure', result: {} })
+      );
+      const internals = adapter as unknown as {
+        activePromptRunIds: Set<string>;
+        finalizePrompt(
+          deliveredRun: RunRecord,
+          response: {
+            result: unknown;
+            raw: Awaited<ReturnType<typeof appendTestProtocolMessage>>;
+          }
+        ): Promise<void>;
+      };
+      internals.activePromptRunIds.add(terminalReadFailureRun.id);
+      const runtime = runtimeFixture(store).runtime;
+      const getRun = vi
+        .spyOn(runtime, 'getRun')
+        .mockRejectedValueOnce(new Error('terminal store read failed'));
+      const revokeCalls = revokeGrant.mock.calls.length;
+      await expect(
+        internals.finalizePrompt(terminalReadFailureRun, {
+          result: {},
+          raw: terminalRaw
+        })
+      ).rejects.toThrow('terminal store read failed');
+      expect(revokeGrant).toHaveBeenCalledTimes(revokeCalls + 1);
+      getRun.mockRestore();
+
+      await adapter.shutdown();
+      const nextTurn = await store.createInlineDesignTurn({
+        designId: task.id,
+        clientMessageId: 'acp-design-mcp-follow-up',
+        message: 'Refine the page.',
+        referenceIds: []
+      });
+      const attachedSession = await getTestAgentSession(store, session.id);
+      if (!attachedSession) throw new Error('Expected the Design session to remain stored.');
+      const nextRun = await createTestRun(store, {
+        task,
+        session: attachedSession,
+        mode: 'DESIGN',
+        prompt: 'Refine the page.',
+        requestedSettings: settings,
+        generationKey: nextTurn.id,
+        clientToolGrants: ['inspect_design']
+      });
+      await adapter.initialize();
+      await adapter.startTurn({
+        localRunId: nextRun.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: 'Refine the page.',
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: []
+      });
+      await waitFor(async () => {
+        const current = await getTestRun(store, nextRun.id);
+        return current?.status === 'COMPLETED' ? current : undefined;
+      });
+      const resumedMessages = await readProtocolMessagesFromLog(messageLog);
+      expect(
+        resumedMessages.find(
+          (message) => message.method === `session/${resumeMethod}`
+        )?.params
+      ).toMatchObject({
+        mcpServers: [expect.objectContaining({ name: 'task-monki-design-tools' })]
+      });
+
+      await adapter.releaseSession({ localSessionId: session.id });
+      expect(releaseSessionGrant).toHaveBeenCalledTimes(2);
+    } finally {
+      await adapter.shutdown();
+    }
+    },
+    15_000
+  );
 
   it.each([
     {
@@ -1022,10 +1448,19 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     );
     temporaryDirectories.push(directory);
     const store = createTestStore(path.join(directory, 'store'));
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      designQualifications: [
+        {
+          runtimeVersion: process.version,
+          modelId: 'provider-specific-model'
+        }
+      ]
+    };
     const adapter = createTestAdapter(
       store,
       new AppEventBus(),
-      TEST_ACP_PROFILE,
+      profile,
       {
         cwd: directory,
         runtimeResolver: async () => ({
@@ -1043,7 +1478,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       }
     );
     const settings = {
-      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      runtimeId: profile.descriptor.id,
       model: 'provider-specific-model',
       modelProvider: 'test-provider',
       sandbox: 'DANGER_FULL_ACCESS' as const,
@@ -1064,6 +1499,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         model: {
           model: 'provider-specific-model',
           modelProvider: 'test-provider',
+          designSupport: { maturity: 'stable' },
           native: { source: 'explicit-runtime-setting' }
         }
       });
@@ -3053,6 +3489,89 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
   });
 
+  it('releases Design MCP grants before an unconfirmed adapter shutdown', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-shutdown-grant-')
+    );
+    temporaryDirectories.push(directory);
+    const store = createTestStore(path.join(directory, 'store'));
+    const server = await createTestAgentServer(store, {
+      runtimeId: 'test-acp-shutdown-grant',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: '/fake/acp',
+      argv: ['--acp'],
+      schemaVersion: '1.19.0'
+    });
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-shutdown-grant' }
+    };
+    const lifecycle: string[] = [];
+    const releaseSessionGrant = vi.fn(async () => {
+      lifecycle.push('release-design-grant');
+    });
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      designClientToolBridge: {
+        createSessionGrant: vi.fn(async () => ({
+          id: 'unused-design-grant',
+          launch: {
+            executablePath: '/fake/electron',
+            argv: ['/fake/design-tool-mcp-server.mjs'],
+            environment: {}
+          }
+        })),
+        activateGrant: vi.fn(async () => undefined),
+        revokeGrant: vi.fn(async () => undefined),
+        releaseSessionGrant
+      }
+    });
+    const shutdownFailure = new Error('ACP child may still be live');
+    const fakeSupervisor = {
+      currentServer: server,
+      currentClient: {} as AcpRpcClient,
+      safetyFenceReason: 'ACP process termination could not be confirmed.',
+      shutdown: vi.fn(async () => {
+        lifecycle.push('shutdown');
+        throw shutdownFailure;
+      })
+    };
+    const internals = adapter as unknown as {
+      supervisor?: typeof fakeSupervisor;
+      initialized: boolean;
+      designToolGrants: Map<string, {
+        grantId: string;
+        providerGeneration: string;
+        worktreeId: string;
+        launch: {
+          executablePath: string;
+          argv: string[];
+          environment: Record<string, string>;
+        };
+      }>;
+    };
+    internals.supervisor = fakeSupervisor;
+    internals.initialized = true;
+    internals.designToolGrants.set('design-session', {
+      grantId: 'active-design-grant',
+      providerGeneration: server.id,
+      worktreeId: 'design-worktree',
+      launch: {
+        executablePath: '/fake/electron',
+        argv: ['/fake/design-tool-mcp-server.mjs'],
+        environment: {}
+      }
+    });
+
+    await expect(adapter.shutdown()).rejects.toThrow(
+      'ACP runtime shutdown was incomplete.'
+    );
+    expect(lifecycle.slice(0, 2)).toEqual(['release-design-grant', 'shutdown']);
+    expect(internals.designToolGrants.size).toBe(0);
+    expect(releaseSessionGrant).toHaveBeenCalledWith('active-design-grant');
+  });
+
   it('retains a failed quarantine and rejects every later runtime operation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-fence-'));
     temporaryDirectories.push(directory);
@@ -3069,18 +3588,48 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-fence' }
     };
+    const lifecycle: string[] = [];
+    const releaseSessionGrant = vi.fn(async () => {
+      lifecycle.push('release-design-grant');
+    });
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
-      cwd: directory
+      cwd: directory,
+      designClientToolBridge: {
+        createSessionGrant: vi.fn(async () => ({
+          id: 'unused-design-grant',
+          launch: {
+            executablePath: '/fake/electron',
+            argv: ['/fake/design-tool-mcp-server.mjs'],
+            environment: {}
+          }
+        })),
+        activateGrant: vi.fn(async () => undefined),
+        revokeGrant: vi.fn(async () => undefined),
+        releaseSessionGrant
+      }
     });
     const shutdownFailure = new Error('old ACP child may still be live');
     const fakeSupervisor = {
       currentServer: server,
       currentClient: {} as AcpRpcClient,
       safetyFenceReason: 'ACP process termination could not be confirmed.',
-      shutdown: vi.fn().mockRejectedValue(shutdownFailure)
+      shutdown: vi.fn(async () => {
+        lifecycle.push('shutdown');
+        throw shutdownFailure;
+      })
     };
     const internals = adapter as unknown as {
       supervisor?: typeof fakeSupervisor;
+      designToolGrants: Map<string, {
+        grantId: string;
+        providerGeneration: string;
+        worktreeId: string;
+        launch: {
+          executablePath: string;
+          argv: string[];
+          environment: Record<string, string>;
+        };
+      }>;
       quarantineRuntimeAfterAmbiguousMutation(
         operation: string,
         detail: string
@@ -3088,6 +3637,16 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       waitForRuntimeQuarantine(): Promise<void>;
     };
     internals.supervisor = fakeSupervisor;
+    internals.designToolGrants.set('design-session', {
+      grantId: 'active-design-grant',
+      providerGeneration: server.id,
+      worktreeId: 'design-worktree',
+      launch: {
+        executablePath: '/fake/electron',
+        argv: ['/fake/design-tool-mcp-server.mjs'],
+        environment: {}
+      }
+    });
 
     await expect(
       internals.quarantineRuntimeAfterAmbiguousMutation(
@@ -3096,6 +3655,8 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       )
     ).rejects.toThrow('safety-fenced until Task Monki restarts');
     expect(internals.supervisor).toBe(fakeSupervisor);
+    expect(lifecycle).toEqual(['release-design-grant', 'shutdown']);
+    expect(internals.designToolGrants.size).toBe(0);
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
     await expect(internals.waitForRuntimeQuarantine()).rejects.toThrow(
       'safety-fenced until Task Monki restarts'
@@ -3106,6 +3667,91 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     await expect(adapter.initialize()).rejects.toThrow(
       'safety-fenced until Task Monki restarts'
     );
+    expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it('revokes Design MCP grants before an unconfirmed configuration restart', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-config-restart-grant-')
+    );
+    temporaryDirectories.push(directory);
+    const store = createTestStore(path.join(directory, 'store'));
+    const server = await createTestAgentServer(store, {
+      runtimeId: 'test-acp-config-restart-grant',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: '/fake/acp',
+      argv: ['--acp'],
+      schemaVersion: '1.19.0'
+    });
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: {
+        ...TEST_ACP_PROFILE.descriptor,
+        id: 'test-acp-config-restart-grant'
+      }
+    };
+    const lifecycle: string[] = [];
+    const releaseSessionGrant = vi.fn(async () => {
+      lifecycle.push('release-design-grant');
+    });
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      designClientToolBridge: {
+        createSessionGrant: vi.fn(async () => ({
+          id: 'unused-design-grant',
+          launch: {
+            executablePath: '/fake/electron',
+            argv: ['/fake/design-tool-mcp-server.mjs'],
+            environment: {}
+          }
+        })),
+        activateGrant: vi.fn(async () => undefined),
+        revokeGrant: vi.fn(async () => undefined),
+        releaseSessionGrant
+      }
+    });
+    const shutdownFailure = new Error('configuration restart remained live');
+    const fakeSupervisor = {
+      currentServer: server,
+      currentClient: {} as AcpRpcClient,
+      safetyFenceReason: 'ACP process termination could not be confirmed.',
+      shutdown: vi.fn(async () => {
+        lifecycle.push('shutdown');
+        throw shutdownFailure;
+      })
+    };
+    const internals = adapter as unknown as {
+      supervisor?: typeof fakeSupervisor;
+      designToolGrants: Map<string, {
+        grantId: string;
+        providerGeneration: string;
+        worktreeId: string;
+        launch: {
+          executablePath: string;
+          argv: string[];
+          environment: Record<string, string>;
+        };
+      }>;
+      resetRuntimeForConfiguration(): Promise<void>;
+    };
+    internals.supervisor = fakeSupervisor;
+    internals.designToolGrants.set('design-session', {
+      grantId: 'active-design-grant',
+      providerGeneration: server.id,
+      worktreeId: 'design-worktree',
+      launch: {
+        executablePath: '/fake/electron',
+        argv: ['/fake/design-tool-mcp-server.mjs'],
+        environment: {}
+      }
+    });
+
+    await expect(internals.resetRuntimeForConfiguration()).rejects.toBe(
+      shutdownFailure
+    );
+    expect(lifecycle).toEqual(['release-design-grant', 'shutdown']);
+    expect(internals.designToolGrants.size).toBe(0);
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
   });
 });
@@ -4829,19 +5475,29 @@ input.on('line', (line) => {
 `;
 }
 
-function attachmentDeliveryAgentSource(messageLog: string): string {
+function attachmentDeliveryAgentSource(
+  messageLog: string,
+  resumeMethod: 'resume' | 'load' = 'resume',
+  emitInspectDesign = false
+): string {
   return `
 const fs = require('node:fs');
 const readline = require('node:readline');
 const input = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+let activePrompt;
 input.on('line', (line) => {
   const message = JSON.parse(line);
   fs.appendFileSync(${JSON.stringify(messageLog)}, JSON.stringify(message) + '\\n');
   if (message.method === 'initialize') {
     send({ jsonrpc: '2.0', id: message.id, result: {
       protocolVersion: 1,
-      agentCapabilities: { promptCapabilities: {} },
+      agentCapabilities: {
+        promptCapabilities: {},
+        ${resumeMethod === 'resume'
+          ? 'sessionCapabilities: { resume: {} }'
+          : 'loadSession: true'}
+      },
       agentInfo: { name: 'attachment-delivery-agent', version: '1.0.0' }
     }});
     return;
@@ -4852,10 +5508,68 @@ input.on('line', (line) => {
     }});
     return;
   }
-  if (message.method === 'session/prompt') {
-    send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+  if (message.method === ${JSON.stringify(`session/${resumeMethod}`)}) {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: message.params.sessionId
+    }});
     return;
   }
+  if (message.method === 'session/prompt') {
+    ${emitInspectDesign ? `activePrompt = message;
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: activePrompt.params.sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'inspect-design-1',
+        title: 'task-monki-design-tools: inspect_design',
+        kind: 'other',
+        status: 'pending',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      }
+    }});
+    send({ jsonrpc: '2.0', id: 'inspect-design-permission-1', method: 'session/request_permission', params: {
+      sessionId: activePrompt.params.sessionId,
+      toolCall: {
+        toolCallId: 'inspect-design-1',
+        title: 'task-monki-design-tools-inspect_design: inspect_design',
+        kind: 'other',
+        status: 'pending'
+      },
+      options: [
+        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'allow-always', name: 'Allow always', kind: 'allow_always' },
+        { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' }
+      ]
+    }});
+    return;` : `send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+    return;`}
+  }
+  ${emitInspectDesign ? `if (message.id === 'inspect-design-permission-1') {
+    if (message.result?.outcome?.optionId !== 'allow-once') {
+      throw new Error('Task Monki did not select the one-time inspect_design permission.');
+    }
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: activePrompt.params.sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'inspect-design-1',
+        title: 'task-monki-design-tools: inspect_design',
+        kind: 'other',
+        status: 'completed',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      }
+    }});
+    send({ jsonrpc: '2.0', id: activePrompt.id, result: { stopReason: 'end_turn' } });
+    return;
+  }` : ''}
   send({ jsonrpc: '2.0', id: message.id, result: {} });
 });
 `;

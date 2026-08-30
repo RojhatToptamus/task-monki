@@ -36,6 +36,10 @@ interface AgentModelSelectorProps {
   showRuntimeLabel?: boolean;
   access?: ReactNode;
   runtimeUnavailableReason?(runtime: AgentRuntimeState): string | undefined;
+  modelUnavailableReason?(
+    model: AgentModel,
+    runtime: AgentRuntimeState
+  ): string | undefined;
   onDiscoverModels?(runtimeId: string): Promise<void>;
   onDiscoveryStatusChange?(status: ModelDiscoveryStatus): void;
   onSelectionChange(runtimeId: string, modelId: string): void;
@@ -70,6 +74,7 @@ export function AgentModelSelector({
   showRuntimeLabel = true,
   access,
   runtimeUnavailableReason,
+  modelUnavailableReason,
   onDiscoverModels,
   onDiscoveryStatusChange,
   onSelectionChange,
@@ -221,6 +226,7 @@ export function AgentModelSelector({
 
   const choose = async (runtime: AgentRuntimeState, model?: AgentModel) => {
     if (runtimeUnavailableReason?.(runtime)) return;
+    if (model && modelUnavailableReason?.(model, runtime)) return;
     const nextRuntimeId = runtime.preflight.runtime.id;
     const nextModelId = model?.id ?? '';
     onSelectionChange(nextRuntimeId, nextModelId);
@@ -344,23 +350,32 @@ export function AgentModelSelector({
                 ) : null}
                 {candidateModels.map((model) => {
                   const selected = model.id === modelId && candidateRuntimeId === runtimeId;
+                  const modelUnavailable = unavailableReason
+                    ? undefined
+                    : modelUnavailableReason?.(model, runtime);
                   return (
                     <button
                       type="button"
                       role="menuitemradio"
                       aria-checked={selected}
                       className="tm-agent-console__option"
-                      disabled={Boolean(unavailableReason)}
+                      disabled={Boolean(unavailableReason || modelUnavailable)}
                       key={model.id}
+                      title={modelUnavailable}
                       onClick={() => void choose(runtime, model)}
                     >
                       <span>{model.displayName}</span>
                       <span className="tm-agent-console__option-meta">
-                        {model.isDefault ? 'Default' : ''}
+                        {modelUnavailable ? 'Unavailable' : model.isDefault ? 'Default' : ''}
                       </span>
                       <span className="tm-agent-console__check" aria-hidden="true">
                         {selected ? <CheckIcon /> : null}
                       </span>
+                      {modelUnavailable ? (
+                        <small className="tm-agent-console__option-detail">
+                          {modelUnavailable}
+                        </small>
+                      ) : null}
                     </button>
                   );
                 })}

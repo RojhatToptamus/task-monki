@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
-import { AgentModelSetting } from './AgentModelSelector';
+import { AgentModelSelector, AgentModelSetting } from './AgentModelSelector';
 
 const model: AgentModel = {
   id: 'cursor-agent-acp:cursor/default',
@@ -58,5 +58,31 @@ describe('AgentModelSetting model discovery', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Load models' }));
     expect(discover).toHaveBeenCalledOnce();
     expect(discover).toHaveBeenCalledWith('cursor-agent-acp');
+  });
+
+  it('shows the exact reason for a model that the workflow cannot use', () => {
+    const onSelectionChange = vi.fn();
+    const reason = 'This exact provider version and model failed Design verification.';
+    render(
+      <AgentModelSelector
+        label="Design"
+        runtimeId="cursor-agent-acp"
+        modelId=""
+        models={[model]}
+        runtimes={[runtime]}
+        modelUnavailableReason={() => reason}
+        onSelectionChange={onSelectionChange}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Design: Cursor Agent' }));
+    const option = screen.getByRole('menuitemradio', {
+      name: `Auto Unavailable ${reason}`
+    });
+
+    expect(option).toHaveProperty('disabled', true);
+    expect(screen.getByText(reason)).toBeTruthy();
+    fireEvent.click(option);
+    expect(onSelectionChange).not.toHaveBeenCalled();
   });
 });

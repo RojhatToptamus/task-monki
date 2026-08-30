@@ -103,6 +103,7 @@ import {
   mapOpenCodeTodoSteps,
   mapOpenCodeUsage,
   normalizeOpenCodeEvent,
+  OPENCODE_DESIGN_MCP_SERVER_NAME,
   openCodeErrorDiagnostic,
   parseOpenCodeMessages,
   parseOpenCodePermissions,
@@ -137,6 +138,14 @@ import {
   type ResolvedOpenCodeRuntime
 } from './OpenCodeRuntimeResolver';
 import { openCodeSensitiveEnvironmentValues } from './OpenCodeEnvironmentPolicy';
+import { buildDesignAgentDeveloperInstructions } from '../../../shared/promptTemplates';
+import {
+  loadDesignSkillPack,
+  type DesignSkillPack
+} from '../../design/DesignSkillPack';
+import type {
+  DesignClientToolBridge
+} from '../../design/DesignClientToolBridge';
 
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
@@ -168,6 +177,7 @@ const MAX_TRACKED_ASSISTANT_USAGE_EVICTIONS_PER_SESSION = 2_048;
 const MAX_TRACKED_ASSISTANT_USAGE_RUNS = 2_048;
 const MAX_INBOUND_RESYNC_MS = 15_000;
 const MAX_RUNTIME_DELTA_BYTES = 64 * 1024;
+const OPENCODE_DESIGN_MCP_TIMEOUT_MS = 120_000;
 const OPENCODE_CATALOG_EVENTS = new Set([
   'models-dev.refreshed',
   'catalog.updated',
@@ -236,6 +246,12 @@ interface OpenCodeSessionRuntimeOwner {
   runtimeId: string;
   worktreePath: string;
   pure?: boolean;
+  design?: boolean;
+}
+
+interface OpenCodeDesignToolRegistration {
+  serverId: string;
+  grantId: string;
 }
 
 interface PreparedOpenCodeAttachmentDelivery {
@@ -258,6 +274,11 @@ export interface OpenCodeAdapterOptions
   sessionIdleTimeoutMs?: number;
   /** Total post-acknowledgement window for OpenCode to prove interruption. */
   interruptCompletionTimeoutMs?: number;
+  designSkillRoot?: string;
+  designClientToolBridge?: Pick<
+    DesignClientToolBridge,
+    'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
+  >;
 }
 
 export class OpenCodeAdapter implements AgentRuntimeAdapter {
@@ -313,6 +334,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private shuttingDown = false;
   private readonly sensitiveValues: readonly string[];
   private readonly interruptCompletionTimeoutMs: number;
+  private designSkillPack?: DesignSkillPack;
+  private designSkillFailure?: string;
+  private designSkillLoadAttempted = false;
+  private readonly designToolRegistrations = new Map<
+    string,
+    OpenCodeDesignToolRegistration
+  >();
 
   constructor(
     private readonly taskRuntime: TaskAgentRuntimeAccess,
@@ -339,6 +367,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.initialized = true;
     this.shuttingDown = false;
     try {
+      await this.prepareDesignSkillPack();
       await this.recoverPersistedRuntimeLosses();
       this.runtime = await (this.options.runtimeResolver ?? resolveOpenCodeRuntime)({
         ...this.options,
@@ -351,7 +380,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.preflightState = {
         runtime: this.descriptor,
         readiness: openCodeFailureReadiness(cause, this.sensitiveValues),
-        capabilities: opencodeCapabilities(),
+        capabilities: this.runtimeCapabilities(),
       };
       await this.shutdown().catch(() => undefined);
       this.initialized = false;
@@ -368,7 +397,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   capabilities(): Promise<AgentRuntimeCapabilities> {
-    return Promise.resolve(opencodeCapabilities());
+    return Promise.resolve(this.runtimeCapabilities());
   }
 
   async listModels(): Promise<AgentModel[]> {
@@ -854,159 +883,199 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         providerSessionId: session.providerSessionId
       });
     }
-    const { client, server } = await this.ensureSessionRuntime(session);
-    const projectCatalog = parseOpenCodeProviderCatalog(
-      (await client.get<unknown>('/provider')).data
-    );
-    const selectedSettings = this.resolveExecutionFromModels(
-      { settings: input.settings, attachments: input.attachments ?? [] },
-      this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
-      `worktree catalog for ${session.worktreePath}`
-    ).settings;
-    const ownershipTitle = openCodeOwnershipTitle(session.id);
-    const existingProviderSession = parseOpenCodeSessions(
-      (await client.get<unknown>('/session')).data
-    ).find(
-      (candidate) =>
-        candidate.metadata?.taskMonkiSessionId === session.id ||
-        candidate.title === ownershipTitle
-    );
-    if (existingProviderSession) {
-      if (!this.isSafeOperationalIdentifier(existingProviderSession.id)) {
-        await this.quarantineSessionRuntime(
+    const startedSessionRuntime = !this.supervisors.has(session.id);
+    try {
+      const { client, server } = await this.ensureSessionRuntime({
+        ...session,
+        pure: input.mode === 'DESIGN',
+        design: input.mode === 'DESIGN'
+      });
+      const projectCatalog = parseOpenCodeProviderCatalog(
+        (await client.get<unknown>('/provider')).data
+      );
+      const selectedSettings = this.resolveExecutionFromModels(
+        { settings: input.settings, attachments: input.attachments ?? [] },
+        this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
+        `worktree catalog for ${session.worktreePath}`
+      ).settings;
+      const ownershipTitle = openCodeOwnershipTitle(session.id);
+      const existingProviderSession = parseOpenCodeSessions(
+        (await client.get<unknown>('/session')).data
+      ).find(
+        (candidate) =>
+          candidate.metadata?.taskMonkiSessionId === session.id ||
+          candidate.title === ownershipTitle
+      );
+      if (existingProviderSession) {
+        if (!this.isSafeOperationalIdentifier(existingProviderSession.id)) {
+          await this.quarantineSessionRuntime(
+            session.id,
+            'session/discovery',
+            'OpenCode returned a session identifier matching a runtime credential.'
+          );
+          throw new Error(
+            'OpenCode cannot attach the discovered session because its identifier matches a runtime credential.'
+          );
+        }
+        await this.assertSessionDirectoryOrQuarantine(
           session.id,
           'session/discovery',
-          'OpenCode returned a session identifier matching a runtime credential.'
+          existingProviderSession,
+          session.worktreePath
         );
-        throw new Error(
-          'OpenCode cannot attach the discovered session because its identifier matches a runtime credential.'
+        session = await this.taskRuntime.updateAgentSession(
+          session.id,
+          {
+            providerSessionId: existingProviderSession.id,
+            providerSessionTreeId: existingProviderSession.id,
+            status: await this.readProviderSessionStatus(
+              client,
+              existingProviderSession.id
+            ),
+            materialized: true,
+            requestedSettings: selectedSettings,
+            observedSettings: this.safeObservedSettings(
+              settingsFromSession(existingProviderSession, selectedSettings)
+            ),
+            lastAttachedAt: new Date().toISOString()
+          },
+          runtimeOperationId(
+            'session/discovery',
+            session.id,
+            existingProviderSession.id,
+            server.id
+          )
         );
+        const verified = await this.synchronizeSessionPermissionPolicy(
+          session,
+          client,
+          selectedSettings,
+          'session/discovery-permission'
+        );
+        session = await this.persistPermissionAttestation(
+          session,
+          verified,
+          selectedSettings,
+          'session/discovery-permission'
+        );
+        await this.bindEventStream(session, client, server.id);
+        if (session.status === 'IDLE') {
+          this.scheduleSessionIdleEviction(session.id);
+        }
+        return session;
+      }
+
+      let response: OpenCodeSession;
+      try {
+        response = parseOpenCodeSession(
+          (
+            await client.post<unknown>('/session', {
+              title: ownershipTitle,
+              model: modelReference(selectedSettings),
+              metadata: {
+                taskMonkiSessionId: session.id,
+                taskMonkiTaskId: input.taskId
+              },
+              permission: openCodePermissionRules(selectedSettings)
+            })
+          ).data
+        );
+      } catch (cause) {
+        const error = mapOpenCodeMutationError('session/create', cause);
+        if (error instanceof AgentMutationAmbiguousError) {
+          await this.throwAmbiguousAfterQuarantine(
+            session.id,
+            'session/create',
+            'The provider may have created a session whose identity was not confirmed.',
+            error
+          );
+        }
+        throw error;
       }
       await this.assertSessionDirectoryOrQuarantine(
         session.id,
-        'session/discovery',
-        existingProviderSession,
+        'session/create',
+        response,
         session.worktreePath
       );
-      session = await this.taskRuntime.updateAgentSession(session.id, {
-        providerSessionId: existingProviderSession.id,
-        providerSessionTreeId: existingProviderSession.id,
-        status: await this.readProviderSessionStatus(client, existingProviderSession.id),
-        materialized: true,
-        requestedSettings: selectedSettings,
-        observedSettings: this.safeObservedSettings(
-          settingsFromSession(existingProviderSession, selectedSettings)
-        ),
-        lastAttachedAt: new Date().toISOString()
-      }, runtimeOperationId('session/discovery', session.id, existingProviderSession.id, server.id));
+      if (!this.isSafeOperationalIdentifier(response.id)) {
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          'session/create',
+          'OpenCode created a session whose identifier cannot be persisted safely.',
+          new AgentMutationAmbiguousError(
+            'session/create',
+            'OpenCode created a session whose identifier matches a runtime credential.'
+          )
+        );
+      }
+      try {
+        session = await this.taskRuntime.updateAgentSession(
+          session.id,
+          {
+            providerSessionId: response.id,
+            providerSessionTreeId: response.id,
+            status: 'IDLE',
+            materialized: false,
+            requestedSettings: selectedSettings,
+            observedSettings: this.safeObservedSettings(
+              settingsFromSession(response, selectedSettings)
+            ),
+            lastAttachedAt: new Date().toISOString()
+          },
+          runtimeOperationId('session/create', session.id, response.id)
+        );
+      } catch (cause) {
+        const persisted = await this.taskRuntime
+          .getAgentSession(session.id)
+          .catch(() => undefined);
+        if (persisted?.providerSessionId === response.id) {
+          session = persisted;
+        } else {
+          await this.throwAmbiguousAfterQuarantine(
+            session.id,
+            'session/create',
+            `OpenCode created session ${response.id}, but Task Monki could not persist its ownership.`,
+            new AgentMutationAmbiguousError(
+              'session/create',
+              `OpenCode created session ${response.id}, but Task Monki could not persist its ownership. A retry will recover it by Task Monki metadata instead of creating another session.`
+            )
+          );
+        }
+      }
       const verified = await this.synchronizeSessionPermissionPolicy(
         session,
         client,
         selectedSettings,
-        'session/discovery-permission'
+        'session/create-permission'
       );
       session = await this.persistPermissionAttestation(
         session,
         verified,
         selectedSettings,
-        'session/discovery-permission'
+        'session/create-permission'
+      );
+      await this.recordSettingsObservation(
+        session,
+        'THREAD_START_RESPONSE',
+        session.observedSettings ?? selectedSettings
       );
       await this.bindEventStream(session, client, server.id);
-      if (session.status === 'IDLE') this.scheduleSessionIdleEviction(session.id);
+      this.scheduleSessionIdleEviction(session.id);
       return session;
-    }
-    let response: OpenCodeSession;
-    try {
-      response = parseOpenCodeSession(
-        (
-          await client.post<unknown>('/session', {
-          title: ownershipTitle,
-          model: modelReference(selectedSettings),
-          metadata: {
-            taskMonkiSessionId: session.id,
-            taskMonkiTaskId: input.taskId
-          },
-          permission: openCodePermissionRules(selectedSettings)
-          })
-        ).data
-      );
     } catch (cause) {
-      const error = mapOpenCodeMutationError('session/create', cause);
-      if (error instanceof AgentMutationAmbiguousError) {
-        await this.throwAmbiguousAfterQuarantine(
-          session.id,
-          'session/create',
-          'The provider may have created a session whose identity was not confirmed.',
-          error
-        );
+      if (startedSessionRuntime && this.supervisors.has(session.id)) {
+        try {
+          await this.closeSessionRuntime(session.id, false);
+        } catch (cleanupCause) {
+          throw new AggregateError(
+            [cause, cleanupCause],
+            'OpenCode session creation and runtime cleanup both failed.'
+          );
+        }
       }
-      throw error;
+      throw cause;
     }
-    await this.assertSessionDirectoryOrQuarantine(
-      session.id,
-      'session/create',
-      response,
-      session.worktreePath
-    );
-    if (!this.isSafeOperationalIdentifier(response.id)) {
-      await this.throwAmbiguousAfterQuarantine(
-        session.id,
-        'session/create',
-        'OpenCode created a session whose identifier cannot be persisted safely.',
-        new AgentMutationAmbiguousError(
-          'session/create',
-          'OpenCode created a session whose identifier matches a runtime credential.'
-        )
-      );
-    }
-    try {
-      session = await this.taskRuntime.updateAgentSession(session.id, {
-        providerSessionId: response.id,
-        providerSessionTreeId: response.id,
-        status: 'IDLE',
-        materialized: false,
-        requestedSettings: selectedSettings,
-        observedSettings: this.safeObservedSettings(
-          settingsFromSession(response, selectedSettings)
-        ),
-        lastAttachedAt: new Date().toISOString()
-      }, runtimeOperationId('session/create', session.id, response.id));
-    } catch (cause) {
-      const persisted = await this.taskRuntime.getAgentSession(session.id).catch(() => undefined);
-      if (persisted?.providerSessionId === response.id) {
-        session = persisted;
-      } else {
-        await this.throwAmbiguousAfterQuarantine(
-          session.id,
-          'session/create',
-          `OpenCode created session ${response.id}, but Task Monki could not persist its ownership.`,
-          new AgentMutationAmbiguousError(
-            'session/create',
-            `OpenCode created session ${response.id}, but Task Monki could not persist its ownership. A retry will recover it by Task Monki metadata instead of creating another session.`
-          )
-        );
-      }
-    }
-    const verified = await this.synchronizeSessionPermissionPolicy(
-      session,
-      client,
-      selectedSettings,
-      'session/create-permission'
-    );
-    session = await this.persistPermissionAttestation(
-      session,
-      verified,
-      selectedSettings,
-      'session/create-permission'
-    );
-    await this.recordSettingsObservation(
-      session,
-      'THREAD_START_RESPONSE',
-      session.observedSettings ?? selectedSettings
-    );
-    await this.bindEventStream(session, client, server.id);
-    this.scheduleSessionIdleEviction(session.id);
-    return session;
   }
 
   async attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord> {
@@ -1022,7 +1091,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         'The persisted OpenCode session identifier matches a runtime credential and cannot be attached safely.'
       );
     }
-    const { client, server } = await this.ensureSessionRuntime(session);
+    const { client, server } = await this.ensureSessionRuntime(
+      await this.runtimeSessionOwnerForSession(session)
+    );
     let response: OpenCodeSession;
     let responseRaw: AgentProtocolMessageReference;
     try {
@@ -1130,7 +1201,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         'The OpenCode session identifier matches a runtime credential and cannot be read safely.'
       );
     }
-    const { client } = await this.ensureSessionRuntime(session);
+    const { client } = await this.ensureSessionRuntime(
+      await this.runtimeSessionOwnerForSession(session)
+    );
     const response = parseOpenCodeSession(
       (await client.get<unknown>(sessionPath(providerSessionId))).data
     );
@@ -1189,162 +1262,203 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     assertOpenCodeExecutionSettings(settings);
     const hadProviderSession = Boolean(session.providerSessionId);
     const previousSupervisor = this.supervisors.get(session.id);
-    let running = await this.ensureSessionRuntime(session);
-    const projectCatalog = parseOpenCodeProviderCatalog(
-      (await running.client.get<unknown>('/provider')).data
-    );
-    const selectedModel = this.resolveExecutionFromModels(
-      { settings, attachments },
-      this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
-      `worktree catalog for ${session.worktreePath}`
-    );
-    if (!session.providerSessionId) {
-      session = await this.createSession({
-        runtimeId: this.descriptor.id,
-        localSessionId: session.id,
-        taskId: session.taskId,
-        iterationId: session.iterationId,
-        worktreeId: session.worktreeId,
-        worktreePath: session.worktreePath,
-        settings: selectedModel.settings,
-        attachments
-      });
-    }
-    if (
-      hadProviderSession &&
-      session.providerSessionId &&
-      this.supervisors.get(session.id) !== previousSupervisor
-    ) {
-      session = await this.attachSession({
-        localSessionId: session.id,
-        providerSessionId: session.providerSessionId
-      });
-    }
-    const providerSessionId = session.providerSessionId!;
-    if (!this.isSafeOperationalIdentifier(providerSessionId)) {
-      throw new Error(
-        'The persisted OpenCode session identifier matches a runtime credential and cannot be used safely.'
-      );
-    }
-    running = await this.ensureSessionRuntime(session);
-    const { client, server } = running;
-    await this.bindEventStream(session, client, server.id);
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new Error('OpenCode replaced the session runtime before prompt submission.');
-    }
-    const verifiedPermissionSession = await this.synchronizeSessionPermissionPolicy(
-      session,
-      client,
-      selectedModel.settings,
-      'session/pre-prompt-permission'
-    );
-    session = await this.persistPermissionAttestation(
-      session,
-      verifiedPermissionSession,
-      selectedModel.settings,
-      'session/pre-prompt-permission'
-    );
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new Error('OpenCode replaced the session runtime before prompt submission.');
-    }
-    const attachmentDelivery = await prepareOpenCodeAttachmentDelivery(
-      input.prompt,
-      selectedModel.model,
-      attachments
-    );
-    const providerMessageId = createOpenCodeMessageId();
-    await this.taskRuntime.updateRun(input.localRunId, {
-      providerTurnId: providerMessageId,
-      serverInstanceId: server.id,
-      status: 'STARTING',
-      lastEventAt: new Date().toISOString()
-    }, runtimeOperationId('turn/send-intent', input.localRunId, providerMessageId, server.id));
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new Error('OpenCode replaced the session runtime before prompt submission.');
-    }
-    let promptAcknowledgement: AgentProtocolMessageReference;
+    let promptAcknowledged = false;
     try {
-      promptAcknowledgement = (
-        await client.post<void>(`${sessionPath(providerSessionId)}/prompt_async`, {
-          messageID: providerMessageId,
-          model: {
-            providerID: selectedModel.model.modelProvider,
-            modelID: selectedModel.model.model
-          },
-          ...(selectedModel.settings.reasoningEffort
-            ? { variant: selectedModel.settings.reasoningEffort }
-            : {}),
-          parts: attachmentDelivery.parts
-        })
-      ).raw;
-    } catch (cause) {
-      const error = mapOpenCodeMutationError('session/prompt_async', cause);
-      if (error instanceof AgentMutationAmbiguousError) {
+      const designInstructions = this.designInstructions(input);
+      const runtimeOwner = {
+        ...session,
+        pure: input.mode === 'DESIGN',
+        design: input.mode === 'DESIGN'
+      };
+      let running = await this.ensureSessionRuntime(runtimeOwner);
+      const projectCatalog = parseOpenCodeProviderCatalog(
+        (await running.client.get<unknown>('/provider')).data
+      );
+      const selectedModel = this.resolveExecutionFromModels(
+        { settings, attachments },
+        this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
+        `worktree catalog for ${session.worktreePath}`
+      );
+      if (!session.providerSessionId) {
+        session = await this.createSession({
+          runtimeId: this.descriptor.id,
+          localSessionId: session.id,
+          taskId: session.taskId,
+          iterationId: session.iterationId,
+          worktreeId: session.worktreeId,
+          worktreePath: session.worktreePath,
+          mode: input.mode,
+          instructionProfile: input.instructionProfile,
+          settings: selectedModel.settings,
+          attachments
+        });
+      }
+      if (
+        hadProviderSession &&
+        session.providerSessionId &&
+        this.supervisors.get(session.id) !== previousSupervisor
+      ) {
+        session = await this.attachSession({
+          localSessionId: session.id,
+          providerSessionId: session.providerSessionId
+        });
+      }
+      const providerSessionId = session.providerSessionId!;
+      if (!this.isSafeOperationalIdentifier(providerSessionId)) {
+        throw new Error(
+          'The persisted OpenCode session identifier matches a runtime credential and cannot be used safely.'
+        );
+      }
+      running = await this.ensureSessionRuntime({
+        ...session,
+        pure: input.mode === 'DESIGN',
+        design: input.mode === 'DESIGN'
+      });
+      const { client, server } = running;
+      await this.bindEventStream(session, client, server.id);
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        throw new Error('OpenCode replaced the session runtime before prompt submission.');
+      }
+      const verifiedPermissionSession = await this.synchronizeSessionPermissionPolicy(
+        session,
+        client,
+        selectedModel.settings,
+        'session/pre-prompt-permission'
+      );
+      session = await this.persistPermissionAttestation(
+        session,
+        verifiedPermissionSession,
+        selectedModel.settings,
+        'session/pre-prompt-permission'
+      );
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        throw new Error('OpenCode replaced the session runtime before prompt submission.');
+      }
+      const attachmentDelivery = await prepareOpenCodeAttachmentDelivery(
+        input.prompt,
+        selectedModel.model,
+        attachments
+      );
+      const providerMessageId = createOpenCodeMessageId();
+      await this.taskRuntime.updateRun(input.localRunId, {
+        providerTurnId: providerMessageId,
+        serverInstanceId: server.id,
+        status: 'STARTING',
+        lastEventAt: new Date().toISOString()
+      }, runtimeOperationId('turn/send-intent', input.localRunId, providerMessageId, server.id));
+      if (input.mode === 'DESIGN') {
+        await this.activateDesignToolGrant(session, input.localRunId, server.id);
+      }
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        throw new Error('OpenCode replaced the session runtime before prompt submission.');
+      }
+      let promptAcknowledgement: AgentProtocolMessageReference;
+      try {
+        promptAcknowledgement = (
+          await client.post<void>(`${sessionPath(providerSessionId)}/prompt_async`, {
+            messageID: providerMessageId,
+            model: {
+              providerID: selectedModel.model.modelProvider,
+              modelID: selectedModel.model.model
+            },
+            ...(selectedModel.settings.reasoningEffort
+              ? { variant: selectedModel.settings.reasoningEffort }
+              : {}),
+            ...(designInstructions ? { system: designInstructions } : {}),
+            parts: attachmentDelivery.parts
+          })
+        ).raw;
+        promptAcknowledged = true;
+      } catch (cause) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        const error = mapOpenCodeMutationError('session/prompt_async', cause);
+        if (error instanceof AgentMutationAmbiguousError) {
+          await this.throwAmbiguousAfterQuarantine(
+            session.id,
+            'session/prompt_async',
+            `Prompt ${providerMessageId} may have been accepted without an authoritative acknowledgement.`,
+            error
+          );
+        }
+        throw error;
+      }
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        throw new AgentMutationAmbiguousError(
+          'session/prompt_async',
+          `OpenCode accepted message ${providerMessageId}, but its owning runtime generation was replaced before Task Monki could persist the acknowledgement.`
+        );
+      }
+      const submittedAt = new Date().toISOString();
+      try {
+        await this.taskRuntime.updateRun(input.localRunId, {
+          status: 'RUNNING',
+          observedSettings: selectedModel.settings,
+          attachmentSubmissions: completeAttachmentSubmissions(
+            attachmentDelivery.submissionCandidates,
+            { kind: 'provider-message', id: providerMessageId },
+            submittedAt
+          ),
+          lastEventAt: submittedAt
+        }, runtimeOperationId('turn/acknowledged', input.localRunId, providerMessageId, server.id));
+        if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+          throw new OpenCodeRuntimeGenerationChangedError();
+        }
+        session = await this.taskRuntime.updateAgentSession(session.id, {
+          status: 'ACTIVE',
+          materialized: true,
+          requestedSettings: selectedModel.settings,
+          observedSettings: selectedModel.settings,
+          lastAttachedAt: submittedAt
+        }, runtimeOperationId('session/turn-active', session.id, providerMessageId, server.id));
+        if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+          throw new OpenCodeRuntimeGenerationChangedError();
+        }
+        await this.recordSettingsObservation(
+          session,
+          'TASK_MONKI_RESOLUTION',
+          selectedModel.settings,
+          input.localRunId,
+          promptAcknowledgement
+        );
+      } catch (cause) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        if (cause instanceof OpenCodeRuntimeGenerationChangedError) {
+          throw new AgentMutationAmbiguousError(
+            'session/prompt_async',
+            `OpenCode accepted message ${providerMessageId}, but its owning runtime generation changed during durable acknowledgement.`
+          );
+        }
         await this.throwAmbiguousAfterQuarantine(
           session.id,
           'session/prompt_async',
-          `Prompt ${providerMessageId} may have been accepted without an authoritative acknowledgement.`,
-          error
+          `OpenCode accepted message ${providerMessageId}, but Task Monki could not persist the acknowledgement.`,
+          new AgentMutationAmbiguousError(
+            'session/prompt_async',
+            `OpenCode accepted message ${providerMessageId}, but Task Monki could not durably record the acknowledgement: ${errorMessage(cause)} Automatic resubmission is disabled.`
+          )
         );
       }
-      throw error;
-    }
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new AgentMutationAmbiguousError(
-        'session/prompt_async',
-        `OpenCode accepted message ${providerMessageId}, but its owning runtime generation was replaced before Task Monki could persist the acknowledgement.`
-      );
-    }
-    const submittedAt = new Date().toISOString();
-    try {
-      await this.taskRuntime.updateRun(input.localRunId, {
-        status: 'RUNNING',
-        observedSettings: selectedModel.settings,
-        attachmentSubmissions: completeAttachmentSubmissions(
-          attachmentDelivery.submissionCandidates,
-          { kind: 'provider-message', id: providerMessageId },
-          submittedAt
-        ),
-        lastEventAt: submittedAt
-      }, runtimeOperationId('turn/acknowledged', input.localRunId, providerMessageId, server.id));
-      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-        throw new OpenCodeRuntimeGenerationChangedError();
-      }
-      session = await this.taskRuntime.updateAgentSession(session.id, {
-        status: 'ACTIVE',
-        materialized: true,
-        requestedSettings: selectedModel.settings,
-        observedSettings: selectedModel.settings,
-        lastAttachedAt: submittedAt
-      }, runtimeOperationId('session/turn-active', session.id, providerMessageId, server.id));
-      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-        throw new OpenCodeRuntimeGenerationChangedError();
-      }
-      await this.recordSettingsObservation(
-        session,
-        'TASK_MONKI_RESOLUTION',
-        selectedModel.settings,
-        input.localRunId,
-        promptAcknowledgement
-      );
+
+      return { localRunId: input.localRunId, providerTurnId: providerMessageId };
     } catch (cause) {
-      if (cause instanceof OpenCodeRuntimeGenerationChangedError) {
-        throw new AgentMutationAmbiguousError(
-          'session/prompt_async',
-          `OpenCode accepted message ${providerMessageId}, but its owning runtime generation changed during durable acknowledgement.`
-        );
+      if (
+        !previousSupervisor &&
+        !promptAcknowledged &&
+        this.supervisors.has(session.id)
+      ) {
+        try {
+          await this.closeSessionRuntime(session.id, false);
+        } catch (cleanupCause) {
+          throw new AggregateError(
+            [cause, cleanupCause],
+            'OpenCode turn setup and runtime cleanup both failed.'
+          );
+        }
       }
-      await this.throwAmbiguousAfterQuarantine(
-        session.id,
-        'session/prompt_async',
-        `OpenCode accepted message ${providerMessageId}, but Task Monki could not persist the acknowledgement.`,
-        new AgentMutationAmbiguousError(
-          'session/prompt_async',
-          `OpenCode accepted message ${providerMessageId}, but Task Monki could not durably record the acknowledgement: ${errorMessage(cause)} Automatic resubmission is disabled.`
-        )
-      );
+      throw cause;
     }
-    return { localRunId: input.localRunId, providerTurnId: providerMessageId };
   }
 
   async interruptTurn(input: InterruptAgentTurn): Promise<void> {
@@ -1365,6 +1479,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       );
       if (!run || run.sessionId !== session.id) {
         throw new Error('The OpenCode turn does not belong to the selected session.');
+      }
+      if (run.mode === 'DESIGN') {
+        await this.revokeDesignToolGrant(session.id).catch((cause) =>
+          this.recordProtocolIncident(session.id, cause).catch(() => undefined)
+        );
       }
       const supervisor = this.supervisors.get(session.id);
       const client = supervisor?.currentClient;
@@ -1906,7 +2025,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!server || server.id !== input.interaction.serverInstanceId) {
       throw new Error('OpenCode interaction belongs to a no-longer-active runtime instance.');
     }
-    const { client } = await this.ensureSessionRuntime(session);
+    const { client } = await this.ensureSessionRuntime(
+      await this.runtimeSessionOwnerForSession(session)
+    );
     const mapped = mapOpenCodeInteractionResponse(input.decision, input.interaction.request);
     const endpoint = mapped.path === 'question'
       ? `/question/${encodeURIComponent(String(input.interaction.providerRequestId))}/reply`
@@ -1995,6 +2116,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (buffer.timer) clearTimeout(buffer.timer);
       buffer.timer = undefined;
     }
+    const designToolReleaseResults = await Promise.allSettled(
+      [...this.designToolRegistrations.keys()].map((sessionId) =>
+        this.releaseDesignToolRegistration(sessionId)
+      )
+    );
     const streams = [...this.eventStreams.values()]
       .map((binding) => binding.stream)
       .filter((stream): stream is OpenCodeEventStream => stream !== undefined);
@@ -2014,6 +2140,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.assistantUsageTotals.clear();
     if (this.catalogRefreshPromise) await this.catalogRefreshPromise.catch(() => undefined);
     const failures: unknown[] = [
+      ...designToolReleaseResults
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason),
       ...streamResults
         .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
         .map((result) => result.reason),
@@ -2133,7 +2262,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     catalog: ReturnType<typeof parseOpenCodeProviderCatalog>,
     runtime: ResolvedOpenCodeRuntime
   ): void {
-    this.operationalModels = mapOpenCodeModels(catalog);
+    this.operationalModels = mapOpenCodeModels(catalog).map((model) =>
+      withOpenCodeDesignSupport(model, runtime.version)
+    );
     this.models = this.safePublishedModels(this.operationalModels);
     const safeProviderIds = new Set(
       catalog.providers
@@ -2266,7 +2397,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.preflightState = {
       runtime: this.descriptor,
       readiness,
-      capabilities: opencodeCapabilities(),
+      capabilities: this.runtimeCapabilities(),
       runtimeVersion: runtime.version,
       accountLabel: providerCount > 0
         ? `${providerCount} connected provider${providerCount === 1 ? '' : 's'}`
@@ -2381,14 +2512,151 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         await this.quarantineSessionRuntime(
           session.id,
           'runtime/pure-mode',
-          'The OpenCode read-only process did not start with external plugins disabled.'
+          'The OpenCode pure process did not start with external plugins disabled.'
         );
         throw new Error(
-          'OpenCode could not attest that external plugins were disabled for this read-only turn.'
+          'OpenCode could not attest that external plugins were disabled for this pure session.'
         );
       }
     }
+    if (session.design) {
+      await this.ensureDesignToolRegistration(
+        session,
+        running.client,
+        running.server.id
+      );
+    }
     return { client: running.client, server: running.server };
+  }
+
+  private async ensureDesignToolRegistration(
+    session: OpenCodeSessionRuntimeOwner,
+    client: OpenCodeClientTransport,
+    serverId: string
+  ): Promise<void> {
+    const bridge = this.options.designClientToolBridge;
+    if (!bridge) {
+      throw new Error('The packaged inspect_design MCP bridge is not configured.');
+    }
+    const existing = this.designToolRegistrations.get(session.id);
+    if (existing?.serverId === serverId) return;
+    if (existing) {
+      await bridge.releaseSessionGrant(existing.grantId);
+      this.designToolRegistrations.delete(session.id);
+    }
+
+    const grant = await bridge.createSessionGrant({
+      runtimeId: this.descriptor.id,
+      sessionId: session.id,
+      worktreeId: await this.requireSessionWorktreeId(session.id),
+      providerGeneration: serverId
+    });
+    const environment = grant.launch.environment;
+    const sensitiveValues = Object.entries(environment)
+      .filter(([name]) => name.startsWith('TASK_MONKI_DESIGN_TOOL_'))
+      .map(([, value]) => value);
+    try {
+      const registration = await client.post<unknown>('/mcp', {
+        name: OPENCODE_DESIGN_MCP_SERVER_NAME,
+        config: {
+          type: 'local',
+          command: [grant.launch.executablePath, ...grant.launch.argv],
+          environment,
+          timeout: OPENCODE_DESIGN_MCP_TIMEOUT_MS
+        }
+      }, { sensitiveValues });
+      assertOpenCodeMcpConnected(
+        registration.data,
+        OPENCODE_DESIGN_MCP_SERVER_NAME
+      );
+    } catch (cause) {
+      await bridge.releaseSessionGrant(grant.id).catch(() => undefined);
+      const error = mapOpenCodeMutationError('mcp/register', cause);
+      if (error instanceof AgentMutationAmbiguousError) {
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          'mcp/register',
+          'OpenCode may have registered the Design MCP server without an authoritative acknowledgement.',
+          error
+        );
+      }
+      throw error;
+    }
+    const registration = { serverId, grantId: grant.id };
+    this.designToolRegistrations.set(session.id, registration);
+  }
+
+  private async requireSessionWorktreeId(sessionId: string): Promise<string> {
+    const session = await this.requireSession(sessionId);
+    if (!session.worktreeId) {
+      throw new Error('The OpenCode Design session has no worktree identity.');
+    }
+    return session.worktreeId;
+  }
+
+  private async activateDesignToolGrant(
+    session: AgentSessionRecord,
+    runId: string,
+    serverId: string
+  ): Promise<void> {
+    const registration = this.designToolRegistrations.get(session.id);
+    const bridge = this.options.designClientToolBridge;
+    if (!registration || registration.serverId !== serverId || !bridge) {
+      throw new Error('The OpenCode Design MCP server is not registered for this runtime.');
+    }
+    await bridge.activateGrant({
+      grantId: registration.grantId,
+      authority: {
+        runtimeId: this.descriptor.id,
+        sessionId: session.id,
+        runId,
+        worktreeId: session.worktreeId,
+        providerGeneration: serverId
+      }
+    });
+  }
+
+  private async revokeDesignToolGrant(sessionId: string): Promise<void> {
+    const registration = this.designToolRegistrations.get(sessionId);
+    if (!registration || !this.options.designClientToolBridge) return;
+    await this.options.designClientToolBridge.revokeGrant(registration.grantId);
+  }
+
+  private async releaseDesignToolRegistration(sessionId: string): Promise<void> {
+    const registration = this.designToolRegistrations.get(sessionId);
+    if (!registration) return;
+    await this.options.designClientToolBridge?.releaseSessionGrant(
+      registration.grantId
+    );
+    this.designToolRegistrations.delete(sessionId);
+  }
+
+  private async releaseDesignToolRegistrationSafely(sessionId: string): Promise<void> {
+    try {
+      await this.releaseDesignToolRegistration(sessionId);
+    } catch (cause) {
+      await this.recordProtocolIncident(sessionId, cause).catch(() => undefined);
+    }
+  }
+
+  private async disconnectDesignToolRegistration(
+    sessionId: string,
+    client: OpenCodeClientTransport,
+    serverId: string
+  ): Promise<void> {
+    const registration = this.designToolRegistrations.get(sessionId);
+    if (!registration || registration.serverId !== serverId) return;
+    await this.revokeDesignToolGrant(sessionId);
+    let failure: unknown;
+    try {
+      await client.post(
+        `/mcp/${encodeURIComponent(OPENCODE_DESIGN_MCP_SERVER_NAME)}/disconnect`
+      );
+    } catch (cause) {
+      failure = mapOpenCodeMutationError('mcp/disconnect', cause);
+    }
+    await this.releaseDesignToolRegistration(sessionId);
+    if (failure) throw failure;
   }
 
   private beginUnexpectedSessionExitDrain(
@@ -2419,6 +2687,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const operation = (async () => {
       let completed = false;
       try {
+        await this.revokeDesignToolGrant(sessionId).catch(() => undefined);
         await stream?.settled;
         if (this.eventStreams.get(sessionId) === binding) {
           this.eventStreams.delete(sessionId);
@@ -2426,6 +2695,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         if (this.supervisors.get(sessionId) === supervisor) {
           this.supervisors.delete(sessionId);
         }
+        await this.releaseDesignToolRegistrationSafely(sessionId);
         await this.enqueueSessionOperation(sessionId, async () => {
           await this.handleRuntimeLoss(
             serverId,
@@ -2758,6 +3028,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     stream?.stop();
     const supervisor = this.supervisors.get(sessionId);
     const serverId = supervisor?.currentServer?.id;
+    // The provider process may outlive an unconfirmed shutdown. Remove its
+    // generation-bound bridge credentials before waiting on that shutdown.
+    await this.releaseDesignToolRegistrationSafely(sessionId);
     let shutdownFailure: unknown;
     try {
       await supervisor?.shutdown();
@@ -2770,6 +3043,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     } catch (cause) {
       shutdownFailure = cause;
     }
+    await this.releaseDesignToolRegistrationSafely(sessionId);
     this.clearAssistantMessageParents(sessionId);
     if (shutdownFailure) {
       // Keep the run active behind the session fence. A recovery event is a
@@ -4331,7 +4605,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     let client: OpenCodeClientTransport;
     let serverId: string;
     try {
-      const running = await this.ensureSessionRuntime(session);
+      const running = await this.ensureSessionRuntime(
+        await this.runtimeSessionOwnerForSession(session)
+      );
       client = running.client;
       serverId = running.server.id;
       if (expectedServerId && serverId !== expectedServerId) return 'recovery-required';
@@ -4928,6 +5204,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       runtimeOperationId('event/run-terminal', current.id, current.status, status, finalArtifact.id)
     );
     if (!published) return false;
+    if (current.mode === 'DESIGN') {
+      await this.revokeDesignToolGrant(current.sessionId).catch((cause) =>
+        this.recordProtocolIncident(current.sessionId, cause).catch(() => undefined)
+      );
+    }
     this.clearInterruptDeadline(current.id);
     this.appEvents.emit({
       type: 'run.terminal',
@@ -5228,6 +5509,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
     }
     const supervisor = this.supervisors.get(sessionId);
+    const client = supervisor?.currentClient;
+    const serverId = supervisor?.currentServer?.id;
+    if (client && serverId) {
+      await this.disconnectDesignToolRegistration(sessionId, client, serverId).catch(
+        () => undefined
+      );
+    } else {
+      await this.releaseDesignToolRegistrationSafely(sessionId);
+    }
     let shutdownConfirmed = false;
     try {
       if (supervisor) await supervisor.shutdown();
@@ -5261,6 +5551,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         }
       }
     } finally {
+      await this.releaseDesignToolRegistrationSafely(sessionId);
       if (shutdownConfirmed && this.sessionRuntimeFences.get(sessionId) === fence) {
         this.sessionRuntimeFences.delete(sessionId);
       }
@@ -5335,7 +5626,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           nextAction: { kind: 'RETRY', label: 'Refresh OpenCode' }
         }
       ),
-      capabilities: opencodeCapabilities(),
+      capabilities: this.runtimeCapabilities(),
     };
     this.emitRuntimeUpdate();
   }
@@ -5921,6 +6212,60 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     };
   }
 
+  private async prepareDesignSkillPack(): Promise<void> {
+    if (this.designSkillLoadAttempted) return;
+    this.designSkillLoadAttempted = true;
+    if (!this.options.designSkillRoot) {
+      this.designSkillFailure = 'The Task Monki host did not configure a Design skill root.';
+      return;
+    }
+    try {
+      this.designSkillPack = await loadDesignSkillPack(this.options.designSkillRoot);
+      this.designSkillFailure = undefined;
+    } catch (cause) {
+      this.designSkillPack = undefined;
+      this.designSkillFailure = errorMessage(cause);
+    }
+  }
+
+  private runtimeCapabilities(): AgentRuntimeCapabilities {
+    return opencodeCapabilities({
+      designSkills: this.designSkillPack
+        ? { available: true }
+        : {
+            available: false,
+            detail:
+              this.designSkillFailure ??
+              'The app-owned Design skill pack has not been validated yet.'
+          },
+      designBrowser: {
+        available: Boolean(this.options.designClientToolBridge),
+        detail: this.options.designClientToolBridge
+          ? undefined
+          : 'The packaged inspect_design MCP bridge has not been configured yet.'
+      }
+    });
+  }
+
+  private designInstructions(input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>): string | undefined {
+    if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') return undefined;
+    if (input.mode !== 'DESIGN' || input.instructionProfile !== 'DESIGN') {
+      throw new Error('The DESIGN instruction profile is valid only for a Design turn.');
+    }
+    if (!this.designSkillPack) {
+      throw new Error(
+        `Task Monki cannot start Design work because its skill pack is unavailable. ${
+          this.designSkillFailure ?? 'The skill pack has not been validated.'
+        }`
+      );
+    }
+    return [
+      buildDesignAgentDeveloperInstructions(this.designSkillPack.catalog),
+      '',
+      'Read each matching Task Monki skill with the normal file-reading tool at its exact Path. Do not invoke a provider-native skill loader by skill name; it does not own the app skill pack.'
+    ].join('\n');
+  }
+
   private noteSensitiveIdentifierOmission(): void {
     if (
       this.preflightState.readiness.diagnostics.some(
@@ -5942,6 +6287,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const session = await this.taskRuntime.getAgentSession(sessionId);
     if (!session) throw new Error(`Agent session not found: ${sessionId}`);
     return session;
+  }
+
+  private async runtimeSessionOwnerForSession(
+    session: AgentSessionRecord
+  ): Promise<OpenCodeSessionRuntimeOwner> {
+    const snapshot = await this.taskRuntime.snapshot();
+    const design = snapshot.runs.some(
+      (run) => run.sessionId === session.id && run.mode === 'DESIGN'
+    );
+    return {
+      ...session,
+      pure: design,
+      design
+    };
   }
 
   private async getCurrentRunForSession(sessionId: string): Promise<RunRecord | undefined> {
@@ -6216,6 +6575,28 @@ function deferredOpenCodeModel(
       discovery: 'deferred-to-worktree-catalog'
     }
   };
+}
+
+function withOpenCodeDesignSupport(
+  model: AgentModel,
+  runtimeVersion: string
+): AgentModel {
+  return {
+    ...model,
+    designSupport: {
+      maturity: 'unsupported',
+      detail: `OpenCode ${runtimeVersion} model ${model.modelProvider ?? 'unknown'}/${model.model} has not passed the full packaged Design qualification.`
+    }
+  };
+}
+
+function assertOpenCodeMcpConnected(value: unknown, serverName: string): void {
+  const status = asRecord(value)?.[serverName];
+  const state = asRecord(status)?.status;
+  if (state === 'connected') return;
+  throw new Error(
+    `OpenCode reported ${typeof state === 'string' ? state : 'an invalid status'} for the Design MCP server.`
+  );
 }
 
 function modelReference(settings: AgentExecutionSettings): { id: string; providerID: string; variant?: string } | undefined {

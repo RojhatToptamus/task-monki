@@ -24,6 +24,7 @@ export function materializeAcpPermission(input: {
   options: readonly AcpPermissionOption[];
   session: AgentSessionRecord;
   run: RunRecord;
+  trustedAppTool?: 'inspect_design';
   rememberedPermissionOwner?: string;
 }): MaterializedAcpPermission {
   const paths = pathsFromToolCall(input.toolCall);
@@ -41,7 +42,9 @@ export function materializeAcpPermission(input: {
   let localAllowed: AgentInteractionAction[];
   let hardBlocked = false;
 
-  if (['edit', 'delete', 'move', 'read'].includes(input.toolCall.kind ?? '')) {
+  if (input.trustedAppTool === 'inspect_design') {
+    localAllowed = ['ACCEPT', 'DECLINE', 'CANCEL'];
+  } else if (['edit', 'delete', 'move', 'read'].includes(input.toolCall.kind ?? '')) {
     const policy = buildInteractionPolicy({
       type: 'FILE_CHANGE_APPROVAL',
       request: {

@@ -1104,7 +1104,9 @@ function promptForTurn(
       .map((candidate) =>
         [
           `User: ${candidate.userMessage}`,
-          candidate.assistantMessage ? `Codex: ${candidate.assistantMessage}` : undefined
+          candidate.assistantMessage
+            ? `Design agent: ${candidate.assistantMessage}`
+            : undefined
         ]
           .filter(Boolean)
           .join('\n')

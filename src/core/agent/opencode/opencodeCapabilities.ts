@@ -10,6 +10,7 @@ const unsupported = (detail?: string): AgentCapability => ({
   maturity: 'unsupported',
   detail
 });
+const stable = (detail?: string): AgentCapability => ({ maturity: 'stable', detail });
 
 export const OPENCODE_RUNTIME_DESCRIPTOR: AgentRuntimeDescriptor = {
   id: OPENCODE_RUNTIME_ID,
@@ -20,7 +21,12 @@ export const OPENCODE_RUNTIME_DESCRIPTOR: AgentRuntimeDescriptor = {
   startupPolicy: 'EAGER'
 };
 
-export function opencodeCapabilities(): AgentRuntimeCapabilities {
+export function opencodeCapabilities(input: {
+  designSkills?: { available: boolean; detail?: string };
+  designBrowser?: { available: boolean; detail?: string };
+} = {}): AgentRuntimeCapabilities {
+  const designSkills = input.designSkills ?? { available: false };
+  const designBrowser = input.designBrowser ?? { available: false };
   return {
     runtimeId: OPENCODE_RUNTIME_ID,
     executionPolicy: {
@@ -130,12 +136,15 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       detail: 'Sessions, messages, pending interactions, and status are reconciled after reconnect.'
     },
     extensions: {
-      'task-monki.design-instructions': unsupported(
-        'OpenCode currently receives Design guidance only as user prompt text.'
-      ),
-      'task-monki.design-skill-access': unsupported(
-        'OpenCode cannot attest a restricted app-owned read root for Design skills.'
-      ),
+      'task-monki.design-instructions': designSkills.available
+        ? stable('Maps the shared Design instruction profile to the native OpenCode system prompt.')
+        : unsupported(designSkills.detail ?? 'The app-owned Design skill pack is unavailable.'),
+      'task-monki.design-skill-access': designSkills.available
+        ? stable('The validated app-owned skill catalog gives exact skill files to the Design agent.')
+        : unsupported(designSkills.detail ?? 'The app-owned Design skill pack is unavailable.'),
+      'task-monki.design-browser-verification': designBrowser.available
+        ? stable('Uses the app-owned inspect_design MCP bridge with bounded text and image output.')
+        : unsupported(designBrowser.detail ?? 'The packaged inspect_design MCP bridge is unavailable.'),
       [BROWSER_DEV_ISOLATION_CAPABILITY]: {
         maturity: 'unsupported',
         detail: 'OpenCode permission rules do not attest an OS-level filesystem and network sandbox.'

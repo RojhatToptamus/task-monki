@@ -9,6 +9,36 @@ import {
 } from './CodexEventMapper';
 
 describe('Codex event mapping', () => {
+  it('keeps Codex Design unavailable without a complete packaged qualification', () => {
+    const model = {
+      id: 'gpt-5.6-luna',
+      model: 'gpt-5.6-luna',
+      displayName: 'GPT-5.6 Luna',
+      description: 'Test model',
+      hidden: false,
+      supportedReasoningEfforts: [],
+      defaultReasoningEffort: 'low',
+      inputModalities: ['text', 'image'],
+      serviceTiers: [],
+      defaultServiceTier: null,
+      isDefault: true
+    };
+    expect(mapModel(model as never, '0.150.0-alpha.12.2').designSupport).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
+    });
+    expect(mapModel(model as never, '0.150.0-alpha.12.3').designSupport).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
+    });
+    expect(
+      mapModel(
+        { ...model, id: 'gpt-5.6-sol', model: 'gpt-5.6-sol' } as never,
+        '0.150.0-alpha.12.2'
+      ).designSupport
+    ).toMatchObject({ maturity: 'unsupported' });
+  });
+
   it('does not invent a provider that model/list did not report', () => {
     expect(
       mapModel({

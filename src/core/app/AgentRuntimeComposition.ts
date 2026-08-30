@@ -10,6 +10,7 @@ import { AcpRuntimeAdapter } from '../agent/acp/AcpRuntimeAdapter';
 import { ACP_RUNTIME_PROFILES } from '../agent/acp/AcpRuntimeProfiles';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 import { OpenCodeAdapter } from '../agent/opencode/OpenCodeAdapter';
+import type { DesignClientToolBridge } from '../design/DesignClientToolBridge';
 
 export interface BuiltInAgentRuntimeOptions {
   cwd: string;
@@ -19,6 +20,7 @@ export interface BuiltInAgentRuntimeOptions {
   browserDevBoundary: boolean;
   codexToolSettings: TaskManagerAppSettings['codexExternalTools'];
   designSkillRoot?: string;
+  designToolBridge?: DesignClientToolBridge;
 }
 
 export function createBuiltInAgentRuntimes(
@@ -38,7 +40,9 @@ export function createBuiltInAgentRuntimes(
   });
   const openCode = new OpenCodeAdapter(taskRuntime, runtimeStore, events, {
     cwd: options.cwd,
-    executable: options.openCodeExecutable ?? process.env.TASK_MONKI_OPENCODE_BIN
+    executable: options.openCodeExecutable ?? process.env.TASK_MONKI_OPENCODE_BIN,
+    designSkillRoot: options.designSkillRoot,
+    designClientToolBridge: options.designToolBridge
   });
   const acp = ACP_RUNTIME_PROFILES.map(
     (profile) =>
@@ -46,7 +50,9 @@ export function createBuiltInAgentRuntimes(
         cwd: options.cwd,
         executable:
           options.acpExecutablePaths?.[profile.descriptor.id] ??
-          process.env[profile.executableEnvironmentKey]
+          process.env[profile.executableEnvironmentKey],
+        designSkillRoot: options.designSkillRoot,
+        designClientToolBridge: options.designToolBridge
       })
   );
   return [codex, openCode, ...acp];

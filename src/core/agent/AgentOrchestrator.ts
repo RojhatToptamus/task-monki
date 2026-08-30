@@ -71,6 +71,7 @@ import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
 } from '../review/AgentReviewContract';
+import { INSPECT_DESIGN_TOOL_NAME } from '../design/DesignClientToolContract';
 
 const MAX_CONCURRENT_TURNS = 2;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
@@ -1584,16 +1585,6 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
   }
 
-  async deleteTaskProviderHistory(task: Task): Promise<void> {
-    const adapter = this.runtimes.require(task.runtimeId);
-    if (!adapter.deleteTaskProviderHistory) {
-      throw new Error(
-        `${adapter.descriptor.displayName} cannot delete provider history safely.`
-      );
-    }
-    await adapter.deleteTaskProviderHistory(task.id);
-  }
-
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {
     const operation = this.startQueue.then(() => this.startTurnSerially(input));
     this.startQueue = operation.then(
@@ -1652,7 +1643,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const settings = await this.validateSettings(
       adapter,
       { ...input.settings, runtimeId },
-      taskAttachments
+      taskAttachments,
+      input.mode
     );
     await this.assertCapacity();
 
@@ -1724,6 +1716,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: input.retryOfRunId,
       continuedFromRunId: input.continuedFromRunId,
       instructionProfile: input.instructionProfile,
+      clientToolGrants:
+        input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
       attachmentSelection: toAgentAttachmentSelectionFromRecords(taskAttachments),
       operationId: `task-run:${runId}`
     });
@@ -1743,6 +1737,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           iterationId: input.iteration.id,
           worktreeId: input.worktree.id,
           worktreePath: input.worktree.worktreePath,
+          mode: input.mode,
+          instructionProfile: input.instructionProfile,
           settings,
           attachments
         });
@@ -2310,6 +2306,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: current.id,
       continuedFromRunId: input.input.continuedFromRunId,
       instructionProfile: input.input.instructionProfile,
+      clientToolGrants:
+        input.input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
       attachmentSelection: toAgentAttachmentSelectionFromRecords(
         input.attachmentRecords
       ),
@@ -2348,6 +2346,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
             iterationId: replacementSession.iterationId,
             worktreeId: replacementSession.worktreeId,
             worktreePath: replacementSession.worktreePath,
+            mode: input.input.mode,
+            instructionProfile: input.input.instructionProfile,
             settings: input.settings,
             attachments: replacementAttachments
           });
@@ -2360,6 +2360,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           iterationId: replacementSession.iterationId,
           worktreeId: replacementSession.worktreeId,
           worktreePath: replacementSession.worktreePath,
+          mode: input.input.mode,
+          instructionProfile: input.input.instructionProfile,
           settings: input.settings,
           attachments: replacementAttachments
         });
@@ -2401,7 +2403,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     attachments: readonly Pick<
       AgentAttachmentSelection,
       'kind' | 'mediaType' | 'byteCount' | 'sha256'
-    >[] = []
+    >[] = [],
+    mode?: AgentRunMode
   ): Promise<AgentExecutionSettings> {
     if (this.options.allowNetworkAccess === false) {
       assertBrowserDevRuntimeIsolation(
@@ -2409,7 +2412,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         await adapter.capabilities()
       );
     }
-    const resolvedSettings = (await adapter.resolveExecution({ settings, attachments })).settings;
+    const resolved = await adapter.resolveExecution({ settings, attachments });
+    const resolvedSettings = resolved.settings;
     if (resolvedSettings.runtimeId !== adapter.descriptor.id) {
       throw new Error(
         `Runtime ${adapter.descriptor.id} returned execution settings for ${String(resolvedSettings.runtimeId)}.`
@@ -2417,6 +2421,14 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
     if (this.options.allowNetworkAccess === false) {
       this.assertBrowserDevSettings(resolvedSettings, 'Requested run');
+    }
+    if (mode === 'DESIGN') {
+      const support = projectAgentExecutionSupport(
+        await adapter.capabilities(),
+        'DESIGN',
+        { model: resolved.model }
+      );
+      if (!support.supported) throw new Error(support.reason);
     }
     return resolvedSettings;
   }

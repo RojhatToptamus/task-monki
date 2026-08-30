@@ -11,7 +11,7 @@ export type AgentExecutionOperation =
   | 'DISCOURSE';
 
 export interface AgentExecutionSupportContext {
-  model?: Pick<AgentModel, 'inputModalities'>;
+  model?: Pick<AgentModel, 'inputModalities' | 'designSupport'>;
 }
 
 export type AgentExecutionSupport =
@@ -42,6 +42,16 @@ export function projectAgentExecutionSupport(
 
     case 'DESIGN': {
       const extensions = capabilities.extensions;
+      const autonomousWrite = capabilities.executionPolicy.presets.some(
+        (preset) =>
+          preset.repositoryMutation === 'ALLOW' &&
+          preset.approvalPolicy.toLocaleLowerCase() === 'never'
+      );
+      if (!autonomousWrite) {
+        return unsupported(
+          'This agent has no approval-free write policy for autonomous Design work.'
+        );
+      }
       const runtimeSupported =
         extensions['task-monki.design-instructions']?.maturity === 'stable' &&
         extensions['task-monki.design-skill-access']?.maturity === 'stable' &&
@@ -60,6 +70,12 @@ export function projectAgentExecutionSupport(
         )
       ) {
         return unsupported('Design Mode requires a model that supports images.');
+      }
+      if (context.model && context.model.designSupport?.maturity !== 'stable') {
+        return unsupported(
+          context.model?.designSupport?.detail?.trim() ||
+            'This provider version and model have not passed the full Design Mode qualification.'
+        );
       }
       return supported();
     }
