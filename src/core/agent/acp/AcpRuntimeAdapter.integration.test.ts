@@ -2599,14 +2599,6 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const sessionNativeState = JSON.stringify(await adapter.readNativeState());
       expect(sessionNativeState).toContain('grok-composer-2.5-fast');
       expect(sessionNativeState).toContain('grok-build');
-      await expect(adapter.capabilities()).resolves.toMatchObject({
-        extensions: {
-          nativeSessionModels: {
-            maturity: 'experimental',
-            detail: expect.stringContaining('grok-build-acp/session-models@v1')
-          }
-        }
-      });
       const [initialControls] = await adapter.listSessionControls();
       expect(initialControls).toMatchObject({
         localSessionId: session.id,

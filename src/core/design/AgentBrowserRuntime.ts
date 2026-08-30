@@ -312,8 +312,10 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
       try {
         await this.runCli(environment, ['close', '--all'], undefined, 10_000);
         await this.stopDaemon(environment, socketRoot, marker.session);
-        await removeOwnedScratch(root, marker);
         await removeOwnedSocketRoot(socketRoot, marker.runId);
+        // Keep the scratch marker until every other run-owned resource is gone.
+        // A later recovery pass needs it to prove socket-directory ownership.
+        await removeOwnedScratch(root, marker);
       } catch (error) {
         failures.push(error instanceof Error ? error : new Error(String(error)));
       }
@@ -539,8 +541,10 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
       await session.lease.close().catch(() => undefined);
       if (runtimeClosed) {
         const marker = await readMarker(session.root);
-        await removeOwnedScratch(session.root, marker);
         await removeOwnedSocketRoot(session.socketRoot, runId);
+        // Remove the ownership marker last so a failed socket cleanup remains
+        // retryable in this process and after an application restart.
+        await removeOwnedScratch(session.root, marker);
         this.sessions.delete(runId);
       }
     }
@@ -973,7 +977,7 @@ async function removeOwnedScratch(root: string, marker: BrowserMarker): Promise<
   if (path.resolve(root) !== path.resolve(expected)) {
     throw new Error('Design browser scratch path does not match its ownership marker.');
   }
-  await fs.rm(root, { recursive: true });
+  await fs.rm(root, { recursive: true, force: true });
 }
 
 async function removeOwnedSocketRoot(root: string, runId: string): Promise<void> {
@@ -984,7 +988,7 @@ async function removeOwnedSocketRoot(root: string, runId: string): Promise<void>
   if (path.resolve(root) !== path.resolve(expected)) {
     throw new Error('Design browser socket path does not match its Run.');
   }
-  await fs.rm(root, { recursive: true });
+  await fs.rm(root, { recursive: true, force: true });
 }
 
 async function waitForDaemonExit(

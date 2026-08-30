@@ -38,9 +38,9 @@ describe('TaskManagerService prompt refinement', () => {
     const capabilities: AgentRuntimeCapabilities = {
       ...acpCapabilities({ ...TEST_ACP_PROFILE, descriptor }),
       runtimeId,
-      promptRefinement: {
+      readOnlyTurns: {
         maturity: 'stable',
-        detail: 'Test-only prompt refinement.'
+        detail: 'Test-only shared read-only turns.'
       },
       attachmentDelivery: {
         maturity: 'stable',

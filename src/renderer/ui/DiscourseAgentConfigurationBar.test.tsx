@@ -42,7 +42,7 @@ describe('DiscourseAgentConfigurationBar', () => {
               }
             ]
           },
-          detachedReview: {
+          readOnlyTurns: {
             maturity: 'unsupported',
             detail: 'This provider can still mutate through child agents.'
           }

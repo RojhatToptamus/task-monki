@@ -275,9 +275,7 @@ describe('SettingsView', () => {
         readiness: createRuntimeReadiness('READY', 'Ready'),
         capabilities: {
           ...codexCapabilities(),
-          runtimeId: 'provider-runtime',
-          review: { maturity: 'unsupported' },
-          detachedReview: { maturity: 'stable' }
+          runtimeId: 'provider-runtime'
         }
       },
       models: [providerModel],
@@ -355,7 +353,7 @@ describe('SettingsView', () => {
               }
             ]
           },
-          promptRefinement: {
+          readOnlyTurns: {
             maturity: 'unsupported',
             detail: 'This profile cannot deny shell changes.'
           }

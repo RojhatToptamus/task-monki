@@ -66,74 +66,22 @@ export function opencodeCapabilities(input: {
         }
       ]
     },
-    promptRefinement: {
+    readOnlyTurns: {
       maturity: 'stable',
-      detail: 'Prompt refinement uses the shared read-only turn path. OpenCode denies mutation-capable native tools, and Task Monki verifies repository state after the turn. This is not an OS sandbox.'
+      detail: 'Shared read-only turns deny mutation-capable native tools, and Task Monki verifies repository state after the turn. This is not an OS sandbox.'
     },
     modelCatalog: {
       maturity: 'stable',
       detail: 'OpenCode reports connected providers, models, modalities, and native variants.'
-    },
-    reasoningEffort: {
-      maturity: 'stable',
-      detail: 'OpenCode model variants are preserved as runtime-native reasoning choices.'
-    },
-    persistentSessions: { maturity: 'stable' },
-    sessionResume: { maturity: 'stable' },
-    sessionFork: {
-      maturity: 'stable',
-      detail:
-        'OpenCode clones native message history into a new session in the request directory. Task Monki sends the mutation through the target worktree runtime and verifies the returned directory.'
     },
     activeTurnSteering: {
       maturity: 'unsupported',
       detail: 'OpenCode does not guarantee in-flight prompt steering over its public HTTP API.'
     },
     turnInterruption: { maturity: 'stable' },
-    truePause: { maturity: 'unsupported' },
-    interactiveApprovals: {
-      maturity: 'stable',
-      detail: 'Permission requests are durable HTTP resources and SSE events.'
-    },
-    userInputRequests: {
-      maturity: 'stable',
-      detail: 'Question requests are durable HTTP resources and SSE events.'
-    },
-    goals: {
-      maturity: 'unsupported',
-      detail: 'Task Monki remains authoritative for goals.'
-    },
-    plans: {
-      maturity: 'stable',
-      detail: 'OpenCode todo updates are retained as plan revisions.'
-    },
-    detachedReview: {
-      maturity: 'stable',
-      detail: 'Detached review uses the shared read-only turn path with native mutation denial and Task Monki repository comparison.'
-    },
-    review: {
-      maturity: 'stable',
-      detail: 'OpenCode has no native review primitive. Task Monki supplies the review prompt through its shared read-only turn path and validates the result independently.'
-    },
-    subagents: {
-      maturity: 'experimental',
-      detail: 'OpenCode child sessions are preserved when parent relationships are reported. Native task delegation is disabled by the approval-gated preset because child tool permissions cannot be independently attested.'
-    },
-    backgroundTerminals: {
-      maturity: 'inferred',
-      detail: 'Terminal work is surfaced through native tool parts.'
-    },
-    dynamicTools: {
-      maturity: 'stable',
-      detail: 'OpenCode retains its native tool, plugin, and MCP runtime.'
-    },
     attachmentDelivery: {
       maturity: 'stable',
       detail: 'Task Monki sends selected verified files as bounded native data-URL parts. OpenCode and its model service receive those bytes; this is not an OS confinement boundary.'
-    },
-    runtimeRecovery: {
-      maturity: 'stable',
-      detail: 'Sessions, messages, pending interactions, and status are reconciled after reconnect.'
     },
     extensions: {
       'task-monki.design-instructions': designSkills.available
@@ -148,18 +96,7 @@ export function opencodeCapabilities(input: {
       [BROWSER_DEV_ISOLATION_CAPABILITY]: {
         maturity: 'unsupported',
         detail: 'OpenCode permission rules do not attest an OS-level filesystem and network sandbox.'
-      },
-      nativeProviderRegistry: { maturity: 'stable' },
-      modelVariants: { maturity: 'stable' },
-      todoPlans: { maturity: 'stable' },
-      sessionUndoRedo: {
-        maturity: 'inferred',
-        detail: 'Retained as OpenCode-native state; Task Monki does not currently expose undo/redo as an application operation.'
-      },
-      nativeFileParts: {
-        maturity: 'stable',
-        detail: 'OpenCode native file parts carry Task Monki managed attachments as verified bounded data URLs.'
-      },
+      }
     }
   };
 }

@@ -141,7 +141,7 @@ describe('runtimeReadinessView', () => {
           }
         ]
       },
-      promptRefinement: {
+      readOnlyTurns: {
         maturity: 'unsupported',
         detail: 'Configured cannot deny repository changes.'
       }
@@ -214,26 +214,11 @@ function state(
           ],
           detail: 'Test'
         },
-        promptRefinement: { maturity: 'unsupported' },
+        readOnlyTurns: { maturity: 'unsupported' },
         modelCatalog: { maturity: 'unsupported' },
-        reasoningEffort: { maturity: 'unsupported' },
-        persistentSessions: { maturity: 'unsupported' },
-        sessionResume: { maturity: 'unsupported' },
-        sessionFork: { maturity: 'unsupported' },
         activeTurnSteering: { maturity: 'unsupported' },
         turnInterruption: { maturity: 'unsupported' },
-        truePause: { maturity: 'unsupported' },
-        interactiveApprovals: { maturity: 'unsupported' },
-        userInputRequests: { maturity: 'unsupported' },
-        goals: { maturity: 'unsupported' },
-        plans: { maturity: 'unsupported' },
-        detachedReview: { maturity: 'unsupported' },
-        review: { maturity: 'unsupported' },
-        subagents: { maturity: 'unsupported' },
-        backgroundTerminals: { maturity: 'unsupported' },
-        dynamicTools: { maturity: 'unsupported' },
         attachmentDelivery: { maturity: 'unsupported' },
-        runtimeRecovery: { maturity: 'unsupported' },
         extensions: {}
       }
     },

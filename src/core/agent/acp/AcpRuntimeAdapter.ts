@@ -5939,10 +5939,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private currentCapabilities(): AgentRuntimeCapabilities {
     const negotiated = this.initializeResponse
       ? {
-          prompt: this.initializeResponse.agentCapabilities.promptCapabilities,
-          loadSession: this.initializeResponse.agentCapabilities.loadSession,
-          resume: Boolean(this.initializeResponse.agentCapabilities.sessionCapabilities?.resume),
-          close: Boolean(this.initializeResponse.agentCapabilities.sessionCapabilities?.close)
+          prompt: this.initializeResponse.agentCapabilities.promptCapabilities
         }
       : undefined;
     const capabilities = acpCapabilities(this.profile, negotiated);
@@ -5981,31 +5978,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
               maturity: 'unsupported' as const,
               detail: 'The packaged inspect_design MCP bridge has not been configured yet.'
             },
-        ...(this.profile.sessionModelExtension && [...this.nativeSessions.values()].some(
-          (session) => (session.models?.availableModels.length ?? 0) > 0
-        )
-          ? {
-              nativeSessionModels: {
-                maturity: 'experimental' as const,
-                detail: `The connected agent advertised exact session model IDs through the explicit ${this.profile.sessionModelExtension.contractId} provider extension.`
-              }
-            }
-          : {}),
         'task-monki.browser-dev-isolation': {
           maturity: 'unsupported',
           detail: 'ACP negotiation does not attest OS process, filesystem, and network isolation.'
-        },
-        workspaceSandbox: {
-          maturity: 'unsupported',
-          detail: 'No ACP profile currently attests a Task Monki-enforced workspace boundary.'
-        },
-        networkIsolation: {
-          maturity: 'unsupported',
-          detail: 'ACP stable v1 does not negotiate provider-process network isolation.'
-        },
-        approvalPolicyEnforcement: {
-          maturity: 'inferred',
-          detail: 'Task Monki safely handles permission requests that arrive, but ACP does not guarantee every native tool requests permission.'
         }
       }
     };

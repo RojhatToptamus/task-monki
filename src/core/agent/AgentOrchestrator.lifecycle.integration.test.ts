@@ -50,6 +50,51 @@ import { addTestRepository } from '../../testSupport/repositoryFixture';
 import { git } from '../git/gitCli';
 
 describe('AgentOrchestrator lifecycle and recovery', () => {
+  it('drains accepted runtime events before shutting adapters down', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-runtime-shutdown-drain-')
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const adapter = new Phase4Adapter(runtime.task);
+    const orchestrator = new AgentOrchestrator(
+      store,
+      runtime.store,
+      new AppEventBus(),
+      adapter
+    );
+    let markEventAccepted!: () => void;
+    const eventAccepted = new Promise<void>((resolve) => {
+      markEventAccepted = resolve;
+    });
+    let releaseEvent!: () => void;
+    const eventGate = new Promise<void>((resolve) => {
+      releaseEvent = resolve;
+    });
+    const getRun = vi.spyOn(runtime.store, 'getRun').mockImplementationOnce(async () => {
+      markEventAccepted();
+      await eventGate;
+      return undefined;
+    });
+
+    adapter.emitRuntimeTurnEvent({
+      type: 'RECOVERY_REQUIRED',
+      runId: 'accepted-before-shutdown',
+      reason: 'The provider process ended.',
+      observedAt: '2026-07-13T00:00:00.000Z'
+    });
+    await eventAccepted;
+
+    const shutdown = orchestrator.shutdown();
+    await Promise.resolve();
+    expect(adapter.shutdownCount).toBe(0);
+
+    releaseEvent();
+    await shutdown;
+    expect(adapter.shutdownCount).toBe(1);
+    getRun.mockRestore();
+  });
+
   it('keeps a prepared turn provably unsent when its local prompt cannot be read', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-runtime-prompt-read-failure-')
@@ -2317,13 +2362,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
 }
 
 function runtimeCapabilities(): AgentRuntimeCapabilities {
-  return {
-    ...codexCapabilities(),
-    promptRefinement: {
-      maturity: 'unsupported',
-      detail: 'The phase-four test adapter does not implement prompt refinement.'
-    }
-  };
+  return codexCapabilities();
 }
 
 async function initializeRepository(repositoryPath: string): Promise<void> {

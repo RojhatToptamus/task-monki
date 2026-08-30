@@ -2158,7 +2158,6 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
     if (
       !session.providerSessionId ||
-      capabilities.goals.maturity === 'unsupported' ||
       !adapter.syncGoal
     ) {
       throw new Error('This provider session cannot synchronize goals.');
@@ -2176,6 +2175,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   async shutdown(): Promise<void> {
     for (const dispose of this.disposeRuntimeTurnListeners.splice(0)) dispose();
     this.runtimeTurnListeners.clear();
+    await this.runtimeTurnEventQueue;
     await this.runtimes.shutdownAll();
   }
 

@@ -35,10 +35,10 @@ export function projectAgentExecutionSupport(
         : unsupported('This agent cannot add instructions to an active turn.');
 
     case 'PROMPT_REFINEMENT':
-      return readOnlyTurnSupport(capabilities, 'PROMPT_REFINEMENT');
+      return readOnlyTurnSupport(capabilities);
 
     case 'REVIEW':
-      return readOnlyTurnSupport(capabilities, 'REVIEW');
+      return readOnlyTurnSupport(capabilities);
 
     case 'DESIGN': {
       const extensions = capabilities.extensions;
@@ -81,47 +81,33 @@ export function projectAgentExecutionSupport(
     }
 
     case 'DISCOURSE': {
-      return readOnlyTurnSupport(capabilities, 'DISCOURSE');
+      return readOnlyTurnSupport(capabilities);
     }
   }
 }
 
 function readOnlyTurnSupport(
-  capabilities: AgentRuntimeCapabilities,
-  operation: Extract<AgentExecutionOperation, 'PROMPT_REFINEMENT' | 'REVIEW' | 'DISCOURSE'>
+  capabilities: AgentRuntimeCapabilities
 ): AgentExecutionSupport {
   const qualified = capabilities.executionPolicy.presets.some(
     (preset) =>
       preset.repositoryMutation === 'DENY' &&
       preset.approvalPolicy.toLocaleLowerCase() === 'never'
   );
-  if (qualified) return supported();
+  if (qualified && capabilities.readOnlyTurns.maturity === 'stable') {
+    return supported();
+  }
 
-  const detail = readOnlyUnavailableDetail(capabilities, operation);
-  const reason = detail ??
+  const reason =
+    (capabilities.readOnlyTurns.maturity !== 'stable'
+      ? capabilities.readOnlyTurns.detail?.trim()
+      : undefined) ||
     'This agent profile has no qualified native policy that denies repository changes.';
   return unsupported(
     /normal tasks remain available\.?$/iu.test(reason)
       ? reason
       : `${reason.replace(/[.\s]+$/u, '')}. Normal Tasks remain available.`
   );
-}
-
-function readOnlyUnavailableDetail(
-  capabilities: AgentRuntimeCapabilities,
-  operation: Extract<AgentExecutionOperation, 'PROMPT_REFINEMENT' | 'REVIEW' | 'DISCOURSE'>
-): string | undefined {
-  const capability = operation === 'PROMPT_REFINEMENT'
-    ? capabilities.promptRefinement
-    : operation === 'REVIEW'
-      ? capabilities.detachedReview
-      : capabilities.extensions['task-monki.read-only-turn']?.maturity === 'unsupported'
-        ? capabilities.extensions['task-monki.read-only-turn']
-        : capabilities.detachedReview;
-  const normalized = capability.maturity === 'unsupported'
-    ? capability.detail?.trim()
-    : undefined;
-  return normalized || undefined;
 }
 
 function supported(): AgentExecutionSupport {

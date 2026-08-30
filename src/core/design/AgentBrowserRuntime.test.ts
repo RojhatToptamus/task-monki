@@ -165,6 +165,79 @@ describe('AgentBrowserRuntime', () => {
     ).resolves.toBeDefined();
   });
 
+  it('keeps the ownership marker until browser cleanup can be retried after restart', async () => {
+    const root = await fixtureRoot();
+    const execute = vi.fn(async (
+      _executable: string,
+      argv: string[],
+      options?: { env?: NodeJS.ProcessEnv }
+    ) => {
+      if (argv[0] === '--version') return { stdout: 'agent-browser 0.34.0\n', stderr: '' };
+      if (argv[1] === 'open') {
+        const pidPath = daemonPidPath(options?.env);
+        await fs.mkdir(path.dirname(pidPath), { recursive: true });
+        await fs.writeFile(pidPath, String(process.pid));
+      }
+      if (argv[1] === 'close' && !argv.includes('--all')) {
+        await fs.unlink(daemonPidPath(options?.env)).catch(() => undefined);
+      }
+      if (argv[1] === 'snapshot') return json('button [ref=e1]');
+      return json('(no output)');
+    });
+    const runtime = await runtimeFixture(root, execute);
+    await runtime.openCandidate({
+      designId,
+      runId,
+      generationId: 'candidate-1',
+      origin: 'http://tm-1234567890abcdef1234567890abcdef.localhost:41000/',
+      lease: { proxyUrl: 'http://127.0.0.1:42000', async close() {} }
+    });
+    const [ownedRoot] = await fs.readdir(path.join(root, 'scratch'));
+    const [ownedSocketRoot] = await fs.readdir(path.join(root, 'sockets'));
+    const socketPath = path.join(root, 'sockets', ownedSocketRoot!);
+    const scratchPath = path.join(root, 'scratch', ownedRoot!);
+    const remove = fs.rm.bind(fs);
+    let socketRemovalFailures = 2;
+    let scratchRemovalFailures = 1;
+    const removeSpy = vi.spyOn(fs, 'rm').mockImplementation(async (...args) => {
+      if (String(args[0]) === socketPath && socketRemovalFailures > 0) {
+        socketRemovalFailures -= 1;
+        throw new Error('socket cleanup failed');
+      }
+      if (String(args[0]) === scratchPath && scratchRemovalFailures > 0) {
+        scratchRemovalFailures -= 1;
+        throw new Error('scratch cleanup failed');
+      }
+      return remove(...args);
+    });
+    try {
+      await expect(runtime.closeRun(runId)).rejects.toThrow('socket cleanup failed');
+      await expect(
+        fs.lstat(path.join(root, 'scratch', ownedRoot!))
+      ).resolves.toBeDefined();
+
+      const recovered = await runtimeFixture(root, execute);
+      await expect(recovered.recover()).rejects.toThrow(
+        'Design browser startup cleanup is incomplete'
+      );
+      await expect(
+        fs.lstat(path.join(root, 'scratch', ownedRoot!))
+      ).resolves.toBeDefined();
+
+      await expect(recovered.recover()).rejects.toThrow(
+        'Design browser startup cleanup is incomplete'
+      );
+      await expect(fs.lstat(scratchPath)).resolves.toBeDefined();
+      await expect(fs.lstat(socketPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+      await recovered.recover();
+      await expect(fs.lstat(scratchPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.lstat(socketPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      removeSpy.mockRestore();
+    }
+  });
+
   it('fails startup recovery when an owned browser cannot be closed', async () => {
     const root = await fixtureRoot();
     let rejectClose = false;

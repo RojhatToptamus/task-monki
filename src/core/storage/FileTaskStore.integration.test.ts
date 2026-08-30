@@ -120,6 +120,23 @@ describe('FileTaskStore', () => {
     await store.close();
   });
 
+  it('removes obsolete Task-store protocol journals without touching unrelated files', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-legacy-journal-'));
+    const legacyDir = path.join(dir, 'protocol-journals');
+    const unrelatedPath = path.join(dir, 'keep.txt');
+    await fs.mkdir(legacyDir, { mode: 0o700 });
+    await fs.writeFile(path.join(legacyDir, 'old.ndjson'), '{"old":true}\n', {
+      mode: 0o600
+    });
+    await fs.writeFile(unrelatedPath, 'keep', { mode: 0o600 });
+
+    const store = new FileTaskStore(dir);
+    await expect(store.snapshot()).resolves.toMatchObject({ tasks: [] });
+    await expect(fs.lstat(legacyDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readFile(unrelatedPath, 'utf8')).resolves.toBe('keep');
+    await store.close();
+  });
+
   it('drains an admitted mutation before terminal close and rejects late work', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-close-'));
     const store = new FileTaskStore(dir);

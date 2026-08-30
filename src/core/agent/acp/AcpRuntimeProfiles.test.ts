@@ -118,9 +118,6 @@ describe('ACP runtime profiles', () => {
       )
     ).toEqual(['grok-acp']);
     expect(
-      acpCapabilities(GROK_ACP_PROFILE).extensions.grokSessionModels
-    ).toMatchObject({ maturity: 'experimental' });
-    expect(
       ACP_RUNTIME_PROFILES.filter((profile) => profile.parameterizedModelCatalog).map(
         (profile) => profile.descriptor.id
       )
@@ -133,64 +130,6 @@ describe('ACP runtime profiles', () => {
       listModelsMethod: 'cursor/list_available_models',
       clientCapabilityMeta: { parameterizedModelPicker: true }
     });
-  });
-
-  it('enables optional lifecycle features only after negotiation', () => {
-    expect(acpCapabilities(TEST_ACP_PROFILE).sessionResume.maturity).toBe('inferred');
-    expect(acpCapabilities(TEST_ACP_PROFILE).persistentSessions.maturity).toBe(
-      'inferred'
-    );
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        resume: false,
-        loadSession: false,
-        close: false,
-        prompt: {}
-      }).persistentSessions.maturity
-    ).toBe('unsupported');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        resume: false,
-        loadSession: false,
-        close: false,
-        prompt: {}
-      }).sessionResume.maturity
-    ).toBe('unsupported');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        resume: true,
-        close: true,
-        prompt: { image: true }
-      }).sessionResume.maturity
-    ).toBe('stable');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        loadSession: true,
-        close: true,
-        prompt: {}
-      }).persistentSessions.maturity
-    ).toBe('stable');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        close: true,
-        prompt: {}
-      }).extensions.sessionClose?.maturity
-    ).toBe('stable');
-  });
-
-  it('never claims Task Monki client terminal execution', () => {
-    for (const profile of ACP_RUNTIME_PROFILES) {
-      expect(acpCapabilities(profile).backgroundTerminals.maturity).toBe('unsupported');
-    }
-  });
-
-  it('keeps general mid-turn input unsupported on every stable ACP profile', () => {
-    for (const profile of ACP_RUNTIME_PROFILES) {
-      expect(acpCapabilities(profile).userInputRequests).toMatchObject({
-        maturity: 'unsupported',
-        detail: expect.stringContaining('no general user-input request method')
-      });
-    }
   });
 
   it('exposes only the access policies each provider profile can enforce', () => {
@@ -250,21 +189,13 @@ describe('ACP runtime profiles', () => {
       policyId: 'cursor-agent-acp/ask-read-only@v1'
     });
     expect(acpCapabilities(CURSOR_ACP_PROFILE)).toMatchObject({
-      promptRefinement: { maturity: 'stable' },
-      detachedReview: { maturity: 'stable' },
-      extensions: {
-        'task-monki.read-only-turn': { maturity: 'stable' }
-      }
+      readOnlyTurns: { maturity: 'stable' }
     });
     for (const profile of [GROK_ACP_PROFILE, CLAUDE_AGENT_ACP_PROFILE]) {
       expect(profile.readOnlyTurnPolicy).toBeUndefined();
       expect(profile.readOnlyTurnUnavailableReason).toBeTruthy();
       expect(acpCapabilities(profile)).toMatchObject({
-        promptRefinement: {
-          maturity: 'unsupported',
-          detail: profile.readOnlyTurnUnavailableReason
-        },
-        detachedReview: {
+        readOnlyTurns: {
           maturity: 'unsupported',
           detail: profile.readOnlyTurnUnavailableReason
         }

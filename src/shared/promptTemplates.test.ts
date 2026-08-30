@@ -67,6 +67,9 @@ describe('prompt templates', () => {
       'assets/ contains local images, SVG files, fonts, and other editable project files.'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'A path that starts with / is not relative.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
       'Do not add a framework, package manager, package file, build step, or dependency installation'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(

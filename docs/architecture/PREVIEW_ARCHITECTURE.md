@@ -179,6 +179,10 @@ the captured generation workspace. The job runs once for that generation,
 before explicit consumers, and the generated files share the generation's
 exact cleanup boundary.
 
+Cleanup removes the exact owned generation first. It removes the per-task
+parent directory only when that directory is empty. A sibling generation keeps
+the shared parent in place.
+
 A `PreviewGenerationRecord` is immutable execution evidence plus a state
 machine. It binds:
 

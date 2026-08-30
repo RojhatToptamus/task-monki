@@ -45,31 +45,13 @@ export interface AgentRuntimeCapabilities {
   runtimeId: AgentRuntimeId;
   /** Truthful Task Monki execution presets supplied by this runtime adapter. */
   executionPolicy: AgentExecutionPolicyCapability;
-  promptRefinement: AgentCapability;
+  /** Shared provider-neutral read-only turns used by refinement, review, and Discourse. */
+  readOnlyTurns: AgentCapability;
   modelCatalog: AgentModelCatalogCapability;
-  reasoningEffort: AgentCapability;
-  persistentSessions: AgentCapability;
-  sessionResume: AgentCapability;
-  sessionFork: AgentCapability;
   activeTurnSteering: AgentCapability;
   turnInterruption: AgentCapability;
-  truePause: AgentCapability;
-  interactiveApprovals: AgentCapability;
-  userInputRequests: AgentCapability;
-  goals: AgentCapability;
-  plans: AgentCapability;
-  /** Provider-neutral review prompt in a separately attested read-only session. */
-  detachedReview: AgentCapability;
-  /** Runtime-native review operation, when the provider exposes one. */
-  review: AgentCapability;
-  subagents: AgentCapability;
-  backgroundTerminals: AgentCapability;
-  dynamicTools: AgentCapability;
   attachmentDelivery: AgentCapability;
-  runtimeRecovery: AgentCapability;
-  /** Safe provider-owned boolean/select controls for an existing session. */
-  sessionControls?: AgentCapability;
-  /** Runtime-native features that Task Monki preserves without pretending they are universal. */
+  /** Current Task Monki product and security capabilities that do not fit the common fields. */
   extensions: Record<string, AgentCapability>;
 }
 

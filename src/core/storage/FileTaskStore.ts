@@ -279,6 +279,7 @@ const CREATE_TASK_COMPLETION_POLICIES: Task['completionPolicy'][] = [
   'MANUAL'
 ];
 const MAX_STORE_FILE_BYTES = 256 * 1024 * 1024;
+const LEGACY_PROTOCOL_JOURNAL_DIRECTORY = 'protocol-journals';
 const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'agent-prompt': 8 * 1024 * 1024,
   'agent-output': 32 * 1024 * 1024,
@@ -744,6 +745,7 @@ export class FileTaskStore {
     this.lease = await acquireStoreOwnershipLease(this.baseDir, this.leasePath);
     try {
       await cleanupStoreTemporaryFiles(this.baseDir, this.storePath);
+      await cleanupLegacyProtocolJournalDirectory(this.baseDir);
       await this.attachmentFiles.init();
       await initializeArtifactDirectory(this.baseDir, this.artifactsDir);
       let raw: string | undefined;
@@ -5804,6 +5806,20 @@ async function cleanupStoreTemporaryFiles(
       if (error.code !== 'ENOENT') throw error;
     });
   }
+}
+
+async function cleanupLegacyProtocolJournalDirectory(baseDir: string): Promise<void> {
+  const legacyDir = path.join(baseDir, LEGACY_PROTOCOL_JOURNAL_DIRECTORY);
+  const stat = await fs.lstat(legacyDir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  });
+  if (!stat) return;
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat)) {
+    throw new Error('Legacy protocol journal directory failed its integrity check.');
+  }
+  await fs.rm(legacyDir, { recursive: true });
+  await syncDirectoryIfSupported(baseDir);
 }
 
 async function initializeArtifactDirectory(

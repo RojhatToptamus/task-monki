@@ -139,7 +139,7 @@ describe('AgentProfileCatalog', () => {
         (preset) => preset.repositoryMutation !== 'DENY'
       )
     };
-    capabilities.detachedReview = {
+    capabilities.readOnlyTurns = {
       maturity: 'unsupported',
       detail: 'This profile can still mutate through shell commands.'
     };

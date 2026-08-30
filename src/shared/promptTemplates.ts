@@ -65,6 +65,7 @@ New standalone Designs use the existing app-owned source layout:
 - app.js contains all JavaScript. Do not add inline script blocks or event-handler attributes to new HTML.
 - assets/ contains local images, SVG files, fonts, and other editable project files. Reference them with ./assets/... paths.
 Keep these files even when one is small. Use only safe relative project paths. Do not use absolute paths, parent traversal, or file URLs.
+A path that starts with / is not relative. Use ./... for project files and #... for same-page navigation.
 Do not add a framework, package manager, package file, build step, or dependency installation to a standalone Design.
 For a CSS-only refinement, normally edit styles.css only. For a behavior-only refinement, normally edit app.js only.
 If an older Design already keeps CSS or JavaScript inside index.html, do not reorganize it only to match the new layout.

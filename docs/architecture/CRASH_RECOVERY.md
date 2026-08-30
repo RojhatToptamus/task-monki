@@ -77,6 +77,14 @@ terminal. Each adapter reconciles the provider it owns and applies its existing
 no-resend rules. A prompt, approval, answer, interrupt, review request, or other
 ambiguous mutation is never replayed automatically.
 
+Graceful runtime shutdown first removes adapter event producers. It then drains
+events that Task Monki already accepted before it stops the adapters. Store
+shutdown cannot race a previously accepted provider terminal event.
+
+Discourse deletion releases each loaded provider session before it writes the
+conversation tombstone or purges runtime evidence. If release is not confirmed,
+deletion stops and keeps the records for an explicit retry.
+
 Long-lived provider processes, external-tool and provider probes, mutating or
 remote-inspection Git commands, GitHub commands, and Docker/Compose CLI
 children run through a small owner process. Local read-only Git inspection

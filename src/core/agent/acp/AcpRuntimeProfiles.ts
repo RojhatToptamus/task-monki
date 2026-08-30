@@ -84,10 +84,6 @@ export interface AcpRuntimeProfile {
   imageInputQualifications?: readonly AcpImageInputQualification[];
   /** Exact runtime/model pairs proven to complete the full Design browser loop. */
   designQualifications?: readonly AcpDesignQualification[];
-  /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
-  extensions: Readonly<
-    Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
-  >;
 }
 
 export interface AcpImageInputQualification {
@@ -226,22 +222,7 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
       ...NETWORK_SENSITIVE_ENVIRONMENT_KEYS
     ]
   },
-  sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
-  extensions: {
-    noAutomaticUpdates: {
-      maturity: 'stable',
-      detail: 'The managed ACP process disables self-update for reproducible launches.'
-    },
-    grokNativeAgent: {
-      maturity: 'stable',
-      detail: 'Grok Build remains the tool-executing agent; Task Monki is only its ACP client.'
-    },
-    grokSessionModels: {
-      maturity: 'experimental',
-      detail:
-        'Grok Build session models use the captured grok-build-acp/session-models@v1 vendor contract, not baseline ACP v1.'
-    }
-  }
+  sessionModelExtension: GROK_SESSION_MODEL_EXTENSION
 };
 
 export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
@@ -301,16 +282,6 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
       ...NETWORK_ENVIRONMENT_KEYS
     ],
     sensitiveKeys: ['CURSOR_API_KEY', ...NETWORK_SENSITIVE_ENVIRONMENT_KEYS]
-  },
-  extensions: {
-    cursorModelSelection: {
-      maturity: 'experimental',
-      detail: 'Cursor model choices use the exact cursor-agent-acp/parameterized-model-picker@v1 vendor contract and are revalidated per session.'
-    },
-    cursorAgentRules: {
-      maturity: 'stable',
-      detail: 'Cursor Agent continues to own its rule and tool behavior.'
-    }
   }
 };
 
@@ -379,16 +350,6 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
       ...GOOGLE_SENSITIVE_ENVIRONMENT_KEYS,
       ...NETWORK_SENSITIVE_ENVIRONMENT_KEYS
     ]
-  },
-  extensions: {
-    claudeAgentSdk: {
-      maturity: 'stable',
-      detail: 'The upstream claude-agent-acp bridge owns Claude Agent SDK behavior.'
-    },
-    claudePermissionModes: {
-      maturity: 'inferred',
-      detail: 'Claude-specific modes and selectors are retained as native ACP state.'
-    }
   }
 };
 
@@ -402,9 +363,6 @@ export function acpCapabilities(
   profile: AcpRuntimeProfile,
   negotiated?: {
     prompt?: { image?: boolean; audio?: boolean; embeddedContext?: boolean };
-    loadSession?: boolean;
-    resume?: boolean;
-    close?: boolean;
   }
 ): AgentRuntimeCapabilities {
   const negotiationDetail = negotiated
@@ -488,7 +446,7 @@ export function acpCapabilities(
       detail:
         'Access modes govern Task Monki responses to reported ACP permission requests. ACP does not provide an enforceable process sandbox.'
     },
-    promptRefinement: readOnlyCapability,
+    readOnlyTurns: readOnlyCapability,
     modelCatalog: {
       maturity: 'inferred',
       ...(profile.parameterizedModelCatalog ? { activation: 'EXPLICIT' as const } : {}),
@@ -498,76 +456,12 @@ export function acpCapabilities(
           ? `Models are loaded on demand through the explicit ${profile.parameterizedModelCatalog.contractId} provider extension and revalidated by every new session.`
         : 'ACP has no global model-list method; model-category config selectors are preserved after session setup.'
     },
-    reasoningEffort: {
-      maturity: 'inferred',
-      detail: profile.sessionModelExtension?.setModelReasoningEffortMetaField
-        ? `Preserved through the explicit ${profile.sessionModelExtension.contractId} model mutation metadata when advertised; stable thought-level selectors remain a separate path.`
-        : profile.parameterizedModelCatalog
-          ? `Advertised per model through ${profile.parameterizedModelCatalog.contractId} and applied through native session config selectors.`
-        : 'Preserved through native thought-level selectors when an agent exposes them.'
-    },
-    persistentSessions: negotiated?.resume || negotiated?.loadSession
-      ? {
-          maturity: 'stable',
-          detail: 'Provider session IDs can be reloaded because the connected agent advertised session/resume or session/load.'
-        }
-      : {
-          maturity: negotiated ? 'unsupported' : 'inferred',
-          detail: negotiated
-            ? 'Provider session IDs are recorded, but the connected agent advertised no method to reload them after process loss.'
-            : negotiationDetail
-        },
-    sessionResume: negotiated?.resume || negotiated?.loadSession
-      ? { maturity: 'stable', detail: negotiationDetail }
-      : {
-          maturity: negotiated ? 'unsupported' : 'inferred',
-          detail: negotiated
-            ? 'The connected ACP agent advertised neither session/resume nor session/load.'
-            : negotiationDetail
-        },
-    sessionFork: { maturity: 'unsupported', detail: 'ACP stable v1 has no session fork method.' },
     activeTurnSteering: {
       maturity: 'unsupported',
       detail: 'ACP stable v1 cannot inject another prompt into an active prompt turn.'
     },
     turnInterruption: { maturity: 'stable', detail: 'session/cancel is a stable ACP notification.' },
-    truePause: { maturity: 'unsupported', detail: 'ACP stable v1 has cancellation, not pause.' },
-    interactiveApprovals: {
-      maturity: 'stable',
-      detail: 'Opaque permission option IDs are retained and returned exactly.'
-    },
-    userInputRequests: {
-      maturity: 'unsupported',
-      detail: 'Stable ACP v1.19.0 has no general user-input request method.'
-    },
-    goals: { maturity: 'unsupported', detail: 'ACP stable v1 has no goal API.' },
-    plans: { maturity: 'stable', detail: 'Plans arrive as typed session/update records.' },
-    detachedReview: readOnlyCapability,
-    review: {
-      maturity: 'unsupported',
-      detail: 'ACP stable v1 has no detached review primitive; review requires a higher-level workflow.'
-    },
-    subagents: {
-      maturity: 'unsupported',
-      detail: 'ACP stable v1 does not define subagent lifecycle records.'
-    },
-    backgroundTerminals: {
-      maturity: 'unsupported',
-      detail: 'Task Monki advertises terminal=false and never executes agent-requested commands.'
-    },
-    dynamicTools: {
-      maturity: 'unsupported',
-      detail: 'Task Monki exposes no general client tools to ACP agents. The run-bound inspect_design MCP bridge is the only Design-session exception.'
-    },
     attachmentDelivery: acpAttachmentCapability(profile, negotiated?.prompt),
-    runtimeRecovery: {
-      maturity: 'stable',
-      detail: 'Disconnects fail closed; ambiguous prompts are never replayed automatically.'
-    },
-    sessionControls: {
-      maturity: 'stable',
-      detail: 'Provider-owned ACP session selectors are projected as typed, revisioned boolean/select controls.'
-    },
     extensions: {
       'task-monki.design-instructions': {
         maturity: 'unsupported',
@@ -576,35 +470,7 @@ export function acpCapabilities(
       'task-monki.design-skill-access': {
         maturity: 'unsupported',
         detail: 'ACP cannot attest a restricted app-owned read root for Design skills.'
-      },
-      nativeSessionConfiguration: {
-        maturity: 'stable',
-        detail: 'Stable ACP mode and config IDs remain exact; renderer state is schema-selected and opaque metadata stays in the protected journal.'
-      },
-      rawAcpExtensions: {
-        maturity: 'stable',
-        detail: 'Unknown extension notifications and _meta payloads remain in the protected durable journal.'
-      },
-      'task-monki.read-only-turn': readOnlyCapability,
-      nativeContentBlocks:
-        negotiated?.prompt?.image || negotiated?.prompt?.embeddedContext
-          ? {
-              maturity: 'stable',
-              detail: 'The connected agent negotiated native ACP image or embedded-resource prompt blocks.'
-            }
-          : {
-              maturity: negotiated ? 'stable' : 'inferred',
-              detail: negotiated
-                ? 'Text and resource links are baseline ACP content; richer blocks were not advertised.'
-                : negotiationDetail
-            },
-      sessionClose: negotiated?.close
-        ? { maturity: 'stable', detail: negotiationDetail }
-        : {
-            maturity: negotiated ? 'unsupported' : 'inferred',
-            detail: negotiated ? 'The connected agent did not advertise session/close.' : negotiationDetail
-          },
-      ...profile.extensions
+      }
     }
   };
 }

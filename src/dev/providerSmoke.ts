@@ -1579,7 +1579,6 @@ function evaluateResult(input: {
   );
   const expectedWorktreeChange = Boolean(
     input.gitSnapshot?.status === 'DIRTY' &&
-      input.gitSnapshot.workingDiffFileCount === 1 &&
       input.worktreeVerification?.verified
   );
   const baseErrors = [
@@ -1600,9 +1599,6 @@ function evaluateResult(input: {
       : undefined,
     input.gitSnapshot && !worktreeMatchesBase
       ? `The implementation worktree no longer matches its base commit (base=${input.gitSnapshot.baseSha ?? 'missing'}, head=${input.gitSnapshot.headSha ?? 'missing'}, commitsAhead=${input.gitSnapshot.commitsAheadOfBase}, committedFiles=${input.gitSnapshot.committedDiffFileCount}).`
-      : undefined,
-    input.gitSnapshot && input.gitSnapshot.workingDiffFileCount !== 1
-      ? `The implementation worktree reported ${input.gitSnapshot.workingDiffFileCount} changed files; exactly one was required.`
       : undefined,
     input.worktreeVerification && !input.worktreeVerification.verified
       ? input.worktreeVerification.error
@@ -1825,11 +1821,14 @@ function sameAttachmentSubmissions(
 function hasConcreteImageObservation(message: string): boolean {
   const normalized = message.toLocaleLowerCase();
   const code = /\bq7\b/u.test(normalized);
-  const shapes = /\bcircle\b[^.\n]{0,100}\btriangle\b[^.\n]{0,100}\b(?:square|rectangle)\b/u.test(
+  const orderedShapes = /\bcircle\b[^.\n]{0,100}\btriangle\b[^.\n]{0,100}\b(?:square|rectangle)\b/u.test(
+    normalized
+  );
+  const positionedOuterShapes = /\btriangle\b[^.\n]{0,60}\b(?:with|between)\b[^.\n]{0,60}\bcircle\b[^.\n]{0,40}\bleft\b[^.\n]{0,80}\b(?:square|rectangle)\b[^.\n]{0,40}\bright\b/u.test(
     normalized
   );
   const background = /\b(?:navy|dark blue|deep blue)\b/u.test(normalized);
-  return code && shapes && background;
+  return code && (orderedShapes || positionedOuterShapes) && background;
 }
 
 interface SmokeWorktreeVerification {

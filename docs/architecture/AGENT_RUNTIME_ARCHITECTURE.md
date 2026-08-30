@@ -2,7 +2,7 @@
 
 Date: 2026-08-30
 
-Status: Provider milestones 1 through 4 are implemented. Milestone 5 is approved but not implemented.
+Status: Provider milestones 1 through 5 are implemented.
 
 This document is the provider architecture source of truth.
 It records current behavior and the approved target direction.
@@ -508,6 +508,11 @@ Optional operations remain small:
 
 Do not add optional `review` or `refinePrompt` workflow implementations.
 The common turn intent covers both.
+
+The shared capability projection contains only current product decisions.
+It reports execution policies, model-catalog activation, shared read-only turns, live steering,
+interruption, attachment delivery, and the four Task Monki extension checks in current use.
+Optional adapter method presence is authoritative for fork, goal, and session-control operations.
 
 ### Execution qualification
 
@@ -1172,9 +1177,12 @@ Provider milestone 4 removed these parts:
 - Codex-only Design instruction and tool ownership.
 - provider-history deletion as a Design support requirement.
 
-Later milestones remove these parts:
+Provider milestone 5 removed these parts:
 
-- capability extensions that exist only to repeat method presence.
+- capability fields that had no runtime consumer.
+- capability fields that only repeated optional adapter methods.
+- three copies of shared read-only turn support.
+- descriptive provider extensions that no workflow or security check used.
 
 Do not remove protocol journals, generation fences, attachment verification, or Preview isolation.
 Each protects a current failure or trust boundary.
@@ -1422,11 +1430,52 @@ Its report records the selected runtime, packaged version, model, and browser op
 
 ### Provider milestone 5: hardening and cleanup
 
-1. Run long-session and crash recovery tests across every adapter.
-2. Verify process, subscription, MCP credential, and provider-session cleanup.
-3. Verify bounded journals, transcripts, attachments, and tool output.
-4. Remove stale capability fields and provider-specific UI copy.
-5. Update current operational documents after behavior ships.
+Status: implemented on 2026-08-30.
+
+The implementation keeps the existing lifecycle and storage owners:
+
+1. `AgentOrchestrator` removes provider event producers and drains accepted
+   runtime events before adapter shutdown.
+2. Discourse deletion confirms loaded provider-session release before it writes
+   a tombstone or purges runtime records. An unconfirmed release leaves all
+   evidence available for retry.
+3. Design browser cleanup removes sockets before its scratch ownership marker.
+   A failed cleanup therefore remains safe to retry after restart.
+4. Preview source cleanup removes an empty per-task parent only after its final
+   owned generation is gone.
+5. Task-store startup removes the obsolete pre-milestone-1 protocol-journal
+   directory. Current journals remain in `FileAgentRuntimeStore` and keep their
+   independent segment and retention bounds.
+6. The shared capability projection keeps only fields with a current product
+   consumer. One `readOnlyTurns` result qualifies refinement, review, and
+   Discourse together with the required native deny policy.
+7. Provider smoke verification accepts the one exact requested file whether
+   the provider leaves it staged or unstaged. Exact path and content checks
+   remain authoritative.
+8. Image qualification accepts equivalent positional wording. It still
+   requires the code, all three shapes, their order, the background, the text
+   attachment fact, and exact submission evidence.
+9. Standalone Design instructions now state that a URL starting with `/` is
+   not relative. This prevents generated navigation from escaping the managed
+   Preview route.
+
+The runtime store keeps its existing hard record and byte limits. Owner purge
+remains the cleanup path for deleted product records. Milestone 5 does not add
+silent history pruning because sessions, turns, transcripts, and submissions
+are current recovery and idempotency evidence.
+
+The renderer audit found no stale provider-specific workflow text. Remaining
+provider names identify real provider settings or diagnostics, so they remain.
+
+The final real-provider results are:
+
+| Exact provider pair | Current result | Disabled behavior and reason |
+| --- | --- | --- |
+| Codex 0.151.0-alpha.7.1 with GPT-5.6-Luna | Normal Task, read-only mutation denial, text, and PNG image checks passed. | Design stays disabled. This exact pair has no passing full Design qualification. |
+| OpenCode 1.18.25 with MiMo V2.5 | Normal Task, read-only mutation denial, text, and image checks passed. | Design stays disabled because its full qualification did not load the Design skills reliably. |
+| Grok Build 1.0.13 with Grok 4.6 | Normal Task, text, and PNG image checks passed. The report records its false image capability advertisement. | Read-only turns stay disabled because plan mode can still mutate through shell, MCP, or subagents. Design stays disabled after its full qualification timeout. |
+| Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Normal Task, read-only mutation denial, text, PNG image, and all nine packaged Design scenarios passed. | No enabled workflow failed qualification. |
+| Claude Agent ACP | Not installed. | All workflows stay unavailable because Task Monki cannot qualify a missing runtime. |
 
 ## Required tests
 
@@ -1716,7 +1765,9 @@ These protocol features support one shared workflow layer with adapter-specific 
 Keep the single runtime coordinator and runtime store from provider milestones 1 and 2.
 Provider milestone 3 now uses the same byte owner and runtime lifecycle.
 Provider milestone 4 now uses the same Design workflow, Preview, browser, and source owners.
-Implement only the documented hardening and cleanup in milestone 5 next.
+Provider milestone 5 keeps these owners and closes the verified cleanup gaps.
+Treat milestones 1 through 5 as the current provider baseline.
+Require exact real-provider qualification before enabling a new provider, version, model, or workflow.
 
 This is the smallest clean path to broad provider support.
 It keeps lifecycle code in one place.

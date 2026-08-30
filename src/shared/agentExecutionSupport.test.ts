@@ -25,14 +25,21 @@ describe('projectAgentExecutionSupport', () => {
     ).toEqual({ supported: true });
   });
 
-  it('uses the shared read-only policy for review without coupling it to the source runtime', () => {
+  it('uses one shared read-only qualification for refinement, review, and Discourse', () => {
     const capabilities = supportedCapabilities({
-      detachedReview: { maturity: 'unsupported' }
+      readOnlyTurns: {
+        maturity: 'unsupported',
+        detail: 'This profile can still mutate through child agents.'
+      }
     });
 
-    expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
-      supported: true
-    });
+    for (const operation of ['PROMPT_REFINEMENT', 'REVIEW', 'DISCOURSE'] as const) {
+      expect(projectAgentExecutionSupport(capabilities, operation)).toEqual({
+        supported: false,
+        reason:
+          'This profile can still mutate through child agents. Normal Tasks remain available.'
+      });
+    }
   });
 
   it('explains the exact unqualified read-only profile without disabling normal Tasks', () => {
@@ -53,31 +60,21 @@ describe('projectAgentExecutionSupport', () => {
           }
         ]
       },
-      promptRefinement: {
+      readOnlyTurns: {
         maturity: 'unsupported',
-        detail: 'This profile cannot deny shell changes during refinement.'
-      },
-      detachedReview: {
-        maturity: 'unsupported',
-        detail: 'This profile has not passed the review mutation test.'
-      },
-      extensions: {
-        'task-monki.read-only-turn': {
-          maturity: 'unsupported',
-          detail: 'This profile can still mutate through child agents.'
-        }
+        detail: 'This profile can still mutate through child agents.'
       }
     });
 
     expect(projectAgentExecutionSupport(capabilities, 'PROMPT_REFINEMENT')).toEqual({
       supported: false,
       reason:
-        'This profile cannot deny shell changes during refinement. Normal Tasks remain available.'
+        'This profile can still mutate through child agents. Normal Tasks remain available.'
     });
     expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
       supported: false,
       reason:
-        'This profile has not passed the review mutation test. Normal Tasks remain available.'
+        'This profile can still mutate through child agents. Normal Tasks remain available.'
     });
     expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
       supported: false,
@@ -201,26 +198,11 @@ function supportedCapabilities(
         }
       ]
     },
-    promptRefinement: stable,
+    readOnlyTurns: stable,
     modelCatalog: stable,
-    reasoningEffort: stable,
-    persistentSessions: stable,
-    sessionResume: stable,
-    sessionFork: stable,
     activeTurnSteering: stable,
     turnInterruption: stable,
-    truePause: { maturity: 'unsupported' },
-    interactiveApprovals: stable,
-    userInputRequests: stable,
-    goals: stable,
-    plans: stable,
-    detachedReview: stable,
-    review: stable,
-    subagents: { maturity: 'unsupported' },
-    backgroundTerminals: { maturity: 'unsupported' },
-    dynamicTools: stable,
     attachmentDelivery: stable,
-    runtimeRecovery: stable,
     extensions: {
       'task-monki.design-instructions': stable,
       'task-monki.design-skill-access': stable,
