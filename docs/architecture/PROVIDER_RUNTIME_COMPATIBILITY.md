@@ -34,7 +34,7 @@ runtimes use stable ACP plus explicitly captured extensions.
 | --- | --- | --- | --- | --- |
 | Codex App Server | `codex`; a resolver-selected native App Server stdio form | Native first-class | Native account and model discovery, threads, resume and fork, streamed turns, steering, interruption, approvals and typed user input, goals, plans, usage, managed attachment delivery, shared read-only workflows, and native Design tool transport | The packaged `0.151.0-alpha.7.2` runtime with GPT-5.6-Luna passed native image and Design qualification. Other Codex pairs remain Design-unqualified. Review, prompt refinement, and Discourse use an attested read-only profile. Task Monki compares repository state after each read-only turn. Task Monki negotiates the experimental API family for generated `item/tool/requestUserInput` requests. It waits for `serverRequest/resolved` after each reply. True pause is unsupported. User input, terminal, and dynamic-tool protocol methods remain experimental. |
 | OpenCode server | `opencode`; `opencode serve --hostname 127.0.0.1 --port <allocated-port>` | Native first-class | Connected provider and model registry, variants, sessions, native history fork, messages, parts, asynchronous prompts, abort, permissions, questions, plans, usage, recovery, bounded SSE, attachments, read-only workflows, and Design MCP transport | Task Monki supports OpenCode `>=1.4.0` and `<2.0.0`. Packaged tests cover `1.18.25`. The complete Design path passed with `openai/gpt-5.6-luna`. Task Monki enables every connected catalog model that reports image input. Text-only models stay disabled. Price and free status are not capability signals. Review, refinement, and Discourse use a dedicated `--pure` session with native deny rules. The process remains unconfined and uses provider network access. In 1.18.25, `/provider` can mark a stored credential as connected when native model discovery cannot load that provider. The installed GitHub Copilot credential had this mismatch, and direct `xai` was not connected. Active steering, true pause, and provider goals remain unsupported. |
-| Grok Build ACP | `grok-acp`; `grok --no-auto-update --permission-mode default agent stdio` | Registered ACP compatibility | ACP streaming, tool calls and diffs, plans, usage and cost context, permissions, cancellation, provider sessions, embedded text, qualified image input, Design MCP transport, and the captured `grok-build-acp/session-models@v1` contract | Grok Build `1.0.13` sends verified text as an embedded resource. Grok 4.6 passed native PNG and Design qualification. Its handshake reports `image: false`, so Task Monki shows capability drift. Design uses low reasoning by default. Normal Tasks keep the provider default. Other versions, models, and image formats stay disabled. Grok plan mode and custom profiles can still expose mutating configured MCP tools. Therefore read-only workflows remain disabled. Active steering, fork, goals, general user input, and standardized subagents remain unsupported. |
+| Grok Build ACP | `grok-acp`; `grok --no-auto-update --permission-mode default agent stdio` | Registered ACP compatibility | ACP streaming, tool calls and diffs, plans, usage and cost context, permissions, cancellation, provider sessions, embedded text, qualified image input, shared read-only workflows, Design MCP transport, and the captured `grok-build-acp/session-models@v1` contract | Grok Build `1.0.13` sends verified text as an embedded resource. Grok 4.6 passed native PNG and Design qualification. Its handshake reports `image: false`, so Task Monki shows capability drift. Design uses low reasoning by default. Normal Tasks keep the provider default. On macOS, review, refinement, and Discourse use a separate ACP process with Grok's native read-only sandbox. Task Monki denies edit, write, and MCP tools, refuses leader routing, checks repository state, and rejects roots in Grok's writable temp and state locations. Other Grok versions, platforms, models, and image formats stay disabled where they lack exact qualification. Active steering, fork, goals, general user input, and standardized subagents remain unsupported. |
 | Cursor Agent ACP | `cursor-agent-acp`; automatic discovery uses `cursor-agent acp`, while `agent acp` needs explicit configuration and a Cursor contract probe | Registered ACP compatibility | ACP streaming, tool and diff updates, plans, exact permission choices, cancellation, Cursor rules, lazy model discovery, native session controls, text, qualified image input, read-only workflows, and Design MCP transport | Cursor `2026.08.25-3e8eec8` sends text as a bounded ACP text block. Composer 2.5 passed native PNG and Design qualification. It also passed the current nine-scenario regression. Other versions, models, and image formats remain text-only and Design-unqualified. Cursor Ask mode provides the read-only policy. Task Monki rejects each permission request and compares repository state after the turn. Cursor does not advertise additional directories, so Task Monki omits that field. The process remains unconfined and uses provider network access. Active steering, fork, goals, general user input, and standardized subagents remain unsupported. |
 | Claude Agent ACP bridge | `claude-agent-acp`; the separate `claude-agent-acp` bridge executable | Registered ACP compatibility bridge | Claude Agent ACP `0.70.0` with Claude Code `2.1.239` is installed. The bridge provides ACP streaming, tools, diffs, plans, permissions, cancellation, modes, model selection, embedded text, qualified image input, read-only workflows, and Design MCP transport. | This is not a direct native integration with the `claude` CLI. Exact model `sonnet` passed normal Task, text, PNG, and Design qualification. The provider profile passed its read-only mutation test with Sonnet selected. Default and Haiku remain image- and Design-unqualified. Opus was not tested. Other versions and media types remain unqualified. Claude read-only turns use native plan mode. Task Monki rejects every permission request and compares repository state after the turn. The packaged Sonnet mutation attempt left the repository unchanged. Claude advertises additional directories, so Design sessions receive the app-owned skill root. |
 
@@ -43,20 +43,20 @@ runtimes use stable ACP plus explicitly captured extensions.
 | Workflow | Codex | OpenCode | Grok ACP | Cursor ACP | Claude ACP |
 | --- | --- | --- | --- | --- | --- |
 | Normal Task | Yes | Yes | Yes | Yes | Yes |
-| Review | Yes | Yes | No | Yes | Yes; profile-wide |
-| Prompt refinement | Yes | Yes | No | Yes | Yes; profile-wide |
-| Discourse | Yes | Yes | No | Yes | Yes; profile-wide |
+| Review | Yes | Yes | Yes; 1.0.13 on macOS | Yes | Yes; profile-wide |
+| Prompt refinement | Yes | Yes | Yes; 1.0.13 on macOS | Yes | Yes; profile-wide |
+| Discourse | Yes | Yes | Yes; 1.0.13 on macOS | Yes | Yes; profile-wide |
 | Managed attachments | Text and image | Text and model-gated image | Text and exact-qualified PNG image | Text and Composer 2.5 PNG image | Text and Sonnet PNG image |
 | Design | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Connected catalog models that report image input | Grok Build 1.0.13 with Grok 4.6 at low reasoning | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Claude Agent ACP 0.70.0 with Sonnet |
 
 Review, prompt refinement, and Discourse use one shared read-only turn path.
-Codex, OpenCode, Cursor, and Claude provide a qualified native mutation-denial policy.
+Codex, OpenCode, Grok, Cursor, and Claude provide a qualified native mutation-denial policy.
 Task Monki compares repository state before and after each applicable turn.
 It fails a changed or unreadable turn and leaves detected changes as evidence.
 
-The provider policy is not an operating-system sandbox.
-OpenCode and ACP processes still run with normal user permissions.
-Their model transport also needs network access.
+Codex, OpenCode, Cursor, and Claude use provider policies, not operating-system
+sandboxes. Grok uses a separate provider process with an operating-system
+sandbox. Every model transport still needs provider network access.
 
 The complete current and target matrices are in
 `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`.
@@ -110,7 +110,8 @@ All registered ACP profiles share these implemented rules:
   Task Monki rejects every permission request during these turns.
 - Claude read-only turns select its native plan mode.
   Task Monki rejects every permission request during these turns.
-  Grok has no qualified read-only policy in this release.
+- Grok read-only turns use a separate process because its sandbox is
+  process-scoped. Normal Task and Design turns stay on the writable process.
 - Permission choices return the exact opaque option ID advertised by the
   provider after Task Monki applies its command, path, and network policy.
 - Only ACP `end_turn` is successful completion. `cancelled` is interrupted.
@@ -195,12 +196,14 @@ only when their live initialization and session checks succeed.
   **Full access**. Cursor and Grok additionally expose **Auto-accept edits**
   and **Full access**
   by selecting exact one-time provider options. Remembered options always
-  require an explicit user choice. Cursor and Grok now document native sandbox
-  options. Current Task Monki ACP profiles do not configure or attest those
-  sandboxes. They also do not silently change provider or repository
+  require an explicit user choice. The normal Cursor and Grok processes do not
+  use a Task Monki sandbox. Grok's separate read-only process uses its exact
+  qualified native sandbox. Task Monki does not rewrite provider or repository
   configuration.
 - Cursor read-only work uses native Ask mode and rejects every permission request.
-  Grok plan mode and custom profiles can still expose mutating configured MCP tools.
+  Grok read-only work uses a separate process with its process-start sandbox.
+  It denies edit, write, MCP, and Task Monki permission requests. Task Monki
+  still compares repository state after the turn.
   Claude read-only work uses native plan mode and rejects every permission request.
 - Runtime children inherit only a minimal portable base environment. OpenCode
   and ACP children additionally receive a versioned, exact provider environment
@@ -282,7 +285,7 @@ One generated defect or one visual miss is not an infrastructure failure.
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Passed all nine regression scenarios. A later menu regression also passed when Task Monki omitted the unadvertised additional-directories field. It read eight app-owned skills and used MCP and browser tools. | Enabled. |
 | Claude Agent ACP 0.70.0 with Sonnet | Passed form, menu and keyboard, responsive, motion, fresh correction, `TM-7Q4`, copy-only, no-change, cancellation, Ready preservation, and cleanup. | Enabled for exact model `sonnet`. Default and Haiku remain Design-unqualified. Opus was not tested. |
 | OpenCode 1.18.25 with `opencode/mimo-v2.5-free` | HTTP, MCP, Preview, candidate, screenshot, and Ready transport worked. Two runs did not use the required skills and browser flow reliably. | This remains model-quality evidence. The current live catalog capability decides availability. |
-| Grok Build 1.0.13 with Grok 4.6 | At low reasoning, form states, the focused menu, wide and narrow layouts, and the 511-second motion chain passed. The tests covered image-result use, fresh correction, copy-only, no-change, cancellation, Ready preservation, and cleanup. Earlier high-reasoning runs did not settle within 900 seconds. | Enabled for Design at low reasoning. Read-only workflows remain disabled because configured MCP tools can still expose mutation. |
+| Grok Build 1.0.13 with Grok 4.6 | At low reasoning, form states, the focused menu, wide and narrow layouts, and the 511-second motion chain passed. The tests covered image-result use, fresh correction, copy-only, no-change, cancellation, Ready preservation, and cleanup. Earlier high-reasoning runs did not settle within 900 seconds. | Enabled for Design at low reasoning. Review, refinement, and Discourse use the qualified read-only ACP process on macOS. |
 | Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna | Native tools worked. A generated menu kept a pointer-blocking backdrop. | Unsupported for Design. This was generated source behavior, not a transport failure. |
 
 Cursor has no supported session-close operation in this profile.

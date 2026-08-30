@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentItemRecord, AgentItemType } from '../shared/agent';
 import {
+  assertDisclosureEnterToggle,
   assertNoDirectAssetInspection,
   isInFlightInspectDesignWait,
   observedBrowserOperations,
@@ -189,7 +190,7 @@ describe('Design agent visual-fact qualification', () => {
     ).toEqual([]);
   });
 
-  it('records the exact media scheme used for Design verification', () => {
+  it('records the exact media scheme and motion setting used for Design verification', () => {
     expect(
       observedBrowserOperations('codex', [
         item('DYNAMIC_TOOL_CALL', {
@@ -211,7 +212,118 @@ describe('Design agent visual-fact qualification', () => {
           }
         })
       ])
-    ).toEqual(['set_media:light', 'set_media:dark']);
+    ).toEqual(['set_media:light:standard', 'set_media:dark:reduced']);
+  });
+
+  it.each([
+    {
+      runtimeId: 'codex',
+      make: (action: 'focus' | 'key', output: string) =>
+        item('DYNAMIC_TOOL_CALL', {
+          type: 'dynamicToolCall',
+          tool: 'inspect_design',
+          arguments:
+            action === 'focus'
+              ? { operation: 'act', action, ref: 'e1' }
+              : { operation: 'act', action, value: 'Enter' },
+          contentItems: [{ type: 'inputText', text: output }]
+        })
+    },
+    {
+      runtimeId: 'opencode',
+      make: (action: 'focus' | 'key', output: string) =>
+        item('MCP_TOOL_CALL', {
+          tool: 'task_monki_design_inspect_design',
+          state: {
+            input:
+              action === 'focus'
+                ? { operation: 'act', action, ref: 'e1' }
+                : { operation: 'act', action, value: 'Enter' },
+            output
+          }
+        })
+    },
+    {
+      runtimeId: 'cursor-agent-acp',
+      make: (action: 'focus' | 'key', output: string) =>
+        item('MCP_TOOL_CALL', {
+          title: 'task-monki-design-tools: inspect_design',
+          rawInput: {
+            providerIdentifier: 'task-monki-design-tools',
+            toolName: 'inspect_design',
+            args:
+              action === 'focus'
+                ? { operation: 'act', action, ref: '@e1' }
+                : { operation: 'act', action, value: 'Enter' }
+          },
+          rawOutput: { content: [{ type: 'text', text: output }] }
+        })
+    }
+  ])('proves the focused disclosure changes after Enter for $runtimeId', ({ runtimeId, make }) => {
+    expect(() =>
+      assertDisclosureEnterToggle('disclosure', runtimeId, [
+        make('focus', 'button "Details" [expanded=false, ref=e1]'),
+        make('key', 'button "Details" [expanded=true, ref=e1]')
+      ])
+    ).not.toThrow();
+  });
+
+  it('rejects weak or out-of-order disclosure interaction evidence', () => {
+    const call = (
+      action: 'focus' | 'key' | 'click',
+      output: string,
+      value?: string
+    ) =>
+      item('DYNAMIC_TOOL_CALL', {
+        type: 'dynamicToolCall',
+        tool: 'inspect_design',
+        arguments: {
+          operation: 'act',
+          action,
+          ...(action === 'focus' ? { ref: 'e1' } : {}),
+          ...(value ? { value } : {})
+        },
+        contentItems: [{ type: 'inputText', text: output }]
+      });
+    const collapsed = 'button "Details" [expanded=false, ref=e1]';
+    const expanded = 'button "Details" [expanded=true, ref=e1]';
+
+    for (const items of [
+      [call('key', expanded, 'Enter'), call('focus', collapsed)],
+      [call('focus', collapsed), call('key', expanded, 'Space')],
+      [call('focus', collapsed), call('click', expanded), call('key', collapsed, 'Enter')],
+      [call('focus', collapsed), call('key', collapsed, 'Enter')]
+    ]) {
+      expect(() => assertDisclosureEnterToggle('disclosure', 'codex', items)).toThrow();
+    }
+  });
+
+  it('accepts a later valid focus pair and does not confuse reference prefixes', () => {
+    const call = (action: 'focus' | 'key', ref: string, output: string) =>
+      item('DYNAMIC_TOOL_CALL', {
+        type: 'dynamicToolCall',
+        tool: 'inspect_design',
+        arguments: {
+          operation: 'act',
+          action,
+          ...(action === 'focus' ? { ref } : { value: 'Enter' })
+        },
+        contentItems: [{ type: 'inputText', text: output }]
+      });
+
+    expect(() =>
+      assertDisclosureEnterToggle('disclosure', 'codex', [
+        call('focus', 'unrelated', 'button "Other" [expanded=false, ref=unrelated]'),
+        call('focus', 'e1', 'button "Details" [expanded=false, ref=e1]'),
+        call('key', 'e1', 'button "Details" [expanded=true, ref=e1]')
+      ])
+    ).not.toThrow();
+    expect(() =>
+      assertDisclosureEnterToggle('disclosure', 'codex', [
+        call('focus', 'e1', 'button "Other" [expanded=false, ref=e10]'),
+        call('key', 'e1', 'button "Other" [expanded=true, ref=e10]')
+      ])
+    ).toThrow();
   });
 });
 

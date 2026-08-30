@@ -215,10 +215,11 @@ Review, refinement, and Discourse availability use `projectAgentExecutionSupport
 The projection requires a qualified native mutation-denial policy with no approval exceptions.
 The provider process can still use its model transport and normal user permissions.
 `DiscourseRuntimeHost` also requires the common runtime operations.
-Codex, OpenCode, Cursor ACP, and Claude Agent ACP 0.70.0 meet these requirements.
+Codex, OpenCode, Cursor ACP, Claude Agent ACP 0.70.0, and Grok Build 1.0.13 on macOS meet these requirements.
 The Claude read-only policy was qualified with Sonnet.
-Grok ACP read-only workflows remain disabled.
-Normal Tasks and the exact qualified Grok Design pair remain available.
+Grok uses a separate adapter-owned ACP process with its native read-only sandbox.
+Task Monki also denies edit, write, and MCP tools on that process.
+Other Grok versions and platforms remain disabled for read-only workflows.
 
 ### Current normal Task path
 
@@ -317,7 +318,7 @@ The Design row requires technical product qualification, not only a working tool
 | Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna Design | The old pair has no current technical qualification. Its generated backdrop defect was not a transport failure. | Unsupported exact pair |
 | OpenCode image attachment with a text-only model | The adapter rejects it before submission. | Model input limit |
 | ACP image attachment without an exact qualification entry | The adapter rejects it before submission. | Profile and model limit |
-| Grok ACP read-only workflows | Plan mode and custom agent profiles can still expose mutating configured MCP tools. | Provider policy limit |
+| Grok read-only work from temporary paths, `~/.grok`, another Grok version, or another platform | Grok's qualified sandbox permits writes to temporary paths and `~/.grok`. Task Monki has only qualified Grok Build 1.0.13 on macOS. | Exact process-policy limit |
 | Claude ACP default, Haiku, or Opus image and Design use | Only exact model `sonnet` passed image and Design qualification. Opus was not tested. | Unqualified exact model |
 
 ## Codex-specific dependency classification
@@ -1273,14 +1274,18 @@ Current profile results:
 - Codex uses an attested read-only permission profile with network and external tools disabled.
 - OpenCode uses a dedicated `--pure` session and native deny rules.
 - Cursor ACP uses native Ask mode and rejects every permission request during the turn.
-- Grok ACP stays disabled because plan mode and custom profiles can still expose
-  mutating configured MCP tools.
+- Grok Build 1.0.13 on macOS uses a separate ACP process for shared read-only
+  turns. The process uses Grok's native read-only sandbox, denies edit, write,
+  and MCP tools, and does not use the shared Grok leader. Task Monki rejects
+  repositories and linked Git control paths in Grok's writable temp and state
+  locations.
 - Claude Agent ACP 0.70.0 uses native plan mode.
   The packaged mutation test selected Sonnet.
   Task Monki rejected permission requests, and the repository remained unchanged after the mutation attempt.
 
-OpenCode and ACP processes still run with normal user permissions.
-Their native policies are not operating-system sandboxes.
+OpenCode, Cursor ACP, and Claude ACP still run with normal user permissions.
+Their native policies are not operating-system sandboxes. Grok's separate
+read-only process uses a provider-owned operating-system sandbox.
 
 Acceptance:
 
@@ -1462,7 +1467,7 @@ The current packaged results are:
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Passed the complete technical gate. | Passed all nine regression scenarios. A later menu regression passed after Task Monki omitted the unadvertised additional-directories field. It read eight app-owned skills and used MCP and browser tools. | Enabled. |
 | Claude Agent ACP 0.70.0 with Sonnet | Passed the complete technical gate. | Passed form, menu and keyboard, responsive, motion, fresh correction, `TM-7Q4`, copy-only, no-change, cancellation, and cleanup across focused runs. | Enabled for exact model `sonnet`. |
 | OpenCode 1.18.25 with `opencode/mimo-v2.5-free` | HTTP, MCP, Preview, candidate, screenshots, and Ready worked. | Two runs did not use the required skills and browser flow reliably. | This is model-quality evidence. It does not override the live catalog capability. |
-| Grok Build 1.0.13 with Grok 4.6 | Passed skills, MCP image results, exact and fresh candidates, Ready, Stop, and cleanup at low reasoning. | Passed form states, menu and keyboard behavior, wide and narrow layouts, motion frames, correction, `TM-7Q4`, copy-only, no-change, cancellation, and Ready preservation. The focused menu took 213 seconds. The motion and recovery chain took 511 seconds. Earlier high-reasoning runs did not settle within 900 seconds. | Enabled at low reasoning. Read-only workflows remain disabled because configured MCP tools can still expose mutation. |
+| Grok Build 1.0.13 with Grok 4.6 | Passed skills, MCP image results, exact and fresh candidates, Ready, Stop, and cleanup at low reasoning. | Passed form states, menu and keyboard behavior, wide and narrow layouts, motion frames, correction, `TM-7Q4`, copy-only, no-change, cancellation, and Ready preservation. The focused menu took 213 seconds. The motion and recovery chain took 511 seconds. Earlier high-reasoning runs did not settle within 900 seconds. | Enabled at low reasoning. Review, refinement, and Discourse use the qualified read-only ACP process on macOS. |
 | Codex 0.150.0-alpha.12.2 with GPT-5.6-Luna | Native tool transport worked. | A generated menu kept a pointer-blocking backdrop. | Unsupported. The source defect was model behavior, not a transport failure. |
 
 A transport probe alone never enables Design.
@@ -1535,7 +1540,7 @@ The final real-provider results are:
 | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Normal Task, read-only mutation denial, text, PNG, and Design qualification passed. | Other Codex runtime and model pairs stay Design-unqualified. |
 | OpenCode 1.18.25 with `openai/gpt-5.6-luna` | The complete packaged Design qualification passed at medium reasoning. | The live connected catalog now decides model image support. |
 | OpenCode 1.18.25 with MiMo V2.5 | Normal Task, read-only mutation denial, text, image, and Design transport checks passed. | Its earlier weak Design behavior remains quality evidence, not an availability override. |
-| Grok Build 1.0.13 with Grok 4.6 | Normal Task, text, PNG, and Design checks passed. The report records its false image capability advertisement. Design defaults to low reasoning. | Read-only turns stay disabled because plan mode and custom profiles can expose mutating configured MCP tools. Other Grok versions and models stay Design-unqualified. |
+| Grok Build 1.0.13 with Grok 4.6 on macOS | Normal Task, text, PNG, Design, and shared read-only checks passed on 2026-08-30. The read-only mutation probe completed with an unchanged repository. A direct sandbox probe reached the write tool and macOS denied the write. The report records Grok's false image capability advertisement. Design defaults to low reasoning. | Other Grok versions and platforms stay read-only-unqualified. Other Grok versions and models stay Design-unqualified. |
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Normal Task, read-only mutation denial, text, PNG, and all nine Design regression scenarios passed. | No enabled workflow failed qualification. |
 | Claude Agent ACP 0.70.0 with Sonnet | Normal Task, read-only mutation denial, text, PNG, Design qualification, and cleanup passed. | Default and Haiku stay image- and Design-unqualified. Opus was not tested. |
 
@@ -1713,7 +1718,9 @@ Disable only the failed content kind, model, or encoded-size range with a clear 
 1. Repeat technical Design qualification before enabling a new or changed Codex or ACP runtime and model.
    Requalify OpenCode when its shared Design transport changes.
 2. Qualify Claude default, Haiku, or Opus only when a product need selects that exact model.
-3. Qualify Grok read-only support only after its packaged profile denies every repository mutation path.
+3. Repeat Grok read-only qualification for each new runtime version or platform.
+   Run the mutation probe outside temporary paths and `~/.grok` because Grok permits writes there.
+   Treat a sandbox warning as a startup failure.
 4. Record the exact provider-session deletion meaning for each adapter.
 5. Measure provider-side screenshot retention where documentation allows it.
 
@@ -1836,6 +1843,7 @@ These protocol features support one shared workflow layer with adapter-specific 
 - [Cursor agent image input](https://cursor.com/docs/agent/overview)
 - [Grok Build ACP source](https://github.com/xai-org/grok-build/blob/bc7f02eddd3d84085849dc19ed216f11c23b0571/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs)
 - [Grok Build image parser](https://github.com/xai-org/grok-build/blob/bc7f02eddd3d84085849dc19ed216f11c23b0571/crates/codegen/xai-grok-shell/src/session/prompt_parser.rs)
+- [Grok Build sandbox behavior](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/18-sandbox.md)
 - [xAI image input](https://docs.x.ai/developers/model-capabilities/images/understanding)
 - [Claude Agent ACP 0.70.0 source](https://github.com/agentclientprotocol/claude-agent-acp/blob/v0.70.0/src/acp-agent.ts)
 - [Anthropic model capabilities](https://platform.claude.com/docs/en/about-claude/models/overview)

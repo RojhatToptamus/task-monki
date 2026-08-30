@@ -166,6 +166,105 @@ describe('AcpStdioSupervisor', () => {
     expect(server?.status).toBe('EXITED');
   });
 
+  it('uses exact lane argv and latches an evicted process-policy failure', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-supervisor-policy-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'agent.cjs');
+    await fs.writeFile(
+      agentScript,
+      [
+        "const readline = require('node:readline');",
+        "if (process.argv[2] !== 'read-only-lane') process.exit(14);",
+        "process.stderr.write('sandbox unavailable\\n' + 'x'.repeat(70 * 1024));",
+        'const input = readline.createInterface({ input: process.stdin });',
+        "input.on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method !== 'initialize') return;",
+        "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {",
+        '    protocolVersion: 1,',
+        '    agentCapabilities: { promptCapabilities: {} },',
+        "    agentInfo: { name: 'fake-acp', version: '1.0.0' }",
+        "  } }) + '\\n');",
+        '});'
+      ].join('\n'),
+      { mode: 0o600 }
+    );
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-policy' },
+      executableCandidates: [process.execPath],
+      argv: [agentScript, 'writable-lane']
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const supervisor = new AcpStdioSupervisor(store, {
+      profile,
+      runtime: {
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [...profile.argv],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      },
+      cwd: directory,
+      launchArgv: [agentScript, 'read-only-lane'],
+      startupFailurePattern: /sandbox unavailable/iu,
+      requestTimeoutMs: 1_000
+    });
+
+    await expect(supervisor.start()).rejects.toThrow(
+      'required process policy could not be applied'
+    );
+    const server = (await store.snapshot()).servers[0];
+    expect(server).toMatchObject({
+      argv: [agentScript, 'read-only-lane'],
+      runtimeResolution: {
+        selectedLaunchArgv: [agentScript, 'read-only-lane']
+      }
+    });
+    expect(['FAILED', 'LOST']).toContain(server?.status);
+    expect(server?.exitReason).not.toContain('sandbox unavailable');
+  });
+
+  it('invalidates a ready generation when the process-policy failure arrives late', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-supervisor-late-policy-')
+    );
+    temporaryDirectories.push(directory);
+    const store = createTestStore(path.join(directory, 'store'));
+    const child = fakeAcpChild({ closeOnKill: true });
+    const supervisor = new AcpStdioSupervisor(store, {
+      profile: testProfile('test-acp-late-policy'),
+      runtime: testRuntime(),
+      cwd: directory,
+      spawnProcess: fakeSpawn(child),
+      startupFailurePattern: /sandbox unavailable/iu,
+      requestTimeoutMs: 500,
+      closeHandlingTimeoutMs: 500
+    });
+    const exit = vi.fn();
+    supervisor.events.on('exit', exit);
+
+    const running = await supervisor.start();
+    expect(running.server.status).toBe('READY');
+    (child.stderr as PassThrough).write('sandbox unavailable\n');
+
+    await waitForCondition(() => supervisor.currentServer?.status === 'LOST');
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(supervisor.currentClient).toBeUndefined();
+    expect(supervisor.safetyFenceReason).toContain(
+      'required process policy was not applied'
+    );
+    expect(exit).toHaveBeenCalledWith(expect.objectContaining({ status: 'LOST' }), true);
+    await expect(supervisor.start()).rejects.toThrow('safety-fenced until app restart');
+  });
+
   it('redacts provider credentials from persisted stderr diagnostics', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-redaction-'));
     temporaryDirectories.push(directory);

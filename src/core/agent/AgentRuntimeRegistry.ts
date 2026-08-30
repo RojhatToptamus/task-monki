@@ -446,16 +446,14 @@ async function validateAdapterContract(adapter: AgentRuntimeAdapter): Promise<vo
     }
   }
   if (
-    capabilities.executionPolicy.presets.some(
-      (preset) => preset.repositoryMutation === 'DENY'
-    ) &&
+    capabilities.readOnlyTurns.maturity === 'stable' &&
     (!adapter.buildExecutionContext ||
       !adapter.startRuntimeTurn ||
       !adapter.interruptRuntimeTurn ||
       !adapter.onRuntimeTurnEvent)
   ) {
     throw new Error(
-      `Runtime ${adapter.descriptor.id} declares native mutation denial but does not implement the shared read-only turn lifecycle.`
+      `Runtime ${adapter.descriptor.id} declares shared read-only turns but does not implement the shared read-only turn lifecycle.`
     );
   }
   if (

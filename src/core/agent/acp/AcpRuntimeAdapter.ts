@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type {
   AgentCommandApprovalDecision,
@@ -305,6 +307,8 @@ export interface AcpRuntimeAdapterOptions
     DesignClientToolBridge,
     'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
   >;
+  /** Internal lane used when a provider requires a process-scoped read-only policy. */
+  runtimeLane?: 'DEFAULT' | 'READ_ONLY';
 }
 
 interface AcpDesignToolGrant {
@@ -367,6 +371,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private designSkillFailure?: string;
   private designSkillLoadAttempted = false;
   private readonly designToolGrants = new Map<string, AcpDesignToolGrant>();
+  private readonly readOnlyLane?: AcpRuntimeAdapter;
 
   constructor(
     private readonly taskRuntime: TaskAgentRuntimeAccess,
@@ -393,6 +398,35 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       ),
       capabilities: acpCapabilities(profile),
     };
+    if (
+      (options.runtimeLane ?? 'DEFAULT') === 'DEFAULT' &&
+      profile.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS'
+    ) {
+      this.readOnlyLane = new AcpRuntimeAdapter(
+        taskRuntime,
+        providerRuntime,
+        appEvents,
+        profile,
+        {
+          ...options,
+          runtimeLane: 'READ_ONLY',
+          designSkillRoot: undefined,
+          designClientToolBridge: undefined
+        }
+      );
+      this.readOnlyLane.onRuntimeTurnEvent((event) => this.emitRuntimeTurnEvent(event));
+    }
+  }
+
+  private ownsTaskSessions(): boolean {
+    return this.options.runtimeLane !== 'READ_ONLY';
+  }
+
+  private ownsSharedRuntimeSessions(): boolean {
+    return (
+      this.options.runtimeLane === 'READ_ONLY' ||
+      this.profile.readOnlyTurnPolicy?.kind !== 'DEDICATED_PROCESS'
+    );
   }
 
   async initialize(): Promise<void> {
@@ -411,6 +445,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     try {
       await this.prepareDesignSkillPack();
       await this.recoverPersistedRuntimeLosses();
+      await this.readOnlyLane?.recoverPersistedRuntimeLosses();
       // Cold recovery is passive: advance persisted ambiguous runs to a
       // user-actionable reconciliation state without launching an ACP child,
       // attaching a session, or replaying a prompt. This must not depend on
@@ -471,6 +506,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const readRoots = input.readRoots
       .map((root) => ({ ...root, canonicalPath: path.resolve(root.canonicalPath) }))
       .sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath));
+    await assertDedicatedReadOnlyRoots(this.profile, [
+      primaryCwd,
+      ...readRoots.map((root) => root.canonicalPath)
+    ]);
     const modelSettings = acpReadOnlyExecutionSettings(
       this.profile,
       input.modelSettings
@@ -824,6 +863,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async configureRuntime(input: { executable?: string; restart: boolean }): Promise<void> {
+    if (this.readOnlyLane) {
+      await this.readOnlyLane.configureRuntime(input);
+    }
     await this.waitForRuntimeQuarantine();
     const executable = normalizeExecutableOverride(input.executable);
     const changed = executable !== this.configuredExecutable;
@@ -847,6 +889,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
+    if (this.readOnlyLane && isAcpReadOnlySettings(input.settings)) {
+      return this.readOnlyLane.resolveExecution(input);
+    }
     const requestedSettings = normalizeAcpReadOnlyExecutionSettings(
       this.profile,
       input.settings
@@ -1000,7 +1045,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.waitForRuntimeQuarantine();
     const local = await this.requireSession(input.localSessionId);
     this.assertSessionOwnership(local);
-    assertAcpExecutionPolicy(this.profile, input.settings);
+    assertAcpTaskExecutionPolicy(this.profile, input.settings);
     const provisionalProviderSessionId = this.provisionalProviderSessionIds.get(local.id);
     if (provisionalProviderSessionId) {
       const client = await this.ensureClient();
@@ -1341,16 +1386,22 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async releaseSession(ref: AgentSessionRef): Promise<void> {
+    const runtimeSession = await this.providerRuntime.getSession(ref.localSessionId);
+    if (runtimeSession && isAcpReadOnlyRuntimeSession(runtimeSession, this.profile)) {
+      if (this.readOnlyLane) {
+        await this.readOnlyLane.releaseSession(ref);
+        return;
+      }
+      await this.waitForRuntimeQuarantine();
+      await this.inboundQueue;
+      await this.releaseRuntimeSession(runtimeSession, ref.providerSessionId);
+      return;
+    }
     await this.waitForRuntimeQuarantine();
     // A terminal run projection can become visible before its serialized
     // inbound handler finishes the corresponding session update. Drain that
     // queue so release state cannot be overwritten by a late terminal write.
     await this.inboundQueue;
-    const runtimeSession = await this.providerRuntime.getSession(ref.localSessionId);
-    if (runtimeSession && isAcpReadOnlyRuntimeSession(runtimeSession, this.profile)) {
-      await this.releaseRuntimeSession(runtimeSession, ref.providerSessionId);
-      return;
-    }
     const session = await this.requireSession(ref.localSessionId);
     this.assertSessionOwnership(session);
     const snapshot = await this.taskRuntime.snapshot();
@@ -1508,6 +1559,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   async startRuntimeTurn(
     input: StartAgentRuntimeTurn
   ): Promise<StartedAgentRuntimeTurn> {
+    if (this.readOnlyLane) return this.readOnlyLane.startRuntimeTurn(input);
     await this.waitForRuntimeQuarantine();
     const policy = requireAcpReadOnlyTurnPolicy(this.profile);
     if (
@@ -1657,6 +1709,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     session: AgentRuntimeSessionRecord;
     run: AgentRuntimeRunRecord;
   }): Promise<void> {
+    if (this.readOnlyLane) return this.readOnlyLane.interruptRuntimeTurn(input);
     if (
       input.run.sessionId !== input.session.id ||
       !input.session.providerSessionId ||
@@ -1761,7 +1814,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const applied = await this.applyRequestedNativeSettings(client, state, settings);
     state = applied.state;
     const policy = requireAcpReadOnlyTurnPolicy(this.profile);
-    if (state.modes?.currentModeId !== policy.modeId) {
+    if (
+      policy.kind === 'SESSION_MODE' &&
+      state.modes?.currentModeId !== policy.modeId
+    ) {
       throw new Error(
         `${this.descriptor.displayName} did not apply its required ${policy.modeId} read-only mode.`
       );
@@ -1802,7 +1858,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const attachments = input.attachments ?? [];
     assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
     const settings = input.settings ?? session.requestedSettings;
-    assertAcpExecutionPolicy(this.profile, settings);
+    assertAcpTaskExecutionPolicy(this.profile, settings);
     const designInstructions = this.designInstructions(input);
     const attachmentDelivery = await this.prepareAttachmentDelivery({
       settings,
@@ -2182,11 +2238,34 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async reconcile(): Promise<AgentReconciliationResult> {
+    const own = await this.reconcileCurrentLane();
+    const readOnly = this.readOnlyLane
+      ? await this.readOnlyLane.reconcileCurrentLane()
+      : undefined;
+    return {
+      reconciledSessionIds: [
+        ...new Set([
+          ...own.reconciledSessionIds,
+          ...(readOnly?.reconciledSessionIds ?? [])
+        ])
+      ],
+      recoveryRequiredSessionIds: [
+        ...new Set([
+          ...own.recoveryRequiredSessionIds,
+          ...(readOnly?.recoveryRequiredSessionIds ?? [])
+        ])
+      ]
+    };
+  }
+
+  private async reconcileCurrentLane(): Promise<AgentReconciliationResult> {
     const recoveryRequiredSessionIds = new Set<string>();
     const reconciledSessionIds = new Set<string>();
-    const runtimeRuns = await this.providerRuntime.getRunsRequiringRecovery({
-      runtimeId: this.descriptor.id
-    });
+    const runtimeRuns = this.ownsSharedRuntimeSessions()
+      ? await this.providerRuntime.getRunsRequiringRecovery({
+          runtimeId: this.descriptor.id
+        })
+      : [];
     const runtimeSessionIds = new Set<string>();
     for (let run of runtimeRuns) {
       const session = await this.providerRuntime.getSession(run.sessionId);
@@ -2242,9 +2321,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       });
     }
 
-    const runs = await this.taskRuntime.getRunsRequiringRecovery({
-      runtimeId: this.descriptor.id
-    });
+    const runs = this.ownsTaskSessions()
+      ? await this.taskRuntime.getRunsRequiringRecovery({
+          runtimeId: this.descriptor.id
+        })
+      : [];
     for (const run of runs) {
       if (runtimeSessionIds.has(run.sessionId)) continue;
       if (
@@ -2304,6 +2385,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   async shutdown(): Promise<void> {
     const failures: unknown[] = [];
+    const readOnlyFailures: unknown[] = [];
+    if (this.readOnlyLane) {
+      try {
+        await this.readOnlyLane.shutdown();
+      } catch (cause) {
+        readOnlyFailures.push(cause);
+      }
+    }
     let resetSafe = true;
     const quarantine = this.runtimeQuarantinePromise;
     if (quarantine) {
@@ -2369,7 +2458,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           `ACP runtime shutdown was incomplete: ${failures.map(errorMessage).join('; ')}`
         );
       }
-      throw new AggregateError(failures, 'ACP runtime shutdown was incomplete.');
+    }
+    const allFailures = [...failures, ...readOnlyFailures];
+    if (allFailures.length > 0) {
+      throw new AggregateError(allFailures, 'ACP runtime shutdown was incomplete.');
     }
   }
 
@@ -2591,6 +2683,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.waitForRuntimeQuarantine();
     if (!this.supervisor) {
       const runtime = await this.ensureResolvedRuntime();
+      const processPolicy = this.options.runtimeLane === 'READ_ONLY' &&
+        this.profile.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS'
+        ? this.profile.readOnlyTurnPolicy
+        : undefined;
       const supervisor = new AcpStdioSupervisor(this.providerRuntime, {
         profile: this.profile,
         runtime,
@@ -2598,6 +2694,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         environment: this.options.environment,
         appVersion: this.options.appVersion,
         requestTimeoutMs: this.options.requestTimeoutMs,
+        launchArgv: processPolicy?.launchArgv,
+        startupFailurePattern: processPolicy?.startupFailurePattern,
         beforeClientReplacementStart: (priorServerInstanceId) =>
           this.waitForClientReplacementFence(priorServerInstanceId)
       });
@@ -2739,6 +2837,16 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         cwd: this.options.cwd
       })
         .then((runtime) => {
+          if (
+            this.options.runtimeLane === 'READ_ONLY' &&
+            this.profile.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS' &&
+            (runtime.version !== this.profile.readOnlyTurnPolicy.runtimeVersion ||
+              process.platform !== this.profile.readOnlyTurnPolicy.platform)
+          ) {
+            throw new Error(
+              `${this.descriptor.displayName} read-only work is qualified only for ${this.profile.readOnlyTurnPolicy.runtimeVersion} on ${this.profile.readOnlyTurnPolicy.platform}. Found ${runtime.version} on ${process.platform}.`
+            );
+          }
           this.resolvedRuntime = runtime;
           return runtime;
         })
@@ -3390,7 +3498,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       return;
     }
     if (method !== 'session/update') {
-      await this.recordExtensionTelemetry(method, params, raw);
+      if (this.ownsTaskSessions()) {
+        await this.recordExtensionTelemetry(method, params, raw);
+      }
       return;
     }
     let notification;
@@ -3410,6 +3520,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       // replayed or late updates instead of allowing them into the Task path.
       return;
     }
+    if (!this.ownsTaskSessions()) return;
     const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       notification.sessionId
@@ -3476,7 +3587,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
     if (request.method !== 'session/request_permission') {
-      await this.recordExtensionTelemetry(request.method, request.params, raw);
+      if (this.ownsTaskSessions()) {
+        await this.recordExtensionTelemetry(request.method, request.params, raw);
+      }
       if (!this.isCurrentClientEvent(client, generation, raw)) return;
       await client.respondError(
         request.id,
@@ -3507,6 +3620,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       return;
     }
     if (await this.isKnownRuntimeSession(permission.sessionId)) {
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
+      await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
+      return;
+    }
+    if (!this.ownsTaskSessions()) {
       if (!this.isCurrentClientEvent(client, generation, raw)) return;
       await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
       return;
@@ -3693,6 +3811,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           });
         }
         const policy = requireAcpReadOnlyTurnPolicy(this.profile);
+        if (policy.kind !== 'SESSION_MODE') return;
         if (update.currentModeId === policy.modeId) return;
         const reason =
           `${this.descriptor.displayName} left required read-only mode ${policy.modeId} during the turn. ` +
@@ -5572,19 +5691,23 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     reason = `${this.descriptor.displayName} exited unexpectedly.`
   ): Promise<void> {
     reason = this.redactProviderText(reason);
-    try {
-      await this.releaseDesignToolGrantsForGeneration(serverInstanceId);
-    } catch (cause) {
-      reason = `${reason} The Design MCP grant was revoked, but scratch cleanup failed: ${this.redactProviderText(errorMessage(cause))}`;
+    if (this.ownsTaskSessions()) {
+      try {
+        await this.releaseDesignToolGrantsForGeneration(serverInstanceId);
+      } catch (cause) {
+        reason = `${reason} The Design MCP grant was revoked, but scratch cleanup failed: ${this.redactProviderText(errorMessage(cause))}`;
+      }
     }
     const loadedProviderSessionIds = new Set(this.nativeSessions.keys());
     const provisionalLocalSessionIds = new Set(this.provisionalProviderSessionIds.keys());
     const runtimeSnapshot = await this.providerRuntime.snapshot();
-    const runtimeSessions = runtimeSnapshot.sessions.filter(
+    const runtimeSessions = this.ownsSharedRuntimeSessions()
+      ? runtimeSnapshot.sessions.filter(
       (session) =>
         session.runtimeId === this.descriptor.id &&
         isAcpReadOnlyRuntimeSession(session, this.profile)
-    );
+      )
+      : [];
     const runtimeSessionIds = new Set(runtimeSessions.map((session) => session.id));
     const runtimeRuns = runtimeSnapshot.runs.filter(
       (run) =>
@@ -5632,13 +5755,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     this.initializeResponse = undefined;
     this.invalidateBoundClient();
     const snapshot = await this.taskRuntime.snapshot();
-    const affectedRuns = snapshot.runs.filter(
+    const affectedRuns = this.ownsTaskSessions() ? snapshot.runs.filter(
       (candidate) =>
         candidate.runtimeId === this.descriptor.id &&
         !runtimeSessionIds.has(candidate.sessionId) &&
         candidate.serverInstanceId === serverInstanceId &&
         ACTIVE_RUN_STATUSES.includes(candidate.status)
-    );
+    ) : [];
     for (const run of affectedRuns) {
       await this.flushRunContent(run.id, true);
       const lossPublished = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
@@ -5682,7 +5805,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     // unloaded when that process is fenced, including idle sessions without an
     // active run. Persist that boundary so UI and restart recovery cannot
     // mistake an old provider session for a currently attached one.
-    for (const session of snapshot.agentSessions.filter(
+    for (const session of (this.ownsTaskSessions() ? snapshot.agentSessions : []).filter(
       (candidate) =>
         candidate.runtimeId === this.descriptor.id &&
         !runtimeSessionIds.has(candidate.id) &&
@@ -5711,7 +5834,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         )
       );
     }
-    for (const interaction of snapshot.interactionRequests.filter(
+    for (const interaction of (this.ownsTaskSessions() ? snapshot.interactionRequests : []).filter(
       (candidate) =>
         candidate.serverInstanceId === serverInstanceId &&
         ['PENDING', 'RESPONDING'].includes(candidate.status)
@@ -5747,7 +5870,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     for (const server of agentServersRequiringLossRecovery(
       snapshot,
       this.descriptor.id
-    )) {
+    ).filter((candidate) => this.ownsServerArgv(candidate.argv))) {
       if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
         await this.providerRuntime.updateAgentServer(server.id, {
           status: 'LOST',
@@ -5758,6 +5881,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       }
       await this.handleRuntimeLoss(server.id);
     }
+  }
+
+  private ownsServerArgv(argv: readonly string[]): boolean {
+    const expected = this.options.runtimeLane === 'READ_ONLY'
+      ? this.profile.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS'
+        ? this.profile.readOnlyTurnPolicy.launchArgv
+        : this.profile.argv
+      : this.profile.argv;
+    return JSON.stringify(argv) === JSON.stringify(expected);
   }
 
   private async cancelPendingPermissions(run: RunRecord, client: AcpRpcClient): Promise<void> {
@@ -5929,6 +6061,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     detail = this.redactProviderText(detail);
+    if (!this.ownsTaskSessions()) {
+      const runId = this.activeRuntimePromptRunIds.values().next().value;
+      const run = typeof runId === 'string'
+        ? await this.providerRuntime.getRun(runId)
+        : undefined;
+      if (run) await this.appendRuntimeDiagnostic(run, detail, raw.sequence);
+      return;
+    }
     const runs = await this.taskRuntime.getRunsRequiringRecovery({ runtimeId: this.descriptor.id });
     const run = runs[0];
     if (!run) return;
@@ -5960,9 +6100,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private currentCapabilities(): AgentRuntimeCapabilities {
     const negotiated = this.initializeResponse
       ? {
-          prompt: this.initializeResponse.agentCapabilities.promptCapabilities
+          prompt: this.initializeResponse.agentCapabilities.promptCapabilities,
+          runtimeVersion: this.resolvedRuntime?.version,
+          platform: process.platform
         }
-      : undefined;
+      : this.resolvedRuntime
+        ? { runtimeVersion: this.resolvedRuntime.version, platform: process.platform }
+        : undefined;
     const capabilities = acpCapabilities(this.profile, negotiated);
     const designSkillAccessFailure = this.designSkillAccessFailure();
     return {
@@ -6771,9 +6915,9 @@ export function acpSessionFailureReadiness(
 }
 
 /**
- * ACP does not itself provide an execution sandbox. Until a concrete profile
- * can attest equivalent native isolation, restricted Task Monki policies must
- * fail closed instead of being silently downgraded.
+ * ACP does not itself provide an execution sandbox. Restricted Task Monki
+ * policies fail closed unless an exact profile owns a qualified native mode or
+ * a separate process-scoped sandbox.
  */
 export function assertAcpExecutionPolicy(
   profile: AcpRuntimeProfile,
@@ -6792,7 +6936,13 @@ export function assertAcpExecutionPolicy(
       `${profile.descriptor.displayName} models are owned by provider ${profile.defaultModelProvider}, not ${settings.modelProvider}.`
     );
   }
-  if (settings.sandbox !== 'DANGER_FULL_ACCESS') {
+  const readOnlyPolicy = settings.approvalPolicy === 'NEVER'
+    ? requireAcpReadOnlyTurnPolicy(profile)
+    : undefined;
+  const expectedSandbox = readOnlyPolicy?.kind === 'DEDICATED_PROCESS'
+    ? 'READ_ONLY'
+    : 'DANGER_FULL_ACCESS';
+  if (settings.sandbox !== expectedSandbox) {
     throw new Error(
       `${profile.descriptor.displayName} cannot enforce Task Monki's ${settings.sandbox ?? 'restricted'} filesystem sandbox over ACP. Its process runs with provider-native filesystem permissions.`
     );
@@ -6813,11 +6963,18 @@ export function assertAcpExecutionPolicy(
     );
   }
   if (approvalPolicy === 'NEVER') {
-    const policy = requireAcpReadOnlyTurnPolicy(profile);
+    const policy = readOnlyPolicy!;
     const native = settings.runtimeOptions?.[profile.descriptor.id];
-    if (!isRecord(native) || native.modeId !== policy.modeId) {
+    const valid = isRecord(native) && (
+      policy.kind === 'SESSION_MODE'
+        ? native.modeId === policy.modeId
+        : native.processPolicyId === policy.policyId
+    );
+    if (!valid) {
       throw new Error(
-        `${profile.descriptor.displayName} read-only execution requires native mode ${policy.modeId}.`
+        policy.kind === 'SESSION_MODE'
+          ? `${profile.descriptor.displayName} read-only execution requires native mode ${policy.modeId}.`
+          : `${profile.descriptor.displayName} read-only execution requires process policy ${policy.policyId}.`
       );
     }
   }
@@ -6835,6 +6992,21 @@ export function assertAcpExecutionPolicy(
       `${profile.descriptor.displayName} runtime options cannot contain credentials or opaque _meta. Authenticate through the provider CLI instead.`
     );
   }
+}
+
+function assertAcpTaskExecutionPolicy(
+  profile: AcpRuntimeProfile,
+  settings: AgentExecutionSettings
+): void {
+  if (
+    profile.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS' &&
+    isAcpReadOnlySettings(settings)
+  ) {
+    throw new Error(
+      `${profile.descriptor.displayName} dedicated read-only execution is available only through shared read-only workflows.`
+    );
+  }
+  assertAcpExecutionPolicy(profile, settings);
 }
 
 export function requireAcpReadOnlyTurnPolicy(
@@ -6858,17 +7030,116 @@ export function normalizeAcpReadOnlyExecutionSettings(
     : settings;
 }
 
+function isAcpReadOnlySettings(settings: AgentExecutionSettings): boolean {
+  return settings.approvalPolicy === 'NEVER' || settings.sandbox === 'READ_ONLY';
+}
+
+async function assertDedicatedReadOnlyRoots(
+  profile: AcpRuntimeProfile,
+  roots: readonly string[]
+): Promise<void> {
+  if (profile.readOnlyTurnPolicy?.kind !== 'DEDICATED_PROCESS') return;
+  const writableRoots = [
+    '/tmp',
+    '/private/tmp',
+    '/var/tmp',
+    '/private/var/tmp',
+    '/var/folders',
+    '/private/var/folders',
+    os.tmpdir(),
+    path.join(os.homedir(), '.grok')
+  ].map((value) => path.resolve(value));
+  const realWritableRoots = await Promise.all(writableRoots.map(resolveExistingPath));
+  const protectedRoots = [...roots];
+  for (const root of roots) {
+    protectedRoots.push(...await gitControlPaths(root));
+  }
+  for (const root of new Set(protectedRoots)) {
+    const lexicalRoot = path.resolve(root);
+    const realRoot = await resolveExistingPath(root);
+    if (
+      writableRoots.some(
+        (candidate) =>
+          pathContains(candidate, lexicalRoot) || pathContains(lexicalRoot, candidate)
+      ) ||
+      realWritableRoots.some(
+        (candidate) =>
+          pathContains(candidate, realRoot) || pathContains(realRoot, candidate)
+      )
+    ) {
+      throw new Error(
+        `${profile.descriptor.displayName} read-only work cannot use ${root} because its native sandbox permits writes there.`
+      );
+    }
+  }
+}
+
+async function gitControlPaths(root: string): Promise<string[]> {
+  const dotGit = path.join(root, '.git');
+  let stat;
+  try {
+    stat = await fs.stat(dotGit);
+  } catch (cause) {
+    if (isMissingFile(cause)) return [];
+    throw cause;
+  }
+  let gitDir: string;
+  if (stat.isDirectory()) {
+    gitDir = dotGit;
+  } else if (stat.isFile()) {
+    const content = await fs.readFile(dotGit, 'utf8');
+    const match = /^gitdir:\s*(.+?)\s*$/iu.exec(content);
+    if (!match?.[1]) return [];
+    gitDir = path.resolve(root, match[1]);
+  } else {
+    return [];
+  }
+  const result = [gitDir];
+  try {
+    const commonDir = (await fs.readFile(path.join(gitDir, 'commondir'), 'utf8')).trim();
+    if (commonDir) result.push(path.resolve(gitDir, commonDir));
+  } catch (cause) {
+    if (!isMissingFile(cause)) throw cause;
+  }
+  return result;
+}
+
+function isMissingFile(cause: unknown): boolean {
+  return (
+    typeof cause === 'object' &&
+    cause !== null &&
+    'code' in cause &&
+    (cause.code === 'ENOENT' || cause.code === 'ENOTDIR')
+  );
+}
+
+async function resolveExistingPath(value: string): Promise<string> {
+  const resolved = path.resolve(value);
+  try {
+    return await fs.realpath(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function pathContains(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 function acpReadOnlyExecutionSettings(
   profile: AcpRuntimeProfile,
   settings: AgentExecutionSettings
 ): AgentExecutionSettings {
   const policy = requireAcpReadOnlyTurnPolicy(profile);
   const native = settings.runtimeOptions?.[profile.descriptor.id];
-  const nativeRecord = isRecord(native) ? native : {};
+  const nativeRecord = isRecord(native) ? { ...native } : {};
+  delete nativeRecord.modeId;
+  delete nativeRecord.processPolicyId;
   return {
     ...settings,
     runtimeId: profile.descriptor.id,
-    sandbox: 'DANGER_FULL_ACCESS',
+    sandbox: policy.kind === 'DEDICATED_PROCESS' ? 'READ_ONLY' : 'DANGER_FULL_ACCESS',
     networkAccess: true,
     approvalPolicy: 'NEVER',
     approvalsReviewer: 'user',
@@ -6876,7 +7147,9 @@ function acpReadOnlyExecutionSettings(
       ...settings.runtimeOptions,
       [profile.descriptor.id]: {
         ...nativeRecord,
-        modeId: policy.modeId
+        ...(policy.kind === 'SESSION_MODE'
+          ? { modeId: policy.modeId }
+          : { processPolicyId: policy.policyId })
       }
     }
   };
@@ -7359,7 +7632,9 @@ function isAcpReadOnlyRuntimeSession(
     session.executionContext.repositoryAccess === 'READ_ONLY' &&
     session.executionContext.modelSettings.approvalPolicy === 'NEVER' &&
     isRecord(native) &&
-    native.modeId === policy.modeId
+    (policy.kind === 'SESSION_MODE'
+      ? native.modeId === policy.modeId
+      : native.processPolicyId === policy.policyId)
   );
 }
 

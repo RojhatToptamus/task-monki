@@ -55,15 +55,26 @@ export interface AcpRuntimeProfile {
   /** Access policies Task Monki can enforce for this provider's ACP requests. */
   approvalPolicies?: readonly AcpApprovalPolicy[];
   /**
-   * Exact provider mode used for shared read-only turns. This is a native tool
-   * policy, not an operating-system sandbox. A profile stays unsupported when
-   * its current mode cannot deny repository mutation on its own.
+   * Exact provider policy used for shared read-only turns. Most profiles use a
+   * native session mode. A qualified provider can instead require a separate,
+   * process-scoped sandbox.
    */
-  readOnlyTurnPolicy?: {
-    modeId: string;
-    policyId: string;
-    detail: string;
-  };
+  readOnlyTurnPolicy?:
+    | {
+        kind: 'SESSION_MODE';
+        modeId: string;
+        policyId: string;
+        detail: string;
+      }
+    | {
+        kind: 'DEDICATED_PROCESS';
+        policyId: string;
+        detail: string;
+        runtimeVersion: string;
+        platform: NodeJS.Platform;
+        launchArgv: readonly string[];
+        startupFailurePattern: RegExp;
+      };
   /** Why this profile cannot currently run shared read-only workflows. */
   readOnlyTurnUnavailableReason?: string;
   /**
@@ -199,8 +210,34 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   // Task Monki decides only how to answer those exact requests; Grok still owns
   // its documented global allow/deny rules and the unconfined agent process.
   approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
-  readOnlyTurnUnavailableReason:
-    'Grok plan mode and custom agent profiles can still expose mutating configured MCP tools. This does not deny repository mutation.',
+  readOnlyTurnPolicy: {
+    kind: 'DEDICATED_PROCESS',
+    policyId: 'grok-build/read-only-process@1.0.13',
+    detail:
+      'A separate Grok Build process uses its read-only sandbox, denies direct edit, write, and MCP tools, and denies Task Monki permission requests.',
+    runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+    platform: 'darwin',
+    launchArgv: [
+      '--no-auto-update',
+      '--sandbox',
+      'read-only',
+      '--permission-mode',
+      'dontAsk',
+      '--deny',
+      'Edit(*)',
+      '--deny',
+      'Write(*)',
+      '--deny',
+      'MCPTool(*)',
+      '--no-subagents',
+      '--disable-web-search',
+      'agent',
+      '--no-leader',
+      'stdio'
+    ],
+    startupFailurePattern:
+      /sandbox could not be applied|could not apply the ['"]read-only['"] sandbox profile|refusing to start without sandbox enforcement/iu
+  },
   allowRememberedPermissions: true,
   attachmentTextTransport: 'embedded-resource',
   imageInputQualifications: [
@@ -260,6 +297,7 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   parameterizedModelCatalog: CURSOR_PARAMETERIZED_MODEL_CATALOG,
   approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
   readOnlyTurnPolicy: {
+    kind: 'SESSION_MODE',
     modeId: 'ask',
     policyId: 'cursor-agent-acp/ask-read-only@v1',
     detail:
@@ -319,6 +357,7 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   defaultModel: 'default',
   approvalPolicies: ['on-request', 'never'],
   readOnlyTurnPolicy: {
+    kind: 'SESSION_MODE',
     modeId: 'plan',
     policyId: 'claude-agent-acp/plan-read-only@v1',
     detail:
@@ -389,6 +428,8 @@ export function acpCapabilities(
   profile: AcpRuntimeProfile,
   negotiated?: {
     prompt?: { image?: boolean; audio?: boolean; embeddedContext?: boolean };
+    runtimeVersion?: string;
+    platform?: NodeJS.Platform;
   }
 ): AgentRuntimeCapabilities {
   const negotiationDetail = negotiated
@@ -440,10 +481,17 @@ export function acpCapabilities(
         };
     }
   });
-  const readOnlyPolicy = profile.readOnlyTurnPolicy;
+  const configuredReadOnlyPolicy = profile.readOnlyTurnPolicy;
+  const dedicatedProcessQualified =
+    configuredReadOnlyPolicy?.kind !== 'DEDICATED_PROCESS' ||
+    (negotiated?.runtimeVersion === configuredReadOnlyPolicy.runtimeVersion &&
+      negotiated.platform === configuredReadOnlyPolicy.platform);
+  const readOnlyPolicy = dedicatedProcessQualified
+    ? configuredReadOnlyPolicy
+    : undefined;
   const executionPresets = [
     ...normalExecutionPresets,
-    ...(readOnlyPolicy
+    ...(readOnlyPolicy?.kind === 'SESSION_MODE'
       ? [
           {
             id: 'native-read-only',
@@ -466,8 +514,10 @@ export function acpCapabilities(
     : {
         maturity: 'unsupported' as const,
         detail:
-          profile.readOnlyTurnUnavailableReason ??
-          `${profile.descriptor.displayName} has no qualified native repository-mutation denial policy.`
+          configuredReadOnlyPolicy?.kind === 'DEDICATED_PROCESS'
+            ? `${profile.descriptor.displayName} read-only work requires ${configuredReadOnlyPolicy.runtimeVersion} on ${configuredReadOnlyPolicy.platform}. Found ${negotiated?.runtimeVersion ?? 'an unknown runtime version'} on ${negotiated?.platform ?? 'an unknown platform'}.`
+            : profile.readOnlyTurnUnavailableReason ??
+              `${profile.descriptor.displayName} has no qualified native repository-mutation denial policy.`
       };
   return {
     runtimeId: profile.descriptor.id,
@@ -475,7 +525,9 @@ export function acpCapabilities(
       defaultPresetId: normalExecutionPresets[0]!.id,
       presets: executionPresets,
       detail:
-        'Access modes govern Task Monki responses to reported ACP permission requests. ACP does not provide an enforceable process sandbox.'
+        readOnlyPolicy?.kind === 'DEDICATED_PROCESS'
+          ? 'Normal ACP access modes govern Task Monki responses to reported permission requests. Read-only work uses a separate provider process with its qualified native process sandbox.'
+          : 'Access modes govern Task Monki responses to reported ACP permission requests. ACP does not provide an enforceable process sandbox.'
     },
     readOnlyTurns: readOnlyCapability,
     modelCatalog: {

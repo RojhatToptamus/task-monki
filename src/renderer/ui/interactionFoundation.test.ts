@@ -46,4 +46,18 @@ describe('renderer style policies', () => {
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*\*,\s*\*::before,\s*\*::after[\s\S]*animation-iteration-count: 1 !important/
     );
   });
+
+  it('keeps the Design canvas device presets at their safe maximum widths', async () => {
+    const css = await readRendererStyles();
+
+    expect(css).toMatch(
+      /\.tm-design-canvas__viewport\s*\{[^}]*width: min\(1280px, 100%\)/u
+    );
+    expect(css).toMatch(
+      /\.tm-design-canvas__viewport\[data-device='tablet'\]\s*\{[^}]*width: min\(768px, 100%\)/u
+    );
+    expect(css).toMatch(
+      /\.tm-design-canvas__viewport\[data-device='phone'\]\s*\{[^}]*width: min\(390px, 100%\)/u
+    );
+  });
 });

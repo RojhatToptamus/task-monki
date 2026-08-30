@@ -93,19 +93,12 @@ export function projectAgentExecutionSupport(
 function readOnlyTurnSupport(
   capabilities: AgentRuntimeCapabilities
 ): AgentExecutionSupport {
-  const qualified = capabilities.executionPolicy.presets.some(
-    (preset) =>
-      preset.repositoryMutation === 'DENY' &&
-      preset.approvalPolicy.toLocaleLowerCase() === 'never'
-  );
-  if (qualified && capabilities.readOnlyTurns.maturity === 'stable') {
+  if (capabilities.readOnlyTurns.maturity === 'stable') {
     return supported();
   }
 
   const reason =
-    (capabilities.readOnlyTurns.maturity !== 'stable'
-      ? capabilities.readOnlyTurns.detail?.trim()
-      : undefined) ||
+    capabilities.readOnlyTurns.detail?.trim() ||
     'This agent profile has no qualified native policy that denies repository changes.';
   return unsupported(
     /normal tasks remain available\.?$/iu.test(reason)

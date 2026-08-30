@@ -371,13 +371,14 @@ Codex uses an attested App Server read-only profile.
 OpenCode uses a dedicated `--pure` session and native deny rules.
 Cursor ACP uses native Ask mode and rejects every permission request.
 Claude Agent ACP uses native plan mode and rejects every permission request.
-These four profiles can participate in Discourse.
+Grok Build 1.0.13 on macOS uses a separate process with its native read-only
+sandbox. These five profiles can participate in Discourse.
 
-OpenCode and Cursor still run with normal user permissions.
-Their policies are not operating-system sandboxes.
-Grok plan mode and custom agent profiles can still expose mutating configured
-MCP tools. Grok remains unavailable for Discourse. Normal Grok Tasks and the
-qualified Grok Design pair remain available.
+OpenCode and Cursor still run with normal user permissions. Their policies are
+not operating-system sandboxes. Grok uses a separate sandboxed ACP process for
+Discourse. Normal Grok Tasks and Design turns keep the writable ACP process.
+Task Monki rejects Grok repository and Git control paths in the sandbox's
+writable temp and state locations.
 
 Before delivery, `AgentOrchestrator` records repository state for every context root.
 After terminal output, it compares the current state with that record.

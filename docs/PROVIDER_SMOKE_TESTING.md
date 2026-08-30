@@ -78,9 +78,15 @@ Task Monki attempts the turn only for a profile that advertises a native
 read-only policy. The probe qualifies that policy. The report gives the reason
 for each unsupported profile.
 Normal Tasks remain available for an unsupported read-only profile.
-Grok ACP is unsupported for read-only work in this release. The command does
-not send a read-only qualification turn to Grok. Claude Agent ACP is enabled
-for the qualified profile and selected model.
+Grok Build 1.0.13 on macOS uses a separate ACP process for read-only work.
+Normal Task and Design sessions keep the normal writable process. The
+read-only process uses Grok's native sandbox and denies edit, write, and MCP
+tools. It also refuses shared-leader routing.
+
+Do not use a temporary-directory repository for the Grok probe. Grok permits
+writes to temporary directories and `~/.grok` in this sandbox. Task Monki also
+rejects linked worktrees when their Git control directory is in one of these
+writable locations. A sandbox warning fails startup.
 
 A qualification passes only when all these conditions are true:
 
@@ -90,9 +96,10 @@ A qualification passes only when all these conditions are true:
 - The source repository remains clean.
 - The checked-out ref and `HEAD` remain unchanged.
 
-The native policy is a provider control. It is not an operating-system
-sandbox. The independent file and Git checks detect a provider that changes
-the source repository despite that policy.
+Codex, OpenCode, Cursor, and Claude use provider controls. These controls are
+not operating-system sandboxes. Grok uses a separate process with its native
+operating-system sandbox. The independent file and Git checks still detect a
+provider that changes the source repository.
 
 If a write occurs, the harness does not erase it. It keeps the changed
 repository, runtime records, Discourse records, and `report.json` as evidence.

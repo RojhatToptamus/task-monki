@@ -83,7 +83,7 @@ describe('projectAgentExecutionSupport', () => {
     });
   });
 
-  it('requires the complete current Design and Discourse contracts', () => {
+  it('requires the complete current Design contract and uses the read-only turn capability for Discourse', () => {
     const capabilities = supportedCapabilities();
 
     expect(
@@ -161,8 +161,8 @@ describe('projectAgentExecutionSupport', () => {
           }
         }),
         'DISCOURSE'
-      ).supported
-    ).toBe(false);
+      )
+    ).toEqual({ supported: true });
   });
 
   it('lets the explicit qualification harness bypass only candidate model and image gates', () => {

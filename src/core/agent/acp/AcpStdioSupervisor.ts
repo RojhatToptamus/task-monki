@@ -56,6 +56,10 @@ export interface AcpStdioSupervisorOptions {
   shutdownGraceTimeoutMs?: number;
   shutdownKillTimeoutMs?: number;
   closeHandlingTimeoutMs?: number;
+  /** Exact process argv for a profile-owned execution lane. */
+  launchArgv?: readonly string[];
+  /** Provider diagnostic that proves a required process policy was not applied. */
+  startupFailurePattern?: RegExp;
   /** Runs after the prior close is finalized and before a replacement is spawned. */
   beforeClientReplacementStart?(priorServerInstanceId: string): Promise<void>;
 }
@@ -96,6 +100,7 @@ export class AcpStdioSupervisor {
     (chunk: Buffer) => void
   >();
   private readonly rawDiagnosticTails = new WeakMap<ChildProcessWithoutNullStreams, string>();
+  private readonly startupPolicyFailures = new WeakSet<ChildProcessWithoutNullStreams>();
   private readonly exitEmittedChildren = new WeakSet<ChildProcessWithoutNullStreams>();
   private safetyFence?: {
     child: ChildProcessWithoutNullStreams;
@@ -266,7 +271,7 @@ export class AcpStdioSupervisor {
 
   private async startInternal(): Promise<RunningAcpAgent> {
     const profile = this.options.profile;
-    const argv = [...profile.argv];
+    const argv = [...(this.options.launchArgv ?? profile.argv)];
     const environment = this.options.environment ?? process.env;
     const sensitiveValues = sensitiveEnvironmentValues(
       profile.environmentPolicy,
@@ -285,7 +290,10 @@ export class AcpStdioSupervisor {
         argv,
         runtimeVersion: this.options.runtime.version,
         schemaVersion: ACP_SCHEMA_ARTIFACT_VERSION,
-        runtimeResolution: this.options.runtime.diagnostics
+        runtimeResolution: {
+          ...this.options.runtime.diagnostics,
+          selectedLaunchArgv: argv
+        }
       });
       this.server = server;
       this.assertStartupActive();
@@ -304,12 +312,18 @@ export class AcpStdioSupervisor {
       this.child = child;
       this.rawDiagnosticTails.set(child, '');
       const onDiagnostic = (chunk: Buffer) => {
+        const combined =
+          `${this.rawDiagnosticTails.get(child!) ?? ''}${chunk.toString('utf8')}`;
+        if (
+          this.options.startupFailurePattern &&
+          matchesPattern(this.options.startupFailurePattern, combined)
+        ) {
+          this.startupPolicyFailures.add(child!);
+          this.invalidateGenerationForProcessPolicyFailure(child!);
+        }
         this.rawDiagnosticTails.set(
           child!,
-          boundedTail(
-            `${this.rawDiagnosticTails.get(child!) ?? ''}${chunk.toString('utf8')}`,
-            MAX_DIAGNOSTIC_TAIL_BYTES
-          )
+          boundedTail(combined, MAX_DIAGNOSTIC_TAIL_BYTES)
         );
       };
       this.diagnosticListeners.set(child, onDiagnostic);
@@ -386,6 +400,11 @@ export class AcpStdioSupervisor {
       // initial catalog so callers cannot observe an already-stale response.
       await client.drainInbound();
       this.assertStartupActive();
+      if (this.startupPolicyFailures.has(child)) {
+        throw new Error(
+          'The provider reported that its required process policy could not be applied.'
+        );
+      }
       const extension = profile.sessionModelExtension;
       const profileModelState = extension?.initializeResponseMetaField
         ? normalizeAcpOperationalModelState(
@@ -419,6 +438,11 @@ export class AcpStdioSupervisor {
       }
       this.initializeResponse = initialize;
       this.profileModelState = profileModelState;
+      if (this.startupPolicyFailures.has(child)) {
+        throw new Error(
+          'The provider reported that its required process policy could not be applied.'
+        );
+      }
       const ready = await this.store.updateAgentServer(server.id, {
         status: 'READY',
         runtimeVersion: initialize.agentInfo?.version ?? this.options.runtime.version,
@@ -427,6 +451,11 @@ export class AcpStdioSupervisor {
       });
       this.assertStartupActive();
       this.server = ready;
+      if (this.startupPolicyFailures.has(child)) {
+        throw new Error(
+          'The provider reported that its required process policy could not be applied.'
+        );
+      }
       this.events.emit('ready', ready, initialize);
       return { client, server: ready, initialize, profileModelState };
     } catch (cause) {
@@ -521,6 +550,29 @@ export class AcpStdioSupervisor {
       // child and a permanent fence for all subsequent start attempts.
       await this.fenceUnconfirmedProcess(child, cause).catch(() => undefined);
     }
+  }
+
+  private invalidateGenerationForProcessPolicyFailure(
+    child: ChildProcessWithoutNullStreams
+  ): void {
+    const client = this.client;
+    const server = this.server;
+    if (
+      !client ||
+      !server ||
+      !this.initializeResponse ||
+      !this.isCurrentGeneration(child, client, server.id) ||
+      child.exitCode !== null ||
+      child.signalCode !== null
+    ) return;
+    const reason = 'ACP required process policy was not applied.';
+    this.latchSafetyFence(child, reason);
+    client.close(reason);
+    void terminateAndConfirm(
+      child,
+      this.options.shutdownGraceTimeoutMs ?? 1_000,
+      this.options.shutdownKillTimeoutMs ?? 2_000
+    ).catch((cause) => this.fenceUnconfirmedProcess(child, cause).catch(() => undefined));
   }
 
   private async handleClose(
@@ -777,6 +829,11 @@ async function terminateAndConfirm(
 function boundedTail(value: string, bytes: number): string {
   const buffer = Buffer.from(value);
   return buffer.byteLength <= bytes ? value : buffer.subarray(buffer.byteLength - bytes).toString('utf8');
+}
+
+function matchesPattern(pattern: RegExp, value: string): boolean {
+  pattern.lastIndex = 0;
+  return pattern.test(value);
 }
 
 function startupFailure(cause: unknown, diagnostics: string): string {

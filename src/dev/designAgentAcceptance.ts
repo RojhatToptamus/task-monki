@@ -58,6 +58,8 @@ interface BrowserExpectations {
   screenshotsAtMost?: number;
   viewportsAtLeast?: number;
   mediaSchemes?: Array<'light' | 'dark'>;
+  reducedMotion?: boolean;
+  disclosureEnterToggle?: true;
   actions?: string[];
   operations?: string[];
   noBrowser?: boolean;
@@ -308,7 +310,9 @@ async function main(): Promise<void> {
           'Create a compact settings page for a neighborhood workshop.',
           'Include one disclosure control that changes visible content and keeps aria-expanded accurate.',
           'Provide intentional light and dark color schemes, visible keyboard focus, and reduced-motion support.',
-          'During rendered verification, set light media and capture it, set dark media and capture it, exercise the disclosure, and run the bounded accessibility audit.',
+          'During rendered verification, set light media and capture it. Set dark media and capture it.',
+          'Use the browser focus action on the disclosure, then use the key action with Enter to exercise it.',
+          'Inspect one reduced-motion state and run the bounded accessibility audit.',
           'Use realistic local content and no network service. Build one complete direction without setup questions.'
         ].join(' '),
         model,
@@ -324,7 +328,8 @@ async function main(): Promise<void> {
           openAtLeast: 1,
           screenshotsAtLeast: 2,
           mediaSchemes: ['light', 'dark'],
-          actions: ['click'],
+          reducedMotion: true,
+          disclosureEnterToggle: true,
           operations: ['accessibility']
         },
         sourceChecks: [
@@ -350,8 +355,7 @@ async function main(): Promise<void> {
         acceptedOutcomes: ['READY', 'NO_CHANGE'],
         browser: {
           openAtLeast: 2,
-          screenshotsAtLeast: 1,
-          actions: ['click']
+          screenshotsAtLeast: 1
         },
         sourceChecks: [
           ['preserves dark media', /prefers-color-scheme\s*:\s*dark/iu],
@@ -899,6 +903,9 @@ async function waitAndInspect(
     browserOperations,
     input.browser ?? { openAtLeast: 1 }
   );
+  if (input.browser?.disclosureEnterToggle) {
+    assertDisclosureEnterToggle(input.name, detail.task.runtimeId, runItems);
+  }
   const skillsRead = observedSkills(runItems);
   for (const skill of input.requiredSkills ?? []) {
     if (!skillsRead.includes(skill)) {
@@ -1031,9 +1038,10 @@ export function observedBrowserOperations(
     if (typeof operation !== 'string') return [];
     if (operation === 'set_media') {
       const colorScheme = argumentsValue.colorScheme;
+      const reducedMotion = argumentsValue.reducedMotion;
       return [
         colorScheme === 'light' || colorScheme === 'dark'
-          ? `set_media:${colorScheme}`
+          ? `set_media:${colorScheme}:${reducedMotion === true ? 'reduced' : 'standard'}`
           : operation
       ];
     }
@@ -1041,6 +1049,44 @@ export function observedBrowserOperations(
     const action = argumentsValue.action;
     return [typeof action === 'string' ? `act:${action}` : 'act'];
   });
+}
+
+export function assertDisclosureEnterToggle(
+  name: string,
+  runtimeId: string,
+  items: readonly AgentItemRecord[]
+): void {
+  const actions = items.flatMap((item) => {
+    if (
+      !['DYNAMIC_TOOL_CALL', 'MCP_TOOL_CALL'].includes(item.type) ||
+      item.status !== 'COMPLETED' ||
+      !isInspectDesignToolCall(runtimeId, item)
+    ) {
+      return [];
+    }
+    const payload = item.payload as Record<string, unknown>;
+    const input = inspectDesignArguments(payload);
+    if (input?.operation !== 'act' || typeof input.action !== 'string') return [];
+    return [{ input, output: inspectDesignResultText(runtimeId, payload) }];
+  });
+  for (let index = 0; index < actions.length - 1; index += 1) {
+    const focus = actions[index]!;
+    const enter = actions[index + 1]!;
+    if (
+      focus.input.action !== 'focus' ||
+      typeof focus.input.ref !== 'string' ||
+      enter.input.action !== 'key' ||
+      enter.input.value !== 'Enter'
+    ) {
+      continue;
+    }
+    const before = expandedStateForRef(focus.output, focus.input.ref);
+    const after = expandedStateForRef(enter.output, focus.input.ref);
+    if (before !== undefined && after !== undefined && before !== after) return;
+  }
+  throw new Error(
+    `${name} did not prove that Enter changed the focused disclosure state.`
+  );
 }
 
 export function isInFlightInspectDesignWait(
@@ -1116,6 +1162,44 @@ function inspectDesignArguments(
   return undefined;
 }
 
+function inspectDesignResultText(
+  runtimeId: string,
+  payload: Record<string, unknown>
+): string {
+  const state = isRecord(payload.state) ? payload.state : undefined;
+  const value =
+    runtimeId === 'codex'
+      ? payload.contentItems
+      : runtimeId === 'opencode'
+        ? state?.output
+        : payload.rawOutput;
+  return nestedStrings(value).join('\n');
+}
+
+function nestedStrings(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(nestedStrings);
+  if (!isRecord(value)) return [];
+  return Object.values(value).flatMap(nestedStrings);
+}
+
+function expandedStateForRef(output: string, ref: string): boolean | undefined {
+  const snapshotRef = ref.startsWith('@') ? ref.slice(1) : ref;
+  const refToken = new RegExp(
+    `(?:^|[^A-Za-z0-9_-])ref=${escapeRegExp(snapshotRef)}(?=$|[^A-Za-z0-9_-])`,
+    'u'
+  );
+  const line = output
+    .split('\n')
+    .find((candidate) => refToken.test(candidate) && /\bexpanded=(?:true|false)\b/u.test(candidate));
+  if (!line) return undefined;
+  return /\bexpanded=true\b/u.test(line);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
 function assertBrowserExpectations(
   name: string,
   operations: readonly string[],
@@ -1143,9 +1227,19 @@ function assertBrowserExpectations(
     assertOperationCount(name, operations, 'set_viewport', expected.viewportsAtLeast);
   }
   for (const colorScheme of expected.mediaSchemes ?? []) {
-    if (!operations.includes(`set_media:${colorScheme}`)) {
+    if (countOperation(operations, `set_media:${colorScheme}`) === 0) {
       throw new Error(`${name} did not inspect ${colorScheme} media.`);
     }
+  }
+  if (
+    expected.reducedMotion !== undefined &&
+    !operations.some((operation) =>
+      operation.endsWith(expected.reducedMotion ? ':reduced' : ':standard')
+    )
+  ) {
+    throw new Error(
+      `${name} did not inspect ${expected.reducedMotion ? 'reduced-motion' : 'standard-motion'} media.`
+    );
   }
   for (const action of expected.actions ?? []) {
     if (!operations.includes(`act:${action}`)) {

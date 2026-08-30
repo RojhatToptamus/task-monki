@@ -106,25 +106,10 @@ describe('AgentRuntimeRegistry', () => {
     expect(incomplete.initialize).not.toHaveBeenCalled();
   });
 
-  it('rejects native mutation-denial claims without the shared turn lifecycle', async () => {
+  it('rejects stable shared read-only turns without the shared turn lifecycle', async () => {
     const incomplete = runtime('read-only-runtime');
     const capabilities = unsupportedCapabilities('read-only-runtime');
-    capabilities.executionPolicy = {
-      defaultPresetId: 'read-only',
-      detail: 'Claims native mutation denial.',
-      presets: [
-        {
-          id: 'read-only',
-          label: 'Read only',
-          detail: 'Claims native mutation denial.',
-          sandbox: 'READ_ONLY',
-          repositoryMutation: 'DENY',
-          approvalPolicy: 'never',
-          approvalsReviewer: 'user',
-          networkAccess: 'DISABLED'
-        }
-      ]
-    };
+    capabilities.readOnlyTurns = { maturity: 'stable' };
     incomplete.capabilities = vi.fn().mockResolvedValue(capabilities);
 
     const [failure] = await new AgentRuntimeRegistry(

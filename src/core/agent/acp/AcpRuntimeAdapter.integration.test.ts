@@ -88,6 +88,268 @@ function runtimeFixture(store: FileTaskStore): {
   return fixture;
 }
 
+async function createDualProcessFixture() {
+  const directory = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'task-monki-acp-dual-process-')
+  );
+  temporaryDirectories.push(directory);
+  const agentScript = path.join(directory, 'dual-process-agent.cjs');
+  const messageLog = path.join(directory, 'messages.jsonl');
+  await fs.writeFile(
+    agentScript,
+    readOnlyRuntimeAgentSource(messageLog, true),
+    { mode: 0o600 }
+  );
+  const runtimeId = 'test-acp-dual-process';
+  const profile: AcpRuntimeProfile = {
+    ...TEST_ACP_PROFILE,
+    descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+    attachmentTextTransport: 'text-block',
+    executableCandidates: [process.execPath],
+    argv: [agentScript, 'writable-lane'],
+    readOnlyTurnPolicy: {
+      kind: 'DEDICATED_PROCESS',
+      policyId: 'test-acp/process-read-only@v1',
+      detail: 'A separate test process owns read-only execution.',
+      runtimeVersion: process.version,
+      platform: process.platform,
+      launchArgv: [agentScript, 'read-only-lane'],
+      startupFailurePattern: /sandbox unavailable/iu
+    }
+  };
+  const store = createTestStore(path.join(directory, 'store'));
+  const { runtimeStore, runtime } = runtimeFixture(store);
+  const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+    cwd: directory,
+    requestTimeoutMs: 1_000,
+    runtimeResolver: async () => ({
+      executable: process.execPath,
+      version: process.version,
+      diagnostics: {
+        selectedExecutable: process.execPath,
+        selectedSource: 'test',
+        selectedVersion: process.version,
+        selectedLaunchArgv: [agentScript, 'writable-lane'],
+        requiredCapabilities: ['ACP protocolVersion=1'],
+        probes: []
+      }
+    })
+  });
+  await adapter.initialize();
+  await adapter.discoverModels();
+  const repository = await addTestRepository(store, directory);
+  let normalOrdinal = 0;
+
+  const startSharedTurn = async (
+    prompt: string,
+    expectedStatus: 'RUNNING' | 'COMPLETED'
+  ) => {
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const owner = {
+      kind: 'PROMPT_REFINEMENT' as const,
+      requestId: randomUUID()
+    };
+    const context = await adapter.buildExecutionContext({
+      sessionId,
+      primaryCwd: process.cwd(),
+      readRoots: [{ canonicalPath: process.cwd(), kind: 'EMPTY_MANAGED' }],
+      modelSettings: {
+        runtimeId,
+        model: 'default',
+        modelProvider: 'test-provider'
+      },
+      clientOperationId: `dual-process-context:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await runtimeStore.prepareRuntimeTurn({
+      session: {
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId,
+          model: 'default',
+          executionContext: context
+        }),
+        executionContext: context,
+        clientOperationId: `dual-process-session:${sessionId}`,
+        runtimeId,
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: context.modelSettings
+      },
+      run: {
+        id: runId,
+        owner,
+        scope: { kind: 'PROMPT_REFINEMENT', requestId: owner.requestId },
+        sessionId,
+        sessionAccessEpoch: 1,
+        purpose: 'PROMPT_REFINEMENT',
+        generationKey: `dual-process:${runId}`,
+        clientOperationId: `dual-process-run:${runId}`,
+        requestedSettings: context.modelSettings,
+        promptArtifactId: `prompt-${runId}`,
+        outputArtifactId: `output-${runId}`,
+        diagnosticArtifactId: `diagnostic-${runId}`
+      },
+      prompt,
+      priority: 'TASK_FOREGROUND',
+      queueOperationId: `dual-process-queue:${runId}`
+    });
+    const starting = await runtimeStore.updateRun(
+      runId,
+      prepared.run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: new Date().toISOString()
+      },
+      `dual-process-starting:${runId}`
+    );
+    await adapter.startRuntimeTurn({
+      session: prepared.session,
+      run: starting,
+      executionContext: context,
+      prompt,
+      attachments: []
+    });
+    const run = await waitFor(async () => {
+      const candidate = await runtimeStore.getRun(runId);
+      return candidate?.status === expectedStatus ? candidate : undefined;
+    });
+    const session = await runtimeStore.getSession(sessionId);
+    if (!session) throw new Error('Expected the shared runtime session.');
+    return { run, session };
+  };
+
+  const prepareNormalTurn = async (
+    prompt: string,
+    settingsOverride: Partial<AgentExecutionSettings> = {}
+  ) => {
+    normalOrdinal += 1;
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      ...settingsOverride
+    };
+    const task = await store.createTask({
+      title: `Dual process normal turn ${normalOrdinal}`,
+      prompt,
+      repositoryId: repository.id,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: `codex/dual-process-${normalOrdinal}`,
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const queued = await createTestRun(store, {
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt,
+      requestedSettings: settings
+    });
+    return { settings, task, iteration, worktree, session, queued };
+  };
+
+  const startNormalTurn = async (
+    prompt: string,
+    settingsOverride: Partial<AgentExecutionSettings> = {}
+  ) => {
+    const prepared = await prepareNormalTurn(prompt, settingsOverride);
+    await adapter.startTurn({
+      localRunId: prepared.queued.id,
+      session: { localSessionId: prepared.session.id },
+      mode: 'IMPLEMENTATION',
+      prompt,
+      authoritativeGoal: prompt,
+      settings: prepared.settings,
+      attachments: []
+    });
+    const run = await waitFor(async () => {
+      const candidate = await getTestRun(store, prepared.queued.id);
+      return candidate?.status === 'RUNNING' ? candidate : undefined;
+    });
+    const activeSession = await runtime.getAgentSession(prepared.session.id);
+    if (!activeSession) throw new Error('Expected the active Task session.');
+    return { run, session: activeSession };
+  };
+
+  const cancelSharedTurn = async (
+    target: Awaited<ReturnType<typeof startSharedTurn>>
+  ) => {
+    const interrupting = await runtimeStore.updateRun(
+      target.run.id,
+      target.run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      `dual-process-interrupt:${target.run.id}`
+    );
+    await adapter.interruptRuntimeTurn({
+      session: target.session,
+      run: interrupting
+    });
+    await waitFor(async () =>
+      (await runtimeStore.getRun(target.run.id))?.status === 'INTERRUPTED'
+        ? true
+        : undefined
+    );
+  };
+
+  const loseLane = async (lane: 'DEFAULT' | 'READ_ONLY') => {
+    const internals = adapter as unknown as {
+      readOnlyLane: {
+        quarantineRuntimeGeneration(reason: string, drainInbound: boolean): Promise<void>;
+      };
+      quarantineRuntimeGeneration(reason: string, drainInbound: boolean): Promise<void>;
+    };
+    const owner = lane === 'READ_ONLY' ? internals.readOnlyLane : internals;
+    await owner.quarantineRuntimeGeneration(`Injected ${lane} process loss.`, true);
+  };
+
+  return {
+    adapter,
+    agentScript,
+    messageLog,
+    runtime,
+    runtimeStore,
+    store,
+    startSharedTurn,
+    prepareNormalTurn,
+    startNormalTurn,
+    cancelSharedTurn,
+    loseLane,
+    async runningServers() {
+      return (await runtimeStore.snapshot()).servers.filter((server) =>
+        ['READY', 'RUNNING', 'DEGRADED'].includes(server.status)
+      );
+    }
+  };
+}
+
 function createTestAdapter(
   store: FileTaskStore,
   appEvents: AppEventBus,
@@ -508,6 +770,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
       readOnlyTurnPolicy: {
+        kind: 'SESSION_MODE',
         modeId: 'ask',
         policyId: 'test-acp/ask-read-only@v1',
         detail: 'Test Ask mode denies repository mutation.'
@@ -846,6 +1109,277 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     }
   });
 
+  it('rejects Grok read-only roots that its process sandbox permits writing', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-read-only-roots-')
+    );
+    temporaryDirectories.push(directory);
+    const runtimeId = 'test-acp-process-read-only-roots';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      readOnlyTurnPolicy: {
+        kind: 'DEDICATED_PROCESS',
+        policyId: 'test-acp/process-read-only@v1',
+        detail: 'A separate test process owns read-only execution.',
+        runtimeVersion: process.version,
+        platform: process.platform,
+        launchArgv: ['--read-only-acp'],
+        startupFailurePattern: /sandbox unavailable/iu
+      }
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: process.cwd()
+    });
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider'
+    };
+    const build = (root: string) => adapter.buildExecutionContext({
+      sessionId: randomUUID(),
+      primaryCwd: root,
+      readRoots: [{ canonicalPath: root, kind: 'EMPTY_MANAGED' }],
+      modelSettings: settings,
+      clientOperationId: `read-only-root:${root}`,
+      attachments: []
+    });
+
+    try {
+      await expect(build(process.cwd())).resolves.toMatchObject({
+        repositoryAccess: 'READ_ONLY',
+        modelSettings: {
+          sandbox: 'READ_ONLY',
+          approvalPolicy: 'NEVER',
+          runtimeOptions: {
+            [runtimeId]: { processPolicyId: 'test-acp/process-read-only@v1' }
+          }
+        }
+      });
+      for (const root of [
+        '/tmp/task-monki-repository',
+        '/var/tmp/task-monki-repository',
+        path.join(os.tmpdir(), 'task-monki-repository'),
+        path.join(os.homedir(), '.grok', 'task-monki-repository'),
+        os.homedir()
+      ]) {
+        await expect(build(root)).rejects.toThrow(
+          'because its native sandbox permits writes there'
+        );
+      }
+      const linkedWorktree = await fs.mkdtemp(
+        path.join(process.cwd(), '.task-monki-acp-linked-worktree-')
+      );
+      temporaryDirectories.push(linkedWorktree);
+      await fs.writeFile(
+        path.join(linkedWorktree, '.git'),
+        `gitdir: ${path.join(os.tmpdir(), 'writable-git-control')}\n`
+      );
+      await expect(build(linkedWorktree)).rejects.toThrow(
+        'because its native sandbox permits writes there'
+      );
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('keeps dedicated read-only turns on a separate ACP process lane', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const shared = await fixture.startSharedTurn(
+        'Read the repository without changing it.',
+        'COMPLETED'
+      );
+      const runningServers = await fixture.runningServers();
+      expect(runningServers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            argv: [fixture.agentScript, 'writable-lane']
+          }),
+          expect.objectContaining({
+            argv: [fixture.agentScript, 'read-only-lane']
+          })
+        ])
+      );
+      const readOnlyServer = runningServers.find(
+        (server) => server.argv.at(-1) === 'read-only-lane'
+      );
+      expect(shared.run.serverInstanceId).toBe(readOnlyServer?.id);
+
+      await fixture.adapter.releaseSession({
+        localSessionId: shared.session.id,
+        providerSessionId: shared.session.providerSessionId
+      });
+      const afterRelease = await fixture.runtimeStore.snapshot();
+      expect(
+        afterRelease.servers.find((server) => server.id === readOnlyServer?.id)
+          ?.status
+      ).toBe('EXITED');
+      expect(
+        afterRelease.servers.find(
+          (server) => server.argv.at(-1) === 'writable-lane'
+        )?.status
+      ).toBe('READY');
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('does not allow Task settings to select the shared read-only process lane', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const readOnlySettings: Partial<AgentExecutionSettings> = {
+        sandbox: 'READ_ONLY',
+        approvalPolicy: 'NEVER',
+        runtimeOptions: {
+          'test-acp-dual-process': {
+            processPolicyId: 'test-acp/process-read-only@v1'
+          }
+        }
+      };
+      const prepared = await fixture.prepareNormalTurn(
+        'Do not start this Task turn.',
+        readOnlySettings
+      );
+      const before = await readProtocolMessagesFromLog(fixture.messageLog);
+      await expect(
+        fixture.adapter.createSession({
+          runtimeId: 'test-acp-dual-process',
+          localSessionId: prepared.session.id,
+          taskId: prepared.task.id,
+          iterationId: prepared.iteration.id,
+          worktreeId: prepared.worktree.id,
+          worktreePath: prepared.worktree.worktreePath,
+          settings: prepared.settings
+        })
+      ).rejects.toThrow(
+        'dedicated read-only execution is available only through shared read-only workflows'
+      );
+      await expect(
+        fixture.adapter.startTurn({
+          localRunId: prepared.queued.id,
+          session: { localSessionId: prepared.session.id },
+          mode: 'IMPLEMENTATION',
+          prompt: prepared.task.prompt,
+          authoritativeGoal: prepared.task.prompt,
+          settings: prepared.settings,
+          attachments: []
+        })
+      ).rejects.toThrow(
+        'dedicated read-only execution is available only through shared read-only workflows'
+      );
+      expect(await readProtocolMessagesFromLog(fixture.messageLog)).toEqual(before);
+      expect(await fixture.runningServers()).toEqual([
+        expect.objectContaining({ argv: [fixture.agentScript, 'writable-lane'] })
+      ]);
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('routes shared cancellation only to the read-only process lane', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation on the read-only lane',
+        'RUNNING'
+      );
+      await fixture.cancelSharedTurn(shared);
+      const messages = await readProtocolMessagesFromLog(fixture.messageLog);
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          method: 'session/cancel',
+          params: { sessionId: shared.session.providerSessionId }
+        })
+      );
+      const server = (await fixture.runtimeStore.snapshot()).servers.find(
+        (candidate) => candidate.id === shared.run.serverInstanceId
+      );
+      expect(server?.argv).toEqual([fixture.agentScript, 'read-only-lane']);
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('isolates read-only process loss from an active normal Task', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const normal = await fixture.startNormalTurn(
+        'wait for cancellation on the writable lane'
+      );
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation before read-only process loss',
+        'RUNNING'
+      );
+      await fixture.loseLane('READ_ONLY');
+
+      expect(await fixture.runtimeStore.getRun(shared.run.id)).toMatchObject({
+        status: 'RECOVERY_REQUIRED',
+        recoveryState: 'REQUIRES_USER_ACTION'
+      });
+      expect(await getTestRun(fixture.store, normal.run.id)).toMatchObject({
+        status: 'RUNNING'
+      });
+      expect(
+        await fixture.runtime.getAgentSession(normal.session.id)
+      ).toMatchObject({ status: 'ACTIVE' });
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('isolates normal Task process loss from an active shared turn', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const normal = await fixture.startNormalTurn(
+        'wait for cancellation before writable process loss'
+      );
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation on the read-only lane',
+        'RUNNING'
+      );
+      await fixture.loseLane('DEFAULT');
+
+      expect(await getTestRun(fixture.store, normal.run.id)).toMatchObject({
+        status: 'RECOVERY_REQUIRED',
+        recoveryState: 'REQUIRES_USER_ACTION'
+      });
+      expect(await fixture.runtimeStore.getRun(shared.run.id)).toMatchObject({
+        status: 'RUNNING'
+      });
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('stops both ACP process lanes during adapter shutdown', async () => {
+    const fixture = await createDualProcessFixture();
+    let stopped = false;
+    try {
+      const normal = await fixture.startNormalTurn(
+        'wait for cancellation until application shutdown'
+      );
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation until application shutdown',
+        'RUNNING'
+      );
+      await fixture.adapter.shutdown();
+      stopped = true;
+
+      const afterShutdown = await fixture.runtimeStore.snapshot();
+      for (const serverId of [
+        normal.run.serverInstanceId,
+        shared.run.serverInstanceId
+      ]) {
+        expect(
+          afterShutdown.servers.find((server) => server.id === serverId)?.status
+        ).toBe('EXITED');
+      }
+    } finally {
+      if (!stopped) await fixture.adapter.shutdown();
+    }
+  });
   it('delivers a verified text attachment on a normal turn and reuses the ACP session', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-acp-attachment-turn-')
@@ -5710,7 +6244,10 @@ input.on('line', (line) => {
 `;
 }
 
-function readOnlyRuntimeAgentSource(messageLog: string): string {
+function readOnlyRuntimeAgentSource(
+  messageLog: string,
+  confirmCancellation = false
+): string {
   return `
 const fs = require('node:fs');
 const readline = require('node:readline');
@@ -5722,6 +6259,7 @@ const record = (message) => fs.appendFileSync(
 );
 let promptId;
 let nextSessionId = 0;
+const sessionNamespace = (process.argv[2] ? process.argv[2] + '-' : '') + process.pid + '-';
 input.on('line', (line) => {
   const message = JSON.parse(line);
   record(message);
@@ -5736,7 +6274,7 @@ input.on('line', (line) => {
   if (message.method === 'session/new') {
     nextSessionId += 1;
     send({ jsonrpc: '2.0', id: message.id, result: {
-      sessionId: 'read-only-runtime-session-' + nextSessionId,
+      sessionId: sessionNamespace + 'read-only-runtime-session-' + nextSessionId,
       modes: {
         currentModeId: 'agent',
         availableModes: [
@@ -5779,6 +6317,7 @@ input.on('line', (line) => {
     return;
   }
   if (message.method === 'session/cancel') {
+    ${confirmCancellation ? "send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'cancelled' } });" : ''}
     return;
   }
   if (message.method === 'session/close') {

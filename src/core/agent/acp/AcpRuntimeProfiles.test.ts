@@ -36,6 +36,41 @@ describe('ACP runtime profiles', () => {
       'stdio'
     ]);
     expect(GROK_ACP_PROFILE.defaultModel).toBe('grok-build');
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      kind: 'DEDICATED_PROCESS',
+      launchArgv: expect.arrayContaining([
+        '--no-leader',
+        '--sandbox',
+        'read-only',
+        '--no-subagents'
+      ])
+    });
+    if (GROK_ACP_PROFILE.readOnlyTurnPolicy?.kind !== 'DEDICATED_PROCESS') {
+      throw new Error('Expected the Grok dedicated read-only process policy.');
+    }
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy.launchArgv).toEqual([
+      '--no-auto-update',
+      '--sandbox',
+      'read-only',
+      '--permission-mode',
+      'dontAsk',
+      '--deny',
+      'Edit(*)',
+      '--deny',
+      'Write(*)',
+      '--deny',
+      'MCPTool(*)',
+      '--no-subagents',
+      '--disable-web-search',
+      'agent',
+      '--no-leader',
+      'stdio'
+    ]);
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy.launchArgv.slice(-3)).toEqual([
+      'agent',
+      '--no-leader',
+      'stdio'
+    ]);
     expect(CURSOR_ACP_PROFILE.argv).toEqual(['acp']);
     expect(CURSOR_ACP_PROFILE.executableCandidates).toEqual(['cursor-agent']);
     expect(CURSOR_ACP_PROFILE.launchContractProbe.argv).toEqual(['help', 'acp']);
@@ -175,6 +210,20 @@ describe('ACP runtime profiles', () => {
         expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' })
       ]
     });
+    expect(acpCapabilities(GROK_ACP_PROFILE).readOnlyTurns).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('unknown runtime version')
+    });
+    const qualifiedGrok = acpCapabilities(GROK_ACP_PROFILE, {
+      runtimeVersion: GROK_ACP_PROFILE.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS'
+        ? GROK_ACP_PROFILE.readOnlyTurnPolicy.runtimeVersion
+        : undefined,
+      platform: 'darwin'
+    });
+    expect(qualifiedGrok.readOnlyTurns).toMatchObject({ maturity: 'stable' });
+    expect(qualifiedGrok.executionPolicy.presets).not.toContainEqual(
+      expect.objectContaining({ repositoryMutation: 'DENY' })
+    );
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' }),
       expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' }),
@@ -189,7 +238,7 @@ describe('ACP runtime profiles', () => {
     ]);
   });
 
-  it('qualifies only the provider profiles with proven native read-only modes', () => {
+  it('qualifies only proven native read-only modes and exact process policies', () => {
     expect(CURSOR_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
       modeId: 'ask',
       policyId: 'cursor-agent-acp/ask-read-only@v1'
@@ -204,21 +253,20 @@ describe('ACP runtime profiles', () => {
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE)).toMatchObject({
       readOnlyTurns: { maturity: 'stable' }
     });
-    for (const profile of [GROK_ACP_PROFILE]) {
-      expect(profile.readOnlyTurnPolicy).toBeUndefined();
-      expect(profile.readOnlyTurnUnavailableReason).toBeTruthy();
-      expect(acpCapabilities(profile)).toMatchObject({
-        readOnlyTurns: {
-          maturity: 'unsupported',
-          detail: profile.readOnlyTurnUnavailableReason
-        }
-      });
-      expect(
-        acpCapabilities(profile).executionPolicy.presets.some(
-          (preset) => preset.repositoryMutation === 'DENY'
-        )
-      ).toBe(false);
-    }
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      kind: 'DEDICATED_PROCESS',
+      runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+      platform: 'darwin'
+    });
+    expect(acpCapabilities(GROK_ACP_PROFILE)).toMatchObject({
+      readOnlyTurns: { maturity: 'unsupported' }
+    });
+    expect(
+      acpCapabilities(GROK_ACP_PROFILE, {
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        platform: 'darwin'
+      })
+    ).toMatchObject({ readOnlyTurns: { maturity: 'stable' } });
   });
 
   it('maps provider-neutral read-only resolution to Cursor Ask without changing normal Tasks', () => {
@@ -249,13 +297,21 @@ describe('ACP runtime profiles', () => {
     expect(normalizeAcpReadOnlyExecutionSettings(CURSOR_ACP_PROFILE, normal)).toBe(
       normal
     );
-    expect(() =>
+    expect(
       normalizeAcpReadOnlyExecutionSettings(GROK_ACP_PROFILE, {
         ...normal,
         runtimeId: GROK_ACP_PROFILE.descriptor.id,
         sandbox: 'READ_ONLY'
       })
-    ).toThrow(GROK_ACP_PROFILE.readOnlyTurnUnavailableReason);
+    ).toMatchObject({
+      sandbox: 'READ_ONLY',
+      approvalPolicy: 'NEVER',
+      runtimeOptions: {
+        'grok-acp': {
+          processPolicyId: 'grok-build/read-only-process@1.0.13'
+        }
+      }
+    });
   });
 
   it('gates provider-owned remembered permission choices to Cursor and Grok', () => {
