@@ -1056,7 +1056,7 @@ async function managedGit(
   options: GitExecutionOptions = {}
 ): Promise<string> {
   const nullDevice = process.platform === 'win32' ? 'NUL' : os.devNull;
-  return git(cwd, argv, {
+  return git(cwd, ['-c', 'core.longpaths=true', ...argv], {
     ...options,
     env: {
       GIT_CONFIG_NOSYSTEM: '1',

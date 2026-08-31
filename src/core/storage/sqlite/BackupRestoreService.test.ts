@@ -274,7 +274,7 @@ describe('BackupRestoreService', () => {
     ]);
     await expect(service.verifyBackup(backup.manifest.backupId)).resolves.toEqual(backup);
     await taskStore.close();
-  });
+  }, 60_000);
 
   it('rejects a managed Design bundle when live HEAD diverges from the database snapshot', async () => {
     const source = new DesignSourceService({

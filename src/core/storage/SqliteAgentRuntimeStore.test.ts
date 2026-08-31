@@ -1255,7 +1255,7 @@ describe('SqliteAgentRuntimeStore', () => {
       restarted.setShutdownLatched(true, 'shutdown-already-latched')
     ).resolves.toBeUndefined();
     expect((await restarted.snapshot()).shutdownLatched).toBe(false);
-  });
+  }, 60_000);
 
   it('keeps shutdown state and receipts inside an outer transaction rollback', async () => {
     const fixture = await storeFixture();

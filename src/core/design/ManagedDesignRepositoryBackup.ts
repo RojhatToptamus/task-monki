@@ -632,7 +632,7 @@ async function managedGit(
     },
     ...additional
   };
-  return git(cwd, argv, options);
+  return git(cwd, ['-c', 'core.longpaths=true', ...argv], options);
 }
 
 function clean(value: string): string {
