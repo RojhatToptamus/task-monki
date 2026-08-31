@@ -530,7 +530,14 @@ async function readStablePrivateFile(filePath: string, maxBytes: number): Promis
 }
 
 async function sealPrivateFile(filePath: string, mode: number): Promise<void> {
-  const handle = await fs.open(filePath, 'r');
+  // Node opens a read-only Windows handle without the access required by
+  // FlushFileBuffers, so FileHandle.sync() fails with EPERM. These files are
+  // owned by Task Monki; use a writable handle on Windows while retaining the
+  // read-only POSIX path needed when a copied file is still mode 0400.
+  const handle = await fs.open(
+    filePath,
+    process.platform === 'win32' ? 'r+' : 'r'
+  );
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || !isOwnedByCurrentUser(stat)) {
@@ -556,7 +563,10 @@ async function syncDirectoryTree(directory: string): Promise<void> {
     if (!entry.isFile()) {
       throw new Error('Restored managed Design repository contains an unsafe filesystem entry.');
     }
-    const handle = await fs.open(entryPath, 'r');
+    const handle = await fs.open(
+      entryPath,
+      process.platform === 'win32' ? 'r+' : 'r'
+    );
     try {
       await handle.sync();
     } finally {

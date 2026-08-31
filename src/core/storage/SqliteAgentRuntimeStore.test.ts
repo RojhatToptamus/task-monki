@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   AGENT_RUNTIME_LIMITS,
   type AgentExecutionContext,
@@ -17,6 +17,12 @@ import type {
 import { SqliteAgentRuntimeStore } from './SqliteAgentRuntimeStore';
 import { AppDatabase } from './sqlite/AppDatabase';
 import { ManagedFileStore } from './sqlite/ManagedFileStore';
+
+const fixtureCleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  await Promise.allSettled(fixtureCleanups.splice(0).map((cleanup) => cleanup()));
+});
 
 describe('SqliteAgentRuntimeStore', () => {
   it('creates and restarts one canonical Task runtime projection with atomic artifacts', async () => {
@@ -1829,18 +1835,27 @@ async function storeFixture(root?: string) {
   let id = 0;
   const database = await AppDatabase.open(path.join(directory, 'task-monki.sqlite'));
   const managedFiles = new ManagedFileStore(path.join(directory, 'managed-files'));
+  const stores = new Set<SqliteAgentRuntimeStore>();
   const options = {
     now: () => times[timeIndex++]!,
     createId: () =>
       `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`
   };
-  const openStore = () =>
-    new SqliteAgentRuntimeStore(
+  const openStore = () => {
+    const store = new SqliteAgentRuntimeStore(
       database,
       managedFiles,
       path.join(directory, 'protocol-journals'),
       options
     );
+    stores.add(store);
+    return store;
+  };
+  fixtureCleanups.push(async () => {
+    await Promise.allSettled([...stores].map((candidate) => candidate.close()));
+    await database.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
   const store = openStore();
   await store.snapshot();
   return { root: directory, store, database, managedFiles, openStore };

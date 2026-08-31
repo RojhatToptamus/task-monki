@@ -1839,7 +1839,12 @@ async function lstatIfExists(filePath: string) {
 }
 
 async function makeMutablePrivateFile(filePath: string): Promise<void> {
-  const handle = await fs.open(filePath, 'r');
+  // Windows requires write access for FileHandle.sync(). POSIX must open the
+  // copied mode-0400 file before changing it back to the live mutable mode.
+  const handle = await fs.open(
+    filePath,
+    process.platform === 'win32' ? 'r+' : 'r'
+  );
   try {
     await enforcePosixMode(handle, 0o600);
     await handle.sync();
