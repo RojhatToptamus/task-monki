@@ -4,7 +4,10 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentModel, AgentRuntimeCapabilities } from '../../shared/contracts';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import {
+  createScriptedAgentRuntimeFixture,
+  ScriptedAgentRuntimeAdapter
+} from '../../testSupport/taskMonkiScenario';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
@@ -47,13 +50,15 @@ describe('TaskManagerService runtime execution defaults', () => {
         path.join(os.tmpdir(), 'task-monki-runtime-defaults-')
       );
       const store = new FileTaskStore(path.join(dir, 'store'));
-      const adapter = new ScriptedAgentRuntimeAdapter(store);
+      const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+      const adapter = scriptedRuntime.adapter;
       Object.defineProperty(adapter, 'descriptor', { value: descriptor });
       vi.spyOn(adapter, 'capabilities').mockResolvedValue(
         capabilities as AgentRuntimeCapabilities
       );
       const resolveExecution = vi.spyOn(adapter, 'resolveExecution');
       const service = new TaskManagerService(store, dir, undefined, {
+        ...scriptedRuntime.serviceOptions,
         agentRuntimeAdapters: [adapter]
       });
 
@@ -105,7 +110,8 @@ describe('TaskManagerService runtime execution defaults', () => {
       path.join(os.tmpdir(), 'task-monki-runtime-executable-settings-')
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
     });
@@ -120,7 +126,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     ]);
     const configureRuntime = vi.fn(async () => undefined);
     Object.defineProperty(adapter, 'configureRuntime', { value: configureRuntime });
-    const cursorAdapter = new ScriptedAgentRuntimeAdapter(store);
+    const cursorAdapter = new ScriptedAgentRuntimeAdapter(scriptedRuntime.taskRuntime);
     Object.defineProperty(cursorAdapter, 'descriptor', {
       value: TEST_ACP_PROFILE.descriptor
     });
@@ -136,6 +142,7 @@ describe('TaskManagerService runtime execution defaults', () => {
       runtimeExecutablePaths: { opencode: '/opt/agents/opencode' }
     });
     const service = new TaskManagerService(store, dir, undefined, {
+      ...scriptedRuntime.serviceOptions,
       agentRuntimeAdapters: [adapter, cursorAdapter],
       appSettingsStore: settingsStore,
       agentProviderStartupDisabledReason: 'settings-only test'
@@ -178,7 +185,8 @@ describe('TaskManagerService runtime execution defaults', () => {
       path.join(os.tmpdir(), 'task-monki-runtime-executable-override-')
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
     });
@@ -186,6 +194,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     const configureRuntime = vi.fn(async () => undefined);
     Object.defineProperty(adapter, 'configureRuntime', { value: configureRuntime });
     const service = new TaskManagerService(store, dir, undefined, {
+      ...scriptedRuntime.serviceOptions,
       agentRuntimeAdapters: [adapter],
       openCodePath: '/debug/overrides/opencode',
       appSettingsStore: new MemoryAppSettingsStore({
@@ -208,13 +217,15 @@ describe('TaskManagerService runtime execution defaults', () => {
       path.join(os.tmpdir(), 'task-monki-browser-runtime-create-')
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
     });
     vi.spyOn(adapter, 'capabilities').mockResolvedValue(opencodeCapabilities());
     const resolveExecution = vi.spyOn(adapter, 'resolveExecution');
     const service = new TaskManagerService(store, dir, undefined, {
+      ...scriptedRuntime.serviceOptions,
       agentRuntimeAdapters: [adapter],
       allowAgentNetworkAccess: false
     });
@@ -237,7 +248,8 @@ describe('TaskManagerService runtime execution defaults', () => {
       path.join(os.tmpdir(), 'task-monki-browser-runtime-settings-')
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
     });
@@ -248,6 +260,7 @@ describe('TaskManagerService runtime execution defaults', () => {
       defaultRuntimeId: 'opencode'
     });
     const service = new TaskManagerService(store, dir, undefined, {
+      ...scriptedRuntime.serviceOptions,
       agentRuntimeAdapters: [adapter],
       appSettingsStore: settingsStore,
       allowAgentNetworkAccess: false
@@ -269,8 +282,9 @@ describe('TaskManagerService runtime execution defaults', () => {
       path.join(os.tmpdir(), 'task-monki-runtime-identity-conflict-')
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+      ...scriptedRuntime.serviceOptions
     });
 
     await expect(

@@ -18,8 +18,10 @@ offers:
 
 The generated draft can be edited, regenerated, discarded, or closed. Close
 leaves the repository unchanged and keeps the last generated draft in
-main-process memory for the current app session. Discard cancels active
-generation and removes the transient draft.
+main-process memory for the current app session. Stop cancels active generation
+and keeps the last valid draft, when one exists. Discard removes an idle draft.
+Task deletion cancels and joins active generation before it removes all draft
+state.
 
 Only **Accept & save recipe** writes to the repository. Acceptance validates
 the exact reviewed YAML, exclusively creates `.taskmonki/preview.yaml`, and
@@ -32,7 +34,7 @@ The generator receives versioned support material from
 `PreviewRecipeGenerationSupport.ts`:
 
 - a stable behavioral instruction;
-- the machine-readable `task-monki-preview-recipe-generation/v3` authoring
+- the machine-readable `task-monki-preview-recipe-generation/v4` authoring
   contract;
 - deterministic `task-monki-preview-framework-capabilities/v2` compatibility
   facts derived from sanitized repository manifests;
@@ -41,9 +43,10 @@ The generator receives versioned support material from
 - safety, evidence, omission, and error rules.
 
 The authoring contract is guidance for the agent, not an executable schema.
-`PreviewRecipeLoader.parsePreviewRecipe` remains the only semantic recipe
-parser and final authority. Every bundled example is tested against it so
-support material cannot silently drift away from accepted syntax.
+`PreviewRecipeLoader.parsePreviewRecipe` remains the structural recipe
+authority. Runtime readiness confirms that the application listens on the
+allocated port. Every bundled example is tested against the parser so support
+material cannot silently drift away from accepted syntax.
 
 Framework compatibility facts are versioned separately from the recipe
 schema. The first profile covers direct Next.js 15-16 development scripts. It
@@ -54,6 +57,14 @@ bundle supplies one exact Preview-only command and exact explanatory YAML
 comment lines. Unknown script shapes, unsupported framework versions, and
 unrecognized arguments remain fail-closed rather than becoming guessed
 commands.
+
+A native port declaration only injects the allocated value through its named
+environment key. It does not add an argument, expand a variable, or change
+framework configuration. The agent can emit a routed service only when source
+evidence proves that exact binding. A trusted framework capability can also
+prove the binding with its matching `portBinding` and
+`compatiblePreviewCommand`. Otherwise, the agent returns
+`insufficient-evidence`.
 
 The Next.js profile also requires a safely validated root npm
 `package-lock.json`. It supplies one exact generic
@@ -88,9 +99,20 @@ Conflicting or absent target evidence deterministically requires
 `target: local`; generated output cannot override that policy with a guessed
 literal endpoint.
 
-Every evidence path must exist in the sanitized bundle. Outputs are bounded,
-unknown fields are rejected, secret canary patterns are rejected, and a draft
-without evidence is invalid.
+Every evidence path must match an authorized relative path. Authorized paths
+come from `files[].path`, a derived lockfile path in
+`frameworkCapabilities`, or `publicEnvironment.templates[].path`. Container
+names and `repository-evidence.json` are not evidence paths.
+
+The requested response contains only one JSON object. Some ACP agents send a
+separate progress message before the final response. Stable ACP does not
+require a message identifier. Therefore, Task Monki also accepts one final
+JSON object after bounded, non-JSON progress text. It does not accept trailing
+commentary or more than one JSON object. All fields and arrays are required.
+Report strings are nonempty, single-line, and at most 1,200 UTF-8 bytes. The four
+bounded report lists contain at most 40 items each. Unknown fields and secret
+canary patterns are rejected. A draft without evidence is invalid. An
+`insufficient-evidence` result requires at least one unresolved decision.
 
 Generated drafts may not retain a repository script with a known port or
 protocol conflict. If a draft uses a supplied compatible framework command,
@@ -101,15 +123,18 @@ fixed-port or HTTPS listener.
 ## Repository inspection boundary
 
 The agent does not receive the live worktree as its working directory. Task
-Monki creates a bounded temporary JSON evidence bundle containing safe text
-from the task worktree and runs the ephemeral Codex process against that
-temporary directory with:
+Monki creates a bounded JSON evidence bundle in app-owned scratch storage. It contains safe text
+from the task worktree. It runs a transient turn through the configured
+provider and model only when that combination supports Preview recipe
+generation. The normal path uses the adapter's native read-only permission
+mapping. An adapter can make one exact runtime-and-model exception only after
+real qualification against the disposable evidence directory. Such an
+exception does not enable repository read-only workflows. The turn uses:
 
-- approval mode `never`;
-- read-only sandboxing;
-- the compatible Codex executable already selected by App Server runtime
-  resolution;
-- web search, MCP servers, and apps disabled with fail-closed discovery;
+- a native read-only policy or the exact adapter-local disposable-evidence
+  qualification;
+- the packaged provider runtime and its normal cancellation and cleanup path;
+- no additional live repository path;
 - sanitized process environment;
 - a two-minute deadline and bounded output;
 - explicit instructions not to run applications, tests, scripts, Docker,
@@ -122,27 +147,37 @@ file/count/byte limits. A trusted bounded parser may reduce a root npm lockfile
 to fixed fields such as lockfile version, root Next.js spec, and locked Next.js
 version; raw lockfile contents, resolved URLs, and unrelated dependency data
 are never included in the agent bundle. The report receives safe omission
-counts, never excluded values. The temporary bundle is removed after success,
-failure, cancellation, or shutdown.
+counts, never excluded values. The app-owned bundle is removed after success,
+failure, or confirmed cancellation. If provider termination is uncertain,
+Task Monki keeps the bundle until recovery settles the provider turn. Startup
+asks the shared runtime to stop an abandoned generation. Cleanup removes the
+bundle after the stop is confirmed. A remaining recovery record blocks another
+generation and task deletion. Startup cleanup removes bundles that have no
+matching recovery record.
 
-This boundary minimizes exposure but does not claim that arbitrary ordinary
-source files can never contain a secret. Repositories must still avoid
-committing secrets. Generated YAML is additionally rejected when a
+This boundary limits the repository content that Task Monki sends. A native
+read-only policy can still let the provider process read other local files
+with the user's normal permissions. The instruction forbids that access, but
+Task Monki does not describe the policy as an operating-system sandbox. This
+boundary also does not claim that ordinary source files can never contain a
+secret. Repositories must still avoid committing secrets. Generated YAML is additionally rejected when a
 secret-like environment key has a literal value; it must use a declared
 private input and typed recipient instead.
 
 ## Transient state and lifecycle
 
 Generation snapshots and drafts are main-process memory only. They are not
-stored in `FileTaskStore`, task snapshots, artifacts, logs, approval records,
-or general provider history. Purpose-specific IPC sends only the current safe
+stored in `FileTaskStore`, task snapshots, approval records, or Preview
+artifacts. The shared runtime keeps the transient provider turn only until
+terminal cleanup succeeds. Purpose-specific IPC sends only the current safe
 snapshot and reviewed YAML.
 
 One generation may run per task. Regeneration preserves the last valid draft
 until a replacement succeeds. Task deletion cancels and joins generation
-before worktree removal. Application shutdown cancels and joins every active
-agent process and removes transient drafts. No generation timer, process,
-listener, or evidence bundle survives shutdown.
+before worktree removal. Application shutdown cancels and joins each active
+provider turn before the runtime owners stop. A turn with uncertain
+termination remains a recovery record. Task Monki does not claim cleanup
+until the provider process is settled.
 
 ## Validation and write boundary
 

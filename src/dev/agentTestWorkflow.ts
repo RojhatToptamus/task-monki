@@ -595,8 +595,17 @@ export async function runAgentResourceStressWorkflow(
     const shutdownMs = elapsed(shutdownStartedAt);
 
     const coldStore = new FileTaskStore(environment.storeDir);
+    const coldRuntimeStore = new FileAgentRuntimeStore(
+      path.join(environment.rootDir, 'agent-runtime')
+    );
+    const coldTaskRuntime = coldRuntimeStore.taskAgentRuntimeAccess(
+      (event, operationId) => coldStore.recordAgentRuntimeEvent(event, operationId)
+    );
+    coldStore.bindAgentRuntime(coldTaskRuntime);
     const coldStartedAt = performance.now();
+    await coldRuntimeStore.init();
     await coldStore.init();
+    await coldStore.refreshAgentRuntimeProjection();
     const coldInitializationMs = elapsed(coldStartedAt);
     const postRestartStartedAt = performance.now();
     const postRestartSnapshot = await coldStore.snapshot();
@@ -604,9 +613,11 @@ export async function runAgentResourceStressWorkflow(
     assert(
       postRestartSnapshot.tasks.length === beforeShutdownSnapshot.tasks.length &&
         postRestartSnapshot.runs.length === beforeShutdownSnapshot.runs.length,
-      'Cold store restart did not preserve accumulated task and run history.'
+      `Cold store restart did not preserve accumulated task and run history: ` +
+        `tasks ${beforeShutdownSnapshot.tasks.length} -> ${postRestartSnapshot.tasks.length}, ` +
+        `runs ${beforeShutdownSnapshot.runs.length} -> ${postRestartSnapshot.runs.length}.`
     );
-    await coldStore.close();
+    await Promise.all([coldStore.close(), coldRuntimeStore.close()]);
 
     await waitForProcessesToExit([...observedProcessIds, ...observedPreviewProcessIds], 5_000);
     const providerProcessesJoined = [...observedProcessIds].every(
@@ -1459,7 +1470,12 @@ async function createAgentTestEnvironment(
     });
     const events = new AppEventBus();
     const profile = deterministicAcpProfile(providerScriptPath);
-    const adapter = new AcpRuntimeAdapter(store, events, profile, {
+    const runtimeStore = new FileAgentRuntimeStore(path.join(rootDir, 'agent-runtime'));
+    const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+      store.recordAgentRuntimeEvent(event, operationId)
+    );
+    store.bindAgentRuntime(taskRuntime);
+    const adapter = new AcpRuntimeAdapter(taskRuntime, runtimeStore, events, profile, {
       cwd: rootDir,
       environment: {
         PATH: process.env.PATH,
@@ -1489,7 +1505,8 @@ async function createAgentTestEnvironment(
       worktreeRoot,
       appSettingsStore,
       agentRuntimeAdapters: [adapter],
-      agentRuntimeStore: new FileAgentRuntimeStore(path.join(rootDir, 'agent-runtime')),
+      agentRuntimeStore: runtimeStore,
+      taskRuntimeAccess: taskRuntime,
       discourseStore: new FileDiscourseStore(path.join(rootDir, 'discourse')),
       discourseWorkspaceRoot: path.join(rootDir, 'discourse-workspaces'),
       defaultAgentRuntimeId: RUNTIME_ID,
@@ -1861,13 +1878,7 @@ function deterministicAcpProfile(providerScriptPath: string): AcpRuntimeProfile 
       allowedKeys: [],
       sensitiveKeys: []
     },
-    approvalPolicies: ['never'],
-    extensions: {
-      deterministicTestRuntime: {
-        maturity: 'stable',
-        detail: 'Local developer-only ACP subprocess with fixed scenario behavior.'
-      }
-    }
+    approvalPolicies: ['never']
   };
 }
 

@@ -860,7 +860,9 @@ export type PreviewRecipeGenerationFailureCode =
   | 'AGENT_UNAVAILABLE'
   | 'GENERATION_TIMED_OUT'
   | 'INVALID_AGENT_OUTPUT'
-  | 'INSUFFICIENT_EVIDENCE';
+  | 'INSUFFICIENT_EVIDENCE'
+  | 'RECIPE_EXISTS'
+  | 'CANCELLATION_UNCONFIRMED';
 
 export interface PreviewRecipeGenerationSnapshot {
   taskId: string;
@@ -879,7 +881,6 @@ export interface GetPreviewRecipeGenerationRequest {
 
 export interface GeneratePreviewRecipeRequest {
   taskId: string;
-  model?: string;
 }
 
 export interface ValidatePreviewRecipeDraftRequest {

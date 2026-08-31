@@ -1,29 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { AgentModel } from '../../shared/agent';
+import type { AgentExecutionSettings, AgentModel } from '../../shared/agent';
+import type { AttachmentSubmissionRecord } from '../../shared/attachments';
 import {
-  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
-  DEFAULT_PROMPT_REFINEMENT_MODEL,
-  type CodexExternalToolSettings,
   type PromptRefinementEvidence,
   type RefinePromptResponse
 } from '../../shared/contracts';
 import { buildPromptRefinementInstruction } from '../../shared/promptTemplates';
-import {
-  verifyAgentTurnAttachments,
-  type AgentTurnAttachment
-} from '../agent/AgentAttachmentDelivery';
-import {
-  buildCodexEphemeralReadOnlyCommand,
-  CodexEphemeralRunError,
-  startCodexEphemeralReadOnlyRun,
-  type CodexEphemeralReadOnlyRun
-} from '../agent/codex/CodexEphemeralReadOnlyRunner';
-import { codexExternalToolConfigOverrides } from '../agent/codex/CodexToolConfig';
-
-const REFINEMENT_REASONING_EFFORT = 'low';
-const REFINEMENT_TIMEOUT_MS = 90_000;
-const REFINEMENT_CONFIG_OVERRIDES = ['features.plugins=false'] as const;
+import type { AgentTurnAttachment } from '../agent/AgentAttachmentDelivery';
 const MAX_REFINED_PROMPT_CHARS = 60_000;
 const MAX_EVIDENCE_ITEMS = 64;
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/u;
@@ -34,31 +18,37 @@ export interface PromptRefinementInput {
   input: string;
   title?: string;
   refinementModel: AgentModel;
+  settings: AgentExecutionSettings;
   targetModel?: AgentModel;
   attachments?: readonly AgentTurnAttachment[];
-  codexExecutable?: string;
-  toolSettings?: CodexExternalToolSettings;
-  failClosedMcpDiscovery?: boolean;
 }
 
 export interface PromptRefinementRunRequest {
+  requestId: string;
   repositoryPath: string;
   instruction: string;
-  model: string;
-  imagePaths: readonly string[];
-  additionalDirectories: readonly string[];
-  codexExecutable?: string;
-  toolSettings?: CodexExternalToolSettings;
-  failClosedMcpDiscovery?: boolean;
+  refinementModel: AgentModel;
+  settings: AgentExecutionSettings;
+  attachments: readonly AgentTurnAttachment[];
+}
+
+export interface PromptRefinementRun {
+  result: Promise<{
+    output: string;
+    attachmentSubmissions: AttachmentSubmissionRecord[];
+  }>;
+  cancel(): Promise<void>;
 }
 
 export type PromptRefinementRunner = (
   request: PromptRefinementRunRequest
-) => Promise<CodexEphemeralReadOnlyRun>;
+) => Promise<PromptRefinementRun>;
 
 interface ActiveRefinement {
   canceled: boolean;
-  run?: CodexEphemeralReadOnlyRun;
+  starting?: Promise<PromptRefinementRun>;
+  run?: PromptRefinementRun;
+  cancellation?: Promise<void>;
 }
 
 export class PromptRefinementCanceledError extends Error {
@@ -85,10 +75,13 @@ class PromptRefinementResponseValidationError extends Error {
 export class PromptRefinementService {
   private terminationFence?: PromptRefinementTerminationUnconfirmedError;
   private readonly active = new Map<string, ActiveRefinement>();
+  private accepting = true;
+  private shutdownWork?: Promise<void>;
 
-  constructor(private readonly runModel: PromptRefinementRunner = runCodexRefinement) {}
+  constructor(private readonly runModel: PromptRefinementRunner) {}
 
   async refine(input: PromptRefinementInput): Promise<RefinePromptResponse> {
+    if (!this.accepting) throw new Error('Prompt refinement is shutting down.');
     const requestId = requireRequestId(input.requestId);
     const userRequest = input.input.trim();
     if (!userRequest) throw new Error('Prompt text is required.');
@@ -102,38 +95,19 @@ export class PromptRefinementService {
     const active: ActiveRefinement = { canceled: false };
     this.active.set(requestId, active);
     try {
-      const attachments = await verifyAgentTurnAttachments(input.attachments ?? []);
-      const nativeImageIds = nativeImageAttachmentIds(
-        userRequest,
-        attachments,
-        input.refinementModel
-      );
+      const attachments = input.attachments ?? [];
       const attachmentContext = attachments.map((attachment, index) => {
-        const providedAsImage = nativeImageIds.has(attachment.attachmentId);
-        const canReadAsText = attachment.kind === 'text';
         return {
           id: attachment.attachmentId,
           referenceLabel: `Attachment ${index + 1} (${attachment.displayName})`,
           displayName: attachment.displayName,
           kind: attachment.kind,
           mediaType: attachment.mediaType,
-          byteCount: attachment.byteCount,
-          ...(canReadAsText ? { readOnlyPath: attachment.path } : {}),
-          providedAsImage
+          byteCount: attachment.byteCount
         };
       });
-      const imagePaths = attachments
-        .filter((attachment) => nativeImageIds.has(attachment.attachmentId))
-        .map((attachment) => attachment.path);
-      const additionalDirectories = [
-        ...new Set(
-          attachmentContext
-            .map((attachment) => attachment.readOnlyPath)
-            .filter((value): value is string => value !== undefined)
-            .map((value) => path.dirname(value))
-        )
-      ];
-      const run = await this.runModel({
+      const starting = this.runModel({
+        requestId,
         repositoryPath: input.repositoryPath,
         instruction: buildPromptRefinementInstruction({
           userRequest,
@@ -142,46 +116,36 @@ export class PromptRefinementService {
           targetModel: input.targetModel,
           attachments: attachmentContext
         }),
-        model: input.refinementModel.model,
-        imagePaths,
-        additionalDirectories,
-        codexExecutable: input.codexExecutable,
-        toolSettings: input.toolSettings,
-        failClosedMcpDiscovery: input.failClosedMcpDiscovery
+        refinementModel: input.refinementModel,
+        settings: input.settings,
+        attachments
       });
+      active.starting = starting;
+      const run = await starting;
       active.run = run;
       if (active.canceled) {
-        await run.cancel();
+        await this.cancelActive(active);
         await run.result.catch(() => undefined);
         throw new PromptRefinementCanceledError();
       }
 
-      const modelOutput = await run.result;
+      const { output: modelOutput, attachmentSubmissions } = await run.result;
       if (active.canceled) throw new PromptRefinementCanceledError();
       let refined: Awaited<ReturnType<typeof parseModelRefinement>>;
       try {
         refined = await parseModelRefinement({
           output: modelOutput,
           repositoryPath: input.repositoryPath,
-          attachments: attachmentContext
+          attachments: attachmentContext,
+          attachmentSubmissions,
+          forbiddenManagedPaths: attachments.map((attachment) => attachment.path)
         });
       } catch (cause) {
         throw new PromptRefinementResponseValidationError(cause);
       }
-      const relevantImagesNotInspectable = attachments.some(
-        (attachment) =>
-          attachment.kind === 'image' &&
-          imageAttachmentLooksRelevant(userRequest, attachment.displayName) &&
-          !nativeImageIds.has(attachment.attachmentId)
-      );
       return {
         ...refined,
-        source: 'model',
-        ...(relevantImagesNotInspectable
-          ? {
-              warning: `${input.refinementModel.displayName} cannot inspect the relevant image attachment directly. The image remains attached to the downstream task and was referenced without claiming to understand its contents.`
-            }
-          : {})
+        source: 'model'
       };
     } catch (cause) {
       if (active.canceled || cause instanceof PromptRefinementCanceledError) {
@@ -200,74 +164,53 @@ export class PromptRefinementService {
     const active = this.active.get(requireRequestId(requestId));
     if (!active) return;
     active.canceled = true;
-    if (!active.run) return;
     try {
-      await active.run.cancel();
+      await this.cancelActive(active);
     } catch (cause) {
-      const error = new PromptRefinementTerminationUnconfirmedError(cause);
+      const error =
+        cause instanceof PromptRefinementTerminationUnconfirmedError
+          ? cause
+          : new PromptRefinementTerminationUnconfirmedError(cause);
       this.terminationFence = error;
       throw error;
     }
   }
-}
 
-export function buildRefinementCommand(
-  repositoryPath: string,
-  model = DEFAULT_PROMPT_REFINEMENT_MODEL,
-  configOverrides: readonly string[] = codexExternalToolConfigOverrides(
-    DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
-  ),
-  executable = 'codex'
-): {
-  executable: string;
-  argv: string[];
-} {
-  if (!repositoryPath.trim()) throw new Error('Repository path is required.');
-  const selectedModel = model.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL;
-  return buildCodexEphemeralReadOnlyCommand({
-    cwd: repositoryPath,
-    model: selectedModel,
-    reasoningEffort: REFINEMENT_REASONING_EFFORT,
-    configOverrides: [...configOverrides, ...REFINEMENT_CONFIG_OVERRIDES],
-    executable
-  });
-}
-
-async function runCodexRefinement({
-  repositoryPath,
-  instruction,
-  model,
-  imagePaths,
-  additionalDirectories,
-  codexExecutable,
-  toolSettings,
-  failClosedMcpDiscovery
-}: PromptRefinementRunRequest): Promise<CodexEphemeralReadOnlyRun> {
-  const run = await startCodexEphemeralReadOnlyRun({
-    cwd: repositoryPath,
-    instruction,
-    model: model.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL,
-    reasoningEffort: REFINEMENT_REASONING_EFFORT,
-    timeoutMs: REFINEMENT_TIMEOUT_MS,
-    codexExecutable,
-    toolSettings,
-    failClosedMcpDiscovery,
-    imagePaths,
-    additionalDirectories,
-    additionalConfigOverrides: REFINEMENT_CONFIG_OVERRIDES
-  });
-  return {
-    cancel: () => run.cancel(),
-    result: run.result.catch((cause) => {
-      if (
-        cause instanceof CodexEphemeralRunError &&
-        cause.code === 'TERMINATION_UNCONFIRMED'
-      ) {
-        throw new PromptRefinementTerminationUnconfirmedError(cause);
+  beginShutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    this.accepting = false;
+    const work = Promise.allSettled(
+      [...this.active.keys()].map((requestId) => this.cancel(requestId))
+    ).then((results) => {
+      const failures = results.flatMap((result) =>
+        result.status === 'rejected'
+          ? [result.reason instanceof Error ? result.reason : new Error(String(result.reason))]
+          : []
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Prompt refinement shutdown cleanup is incomplete.');
       }
-      throw cause;
-    })
-  };
+    });
+    this.shutdownWork = work;
+    return work;
+  }
+
+  private cancelActive(active: ActiveRefinement): Promise<void> {
+    if (active.cancellation) return active.cancellation;
+    active.cancellation = (async () => {
+      let run = active.run;
+      if (!run && active.starting) {
+        try {
+          run = await active.starting;
+        } catch {
+          // Setup failed before it returned a process-owning run.
+          return;
+        }
+      }
+      await run?.cancel();
+    })();
+    return active.cancellation;
+  }
 }
 
 async function parseModelRefinement(input: {
@@ -277,15 +220,11 @@ async function parseModelRefinement(input: {
     id: string;
     displayName: string;
     kind: 'image' | 'text';
-    readOnlyPath?: string;
-    providedAsImage: boolean;
   }[];
+  attachmentSubmissions: readonly AttachmentSubmissionRecord[];
+  forbiddenManagedPaths: readonly string[];
 }): Promise<Pick<RefinePromptResponse, 'prompt' | 'titleSuggestion' | 'evidence'>> {
-  const normalized = input.output
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '');
-  const parsed = JSON.parse(normalized) as Record<string, unknown>;
+  const parsed = parseRefinementObject(input.output);
   if (typeof parsed.prompt !== 'string' || typeof parsed.titleSuggestion !== 'string') {
     throw new Error('Prompt refinement response has an invalid shape.');
   }
@@ -326,13 +265,12 @@ async function parseModelRefinement(input: {
   const attachmentsById = new Map(
     input.attachments.map((attachment) => [attachment.id, attachment])
   );
+  const inspectedAttachmentIds = new Set(
+    input.attachmentSubmissions.map((submission) => submission.attachmentId)
+  );
   for (const id of attachmentIdsInspected) {
     const attachment = attachmentsById.get(id);
-    if (
-      !attachment ||
-      (attachment.kind === 'image' && !attachment.providedAsImage) ||
-      (attachment.kind === 'text' && !attachment.readOnlyPath)
-    ) {
+    if (!attachment || !inspectedAttachmentIds.has(id)) {
       throw new Error('Prompt refinement claimed attachment evidence it could not inspect.');
     }
   }
@@ -343,8 +281,9 @@ async function parseModelRefinement(input: {
     }
   }
   if (
-    input.attachments.some(
-      (attachment) => attachment.readOnlyPath && prompt.includes(attachment.readOnlyPath)
+    input.forbiddenManagedPaths.some(
+      (managedPath) =>
+        prompt.includes(managedPath) || titleSuggestion.includes(managedPath)
     )
   ) {
     throw new Error('Prompt refinement exposed an ephemeral attachment path.');
@@ -361,6 +300,69 @@ async function parseModelRefinement(input: {
     titleSuggestion: titleSuggestion.slice(0, 72),
     evidence
   };
+}
+
+function parseRefinementObject(output: string): Record<string, unknown> {
+  const normalized = output.trim();
+  try {
+    return JSON.parse(stripOuterJsonFence(normalized)) as Record<string, unknown>;
+  } catch (directError) {
+    const fenced = extractSingleJsonFence(normalized);
+    if (fenced !== undefined) {
+      return JSON.parse(fenced) as Record<string, unknown>;
+    }
+    const start = normalized.indexOf('{');
+    if (start > 0) {
+      const prefix = normalized.slice(0, start);
+      if (prefix.length <= 4_096 && !/[{}[\]]/u.test(prefix)) {
+        try {
+          return JSON.parse(normalized.slice(start).trim()) as Record<string, unknown>;
+        } catch {
+          // The complete suffix must be the only JSON result.
+        }
+      }
+    }
+    throw directError;
+  }
+}
+
+function stripOuterJsonFence(value: string): string {
+  return value
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '');
+}
+
+function extractSingleJsonFence(value: string): string | undefined {
+  const lines = value.split(/\r?\n/u);
+  let block: { content: string; opening: number; closing: number } | undefined;
+  let start: number | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (start === undefined) {
+      if (/^\s*```json\s*$/iu.test(line)) {
+        if (block) return undefined;
+        start = index + 1;
+      }
+      continue;
+    }
+    if (/^\s*```\s*$/u.test(line)) {
+      block = {
+        content: lines.slice(start, index).join('\n').trim(),
+        opening: start - 1,
+        closing: index
+      };
+      start = undefined;
+    }
+  }
+  if (start !== undefined || !block?.content) return undefined;
+  const surrounding = [
+    ...lines.slice(0, block.opening),
+    ...lines.slice(block.closing + 1)
+  ].join('\n');
+  if (surrounding.length > 4_096 || /[{}[\]]|```/u.test(surrounding)) {
+    return undefined;
+  }
+  return block.content;
 }
 
 async function validateRepositoryFiles(
@@ -425,20 +427,6 @@ function refinementFailureWarning(cause: unknown): string {
   if (cause instanceof PromptRefinementResponseValidationError) {
     return `The refinement model returned a response Task Monki could not validate. ${unchanged}`;
   }
-  if (cause instanceof CodexEphemeralRunError) {
-    switch (cause.code) {
-      case 'TIMED_OUT':
-        return `Prompt refinement timed out before the model finished. ${unchanged}`;
-      case 'NO_FINAL_MESSAGE':
-        return `The refinement model finished without returning a usable prompt. ${unchanged}`;
-      case 'PROCESS_FAILED':
-        return `The refinement model process failed before producing a prompt. ${unchanged}`;
-      case 'CANCELED':
-        return `Prompt refinement was canceled before completion. ${unchanged}`;
-      case 'TERMINATION_UNCONFIRMED':
-        return `The refinement process could not be stopped safely. ${unchanged}`;
-    }
-  }
   return `Prompt refinement could not be completed reliably. ${unchanged}`;
 }
 
@@ -449,42 +437,6 @@ function emptyEvidence(): PromptRefinementEvidence {
     attachmentIdsInspected: [],
     attachmentIdsReferenced: []
   };
-}
-
-function nativeImageAttachmentIds(
-  userRequest: string,
-  attachments: readonly AgentTurnAttachment[],
-  model: AgentModel
-): Set<string> {
-  const supportsImages = model.inputModalities.some(
-    (modality) => modality.toLowerCase() === 'image'
-  );
-  if (!supportsImages) return new Set();
-  return new Set(
-    attachments
-      .filter(
-        (attachment) =>
-          attachment.kind === 'image' &&
-          imageAttachmentLooksRelevant(userRequest, attachment.displayName)
-      )
-      .map((attachment) => attachment.attachmentId)
-  );
-}
-
-export function imageAttachmentLooksRelevant(
-  userRequest: string,
-  displayName: string
-): boolean {
-  const normalized = userRequest.toLocaleLowerCase('en-US');
-  return (
-    normalized.includes(displayName.toLocaleLowerCase('en-US')) ||
-    /^(?:please\s+)?(?:fix|change|update|match|make)\s+(?:this|that|it)\b/u.test(
-      normalized.trim()
-    ) ||
-    /\b(attach(?:ed|ment)?|image|screenshot|screen|mockup|design|visual|ui|ux|layout|style|color|colour|icon|photo|diagram|shown|look|pixel|responsive|frontend|page|button|modal|panel)\b/u.test(
-      normalized
-    )
-  );
 }
 
 function requireRequestId(requestId: string): string {

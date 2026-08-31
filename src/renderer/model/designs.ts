@@ -1,4 +1,6 @@
 import type {
+  AgentModel,
+  AgentRuntimeState,
   AppUpdateEvent,
   AgentRuntimeCatalog,
   DesignCanvasTarget,
@@ -9,6 +11,7 @@ import type {
   DesignStatus
 } from '../../shared/contracts';
 import type { DesignCanvasBounds } from '../../shared/designCanvas';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import { buildOverviewRunActivityRows, type OverviewActivityRow } from './overviewRunActivity';
 import { buildRunActivityProjection } from './runActivity';
 
@@ -74,12 +77,12 @@ const STATUS_VIEWS: Record<DesignProjectStatus, DesignStatusView> = {
   },
   RUNNING: {
     label: 'Running',
-    detail: 'Codex is building the first ready preview.',
+    detail: 'The Design agent is building the first ready preview.',
     tone: 'working'
   },
   UPDATING: {
     label: 'Updating',
-    detail: 'Codex is refining the Design. The ready preview stays visible.',
+    detail: 'The Design agent is refining the Design. The ready preview stays visible.',
     tone: 'working'
   },
   READY: {
@@ -89,7 +92,7 @@ const STATUS_VIEWS: Record<DesignProjectStatus, DesignStatusView> = {
   },
   NEEDS_INPUT: {
     label: 'Blocked',
-    detail: 'Codex needs your response before it can continue.',
+    detail: 'The Design agent needs your response before it can continue.',
     tone: 'waiting'
   },
   NEEDS_ATTENTION: {
@@ -311,34 +314,101 @@ export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
 export function eligibleDesignRuntimeCatalog(
   catalog: AgentRuntimeCatalog
 ): AgentRuntimeCatalog {
-  const runtimes = catalog.runtimes.filter((runtime) => {
-    const capabilities = runtime.preflight.capabilities;
-    return (
-      runtime.preflight.readiness.canStart &&
-      capabilities.extensions['task-monki.design-instructions']?.maturity === 'stable' &&
-      capabilities.extensions['task-monki.design-skill-access']?.maturity === 'stable' &&
-      capabilities.extensions['task-monki.design-browser-verification']?.maturity === 'stable' &&
-      capabilities.attachmentDelivery.maturity === 'stable' &&
-      capabilities.turnInterruption.maturity === 'stable'
-    );
-  });
+  const runtimes = [...catalog.runtimes];
   const runtimeIds = new Set(
     runtimes.map((runtime) => runtime.preflight.runtime.id)
+  );
+  const models = catalog.models.filter((model) => runtimeIds.has(model.runtimeId));
+  const qualifiedModels = qualifiedDesignModels(runtimes, models);
+  const supportedModelRuntimeIds = new Set(
+    qualifiedModels.map((model) => model.runtimeId)
   );
   return {
     ...catalog,
     runtimes,
-    models: catalog.models.filter(
-      (model) =>
-        runtimeIds.has(model.runtimeId) &&
-        (model.inputModalities ?? []).some(
-          (modality) => modality.toLowerCase() === 'image'
-        )
-    ),
-    defaultRuntimeId: runtimeIds.has(catalog.defaultRuntimeId)
+    models,
+    defaultRuntimeId: supportedModelRuntimeIds.has(catalog.defaultRuntimeId)
       ? catalog.defaultRuntimeId
-      : runtimes[0]?.preflight.runtime.id ?? catalog.defaultRuntimeId
+      : runtimes.find((runtime) =>
+          supportedModelRuntimeIds.has(runtime.preflight.runtime.id)
+        )?.preflight.runtime.id ??
+        (runtimeIds.has(catalog.defaultRuntimeId)
+          ? catalog.defaultRuntimeId
+          : runtimes[0]?.preflight.runtime.id ?? catalog.defaultRuntimeId)
   };
+}
+
+export function qualifiedDesignModels(
+  runtimes: readonly AgentRuntimeState[],
+  models: readonly AgentModel[]
+): AgentModel[] {
+  const runtimeById = new Map(
+    runtimes.map((runtime) => [runtime.preflight.runtime.id, runtime] as const)
+  );
+  return models.filter((model) => {
+    const runtime = runtimeById.get(model.runtimeId);
+    return Boolean(
+      runtime?.preflight.readiness.canStart &&
+        projectAgentExecutionSupport(
+          runtime.preflight.capabilities,
+          'DESIGN',
+          { model }
+        ).supported
+    );
+  });
+}
+
+export function designModelUnavailableReason(
+  runtime: AgentRuntimeState,
+  model: AgentModel
+): string | undefined {
+  const support = projectAgentExecutionSupport(
+    runtime.preflight.capabilities,
+    'DESIGN',
+    { model }
+  );
+  return support.supported ? undefined : support.reason;
+}
+
+export function designRuntimeUnavailableReason(
+  runtime: AgentRuntimeState,
+  models: readonly AgentModel[]
+): string | undefined {
+  const runtimeId = runtime.preflight.runtime.id;
+  if (!runtime.preflight.readiness.canStart) {
+    return runtime.preflight.readiness.detail || runtime.preflight.readiness.summary;
+  }
+  const runtimeSupport = projectAgentExecutionSupport(
+    runtime.preflight.capabilities,
+    'DESIGN'
+  );
+  if (!runtimeSupport.supported) return runtimeSupport.reason;
+  if (
+    runtime.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
+    runtime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
+  ) {
+    return undefined;
+  }
+  const runtimeModels = models.filter((model) => model.runtimeId === runtimeId);
+  const modelResults = runtimeModels.map((model) =>
+    projectAgentExecutionSupport(runtime.preflight.capabilities, 'DESIGN', {
+      model
+    })
+  );
+  if (modelResults.some((result) => result.supported)) return undefined;
+  const exactModelReason = modelResults.find(
+    (result): result is { supported: false; reason: string } => !result.supported
+  )?.reason;
+  if (exactModelReason) return exactModelReason;
+  for (const model of runtime.models) {
+    const support = projectAgentExecutionSupport(
+      runtime.preflight.capabilities,
+      'DESIGN',
+      { model }
+    );
+    if (!support.supported) return support.reason;
+  }
+  return 'This agent has no model that supports Design Mode.';
 }
 
 export function mergeDesignConversationPage(

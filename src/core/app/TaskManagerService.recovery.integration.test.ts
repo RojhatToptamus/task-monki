@@ -6,7 +6,7 @@ import { parsePrView } from '../github/GitHubService';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import {
-  ScriptedAgentRuntimeAdapter,
+  createScriptedAgentRuntimeFixture,
   TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
@@ -519,10 +519,11 @@ async function openRestartedScenario(
   ghPath?: string
 ): Promise<{ store: FileTaskStore; service: TaskManagerService }> {
   const store = new FileTaskStore(path.join(scenario.rootDir, 'store'));
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
   const service = new TaskManagerService(store, scenario.repositoryPath, undefined, {
     worktreeRoot: scenario.worktreeRoot,
     ghPath,
-    agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+    ...scriptedRuntime.serviceOptions
   });
   await service.init();
   return { store, service };

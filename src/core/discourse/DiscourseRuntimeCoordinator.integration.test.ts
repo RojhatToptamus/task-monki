@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   AgentAssignmentSnapshot,
   DiscourseAgentJobRecord,
@@ -12,13 +12,9 @@ import type {
 import { DISCOURSE_LIMITS } from '../../shared/discourse';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
 import { createAgentSessionAccessEpoch } from '../agent/AgentRuntimeOwnership';
-import type {
-  AgentScopedTurnProvider,
-  StartScopedAgentTurnInput
-} from '../agent/AgentScopedTurnProvider';
-import { AgentScopedMutationError } from '../agent/AgentScopedTurnProvider';
 import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../storage/FileDiscourseStore';
+import { ScriptedAgentRuntimeCoordinator } from '../../testSupport/ScriptedAgentRuntimeCoordinator';
 import { DiscourseRuntimeCoordinator } from './DiscourseRuntimeCoordinator';
 
 describe('DiscourseRuntimeCoordinator', () => {
@@ -54,7 +50,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     expect(leased).toMatchObject({ id: prepared.queueEntry.id, status: 'LEASED' });
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-1'
     );
     expect(running).toMatchObject({
@@ -62,6 +57,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       delivery: 'ACKNOWLEDGED',
       providerTurnId: 'provider-turn-1'
     });
+    await markRepositoryUnchanged(fixture.runtime, running.id, 'terminal-1-integrity');
 
     const terminal = await fixture.coordinator.ingestContribution({
       runId: running.id,
@@ -125,7 +121,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-1'
     );
     const output = await fixture.runtime.getArtifact(prepared.run.outputArtifactId);
@@ -141,6 +136,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: '2026-07-13T00:10:00.000Z',
         lastEventAt: '2026-07-13T00:10:00.000Z'
@@ -166,6 +165,54 @@ describe('DiscourseRuntimeCoordinator', () => {
     });
   });
 
+  it('does not curate successful output before repository integrity is verified', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Do not accept this output before the read-only boundary is verified.',
+      clientOperationId: 'prepare-unverified-terminal'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable(
+      'lease-unverified-terminal'
+    );
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      'dispatch-unverified-terminal'
+    );
+
+    await expect(
+      fixture.coordinator.ingestContribution({
+        runId: running.id,
+        providerTurnId: running.providerTurnId!,
+        body: 'This output must not become a conversation message.',
+        freshnessAtCompletion: 'FRESH',
+        clientOperationId: 'terminal-unverified',
+        completedAt: '2026-07-13T00:10:00.000Z',
+        providerTerminalSource: 'TEST_TERMINAL'
+      })
+    ).resolves.toMatchObject({
+      kind: 'IGNORED_TERMINAL',
+      job: { status: 'RECOVERY_REQUIRED' }
+    });
+    expect(
+      (await fixture.discourse.listMessages({
+        conversationId: fixture.conversationId,
+        limit: 100
+      })).messages
+    ).toHaveLength(1);
+    expect(await fixture.runtime.getSession(running.sessionId)).toMatchObject({
+      status: 'IDLE'
+    });
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'SETTLED'
+    });
+    expect(fixture.provider.finishedRunIds).toEqual([running.id]);
+    expect(fixture.provider.releasedSessionIds).toEqual([running.sessionId]);
+  });
+
   it('accepts an authoritative started notification that wins the start-response race', async () => {
     const fixture = await coordinatorFixture();
     const prepared = await fixture.coordinator.prepareJob({
@@ -177,8 +224,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       clientOperationId: 'prepare-race'
     });
     const [leased] = await fixture.scheduler.leaseAvailable('lease-race');
-    const provider: AgentScopedTurnProvider = {
-      startScopedTurn: async (input) => {
+    fixture.provider.startHook = async (input) => {
         const session = (await fixture.runtime.getSession(input.session.id))!;
         await fixture.runtime.updateSession(
           session.id,
@@ -210,11 +256,10 @@ describe('DiscourseRuntimeCoordinator', () => {
           providerTurnId: 'provider-turn-race',
           startedAt: '2026-07-13T00:07:00.000Z'
         };
-      }
     };
 
     await expect(
-      fixture.coordinator.dispatchLeasedJob(leased!.id, provider, 'dispatch-race')
+      fixture.coordinator.dispatchLeasedJob(leased!.id, 'dispatch-race')
     ).resolves.toMatchObject({
       id: prepared.run.id,
       status: 'RUNNING',
@@ -287,7 +332,7 @@ describe('DiscourseRuntimeCoordinator', () => {
     });
     expect(fixture.provider.calls).toHaveLength(0);
     expect(await fixture.runtime.getRun(prepared.run.id)).toMatchObject({
-      status: 'FAILED',
+      status: 'INTERRUPTED',
       delivery: 'NOT_DELIVERED'
     });
     expect(await fixture.discourse.getConversation(fixture.conversationId)).toMatchObject({
@@ -371,7 +416,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-active-stop');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-active-stop'
     );
 
@@ -382,8 +426,7 @@ describe('DiscourseRuntimeCoordinator', () => {
           waveId: fixture.waveId,
           clientOperationId: 'stop-active-wave',
           reason: 'User stopped the active response.'
-        },
-        fixture.provider
+        }
       )
     ).resolves.toMatchObject({ status: 'STOPPING' });
     expect(fixture.provider.interruptCalls).toEqual([running.id]);
@@ -402,8 +445,7 @@ describe('DiscourseRuntimeCoordinator', () => {
         waveId: fixture.waveId,
         clientOperationId: 'stop-active-wave',
         reason: 'User stopped the active response.'
-      },
-      fixture.provider
+      }
     );
     expect(fixture.provider.interruptCalls).toEqual([running.id]);
 
@@ -439,7 +481,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-ambiguous-stop');
     await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-ambiguous-stop'
     );
     fixture.provider.ambiguousInterrupt = true;
@@ -451,8 +492,7 @@ describe('DiscourseRuntimeCoordinator', () => {
           waveId: fixture.waveId,
           clientOperationId: 'ambiguous-active-stop',
           reason: 'User stopped the active response.'
-        },
-        fixture.provider
+        }
       )
     ).resolves.toMatchObject({ status: 'STOPPING' });
     expect(fixture.provider.interruptCalls).toHaveLength(1);
@@ -470,8 +510,7 @@ describe('DiscourseRuntimeCoordinator', () => {
         waveId: fixture.waveId,
         clientOperationId: 'ambiguous-active-stop-again',
         reason: 'User stopped the active response.'
-      },
-      fixture.provider
+      }
     )).resolves.toMatchObject({
       status: 'STOPPING'
     });
@@ -529,7 +568,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-not-delivered-stop');
     await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-not-delivered-stop'
     );
     fixture.provider.notDeliveredInterrupt = true;
@@ -539,7 +577,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       waveId: fixture.waveId,
       clientOperationId: 'not-delivered-stop',
       reason: 'User stopped the response.'
-    }, fixture.provider)).resolves.toMatchObject({ status: 'STOPPING' });
+    })).resolves.toMatchObject({ status: 'STOPPING' });
     expect((await fixture.runtime.snapshot()).runs[0]).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       delivery: 'ACKNOWLEDGED',
@@ -555,7 +593,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       waveId: fixture.waveId,
       clientOperationId: 'not-delivered-stop-confirmed',
       reason: 'User retried stopping the provider turn.'
-    }, fixture.provider)).resolves.toMatchObject({
+    })).resolves.toMatchObject({
       status: 'STOPPING'
     });
     expect(fixture.provider.interruptCalls).toHaveLength(2);
@@ -590,8 +628,12 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-oversized');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-oversized'
+    );
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'terminal-oversized-integrity'
     );
 
     await expect(fixture.coordinator.ingestContribution({
@@ -633,7 +675,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-empty-output');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-empty-output'
     );
     await fixture.coordinator.ingestFailure({
@@ -697,6 +738,71 @@ describe('DiscourseRuntimeCoordinator', () => {
     });
   });
 
+  it('retries provider session cleanup before deleting a settled conversation', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Settle the turn before deleting its conversation.',
+      clientOperationId: 'prepare-delete-release'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-delete-release');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      'dispatch-delete-release'
+    );
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'delete-release-integrity'
+    );
+    await fixture.coordinator.ingestContribution({
+      runId: running.id,
+      providerTurnId: running.providerTurnId!,
+      body: 'The response settled before deletion.',
+      freshnessAtCompletion: 'FRESH',
+      clientOperationId: 'terminal-delete-release',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_TERMINAL'
+    });
+    const session = (await fixture.runtime.getSession(running.sessionId))!;
+    await fixture.runtime.updateSession(
+      session.id,
+      session.recordRevision,
+      { status: 'SYSTEM_ERROR' },
+      'simulate-unconfirmed-provider-release'
+    );
+    const releaseSession = vi
+      .spyOn(fixture.provider, 'releaseRuntimeSession')
+      .mockRejectedValueOnce(new Error('provider session cleanup was not confirmed'));
+    const conversation = await fixture.discourse.getConversation(fixture.conversationId);
+    const deletion = {
+      conversationId: fixture.conversationId,
+      expectedRevision: conversation.conversation.recordRevision,
+      clientOperationId: 'delete-after-release'
+    };
+
+    await expect(fixture.coordinator.deleteConversation(deletion)).rejects.toThrow(
+      'provider session cleanup was not confirmed'
+    );
+    expect(
+      await fixture.discourse.getConversationTombstone(fixture.conversationId)
+    ).toBeUndefined();
+    await expect(fixture.runtime.getSession(session.id)).resolves.toBeDefined();
+
+    const tombstone = await fixture.coordinator.deleteConversation(deletion);
+    expect(tombstone.conversationId).toBe(fixture.conversationId);
+    expect(releaseSession).toHaveBeenCalledTimes(2);
+    expect(await fixture.runtime.snapshot()).toMatchObject({
+      sessions: [],
+      runs: [],
+      queueEntries: [],
+      artifacts: []
+    });
+  });
+
   it('serializes preparation against deletion so no orphan run crosses a tombstone', async () => {
     const fixture = await coordinatorFixture();
     const conversation = await fixture.discourse.getConversation(fixture.conversationId);
@@ -739,7 +845,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-1'
     );
     const conversation = await fixture.discourse.getConversation(fixture.conversationId);
@@ -748,6 +853,11 @@ describe('DiscourseRuntimeCoordinator', () => {
       expectedRevision: conversation.conversation.recordRevision,
       clientOperationId: 'delete-active-conversation'
     });
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'late-terminal-integrity'
+    );
 
     const result = await fixture.coordinator.ingestContribution({
       runId: running.id,
@@ -790,7 +900,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-1'
     );
     const output = await fixture.runtime.getArtifact(prepared.run.outputArtifactId);
@@ -806,6 +915,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: '2026-07-13T00:10:00.000Z',
@@ -838,7 +951,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-curated-checkpoint');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-curated-checkpoint'
     );
     const completedAt = '2026-07-13T00:10:00.000Z';
@@ -855,6 +967,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: completedAt
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: completedAt,
@@ -923,7 +1039,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-empty-terminal');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-empty-terminal'
     );
     await fixture.runtime.updateRun(
@@ -932,6 +1047,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_TERMINAL',
         endedAt: '2026-07-13T00:10:00.000Z',
@@ -1035,7 +1154,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       waveId: fixture.waveId,
       clientOperationId: 'stop-duplicate-recovery',
       reason: 'User stopped the inconsistent response.'
-    }, fixture.provider)).resolves.toMatchObject({
+    })).resolves.toMatchObject({
       status: 'SETTLED',
       outcome: 'CANCELED'
     });
@@ -1058,7 +1177,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-active-duplicate');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-active-duplicate'
     );
     if (prepared.run.scope.kind !== 'DISCOURSE') {
@@ -1129,7 +1247,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       waveId: fixture.waveId,
       clientOperationId: 'stop-active-duplicate',
       reason: 'User stopped the inconsistent response.'
-    }, fixture.provider)).resolves.toMatchObject({ status: 'STOPPING' });
+    })).resolves.toMatchObject({ status: 'STOPPING' });
     snapshot = await fixture.runtime.snapshot();
     expect(fixture.provider.interruptCalls).toEqual([running.id]);
     expect(snapshot.runs).toEqual(expect.arrayContaining([
@@ -1166,6 +1284,11 @@ describe('DiscourseRuntimeCoordinator', () => {
 
     await expect(fixture.coordinator.recoverConversation(fixture.conversationId))
       .resolves.toMatchObject({ recoveryRequiredJobIds: [fixture.jobId] });
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'natural-success-integrity'
+    );
     await expect(fixture.coordinator.ingestContribution({
       runId: running.id,
       providerTurnId: running.providerTurnId!,
@@ -1359,7 +1482,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable(`lease-partial-${name}`);
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       `dispatch-partial-${name}`
     );
     const recoveryBase = interruptDelivery
@@ -1396,7 +1518,7 @@ describe('DiscourseRuntimeCoordinator', () => {
       waveId: fixture.waveId,
       clientOperationId: `stop-partial-${name}`,
       reason: 'User stopped the recovering response.'
-    }, fixture.provider)).resolves.toMatchObject({ status: 'STOPPING' });
+    })).resolves.toMatchObject({ status: 'STOPPING' });
     expect((await fixture.discourse.getConversation(fixture.conversationId)).jobs[0])
       .toMatchObject({
         status: interruptDelivery ? 'CANCEL_REQUESTED' : 'RECOVERY_REQUIRED'
@@ -1419,7 +1541,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-incomplete-terminal');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-incomplete-terminal'
     );
     await fixture.runtime.updateRun(
@@ -1428,6 +1549,10 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:10:00.000Z'
+        },
         endedAt: '2026-07-13T00:10:00.000Z',
         lastEventAt: '2026-07-13T00:10:00.000Z'
       },
@@ -1465,7 +1590,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-failure');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-failure'
     );
     await fixture.runtime.updateRun(
@@ -1554,7 +1678,6 @@ describe('DiscourseRuntimeCoordinator', () => {
     const [leased] = await fixture.scheduler.leaseAvailable('lease-existing-recovery');
     const running = await fixture.coordinator.dispatchLeasedJob(
       leased!.id,
-      fixture.provider,
       'dispatch-existing-recovery'
     );
     await fixture.runtime.updateRun(
@@ -1624,7 +1747,8 @@ async function coordinatorFixture() {
   const emptyWorkspace = path.join(root, 'empty-workspace');
   await fs.mkdir(emptyWorkspace, { mode: 0o700 });
   const executionContext = {
-    attestation: { status: 'ATTESTED' as const },
+      attestation: { status: 'ATTESTED' as const },
+      repositoryAccess: 'READ_ONLY' as const,
     primaryCwd: emptyWorkspace,
     readRoots: [{ canonicalPath: emptyWorkspace, kind: 'EMPTY_MANAGED' as const }],
     managedAttachments: [],
@@ -1645,10 +1769,11 @@ async function coordinatorFixture() {
     },
     clientOperationId: 'execution-context-1'
   };
-  const provider = new TestScopedProvider();
+  const provider = new ScriptedAgentRuntimeCoordinator(runtime);
   const coordinator = new DiscourseRuntimeCoordinator(
     discourse,
     runtime,
+    provider,
     () => '2026-07-13T00:05:00.000Z'
   );
   const scheduler = new AgentTurnScheduler(runtime, () => '2026-07-13T00:06:00.000Z');
@@ -1722,6 +1847,26 @@ async function createSiblingRuntimeRun(
   return { run, queueEntry };
 }
 
+async function markRepositoryUnchanged(
+  runtime: FileAgentRuntimeStore,
+  runId: string,
+  clientOperationId: string
+): Promise<void> {
+  const run = await runtime.getRun(runId);
+  if (!run) throw new Error(`Runtime run not found: ${runId}`);
+  await runtime.updateRun(
+    run.id,
+    run.recordRevision,
+    {
+      repositoryIntegrity: {
+        status: 'UNCHANGED',
+        checkedAt: '2026-07-13T00:10:00.000Z'
+      }
+    },
+    clientOperationId
+  );
+}
+
 async function prepareDeliveredDuplicate(
   fixture: Awaited<ReturnType<typeof coordinatorFixture>>,
   id: string
@@ -1737,7 +1882,6 @@ async function prepareDeliveredDuplicate(
   const [leased] = await fixture.scheduler.leaseAvailable(`lease-${id}`);
   const running = await fixture.coordinator.dispatchLeasedJob(
     leased!.id,
-    fixture.provider,
     `dispatch-${id}`
   );
   if (prepared.run.scope.kind !== 'DISCOURSE') throw new Error('Expected Discourse scope.');
@@ -1776,44 +1920,6 @@ async function prepareDeliveredDuplicate(
   );
   void siblingLease;
   return { running, stale };
-}
-
-class TestScopedProvider implements AgentScopedTurnProvider {
-  calls: StartScopedAgentTurnInput[] = [];
-  interruptCalls: string[] = [];
-  ambiguousInterrupt = false;
-  notDeliveredInterrupt = false;
-
-  async startScopedTurn(input: StartScopedAgentTurnInput) {
-    this.calls.push(input);
-    expect(input.run.owner.kind).toBe('DISCOURSE');
-    expect(input.executionContext.modelSettings.sandbox).toBe('READ_ONLY');
-    expect(input.executionContext.externalTools.network).toBe(false);
-    return {
-      serverInstanceId: 'server-1',
-      providerSessionId: 'provider-session-1',
-      providerTurnId: 'provider-turn-1',
-      startedAt: '2026-07-13T00:07:00.000Z'
-    };
-  }
-
-  async interruptScopedTurn(
-    input: Pick<StartScopedAgentTurnInput, 'session' | 'run'>
-  ) {
-    this.interruptCalls.push(input.run.id);
-    if (this.ambiguousInterrupt) {
-      throw new AgentScopedMutationError(
-        'AMBIGUOUS',
-        'Provider interrupt response was lost.'
-      );
-    }
-    if (this.notDeliveredInterrupt) {
-      throw new AgentScopedMutationError(
-        'NOT_DELIVERED',
-        'Provider rejected the interrupt before delivery.'
-      );
-    }
-  }
 }
 
 function participantSeed(conversationId: string): {

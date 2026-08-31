@@ -13,10 +13,6 @@ import {
   codexCapabilities
 } from '../agent/codex/codexCapabilities';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
-import type {
-  AgentScopedTurnProvider,
-  StartScopedAgentTurnInput
-} from '../agent/AgentScopedTurnProvider';
 import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../storage/FileDiscourseStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
@@ -36,6 +32,7 @@ import {
   type DiscourseConversationAggregateRecord,
   type SendDiscourseMessageRequest
 } from '../../shared/discourse';
+import { ScriptedAgentRuntimeCoordinator } from '../../testSupport/ScriptedAgentRuntimeCoordinator';
 
 function selections(
   ...agentProfileIds: BuiltInAgentProfileId[]
@@ -67,6 +64,7 @@ describe('DiscourseService', () => {
       new DiscourseWorkspace(path.join(root, 'workspaces')),
       async (input) => ({
         attestation: { status: 'ATTESTED' },
+        repositoryAccess: 'READ_ONLY',
         primaryCwd: input.primaryCwd,
         readRoots: input.readRoots,
         managedAttachments: [],
@@ -83,9 +81,11 @@ describe('DiscourseService', () => {
       }),
       () => '2026-07-13T00:01:00.000Z'
     );
+    const agents = new ScriptedAgentRuntimeCoordinator(runtimeStore);
     const coordinator = new DiscourseRuntimeCoordinator(
       discourseStore,
       runtimeStore,
+      agents,
       () => '2026-07-13T00:01:00.000Z'
     );
     let schedulerNotifications = 0;
@@ -100,11 +100,6 @@ describe('DiscourseService', () => {
         runtime: {
           coordinator,
           contextSnapshots: snapshots,
-          provider: {
-            startScopedTurn: async () => {
-              throw new Error('The unit test must not dispatch provider work.');
-            }
-          },
           notifySchedulerWorkAvailable: () => {
             schedulerNotifications += 1;
           }
@@ -218,6 +213,89 @@ describe('DiscourseService', () => {
     expect(new Set(sent.jobs.map((job) => JSON.stringify(job.visibleMessageIds))).size).toBe(1);
     expect((await fixture.runtimeStore.snapshot()).queueEntries).toHaveLength(2);
   });
+
+  it('preserves a successful Panel response when another participant fails', async () => {
+    const fixture = await serviceFixture('panel-participant-failure');
+    const conversation = await fixture.service.createConversation({
+      title: 'Isolated panel failure',
+      defaultPolicy: 'PANEL',
+      agents: selections('builtin.lead', 'builtin.skeptic'),
+      clientOperationId: 'create-panel-failure'
+    });
+    const preview = await fixture.service.previewContext({
+      conversationId: conversation.id,
+      messageContext: []
+    });
+    const sent = await fixture.service.sendMessage({
+      conversationId: conversation.id,
+      body: 'Keep each participant result independent.',
+      context: [],
+      clientMessageId: 'panel-failure-message',
+      policy: 'PANEL',
+      agents: selections('builtin.lead', 'builtin.skeptic'),
+      previewFingerprint: preview.fingerprint
+    });
+    const leases = await fixture.scheduler.leaseAvailable('lease-panel-failure');
+    expect(leases).toHaveLength(2);
+    const runs = [];
+    for (const [index, lease] of leases.entries()) {
+      runs.push(
+        await fixture.coordinator.dispatchLeasedJob(
+          lease.id,
+          `dispatch-panel-failure-${index}`
+        )
+      );
+    }
+
+    await fixture.coordinator.ingestFailure({
+      runId: runs[0]!.id,
+      providerTurnId: runs[0]!.providerTurnId!,
+      clientOperationId: 'terminal-panel-failure',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_TERMINAL',
+      reason: 'One participant failed independently.'
+    });
+    await markRepositoryUnchanged(
+      fixture.runtimeStore,
+      runs[1]!.id,
+      'terminal-panel-success-integrity'
+    );
+    await expect(
+      fixture.coordinator.ingestContribution({
+        runId: runs[1]!.id,
+        providerTurnId: runs[1]!.providerTurnId!,
+        body: 'The sibling participant still produced a useful answer.',
+        freshnessAtCompletion: 'FRESH',
+        clientOperationId: 'terminal-panel-success',
+        completedAt: '2026-07-13T00:11:00.000Z',
+        providerTerminalSource: 'TEST_TERMINAL'
+      })
+    ).resolves.toMatchObject({ kind: 'CURATED' });
+
+    const aggregate = await fixture.discourseStore.getConversation(conversation.id);
+    expect(aggregate.waves).toMatchObject([
+      { id: sent.wave!.id, status: 'SETTLED', outcome: 'PARTIAL' }
+    ]);
+    expect(aggregate.jobs.map((job) => job.status).sort()).toEqual([
+      'COMPLETED',
+      'FAILED'
+    ]);
+    expect(
+      (await fixture.discourseStore.listMessages({
+        conversationId: conversation.id,
+        limit: 100
+      })).messages.map((message) => message.body)
+    ).toContain('The sibling participant still produced a useful answer.');
+    expect((await fixture.runtimeStore.snapshot()).queueEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 'SETTLED' }),
+        expect.objectContaining({ status: 'SETTLED' })
+      ])
+    );
+    expect(new Set(fixture.provider.finishedRunIds)).toEqual(
+      new Set(runs.map((run) => run.id))
+    );
+  }, 15_000);
 
   it('routes independently configured agent models and freezes each assignment', async () => {
     const catalog = runtimeCatalog();
@@ -376,13 +454,12 @@ describe('DiscourseService', () => {
     for (const [index, lease] of leases.entries()) {
       await fixture.coordinator.dispatchLeasedJob(
         lease.id,
-        fixture.provider,
         `cross-runtime-dispatch-${index}`
       );
     }
     expect(fixture.provider.calls.map((call) => [
       call.session.runtimeId,
-      call.executionContext.modelSettings.model
+      call.session.executionContext.modelSettings.model
     ])).toEqual([
       ['codex', 'gpt-test'],
       ['alternate', 'reasoner']
@@ -396,6 +473,65 @@ describe('DiscourseService', () => {
     const afterConflict = await fixture.discourseStore.getConversation(conversation.id);
     expect(afterConflict.participantRevisions).toEqual(beforeConflict.participantRevisions);
     expect(afterConflict.waves).toEqual(beforeConflict.waves);
+  });
+
+  it('preserves an explicit model provider that equals its runtime id through dispatch', async () => {
+    const catalog = runtimeCatalog({
+      id: 'opencode:opencode/model',
+      runtimeId: 'opencode',
+      modelProvider: 'opencode',
+      model: 'model',
+      displayName: 'OpenCode Model'
+    });
+    catalog.defaultRuntimeId = 'opencode';
+    catalog.runtimes[0] = {
+      ...catalog.runtimes[0]!,
+      preflight: {
+        ...catalog.runtimes[0]!.preflight,
+        runtime: {
+          ...catalog.runtimes[0]!.preflight.runtime,
+          id: 'opencode',
+          displayName: 'OpenCode'
+        },
+        capabilities: {
+          ...catalog.runtimes[0]!.preflight.capabilities,
+          runtimeId: 'opencode'
+        }
+      },
+      models: catalog.models
+    };
+    const fixture = await serviceFixture('provider-runtime-collision', () => catalog);
+    const agents: DiscourseAgentSelectionInput[] = [{
+      agentProfileId: 'builtin.lead',
+      runtimeId: 'opencode',
+      modelId: 'opencode:opencode/model'
+    }];
+    const conversation = await fixture.service.createConversation({
+      title: 'Provider identity',
+      defaultPolicy: 'DIRECT',
+      agents,
+      clientOperationId: 'create-provider-identity'
+    });
+    const preview = await fixture.service.previewContext({
+      conversationId: conversation.id,
+      messageContext: []
+    });
+    const sent = await fixture.service.sendMessage({
+      conversationId: conversation.id,
+      body: 'Keep the selected provider identity.',
+      context: [],
+      clientMessageId: 'provider-identity-message',
+      policy: 'DIRECT',
+      agents,
+      previewFingerprint: preview.fingerprint
+    });
+    const aggregate = await fixture.discourseStore.getConversation(conversation.id);
+
+    expect(aggregate.participantRevisions[0]?.modelProvider).toBe('opencode');
+    expect(sent.jobs[0]?.assignment.modelProvider).toBe('opencode');
+    expect(fixture.executionContextInputs[0]?.modelSettings.modelProvider).toBe('opencode');
+    expect((await fixture.runtimeStore.snapshot()).sessions[0]?.requestedSettings.modelProvider)
+      .toBe('opencode');
   });
 
   it('blocks every initial Panel job before runtime creation when its prompt budget fails', async () => {
@@ -1065,9 +1201,7 @@ describe('DiscourseService', () => {
       policy: 'DIRECT',
       agents: selections('builtin.lead'),
       previewFingerprint: preview.fingerprint
-    })).rejects.toThrow(
-      'The selected agent is unavailable. Check its connection in Settings.'
-    );
+    })).rejects.toThrow('Sign in to Codex.');
 
     expect((await fixture.discourseStore.listMessages({
       conversationId: conversation.id,
@@ -1291,8 +1425,12 @@ describe('DiscourseService', () => {
     const [leadLease] = await fixture.scheduler.leaseAvailable('lease-lead');
     const leadRun = await fixture.coordinator.dispatchLeasedJob(
       leadLease!.id,
-      fixture.provider,
       'dispatch-lead'
+    );
+    await markRepositoryUnchanged(
+      fixture.runtimeStore,
+      leadRun.id,
+      'terminal-lead-integrity'
     );
     const leadTerminal = await fixture.coordinator.ingestSuccessfulTerminal({
       runId: leadRun.id,
@@ -1316,7 +1454,6 @@ describe('DiscourseService', () => {
     const reviewRuns = await Promise.all(reviewLeases.map((lease, index) =>
       fixture.coordinator.dispatchLeasedJob(
         lease.id,
-        fixture.provider,
         `dispatch-review-${index}`
       )
     ));
@@ -1342,6 +1479,10 @@ describe('DiscourseService', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:11:00.000Z'
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_RECOVERY_TERMINAL',
         lastEventAt: '2026-07-13T00:11:00.000Z',
@@ -1370,6 +1511,11 @@ describe('DiscourseService', () => {
         suggestedResolution: 'State that rollback requires an explicit reverse migration.'
       }]
     });
+    await markRepositoryUnchanged(
+      fixture.runtimeStore,
+      reviewRuns[1]!.id,
+      'terminal-review-2-integrity'
+    );
     await fixture.coordinator.ingestSuccessfulTerminal({
       runId: reviewRuns[1]!.id,
       providerTurnId: reviewRuns[1]!.providerTurnId!,
@@ -1399,7 +1545,6 @@ describe('DiscourseService', () => {
     const [correctionLease] = await fixture.scheduler.leaseAvailable('lease-correction');
     const correctionRun = await fixture.coordinator.dispatchLeasedJob(
       correctionLease!.id,
-      fixture.provider,
       'dispatch-correction'
     );
     const correctionBody = JSON.stringify({
@@ -1422,6 +1567,10 @@ describe('DiscourseService', () => {
       {
         status: 'COMPLETED',
         delivery: 'TERMINAL',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: '2026-07-13T00:13:00.000Z'
+        },
         contextFreshnessAtCompletion: 'FRESH',
         providerTerminalSource: 'TEST_RECOVERY_TERMINAL',
         lastEventAt: '2026-07-13T00:13:00.000Z',
@@ -1492,6 +1641,7 @@ async function serviceFixture(
       executionContextInputs.push(input);
       return {
         attestation: { status: 'ATTESTED' },
+        repositoryAccess: 'READ_ONLY',
         primaryCwd: input.primaryCwd,
         readRoots: input.readRoots,
         managedAttachments: [],
@@ -1509,16 +1659,17 @@ async function serviceFixture(
     },
     () => '2026-07-13T00:01:00.000Z'
   );
+  const provider = new ScriptedAgentRuntimeCoordinator(runtimeStore);
   const coordinator = new DiscourseRuntimeCoordinator(
     discourseStore,
     runtimeStore,
+    provider,
     () => '2026-07-13T00:05:00.000Z'
   );
   const scheduler = new AgentTurnScheduler(
     runtimeStore,
     () => '2026-07-13T00:06:00.000Z'
   );
-  const provider = new SequentialScopedProvider();
   const service = new DiscourseService(
     discourseStore,
     resolver,
@@ -1530,7 +1681,6 @@ async function serviceFixture(
       runtime: {
         coordinator,
         contextSnapshots: snapshots,
-        provider,
         notifySchedulerWorkAvailable: () => undefined
       }
     }
@@ -1548,20 +1698,24 @@ async function serviceFixture(
   };
 }
 
-class SequentialScopedProvider implements AgentScopedTurnProvider {
-  private sequence = 0;
-  calls: StartScopedAgentTurnInput[] = [];
-
-  async startScopedTurn(input: StartScopedAgentTurnInput) {
-    this.calls.push(input);
-    const sequence = ++this.sequence;
-    return {
-      serverInstanceId: 'server-test',
-      providerSessionId: `provider-session-${sequence}`,
-      providerTurnId: `provider-turn-${sequence}`,
-      startedAt: '2026-07-13T00:07:00.000Z'
-    };
-  }
+async function markRepositoryUnchanged(
+  runtime: FileAgentRuntimeStore,
+  runId: string,
+  clientOperationId: string
+): Promise<void> {
+  const run = await runtime.getRun(runId);
+  if (!run) throw new Error(`Runtime run not found: ${runId}`);
+  await runtime.updateRun(
+    run.id,
+    run.recordRevision,
+    {
+      repositoryIntegrity: {
+        status: 'UNCHANGED',
+        checkedAt: '2026-07-13T00:10:00.000Z'
+      }
+    },
+    clientOperationId
+  );
 }
 
 function runtimeCatalog(

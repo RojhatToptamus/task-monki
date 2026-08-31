@@ -22,8 +22,8 @@ describe('AppSettingsStore', () => {
 
     expect(settings).toMatchObject({
       schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      theme: 'device',
-      themePreset: 'umber',
+      theme: 'dark',
+      themePreset: 'graphite',
       sidebarCollapsed: false,
       showMascot: true,
       autoInstallUpdatesOnQuit: true,
@@ -98,6 +98,39 @@ describe('AppSettingsStore', () => {
     await expect(fs.readFile(settingsPath, 'utf8')).resolves.toContain(
       '"autoInstallUpdatesOnQuit": true'
     );
+  });
+
+  it('migrates schema 11 settings without inventing a Preview generation choice', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-v11-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const previous = currentSettings() as Record<string, unknown>;
+    previous.schemaVersion = 11;
+    await fs.writeFile(settingsPath, `${JSON.stringify(previous)}\n`, 'utf8');
+
+    const settings = await new AppSettingsStore(settingsPath).get();
+
+    expect(settings).toMatchObject({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
+    });
+    expect(settings.previewRecipeGenerationRuntimeId).toBeUndefined();
+    expect(settings.previewRecipeGenerationModel).toBeUndefined();
+    expect(settings.previewRecipeGenerationModelProvider).toBeUndefined();
+  });
+
+  it('stores the dedicated Preview recipe generation selection', async () => {
+    const store = new MemoryAppSettingsStore();
+
+    await expect(
+      store.update({
+        previewRecipeGenerationRuntimeId: 'opencode',
+        previewRecipeGenerationModel: 'openai/gpt-5',
+        previewRecipeGenerationModelProvider: 'openai'
+      })
+    ).resolves.toMatchObject({
+      previewRecipeGenerationRuntimeId: 'opencode',
+      previewRecipeGenerationModel: 'openai/gpt-5',
+      previewRecipeGenerationModelProvider: 'openai'
+    });
   });
 
   it('stores repository selection as an ID-only UI preference', async () => {

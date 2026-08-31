@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto';
 import type {
   InteractionRequestRecord,
   RespondToInteractionRequest,
   RunRecord
 } from '../../shared/contracts';
 import type { AppEventBus } from '../runner/AppEventBus';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import type { TaskAgentRuntimeAccess } from './AgentRuntimeStore';
 import {
   validateInteractionDecision
 } from './AgentInteractionPolicy';
@@ -17,7 +18,7 @@ import { createDomainEvent } from '../storage/domainEvent';
 
 export class AgentInteractionService {
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: TaskAgentRuntimeAccess,
     private readonly events: AppEventBus,
     private readonly resolveRuntime: (runtimeId: AgentRuntimeId) => AgentRuntimeAdapter
   ) {}
@@ -79,7 +80,8 @@ export class AgentInteractionService {
         status: 'RESPONDING',
         decision: input.decision,
         respondedAt: new Date().toISOString()
-      }
+      },
+      interactionOperationId(interaction.id, 'responding', input.decision)
     );
     this.emitUpdate(responding);
 
@@ -105,10 +107,14 @@ export class AgentInteractionService {
                 automaticResubmission: false
               },
               resolvedAt: new Date().toISOString()
-            }
+            },
+            interactionOperationId(latest.id, 'ambiguous', {
+              operation: error.operation,
+              reason
+            })
           );
           this.emitUpdate(stale);
-          const recorded = await this.store.appendRunEventIfStatus(
+          const recorded = await this.store.applyTaskRuntimeEventIfRunStatus(
             createDomainEvent({
               type: 'AGENT_MUTATION_AMBIGUOUS',
               taskId: run.taskId,
@@ -124,7 +130,11 @@ export class AgentInteractionService {
                 automaticResubmission: false
               }
             }),
-            ACTIVE_RUN_STATUSES
+            ACTIVE_RUN_STATUSES,
+            interactionOperationId(latest.id, 'run-ambiguous', {
+              operation: error.operation,
+              reason
+            })
           );
           if (recorded) {
             this.events.emit({
@@ -152,7 +162,10 @@ export class AgentInteractionService {
                 lastResponseError:
                   error instanceof Error ? error.message : String(error)
               }
-            }
+            },
+            interactionOperationId(latest.id, 'response-failed', {
+              error: error instanceof Error ? error.message : String(error)
+            })
           );
           this.emitUpdate(pending);
         }
@@ -171,6 +184,18 @@ export class AgentInteractionService {
       at: new Date().toISOString()
     });
   }
+}
+
+function interactionOperationId(
+  interactionId: string,
+  action: string,
+  value: unknown
+): string {
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify(value))
+    .digest('hex')
+    .slice(0, 24);
+  return `interaction:${interactionId}:${action}:${fingerprint}`;
 }
 
 const ACTIVE_RUN_STATUSES: readonly RunRecord['status'][] = [

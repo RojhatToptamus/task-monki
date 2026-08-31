@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   AgentExecutionSettings,
   AgentInstructionProfile,
@@ -15,6 +15,11 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
+import type {
+  AgentAttachmentSelection,
+  TaskAttachmentRecord
+} from '../../shared/attachments';
+import type { AgentExecutionContext } from '../../shared/agentRuntime';
 import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import type { FileTaskStore } from '../storage/FileTaskStore';
@@ -22,6 +27,7 @@ import { buildAgentReviewPrompt } from '../../shared/promptTemplates';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
+  AgentRuntimeDeliveryError,
   type AgentRuntimeAdapter
 } from './AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from './AgentRuntimeRegistry';
@@ -30,7 +36,13 @@ import {
   errorDiagnostic
 } from './AgentRuntimeReadiness';
 import { AgentInteractionService } from './AgentInteractionService';
-import { toAgentTurnAttachments, type AgentTurnAttachment } from './AgentAttachmentDelivery';
+import {
+  assertAgentTurnAttachmentSelection,
+  toAgentAttachmentSelection,
+  toAgentAttachmentSelectionFromRecords,
+  toAgentTurnAttachments,
+  type AgentTurnAttachment
+} from './AgentAttachmentDelivery';
 import {
   assertBrowserDevRuntimeIsolation,
   assertBrowserDevSettingsSafe,
@@ -38,6 +50,28 @@ import {
   browserDevSettingsViolations
 } from './BrowserDevAgentBoundary';
 import { agentServersOwnedByPreviousApplication } from './AgentRuntimeRecovery';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
+import type {
+  AgentRuntimeStore,
+  TaskAgentRuntimeAccess
+} from './AgentRuntimeStore';
+import type {
+  AgentRuntimeCoordinator,
+  AgentRuntimeTurnEvent,
+  BuildAgentRuntimeExecutionContextInput,
+  PrepareAgentRuntimeTurnInput,
+  PreparedAgentRuntimeTurn
+} from './AgentRuntimeCoordinator';
+import {
+  assertReadOnlyExecutionContext,
+  createAgentSessionAccessEpoch
+} from './AgentRuntimeOwnership';
+import { inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
+import {
+  agentReviewStatusFromResult,
+  parseAgentReviewResult
+} from '../review/AgentReviewContract';
+import { INSPECT_DESIGN_TOOL_NAME } from '../design/DesignClientToolContract';
 
 const MAX_CONCURRENT_TURNS = 2;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
@@ -52,6 +86,104 @@ const RECOVERABLE_RUN_STATUSES: RunRecord['status'][] = [
   ...ACTIVE_RUN_STATUSES,
   'RECOVERY_REQUIRED'
 ];
+
+function isTerminalRuntimeRun(
+  status: import('../../shared/agent').AgentRunStatus
+): boolean {
+  return ['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(status);
+}
+
+function isReadOnlyRuntimePurpose(
+  purpose: import('../../shared/agentRuntime').AgentRuntimePurpose
+): boolean {
+  return (
+    purpose === 'TASK_REVIEW' ||
+    purpose === 'PROMPT_REFINEMENT' ||
+    purpose === 'PREVIEW_RECIPE_GENERATION' ||
+    purpose.startsWith('DISCOURSE_')
+  );
+}
+
+async function inspectReadOnlyRepositoryState(
+  context: import('../../shared/agentRuntime').AgentExecutionContext
+): Promise<string | undefined> {
+  const roots = context.readRoots
+    .filter((root) => root.kind === 'WORKTREE' || root.kind === 'REPOSITORY')
+    .map((root) => root.canonicalPath)
+    .sort();
+  if (roots.length === 0) return undefined;
+  const fingerprints = await Promise.all(
+    roots.map(async (root) => ({
+      root,
+      fingerprint: await inspectGitWorkingTreeFingerprint(root)
+    }))
+  );
+  const hash = createHash('sha256');
+  for (const entry of fingerprints) {
+    hash.update(entry.root);
+    hash.update('\0');
+    hash.update(entry.fingerprint);
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
+function verifyRuntimeTurnAttachments(
+  selection: readonly AgentAttachmentSelection[],
+  attachments: readonly AgentTurnAttachment[]
+): AgentTurnAttachment[] {
+  assertAgentTurnAttachmentSelection(selection, attachments);
+  return [...attachments];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function taskExecutionContext(input: {
+  sessionId: string;
+  operationId: string;
+  worktree: WorktreeRecord;
+  settings: AgentExecutionSettings;
+  allowDynamicTools: boolean;
+}): AgentExecutionContext {
+  const managedAttachments: AgentExecutionContext['managedAttachments'] = [];
+  const permissionProfileHash = createHash('sha256')
+    .update(
+      JSON.stringify({
+        sessionId: input.sessionId,
+        runtimeId: input.settings.runtimeId,
+        primaryCwd: input.worktree.worktreePath,
+        settings: input.settings,
+        managedAttachments,
+        allowDynamicTools: input.allowDynamicTools
+      })
+    )
+    .digest('hex');
+  return {
+    attestation: { status: 'ATTESTED' },
+    primaryCwd: input.worktree.worktreePath,
+    repositoryAccess: 'WRITE',
+    readRoots: [
+      {
+        canonicalPath: input.worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: input.worktree.id
+      }
+    ],
+    managedAttachments,
+    permissionProfileHash,
+    modelSettings: { ...input.settings },
+    externalTools: {
+      network: input.settings.networkAccess === true,
+      webSearch: 'disabled',
+      mcpServers: false,
+      apps: false,
+      dynamicTools: input.allowDynamicTools
+    },
+    clientOperationId: input.operationId
+  };
+}
 export interface StartOrchestratedTurn {
   task: Task;
   iteration: TaskIteration;
@@ -101,28 +233,1101 @@ export interface StartOrchestratedReview {
   beforeGitSnapshotId?: string;
 }
 
-export class AgentOrchestrator {
+export class AgentOrchestrator implements AgentRuntimeCoordinator {
   private startQueue: Promise<void> = Promise.resolve();
   private persistedServerOwnershipReconciled = false;
   private readonly interactions: AgentInteractionService;
   private readonly runtimes: AgentRuntimeRegistry;
+  private readonly taskRuntime: TaskAgentRuntimeAccess;
+  private readonly runtimeTurnListeners = new Set<
+    (event: AgentRuntimeTurnEvent) => void
+  >();
+  private readonly disposeRuntimeTurnListeners: Array<() => void> = [];
+  private runtimeTurnEventQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly store: FileTaskStore,
+    private readonly runtimeStore: AgentRuntimeStore,
     private readonly events: AppEventBus,
     runtimes: AgentRuntimeRegistry | AgentRuntimeAdapter,
     private readonly options: {
       allowNetworkAccess?: boolean;
       providerStartupDisabledReason?: string;
+      allowCandidateDesignModels?: boolean;
     } = {}
   ) {
     this.runtimes =
       runtimes instanceof AgentRuntimeRegistry
         ? runtimes
         : new AgentRuntimeRegistry([runtimes], runtimes.descriptor.id);
-    this.interactions = new AgentInteractionService(store, events, (runtimeId) =>
+    this.taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+      store.recordAgentRuntimeEvent(event, operationId)
+    );
+    this.interactions = new AgentInteractionService(this.taskRuntime, events, (runtimeId) =>
       this.runtimes.require(runtimeId)
     );
+    for (const adapter of this.runtimes.list()) {
+      if (!adapter.onRuntimeTurnEvent) continue;
+      this.disposeRuntimeTurnListeners.push(
+        adapter.onRuntimeTurnEvent((event) => {
+          this.enqueueRuntimeTurnEvent(event);
+        })
+      );
+    }
+  }
+
+  hasRuntime(runtimeId: string): boolean {
+    if (!this.runtimes.has(runtimeId)) return false;
+    const adapter = this.runtimes.require(runtimeId);
+    return Boolean(
+      adapter.buildExecutionContext &&
+      adapter.startRuntimeTurn &&
+      adapter.onRuntimeTurnEvent
+    );
+  }
+
+  buildExecutionContext(
+    runtimeId: string,
+    input: BuildAgentRuntimeExecutionContextInput
+  ) {
+    const adapter = this.runtimes.require(runtimeId);
+    if (!adapter.buildExecutionContext) {
+      throw new Error(
+        `${adapter.descriptor.displayName} is not configured for this workflow.`
+      );
+    }
+    return adapter.buildExecutionContext(input);
+  }
+
+  async prepareTurn(
+    input: PrepareAgentRuntimeTurnInput
+  ): Promise<PreparedAgentRuntimeTurn> {
+    if (!this.hasRuntime(input.runtimeId)) {
+      throw new Error(`Runtime ${input.runtimeId} is not configured for this workflow.`);
+    }
+    if (input.executionContext.modelSettings.runtimeId !== input.runtimeId) {
+      throw new Error('Runtime turn settings do not match the selected runtime.');
+    }
+    const promptArtifactId = `prompt-${input.runId}`;
+    const outputArtifactId = `output-${input.runId}`;
+    const diagnosticArtifactId = `diagnostic-${input.runId}`;
+    return this.runtimeStore.prepareRuntimeTurn({
+      session: {
+        id: input.sessionId,
+        owner: input.owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner: input.owner,
+          sessionId: input.sessionId,
+          epoch: 1,
+          runtimeId: input.runtimeId,
+          model: input.model,
+          executionContext: input.executionContext,
+          createdAt: input.createdAt
+        }),
+        executionContext: input.executionContext,
+        clientOperationId: `${input.clientOperationId}:session`,
+        runtimeId: input.runtimeId,
+        role: input.role ?? 'PRIMARY',
+        ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+        ...(input.forkedFromSessionId
+          ? { forkedFromSessionId: input.forkedFromSessionId }
+          : {}),
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: input.executionContext.modelSettings,
+        ...(input.taskContext ? { taskContext: input.taskContext } : {})
+      },
+      run: {
+        id: input.runId,
+        owner: input.owner,
+        scope: input.scope,
+        sessionId: input.sessionId,
+        sessionAccessEpoch: 1,
+        purpose: input.purpose,
+        generationKey: input.generationKey,
+        clientOperationId: `${input.clientOperationId}:run`,
+        requestedSettings: input.executionContext.modelSettings,
+        promptArtifactId,
+        outputArtifactId,
+        diagnosticArtifactId,
+        attachmentSelection: [...(input.attachmentSelection ?? [])],
+        ...(input.taskDetails ? { taskDetails: input.taskDetails } : {}),
+        ...(input.taskReviewTarget
+          ? { taskReviewTarget: input.taskReviewTarget }
+          : {})
+      },
+      prompt: input.prompt,
+      priority: input.priority,
+      queueOperationId: `${input.clientOperationId}:enqueue`,
+      notBefore: input.notBefore
+    });
+  }
+
+  async startPreparedTurn(
+    queueEntryId: string,
+    clientOperationId: string,
+    attachments: readonly AgentTurnAttachment[] = []
+  ) {
+    const snapshot = await this.runtimeStore.snapshot();
+    const entry = snapshot.queueEntries.find(
+      (candidate) => candidate.id === queueEntryId
+    );
+    if (!entry || entry.status !== 'LEASED') {
+      throw new Error('Only a leased runtime turn can start.');
+    }
+    let run = snapshot.runs.find((candidate) => candidate.id === entry.runId);
+    if (!run) throw new Error(`Agent runtime run not found: ${entry.runId}`);
+    let session = snapshot.sessions.find(
+      (candidate) => candidate.id === run!.sessionId
+    );
+    if (!session) throw new Error(`Agent runtime session not found: ${run.sessionId}`);
+    if (run.status !== 'QUEUED' || run.delivery !== 'NOT_SENT') {
+      if (
+        run.status === 'RUNNING' ||
+        run.status === 'RECOVERY_REQUIRED' ||
+        isTerminalRuntimeRun(run.status)
+      ) {
+        return run;
+      }
+      throw new Error(`Runtime turn cannot start from ${run.status}/${run.delivery}.`);
+    }
+    const adapter = this.runtimes.require(session.runtimeId);
+    if (!adapter.startRuntimeTurn) {
+      throw new Error(
+        `${adapter.descriptor.displayName} is not configured for this workflow.`
+      );
+    }
+    const prompt = await this.runtimeStore.readArtifact(run.promptArtifactId);
+    const verifiedAttachments = verifyRuntimeTurnAttachments(
+      run.attachmentSelection,
+      attachments
+    );
+    if (isReadOnlyRuntimePurpose(run.purpose)) {
+      assertReadOnlyExecutionContext(session.executionContext);
+      try {
+        const beforeFingerprint = await inspectReadOnlyRepositoryState(
+          session.executionContext
+        );
+        run = await this.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            repositoryIntegrity: {
+              ...(beforeFingerprint ? { beforeFingerprint } : {}),
+              status: 'PENDING'
+            }
+          },
+          `${clientOperationId}:repository-before`
+        );
+      } catch (error) {
+        const endedAt = new Date().toISOString();
+        const detail = `Task Monki could not inspect the repository before the read-only turn: ${errorMessage(error)}`;
+        run = await this.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            status: 'FAILED',
+            delivery: 'NOT_DELIVERED',
+            recoveryState: 'NONE',
+            repositoryIntegrity: {
+              status: 'UNVERIFIABLE',
+              checkedAt: endedAt,
+              detail
+            },
+            terminalReason: detail,
+            providerTerminalSource: 'REPOSITORY_INTEGRITY',
+            lastEventAt: endedAt,
+            endedAt
+          },
+          `${clientOperationId}:repository-before-failed`
+        );
+        await this.settleRuntimeQueueEntry(entry.id, `${clientOperationId}:settle-before-failed`);
+        throw new Error(detail, { cause: error });
+      }
+    }
+    const startedAt = new Date().toISOString();
+    run = await this.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt,
+        lastEventAt: startedAt
+      },
+      `${clientOperationId}:runtime-starting`
+    );
+    try {
+      const started = await adapter.startRuntimeTurn({
+        session,
+        run,
+        executionContext: session.executionContext,
+        prompt,
+        attachments: verifiedAttachments
+      });
+      const latest = (await this.runtimeStore.getRun(run.id)) ?? run;
+      if (
+        latest.status === 'RUNNING' &&
+        latest.delivery === 'ACKNOWLEDGED'
+      ) {
+        return latest;
+      }
+      if (isTerminalRuntimeRun(latest.status)) return latest;
+      session = (await this.runtimeStore.getSession(session.id)) ?? session;
+      if (
+        session.providerSessionId &&
+        session.providerSessionId !== started.providerSessionId
+      ) {
+        throw new Error('Provider acknowledgement changed the session identity.');
+      }
+      session = await this.runtimeStore.updateSession(
+        session.id,
+        session.recordRevision,
+        {
+          providerSessionId: started.providerSessionId,
+          providerSessionTreeId: started.providerSessionTreeId,
+          status: 'ACTIVE',
+          materialized: true,
+          lastAttachedAt: started.startedAt
+        },
+        `${clientOperationId}:session-acknowledged`
+      );
+      run = await this.runtimeStore.updateRun(
+        latest.id,
+        latest.recordRevision,
+        {
+          serverInstanceId: started.serverInstanceId,
+          providerTurnId: started.providerTurnId,
+          status: 'RUNNING',
+          delivery: 'ACKNOWLEDGED',
+          ...(started.attachmentSubmissions
+            ? { attachmentSubmissions: started.attachmentSubmissions }
+            : {}),
+          lastEventAt: started.startedAt
+        },
+        `${clientOperationId}:runtime-acknowledged`
+      );
+      void session;
+      return run;
+    } catch (error) {
+      const latest = (await this.runtimeStore.getRun(run.id)) ?? run;
+      if (
+        latest.status === 'RUNNING' ||
+        isTerminalRuntimeRun(latest.status) ||
+        latest.status === 'RECOVERY_REQUIRED'
+      ) {
+        return latest;
+      }
+      const delivery =
+        error instanceof AgentRuntimeDeliveryError
+          ? error.delivery
+          : 'AMBIGUOUS';
+      const terminal = delivery === 'NOT_DELIVERED';
+      const observedAt = new Date().toISOString();
+      run = await this.runtimeStore.updateRun(
+        latest.id,
+        latest.recordRevision,
+        {
+          status: terminal ? 'FAILED' : 'RECOVERY_REQUIRED',
+          delivery,
+          recoveryState: terminal ? 'NONE' : 'REQUIRES_USER_ACTION',
+          terminalReason: error instanceof Error ? error.message : String(error),
+          lastEventAt: observedAt,
+          ...(terminal ? { endedAt: observedAt } : {})
+        },
+        `${clientOperationId}:runtime-start-failed`
+      );
+      if (terminal) {
+        const currentEntry = (await this.runtimeStore.snapshot()).queueEntries.find(
+          (candidate) => candidate.id === entry.id
+        );
+        if (currentEntry?.status === 'LEASED') {
+          await this.runtimeStore.settleQueueEntry(
+            currentEntry.id,
+            currentEntry.recordRevision,
+            `${clientOperationId}:settle-not-delivered`
+          );
+        }
+        if (isReadOnlyRuntimePurpose(run.purpose)) {
+          await this.verifyReadOnlyRuntimeBoundary({
+            type: 'TERMINAL',
+            runId: run.id,
+            providerTurnId: run.providerTurnId ?? run.id,
+            status: 'failed',
+            error: run.terminalReason,
+            completedAt: run.endedAt ?? observedAt
+          });
+        }
+      }
+      throw error;
+    }
+  }
+
+  async startPreparedTurnNow(
+    queueEntryId: string,
+    clientOperationId: string,
+    attachments: readonly AgentTurnAttachment[] = []
+  ) {
+    const entry = (await this.runtimeStore.snapshot()).queueEntries.find(
+      (candidate) => candidate.id === queueEntryId
+    );
+    if (!entry) throw new Error(`Agent runtime queue entry not found: ${queueEntryId}`);
+    if (entry.status === 'QUEUED') {
+      await this.runtimeStore.leaseQueueEntry(
+        entry.id,
+        entry.recordRevision,
+        `${clientOperationId}:lease`
+      );
+    } else if (entry.status !== 'LEASED') {
+      const run = await this.runtimeStore.getRun(entry.runId);
+      if (run && isTerminalRuntimeRun(run.status)) return run;
+      throw new Error(`Runtime turn cannot start from queue state ${entry.status}.`);
+    }
+    return this.startPreparedTurn(queueEntryId, clientOperationId, attachments);
+  }
+
+  async cancelQueuedTurn(
+    runId: string,
+    reason: string,
+    clientOperationId: string
+  ) {
+    let run = await this.runtimeStore.getRun(runId);
+    if (!run) throw new Error(`Agent runtime run not found: ${runId}`);
+    if (isTerminalRuntimeRun(run.status)) return run;
+    if (run.status !== 'QUEUED' || run.delivery !== 'NOT_SENT') {
+      throw new Error('Only a provably unsubmitted runtime turn can be canceled.');
+    }
+    const endedAt = new Date().toISOString();
+    run = await this.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTED',
+        delivery: 'NOT_DELIVERED',
+        recoveryState: 'NONE',
+        ...(isReadOnlyRuntimePurpose(run.purpose)
+          ? {
+              repositoryIntegrity: {
+                status: 'UNCHANGED' as const,
+                checkedAt: endedAt
+              }
+            }
+          : {}),
+        terminalReason: reason,
+        lastEventAt: endedAt,
+        endedAt
+      },
+      `${clientOperationId}:runtime-canceled`
+    );
+    const entry = (await this.runtimeStore.snapshot()).queueEntries.find(
+      (candidate) => candidate.runId === run!.id
+    );
+    if (entry?.status === 'QUEUED') {
+      await this.runtimeStore.cancelQueueEntry(
+        entry.id,
+        entry.recordRevision,
+        reason,
+        `${clientOperationId}:queue-canceled`
+      );
+    } else if (entry?.status === 'LEASED') {
+      await this.runtimeStore.settleQueueEntry(
+        entry.id,
+        entry.recordRevision,
+        `${clientOperationId}:queue-settled`
+      );
+    }
+    return run;
+  }
+
+  async interruptTurn(
+    runId: string,
+    reason: string,
+    clientOperationId: string
+  ) {
+    let run = await this.runtimeStore.getRun(runId);
+    if (!run) throw new Error(`Agent runtime run not found: ${runId}`);
+    if (isTerminalRuntimeRun(run.status)) return run;
+    if (run.status === 'QUEUED' && run.delivery === 'NOT_SENT') {
+      return this.cancelQueuedTurn(run.id, reason, clientOperationId);
+    }
+    const session = await this.runtimeStore.getSession(run.sessionId);
+    if (!session) throw new Error(`Agent runtime session not found: ${run.sessionId}`);
+    if (run.status === 'RECOVERY_REQUIRED') {
+      if (
+        run.interruptDelivery === 'AMBIGUOUS' ||
+        run.interruptDelivery === 'SENDING'
+      ) {
+        return run;
+      }
+      if (['NOT_SENT', 'NOT_DELIVERED'].includes(run.delivery)) {
+        const endedAt = new Date().toISOString();
+        return this.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            status: 'INTERRUPTED',
+            delivery: 'NOT_DELIVERED',
+            recoveryState: 'NONE',
+            terminalReason: reason,
+            lastEventAt: endedAt,
+            endedAt
+          },
+          `${clientOperationId}:runtime-terminal`
+        );
+      }
+      if (run.delivery === 'ACKNOWLEDGED' && run.providerTurnId) {
+        run = await this.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            status: 'RUNNING',
+            interruptDelivery: undefined,
+            stopRequestedAt: undefined,
+            recoveryState: 'NONE',
+            lastEventAt: new Date().toISOString()
+          },
+          `${clientOperationId}:runtime-active`
+        );
+      }
+    }
+    if (
+      !run.providerTurnId ||
+      !['RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status)
+    ) {
+      throw new Error('Runtime interruption requires an acknowledged active turn.');
+    }
+    const adapter = this.runtimes.require(session.runtimeId);
+    if (!adapter.interruptRuntimeTurn) {
+      throw new Error(
+        `${adapter.descriptor.displayName} cannot interrupt this workflow.`
+      );
+    }
+    const requestedAt = new Date().toISOString();
+    run = await this.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: requestedAt,
+        terminalReason: reason,
+        lastEventAt: requestedAt
+      },
+      `${clientOperationId}:runtime-stop-intent`
+    );
+    try {
+      await adapter.interruptRuntimeTurn({ session, run });
+      let latest = (await this.runtimeStore.getRun(run.id)) ?? run;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (
+          isTerminalRuntimeRun(latest.status) ||
+          latest.status === 'RECOVERY_REQUIRED' ||
+          latest.status !== 'INTERRUPTING' ||
+          latest.interruptDelivery !== 'SENDING'
+        ) {
+          return latest;
+        }
+        try {
+          return await this.runtimeStore.updateRun(
+            latest.id,
+            latest.recordRevision,
+            {
+              interruptDelivery: 'ACKNOWLEDGED',
+              lastEventAt: new Date().toISOString()
+            },
+            `${clientOperationId}:runtime-stop-ack`
+          );
+        } catch (error) {
+          const current = await this.runtimeStore.getRun(latest.id);
+          if (
+            !current ||
+            current.recordRevision === latest.recordRevision ||
+            attempt === 2
+          ) {
+            throw error;
+          }
+          latest = current;
+        }
+      }
+      return latest;
+    } catch (error) {
+      const latest = (await this.runtimeStore.getRun(run.id)) ?? run;
+      if (
+        isTerminalRuntimeRun(latest.status) ||
+        latest.status === 'RECOVERY_REQUIRED'
+      ) {
+        return latest;
+      }
+      const interruptDelivery =
+        error instanceof AgentRuntimeDeliveryError
+          ? error.delivery
+          : 'AMBIGUOUS';
+      const terminalReason = error instanceof Error ? error.message : String(error);
+      if (interruptDelivery === 'AMBIGUOUS') {
+        return this.runtimeStore.updateRun(
+          latest.id,
+          latest.recordRevision,
+          {
+            status: 'INTERRUPTING',
+            interruptDelivery,
+            recoveryState: 'NONE',
+            terminalReason,
+            lastEventAt: new Date().toISOString()
+          },
+          `${clientOperationId}:runtime-stop-ambiguous`
+        );
+      }
+      return this.runtimeStore.updateRun(
+        latest.id,
+        latest.recordRevision,
+        {
+          status: 'RECOVERY_REQUIRED',
+          interruptDelivery,
+          recoveryState: 'REQUIRES_USER_ACTION',
+          terminalReason,
+          lastEventAt: new Date().toISOString()
+        },
+        `${clientOperationId}:runtime-stop-recovery`
+      );
+    }
+  }
+
+  subscribe(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
+    this.runtimeTurnListeners.add(listener);
+    return () => this.runtimeTurnListeners.delete(listener);
+  }
+
+  async releaseRuntimeSession(sessionId: string): Promise<void> {
+    await this.runtimeTurnEventQueue;
+    await this.releaseRuntimeSessionNow(sessionId);
+  }
+
+  async finishRuntimeTurn(runId: string): Promise<void> {
+    await this.runtimeTurnEventQueue;
+    const run = await this.runtimeStore.getRun(runId);
+    if (!run || !isTerminalRuntimeRun(run.status)) return;
+    await this.settleRuntimeQueueEntryForRun(
+      run.id,
+      `runtime-finish-settle:${run.id}`
+    );
+    const released = await this.releaseTerminalRuntimeSession(run);
+    if (released && run.owner.kind === 'PROMPT_REFINEMENT') {
+      await this.runtimeStore
+        .purgePromptRefinement(run.owner.requestId)
+        .catch((error) =>
+          this.appendRuntimeDiagnostic(
+            run,
+            `Task Monki could not clean up prompt-refinement records: ${errorMessage(error)}`
+          )
+        );
+    }
+    if (released && run.owner.kind === 'PREVIEW_RECIPE_GENERATION') {
+      await this.runtimeStore
+        .purgePreviewRecipeGeneration(run.owner.taskId, run.owner.generationId)
+        .catch((error) =>
+          this.appendRuntimeDiagnostic(
+            run,
+            `Task Monki could not clean up Preview recipe generation records: ${errorMessage(error)}`
+          )
+        );
+    }
+  }
+
+  private async releaseRuntimeSessionNow(sessionId: string): Promise<void> {
+    const session = await this.runtimeStore.getSession(sessionId);
+    if (!session) return;
+    const activeRun = await this.runtimeStore.getActiveRunForSession(session.id);
+    if (activeRun) {
+      throw new Error(
+        `Cannot release runtime session ${session.id} while run ${activeRun.id} is ${activeRun.status}.`
+      );
+    }
+    const adapter = this.runtimes.require(session.runtimeId);
+    await adapter.releaseSession?.({
+      localSessionId: session.id,
+      providerSessionId: session.providerSessionId
+    });
+  }
+
+  private async releaseTerminalRuntimeSession(
+    run: import('../../shared/agentRuntime').AgentRuntimeRunRecord
+  ): Promise<boolean> {
+    try {
+      await this.releaseRuntimeSessionNow(run.sessionId);
+      return true;
+    } catch (error) {
+      const reason = `Task Monki could not release the provider session: ${errorMessage(error)}`;
+      await this.appendRuntimeDiagnostic(run, reason).catch(() => undefined);
+      const session = await this.runtimeStore.getSession(run.sessionId).catch(() => undefined);
+      if (session && session.status !== 'SYSTEM_ERROR') {
+        await this.runtimeStore
+          .updateSession(
+            session.id,
+            session.recordRevision,
+            { status: 'SYSTEM_ERROR' },
+            `runtime-release-failed:${run.id}`
+          )
+          .catch(() => undefined);
+      }
+      return false;
+    }
+  }
+
+  async waitForRuntimeTurn(
+    runId: string,
+    timeoutMs: number
+  ): Promise<{
+    run: import('../../shared/agentRuntime').AgentRuntimeRunRecord;
+    output: string;
+  }> {
+    const readTerminal = async () => {
+      const run = await this.runtimeStore.getRun(runId);
+      if (!run) return undefined;
+      if (run.status === 'RECOVERY_REQUIRED') {
+        throw new Error(
+          run.terminalReason ?? 'The agent runtime turn requires recovery.'
+        );
+      }
+      if (!isTerminalRuntimeRun(run.status)) return undefined;
+      if (isReadOnlyRuntimePurpose(run.purpose)) {
+        const integrity = run.repositoryIntegrity;
+        if (!integrity || integrity.status === 'PENDING') return undefined;
+        if (integrity.status !== 'UNCHANGED' && run.status !== 'FAILED') {
+          return undefined;
+        }
+      }
+      return {
+        run,
+        output: await this.runtimeStore.readArtifact(run.outputArtifactId)
+      };
+    };
+    const existing = await readTerminal();
+    if (existing) return existing;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (operation: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        operation();
+      };
+      const unsubscribe = this.subscribe((event) => {
+        if (event.runId !== runId) return;
+        if (event.type === 'RECOVERY_REQUIRED') {
+          finish(() => reject(new Error(event.reason)));
+          return;
+        }
+        if (event.type !== 'TERMINAL') return;
+        void readTerminal().then(
+          (result) => {
+            if (!result) {
+              finish(() =>
+                reject(new Error('The provider reported completion without durable state.'))
+              );
+              return;
+            }
+            finish(() => resolve(result));
+          },
+          (error) => finish(() => reject(error))
+        );
+      });
+      const timer = setTimeout(() => {
+        finish(() => reject(new Error('The agent runtime turn timed out.')));
+      }, timeoutMs);
+      timer.unref();
+      // A provider can settle between the first read and listener registration.
+      // Re-read after subscribing so a fast terminal event cannot be missed.
+      void readTerminal().then(
+        (result) => {
+          if (result) finish(() => resolve(result));
+        },
+        (error) => finish(() => reject(error))
+      );
+    });
+  }
+
+  private enqueueRuntimeTurnEvent(event: AgentRuntimeTurnEvent): void {
+    const operation = this.runtimeTurnEventQueue.then(() =>
+      this.processRuntimeTurnEvent(event)
+    );
+    this.runtimeTurnEventQueue = operation
+      .catch((error) => this.recoverRuntimeTurnEventProcessing(event, error))
+      .catch(() => undefined);
+  }
+
+  private async processRuntimeTurnEvent(event: AgentRuntimeTurnEvent): Promise<void> {
+    const verifiedEvent =
+      event.type === 'TERMINAL' || event.type === 'RECOVERY_REQUIRED'
+        ? await this.verifyReadOnlyRuntimeBoundary(event)
+        : event;
+    await this.projectTaskReadOnlyRuntimeEvent(verifiedEvent);
+    for (const listener of this.runtimeTurnListeners) {
+      try {
+        listener(verifiedEvent);
+      } catch (error) {
+        const run = await this.runtimeStore.getRun(verifiedEvent.runId);
+        if (run) {
+          await this.appendRuntimeDiagnostic(
+            run,
+            `A runtime event listener failed: ${errorMessage(error)}`
+          ).catch(() => undefined);
+        }
+      }
+    }
+  }
+
+  private async recoverRuntimeTurnEventProcessing(
+    event: AgentRuntimeTurnEvent,
+    error: unknown
+  ): Promise<void> {
+    const reason = `Task Monki could not finish runtime event processing: ${errorMessage(error)}`;
+    let run = await this.runtimeStore.getRun(event.runId).catch(() => undefined);
+    if (run) {
+      await this.appendRuntimeDiagnostic(run, reason).catch(() => undefined);
+      if (run.status !== 'RECOVERY_REQUIRED') {
+        const update = {
+          status: 'RECOVERY_REQUIRED' as const,
+          recoveryState: 'RECONCILING' as const,
+          terminalReason: reason,
+          lastEventAt: new Date().toISOString(),
+          ...(isTerminalRuntimeRun(run.status) ? { endedAt: undefined } : {})
+        };
+        run = await this.runtimeStore
+          .updateRun(
+            run.id,
+            run.recordRevision,
+            update,
+            `runtime-event-recovery:${run.id}:${event.type}`
+          )
+          .catch(() => run);
+      }
+    }
+    const recoveryEvent: AgentRuntimeTurnEvent = {
+      type: 'RECOVERY_REQUIRED',
+      runId: event.runId,
+      ...(run?.providerTurnId ? { providerTurnId: run.providerTurnId } : {}),
+      reason,
+      observedAt: new Date().toISOString()
+    };
+    await this.projectTaskReadOnlyRuntimeEvent(recoveryEvent).catch(() => undefined);
+    for (const listener of this.runtimeTurnListeners) {
+      try {
+        listener(recoveryEvent);
+      } catch {
+        // One consumer must not prevent other workflows from seeing recovery.
+      }
+    }
+  }
+
+  private async verifyReadOnlyRuntimeBoundary(
+    event:
+      | Extract<AgentRuntimeTurnEvent, { type: 'TERMINAL' }>
+      | Extract<AgentRuntimeTurnEvent, { type: 'RECOVERY_REQUIRED' }>
+  ): Promise<AgentRuntimeTurnEvent> {
+    let run = await this.runtimeStore.getRun(event.runId);
+    if (!run || !isReadOnlyRuntimePurpose(run.purpose)) return event;
+    if (run.repositoryIntegrity?.status === 'UNCHANGED') return event;
+    if (
+      run.repositoryIntegrity &&
+      run.repositoryIntegrity.status !== 'PENDING'
+    ) {
+      return {
+        type: 'TERMINAL',
+        runId: event.runId,
+        providerTurnId: run.providerTurnId ?? event.providerTurnId ?? run.id,
+        status: 'failed',
+        error:
+          run.repositoryIntegrity.detail ??
+          'Task Monki could not verify the repository boundary for this read-only turn.',
+        completedAt:
+          event.type === 'TERMINAL' ? event.completedAt : event.observedAt
+      };
+    }
+    const session = await this.runtimeStore.getSession(run.sessionId);
+    if (!session) return event;
+    const repositoryRoots = session.executionContext.readRoots.filter(
+      (root) => root.kind === 'WORKTREE' || root.kind === 'REPOSITORY'
+    );
+    const boundaryAt =
+      event.type === 'TERMINAL' ? event.completedAt : event.observedAt;
+    if (repositoryRoots.length === 0) {
+      await this.runtimeStore.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          repositoryIntegrity: {
+            status: 'UNCHANGED',
+            checkedAt: boundaryAt
+          }
+        },
+        `repository-integrity:${run.id}:${boundaryAt}`
+      );
+      return event;
+    }
+
+    let afterFingerprint: string | undefined;
+    let failure: string | undefined;
+    let status: NonNullable<
+      import('../../shared/agentRuntime').AgentRuntimeRunRecord['repositoryIntegrity']
+    >['status'];
+    try {
+      afterFingerprint = await inspectReadOnlyRepositoryState(
+        session.executionContext
+      );
+      if (!run.repositoryIntegrity?.beforeFingerprint || !afterFingerprint) {
+        status = 'UNVERIFIABLE';
+        failure =
+          'Task Monki could not verify the repository boundary for this read-only turn.';
+      } else if (
+        run.repositoryIntegrity.beforeFingerprint !== afterFingerprint
+      ) {
+        status = 'CHANGED';
+        failure =
+          'Repository state changed during the read-only turn. The changes were left in place as evidence.';
+      } else {
+        status = 'UNCHANGED';
+      }
+    } catch (error) {
+      status = 'UNVERIFIABLE';
+      failure = `Task Monki could not inspect the repository after the read-only turn: ${errorMessage(error)}`;
+    }
+
+    const integrity = {
+      ...(run.repositoryIntegrity?.beforeFingerprint
+        ? { beforeFingerprint: run.repositoryIntegrity.beforeFingerprint }
+        : {}),
+      ...(afterFingerprint ? { afterFingerprint } : {}),
+      status,
+      checkedAt: new Date().toISOString(),
+      ...(failure ? { detail: failure } : {})
+    };
+    run = await this.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      { repositoryIntegrity: integrity },
+      `repository-integrity:${run.id}:${boundaryAt}`
+    );
+    if (!failure) return event;
+
+    await this.appendRuntimeDiagnostic(run, failure);
+    await this.failRuntimeRunAfterIntegrityViolation(run, failure, boundaryAt);
+    return {
+      type: 'TERMINAL',
+      runId: event.runId,
+      providerTurnId: run.providerTurnId ?? event.providerTurnId ?? run.id,
+      status: 'failed',
+      error: failure,
+      completedAt:
+        event.type === 'TERMINAL' ? event.completedAt : event.observedAt
+    };
+  }
+
+  private async projectTaskReadOnlyRuntimeEvent(
+    event: AgentRuntimeTurnEvent
+  ): Promise<void> {
+    if (event.type === 'DELTA') return;
+    const runtimeRun = await this.runtimeStore.getRun(event.runId);
+    if (
+      !runtimeRun ||
+      runtimeRun.owner.kind !== 'TASK' ||
+      runtimeRun.purpose !== 'TASK_REVIEW'
+    ) {
+      return;
+    }
+    const run = await this.taskRuntime.getRun(runtimeRun.id);
+    if (!run) return;
+    if (event.type === 'RECOVERY_REQUIRED') {
+      await this.taskRuntime.applyTaskRuntimeEvent(
+        createDomainEvent({
+          type: 'AGENT_RUNTIME_LOST',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
+          source: 'provider',
+          payload: { reason: event.reason }
+        }),
+        `shared-review-recovery:${run.id}:${event.observedAt}`
+      );
+      this.events.emit({
+        type: 'run.state.updated',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        payload: { eventType: 'runtime/recovery-required' },
+        at: event.observedAt
+      });
+      return;
+    }
+
+    const output = await this.runtimeStore.readArtifact(runtimeRun.outputArtifactId);
+    const finalArtifact = await this.taskRuntime.writeFinalArtifact(
+      run.taskId,
+      run.id,
+      output.trim() || event.error || 'The review returned no final response.',
+      `shared-review-final:${run.id}`
+    );
+    await this.taskRuntime.applyTaskRuntimeEvent(
+      createDomainEvent({
+        type: 'ARTIFACT_CREATED',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        serverInstanceId: run.serverInstanceId,
+        source: 'storage',
+        payload: {
+          artifactId: finalArtifact.id,
+          kind: 'agent-final'
+        }
+      }),
+      `shared-review-final-link:${run.id}`
+    );
+    const reviewResult =
+      event.status === 'completed' ? parseAgentReviewResult(output) : undefined;
+    const reviewStatus = agentReviewStatusFromResult(reviewResult);
+    const type =
+      event.status === 'completed'
+        ? 'AGENT_RUN_COMPLETED'
+        : event.status === 'interrupted'
+          ? 'AGENT_RUN_INTERRUPTED'
+          : 'AGENT_RUN_FAILED';
+    await this.taskRuntime.applyTaskRuntimeEvent(
+      createDomainEvent({
+        type,
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        serverInstanceId: run.serverInstanceId,
+        source: 'provider',
+        payload: {
+          terminalStatus: event.status,
+          error: event.error,
+          terminalReason: event.error,
+          finalArtifactId: finalArtifact.id,
+          agentReviewStatus: reviewStatus,
+          agentReviewResult: reviewResult
+        }
+      }),
+      `shared-review-terminal:${run.id}:${event.completedAt}`
+    );
+    await this.settleRuntimeQueueEntryForRun(
+      run.id,
+      `shared-review-settle:${run.id}`
+    );
+    await this.releaseTerminalRuntimeSession(runtimeRun);
+    this.events.emit({
+      type: 'run.terminal',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      payload: { status: event.status, finalArtifactId: finalArtifact.id },
+      at: event.completedAt
+    });
+  }
+
+  private async appendRuntimeDiagnostic(
+    run: import('../../shared/agentRuntime').AgentRuntimeRunRecord,
+    message: string
+  ): Promise<void> {
+    const artifact = await this.runtimeStore.getArtifact(run.diagnosticArtifactId);
+    if (!artifact) return;
+    const current = await this.runtimeStore.readArtifact(artifact.id);
+    await this.runtimeStore.updateArtifact({
+      artifactId: artifact.id,
+      expectedRevision: artifact.recordRevision,
+      clientOperationId: `repository-integrity-diagnostic:${run.id}`,
+      content: `${current}${current ? '\n' : ''}${message}`
+    });
+  }
+
+  private async failRuntimeRunAfterIntegrityViolation(
+    run: import('../../shared/agentRuntime').AgentRuntimeRunRecord,
+    reason: string,
+    completedAt: string
+  ): Promise<void> {
+    let current = (await this.runtimeStore.getRun(run.id)) ?? run;
+    if (current.status === 'FAILED') {
+      await this.runtimeStore.updateRun(
+        current.id,
+        current.recordRevision,
+        {
+          terminalReason: reason,
+          providerTerminalSource: 'REPOSITORY_INTEGRITY'
+        },
+        `repository-integrity-failed:${run.id}`
+      );
+      return;
+    }
+    if (isTerminalRuntimeRun(current.status)) {
+      current = await this.runtimeStore.updateRun(
+        current.id,
+        current.recordRevision,
+        {
+          status: 'RECOVERY_REQUIRED',
+          recoveryState: 'REQUIRES_USER_ACTION',
+          terminalReason: reason,
+          providerTerminalSource: 'REPOSITORY_INTEGRITY',
+          endedAt: undefined
+        },
+        `repository-integrity-reopen:${run.id}`
+      );
+    }
+    await this.runtimeStore.updateRun(
+      current.id,
+      current.recordRevision,
+      {
+        status: 'FAILED',
+        delivery: current.providerTurnId ? 'TERMINAL' : 'NOT_DELIVERED',
+        recoveryState: 'NONE',
+        terminalReason: reason,
+        providerTerminalSource: 'REPOSITORY_INTEGRITY',
+        lastEventAt: completedAt,
+        endedAt: completedAt
+      },
+      `repository-integrity-terminal:${run.id}`
+    );
+  }
+
+  private async settleRuntimeQueueEntry(
+    queueEntryId: string,
+    operationId: string
+  ): Promise<void> {
+    const entry = (await this.runtimeStore.snapshot()).queueEntries.find(
+      (candidate) => candidate.id === queueEntryId
+    );
+    if (entry?.status === 'LEASED') {
+      await this.runtimeStore.settleQueueEntry(
+        entry.id,
+        entry.recordRevision,
+        operationId
+      );
+    }
+  }
+
+  private async settleRuntimeQueueEntryForRun(
+    runId: string,
+    operationId: string
+  ): Promise<void> {
+    const entry = (await this.runtimeStore.snapshot()).queueEntries.find(
+      (candidate) => candidate.runId === runId
+    );
+    if (entry?.status === 'LEASED') {
+      await this.runtimeStore.settleQueueEntry(
+        entry.id,
+        entry.recordRevision,
+        operationId
+      );
+    }
   }
 
   async initialize(
@@ -134,11 +1339,17 @@ export class AgentOrchestrator {
       return;
     }
     await this.reconcilePersistedServerOwnership();
-    const persisted = await this.store.snapshot();
+    const persisted = await this.runtimeStore.snapshot();
+    const runtimeIdBySessionId = new Map(
+      persisted.sessions.map((session) => [session.id, session.runtimeId])
+    );
     const recoveryRuntimeIds = new Set(
       persisted.runs
         .filter((run) => RECOVERABLE_RUN_STATUSES.includes(run.status))
-        .map((run) => run.runtimeId)
+        .flatMap((run) => {
+          const runtimeId = runtimeIdBySessionId.get(run.sessionId);
+          return runtimeId ? [runtimeId] : [];
+        })
     );
     let runtimeIdsToInitialize = this.runtimes
       .list()
@@ -172,6 +1383,10 @@ export class AgentOrchestrator {
     const initializationFailures = await this.runtimes.initialize(
       runtimeIdsToInitialize
     );
+    await this.runtimeTurnEventQueue;
+    await this.stopAbandonedPreviewRecipeGenerations();
+    await this.runtimeTurnEventQueue;
+    await this.reconcileSettledReadOnlyTurns();
     if (this.options.allowNetworkAccess === false) {
       const requiredFailure = initializationFailures.find((failure) =>
         requiredRuntimeIds.includes(failure.runtimeId)
@@ -209,10 +1424,10 @@ export class AgentOrchestrator {
 
   private async reconcilePersistedServerOwnership(): Promise<void> {
     if (this.persistedServerOwnershipReconciled) return;
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const lostAt = new Date().toISOString();
     for (const server of agentServersOwnedByPreviousApplication(snapshot)) {
-      await this.store.updateAgentServer(server.id, {
+      await this.runtimeStore.updateAgentServer(server.id, {
         status: 'LOST',
         disconnectedAt: lostAt,
         exitedAt: lostAt,
@@ -220,6 +1435,151 @@ export class AgentOrchestrator {
       });
     }
     this.persistedServerOwnershipReconciled = true;
+  }
+
+  private async reconcileSettledReadOnlyTurns(): Promise<void> {
+    const snapshot = await this.runtimeStore.snapshot();
+    const taskSnapshot = await this.store.snapshot();
+    const publishedTaskRuntimeOperations = new Set(
+      taskSnapshot.events
+        .map((event) => {
+          const operationId = (event.payload as { runtimeOperationId?: unknown })
+            .runtimeOperationId;
+          return typeof operationId === 'string' ? operationId : undefined;
+        })
+        .filter((operationId): operationId is string => operationId !== undefined)
+    );
+    for (const run of snapshot.runs) {
+      const terminal = isTerminalRuntimeRun(run.status);
+      const observedAt = run.endedAt ?? run.lastEventAt ?? run.createdAt;
+      const taskProjectionOperationId = terminal
+        ? `shared-review-terminal:${run.id}:${observedAt}`
+        : `shared-review-recovery:${run.id}:${observedAt}`;
+      const taskProjectionNeedsReconciliation =
+        run.owner.kind === 'TASK' &&
+        run.purpose === 'TASK_REVIEW' &&
+        !publishedTaskRuntimeOperations.has(taskProjectionOperationId);
+      const transientTurnNeedsCleanup =
+        terminal &&
+        (run.owner.kind === 'PROMPT_REFINEMENT' ||
+          run.owner.kind === 'PREVIEW_RECIPE_GENERATION');
+      const queueEntry = snapshot.queueEntries.find(
+        (candidate) => candidate.runId === run.id
+      );
+      const terminalQueueNeedsSettlement = terminal && queueEntry?.status === 'LEASED';
+      if (
+        !isReadOnlyRuntimePurpose(run.purpose) ||
+        ![
+          'COMPLETED',
+          'FAILED',
+          'INTERRUPTED',
+          'LOST',
+          'RECOVERY_REQUIRED'
+        ].includes(run.status) ||
+        !(
+          run.repositoryIntegrity?.status === 'PENDING' ||
+          taskProjectionNeedsReconciliation ||
+          transientTurnNeedsCleanup ||
+          terminalQueueNeedsSettlement
+        )
+      ) {
+        continue;
+      }
+      const event: AgentRuntimeTurnEvent = isTerminalRuntimeRun(run.status)
+        ? {
+            type: 'TERMINAL',
+            runId: run.id,
+            providerTurnId: run.providerTurnId ?? run.id,
+            status:
+              run.status === 'COMPLETED'
+                ? 'completed'
+                : run.status === 'INTERRUPTED'
+                  ? 'interrupted'
+                  : 'failed',
+            ...(run.terminalReason ? { error: run.terminalReason } : {}),
+            completedAt: observedAt
+          }
+        : {
+            type: 'RECOVERY_REQUIRED',
+            runId: run.id,
+            ...(run.providerTurnId ? { providerTurnId: run.providerTurnId } : {}),
+            reason:
+              run.terminalReason ??
+              'The provider turn requires recovery before Task Monki can trust its result.',
+            observedAt
+          };
+      const needsEventProcessing =
+        run.repositoryIntegrity?.status === 'PENDING' ||
+        taskProjectionNeedsReconciliation;
+      if (needsEventProcessing) {
+        if (!run.providerTurnId && event.type === 'TERMINAL') {
+          const verified = await this.verifyReadOnlyRuntimeBoundary(event);
+          await this.projectTaskReadOnlyRuntimeEvent(verified);
+        } else {
+          await this.processRuntimeTurnEvent(event);
+        }
+      }
+      if (event.type === 'TERMINAL') {
+        if (
+          run.owner.kind === 'PROMPT_REFINEMENT' ||
+          run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
+        ) {
+          await this.finishRuntimeTurn(run.id);
+        } else if (run.owner.kind === 'TASK' && run.purpose === 'TASK_REVIEW') {
+          if (!needsEventProcessing && terminalQueueNeedsSettlement) {
+            await this.finishRuntimeTurn(run.id);
+          }
+        } else {
+          await this.settleRuntimeQueueEntryForRun(
+            run.id,
+            `startup-read-only-settle:${run.id}`
+          );
+        }
+      }
+    }
+  }
+
+  private async stopAbandonedPreviewRecipeGenerations(): Promise<void> {
+    const snapshot = await this.runtimeStore.snapshot();
+    const abandoned = snapshot.runs.filter(
+      (run) =>
+        run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
+        !isTerminalRuntimeRun(run.status)
+    );
+    await Promise.allSettled(
+      abandoned.map(async (run) => {
+        try {
+          const stopped = await this.interruptTurn(
+            run.id,
+            'Task Monki restarted before Preview recipe generation finished.',
+            `startup-preview-recipe-stop:${run.id}`
+          );
+          if (isTerminalRuntimeRun(stopped.status)) {
+            await this.finishRuntimeTurn(stopped.id);
+            return;
+          }
+          if (
+            stopped.status === 'RECOVERY_REQUIRED' ||
+            (stopped.status === 'INTERRUPTING' &&
+              stopped.interruptDelivery === 'AMBIGUOUS')
+          ) {
+            return;
+          }
+          const terminal = await this.waitForRuntimeTurn(run.id, 15_000);
+          if (isTerminalRuntimeRun(terminal.run.status)) {
+            await this.finishRuntimeTurn(run.id);
+          }
+        } catch (error) {
+          const current = await this.runtimeStore.getRun(run.id).catch(() => undefined);
+          if (current) {
+            await this.appendRuntimeDiagnostic(
+              current,
+              `Task Monki could not stop abandoned Preview recipe generation: ${errorMessage(error)}`
+            ).catch(() => undefined);
+          }
+        }
+      })
+    );
   }
 
   async getRuntimeCatalog(
@@ -303,16 +1663,6 @@ export class AgentOrchestrator {
     }
   }
 
-  async deleteTaskProviderHistory(task: Task): Promise<void> {
-    const adapter = this.runtimes.require(task.runtimeId);
-    if (!adapter.deleteTaskProviderHistory) {
-      throw new Error(
-        `${adapter.descriptor.displayName} cannot delete provider history safely.`
-      );
-    }
-    await adapter.deleteTaskProviderHistory(task.id);
-  }
-
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {
     const operation = this.startQueue.then(() => this.startTurnSerially(input));
     this.startQueue = operation.then(
@@ -329,9 +1679,35 @@ export class AgentOrchestrator {
       mode: input.mode,
       generationKey: input.generationKey
     });
-    let session = input.sessionId
-      ? await this.requireSession(input.sessionId)
-      : await this.store.getPrimaryAgentSession(input.task.id, input.iteration.id);
+    const taskRuntimeSnapshot = await this.taskRuntime.snapshot();
+    let session: AgentSessionRecord | undefined;
+    if (input.sessionId) {
+      session = await this.requireSession(input.sessionId);
+    } else {
+      const primarySessions = taskRuntimeSnapshot.agentSessions.filter(
+        (candidate) =>
+          candidate.taskId === input.task.id &&
+          candidate.iterationId === input.iteration.id &&
+          candidate.worktreeId === input.worktree.id &&
+          candidate.role === 'PRIMARY'
+      );
+      if (input.task.currentAgentSessionId) {
+        session = primarySessions.find(
+          (candidate) => candidate.id === input.task.currentAgentSessionId
+        );
+        if (!session) {
+          throw new Error('Task current agent session ownership is inconsistent.');
+        }
+      } else {
+        session = primarySessions
+          .sort(
+            (left, right) =>
+              left.createdAt.localeCompare(right.createdAt) ||
+              left.updatedAt.localeCompare(right.updatedAt)
+          )
+          .at(-1);
+      }
+    }
     const runtimeId = session?.runtimeId ?? input.task.runtimeId;
     if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
       throw new Error(
@@ -345,19 +1721,33 @@ export class AgentOrchestrator {
     const settings = await this.validateSettings(
       adapter,
       { ...input.settings, runtimeId },
-      taskAttachments
+      taskAttachments,
+      input.mode
     );
     await this.assertCapacity();
 
-    session =
-      session ??
-        (await this.store.createAgentSession({
-          task: input.task,
-          iteration: input.iteration,
+    if (!session) {
+      const sessionId = randomUUID();
+      const operationId = `task-session:${input.task.id}:${input.iteration.id}:${runtimeId}`;
+      session = await this.taskRuntime.createTaskSession({
+        id: sessionId,
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        worktreePath: input.worktree.worktreePath,
+        runtimeId,
+        requestedSettings: settings,
+        executionContext: taskExecutionContext({
+          sessionId,
+          operationId,
           worktree: input.worktree,
-          runtimeId,
-          requestedSettings: settings
-        }));
+          settings,
+          allowDynamicTools: input.mode === 'DESIGN'
+        }),
+        operationId
+      });
+      await this.store.recordAgentSessionCreated(session);
+    }
     if (
       session.taskId !== input.task.id ||
       session.iterationId !== input.iteration.id ||
@@ -368,13 +1758,13 @@ export class AgentOrchestrator {
     await this.assertBrowserDevSessionHistory(session, 'Selected session');
     await this.assertNoPendingInteractions(session.id);
 
-    const activeSessionRun = await this.store.getActiveRunForSession(session.id);
+    const activeSessionRun = await this.taskRuntime.getActiveRunForSession(session.id);
     if (activeSessionRun) {
       throw new Error(
         `Agent session ${session.id} already has active run ${activeSessionRun.id}.`
       );
     }
-    const unresolvedRecoveryRun = (await this.store.snapshot()).runs.find(
+    const unresolvedRecoveryRun = (await this.taskRuntime.snapshot()).runs.find(
       (run) => run.sessionId === session!.id && run.status === 'RECOVERY_REQUIRED'
     );
     if (
@@ -389,17 +1779,27 @@ export class AgentOrchestrator {
     if (session.runtimeId !== runtimeId) {
       throw new Error('Selected agent session runtime changed unexpectedly.');
     }
-    const run = await this.store.createRun({
-      task: input.task,
-      session,
+    const runId = randomUUID();
+    const run = await this.taskRuntime.createTaskRun({
+      id: runId,
+      taskId: input.task.id,
+      iterationId: input.iteration.id,
+      worktreeId: input.worktree.id,
+      sessionId: session.id,
       mode: input.mode,
       prompt: input.prompt,
       generationKey: input.generationKey,
       requestedSettings: settings,
       beforeGitSnapshotId: input.beforeGitSnapshotId,
       retryOfRunId: input.retryOfRunId,
-      continuedFromRunId: input.continuedFromRunId
+      continuedFromRunId: input.continuedFromRunId,
+      instructionProfile: input.instructionProfile,
+      clientToolGrants:
+        input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
+      attachmentSelection: toAgentAttachmentSelectionFromRecords(taskAttachments),
+      operationId: `task-run:${runId}`
     });
+    await this.store.recordAgentRunStarted(run);
 
     let attachments: AgentTurnAttachment[] = [];
     try {
@@ -415,31 +1815,38 @@ export class AgentOrchestrator {
           iterationId: input.iteration.id,
           worktreeId: input.worktree.id,
           worktreePath: input.worktree.worktreePath,
+          mode: input.mode,
+          instructionProfile: input.instructionProfile,
           settings,
           attachments
         });
         assertSessionPostcondition(session, localSession, 'Created session');
         await this.assertBrowserDevSessionHistory(session, 'Created session');
       }
-      await this.startProviderTurn(adapter, run, session, input, settings, attachments);
-      return (await this.store.getRun(run.id)) ?? run;
+      const submitted = await this.startProviderTurn(
+        adapter,
+        run,
+        session,
+        input,
+        settings,
+        attachments
+      );
+      if (!submitted) {
+        return (await this.taskRuntime.getRun(run.id)) ?? run;
+      }
+      return (await this.taskRuntime.getRun(run.id)) ?? run;
     } catch (error) {
       if (error instanceof AgentProviderSessionMissingError) {
-        try {
-          const recovered = await this.recreateMissingProviderSession(
-            adapter,
-            session,
-            settings,
-            error,
-            attachments
-          );
-          await this.assertBrowserDevSessionHistory(recovered, 'Recreated session');
-          await this.startProviderTurn(adapter, run, recovered, input, settings, attachments);
-          return (await this.store.getRun(run.id)) ?? run;
-        } catch (retryError) {
-          await this.recordStartFailure(run, retryError);
-          throw retryError;
-        }
+        return this.replaceUndeliveredTaskTurn({
+          adapter,
+          sourceSession: session,
+          sourceRun: run,
+          input,
+          settings,
+          attachmentRecords: taskAttachments,
+          attachments,
+          error
+        });
       }
       await this.recordStartFailure(run, error);
       throw error;
@@ -465,17 +1872,11 @@ export class AgentOrchestrator {
     }
     const reviewRuntimeId = input.settings.runtimeId ?? sourceSession.runtimeId;
     const adapter = this.runtimes.require(reviewRuntimeId);
-    const capabilities = await adapter.capabilities();
-    const useNativeReview =
-      reviewRuntimeId === sourceSession.runtimeId &&
-      capabilities.review.maturity !== 'unsupported' &&
-      typeof adapter.startReview === 'function';
-    const supportsDetachedReview = capabilities.detachedReview.maturity === 'stable';
-    if (!useNativeReview && !supportsDetachedReview) {
-      throw new Error(
-        `${adapter.descriptor.displayName} cannot run a detached review because it does not attest stable read-only review isolation.`
-      );
-    }
+    const reviewSupport = projectAgentExecutionSupport(
+      await adapter.capabilities(),
+      'REVIEW'
+    );
+    if (!reviewSupport.supported) throw new Error(reviewSupport.reason);
     const taskAttachments = await this.store.getTaskAttachments(input.task.id);
     const settings = await this.validateSettings(
       adapter,
@@ -483,137 +1884,105 @@ export class AgentOrchestrator {
       taskAttachments
     );
     await this.assertCapacity();
-    if (useNativeReview) {
-      this.assertBrowserDevSettings(input.sourceRun.requestedSettings, 'Review source run');
-      if (input.sourceRun.observedSettings) {
-        this.assertBrowserDevSettings(
-          input.sourceRun.observedSettings,
-          'Review source run observed settings'
-        );
-      }
-      await this.assertBrowserDevSessionHistory(sourceSession, 'Review source session');
-      await this.assertNoPendingInteractions(sourceSession.id);
-    }
-    let reviewSession = await this.store.createAgentSession({
-      task: input.task,
-      iteration: input.iteration,
-      worktree: input.worktree,
-      runtimeId: reviewRuntimeId,
-      role: 'REVIEW',
-      requestedSettings: settings,
-      parentSessionId: sourceSession.id,
-      forkedFromSessionId: useNativeReview ? sourceSession.id : undefined
-    });
+    const preflightAttachments = toAgentTurnAttachments(
+      await this.store.verifyTaskAttachments(input.task.id)
+    );
+    const reviewSessionId = randomUUID();
+    const reviewSessionOperationId =
+      `review-session:${input.task.id}:${input.sourceRun.id}:${input.generationKey ?? 'current'}:${reviewRuntimeId}`;
     const prompt = buildAgentReviewPrompt({
       task: input.task,
       worktree: input.worktree,
       target: input.target
     });
-    const run = await this.store.createRun({
-      task: input.task,
-      session: reviewSession,
-      mode: 'REVIEW',
-      prompt,
-      generationKey: input.generationKey,
-      requestedSettings: settings,
-      beforeGitSnapshotId: input.beforeGitSnapshotId,
-      continuedFromRunId: input.sourceRun.id
-    });
-    let attachments: AgentTurnAttachment[] = [];
-    try {
-      attachments = toAgentTurnAttachments(
-        await this.store.prepareRunAttachments(run.id, input.task.id)
-      );
-      if (!useNativeReview && !reviewSession.providerSessionId) {
-        const localReviewSession = reviewSession;
-        reviewSession = await adapter.createSession({
-          runtimeId: reviewRuntimeId,
-          localSessionId: reviewSession.id,
-          taskId: input.task.id,
-          iterationId: input.iteration.id,
-          worktreeId: input.worktree.id,
-          worktreePath: input.worktree.worktreePath,
-          settings,
-          attachments
-        });
-        assertSessionPostcondition(
-          reviewSession,
-          localReviewSession,
-          'Created review session'
-        );
-        await this.assertBrowserDevSessionHistory(
-          reviewSession,
-          'Created review session'
-        );
-      }
-      if (useNativeReview) {
-        await this.startProviderReview(
-          adapter,
-          run,
-          sourceSession,
-          reviewSession,
-          input.target,
-          attachments
-        );
-      } else {
-        await adapter.startTurn({
-          localRunId: run.id,
-          session: {
-            localSessionId: reviewSession.id,
-            providerSessionId: reviewSession.providerSessionId
-          },
-          mode: 'REVIEW',
-          prompt,
-          authoritativeGoal: input.task.prompt,
-          attachments,
-          settings
-        });
-      }
-      return (await this.store.getRun(run.id)) ?? run;
-    } catch (error) {
-      if (error instanceof AgentProviderSessionMissingError) {
-        try {
-          const recovered = await this.recreateMissingProviderSession(
-            adapter,
-            useNativeReview ? sourceSession : reviewSession,
-            settings,
-            error,
-            attachments
-          );
-          await this.assertBrowserDevSessionHistory(
-            recovered,
-            'Recreated review source session'
-          );
-          if (useNativeReview) {
-            await this.startProviderReview(
-              adapter,
-              run,
-              recovered,
-              reviewSession,
-              input.target,
-              attachments
-            );
-          } else {
-            await adapter.startTurn({
-              localRunId: run.id,
-              session: {
-                localSessionId: recovered.id,
-                providerSessionId: recovered.providerSessionId
-              },
-              mode: 'REVIEW',
-              prompt,
-              authoritativeGoal: input.task.prompt,
-              attachments,
-              settings
-            });
-          }
-          return (await this.store.getRun(run.id)) ?? run;
-        } catch (retryError) {
-          await this.recordStartFailure(run, retryError);
-          throw retryError;
+    const executionContext = await this.buildExecutionContext(reviewRuntimeId, {
+      sessionId: reviewSessionId,
+      primaryCwd: input.worktree.worktreePath,
+      readRoots: [
+        {
+          canonicalPath: input.worktree.worktreePath,
+          kind: 'WORKTREE',
+          entityId: input.worktree.id
         }
+      ],
+      modelSettings: settings,
+      clientOperationId: reviewSessionOperationId,
+      attachments: preflightAttachments
+    });
+    const runId = randomUUID();
+    const prepared = await this.prepareTurn({
+      sessionId: reviewSessionId,
+      runId,
+      owner: { kind: 'TASK', taskId: input.task.id },
+      scope: {
+        kind: 'TASK',
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id
+      },
+      runtimeId: reviewRuntimeId,
+      model: settings.model ?? reviewRuntimeId,
+      purpose: 'TASK_REVIEW',
+      generationKey: input.generationKey ?? input.beforeGitSnapshotId ?? runId,
+      executionContext,
+      prompt,
+      priority: 'TASK_FOREGROUND',
+      clientOperationId: `review-run:${input.task.id}:${input.sourceRun.id}:${input.generationKey ?? runId}:${reviewRuntimeId}`,
+      createdAt: new Date().toISOString(),
+      role: 'REVIEW',
+      parentSessionId: sourceSession.id,
+      taskContext: {
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        worktreePath: input.worktree.worktreePath
+      },
+      taskDetails: {
+        continuedFromRunId: input.sourceRun.id,
+        beforeGitSnapshotId: input.beforeGitSnapshotId,
+        eventCount: 0
+      },
+      taskReviewTarget: input.target,
+      attachmentSelection: toAgentAttachmentSelection(preflightAttachments)
+    });
+    const reviewSession = await this.taskRuntime.getAgentSession(prepared.session.id);
+    const reviewRun = await this.taskRuntime.getRun(prepared.run.id);
+    if (!reviewSession || !reviewRun) {
+      throw new Error('Prepared review did not project into its Task owner.');
+    }
+    await this.store.recordAgentSessionCreated(reviewSession);
+    await this.store.recordAgentRunStarted(reviewRun);
+    try {
+      const attachments = toAgentTurnAttachments(
+        await this.store.prepareRunAttachments(prepared.run.id, input.task.id)
+      );
+      await this.startPreparedTurnNow(
+        prepared.queueEntry.id,
+        `review-start:${prepared.run.id}`,
+        attachments
+      );
+      return (await this.taskRuntime.getRun(prepared.run.id)) ?? reviewRun;
+    } catch (error) {
+      await this.runtimeTurnEventQueue;
+      const canonical = await this.runtimeStore.getRun(prepared.run.id);
+      if (canonical?.status === 'RECOVERY_REQUIRED') {
+        await this.processRuntimeTurnEvent({
+          type: 'RECOVERY_REQUIRED',
+          runId: canonical.id,
+          ...(canonical.providerTurnId
+            ? { providerTurnId: canonical.providerTurnId }
+            : {}),
+          reason:
+            canonical.terminalReason ??
+            'Task Monki could not confirm whether the review started.',
+          observedAt: canonical.lastEventAt ?? new Date().toISOString()
+        });
+        throw error;
       }
-      await this.recordStartFailure(run, error);
+      const projected = (await this.taskRuntime.getRun(prepared.run.id)) ?? reviewRun;
+      await this.recordStartFailure(projected, error);
+      if (canonical && isTerminalRuntimeRun(canonical.status)) {
+        await this.finishRuntimeTurn(canonical.id);
+      }
       throw error;
     }
   }
@@ -624,7 +1993,7 @@ export class AgentOrchestrator {
     if (!prompt) {
       throw new Error('An instruction is required.');
     }
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run?.providerTurnId || run.status !== 'RUNNING') {
       throw new Error('Only the current running turn can accept an instruction.');
     }
@@ -635,12 +2004,16 @@ export class AgentOrchestrator {
     if (this.options.allowNetworkAccess === false) {
       assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
     }
-    if (
-      !session.providerSessionId ||
-      capabilities.activeTurnSteering.maturity === 'unsupported' ||
-      !adapter.steerTurn
-    ) {
-      throw new Error('This provider session cannot steer the active turn.');
+    const steeringSupport = projectAgentExecutionSupport(
+      capabilities,
+      'ACTIVE_TURN_STEERING'
+    );
+    if (!session.providerSessionId || !steeringSupport.supported || !adapter.steerTurn) {
+      throw new Error(
+        steeringSupport.supported
+          ? 'This provider session cannot steer the active turn.'
+          : steeringSupport.reason
+      );
     }
     try {
       await adapter.steerTurn({
@@ -662,10 +2035,52 @@ export class AgentOrchestrator {
 
   async interruptRun(runId: string): Promise<void> {
     this.assertProviderStartupAvailable();
-    const run = await this.store.getRun(runId);
+    let run = await this.taskRuntime.getRun(runId);
     if (!run) {
       return;
     }
+    const canonical = await this.runtimeStore.getRun(run.id);
+    if (canonical?.purpose === 'TASK_REVIEW') {
+      const interrupted = await this.interruptTurn(
+        run.id,
+        'The review was canceled.',
+        `cancel-shared-review:${run.id}`
+      );
+      if (interrupted.status === 'RECOVERY_REQUIRED') {
+        // Provider adapters publish recovery only after their process boundary
+        // is settled. Do not synthesize that event from a failed interrupt:
+        // the provider may still be able to change the repository.
+        await this.runtimeTurnEventQueue;
+        return;
+      }
+      if (isTerminalRuntimeRun(interrupted.status)) {
+        await this.runtimeTurnEventQueue;
+        const latest = (await this.runtimeStore.getRun(interrupted.id)) ?? interrupted;
+        const projected = await this.store.getRun(run.id);
+        if (
+          latest.repositoryIntegrity?.status === 'PENDING' ||
+          (projected && !isTerminalRuntimeRun(projected.status))
+        ) {
+          await this.processRuntimeTurnEvent({
+            type: 'TERMINAL',
+            runId: latest.id,
+            providerTurnId: latest.providerTurnId ?? latest.id,
+            status:
+              latest.status === 'COMPLETED'
+                ? 'completed'
+                : latest.status === 'INTERRUPTED'
+                  ? 'interrupted'
+                  : 'failed',
+            ...(latest.terminalReason
+              ? { error: latest.terminalReason }
+              : {}),
+            completedAt: latest.endedAt ?? new Date().toISOString()
+          });
+        }
+      }
+      return;
+    }
+    if (isTerminalRuntimeRun(run.status)) return;
     if (run.status === 'RECOVERY_REQUIRED') {
       await this.resolveRecoveryRun(
         run,
@@ -673,8 +2088,50 @@ export class AgentOrchestrator {
       );
       return;
     }
-    if (!run.providerTurnId) return;
-    const session = await this.store.getAgentSession(run.sessionId);
+    if (run.status === 'QUEUED') {
+      const canonical = await this.runtimeStore.getRun(run.id);
+      if (
+        canonical?.owner.kind === 'TASK' &&
+        canonical.status === 'QUEUED' &&
+        canonical.delivery === 'NOT_SENT'
+      ) {
+        const terminalReason = 'Canceled before the turn was sent to the provider.';
+        const interrupted = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
+          createDomainEvent({
+            type: 'AGENT_RUN_INTERRUPTED',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            agentSessionId: run.sessionId,
+            source: 'ui',
+            payload: { terminalReason }
+          }),
+          ['QUEUED'],
+          `cancel-unsent:${run.id}`
+        );
+        if (interrupted) {
+          this.events.emit({
+            type: 'run.terminal',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            payload: { status: 'interrupted', terminalReason },
+            at: new Date().toISOString()
+          });
+          return;
+        }
+      }
+      run = (await this.taskRuntime.getRun(run.id)) ?? run;
+      if (isTerminalRuntimeRun(run.status)) return;
+    }
+    if (canonical?.delivery === 'SENDING' || !run.providerTurnId) {
+      throw new Error(
+        'This turn is being sent to the provider. Stop it after the provider acknowledges it.'
+      );
+    }
+    const session = await this.taskRuntime.getAgentSession(run.sessionId);
     if (!session) {
       throw new Error(`Agent session not found: ${run.sessionId}`);
     }
@@ -691,7 +2148,7 @@ export class AgentOrchestrator {
     ) {
       throw new Error('This provider session cannot interrupt the active turn.');
     }
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'CANCEL_REQUESTED',
         taskId: run.taskId,
@@ -702,7 +2159,8 @@ export class AgentOrchestrator {
         serverInstanceId: run.serverInstanceId,
         source: 'ui',
         payload: {}
-      })
+      }),
+      `cancel-requested:${run.id}`
     );
     try {
       await adapter.interruptTurn({
@@ -725,7 +2183,7 @@ export class AgentOrchestrator {
   ): Promise<InteractionRequestRecord> {
     this.assertProviderStartupAvailable();
     if (this.options.allowNetworkAccess === false) {
-      const interaction = await this.store.getInteractionRequest(input.interactionRequestId);
+      const interaction = await this.taskRuntime.getInteractionRequest(input.interactionRequestId);
       if (interaction?.taskId === input.taskId && interaction.runId === input.runId) {
         const adapter = this.runtimes.require(interaction.runtimeId);
         assertBrowserDevRuntimeIsolation(
@@ -751,7 +2209,7 @@ export class AgentOrchestrator {
 
   async resolveRecoveryRunForReplacement(runId: string): Promise<void> {
     this.assertProviderStartupAvailable();
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run || run.status !== 'RECOVERY_REQUIRED') return;
     await this.resolveRecoveryRun(
       run,
@@ -778,7 +2236,6 @@ export class AgentOrchestrator {
     }
     if (
       !session.providerSessionId ||
-      capabilities.goals.maturity === 'unsupported' ||
       !adapter.syncGoal
     ) {
       throw new Error('This provider session cannot synchronize goals.');
@@ -794,6 +2251,9 @@ export class AgentOrchestrator {
   }
 
   async shutdown(): Promise<void> {
+    for (const dispose of this.disposeRuntimeTurnListeners.splice(0)) dispose();
+    this.runtimeTurnListeners.clear();
+    await this.runtimeTurnEventQueue;
     await this.runtimes.shutdownAll();
   }
 
@@ -804,7 +2264,9 @@ export class AgentOrchestrator {
     input: StartOrchestratedTurn,
     settings: AgentExecutionSettings,
     attachments: AgentTurnAttachment[]
-  ): Promise<void> {
+  ): Promise<boolean> {
+    assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
+    if (!(await this.claimTaskTurnSubmission(run.id))) return false;
     await adapter.startTurn({
       localRunId: run.id,
       session: {
@@ -818,69 +2280,209 @@ export class AgentOrchestrator {
       attachments,
       settings
     });
+    return true;
   }
 
-  private async startProviderReview(
-    adapter: AgentRuntimeAdapter,
-    run: RunRecord,
-    sourceSession: AgentSessionRecord,
-    reviewSession: AgentSessionRecord,
-    target: AgentReviewTarget,
-    attachments: AgentTurnAttachment[]
-  ): Promise<void> {
-    if (!adapter.startReview) {
-      throw new Error('This provider does not support detached review.');
+  private async claimTaskTurnSubmission(runId: string): Promise<boolean> {
+    const current = await this.runtimeStore.getRun(runId);
+    if (!current || current.owner.kind !== 'TASK') {
+      throw new Error(`Task agent runtime run not found: ${runId}`);
     }
-    await adapter.startReview({
-      localRunId: run.id,
-      sourceSession: {
-        localSessionId: sourceSession.id,
-        providerSessionId: sourceSession.providerSessionId
-      },
-      reviewSessionId: reviewSession.id,
-      target,
-      attachments
-    });
-  }
-
-  private async recreateMissingProviderSession(
-    adapter: AgentRuntimeAdapter,
-    session: AgentSessionRecord,
-    settings: AgentExecutionSettings,
-    error: AgentProviderSessionMissingError,
-    attachments: AgentTurnAttachment[]
-  ): Promise<AgentSessionRecord> {
-    const previousProviderSessionId = session.providerSessionId;
-    if (!previousProviderSessionId) {
+    if (isTerminalRuntimeRun(current.status)) return false;
+    if (current.status !== 'QUEUED' || current.delivery !== 'NOT_SENT') {
+      throw new Error(
+        `Task turn cannot begin provider submission from ${current.status}/${current.delivery}.`
+      );
+    }
+    const startedAt = new Date().toISOString();
+    try {
+      await this.runtimeStore.updateRun(
+        current.id,
+        current.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt,
+          lastEventAt: startedAt
+        },
+        `task-turn-send-intent:${current.id}`
+      );
+      return true;
+    } catch (error) {
+      const latest = await this.runtimeStore.getRun(current.id);
+      if (latest && isTerminalRuntimeRun(latest.status)) return false;
       throw error;
     }
-    const reset = await this.store.updateAgentSession(session.id, {
-      providerSessionId: undefined,
-      providerSessionTreeId: undefined,
-      status: 'NOT_MATERIALIZED',
-      materialized: false,
-      observedSettings: undefined,
-      lastAttachedAt: undefined,
-      relationshipDetail: `${adapter.descriptor.displayName} session ${previousProviderSessionId} was missing during ${error.operation}; Task Monki recreated the provider session.`
+  }
+
+  private async replaceUndeliveredTaskTurn(input: {
+    adapter: AgentRuntimeAdapter;
+    sourceSession: AgentSessionRecord;
+    sourceRun: RunRecord;
+    input: StartOrchestratedTurn;
+    settings: AgentExecutionSettings;
+    attachmentRecords: readonly TaskAttachmentRecord[];
+    attachments: AgentTurnAttachment[];
+    error: AgentProviderSessionMissingError;
+  }): Promise<RunRecord> {
+    const current = (await this.taskRuntime.getRun(input.sourceRun.id)) ?? input.sourceRun;
+    if (
+      current.providerTurnId ||
+      current.status === 'RECOVERY_REQUIRED' ||
+      !ACTIVE_RUN_STATUSES.includes(current.status)
+    ) {
+      throw input.error;
+    }
+    await this.taskRuntime.updateRun(
+      current.id,
+      {
+        status: 'FAILED',
+        terminalReason: `${input.adapter.descriptor.displayName} could not resume its provider session during ${input.error.operation}. Task Monki started a replacement session without resending an uncertain turn.`
+      },
+      `missing-provider-session-run:${current.id}`
+    );
+
+    const replacementSessionId = randomUUID();
+    const replacementSessionOperation =
+      `replacement-session:${input.sourceSession.id}:${current.id}`;
+    let replacementSession = await this.taskRuntime.createTaskSession({
+      id: replacementSessionId,
+      taskId: input.input.task.id,
+      iterationId: input.input.iteration.id,
+      worktreeId: input.input.worktree.id,
+      worktreePath: input.input.worktree.worktreePath,
+      runtimeId: input.sourceSession.runtimeId,
+      role: input.sourceSession.role,
+      requestedSettings: input.settings,
+      parentSessionId: input.sourceSession.id,
+      forkedFromSessionId:
+        input.error.operation === 'thread/fork' && input.adapter.forkSession
+          ? input.sourceSession.id
+          : undefined,
+      executionContext: taskExecutionContext({
+        sessionId: replacementSessionId,
+        operationId: replacementSessionOperation,
+        worktree: input.input.worktree,
+        settings: input.settings,
+        allowDynamicTools: input.input.mode === 'DESIGN'
+      }),
+      operationId: replacementSessionOperation
     });
-    const recreated = await adapter.createSession({
-      runtimeId: reset.runtimeId,
-      localSessionId: reset.id,
-      taskId: reset.taskId,
-      iterationId: reset.iterationId,
-      worktreeId: reset.worktreeId,
-      worktreePath: reset.worktreePath,
-      settings,
-      attachments
+    await this.store.recordAgentSessionCreated(replacementSession);
+
+    const replacementRun = await this.taskRuntime.createTaskRun({
+      id: randomUUID(),
+      taskId: input.input.task.id,
+      iterationId: input.input.iteration.id,
+      worktreeId: input.input.worktree.id,
+      sessionId: replacementSession.id,
+      mode: input.input.mode,
+      prompt: input.input.prompt,
+      generationKey: input.input.generationKey,
+      requestedSettings: input.settings,
+      beforeGitSnapshotId: input.input.beforeGitSnapshotId,
+      retryOfRunId: current.id,
+      continuedFromRunId: input.input.continuedFromRunId,
+      instructionProfile: input.input.instructionProfile,
+      clientToolGrants:
+        input.input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
+      attachmentSelection: toAgentAttachmentSelectionFromRecords(
+        input.attachmentRecords
+      ),
+      operationId: `replacement-run:${current.id}`
     });
-    assertSessionPostcondition(recreated, reset, 'Recreated session');
-    return recreated;
+    await this.store.recordAgentRunStarted(replacementRun);
+
+    try {
+      const replacementAttachments = toAgentTurnAttachments(
+        await this.store.prepareRunAttachments(
+          replacementRun.id,
+          input.input.task.id
+        )
+      );
+      if (
+        input.error.operation === 'thread/fork' &&
+        input.adapter.forkSession &&
+        input.sourceSession.providerSessionId
+      ) {
+        try {
+          replacementSession = await input.adapter.forkSession({
+            sourceSession: {
+              localSessionId: input.sourceSession.id,
+              providerSessionId: input.sourceSession.providerSessionId
+            },
+            localSessionId: replacementSession.id,
+            settings: input.settings,
+            attachments: replacementAttachments
+          });
+        } catch (forkError) {
+          if (!(forkError instanceof AgentProviderSessionMissingError)) throw forkError;
+          replacementSession = await input.adapter.createSession({
+            runtimeId: replacementSession.runtimeId,
+            localSessionId: replacementSession.id,
+            taskId: replacementSession.taskId,
+            iterationId: replacementSession.iterationId,
+            worktreeId: replacementSession.worktreeId,
+            worktreePath: replacementSession.worktreePath,
+            mode: input.input.mode,
+            instructionProfile: input.input.instructionProfile,
+            settings: input.settings,
+            attachments: replacementAttachments
+          });
+        }
+      } else {
+        replacementSession = await input.adapter.createSession({
+          runtimeId: replacementSession.runtimeId,
+          localSessionId: replacementSession.id,
+          taskId: replacementSession.taskId,
+          iterationId: replacementSession.iterationId,
+          worktreeId: replacementSession.worktreeId,
+          worktreePath: replacementSession.worktreePath,
+          mode: input.input.mode,
+          instructionProfile: input.input.instructionProfile,
+          settings: input.settings,
+          attachments: replacementAttachments
+        });
+      }
+      await this.taskRuntime.updateAgentSession(
+        replacementSession.id,
+        {
+          relationshipDetail: `${input.adapter.descriptor.displayName} replaced session ${input.sourceSession.id} after ${input.error.operation} proved that the old provider session could not be used.`
+        },
+        `replacement-session-detail:${replacementSession.id}`
+      );
+      assertSessionPostcondition(
+        replacementSession,
+        await this.requireSession(replacementSession.id),
+        'Replacement session'
+      );
+      await this.assertBrowserDevSessionHistory(
+        replacementSession,
+        'Replacement session'
+      );
+      await this.startProviderTurn(
+        input.adapter,
+        replacementRun,
+        replacementSession,
+        input.input,
+        input.settings,
+        replacementAttachments
+      );
+      return (await this.taskRuntime.getRun(replacementRun.id)) ?? replacementRun;
+    } catch (replacementError) {
+      await this.recordStartFailure(replacementRun, replacementError);
+      throw replacementError;
+    }
   }
 
   private async validateSettings(
     adapter: AgentRuntimeAdapter,
     settings: AgentExecutionSettings,
-    attachments: readonly Pick<AgentTurnAttachment, 'kind'>[] = []
+    attachments: readonly Pick<
+      AgentAttachmentSelection,
+      'kind' | 'mediaType' | 'byteCount' | 'sha256'
+    >[] = [],
+    mode?: AgentRunMode
   ): Promise<AgentExecutionSettings> {
     if (this.options.allowNetworkAccess === false) {
       assertBrowserDevRuntimeIsolation(
@@ -888,7 +2490,8 @@ export class AgentOrchestrator {
         await adapter.capabilities()
       );
     }
-    const resolvedSettings = (await adapter.resolveExecution({ settings, attachments })).settings;
+    const resolved = await adapter.resolveExecution({ settings, attachments });
+    const resolvedSettings = resolved.settings;
     if (resolvedSettings.runtimeId !== adapter.descriptor.id) {
       throw new Error(
         `Runtime ${adapter.descriptor.id} returned execution settings for ${String(resolvedSettings.runtimeId)}.`
@@ -896,6 +2499,17 @@ export class AgentOrchestrator {
     }
     if (this.options.allowNetworkAccess === false) {
       this.assertBrowserDevSettings(resolvedSettings, 'Requested run');
+    }
+    if (mode === 'DESIGN') {
+      const support = projectAgentExecutionSupport(
+        await adapter.capabilities(),
+        'DESIGN',
+        {
+          model: resolved.model,
+          allowCandidateDesignModel: this.options.allowCandidateDesignModels
+        }
+      );
+      if (!support.supported) throw new Error(support.reason);
     }
     return resolvedSettings;
   }
@@ -909,7 +2523,7 @@ export class AgentOrchestrator {
   private async terminalizeUnsafePersistedRuns(
     unsafeRuntimeIds: ReadonlySet<string> = new Set()
   ): Promise<number> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     let terminalized = 0;
     const sessions = new Map(snapshot.agentSessions.map((session) => [session.id, session]));
     const latestSettingsObservations = new Map<
@@ -980,12 +2594,13 @@ export class AgentOrchestrator {
       if (violations.length === 0) continue;
 
       const reason = `${BROWSER_DEV_BOUNDARY_MESSAGE} The persisted run was not resumed because of: ${violations.join(', ')}.`;
-      const finalArtifact = await this.store.writeFinalArtifact(
+      const finalArtifact = await this.taskRuntime.writeFinalArtifact(
         run.taskId,
         run.id,
-        `# Agent turn blocked at startup\n\n${reason}\n`
+        `# Agent turn blocked at startup\n\n${reason}\n`,
+        `browser-boundary-final:${run.id}`
       );
-      await this.store.appendEvent(
+      await this.taskRuntime.applyTaskRuntimeEvent(
         createDomainEvent({
           type: 'AGENT_RUN_FAILED',
           taskId: run.taskId,
@@ -1001,21 +2616,26 @@ export class AgentOrchestrator {
             finalArtifactId: finalArtifact.id,
             securityBoundary: 'BROWSER_DEV'
           }
-        })
+        }),
+        `browser-boundary-failed:${run.id}`
       );
       for (const interaction of snapshot.interactionRequests.filter(
         (candidate) =>
           candidate.runId === run.id &&
           (candidate.status === 'PENDING' || candidate.status === 'RESPONDING')
       )) {
-        await this.store.transitionInteractionRequest(interaction.id, interaction.status, {
+        await this.taskRuntime.transitionInteractionRequest(interaction.id, interaction.status, {
           status: 'STALE',
           resolution: { reason },
           resolvedAt: new Date().toISOString()
-        });
+        }, `browser-boundary-interaction:${interaction.id}`);
       }
       if (session) {
-        await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+        await this.taskRuntime.updateAgentSession(
+          session.id,
+          { status: 'NOT_LOADED' },
+          `browser-boundary-session:${session.id}`
+        );
       }
       this.events.emit({
         type: 'run.terminal',
@@ -1076,7 +2696,7 @@ export class AgentOrchestrator {
     if (session.observedSettings) {
       this.assertBrowserDevSettings(session.observedSettings, `${subject} observed settings`);
     }
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const latestObservation = snapshot.agentSettingsObservations.find(
       (observation) => observation.sessionId === session.id
     );
@@ -1089,7 +2709,7 @@ export class AgentOrchestrator {
   }
 
   private async assertCapacity(): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const activeRunCount = snapshot.runs.filter((run) =>
       ACTIVE_RUN_STATUSES.includes(run.status)
     ).length;
@@ -1101,7 +2721,7 @@ export class AgentOrchestrator {
   }
 
   private async assertNoPendingInteractions(sessionId: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const pending = snapshot.interactionRequests.find(
       (interaction) =>
         interaction.sessionId === sessionId &&
@@ -1115,7 +2735,7 @@ export class AgentOrchestrator {
   }
 
   private async requireSession(sessionId: string) {
-    const session = await this.store.getAgentSession(sessionId);
+    const session = await this.taskRuntime.getAgentSession(sessionId);
     if (!session) {
       throw new Error(`Agent session not found: ${sessionId}`);
     }
@@ -1136,41 +2756,68 @@ export class AgentOrchestrator {
       await this.recordAmbiguousMutation(run, error);
       return;
     }
-    const current = await this.store.getRun(run.id);
-    if (!current || !ACTIVE_RUN_STATUSES.includes(current.status)) {
+    const current = await this.taskRuntime.getRun(run.id);
+    if (
+      !current ||
+      (!ACTIVE_RUN_STATUSES.includes(current.status) &&
+        !(current.status === 'FAILED' && !current.finalArtifactId))
+    ) {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    const recorded = await this.store.appendRunEventIfStatus(
-      createDomainEvent({
-        type: 'AGENT_RUN_FAILED',
-        taskId: current.taskId,
-        iterationId: current.iterationId,
-        runId: current.id,
-        worktreeId: current.worktreeId,
-        agentSessionId: current.sessionId,
-        source: 'provider',
-        payload: { error: message }
-      }),
-      ACTIVE_RUN_STATUSES
-    );
+    const failureEvent = createDomainEvent({
+      type: 'AGENT_RUN_FAILED',
+      taskId: current.taskId,
+      iterationId: current.iterationId,
+      runId: current.id,
+      worktreeId: current.worktreeId,
+      agentSessionId: current.sessionId,
+      source: 'provider',
+      payload: { error: message }
+    });
+    const recorded = ACTIVE_RUN_STATUSES.includes(current.status)
+      ? await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
+          failureEvent,
+          ACTIVE_RUN_STATUSES,
+          `start-failed:${current.id}`
+        )
+      : await this.taskRuntime
+          .applyTaskRuntimeEvent(failureEvent, `start-failed:${current.id}`)
+          .then(() => true);
     if (!recorded) return;
     let finalArtifactId: string | undefined;
     try {
-      finalArtifactId = (
-        await this.store.writeFinalArtifact(
-          current.taskId,
-          current.id,
-          `# Agent turn failed to start\n\n${message}\n`
-        )
-      ).id;
+      const finalArtifact = await this.taskRuntime.writeFinalArtifact(
+        current.taskId,
+        current.id,
+        `# Agent turn failed to start\n\n${message}\n`,
+        `start-failed-final:${current.id}`
+      );
+      finalArtifactId = finalArtifact.id;
+      await this.taskRuntime.applyTaskRuntimeEvent(
+        createDomainEvent({
+          type: 'ARTIFACT_CREATED',
+          taskId: current.taskId,
+          iterationId: current.iterationId,
+          runId: current.id,
+          worktreeId: current.worktreeId,
+          agentSessionId: current.sessionId,
+          source: 'storage',
+          payload: {
+            artifactId: finalArtifact.id,
+            kind: 'agent-final'
+          }
+        }),
+        `start-failed-artifact-link:${current.id}`
+      );
     } catch (artifactError) {
       const artifactMessage =
         artifactError instanceof Error ? artifactError.message : String(artifactError);
-      await this.store
+      await this.taskRuntime
         .appendArtifact(
           current.diagnosticArtifactId,
-          `\n[task-monki/start-failure-artifact]\n${artifactMessage}\n`
+          `\n[task-monki/start-failure-artifact]\n${artifactMessage}\n`,
+          `start-failed-diagnostic:${current.id}`
         )
         .catch(() => undefined);
     }
@@ -1190,12 +2837,13 @@ export class AgentOrchestrator {
   }
 
   private async resolveRecoveryRun(run: RunRecord, terminalReason: string): Promise<void> {
-    const finalArtifact = await this.store.writeFinalArtifact(
+    const finalArtifact = await this.taskRuntime.writeFinalArtifact(
       run.taskId,
       run.id,
-      `# Recovery run closed\n\n${terminalReason}\n`
+      `# Recovery run closed\n\n${terminalReason}\n`,
+      `recovery-closed-final:${run.id}`
     );
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_RUN_INTERRUPTED',
         taskId: run.taskId,
@@ -1206,7 +2854,8 @@ export class AgentOrchestrator {
         serverInstanceId: run.serverInstanceId,
         source: 'ui',
         payload: { terminalReason, finalArtifactId: finalArtifact.id }
-      })
+      }),
+      `recovery-closed:${run.id}`
     );
     this.events.emit({
       type: 'run.terminal',
@@ -1223,8 +2872,8 @@ export class AgentOrchestrator {
     run: RunRecord,
     error: AgentMutationAmbiguousError
   ): Promise<void> {
-    const current = (await this.store.getRun(run.id)) ?? run;
-    const recorded = await this.store.appendRunEventIfStatus(
+    const current = (await this.taskRuntime.getRun(run.id)) ?? run;
+    const recorded = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
       createDomainEvent({
         type: 'AGENT_MUTATION_AMBIGUOUS',
         taskId: current.taskId,
@@ -1240,7 +2889,8 @@ export class AgentOrchestrator {
           automaticResubmission: false
         }
       }),
-      ACTIVE_RUN_STATUSES
+      ACTIVE_RUN_STATUSES,
+      `mutation-ambiguous:${current.id}:${error.operation}`
     );
     if (!recorded) return;
     this.events.emit({

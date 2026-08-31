@@ -1,4 +1,16 @@
 import type {
+  AgentGoalObservationSource,
+  AgentGoalStatus,
+  AgentGoalSyncState,
+  AgentInstructionProfile,
+  AgentInteractionAction,
+  AgentInteractionDecision,
+  AgentInteractionRequestPayload,
+  AgentItemStatus,
+  AgentItemType,
+  AgentObservationSource,
+  AgentPlanStep,
+  AgentProtocolMessageReference,
   AgentExecutionSettings,
   AgentRuntimeId,
   AgentRecoveryState,
@@ -8,10 +20,16 @@ import type {
   AgentSessionRelationshipState,
   AgentSessionRole,
   AgentSessionStatus,
+  AgentSubagentObservationSource,
+  AgentTokenUsageBreakdown,
   AgentSubagentStatus
 } from './agent';
+import type {
+  AgentAttachmentSelection,
+  AttachmentSubmissionRecord
+} from './attachments';
 
-export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 3 as const;
+export const AGENT_RUNTIME_STORE_SCHEMA_VERSION = 6 as const;
 
 export const AGENT_RUNTIME_LIMITS = {
   maxSessions: 20_000,
@@ -19,10 +37,8 @@ export const AGENT_RUNTIME_LIMITS = {
   maxQueueEntries: 10_000,
   maxArtifacts: 300_000,
   maxTelemetryRecords: 500_000,
+  maxTypedRecords: 500_000,
   maxServerInstances: 2_000,
-  maxProtocolMessageBytes: 10 * 1024 * 1024,
-  maxProtocolMessagesPerServer: 100_000,
-  maxProtocolJournalBytesPerServer: 256 * 1024 * 1024,
   maxEvents: 200_000,
   maxOwnerIdBytes: 512,
   maxClientOperationIdBytes: 512,
@@ -44,9 +60,15 @@ export const AGENT_SCHEDULER_POLICY = {
   optimisticLeaseRetries: 8
 } as const;
 
-/** Durable participant/task owner. It never fabricates a task for discourse. */
+/** Exact workflow owner. Transient operations use their own non-Task scope. */
 export type AgentOwnerScope =
   | { kind: 'TASK'; taskId: string }
+  | { kind: 'PROMPT_REFINEMENT'; requestId: string }
+  | {
+      kind: 'PREVIEW_RECIPE_GENERATION';
+      taskId: string;
+      generationId: string;
+    }
   | {
       kind: 'DISCOURSE';
       conversationId: string;
@@ -68,6 +90,15 @@ export type AgentRunScope =
       jobId: string;
       contextSnapshotId: string;
       attemptId: string;
+    }
+  | {
+      kind: 'PROMPT_REFINEMENT';
+      requestId: string;
+    }
+  | {
+      kind: 'PREVIEW_RECIPE_GENERATION';
+      taskId: string;
+      generationId: string;
     };
 
 export interface AgentAttestedReadRoot {
@@ -96,6 +127,8 @@ export interface AgentExecutionContext {
         reason: string;
       };
   primaryCwd: string;
+  /** Logical repository access requested by the workflow. */
+  repositoryAccess: 'READ_ONLY' | 'WRITE';
   readRoots: AgentAttestedReadRoot[];
   managedAttachments: AgentManagedAttachmentAccess[];
   permissionProfileHash: string;
@@ -152,14 +185,25 @@ export interface AgentRuntimeSessionRecord {
   createdAt: string;
   updatedAt: string;
   lastAttachedAt?: string;
+  /** Task-only identity needed to project the existing task session contract. */
+  taskContext?: {
+    iterationId: string;
+    worktreeId: string;
+    worktreePath: string;
+  };
 }
 
 export type AgentRuntimePurpose =
+  | 'TASK_ANALYSIS'
   | 'TASK_IMPLEMENTATION'
   | 'TASK_FOLLOW_UP'
   | 'TASK_RETRY'
   | 'TASK_REVIEW'
+  | 'TASK_DESIGN'
+  | 'TASK_COMPACTION'
   | 'PROVIDER_SUBAGENT'
+  | 'PROMPT_REFINEMENT'
+  | 'PREVIEW_RECIPE_GENERATION'
   | 'DISCOURSE_ANSWER'
   | 'DISCOURSE_CRITIQUE'
   | 'DISCOURSE_CORRECT'
@@ -202,6 +246,31 @@ export interface AgentRuntimeRunRecord {
   terminalReason?: string;
   providerTerminalSource?: string;
   contextFreshnessAtCompletion?: 'FRESH' | 'CHANGED_DURING_JOB' | 'UNKNOWN';
+  /** Durable before/after evidence for a provider-native read-only turn. */
+  repositoryIntegrity?: {
+    beforeFingerprint?: string;
+    afterFingerprint?: string;
+    status: 'PENDING' | 'UNCHANGED' | 'CHANGED' | 'UNVERIFIABLE';
+    checkedAt?: string;
+    detail?: string;
+  };
+  instructionProfile?: AgentInstructionProfile;
+  /** Exact ordered files selected by the workflow before provider submission. */
+  attachmentSelection: AgentAttachmentSelection[];
+  attachmentSubmissions?: AttachmentSubmissionRecord[];
+  providerTerminalRawMessage?: AgentProtocolMessageReference;
+  /** Exact app-owned tools granted to this run. Empty means no app-owned tool. */
+  clientToolGrants?: string[];
+  /** Task-owned projection details that do not apply to Discourse runs. */
+  taskDetails?: {
+    retryOfRunId?: string;
+    continuedFromRunId?: string;
+    beforeGitSnapshotId?: string;
+    afterGitSnapshotId?: string;
+    eventCount: number;
+    lastEventType?: string;
+    finalMessage?: string;
+  };
   stopRequestedAt?: string;
   recordRevision: number;
   createdAt: string;
@@ -238,6 +307,127 @@ export type AgentRuntimeTelemetryKind =
   | 'SETTINGS'
   | 'SUBAGENT'
   | 'PROTOCOL_REFERENCE';
+
+interface AgentRuntimeTypedRecordBase {
+  id: string;
+  owner: AgentOwnerScope;
+  sessionId: string;
+  clientOperationId: string;
+  requestFingerprint: string;
+  recordRevision: number;
+}
+
+/** Mutable provider item. Task fields are derived from its owner and run scope. */
+export interface AgentRuntimeItemRecord extends AgentRuntimeTypedRecordBase {
+  runId: string;
+  providerItemId: string;
+  type: AgentItemType;
+  status: AgentItemStatus;
+  payload: unknown;
+  rawMessage?: AgentProtocolMessageReference;
+  outputArtifactId?: string;
+  providerStartedAt?: string;
+  providerCompletedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Actionable provider request. It is mutable and cannot be stored as telemetry. */
+export interface AgentRuntimeInteractionRecord extends AgentRuntimeTypedRecordBase {
+  runId: string;
+  serverInstanceId: string;
+  providerRequestId: string | number;
+  providerTurnId?: string;
+  providerItemId?: string;
+  type:
+    | 'COMMAND_APPROVAL'
+    | 'FILE_CHANGE_APPROVAL'
+    | 'PERMISSION_APPROVAL'
+    | 'MCP_ELICITATION'
+    | 'USER_INPUT'
+    | 'DYNAMIC_TOOL';
+  status:
+    | 'PENDING'
+    | 'RESPONDING'
+    | 'RESOLVED'
+    | 'DECLINED'
+    | 'CANCELED'
+    | 'ABORTED_SERVER_LOST'
+    | 'STALE';
+  request: AgentInteractionRequestPayload;
+  allowedActions: AgentInteractionAction[];
+  policyWarnings: string[];
+  requestRawMessage: AgentProtocolMessageReference;
+  decision?: AgentInteractionDecision;
+  responseRawMessage?: AgentProtocolMessageReference;
+  resolution?: unknown;
+  requestedAt: string;
+  respondedAt?: string;
+  resolvedAt?: string;
+}
+
+export interface AgentRuntimeGoalSnapshotRecord extends AgentRuntimeTypedRecordBase {
+  taskGoalHash: string;
+  lastSynchronizedTaskGoalHash?: string;
+  providerObjective?: string;
+  providerStatus?: AgentGoalStatus;
+  tokenBudget?: number;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  syncState: AgentGoalSyncState;
+  source: AgentGoalObservationSource;
+  detail?: string;
+  rawMessage?: AgentProtocolMessageReference;
+  providerCreatedAt?: string;
+  providerUpdatedAt?: string;
+  observedAt: string;
+}
+
+export interface AgentRuntimePlanRevisionRecord extends AgentRuntimeTypedRecordBase {
+  runId: string;
+  revision: number;
+  explanation?: string;
+  steps: AgentPlanStep[];
+  rawMessage: AgentProtocolMessageReference;
+  observedAt: string;
+}
+
+export interface AgentRuntimeUsageSnapshotRecord extends AgentRuntimeTypedRecordBase {
+  runId?: string;
+  total: AgentTokenUsageBreakdown;
+  last: AgentTokenUsageBreakdown;
+  modelContextWindow?: number;
+  rawMessage: AgentProtocolMessageReference;
+  observedAt: string;
+}
+
+export interface AgentRuntimeSettingsObservationRecord extends AgentRuntimeTypedRecordBase {
+  runId?: string;
+  source: AgentObservationSource;
+  settings: AgentExecutionSettings;
+  detail?: string;
+  rawMessage?: AgentProtocolMessageReference;
+  observedAt: string;
+}
+
+export interface AgentRuntimeSubagentObservationRecord extends AgentRuntimeTypedRecordBase {
+  parentSessionId: string;
+  parentRunId?: string;
+  providerChildSessionId: string;
+  providerParentSessionId?: string;
+  providerForkedFromSessionId?: string;
+  source: AgentSubagentObservationSource;
+  relationshipState: AgentSessionRelationshipState;
+  status?: AgentSubagentStatus;
+  delegatedPrompt?: string;
+  requestedSettings?: AgentExecutionSettings;
+  providerNickname?: string;
+  providerRole?: string;
+  agentPath?: string;
+  detail?: string;
+  rawMessage: AgentProtocolMessageReference;
+  observedAt: string;
+}
 
 /** Immutable normalized observation. Raw protocol bytes remain in bounded journals. */
 export interface AgentRuntimeTelemetryRecord {
@@ -294,6 +484,14 @@ export type AgentRuntimeEventType =
   | 'ARTIFACT_CREATED'
   | 'ARTIFACT_UPDATED'
   | 'TELEMETRY_RECORDED'
+  | 'ITEM_UPSERTED'
+  | 'INTERACTION_CREATED'
+  | 'INTERACTION_UPDATED'
+  | 'GOAL_RECORDED'
+  | 'PLAN_RECORDED'
+  | 'USAGE_RECORDED'
+  | 'SETTINGS_RECORDED'
+  | 'SUBAGENT_RECORDED'
   | 'QUEUE_ENQUEUED'
   | 'QUEUE_LEASED'
   | 'QUEUE_RELEASED'
@@ -328,20 +526,43 @@ export interface AgentRuntimeStoreState {
   queueEntries: AgentSchedulerQueueEntry[];
   artifacts: AgentRuntimeArtifactRecord[];
   telemetryRecords: AgentRuntimeTelemetryRecord[];
+  items: AgentRuntimeItemRecord[];
+  interactions: AgentRuntimeInteractionRecord[];
+  goalSnapshots: AgentRuntimeGoalSnapshotRecord[];
+  planRevisions: AgentRuntimePlanRevisionRecord[];
+  usageSnapshots: AgentRuntimeUsageSnapshotRecord[];
+  settingsObservations: AgentRuntimeSettingsObservationRecord[];
+  subagentObservations: AgentRuntimeSubagentObservationRecord[];
   events: AgentRuntimeEventRecord[];
 }
 
 export function agentOwnerScopeKey(scope: AgentOwnerScope): string {
-  return scope.kind === 'TASK'
-    ? `task:${scope.taskId}`
-    : `discourse:${scope.conversationId}:${scope.stableParticipantId}`;
+  if (scope.kind === 'TASK') return `task:${scope.taskId}`;
+  if (scope.kind === 'PROMPT_REFINEMENT') {
+    return `prompt-refinement:${scope.requestId}`;
+  }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    return `preview-recipe-generation:${scope.taskId}:${scope.generationId}`;
+  }
+  return `discourse:${scope.conversationId}:${scope.stableParticipantId}`;
 }
 
 export function agentRunScopeBelongsToOwner(
   scope: AgentRunScope,
   owner: AgentOwnerScope
 ): boolean {
-  return scope.kind === 'TASK'
-    ? owner.kind === 'TASK' && owner.taskId === scope.taskId
-    : owner.kind === 'DISCOURSE' && owner.conversationId === scope.conversationId;
+  if (scope.kind === 'TASK') {
+    return owner.kind === 'TASK' && owner.taskId === scope.taskId;
+  }
+  if (scope.kind === 'PROMPT_REFINEMENT') {
+    return owner.kind === 'PROMPT_REFINEMENT' && owner.requestId === scope.requestId;
+  }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    return (
+      owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
+      owner.taskId === scope.taskId &&
+      owner.generationId === scope.generationId
+    );
+  }
+  return owner.kind === 'DISCOURSE' && owner.conversationId === scope.conversationId;
 }

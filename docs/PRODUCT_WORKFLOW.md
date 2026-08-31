@@ -1,6 +1,6 @@
 # Product Workflow
 
-Date: 2026-07-18
+Date: 2026-08-29
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
@@ -46,8 +46,8 @@ repository by ID and never accepts a repository path as task identity.
 Capturing a text-only task is a local operation and remains available when the
 selected agent runtime is unavailable; live model resolution is deferred until
 Start. Attachment-backed creation still requires a runtime/model with an
-attested attachment boundary because Task Monki must validate modality and
-isolation before adopting the draft.
+enabled delivery path for each selected content type. Task Monki validates the
+model input types before it adopts the draft.
 
 The New Task composer is a parallel workspace panel rather than a modal
 decision. Closing it preserves title and description text for the current app
@@ -55,16 +55,22 @@ session, while unsubmitted attachment batches are still discarded. A
 successful Create clears the preserved text draft.
 
 Refine is a reversible proposal, not an automatic append or overwrite. One
-ephemeral read-only, network-isolated agent run receives the current title and
-description, the selected downstream model's capabilities, and any staged
-attachments. It first decides whether repository or attachment inspection can
+short-lived read-only agent run receives the current title and description.
+It also receives the selected downstream model capabilities and supported staged attachments.
+The adapter applies its qualified native mutation-denial policy.
+Task Monki grants only the exact selected attachments. It does not grant
+app-owned web, MCP, app, dynamic-tool, or approval access for the turn.
+An ACP provider can still expose its own tools when its native policy permits them.
+The provider process can still use its model transport.
+The agent first decides whether repository or attachment inspection can
 materially improve the request. Clear, small tasks may use no repository tools;
 ambiguous or cross-cutting tasks start in the likely relevant area and broaden
 only when inspected dependencies justify it. The run returns a standalone
 rewrite plus path-free inspection evidence. Core accepts repository paths and
 attachment observations only when they match files that were actually made
-available to that run. If refinement cannot be validated, the original request
-is returned unchanged with a visible degraded-result warning.
+available to that run. Task Monki compares repository state before and after the turn.
+If the repository changes, Task Monki rejects the result and leaves the changes as evidence.
+If refinement cannot be validated, the original request remains unchanged with a visible warning.
 
 The composer locks refinement inputs while that run is active, cancels the run
 when the panel closes, and accepts a proposal only while its repository, title,
@@ -75,11 +81,13 @@ copy their generic rules into every task prompt.
 ## Runtime and model configuration
 
 First-launch defaults, New Task, and Settings use the same runtime/model
-selector. Implementation defaults can use every enabled runtime. Prompt
-refinement and review receive narrower runtime lists derived from their typed
-capabilities, so those operations are never assumed to be Codex-only and an
-unsupported provider is never offered for them. Reasoning choices come from the
-selected model's native catalog.
+selector. Implementation defaults can use every enabled runtime.
+Prompt refinement, review, and Discourse use one shared read-only support projection.
+The projection requires qualified native mutation denial. Preview recipe generation
+normally uses that path. An adapter can instead qualify an exact runtime and model for
+the app-owned disposable evidence copy, which contains no source repository path.
+Unsupported providers remain visible with the reason that blocks the operation.
+Reasoning choices come from the selected model's native catalog.
 
 ## Discourse
 
@@ -91,11 +99,13 @@ correction. It never creates a hidden task or treats an agent response as Git,
 test, GitHub, workflow, or acceptance evidence.
 
 Task and repository context is explicit per message or explicitly pinned.
-Agent turns use immutable context snapshots and a read-only, offline execution
-scope. Runtime/model identity is frozen in participant revisions, so a reply is
-never silently rerouted to the current default runtime. Only runtimes with an
-adapter-attested scoped Discourse boundary are offered; unsupported runtimes
-stay visible as unavailable with their reason rather than falling back.
+Agent turns use immutable context snapshots and a provider-native read-only policy.
+Task Monki grants no app-owned external tools for these turns and compares repository state after the turn.
+Provider-owned tools remain subject to the selected native policy.
+Runtime and model identity remain frozen in participant revisions.
+A reply is never silently rerouted to the current default runtime.
+Only qualified runtimes are offered.
+Unsupported runtimes remain visible with their reason instead of falling back.
 
 See `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md` for response policies,
 waiting, review/correction, stale context, cancellation, recovery, and limits.
@@ -123,22 +133,21 @@ original paths or places them in the repository worktree. The composer uses
 Chromium's native decoder to re-encode images before submission so embedded
 metadata is not copied. PDFs, Office files, video, audio,
 archives, databases, and arbitrary binaries are not supported. Codex uses
-verified local-image inputs and managed path references. OpenCode retains
-native file parts for provider-owned integrations, but Task Monki managed
-attachments are disabled because that process cannot attest attachment
-confinement. Every runtime must advertise attachment delivery before the
-composer enables it, and Task Monki does not provide a generic extraction
-pipeline.
+verified local-image inputs and managed path references. OpenCode uses bounded
+native file parts. Qualified ACP profiles use their native text or image blocks.
+The composer uses the effective runtime and model projection for each content
+type. Negotiated ACP support is the default. A tested provider-local exception
+can correct one false capability flag and must show a diagnostic.
+Task Monki does not provide a generic extraction pipeline.
 
-Provider delivery is runtime-specific and fail-closed. Codex uses a complete
-thread-local permission profile for the exact worktree and verified files.
-Attachment runs force network off, so runtimes such as OpenCode whose network
-is provider-controlled cannot accept them. Full access remains available for
-attachment-free tasks but is rejected when attachments are present. In the
-packaged app, the user's Codex web search, MCP server, and app choices remain in
-effect for attachment runs; enabling those integrations means trusting them
-with the task content the agent can provide to them. Browser development keeps
-its separate rule that forces those integrations off.
+Provider delivery is runtime-specific and fail-closed. A restricted Codex
+session uses a complete permission profile for the exact worktree and verified
+files. The task's network and full-access settings do not change only because
+the task has attachments. These settings define provider access, not file
+delivery eligibility. In the packaged app, the user's Codex web search, MCP
+server, and app choices remain in effect. Enabling those integrations means
+trusting them with the task content the agent can provide. Browser development
+keeps its separate rule that forces those integrations off.
 
 Files stay renderer-local during editing and cross the trusted boundary in one
 bounded batch. A successful task create atomically adopts that batch as one
@@ -153,8 +162,6 @@ that the verified bytes were submitted with a provider turn, but never presents
 that as proof that the model read or used the file. See
 `docs/architecture/ATTACHMENT_LIFECYCLE.md` for limits, delivery, portability,
 cleanup, and privacy semantics.
-
-Task Monki attachment runs require read-only or managed workspace access.
 
 Task records remain bound to exactly one repository ID. Runs, worktrees, Git
 evidence, GitHub delivery, and provider sessions resolve through task and

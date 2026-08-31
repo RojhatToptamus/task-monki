@@ -1,17 +1,40 @@
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentInteractionService } from '../AgentInteractionService';
-import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
-import { AppEventBus } from '../../runner/AppEventBus';
 import {
-  ArtifactAppendAmbiguousError,
-  FileTaskStore
-} from '../../storage/FileTaskStore';
+  toAgentAttachmentSelection,
+  type AgentTurnAttachment
+} from '../AgentAttachmentDelivery';
+import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
+import {
+  AgentMutationAmbiguousError,
+  AgentRuntimeDeliveryError,
+  type StartAgentTurn
+} from '../AgentRuntimeAdapter';
+import { AppEventBus } from '../../runner/AppEventBus';
+import type {
+  AgentExecutionSettings,
+  AgentRunMode,
+  AgentSessionRecord,
+  RunRecord,
+  Task,
+  TaskIteration,
+  WorktreeRecord
+} from '../../../shared/contracts';
+import type { AgentAttachmentSelection } from '../../../shared/attachments';
+import { FileTaskStore } from '../../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import type { TaskAgentRuntimeAccess } from '../AgentRuntimeStore';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import type { AcpNativeSessionState } from './AcpNativeSession';
-import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
+import {
+  AcpRuntimeAdapter,
+  isTaskMonkiInspectDesignToolCall
+} from './AcpRuntimeAdapter';
 import type { AcpSessionConfigOption, AcpSessionUpdate } from './AcpProtocol';
 import type { AcpRpcClient } from './AcpRpcClient';
 import {
@@ -22,16 +45,32 @@ import {
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 
 const temporaryDirectories: string[] = [];
-const testStores = new Set<FileTaskStore>();
+const testStores = new Set<{
+  tasks: FileTaskStore;
+  runtimeStore: FileAgentRuntimeStore;
+}>();
+const runtimeByTaskStore = new WeakMap<
+  FileTaskStore,
+  { runtimeStore: FileAgentRuntimeStore; runtime: TaskAgentRuntimeAccess }
+>();
+let testOperationOrdinal = 0;
 
 function createTestStore(root: string): FileTaskStore {
   const store = new FileTaskStore(root);
-  testStores.add(store);
+  const runtimeStore = new FileAgentRuntimeStore(`${root}-runtime`);
+  const runtime = runtimeStore.taskAgentRuntimeAccess(async (event, operationId) => {
+    await store.recordAgentRuntimeEvent(event, operationId);
+  });
+  store.bindAgentRuntime(runtime);
+  runtimeByTaskStore.set(store, { runtimeStore, runtime });
+  testStores.add({ tasks: store, runtimeStore });
   return store;
 }
 
 afterEach(async () => {
-  await Promise.all([...testStores].map((store) => store.close()));
+  await Promise.all(
+    [...testStores].flatMap(({ tasks, runtimeStore }) => [tasks.close(), runtimeStore.close()])
+  );
   testStores.clear();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
@@ -40,7 +79,1948 @@ afterEach(async () => {
   );
 });
 
+function runtimeFixture(store: FileTaskStore): {
+  runtimeStore: FileAgentRuntimeStore;
+  runtime: TaskAgentRuntimeAccess;
+} {
+  const fixture = runtimeByTaskStore.get(store);
+  if (!fixture) throw new Error('ACP test store has no runtime fixture.');
+  return fixture;
+}
+
+async function createDualProcessFixture() {
+  const directory = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'task-monki-acp-dual-process-')
+  );
+  temporaryDirectories.push(directory);
+  const agentScript = path.join(directory, 'dual-process-agent.cjs');
+  const messageLog = path.join(directory, 'messages.jsonl');
+  await fs.writeFile(
+    agentScript,
+    readOnlyRuntimeAgentSource(messageLog, true),
+    { mode: 0o600 }
+  );
+  const runtimeId = 'test-acp-dual-process';
+  const profile: AcpRuntimeProfile = {
+    ...TEST_ACP_PROFILE,
+    descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+    attachmentTextTransport: 'text-block',
+    executableCandidates: [process.execPath],
+    argv: [agentScript, 'writable-lane'],
+    readOnlyTurnPolicy: {
+      kind: 'DEDICATED_PROCESS',
+      policyId: 'test-acp/process-read-only@v1',
+      detail: 'A separate test process owns read-only execution.',
+      runtimeVersion: process.version,
+      platform: process.platform,
+      launchArgv: [agentScript, 'read-only-lane'],
+      startupFailurePattern: /sandbox unavailable/iu
+    }
+  };
+  const store = createTestStore(path.join(directory, 'store'));
+  const { runtimeStore, runtime } = runtimeFixture(store);
+  const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+    cwd: directory,
+    requestTimeoutMs: 1_000,
+    runtimeResolver: async () => ({
+      executable: process.execPath,
+      version: process.version,
+      diagnostics: {
+        selectedExecutable: process.execPath,
+        selectedSource: 'test',
+        selectedVersion: process.version,
+        selectedLaunchArgv: [agentScript, 'writable-lane'],
+        requiredCapabilities: ['ACP protocolVersion=1'],
+        probes: []
+      }
+    })
+  });
+  await adapter.initialize();
+  await adapter.discoverModels();
+  const repository = await addTestRepository(store, directory);
+  let normalOrdinal = 0;
+
+  const startSharedTurn = async (
+    prompt: string,
+    expectedStatus: 'RUNNING' | 'COMPLETED'
+  ) => {
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const owner = {
+      kind: 'PROMPT_REFINEMENT' as const,
+      requestId: randomUUID()
+    };
+    const context = await adapter.buildExecutionContext({
+      sessionId,
+      primaryCwd: process.cwd(),
+      readRoots: [{ canonicalPath: process.cwd(), kind: 'EMPTY_MANAGED' }],
+      modelSettings: {
+        runtimeId,
+        model: 'default',
+        modelProvider: 'test-provider'
+      },
+      clientOperationId: `dual-process-context:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await runtimeStore.prepareRuntimeTurn({
+      session: {
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId,
+          model: 'default',
+          executionContext: context
+        }),
+        executionContext: context,
+        clientOperationId: `dual-process-session:${sessionId}`,
+        runtimeId,
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: context.modelSettings
+      },
+      run: {
+        id: runId,
+        owner,
+        scope: { kind: 'PROMPT_REFINEMENT', requestId: owner.requestId },
+        sessionId,
+        sessionAccessEpoch: 1,
+        purpose: 'PROMPT_REFINEMENT',
+        generationKey: `dual-process:${runId}`,
+        clientOperationId: `dual-process-run:${runId}`,
+        requestedSettings: context.modelSettings,
+        promptArtifactId: `prompt-${runId}`,
+        outputArtifactId: `output-${runId}`,
+        diagnosticArtifactId: `diagnostic-${runId}`
+      },
+      prompt,
+      priority: 'TASK_FOREGROUND',
+      queueOperationId: `dual-process-queue:${runId}`
+    });
+    const starting = await runtimeStore.updateRun(
+      runId,
+      prepared.run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: new Date().toISOString()
+      },
+      `dual-process-starting:${runId}`
+    );
+    await adapter.startRuntimeTurn({
+      session: prepared.session,
+      run: starting,
+      executionContext: context,
+      prompt,
+      attachments: []
+    });
+    const run = await waitFor(async () => {
+      const candidate = await runtimeStore.getRun(runId);
+      return candidate?.status === expectedStatus ? candidate : undefined;
+    });
+    const session = await runtimeStore.getSession(sessionId);
+    if (!session) throw new Error('Expected the shared runtime session.');
+    return { run, session };
+  };
+
+  const prepareNormalTurn = async (
+    prompt: string,
+    settingsOverride: Partial<AgentExecutionSettings> = {}
+  ) => {
+    normalOrdinal += 1;
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      ...settingsOverride
+    };
+    const task = await store.createTask({
+      title: `Dual process normal turn ${normalOrdinal}`,
+      prompt,
+      repositoryId: repository.id,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: `codex/dual-process-${normalOrdinal}`,
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const queued = await createTestRun(store, {
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt,
+      requestedSettings: settings
+    });
+    return { settings, task, iteration, worktree, session, queued };
+  };
+
+  const startNormalTurn = async (
+    prompt: string,
+    settingsOverride: Partial<AgentExecutionSettings> = {}
+  ) => {
+    const prepared = await prepareNormalTurn(prompt, settingsOverride);
+    await adapter.startTurn({
+      localRunId: prepared.queued.id,
+      session: { localSessionId: prepared.session.id },
+      mode: 'IMPLEMENTATION',
+      prompt,
+      authoritativeGoal: prompt,
+      settings: prepared.settings,
+      attachments: []
+    });
+    const run = await waitFor(async () => {
+      const candidate = await getTestRun(store, prepared.queued.id);
+      return candidate?.status === 'RUNNING' ? candidate : undefined;
+    });
+    const activeSession = await runtime.getAgentSession(prepared.session.id);
+    if (!activeSession) throw new Error('Expected the active Task session.');
+    return { run, session: activeSession };
+  };
+
+  const cancelSharedTurn = async (
+    target: Awaited<ReturnType<typeof startSharedTurn>>
+  ) => {
+    const interrupting = await runtimeStore.updateRun(
+      target.run.id,
+      target.run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      `dual-process-interrupt:${target.run.id}`
+    );
+    await adapter.interruptRuntimeTurn({
+      session: target.session,
+      run: interrupting
+    });
+    await waitFor(async () =>
+      (await runtimeStore.getRun(target.run.id))?.status === 'INTERRUPTED'
+        ? true
+        : undefined
+    );
+  };
+
+  const loseLane = async (lane: 'DEFAULT' | 'READ_ONLY') => {
+    const internals = adapter as unknown as {
+      readOnlyLane: {
+        quarantineRuntimeGeneration(reason: string, drainInbound: boolean): Promise<void>;
+      };
+      quarantineRuntimeGeneration(reason: string, drainInbound: boolean): Promise<void>;
+    };
+    const owner = lane === 'READ_ONLY' ? internals.readOnlyLane : internals;
+    await owner.quarantineRuntimeGeneration(`Injected ${lane} process loss.`, true);
+  };
+
+  return {
+    adapter,
+    agentScript,
+    messageLog,
+    runtime,
+    runtimeStore,
+    store,
+    startSharedTurn,
+    prepareNormalTurn,
+    startNormalTurn,
+    cancelSharedTurn,
+    loseLane,
+    async runningServers() {
+      return (await runtimeStore.snapshot()).servers.filter((server) =>
+        ['READY', 'RUNNING', 'DEGRADED'].includes(server.status)
+      );
+    }
+  };
+}
+
+function createTestAdapter(
+  store: FileTaskStore,
+  appEvents: AppEventBus,
+  profile: AcpRuntimeProfile,
+  options: ConstructorParameters<typeof AcpRuntimeAdapter>[4]
+): AcpRuntimeAdapter {
+  const fixture = runtimeFixture(store);
+  return new AcpRuntimeAdapter(
+    fixture.runtime,
+    fixture.runtimeStore,
+    appEvents,
+    profile,
+    options
+  );
+}
+
+function testOperationId(action: string, ...identity: unknown[]): string {
+  testOperationOrdinal += 1;
+  return `acp-test:${action}:${testOperationOrdinal}:${JSON.stringify(identity)}`;
+}
+
+interface CreateTestAgentSessionInput {
+  task: Task;
+  iteration: TaskIteration;
+  worktree: WorktreeRecord;
+  runtimeId: string;
+  role?: AgentSessionRecord['role'];
+  requestedSettings?: AgentExecutionSettings;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+}
+
+async function createTestAgentSession(
+  store: FileTaskStore,
+  input: CreateTestAgentSessionInput
+): Promise<AgentSessionRecord> {
+  const runtime = runtimeFixture(store).runtime;
+  const id = randomUUID();
+  const requestedSettings = {
+    ...input.requestedSettings,
+    runtimeId: input.runtimeId,
+    model: input.requestedSettings?.model ?? 'default'
+  };
+  const operationId = testOperationId('session/create', id);
+  const session = await runtime.createTaskSession({
+    id,
+    taskId: input.task.id,
+    iterationId: input.iteration.id,
+    worktreeId: input.worktree.id,
+    worktreePath: input.worktree.worktreePath,
+    runtimeId: input.runtimeId,
+    role: input.role,
+    requestedSettings,
+    executionContext: {
+      attestation: { status: 'ATTESTED' },
+      primaryCwd: input.worktree.worktreePath,
+      repositoryAccess: 'WRITE',
+      readRoots: [{
+        canonicalPath: input.worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: input.worktree.id
+      }],
+      managedAttachments: [],
+      permissionProfileHash: 'a'.repeat(64),
+      modelSettings: requestedSettings,
+      externalTools: {
+        network: requestedSettings.networkAccess === true,
+        webSearch: requestedSettings.networkAccess === true ? 'live' : 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: operationId
+    },
+    operationId,
+    ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+    ...(input.forkedFromSessionId
+      ? { forkedFromSessionId: input.forkedFromSessionId }
+      : {})
+  });
+  await store.recordAgentSessionCreated(session);
+  return session;
+}
+
+function updateTestAgentSession(
+  store: FileTaskStore,
+  id: string,
+  update: Partial<AgentSessionRecord>
+) {
+  return runtimeFixture(store).runtime.updateAgentSession(
+    id,
+    update,
+    testOperationId('session/update', id, update)
+  );
+}
+
+interface CreateTestRunInput {
+  task: Task;
+  session: AgentSessionRecord;
+  mode: AgentRunMode;
+  prompt: string;
+  serverInstanceId?: string;
+  generationKey?: string;
+  retryOfRunId?: string;
+  continuedFromRunId?: string;
+  requestedSettings?: AgentExecutionSettings;
+  beforeGitSnapshotId?: string;
+  attachmentSelection?: AgentAttachmentSelection[];
+  clientToolGrants?: string[];
+}
+
+async function createTestRun(
+  store: FileTaskStore,
+  input: CreateTestRunInput
+): Promise<RunRecord> {
+  const id = randomUUID();
+  const run = await runtimeFixture(store).runtime.createTaskRun({
+    id,
+    taskId: input.task.id,
+    iterationId: input.session.iterationId,
+    worktreeId: input.session.worktreeId,
+    sessionId: input.session.id,
+    mode: input.mode,
+    prompt: input.prompt,
+    generationKey: input.generationKey ?? `acp-test:${id}`,
+    requestedSettings: input.requestedSettings ?? input.session.requestedSettings,
+    ...(input.attachmentSelection
+      ? { attachmentSelection: input.attachmentSelection }
+      : {}),
+    ...(input.clientToolGrants
+      ? { clientToolGrants: input.clientToolGrants }
+      : {}),
+    ...(input.beforeGitSnapshotId
+      ? { beforeGitSnapshotId: input.beforeGitSnapshotId }
+      : {}),
+    ...(input.retryOfRunId ? { retryOfRunId: input.retryOfRunId } : {}),
+    ...(input.continuedFromRunId
+      ? { continuedFromRunId: input.continuedFromRunId }
+      : {}),
+    operationId: testOperationId('run/create', id)
+  });
+  if (input.serverInstanceId) {
+    await updateTestRun(store, run.id, { serverInstanceId: input.serverInstanceId });
+  }
+  await store.recordAgentRunStarted(
+    (await runtimeFixture(store).runtime.getRun(run.id)) ?? run
+  );
+  return (await runtimeFixture(store).runtime.getRun(run.id)) ?? run;
+}
+
+function updateTestRun(store: FileTaskStore, id: string, update: Partial<RunRecord>) {
+  return runtimeFixture(store).runtime.updateRun(
+    id,
+    update,
+    testOperationId('run/update', id, update)
+  );
+}
+
+function getTestAgentSession(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtime.getAgentSession(id);
+}
+
+function getTestRun(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtime.getRun(id);
+}
+
+function getTestAgentServer(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtimeStore.getAgentServer(id);
+}
+
+function getTestAgentItemByProviderId(
+  store: FileTaskStore,
+  runId: string,
+  providerItemId: string
+) {
+  return runtimeFixture(store).runtime.getAgentItemByProviderId(runId, providerItemId);
+}
+
+function getTestInteractionRequest(store: FileTaskStore, id: string) {
+  return runtimeFixture(store).runtime.getInteractionRequest(id);
+}
+
+function appendTestProtocolMessage(
+  store: FileTaskStore,
+  ...input: Parameters<FileAgentRuntimeStore['appendProtocolMessage']>
+) {
+  return runtimeFixture(store).runtimeStore.appendProtocolMessage(...input);
+}
+
+function createTestAgentServer(
+  store: FileTaskStore,
+  input: Parameters<FileAgentRuntimeStore['createAgentServer']>[0]
+) {
+  return runtimeFixture(store).runtimeStore.createAgentServer(input);
+}
+
+async function createManagedTextAttachment(input: {
+  directory: string;
+  attachmentId: string;
+  displayName: string;
+  text: string;
+}): Promise<AgentTurnAttachment> {
+  const bytes = Buffer.from(input.text);
+  const filePath = path.join(input.directory, input.displayName);
+  await fs.writeFile(filePath, bytes, { mode: 0o400 });
+  await fs.chmod(filePath, 0o400);
+  return {
+    attachmentId: input.attachmentId,
+    ordinal: 0,
+    displayName: input.displayName,
+    kind: 'text',
+    mediaType: 'text/plain',
+    byteCount: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    path: filePath,
+    verifiedAt: new Date(0).toISOString()
+  };
+}
+
 describe('AcpRuntimeAdapter end-to-end', () => {
+  it('trusts only exact Task Monki Design MCP identities', () => {
+    expect(
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
+        title: 'task-monki-design-tools: inspect_design',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      })
+    ).toBe(true);
+    expect(
+      isTaskMonkiInspectDesignToolCall('grok-acp', {
+        title: 'task-monki-design-tools__inspect_design',
+        rawInput: {
+          tool_name: 'task-monki-design-tools__inspect_design',
+          tool_input: { operation: 'screenshot' }
+        }
+      })
+    ).toBe(true);
+    expect(
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'mcp__task-monki-design-tools__inspect_design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
+        }
+      })
+    ).toBe(true);
+    expect(
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
+        title: 'task-monki-design-tools-inspect_design: inspect_design',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'Inspect the current Design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'mcp__another-server__inspect_design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('claude-agent-acp', {
+        title: 'mcp__task-monki-design-tools__inspect_design',
+        rawInput: { command: 'unexpected mutation' }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
+        title: 'malicious_inspect_design',
+        rawInput: {
+          providerIdentifier: 'another-server',
+          toolName: 'inspect_design',
+          args: { command: 'unexpected mutation' }
+        }
+      })
+    ).toBe(false);
+    expect(
+      isTaskMonkiInspectDesignToolCall('cursor-agent-acp', {
+        title: 'mcp__task-monki-design-tools__inspect_design',
+        rawInput: { operation: 'screenshot' },
+        _meta: {
+          claudeCode: {
+            toolName: 'mcp__task-monki-design-tools__inspect_design'
+          }
+        }
+      })
+    ).toBe(false);
+  });
+
+  it('does not rewrite an interrupt intent already persisted by the orchestrator', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-existing-interrupt-')
+    );
+    temporaryDirectories.push(directory);
+    const runtimeId = 'test-acp-existing-interrupt';
+    const store = createTestStore(path.join(directory, 'store'));
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider'
+    };
+    const task = await store.createTask({
+      title: 'ACP interrupt',
+      prompt: 'Wait until canceled.',
+      repositoryId: (await addTestRepository(store, directory)).id,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-existing-interrupt',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const run = await createTestRun(store, {
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: settings
+    });
+    const providerTurnId = 'server-existing-interrupt:17';
+    const runtime = runtimeFixture(store).runtime;
+    vi.spyOn(runtime, 'getAgentSession').mockResolvedValue({
+      ...session,
+      providerSessionId: 'provider-session-existing-interrupt'
+    });
+    vi.spyOn(runtime, 'getRunByProviderTurnId').mockResolvedValue({
+      ...run,
+      status: 'INTERRUPTING',
+      providerTurnId,
+      serverInstanceId: 'server-existing-interrupt'
+    });
+    const updateRun = vi.spyOn(runtime, 'updateRun');
+    const notify = vi.fn(async () => undefined);
+    const shutdown = vi.fn(async () => undefined);
+    const adapter = createTestAdapter(store, new AppEventBus(), {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId }
+    }, {
+      cwd: directory,
+      interruptCompletionTimeoutMs: 60_000
+    });
+    const internals = adapter as unknown as {
+      supervisor?: {
+        currentClient: AcpRpcClient;
+        currentServer: { id: string };
+        safetyFenceReason?: string;
+        shutdown(): Promise<void>;
+      };
+    };
+    internals.supervisor = {
+      currentClient: { notify } as unknown as AcpRpcClient,
+      currentServer: { id: 'server-existing-interrupt' },
+      shutdown
+    };
+
+    try {
+      await adapter.interruptTurn({
+        session: {
+          localSessionId: session.id,
+          providerSessionId: 'provider-session-existing-interrupt'
+        },
+        providerTurnId
+      });
+
+      expect(notify).toHaveBeenCalledWith('session/cancel', {
+        sessionId: 'provider-session-existing-interrupt'
+      });
+      expect(updateRun).not.toHaveBeenCalled();
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('fences unconfirmed shared read-only cancellation before recovery is visible', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-read-only-runtime-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'read-only-agent.cjs');
+    const messageLog = path.join(directory, 'messages.jsonl');
+    await fs.writeFile(agentScript, readOnlyRuntimeAgentSource(messageLog), {
+      mode: 0o600
+    });
+    const runtimeId = 'test-acp-read-only-runtime';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      readOnlyTurnPolicy: {
+        kind: 'SESSION_MODE',
+        modeId: 'ask',
+        policyId: 'test-acp/ask-read-only@v1',
+        detail: 'Test Ask mode denies repository mutation.'
+      },
+      attachmentTextTransport: 'text-block',
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const fixture = runtimeFixture(store);
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 1_000,
+      interruptCompletionTimeoutMs: 25,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const owner = {
+      kind: 'PROMPT_REFINEMENT' as const,
+      requestId: randomUUID()
+    };
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider'
+    };
+    const attachment = await createManagedTextAttachment({
+      directory,
+      attachmentId: 'read-only-reference',
+      displayName: 'reference.txt',
+      text: 'read-only attachment content'
+    });
+    const attachmentSelection = toAgentAttachmentSelection([attachment]);
+    const context = await adapter.buildExecutionContext({
+      sessionId,
+      primaryCwd: directory,
+      readRoots: [{ canonicalPath: directory, kind: 'EMPTY_MANAGED' }],
+      modelSettings: settings,
+      clientOperationId: `read-only-context:${sessionId}`,
+      attachments: [attachment]
+    });
+    const prepared = await fixture.runtimeStore.prepareRuntimeTurn({
+      session: {
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId,
+          model: 'default',
+          executionContext: context
+        }),
+        executionContext: context,
+        clientOperationId: `read-only-session:${sessionId}`,
+        runtimeId,
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: context.modelSettings
+      },
+      run: {
+        id: runId,
+        owner,
+        scope: { kind: 'PROMPT_REFINEMENT', requestId: owner.requestId },
+        sessionId,
+        sessionAccessEpoch: 1,
+        purpose: 'PROMPT_REFINEMENT',
+        generationKey: `read-only:${runId}`,
+        clientOperationId: `read-only-run:${runId}`,
+        requestedSettings: context.modelSettings,
+        attachmentSelection,
+        promptArtifactId: `prompt-${runId}`,
+        outputArtifactId: `output-${runId}`,
+        diagnosticArtifactId: `diagnostic-${runId}`
+      },
+      prompt: 'Refine this prompt without changing files.',
+      priority: 'TASK_FOREGROUND',
+      queueOperationId: `read-only-queue:${runId}`
+    });
+    const events: import('../AgentRuntimeCoordinator').AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = adapter.onRuntimeTurnEvent((event) => events.push(event));
+    try {
+      await adapter.initialize();
+      const startingRun = await fixture.runtimeStore.updateRun(
+        prepared.run.id,
+        prepared.run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: new Date().toISOString()
+        },
+        `read-only-starting:${runId}`
+      );
+      const preDeliveryError = await adapter.startRuntimeTurn({
+        session: prepared.session,
+        run: startingRun,
+        executionContext: context,
+        prompt: 'Refine this prompt without changing files.',
+        attachments: []
+      }).catch((cause: unknown) => cause);
+      expect(preDeliveryError).toBeInstanceOf(AgentRuntimeDeliveryError);
+      expect(preDeliveryError).toMatchObject({
+        name: 'AgentRuntimeDeliveryError',
+        delivery: 'NOT_DELIVERED'
+      });
+      await adapter.startRuntimeTurn({
+        session: prepared.session,
+        run: startingRun,
+        executionContext: context,
+        prompt: 'Refine this prompt without changing files.',
+        attachments: [attachment]
+      });
+      const completed = await waitFor(async () => {
+        const run = await fixture.runtimeStore.getRun(runId);
+        return run?.status === 'COMPLETED' ? run : undefined;
+      });
+      await expect(fixture.runtimeStore.readArtifact(completed.outputArtifactId)).resolves.toBe(
+        'Read-only answer.'
+      );
+      await expect(
+        fixture.runtimeStore.readArtifact(completed.diagnosticArtifactId)
+      ).resolves.toContain('denied an ACP permission request');
+      expect(completed.attachmentSubmissions).toEqual([
+        expect.objectContaining({
+          attachmentId: attachment.attachmentId,
+          transport: 'text-block',
+          correlation: {
+            kind: 'client-request',
+            id: completed.providerTurnId?.split(':').at(-1)
+          }
+        })
+      ]);
+      expect(JSON.stringify(completed.attachmentSubmissions)).not.toContain(
+        attachment.path
+      );
+      await waitFor(async () =>
+        events.some((event) => event.type === 'TERMINAL' && event.runId === runId)
+          ? true
+          : undefined
+      );
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'DELTA', runId, text: 'Read-only answer.' }),
+          expect.objectContaining({ type: 'TERMINAL', runId, status: 'completed' })
+        ])
+      );
+      const messages = await readProtocolMessagesFromLog(messageLog);
+      expect(messages.findIndex((message) => message.method === 'session/set_mode')).toBeLessThan(
+        messages.findIndex((message) => message.method === 'session/prompt')
+      );
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          id: 'permission-1',
+          result: {
+            outcome: { outcome: 'selected', optionId: 'reject-once' }
+          }
+        })
+      );
+      const submittedPrompt = messages.find(
+        (message) => message.method === 'session/prompt'
+      );
+      expect(JSON.stringify(submittedPrompt)).toContain('read-only attachment content');
+      expect(JSON.stringify(submittedPrompt)).not.toContain(attachment.path);
+      expect(JSON.stringify(submittedPrompt)).not.toContain(
+        JSON.stringify(attachment.path).slice(1, -1)
+      );
+
+      const cancellationSessionId = randomUUID();
+      const cancellationRunId = randomUUID();
+      const cancellationOwner = {
+        kind: 'PROMPT_REFINEMENT' as const,
+        requestId: randomUUID()
+      };
+      const cancellationPrompt =
+        'wait for cancellation without returning a terminal response';
+      const cancellationContext = await adapter.buildExecutionContext({
+        sessionId: cancellationSessionId,
+        primaryCwd: directory,
+        readRoots: [{ canonicalPath: directory, kind: 'EMPTY_MANAGED' }],
+        modelSettings: settings,
+        clientOperationId: `read-only-context:${cancellationSessionId}`,
+        attachments: []
+      });
+      const cancellationPrepared = await fixture.runtimeStore.prepareRuntimeTurn({
+        session: {
+          id: cancellationSessionId,
+          owner: cancellationOwner,
+          accessEpoch: createAgentSessionAccessEpoch({
+            owner: cancellationOwner,
+            sessionId: cancellationSessionId,
+            epoch: 1,
+            runtimeId,
+            model: 'default',
+            executionContext: cancellationContext
+          }),
+          executionContext: cancellationContext,
+          clientOperationId: `read-only-session:${cancellationSessionId}`,
+          runtimeId,
+          role: 'PRIMARY',
+          relationshipState: 'ROOT',
+          status: 'NOT_MATERIALIZED',
+          materialized: false,
+          requestedSettings: cancellationContext.modelSettings
+        },
+        run: {
+          id: cancellationRunId,
+          owner: cancellationOwner,
+          scope: {
+            kind: 'PROMPT_REFINEMENT',
+            requestId: cancellationOwner.requestId
+          },
+          sessionId: cancellationSessionId,
+          sessionAccessEpoch: 1,
+          purpose: 'PROMPT_REFINEMENT',
+          generationKey: `read-only:${cancellationRunId}`,
+          clientOperationId: `read-only-run:${cancellationRunId}`,
+          requestedSettings: cancellationContext.modelSettings,
+          promptArtifactId: `prompt-${cancellationRunId}`,
+          outputArtifactId: `output-${cancellationRunId}`,
+          diagnosticArtifactId: `diagnostic-${cancellationRunId}`
+        },
+        prompt: cancellationPrompt,
+        priority: 'TASK_FOREGROUND',
+        queueOperationId: `read-only-queue:${cancellationRunId}`
+      });
+      const cancellationStarting = await fixture.runtimeStore.updateRun(
+        cancellationPrepared.run.id,
+        cancellationPrepared.run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: new Date().toISOString()
+        },
+        `read-only-starting:${cancellationRunId}`
+      );
+      const currentSession = await fixture.runtimeStore.getSession(
+        cancellationSessionId
+      );
+      if (!currentSession) throw new Error('Expected the shared ACP session to exist.');
+      await adapter.startRuntimeTurn({
+        session: currentSession,
+        run: cancellationStarting,
+        executionContext: cancellationContext,
+        prompt: cancellationPrompt,
+        attachments: []
+      });
+      const acknowledged = await waitFor(async () => {
+        const run = await fixture.runtimeStore.getRun(cancellationRunId);
+        return run?.status === 'RUNNING' && run.providerTurnId ? run : undefined;
+      });
+      const activeSession = await fixture.runtimeStore.getSession(
+        cancellationSessionId
+      );
+      if (!activeSession) throw new Error('Expected the active shared ACP session to exist.');
+      const interrupting = await fixture.runtimeStore.updateRun(
+        acknowledged.id,
+        acknowledged.recordRevision,
+        {
+          status: 'INTERRUPTING',
+          interruptDelivery: 'SENDING',
+          stopRequestedAt: new Date().toISOString()
+        },
+        `read-only-interrupting:${cancellationRunId}`
+      );
+
+      const runtimeInternals = adapter as unknown as {
+        quarantineRuntimeGeneration(reason: string, drainInbound: boolean): Promise<void>;
+      };
+      const quarantineRuntimeGeneration =
+        runtimeInternals.quarantineRuntimeGeneration.bind(runtimeInternals);
+      let quarantineEntered = false;
+      let releaseQuarantine = () => {};
+      const quarantineGate = new Promise<void>((resolve) => {
+        releaseQuarantine = resolve;
+      });
+      const quarantineSpy = vi
+        .spyOn(runtimeInternals, 'quarantineRuntimeGeneration')
+        .mockImplementation(async (reason, drainInbound) => {
+          quarantineEntered = true;
+          await quarantineGate;
+          await quarantineRuntimeGeneration(reason, drainInbound);
+        });
+      try {
+        await adapter.interruptRuntimeTurn({
+          session: activeSession,
+          run: interrupting
+        });
+        await waitFor(async () => (quarantineEntered ? true : undefined));
+        expect(
+          events.some(
+            (event) =>
+              event.type === 'RECOVERY_REQUIRED' && event.runId === cancellationRunId
+          )
+        ).toBe(false);
+
+        releaseQuarantine();
+        const recovered = await waitFor(async () => {
+          const [run, snapshot] = await Promise.all([
+            fixture.runtimeStore.getRun(cancellationRunId),
+            fixture.runtimeStore.snapshot()
+          ]);
+          const processStopped = !snapshot.servers.some((server) =>
+            ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(
+              server.status
+            )
+          );
+          const recoveryEmitted = events.some(
+            (event) =>
+              event.type === 'RECOVERY_REQUIRED' && event.runId === cancellationRunId
+          );
+          return run?.status === 'RECOVERY_REQUIRED' &&
+            processStopped &&
+            recoveryEmitted
+            ? run
+            : undefined;
+        });
+        expect(recovered.interruptDelivery).toBe('AMBIGUOUS');
+      } finally {
+        releaseQuarantine();
+        quarantineSpy.mockRestore();
+      }
+    } finally {
+      unsubscribe();
+      await adapter.shutdown();
+    }
+  });
+
+  it('rejects Grok read-only roots that its process sandbox permits writing', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-read-only-roots-')
+    );
+    temporaryDirectories.push(directory);
+    const runtimeId = 'test-acp-process-read-only-roots';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      readOnlyTurnPolicy: {
+        kind: 'DEDICATED_PROCESS',
+        policyId: 'test-acp/process-read-only@v1',
+        detail: 'A separate test process owns read-only execution.',
+        runtimeVersion: process.version,
+        platform: process.platform,
+        launchArgv: ['--read-only-acp'],
+        startupFailurePattern: /sandbox unavailable/iu
+      }
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: process.cwd()
+    });
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider'
+    };
+    const build = (root: string) => adapter.buildExecutionContext({
+      sessionId: randomUUID(),
+      primaryCwd: root,
+      readRoots: [{ canonicalPath: root, kind: 'EMPTY_MANAGED' }],
+      modelSettings: settings,
+      clientOperationId: `read-only-root:${root}`,
+      attachments: []
+    });
+
+    try {
+      await expect(build(process.cwd())).resolves.toMatchObject({
+        repositoryAccess: 'READ_ONLY',
+        modelSettings: {
+          sandbox: 'READ_ONLY',
+          approvalPolicy: 'NEVER',
+          runtimeOptions: {
+            [runtimeId]: { processPolicyId: 'test-acp/process-read-only@v1' }
+          }
+        }
+      });
+      for (const root of [
+        '/tmp/task-monki-repository',
+        '/var/tmp/task-monki-repository',
+        path.join(os.tmpdir(), 'task-monki-repository'),
+        path.join(os.homedir(), '.grok', 'task-monki-repository'),
+        os.homedir()
+      ]) {
+        await expect(build(root)).rejects.toThrow(
+          'because its native sandbox permits writes there'
+        );
+      }
+      const linkedWorktree = await fs.mkdtemp(
+        path.join(process.cwd(), '.task-monki-acp-linked-worktree-')
+      );
+      temporaryDirectories.push(linkedWorktree);
+      await fs.writeFile(
+        path.join(linkedWorktree, '.git'),
+        `gitdir: ${path.join(os.tmpdir(), 'writable-git-control')}\n`
+      );
+      await expect(build(linkedWorktree)).rejects.toThrow(
+        'because its native sandbox permits writes there'
+      );
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('limits a qualified Preview exception to one app-owned evidence root', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-preview-root-')
+    );
+    temporaryDirectories.push(directory);
+    const runtimeId = 'test-acp-preview-root';
+    const unavailableReason =
+      'Repository read-only workflows are unavailable for this test provider.';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      readOnlyTurnPolicy: {
+        kind: 'SESSION_MODE',
+        modeId: 'plan',
+        policyId: 'test-acp/isolated-preview@v1',
+        detail: 'Plan mode is qualified only for disposable Preview evidence.'
+      },
+      readOnlyTurnUnavailableReason: unavailableReason,
+      previewRecipeGenerationQualification: {
+        runtimeVersion: process.version,
+        modelId: 'default',
+        detail: 'The exact test runtime and model passed isolated Preview generation.'
+      }
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const fixture = runtimeFixture(store);
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const owner = {
+      kind: 'PREVIEW_RECIPE_GENERATION' as const,
+      taskId: 'task-preview-root',
+      generationId: 'generation-preview-root'
+    };
+    const context = await adapter.buildExecutionContext({
+      sessionId,
+      primaryCwd: directory,
+      readRoots: [{ canonicalPath: directory, kind: 'WORKTREE', entityId: 'worktree-1' }],
+      modelSettings: {
+        runtimeId,
+        model: 'default',
+        modelProvider: 'test-provider'
+      },
+      clientOperationId: `preview-root-context:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await fixture.runtimeStore.prepareRuntimeTurn({
+      session: {
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId,
+          model: 'default',
+          executionContext: context
+        }),
+        executionContext: context,
+        clientOperationId: `preview-root-session:${sessionId}`,
+        runtimeId,
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: context.modelSettings
+      },
+      run: {
+        id: runId,
+        owner,
+        scope: owner,
+        sessionId,
+        sessionAccessEpoch: 1,
+        purpose: 'PREVIEW_RECIPE_GENERATION',
+        generationKey: owner.generationId,
+        clientOperationId: `preview-root-run:${runId}`,
+        requestedSettings: context.modelSettings,
+        promptArtifactId: `prompt-${runId}`,
+        outputArtifactId: `output-${runId}`,
+        diagnosticArtifactId: `diagnostic-${runId}`
+      },
+      prompt: 'Generate Preview YAML from this evidence.',
+      priority: 'TASK_FOREGROUND',
+      queueOperationId: `preview-root-queue:${runId}`
+    });
+    const starting = await fixture.runtimeStore.updateRun(
+      runId,
+      prepared.run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: new Date().toISOString()
+      },
+      `preview-root-starting:${runId}`
+    );
+
+    try {
+      await adapter.initialize();
+      await expect(
+        adapter.startRuntimeTurn({
+          session: prepared.session,
+          run: starting,
+          executionContext: context,
+          prompt: 'Generate Preview YAML from this evidence.',
+          attachments: []
+        })
+      ).rejects.toThrow('one app-owned isolated evidence directory');
+      const storedSession = await fixture.runtimeStore.getSession(sessionId);
+      expect(storedSession?.materialized).toBe(false);
+      expect(storedSession?.providerSessionId).toBeUndefined();
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('keeps dedicated read-only turns on a separate ACP process lane', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const shared = await fixture.startSharedTurn(
+        'Read the repository without changing it.',
+        'COMPLETED'
+      );
+      const runningServers = await fixture.runningServers();
+      expect(runningServers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            argv: [fixture.agentScript, 'writable-lane']
+          }),
+          expect.objectContaining({
+            argv: [fixture.agentScript, 'read-only-lane']
+          })
+        ])
+      );
+      const readOnlyServer = runningServers.find(
+        (server) => server.argv.at(-1) === 'read-only-lane'
+      );
+      expect(shared.run.serverInstanceId).toBe(readOnlyServer?.id);
+
+      await fixture.adapter.releaseSession({
+        localSessionId: shared.session.id,
+        providerSessionId: shared.session.providerSessionId
+      });
+      const afterRelease = await fixture.runtimeStore.snapshot();
+      expect(
+        afterRelease.servers.find((server) => server.id === readOnlyServer?.id)
+          ?.status
+      ).toBe('EXITED');
+      expect(
+        afterRelease.servers.find(
+          (server) => server.argv.at(-1) === 'writable-lane'
+        )?.status
+      ).toBe('READY');
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('does not allow Task settings to select the shared read-only process lane', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const readOnlySettings: Partial<AgentExecutionSettings> = {
+        sandbox: 'READ_ONLY',
+        approvalPolicy: 'NEVER',
+        runtimeOptions: {
+          'test-acp-dual-process': {
+            processPolicyId: 'test-acp/process-read-only@v1'
+          }
+        }
+      };
+      const prepared = await fixture.prepareNormalTurn(
+        'Do not start this Task turn.',
+        readOnlySettings
+      );
+      const before = await readProtocolMessagesFromLog(fixture.messageLog);
+      await expect(
+        fixture.adapter.createSession({
+          runtimeId: 'test-acp-dual-process',
+          localSessionId: prepared.session.id,
+          taskId: prepared.task.id,
+          iterationId: prepared.iteration.id,
+          worktreeId: prepared.worktree.id,
+          worktreePath: prepared.worktree.worktreePath,
+          settings: prepared.settings
+        })
+      ).rejects.toThrow(
+        'dedicated read-only execution is available only through shared read-only workflows'
+      );
+      await expect(
+        fixture.adapter.startTurn({
+          localRunId: prepared.queued.id,
+          session: { localSessionId: prepared.session.id },
+          mode: 'IMPLEMENTATION',
+          prompt: prepared.task.prompt,
+          authoritativeGoal: prepared.task.prompt,
+          settings: prepared.settings,
+          attachments: []
+        })
+      ).rejects.toThrow(
+        'dedicated read-only execution is available only through shared read-only workflows'
+      );
+      expect(await readProtocolMessagesFromLog(fixture.messageLog)).toEqual(before);
+      expect(await fixture.runningServers()).toEqual([
+        expect.objectContaining({ argv: [fixture.agentScript, 'writable-lane'] })
+      ]);
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('routes shared cancellation only to the read-only process lane', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation on the read-only lane',
+        'RUNNING'
+      );
+      await fixture.cancelSharedTurn(shared);
+      const messages = await readProtocolMessagesFromLog(fixture.messageLog);
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          method: 'session/cancel',
+          params: { sessionId: shared.session.providerSessionId }
+        })
+      );
+      const server = (await fixture.runtimeStore.snapshot()).servers.find(
+        (candidate) => candidate.id === shared.run.serverInstanceId
+      );
+      expect(server?.argv).toEqual([fixture.agentScript, 'read-only-lane']);
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('isolates read-only process loss from an active normal Task', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const normal = await fixture.startNormalTurn(
+        'wait for cancellation on the writable lane'
+      );
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation before read-only process loss',
+        'RUNNING'
+      );
+      await fixture.loseLane('READ_ONLY');
+
+      expect(await fixture.runtimeStore.getRun(shared.run.id)).toMatchObject({
+        status: 'RECOVERY_REQUIRED',
+        recoveryState: 'REQUIRES_USER_ACTION'
+      });
+      expect(await getTestRun(fixture.store, normal.run.id)).toMatchObject({
+        status: 'RUNNING'
+      });
+      expect(
+        await fixture.runtime.getAgentSession(normal.session.id)
+      ).toMatchObject({ status: 'ACTIVE' });
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('isolates normal Task process loss from an active shared turn', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const normal = await fixture.startNormalTurn(
+        'wait for cancellation before writable process loss'
+      );
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation on the read-only lane',
+        'RUNNING'
+      );
+      await fixture.loseLane('DEFAULT');
+
+      expect(await getTestRun(fixture.store, normal.run.id)).toMatchObject({
+        status: 'RECOVERY_REQUIRED',
+        recoveryState: 'REQUIRES_USER_ACTION'
+      });
+      expect(await fixture.runtimeStore.getRun(shared.run.id)).toMatchObject({
+        status: 'RUNNING'
+      });
+    } finally {
+      await fixture.adapter.shutdown();
+    }
+  });
+
+  it('stops both ACP process lanes during adapter shutdown', async () => {
+    const fixture = await createDualProcessFixture();
+    let stopped = false;
+    try {
+      const normal = await fixture.startNormalTurn(
+        'wait for cancellation until application shutdown'
+      );
+      const shared = await fixture.startSharedTurn(
+        'wait for cancellation until application shutdown',
+        'RUNNING'
+      );
+      await fixture.adapter.shutdown();
+      stopped = true;
+
+      const afterShutdown = await fixture.runtimeStore.snapshot();
+      for (const serverId of [
+        normal.run.serverInstanceId,
+        shared.run.serverInstanceId
+      ]) {
+        expect(
+          afterShutdown.servers.find((server) => server.id === serverId)?.status
+        ).toBe('EXITED');
+      }
+    } finally {
+      if (!stopped) await fixture.adapter.shutdown();
+    }
+  });
+  it('delivers a verified text attachment on a normal turn and reuses the ACP session', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-attachment-turn-')
+    );
+    temporaryDirectories.push(directory);
+    const messageLog = path.join(directory, 'attachment-messages.jsonl');
+    const agentScript = path.join(directory, 'attachment-agent.cjs');
+    await fs.writeFile(agentScript, attachmentDeliveryAgentSource(messageLog), {
+      mode: 0o600
+    });
+    const runtimeId = 'test-acp-attachment-turn';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      attachmentTextTransport: 'text-block',
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 1_000,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
+    };
+    const task = await store.createTask({
+      title: 'ACP attachment turn',
+      prompt: 'Use the selected reference.',
+      repositoryId: (await addTestRepository(store, directory)).id,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-attachment-turn',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const attachment = await createManagedTextAttachment({
+      directory,
+      attachmentId: 'normal-reference',
+      displayName: 'normal-reference.txt',
+      text: 'normal turn attachment content'
+    });
+    const firstRun = await createTestRun(store, {
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: settings,
+      attachmentSelection: toAgentAttachmentSelection([attachment])
+    });
+
+    try {
+      await adapter.initialize();
+      await adapter.startTurn({
+        localRunId: firstRun.id,
+        session: { localSessionId: session.id },
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: [attachment]
+      });
+      const completedFirst = await waitFor(async () => {
+        const run = await getTestRun(store, firstRun.id);
+        return run?.status === 'COMPLETED' ? run : undefined;
+      });
+      expect(completedFirst.attachmentSubmissions).toEqual([
+        expect.objectContaining({
+          attachmentId: attachment.attachmentId,
+          transport: 'text-block',
+          correlation: {
+            kind: 'client-request',
+            id: completedFirst.providerTurnId?.split(':').at(-1)
+          }
+        })
+      ]);
+      expect(JSON.stringify(completedFirst.attachmentSubmissions)).not.toContain(
+        attachment.path
+      );
+
+      const activeSession = await getTestAgentSession(store, session.id);
+      if (!activeSession) throw new Error('Expected the ACP session to remain available.');
+      const secondRun = await createTestRun(store, {
+        task,
+        session: activeSession,
+        mode: 'FOLLOW_UP',
+        prompt: 'Continue without a reference.',
+        requestedSettings: settings,
+        attachmentSelection: []
+      });
+      await adapter.startTurn({
+        localRunId: secondRun.id,
+        session: { localSessionId: session.id },
+        mode: 'FOLLOW_UP',
+        prompt: 'Continue without a reference.',
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: []
+      });
+      await waitFor(async () => {
+        const run = await getTestRun(store, secondRun.id);
+        return run?.status === 'COMPLETED' ? run : undefined;
+      });
+
+      const messages = await readProtocolMessagesFromLog(messageLog);
+      const sessionCreates = messages.filter((message) => message.method === 'session/new');
+      expect(sessionCreates).toHaveLength(1);
+      expect(sessionCreates[0]?.params).toMatchObject({ mcpServers: [] });
+      expect(sessionCreates[0]?.params).not.toHaveProperty('additionalDirectories');
+      const prompts = messages.filter((message) => message.method === 'session/prompt');
+      expect(prompts).toHaveLength(2);
+      expect(JSON.stringify(prompts[0])).toContain('normal turn attachment content');
+      expect(JSON.stringify(prompts[0])).not.toContain(attachment.path);
+      expect(JSON.stringify(prompts[0])).not.toContain(
+        JSON.stringify(attachment.path).slice(1, -1)
+      );
+      expect(JSON.stringify(prompts[1])).not.toContain('normal turn attachment content');
+
+      const journals = await Promise.all(
+        (await store.snapshot()).agentServers.map((server) =>
+          fs.readFile(server.protocolJournalPath, 'utf8')
+        )
+      );
+      expect(journals.join('\n')).not.toContain('normal turn attachment content');
+      expect(journals.join('\n')).not.toContain(attachment.path);
+      expect(journals.join('\n')).not.toContain(
+        JSON.stringify(attachment.path).slice(1, -1)
+      );
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it.each([
+    {
+      resumeMethod: 'resume' as const,
+      advertiseAdditionalDirectories: true,
+      requireAdditionalDirectories: false
+    },
+    {
+      resumeMethod: 'load' as const,
+      advertiseAdditionalDirectories: true,
+      requireAdditionalDirectories: false
+    },
+    {
+      resumeMethod: 'resume' as const,
+      advertiseAdditionalDirectories: false,
+      requireAdditionalDirectories: false
+    },
+    {
+      resumeMethod: 'resume' as const,
+      advertiseAdditionalDirectories: false,
+      requireAdditionalDirectories: true
+    }
+  ])(
+    'binds Design across session/$resumeMethod with additional directories advertised=$advertiseAdditionalDirectories required=$requireAdditionalDirectories',
+    async ({
+      resumeMethod,
+      advertiseAdditionalDirectories,
+      requireAdditionalDirectories
+    }) => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-design-mcp-')
+    );
+    temporaryDirectories.push(directory);
+    const messageLog = path.join(directory, 'design-messages.jsonl');
+    const agentScript = path.join(directory, 'design-agent.cjs');
+    const designSkillRoot = path.resolve('resources/design-skills');
+    await fs.writeFile(
+      agentScript,
+      attachmentDeliveryAgentSource(
+        messageLog,
+        resumeMethod,
+        true,
+        advertiseAdditionalDirectories
+      ),
+      {
+      mode: 0o600
+      }
+    );
+    const runtimeId = 'cursor-agent-acp';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      approvalPolicies: ['on-request', 'never'],
+      designSkillAdditionalDirectoryRequired: requireAdditionalDirectories
+        ? true
+        : undefined,
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const createSessionGrant = vi.fn(async () => ({
+      id: 'design-grant',
+      launch: {
+        executablePath: '/packaged/electron',
+        argv: ['/packaged/design-tool-mcp-server.mjs'],
+        environment: {
+          ELECTRON_RUN_AS_NODE: '1',
+          TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'design-session-secret'
+        }
+      }
+    }));
+    const activateGrant = vi.fn(async () => undefined);
+    const revokeGrant = vi.fn(async () => undefined);
+    const releaseSessionGrant = vi.fn(async () => undefined);
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 1_000,
+      designSkillRoot,
+      designClientToolBridge: {
+        createSessionGrant,
+        activateGrant,
+        revokeGrant,
+        releaseSessionGrant
+      },
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const settings: AgentExecutionSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
+    };
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create a small page.',
+        creationToken: 'acp-design-mcp-creation',
+        runtimeId,
+        model: settings.model
+      },
+      agentSettings: settings,
+      repository: {
+        id: randomUUID(),
+        name: 'ACP Design MCP',
+        path: directory,
+        headSha: 'a'.repeat(40),
+        branch: 'main',
+        checkedAt: new Date().toISOString()
+      }
+    });
+    const task = created.task;
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-design-mcp',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const run = await createTestRun(store, {
+      task,
+      session,
+      mode: 'DESIGN',
+      prompt: task.prompt,
+      requestedSettings: settings,
+      generationKey: created.turn.id,
+      clientToolGrants: ['inspect_design']
+    });
+
+    try {
+      await adapter.initialize();
+      await adapter.discoverModels();
+      const start: StartAgentTurn = {
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: task.prompt,
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: []
+      };
+      if (requireAdditionalDirectories && !advertiseAdditionalDirectories) {
+        expect(
+          (await adapter.capabilities()).extensions[
+            'task-monki.design-skill-access'
+          ]
+        ).toMatchObject({
+          maturity: 'unsupported',
+          detail: expect.stringContaining(
+            'additional-directories capability required'
+          )
+        });
+        await expect(adapter.startTurn(start)).rejects.toThrow(
+          'did not advertise the additional-directories capability required by its qualified Design skill path'
+        );
+        expect(createSessionGrant).not.toHaveBeenCalled();
+        return;
+      }
+      await adapter.startTurn(start);
+      const completed = await waitFor(async () => {
+        const current = await getTestRun(store, run.id);
+        return current?.status === 'COMPLETED' ? current : undefined;
+      });
+      expect(
+        (await store.snapshot()).agentItems.find(
+          (item) => item.runId === run.id && item.providerItemId === 'inspect-design-1'
+        )
+      ).toMatchObject({
+        type: 'MCP_TOOL_CALL',
+        status: 'COMPLETED',
+        payload: {
+          title: 'task-monki-design-tools: inspect_design',
+          rawInput: {
+            providerIdentifier: 'task-monki-design-tools',
+            toolName: 'inspect_design',
+            args: { operation: 'screenshot' }
+          }
+        }
+      });
+      const messages = await readProtocolMessagesFromLog(messageLog);
+      const sessionNew = messages.find((message) => message.method === 'session/new');
+      expect(sessionNew?.params).toMatchObject({
+        mcpServers: [{
+          name: 'task-monki-design-tools',
+          command: '/packaged/electron',
+          args: ['/packaged/design-tool-mcp-server.mjs'],
+          env: expect.arrayContaining([
+            { name: 'ELECTRON_RUN_AS_NODE', value: '1' },
+            {
+              name: 'TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL',
+              value: 'design-session-secret'
+            }
+          ])
+        }]
+      });
+      if (advertiseAdditionalDirectories) {
+        expect(sessionNew?.params).toMatchObject({
+          additionalDirectories: [designSkillRoot]
+        });
+      } else {
+        expect(sessionNew?.params).not.toHaveProperty('additionalDirectories');
+      }
+      expect(createSessionGrant).toHaveBeenCalledWith({
+        runtimeId,
+        sessionId: session.id,
+        worktreeId: worktree.id,
+        providerGeneration: expect.any(String)
+      });
+      expect(activateGrant).toHaveBeenCalledWith({
+        grantId: 'design-grant',
+        authority: {
+          runtimeId,
+          sessionId: session.id,
+          runId: run.id,
+          worktreeId: worktree.id,
+          providerGeneration: completed.serverInstanceId
+        }
+      });
+      const firstPrompt = messages.find(
+        (message) => message.method === 'session/prompt'
+      );
+      expect(JSON.stringify(firstPrompt?.params)).toContain(
+        'Task Monki Design agent'
+      );
+      expect(JSON.stringify(firstPrompt?.params)).toContain(
+        'Task Monki Design skills:'
+      );
+      expect(revokeGrant).toHaveBeenCalledWith('design-grant');
+
+      const server = (await store.snapshot()).agentServers.find(
+        (candidate) => candidate.id === completed.serverInstanceId
+      );
+      expect(server).toBeDefined();
+      expect(await fs.readFile(server!.protocolJournalPath, 'utf8')).not.toContain(
+        'design-session-secret'
+      );
+
+      const terminalReadFailureRun = {
+        ...completed,
+        id: randomUUID(),
+        status: 'RUNNING' as const
+      };
+      const terminalRaw = await appendTestProtocolMessage(
+        store,
+        completed.serverInstanceId!,
+        'INBOUND',
+        JSON.stringify({ id: 'terminal-read-failure', result: {} })
+      );
+      const internals = adapter as unknown as {
+        activePromptRunIds: Set<string>;
+        finalizePrompt(
+          deliveredRun: RunRecord,
+          response: {
+            result: unknown;
+            raw: Awaited<ReturnType<typeof appendTestProtocolMessage>>;
+          }
+        ): Promise<void>;
+      };
+      internals.activePromptRunIds.add(terminalReadFailureRun.id);
+      const runtime = runtimeFixture(store).runtime;
+      const getRun = vi
+        .spyOn(runtime, 'getRun')
+        .mockRejectedValueOnce(new Error('terminal store read failed'));
+      const revokeCalls = revokeGrant.mock.calls.length;
+      await expect(
+        internals.finalizePrompt(terminalReadFailureRun, {
+          result: {},
+          raw: terminalRaw
+        })
+      ).rejects.toThrow('terminal store read failed');
+      expect(revokeGrant).toHaveBeenCalledTimes(revokeCalls + 1);
+      getRun.mockRestore();
+
+      await adapter.shutdown();
+      const nextTurn = await store.createInlineDesignTurn({
+        designId: task.id,
+        clientMessageId: 'acp-design-mcp-follow-up',
+        message: 'Refine the page.',
+        referenceIds: []
+      });
+      const attachedSession = await getTestAgentSession(store, session.id);
+      if (!attachedSession) throw new Error('Expected the Design session to remain stored.');
+      const nextRun = await createTestRun(store, {
+        task,
+        session: attachedSession,
+        mode: 'DESIGN',
+        prompt: 'Refine the page.',
+        requestedSettings: settings,
+        generationKey: nextTurn.id,
+        clientToolGrants: ['inspect_design']
+      });
+      await adapter.initialize();
+      await adapter.startTurn({
+        localRunId: nextRun.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: 'Refine the page.',
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: []
+      });
+      await waitFor(async () => {
+        const current = await getTestRun(store, nextRun.id);
+        return current?.status === 'COMPLETED' ? current : undefined;
+      });
+      const resumedMessages = await readProtocolMessagesFromLog(messageLog);
+      const resumedParams = resumedMessages.find(
+        (message) => message.method === `session/${resumeMethod}`
+      )?.params;
+      expect(resumedParams).toMatchObject({
+        mcpServers: [expect.objectContaining({ name: 'task-monki-design-tools' })]
+      });
+      if (advertiseAdditionalDirectories) {
+        expect(resumedParams).toMatchObject({
+          additionalDirectories: [designSkillRoot]
+        });
+      } else {
+        expect(resumedParams).not.toHaveProperty('additionalDirectories');
+      }
+
+      await adapter.releaseSession({ localSessionId: session.id });
+      expect(releaseSessionGrant).toHaveBeenCalledTimes(2);
+    } finally {
+      await adapter.shutdown();
+    }
+    },
+    15_000
+  );
+
   it.each([
     {
       catalog: 'missing',
@@ -98,7 +2078,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         argv: [agentScript]
       };
       const store = createTestStore(path.join(directory, 'store'));
-      const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      const adapter = createTestAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         ...(credential
           ? { environment: { ...process.env, TEST_ACP_API_KEY: credential } }
@@ -138,14 +2118,14 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         worktreePath: directory,
         baseSha: 'base'
       });
-      const session = await store.createAgentSession({
+      const session = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
         runtimeId,
         requestedSettings: settings
       });
-      const run = await store.createRun({
+      const run = await createTestRun(store, {
         task,
         session,
         mode: 'IMPLEMENTATION',
@@ -199,7 +2179,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         await expect(fs.readFile(mutationMarker, 'utf8')).rejects.toMatchObject({
           code: 'ENOENT'
         });
-        expect((await store.getAgentSession(session.id))?.providerSessionId).toBeUndefined();
+        expect((await getTestAgentSession(store, session.id))?.providerSessionId).toBeUndefined();
       } finally {
         await adapter.shutdown();
       }
@@ -225,7 +2205,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
       const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -258,10 +2238,19 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     );
     temporaryDirectories.push(directory);
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      designQualifications: [
+        {
+          runtimeVersion: process.version,
+          modelId: 'provider-specific-model'
+        }
+      ]
+    };
+    const adapter = createTestAdapter(
       store,
       new AppEventBus(),
-      TEST_ACP_PROFILE,
+      profile,
       {
         cwd: directory,
         runtimeResolver: async () => ({
@@ -279,7 +2268,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       }
     );
     const settings = {
-      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      runtimeId: profile.descriptor.id,
       model: 'provider-specific-model',
       modelProvider: 'test-provider',
       sandbox: 'DANGER_FULL_ACCESS' as const,
@@ -290,6 +2279,15 @@ describe('AcpRuntimeAdapter end-to-end', () => {
 
     try {
       await adapter.initialize();
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default', isDefault: true }),
+        expect.objectContaining({
+          model: 'provider-specific-model',
+          modelProvider: 'test-provider',
+          designSupport: expect.objectContaining({ maturity: 'stable' }),
+          native: expect.objectContaining({ source: 'profile-qualified-model' })
+        })
+      ]);
       await expect(
         adapter.resolveExecution({ settings, attachments: [] })
       ).resolves.toMatchObject({
@@ -300,7 +2298,8 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         model: {
           model: 'provider-specific-model',
           modelProvider: 'test-provider',
-          native: { source: 'explicit-runtime-setting' }
+          designSupport: { maturity: 'stable' },
+          native: { source: 'profile-qualified-model' }
         }
       });
       expect((await store.snapshot()).agentServers).toEqual([]);
@@ -340,7 +2339,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -439,7 +2438,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         worktreePath,
         baseSha: 'base'
       });
-      const session = await store.createAgentSession({
+      const session = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
@@ -524,7 +2523,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -563,7 +2562,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
@@ -646,11 +2645,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       defaultModelProvider: 'xai',
       defaultModel: 'grok-build',
       sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
+      designQualifications: [
+        {
+          runtimeVersion: process.version,
+          modelId: 'grok-4.5',
+          defaultReasoningEffort: 'low'
+        }
+      ],
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       environment: { ...process.env, TEST_ACP_API_KEY: secret },
       requestTimeoutMs: 1_000,
@@ -678,6 +2684,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           description: 'Frontier [REDACTED]',
           supportedReasoningEfforts: ['high', 'medium', 'low'],
           defaultReasoningEffort: 'high',
+          designSupport: {
+            maturity: 'stable',
+            defaultReasoningEffort: 'low',
+            detail: expect.stringContaining('passed the packaged Design')
+          },
           isDefault: true,
           native: expect.objectContaining({
             advertisedReasoningEfforts: ['high', 'medium', 'low'],
@@ -695,7 +2706,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const client = internals.boundClient!;
       const server = (await store.snapshot()).agentServers[0]!;
       const emitModelUpdate = async (params: unknown) => {
-        const raw = await store.appendProtocolMessage(
+        const raw = await appendTestProtocolMessage(store,
           server.id,
           'INBOUND',
           JSON.stringify({
@@ -744,7 +2755,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
       runtimeResolver: async () => ({
@@ -782,7 +2793,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const localSession = await store.createAgentSession({
+    const localSession = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
@@ -873,7 +2884,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       argv: [agentScript]
     };
     const store = createTestStore(path.join(directory, 'store'));
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
       runtimeResolver: async () => ({
@@ -911,21 +2922,22 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId,
       requestedSettings: settings
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
       prompt: task.prompt,
       requestedSettings: settings
     });
-    const lookupSession = store.getAgentSessionByProviderId.bind(store);
+    const runtime = runtimeFixture(store).runtime;
+    const lookupSession = runtime.getAgentSessionByProviderId.bind(runtime);
     let releaseMaterialization!: () => void;
     const materializationGate = new Promise<void>((resolve) => {
       releaseMaterialization = resolve;
@@ -936,7 +2948,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     });
     let gatePending = true;
     const lookupSpy = vi
-      .spyOn(store, 'getAgentSessionByProviderId')
+      .spyOn(runtime, 'getAgentSessionByProviderId')
       .mockImplementation(async (requestedRuntimeId, providerSessionId) => {
         if (providerSessionId === 'replacement-fence-session' && gatePending) {
           gatePending = false;
@@ -972,9 +2984,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const lossReconciliation = new Promise<void>((resolve) => {
         lossReconciliationEntered = resolve;
       });
-      const readSnapshot = store.snapshot.bind(store);
+      const readSnapshot = runtime.snapshot.bind(runtime);
       let lossGatePending = true;
-      snapshotSpy = vi.spyOn(store, 'snapshot').mockImplementation(async () => {
+      snapshotSpy = vi.spyOn(runtime, 'snapshot').mockImplementation(async () => {
         if (lossGatePending && internals.boundClient === undefined) {
           lossGatePending = false;
           lossReconciliationEntered();
@@ -1058,7 +3070,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     events.on((event) => observedEvents.push(event));
     let resolutionCalls = 0;
     const resolvedExecutableOverrides: Array<string | undefined> = [];
-    const adapter = new AcpRuntimeAdapter(store, events, profile, {
+    const adapter = createTestAdapter(store, events, profile, {
       cwd: directory,
       environment: { ...process.env, GEMINI_API_KEY: opaqueProviderSecret },
       // Keep control calls bounded without making child startup sensitive to
@@ -1105,7 +3117,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const localSession = await store.createAgentSession({
+    const localSession = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
@@ -1116,8 +3128,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     try {
       await adapter.configureRuntime({ executable: process.execPath, restart: false });
       await expect(
-        adapter.resolveExecution({ settings, attachments: [{ kind: 'text' }] })
-      ).rejects.toThrow('managed attachments are unavailable');
+        adapter.resolveExecution({
+          settings,
+          attachments: [
+            {
+              kind: 'text',
+              mediaType: 'text/plain',
+              byteCount: 1,
+              sha256: '0'.repeat(64)
+            }
+          ]
+        })
+      ).rejects.toThrow('has no qualified text attachment transport');
       expect(resolutionCalls).toBe(0);
       await adapter.initialize();
       expect(await adapter.preflight()).toMatchObject({
@@ -1204,12 +3226,22 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       ).toEqual([]);
       expect(resolutionCalls).toBe(1);
       expect(resolvedExecutableOverrides).toEqual([process.execPath]);
-      const attachmentRun = await store.createRun({
+      const attachmentRun = await createTestRun(store, {
         task,
         session: localSession,
         mode: 'IMPLEMENTATION',
         prompt: 'Must reject before provider session creation.',
-        requestedSettings: settings
+        requestedSettings: settings,
+        attachmentSelection: [
+          {
+            attachmentId: 'attachment-unsupported',
+            ordinal: 0,
+            kind: 'text',
+            mediaType: 'text/plain',
+            byteCount: 1,
+            sha256: '0'.repeat(64)
+          }
+        ]
       });
       await expect(
         adapter.startTurn({
@@ -1233,22 +3265,27 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             }
           ]
         })
-      ).rejects.toThrow('managed attachments are unavailable');
-      expect((await store.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
+      ).rejects.toThrow('has no qualified text attachment transport');
+      expect((await getTestAgentSession(store, localSession.id))?.providerSessionId).toBeUndefined();
       expect((await store.snapshot()).agentServers).toHaveLength(1);
-      await store.updateRun(attachmentRun.id, {
+      await updateTestRun(store, attachmentRun.id, {
         status: 'FAILED',
         endedAt: new Date().toISOString()
       });
-      const originalSessionUpdate = store.updateAgentSession.bind(store);
+      const sessionRuntime = runtimeFixture(store).runtime;
+      const originalSessionUpdate = sessionRuntime.updateAgentSession.bind(sessionRuntime);
       let failProviderOwnershipPersistence = true;
-      store.updateAgentSession = (async (id, update) => {
+      const sessionUpdateSpy = vi.spyOn(sessionRuntime, 'updateAgentSession').mockImplementation(async (
+        id,
+        update,
+        operationId
+      ) => {
         if (failProviderOwnershipPersistence && update.providerSessionId) {
           failProviderOwnershipPersistence = false;
           throw new Error('injected provider ownership persistence failure');
         }
-        return originalSessionUpdate(id, update);
-      }) as typeof store.updateAgentSession;
+        return originalSessionUpdate(id, update, operationId);
+      });
       try {
         await expect(
           adapter.createSession({
@@ -1262,11 +3299,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           })
         ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
       } finally {
-        store.updateAgentSession = originalSessionUpdate;
+        sessionUpdateSpy.mockRestore();
       }
       const quarantinedOwnershipServer = (await store.snapshot()).agentServers[0];
       expect(quarantinedOwnershipServer).toMatchObject({ status: 'EXITED' });
-      expect((await store.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
+      expect((await getTestAgentSession(store, localSession.id))?.providerSessionId).toBeUndefined();
       const session = await adapter.createSession({
         runtimeId: 'test-acp',
         localSessionId: localSession.id,
@@ -1294,7 +3331,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           }
         }
       });
-      const unsupportedReasoningRun = await store.createRun({
+      const unsupportedReasoningRun = await createTestRun(store, {
         task,
         session,
         mode: 'FOLLOW_UP',
@@ -1315,11 +3352,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           settings: { ...settings, reasoningEffort: 'low' },
           attachments: []
         })
-      ).rejects.toThrow('did not advertise reasoning effort low');
+      ).rejects.toThrow('does not advertise reasoning effort low');
       expect(
         await protocolMethodCount(store, 'session/prompt')
       ).toBe(promptCountBeforeReasoningRejection);
-      await store.updateRun(unsupportedReasoningRun.id, {
+      await updateTestRun(store, unsupportedReasoningRun.id, {
         status: 'FAILED',
         endedAt: new Date().toISOString()
       });
@@ -1373,14 +3410,6 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const sessionNativeState = JSON.stringify(await adapter.readNativeState());
       expect(sessionNativeState).toContain('grok-composer-2.5-fast');
       expect(sessionNativeState).toContain('grok-build');
-      await expect(adapter.capabilities()).resolves.toMatchObject({
-        extensions: {
-          nativeSessionModels: {
-            maturity: 'experimental',
-            detail: expect.stringContaining('grok-build-acp/session-models@v1')
-          }
-        }
-      });
       const [initialControls] = await adapter.listSessionControls();
       expect(initialControls).toMatchObject({
         localSessionId: session.id,
@@ -1415,7 +3444,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(modelUpdate.native).toMatchObject({
         models: { currentModelId: 'grok-build' }
       });
-      expect(await store.getAgentSession(session.id)).toMatchObject({
+      expect(await getTestAgentSession(store, session.id)).toMatchObject({
         observedSettings: {
           model: 'grok-build',
           runtimeOptions: { 'test-acp': { modeId: 'code', configValues: { telemetry: true } } }
@@ -1460,9 +3489,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           }
         }
       };
-      const unsafePermissionRun = await store.createRun({
+      const unsafePermissionRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'unsafe permission identifiers',
         requestedSettings: turnSettings
@@ -1476,7 +3505,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings: turnSettings
       });
       await waitFor(async () =>
-        (await store.getRun(unsafePermissionRun.id))?.status === 'COMPLETED'
+        (await getTestRun(store, unsafePermissionRun.id))?.status === 'COMPLETED'
           ? true
           : undefined
       );
@@ -1498,9 +3527,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           })
         ]
       });
-      const delayedRun = await store.createRun({
+      const delayedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'delayed terminal',
         requestedSettings: settings
@@ -1514,18 +3543,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       await waitFor(async () => {
-        const current = await store.getRun(delayedRun.id);
+        const current = await getTestRun(store, delayedRun.id);
         return current?.status === 'COMPLETED' ? current : undefined;
       });
       await adapter.releaseSession({
         localSessionId: session.id,
         providerSessionId: session.providerSessionId
       });
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
       expect(await adapter.readNativeState()).toMatchObject({ sessions: [] });
-      const run = await store.createRun({
+      const run = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'IMPLEMENTATION',
         prompt: task.prompt,
         requestedSettings: settings
@@ -1573,8 +3602,12 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         executable: '/deferred/custom-acp',
         restart: true
       });
-      expect((await store.getAgentServer(originalServerId))?.status).toBe('RUNNING');
-      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      expect((await getTestAgentServer(store, originalServerId))?.status).toBe('RUNNING');
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
       await interactionService.respond({
         taskId: task.id,
         runId: run.id,
@@ -1587,7 +3620,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       });
 
       const completed = await waitFor(async () => {
-        const current = await store.getRun(run.id);
+        const current = await getTestRun(store, run.id);
         return current?.status === 'COMPLETED' ? current : undefined;
       });
       expect(completed.finalMessage).toBe('Implemented safely.');
@@ -1652,7 +3685,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         }
       });
       await waitFor(async () =>
-        (await store.getAgentServer(originalServerId))?.status === 'EXITED'
+        (await getTestAgentServer(store, originalServerId))?.status === 'EXITED'
           ? true
           : undefined
       );
@@ -1662,9 +3695,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       });
       expect(resolvedExecutableOverrides.at(-1)).toBe('/deferred/custom-acp');
 
-      const highVolumeRun = await store.createRun({
+      const highVolumeRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'high volume stream',
         requestedSettings: settings
@@ -1673,14 +3706,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         { length: 512 },
         (_, index) => String(index).padStart(4, '0')
       ).join('');
-      const originalUpsertAgentItem = store.upsertAgentItem.bind(store);
+      const itemRuntime = runtimeFixture(store).runtime;
+      const originalUpsertAgentItem = itemRuntime.upsertAgentItem.bind(itemRuntime);
       let highVolumeItemWrites = 0;
-      store.upsertAgentItem = (async (input) => {
+      const upsertSpy = vi.spyOn(itemRuntime, 'upsertAgentItem').mockImplementation(async (
+        input,
+        operationId
+      ) => {
         if (input.runId === highVolumeRun.id && input.providerItemId === 'message-high-volume') {
           highVolumeItemWrites += 1;
         }
-        return originalUpsertAgentItem(input);
-      }) as typeof store.upsertAgentItem;
+        return originalUpsertAgentItem(input, operationId);
+      });
       try {
         await adapter.startTurn({
           localRunId: highVolumeRun.id,
@@ -1691,16 +3728,16 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           settings
         });
         await waitFor(async () => {
-          const current = await store.getRun(highVolumeRun.id);
+          const current = await getTestRun(store, highVolumeRun.id);
           return current?.status === 'COMPLETED' ? current : undefined;
         }, 30_000);
       } finally {
-        store.upsertAgentItem = originalUpsertAgentItem;
+        upsertSpy.mockRestore();
       }
       expect(highVolumeItemWrites).toBe(1);
       expect(
         itemPayloadText(
-          await store.getAgentItemByProviderId(highVolumeRun.id, 'message-high-volume')
+          await getTestAgentItemByProviderId(store, highVolumeRun.id, 'message-high-volume')
         )
       ).toBe(expectedHighVolumeOutput);
       const highVolumeSnapshot = await store.snapshot();
@@ -1728,9 +3765,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           event.payload.text !== undefined &&
           highVolumeRun.id === event.runId
       );
-      // The 75 ms flush boundary is scheduler-dependent under parallel I/O,
-      // but it must still collapse at least eight wire deltas per UI event on
-      // average for this burst.
+      // The timed flush is scheduler-dependent under parallel I/O, but it must
+      // still collapse at least eight wire deltas per UI event on average for
+      // this burst.
       expect(highVolumeOutputEvents.length).toBeLessThanOrEqual(64);
       expect(
         highVolumeOutputEvents
@@ -1766,9 +3803,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         )
       ).toHaveLength(512);
 
-      const persistenceRun = await store.createRun({
+      const persistenceRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'persistence failure after permission delivery',
         requestedSettings: settings
@@ -1787,15 +3824,23 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             interaction.runId === persistenceRun.id && interaction.status === 'PENDING'
         )
       );
-      const originalTransition = store.transitionInteractionRequest.bind(store);
+      const interactionRuntime = runtimeFixture(store).runtime;
+      const originalTransition = interactionRuntime.transitionInteractionRequest.bind(
+        interactionRuntime
+      );
       let injected = false;
-      store.transitionInteractionRequest = (async (id, expected, update) => {
+      const transitionSpy = vi.spyOn(interactionRuntime, 'transitionInteractionRequest').mockImplementation(async (
+        id,
+        expected,
+        update,
+        operationId
+      ) => {
         if (!injected && expected === 'RESPONDING' && update.status === 'RESOLVED') {
           injected = true;
           throw new Error('injected completion persistence failure');
         }
-        return originalTransition(id, expected, update);
-      }) as typeof store.transitionInteractionRequest;
+        return originalTransition(id, expected, update, operationId);
+      });
       try {
         await expect(
           interactionService.respond({
@@ -1810,23 +3855,23 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           })
         ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
       } finally {
-        store.transitionInteractionRequest = originalTransition;
+        transitionSpy.mockRestore();
       }
-      const staleInteraction = await store.getInteractionRequest(persistenceInteraction.id);
+      const staleInteraction = await getTestInteractionRequest(store, persistenceInteraction.id);
       expect(staleInteraction?.status).toBe('STALE');
       await waitFor(async () => {
-        const current = await store.getRun(persistenceRun.id);
+        const current = await getTestRun(store, persistenceRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
       }, 45_000);
-      await store.updateRun(persistenceRun.id, {
+      await updateTestRun(store, persistenceRun.id, {
         status: 'INTERRUPTED',
         endedAt: new Date().toISOString()
       });
-      await store.updateAgentSession(session.id, { status: 'IDLE' });
+      await updateTestAgentSession(store, session.id, { status: 'IDLE' });
 
-      const failedRun = await store.createRun({
+      const failedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'definitive failure',
         requestedSettings: settings
@@ -1840,7 +3885,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       await waitFor(async () => {
-        const current = await store.getRun(failedRun.id);
+        const current = await getTestRun(store, failedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       await waitFor(async () =>
@@ -1862,7 +3907,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             ['PENDING', 'RESPONDING'].includes(interaction.status)
         )
       ).toHaveLength(0);
-      const failedRecord = (await store.getRun(failedRun.id))!;
+      const failedRecord = (await getTestRun(store, failedRun.id))!;
       const failedArtifact = (await store.snapshot()).artifacts.find(
         (artifact) => artifact.id === failedRecord.finalArtifactId
       );
@@ -1882,9 +3927,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const failedJournal = await fs.readFile(failedServer!.protocolJournalPath, 'utf8');
       expect(failedJournal).not.toContain(opaqueProviderSecret);
 
-      const tokenLimitedRun = await store.createRun({
+      const tokenLimitedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'token limit terminal',
         requestedSettings: settings
@@ -1898,7 +3943,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       const tokenLimited = await waitFor(async () => {
-        const current = await store.getRun(tokenLimitedRun.id);
+        const current = await getTestRun(store, tokenLimitedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       expect(tokenLimited.terminalReason).toBe(
@@ -1911,9 +3956,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         'Failure: The ACP agent reached its token limit before completing the turn.'
       );
 
-      const planLimitedRun = await store.createRun({
+      const planLimitedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'plan limit terminal',
         requestedSettings: settings
@@ -1927,7 +3972,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       const planLimited = await waitFor(async () => {
-        const current = await store.getRun(planLimitedRun.id);
+        const current = await getTestRun(store, planLimitedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       expect(planLimited.finalMessage).toBe('Upgrade your plan to continue');
@@ -1941,9 +3986,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         'Failure: Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
       );
 
-      const malformedRun = await store.createRun({
+      const malformedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'malformed terminal response',
         requestedSettings: settings
@@ -1957,7 +4002,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       await waitFor(async () => {
-        const current = await store.getRun(malformedRun.id);
+        const current = await getTestRun(store, malformedRun.id);
         return current?.status === 'FAILED' ? current : undefined;
       });
       expect(
@@ -1966,12 +4011,12 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         )
       ).toBe(true);
       await adapter.releaseTask(task.id);
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
       expect((await store.snapshot()).agentServers[0]?.status).toBe('EXITED');
 
-      const interruptedRun = await store.createRun({
+      const interruptedRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'hang for interrupt',
         requestedSettings: settings
@@ -1993,7 +4038,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         providerTurnId: interruptedTurn.providerTurnId!
       });
       await waitFor(async () => {
-        const current = await store.getRun(interruptedRun.id);
+        const current = await getTestRun(store, interruptedRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
       });
       await waitFor(async () =>
@@ -2008,12 +4053,12 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           ? true
           : undefined
       );
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
-      const quarantinedServerId = (await store.getRun(interruptedRun.id))?.serverInstanceId;
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
+      const quarantinedServerId = (await getTestRun(store, interruptedRun.id))?.serverInstanceId;
       expect(quarantinedServerId).toBeDefined();
       expect(quarantinedClient!.serverInstanceId).toBe(quarantinedServerId);
       await waitFor(async () =>
-        (await store.getAgentServer(quarantinedServerId!))?.status === 'EXITED'
+        (await getTestAgentServer(store, quarantinedServerId!))?.status === 'EXITED'
           ? true
           : undefined
       );
@@ -2022,15 +4067,15 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       // The fake process schedules a late old-turn chunk after the cancellation
       // deadline. Quarantine must kill that process so the chunk cannot be
       // attributed to this replacement run (ACP updates have no prompt ID).
-      await store.updateRun(interruptedRun.id, {
+      await updateTestRun(store, interruptedRun.id, {
         status: 'INTERRUPTED',
         endedAt: new Date().toISOString()
       });
-      await store.updateAgentSession(session.id, { status: 'IDLE' });
+      await updateTestAgentSession(store, session.id, { status: 'IDLE' });
 
-      const replacementRun = await store.createRun({
+      const replacementRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'replacement after ambiguous cancel',
         requestedSettings: settings
@@ -2080,7 +4125,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           options: [{ optionId: 'late-old-reject', name: 'Reject', kind: 'reject_once' }]
         }
       };
-      const lateNotificationRaw = await store.appendProtocolMessage(
+      const lateNotificationRaw = await appendTestProtocolMessage(store,
         quarantinedServerId!,
         'INBOUND',
         JSON.stringify({
@@ -2089,7 +4134,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           params: lateNotificationParams
         })
       );
-      const latePermissionRaw = await store.appendProtocolMessage(
+      const latePermissionRaw = await appendTestProtocolMessage(store,
         quarantinedServerId!,
         'INBOUND',
         JSON.stringify(latePermissionRequest)
@@ -2127,7 +4172,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         }
       });
       const replacementCompleted = await waitFor(async () => {
-        const current = await store.getRun(replacementRun.id);
+        const current = await getTestRun(store, replacementRun.id);
         return current?.status === 'COMPLETED' ? current : undefined;
       });
       expect(replacementCompleted.finalMessage).toBe('Implemented safely.');
@@ -2140,11 +4185,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(replacementItems.map(itemPayloadText).join('')).not.toContain(
         'late injected output from old ACP generation'
       );
-      expect((await store.getRun(interruptedRun.id))?.status).toBe('INTERRUPTED');
+      expect((await getTestRun(store, interruptedRun.id))?.status).toBe('INTERRUPTED');
 
-      const ambiguousRun = await store.createRun({
+      const ambiguousRun = await createTestRun(store, {
         task,
-        session: (await store.getAgentSession(session.id))!,
+        session: (await getTestAgentSession(store, session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'ambiguous disconnect',
         requestedSettings: settings
@@ -2158,7 +4203,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       const recovery = await waitFor(async () => {
-        const current = await store.getRun(ambiguousRun.id);
+        const current = await getTestRun(store, ambiguousRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
       });
       expect(recovery.terminalReason).toMatch(/ambiguous|exited/iu);
@@ -2203,7 +4248,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     );
     temporaryDirectories.push(directory);
     const store = createTestStore(path.join(directory, 'store'));
-    const server = await store.createAgentServer({
+    const server = await createTestAgentServer(store, {
       runtimeId: 'test-acp-shutdown-fence',
       runtimeKind: 'ACP_AGENT',
       transport: 'STDIO',
@@ -2215,7 +4260,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-shutdown-fence' }
     };
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory
     });
     const shutdownFailure = new Error('ACP supervisor shutdown rejected');
@@ -2247,11 +4292,94 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
   });
 
+  it('releases Design MCP grants before an unconfirmed adapter shutdown', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-shutdown-grant-')
+    );
+    temporaryDirectories.push(directory);
+    const store = createTestStore(path.join(directory, 'store'));
+    const server = await createTestAgentServer(store, {
+      runtimeId: 'test-acp-shutdown-grant',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: '/fake/acp',
+      argv: ['--acp'],
+      schemaVersion: '1.19.0'
+    });
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-shutdown-grant' }
+    };
+    const lifecycle: string[] = [];
+    const releaseSessionGrant = vi.fn(async () => {
+      lifecycle.push('release-design-grant');
+    });
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      designClientToolBridge: {
+        createSessionGrant: vi.fn(async () => ({
+          id: 'unused-design-grant',
+          launch: {
+            executablePath: '/fake/electron',
+            argv: ['/fake/design-tool-mcp-server.mjs'],
+            environment: {}
+          }
+        })),
+        activateGrant: vi.fn(async () => undefined),
+        revokeGrant: vi.fn(async () => undefined),
+        releaseSessionGrant
+      }
+    });
+    const shutdownFailure = new Error('ACP child may still be live');
+    const fakeSupervisor = {
+      currentServer: server,
+      currentClient: {} as AcpRpcClient,
+      safetyFenceReason: 'ACP process termination could not be confirmed.',
+      shutdown: vi.fn(async () => {
+        lifecycle.push('shutdown');
+        throw shutdownFailure;
+      })
+    };
+    const internals = adapter as unknown as {
+      supervisor?: typeof fakeSupervisor;
+      initialized: boolean;
+      designToolGrants: Map<string, {
+        grantId: string;
+        providerGeneration: string;
+        worktreeId: string;
+        launch: {
+          executablePath: string;
+          argv: string[];
+          environment: Record<string, string>;
+        };
+      }>;
+    };
+    internals.supervisor = fakeSupervisor;
+    internals.initialized = true;
+    internals.designToolGrants.set('design-session', {
+      grantId: 'active-design-grant',
+      providerGeneration: server.id,
+      worktreeId: 'design-worktree',
+      launch: {
+        executablePath: '/fake/electron',
+        argv: ['/fake/design-tool-mcp-server.mjs'],
+        environment: {}
+      }
+    });
+
+    await expect(adapter.shutdown()).rejects.toThrow(
+      'ACP runtime shutdown was incomplete.'
+    );
+    expect(lifecycle.slice(0, 2)).toEqual(['release-design-grant', 'shutdown']);
+    expect(internals.designToolGrants.size).toBe(0);
+    expect(releaseSessionGrant).toHaveBeenCalledWith('active-design-grant');
+  });
+
   it('retains a failed quarantine and rejects every later runtime operation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-fence-'));
     temporaryDirectories.push(directory);
     const store = createTestStore(path.join(directory, 'store'));
-    const server = await store.createAgentServer({
+    const server = await createTestAgentServer(store, {
       runtimeId: 'test-acp-fence',
       runtimeKind: 'ACP_AGENT',
       transport: 'STDIO',
@@ -2263,18 +4391,48 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-fence' }
     };
-    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
-      cwd: directory
+    const lifecycle: string[] = [];
+    const releaseSessionGrant = vi.fn(async () => {
+      lifecycle.push('release-design-grant');
+    });
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      designClientToolBridge: {
+        createSessionGrant: vi.fn(async () => ({
+          id: 'unused-design-grant',
+          launch: {
+            executablePath: '/fake/electron',
+            argv: ['/fake/design-tool-mcp-server.mjs'],
+            environment: {}
+          }
+        })),
+        activateGrant: vi.fn(async () => undefined),
+        revokeGrant: vi.fn(async () => undefined),
+        releaseSessionGrant
+      }
     });
     const shutdownFailure = new Error('old ACP child may still be live');
     const fakeSupervisor = {
       currentServer: server,
       currentClient: {} as AcpRpcClient,
       safetyFenceReason: 'ACP process termination could not be confirmed.',
-      shutdown: vi.fn().mockRejectedValue(shutdownFailure)
+      shutdown: vi.fn(async () => {
+        lifecycle.push('shutdown');
+        throw shutdownFailure;
+      })
     };
     const internals = adapter as unknown as {
       supervisor?: typeof fakeSupervisor;
+      designToolGrants: Map<string, {
+        grantId: string;
+        providerGeneration: string;
+        worktreeId: string;
+        launch: {
+          executablePath: string;
+          argv: string[];
+          environment: Record<string, string>;
+        };
+      }>;
       quarantineRuntimeAfterAmbiguousMutation(
         operation: string,
         detail: string
@@ -2282,6 +4440,16 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       waitForRuntimeQuarantine(): Promise<void>;
     };
     internals.supervisor = fakeSupervisor;
+    internals.designToolGrants.set('design-session', {
+      grantId: 'active-design-grant',
+      providerGeneration: server.id,
+      worktreeId: 'design-worktree',
+      launch: {
+        executablePath: '/fake/electron',
+        argv: ['/fake/design-tool-mcp-server.mjs'],
+        environment: {}
+      }
+    });
 
     await expect(
       internals.quarantineRuntimeAfterAmbiguousMutation(
@@ -2290,6 +4458,8 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       )
     ).rejects.toThrow('safety-fenced until Task Monki restarts');
     expect(internals.supervisor).toBe(fakeSupervisor);
+    expect(lifecycle).toEqual(['release-design-grant', 'shutdown']);
+    expect(internals.designToolGrants.size).toBe(0);
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
     await expect(internals.waitForRuntimeQuarantine()).rejects.toThrow(
       'safety-fenced until Task Monki restarts'
@@ -2300,6 +4470,91 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     await expect(adapter.initialize()).rejects.toThrow(
       'safety-fenced until Task Monki restarts'
     );
+    expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it('revokes Design MCP grants before an unconfirmed configuration restart', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-config-restart-grant-')
+    );
+    temporaryDirectories.push(directory);
+    const store = createTestStore(path.join(directory, 'store'));
+    const server = await createTestAgentServer(store, {
+      runtimeId: 'test-acp-config-restart-grant',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: '/fake/acp',
+      argv: ['--acp'],
+      schemaVersion: '1.19.0'
+    });
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: {
+        ...TEST_ACP_PROFILE.descriptor,
+        id: 'test-acp-config-restart-grant'
+      }
+    };
+    const lifecycle: string[] = [];
+    const releaseSessionGrant = vi.fn(async () => {
+      lifecycle.push('release-design-grant');
+    });
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      designClientToolBridge: {
+        createSessionGrant: vi.fn(async () => ({
+          id: 'unused-design-grant',
+          launch: {
+            executablePath: '/fake/electron',
+            argv: ['/fake/design-tool-mcp-server.mjs'],
+            environment: {}
+          }
+        })),
+        activateGrant: vi.fn(async () => undefined),
+        revokeGrant: vi.fn(async () => undefined),
+        releaseSessionGrant
+      }
+    });
+    const shutdownFailure = new Error('configuration restart remained live');
+    const fakeSupervisor = {
+      currentServer: server,
+      currentClient: {} as AcpRpcClient,
+      safetyFenceReason: 'ACP process termination could not be confirmed.',
+      shutdown: vi.fn(async () => {
+        lifecycle.push('shutdown');
+        throw shutdownFailure;
+      })
+    };
+    const internals = adapter as unknown as {
+      supervisor?: typeof fakeSupervisor;
+      designToolGrants: Map<string, {
+        grantId: string;
+        providerGeneration: string;
+        worktreeId: string;
+        launch: {
+          executablePath: string;
+          argv: string[];
+          environment: Record<string, string>;
+        };
+      }>;
+      resetRuntimeForConfiguration(): Promise<void>;
+    };
+    internals.supervisor = fakeSupervisor;
+    internals.designToolGrants.set('design-session', {
+      grantId: 'active-design-grant',
+      providerGeneration: server.id,
+      worktreeId: 'design-worktree',
+      launch: {
+        executablePath: '/fake/electron',
+        argv: ['/fake/design-tool-mcp-server.mjs'],
+        environment: {}
+      }
+    });
+
+    await expect(internals.resetRuntimeForConfiguration()).rejects.toBe(
+      shutdownFailure
+    );
+    expect(lifecycle).toEqual(['release-design-grant', 'shutdown']);
+    expect(internals.designToolGrants.size).toBe(0);
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
   });
 });
@@ -2315,7 +4570,7 @@ describe('AcpRuntimeAdapter native settings', () => {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId }
     };
-    const adapter = new AcpRuntimeAdapter(
+    const adapter = createTestAdapter(
       createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       profile,
@@ -2409,7 +4664,7 @@ describe('AcpRuntimeAdapter native settings', () => {
     );
     temporaryDirectories.push(directory);
     const runtimeId = 'test-grok-reasoning-setting';
-    const adapter = new AcpRuntimeAdapter(
+    const adapter = createTestAdapter(
       createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       {
@@ -2478,7 +4733,7 @@ describe('AcpRuntimeAdapter native settings', () => {
       path.join(os.tmpdir(), 'task-monki-acp-invalid-config-update-')
     );
     temporaryDirectories.push(directory);
-    const adapter = new AcpRuntimeAdapter(
+    const adapter = createTestAdapter(
       createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       TEST_ACP_PROFILE,
@@ -2549,7 +4804,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           rawInput: { command: 'npm test', cwd: harness.directory }
         }
       };
-      const notificationRaw = await store.appendProtocolMessage(
+      const notificationRaw = await appendTestProtocolMessage(store,
         server.id,
         'INBOUND',
         JSON.stringify({
@@ -2584,7 +4839,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           ]
         }
       };
-      const raw = await store.appendProtocolMessage(
+      const raw = await appendTestProtocolMessage(store,
         server.id,
         'INBOUND',
         JSON.stringify(request)
@@ -2607,7 +4862,11 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         'ACP did not provide a verifiable command for this execution request.'
       );
 
-      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
       await interactionService.respond({
         taskId: task.id,
         runId: run.id,
@@ -2696,7 +4955,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
             ]
           }
         };
-        const raw = await store.appendProtocolMessage(
+        const raw = await appendTestProtocolMessage(store,
           server.id,
           'INBOUND',
           JSON.stringify(request)
@@ -2775,7 +5034,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
               options: request.params.options
             }
           };
-          const commandRaw = await store.appendProtocolMessage(
+          const commandRaw = await appendTestProtocolMessage(store,
             server.id,
             'INBOUND',
             JSON.stringify(command)
@@ -2836,7 +5095,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           ]
         }
       };
-      const raw = await store.appendProtocolMessage(
+      const raw = await appendTestProtocolMessage(store,
         server.id,
         'INBOUND',
         JSON.stringify(request)
@@ -2871,7 +5130,11 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         'owns the scope and lifetime of remembered choices'
       );
 
-      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
       await interactionService.respond({
         taskId: task.id,
         runId: run.id,
@@ -2931,7 +5194,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         argv: [agentScript]
       };
       const store = createTestStore(path.join(directory, 'store'));
-      const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      const adapter = createTestAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         requestTimeoutMs: 1_000,
         runtimeResolver: async () => ({
@@ -2969,14 +5232,14 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         worktreePath: directory,
         baseSha: 'base'
       });
-      const session = await store.createAgentSession({
+      const session = await createTestAgentSession(store, {
         task,
         iteration,
         worktree,
         runtimeId,
         requestedSettings: settings
       });
-      const run = await store.createRun({
+      const run = await createTestRun(store, {
         task,
         session,
         mode: 'IMPLEMENTATION',
@@ -2984,27 +5247,31 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         requestedSettings: settings
       });
 
+      const runtimeFixtureForPermission = runtimeFixture(store);
       const persistenceSpies: Array<{ mockRestore(): void }> = [];
       if (!failDuringPersistence) {
         persistenceSpies.push(
           vi
-            .spyOn(store, 'createInteractionRequest')
+            .spyOn(runtimeFixtureForPermission.runtime, 'createInteractionRequest')
             .mockRejectedValueOnce(new Error(failure))
         );
       } else {
-        const createInteractionRequest = store.createInteractionRequest.bind(store);
+        const createInteractionRequest =
+          runtimeFixtureForPermission.runtime.createInteractionRequest.bind(
+            runtimeFixtureForPermission.runtime
+          );
         persistenceSpies.push(
           vi
-            .spyOn(store, 'createInteractionRequest')
-            .mockImplementationOnce(async (input) => {
-              const internals = store as unknown as {
-                persistSnapshot(): Promise<boolean>;
+            .spyOn(runtimeFixtureForPermission.runtime, 'createInteractionRequest')
+            .mockImplementationOnce(async (input, operationId) => {
+              const internals = runtimeFixtureForPermission.runtimeStore as unknown as {
+                persist(state: unknown): Promise<void>;
               };
               const persist = vi
-                .spyOn(internals, 'persistSnapshot')
+                .spyOn(internals, 'persist')
                 .mockRejectedValueOnce(new Error(failure));
               try {
-                return await createInteractionRequest(input);
+                return await createInteractionRequest(input, operationId);
               } finally {
                 persist.mockRestore();
               }
@@ -3073,7 +5340,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
             ]
           }
         };
-        const raw = await store.appendProtocolMessage(
+        const raw = await appendTestProtocolMessage(store,
           server.id,
           'INBOUND',
           JSON.stringify(request)
@@ -3082,8 +5349,8 @@ describe('AcpRuntimeAdapter permission materialization', () => {
 
         const recovered = await waitFor(async () => {
           const [currentRun, currentSession, snapshot] = await Promise.all([
-            store.getRun(run.id),
-            store.getAgentSession(session.id),
+            getTestRun(store, run.id),
+            getTestAgentSession(store, session.id),
             store.snapshot()
           ]);
           const runtimeStopped = !snapshot.agentServers.some((server) =>
@@ -3147,8 +5414,8 @@ describe('AcpRuntimeAdapter permission materialization', () => {
 
         const reconciliation = await adapter.reconcile();
         expect(reconciliation.recoveryRequiredSessionIds).toContain(session.id);
-        expect((await store.getRun(run.id))?.status).toBe('RECOVERY_REQUIRED');
-        expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+        expect((await getTestRun(store, run.id))?.status).toBe('RECOVERY_REQUIRED');
+        expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
         expect(
           (await readProtocolMessages()).filter(
             (message) => message.method === 'session/prompt'
@@ -3183,7 +5450,7 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
     const appEvents = new AppEventBus();
     const observedEvents: Array<{ type: string; runId?: string }> = [];
     appEvents.on((event) => observedEvents.push(event));
-    const adapter = new AcpRuntimeAdapter(store, appEvents, profile, {
+    const adapter = createTestAdapter(store, appEvents, profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
       runtimeResolver: async () => ({
@@ -3221,14 +5488,14 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task,
       iteration,
       worktree,
       runtimeId,
       requestedSettings: settings
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -3236,16 +5503,17 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
       requestedSettings: settings
     });
 
-    const originalWriteFinalArtifact = store.writeFinalArtifact.bind(store);
+    const runtime = runtimeFixture(store).runtime;
+    const originalWriteFinalArtifact = runtime.writeFinalArtifact.bind(runtime);
     let injectedFailures = 0;
     const artifactSpy = vi
-      .spyOn(store, 'writeFinalArtifact')
-      .mockImplementation(async (taskId, runId, content) => {
+      .spyOn(runtime, 'writeFinalArtifact')
+      .mockImplementation(async (taskId, runId, content, operationId) => {
         if (runId === run.id && injectedFailures === 0) {
           injectedFailures += 1;
           throw new Error('injected post-response final artifact persistence failure');
         }
-        return originalWriteFinalArtifact(taskId, runId, content);
+        return originalWriteFinalArtifact(taskId, runId, content, operationId);
       });
 
     try {
@@ -3262,8 +5530,8 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
 
       const recovered = await waitFor(async () => {
         const [currentRun, currentSession, snapshot] = await Promise.all([
-          store.getRun(run.id),
-          store.getAgentSession(session.id),
+          getTestRun(store, run.id),
+          getTestAgentSession(store, session.id),
           store.snapshot()
         ]);
         const runtimeStopped = !snapshot.agentServers.some((server) =>
@@ -3327,8 +5595,8 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
 
       const reconciliation = await adapter.reconcile();
       expect(reconciliation.recoveryRequiredSessionIds).toContain(session.id);
-      expect((await store.getRun(run.id))?.status).toBe('RECOVERY_REQUIRED');
-      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect((await getTestRun(store, run.id))?.status).toBe('RECOVERY_REQUIRED');
+      expect((await getTestAgentSession(store, session.id))?.status).toBe('NOT_LOADED');
       expect(await readPromptRequests()).toHaveLength(1);
       expect(
         (await store.snapshot()).agentServers.some((server) =>
@@ -3349,7 +5617,7 @@ describe('AcpRuntimeAdapter stream safety', () => {
     try {
       await harness.start();
       const completed = await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       });
       const snapshot = await harness.store.snapshot();
@@ -3388,7 +5656,7 @@ describe('AcpRuntimeAdapter stream safety', () => {
     try {
       await harness.start();
       const completed = await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       });
 
@@ -3404,7 +5672,7 @@ describe('AcpRuntimeAdapter stream safety', () => {
     try {
       await harness.start();
       const completed = await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       });
       const snapshot = await harness.store.snapshot();
@@ -3437,20 +5705,21 @@ describe('AcpRuntimeAdapter stream safety', () => {
     'fences the run after $kind artifact append failure without unbounded retries',
     async ({ kind, expectedAttempts }) => {
       const harness = await createStreamSafetyHarness(`persistence-${kind}`);
-      const appendArtifact = harness.store.appendArtifact.bind(harness.store);
+      const appendArtifact = runtimeFixture(harness.store).runtime.appendArtifact.bind(
+        runtimeFixture(harness.store).runtime
+      );
       let attempts = 0;
       const appendSpy = vi
-        .spyOn(harness.store, 'appendArtifact')
-        .mockImplementation(async (artifactId, text) => {
+        .spyOn(runtimeFixture(harness.store).runtime, 'appendArtifact')
+        .mockImplementation(async (artifactId, text, operationId) => {
           if (artifactId !== harness.run.outputArtifactId) {
-            return appendArtifact(artifactId, text);
+            return appendArtifact(artifactId, text, operationId);
           }
           attempts += 1;
           if (kind === 'ambiguous') {
-            throw new ArtifactAppendAmbiguousError(
-              artifactId,
-              new Error('injected append failure'),
-              new Error('injected rollback failure')
+            throw new AgentRuntimeArtifactMutationAmbiguousError(
+              `Artifact ${artifactId} append is ambiguous.`,
+              { cause: new Error('injected append and rollback failure') }
             );
           }
           throw new Error('injected persistent append failure');
@@ -3459,8 +5728,8 @@ describe('AcpRuntimeAdapter stream safety', () => {
         await harness.start();
         const recovered = await waitFor(async () => {
           const [run, session] = await Promise.all([
-            harness.store.getRun(harness.run.id),
-            harness.store.getAgentSession(harness.session.id)
+            getTestRun(harness.store, harness.run.id),
+            getTestAgentSession(harness.store, harness.session.id)
           ]);
           if (
             run?.status === 'RECOVERY_REQUIRED' &&
@@ -3492,23 +5761,25 @@ describe('AcpRuntimeAdapter stream safety', () => {
 
   it('keeps duplicated item and artifact buffering within the hard retained-byte cap', async () => {
     const harness = await createStreamSafetyHarness('large-stream');
-    const appendArtifact = harness.store.appendArtifact.bind(harness.store);
+    const appendArtifact = runtimeFixture(harness.store).runtime.appendArtifact.bind(
+      runtimeFixture(harness.store).runtime
+    );
     let maximumRetainedBytes = 0;
     const appendSpy = vi
-      .spyOn(harness.store, 'appendArtifact')
-      .mockImplementation(async (artifactId, text) => {
+      .spyOn(runtimeFixture(harness.store).runtime, 'appendArtifact')
+      .mockImplementation(async (artifactId, text, operationId) => {
         maximumRetainedBytes = Math.max(
           maximumRetainedBytes,
           (
             harness.adapter as unknown as { retainedStreamBytes(): number }
           ).retainedStreamBytes()
         );
-        return appendArtifact(artifactId, text);
+        return appendArtifact(artifactId, text, operationId);
       });
     try {
       await harness.start();
       await waitFor(async () => {
-        const run = await harness.store.getRun(harness.run.id);
+        const run = await getTestRun(harness.store, harness.run.id);
         return run?.status === 'COMPLETED' ? run : undefined;
       }, 20_000);
 
@@ -3565,6 +5836,16 @@ async function readProtocolMessages(
     .map((line) => JSON.parse(JSON.parse(line).raw) as Record<string, unknown>);
 }
 
+async function readProtocolMessagesFromLog(
+  messageLog: string
+): Promise<Array<Record<string, unknown>>> {
+  return (await fs.readFile(messageLog, 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 async function createPermissionHarness(input: {
   runtimeId: string;
   approvalPolicy: 'on-request' | 'auto-accept-edits' | 'never';
@@ -3590,7 +5871,7 @@ async function createPermissionHarness(input: {
   };
   const store = createTestStore(path.join(directory, 'store'));
   const events = new AppEventBus();
-  const adapter = new AcpRuntimeAdapter(store, events, profile, {
+  const adapter = createTestAdapter(store, events, profile, {
     cwd: directory,
     requestTimeoutMs: 1_000,
     runtimeResolver: async () => ({
@@ -3628,14 +5909,14 @@ async function createPermissionHarness(input: {
     worktreePath: directory,
     baseSha: 'base'
   });
-  const session = await store.createAgentSession({
+  const session = await createTestAgentSession(store, {
     task,
     iteration,
     worktree,
     runtimeId: input.runtimeId,
     requestedSettings: settings
   });
-  const run = await store.createRun({
+  const run = await createTestRun(store, {
     task,
     session,
     mode: 'IMPLEMENTATION',
@@ -3806,7 +6087,7 @@ async function createStreamSafetyHarness(scenario: string, secret = 'test-stream
   const appEvents = new AppEventBus();
   const observedEvents: Array<{ type: string; runId?: string; payload: unknown }> = [];
   appEvents.on((event) => observedEvents.push(event));
-  const adapter = new AcpRuntimeAdapter(store, appEvents, profile, {
+  const adapter = createTestAdapter(store, appEvents, profile, {
     cwd: directory,
     environment: { ...process.env, TEST_ACP_API_KEY: secret },
     requestTimeoutMs: 1_000,
@@ -3845,14 +6126,14 @@ async function createStreamSafetyHarness(scenario: string, secret = 'test-stream
     worktreePath: directory,
     baseSha: 'base'
   });
-  const session = await store.createAgentSession({
+  const session = await createTestAgentSession(store, {
     task,
     iteration,
     worktree,
     runtimeId,
     requestedSettings: settings
   });
-  const run = await store.createRun({
+  const run = await createTestRun(store, {
     task,
     session,
     mode: 'IMPLEMENTATION',
@@ -3993,6 +6274,193 @@ input.on('line', (line) => {
     return;
   }
   send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
+}
+
+function attachmentDeliveryAgentSource(
+  messageLog: string,
+  resumeMethod: 'resume' | 'load' = 'resume',
+  emitInspectDesign = false,
+  advertiseAdditionalDirectories = false
+): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+let activePrompt;
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(${JSON.stringify(messageLog)}, JSON.stringify(message) + '\\n');
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: {
+        promptCapabilities: {},
+        ${resumeMethod === 'resume'
+          ? `sessionCapabilities: { resume: {}${advertiseAdditionalDirectories ? ', additionalDirectories: {}' : ''} }`
+          : 'loadSession: true'}
+        ${resumeMethod === 'load' && advertiseAdditionalDirectories
+          ? ', sessionCapabilities: { additionalDirectories: {} }'
+          : ''}
+      },
+      agentInfo: { name: 'attachment-delivery-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: 'attachment-delivery-session'
+    }});
+    return;
+  }
+  if (message.method === ${JSON.stringify(`session/${resumeMethod}`)}) {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: message.params.sessionId
+    }});
+    return;
+  }
+  if (message.method === 'session/prompt') {
+    ${emitInspectDesign ? `activePrompt = message;
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: activePrompt.params.sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'inspect-design-1',
+        title: 'task-monki-design-tools: inspect_design',
+        kind: 'other',
+        status: 'pending',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      }
+    }});
+    send({ jsonrpc: '2.0', id: 'inspect-design-permission-1', method: 'session/request_permission', params: {
+      sessionId: activePrompt.params.sessionId,
+      toolCall: {
+        toolCallId: 'inspect-design-1',
+        title: 'task-monki-design-tools-inspect_design: inspect_design',
+        kind: 'other',
+        status: 'pending'
+      },
+      options: [
+        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'allow-always', name: 'Allow always', kind: 'allow_always' },
+        { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' }
+      ]
+    }});
+    return;` : `send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+    return;`}
+  }
+  ${emitInspectDesign ? `if (message.id === 'inspect-design-permission-1') {
+    if (message.result?.outcome?.optionId !== 'allow-once') {
+      throw new Error('Task Monki did not select the one-time inspect_design permission.');
+    }
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: activePrompt.params.sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'inspect-design-1',
+        title: 'task-monki-design-tools: inspect_design',
+        kind: 'other',
+        status: 'completed',
+        rawInput: {
+          providerIdentifier: 'task-monki-design-tools',
+          toolName: 'inspect_design',
+          args: { operation: 'screenshot' }
+        }
+      }
+    }});
+    send({ jsonrpc: '2.0', id: activePrompt.id, result: { stopReason: 'end_turn' } });
+    return;
+  }` : ''}
+  send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
+}
+
+function readOnlyRuntimeAgentSource(
+  messageLog: string,
+  confirmCancellation = false
+): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+const record = (message) => fs.appendFileSync(
+  ${JSON.stringify(messageLog)},
+  JSON.stringify(message) + '\\n'
+);
+let promptId;
+let nextSessionId = 0;
+const sessionNamespace = (process.argv[2] ? process.argv[2] + '-' : '') + process.pid + '-';
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  record(message);
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {}, sessionCapabilities: { close: {} } },
+      agentInfo: { name: 'read-only-runtime-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    nextSessionId += 1;
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: sessionNamespace + 'read-only-runtime-session-' + nextSessionId,
+      modes: {
+        currentModeId: 'agent',
+        availableModes: [
+          { id: 'agent', name: 'Agent' },
+          { id: 'ask', name: 'Ask' }
+        ]
+      }
+    }});
+    return;
+  }
+  if (message.method === 'session/set_mode') {
+    send({ jsonrpc: '2.0', id: message.id, result: {} });
+    return;
+  }
+  if (message.method === 'session/prompt') {
+    promptId = message.id;
+    if (JSON.stringify(message.params.prompt).includes('wait for cancellation')) {
+      return;
+    }
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: message.params.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'answer-1',
+        content: { type: 'text', text: 'Read-only answer.' }
+      }
+    }});
+    send({ jsonrpc: '2.0', id: 'permission-1', method: 'session/request_permission', params: {
+      sessionId: message.params.sessionId,
+      toolCall: { toolCallId: 'write-1', kind: 'edit', title: 'Edit a file' },
+      options: [
+        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'reject-once', name: 'Reject once', kind: 'reject_once' }
+      ]
+    }});
+    return;
+  }
+  if (message.id === 'permission-1' && message.result) {
+    send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
+    return;
+  }
+  if (message.method === 'session/cancel') {
+    ${confirmCancellation ? "send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'cancelled' } });" : ''}
+    return;
+  }
+  if (message.method === 'session/close') {
+    send({ jsonrpc: '2.0', id: message.id, result: {} });
+  }
 });
 `;
 }

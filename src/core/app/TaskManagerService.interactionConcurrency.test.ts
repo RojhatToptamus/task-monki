@@ -4,7 +4,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentExecutionSettings } from '../../shared/agent';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import {
+  createScriptedAgentRuntimeFixture,
+  createTaskMonkiScenario
+} from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
@@ -19,15 +22,72 @@ afterEach(async () => {
 });
 
 describe('TaskManagerService interaction and cancellation coordination', () => {
+  it('admits Stop while a normal Task start still owns the task action', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-cancel-queued-service'
+    });
+    let releaseSession = () => {};
+    let starting: Promise<unknown> | undefined;
+    try {
+      const task = await scenario.createTask({
+        title: 'Cancel queued Task start',
+        prompt: 'This prompt must remain unsent after Stop.'
+      });
+      const createSession = scenario.agent.createSession.bind(scenario.agent);
+      let markSessionStarted!: () => void;
+      const sessionStarted = new Promise<void>((resolve) => {
+        markSessionStarted = resolve;
+      });
+      const sessionGate = new Promise<void>((resolve) => {
+        releaseSession = resolve;
+      });
+      vi.spyOn(scenario.agent, 'createSession').mockImplementation(async (input) => {
+        markSessionStarted();
+        await sessionGate;
+        return createSession(input);
+      });
+
+      starting = scenario.service.startRun({ taskId: task.id });
+      await Promise.race([
+        sessionStarted,
+        starting.then(() => {
+          throw new Error('The run finished before it tried to create a provider session.');
+        })
+      ]);
+      const queued = (await scenario.store.snapshot()).runs.find(
+        (candidate) => candidate.taskId === task.id
+      )!;
+      expect(queued.status).toBe('QUEUED');
+      expect(queued.providerTurnId).toBeUndefined();
+
+      await expect(
+        scenario.service.cancelRun({ runId: queued.id })
+      ).resolves.toBeUndefined();
+      releaseSession();
+
+      await expect(starting).resolves.toMatchObject({
+        id: queued.id,
+        status: 'INTERRUPTED',
+        providerTurnId: undefined
+      });
+      expect(scenario.agent.startedTurns).toEqual([]);
+    } finally {
+      releaseSession();
+      await starting?.catch(() => undefined);
+      await scenario.dispose();
+    }
+  }, 20_000);
+
   it('does not deliver a positive approval while cancellation owns the task', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-interaction-cancel-')
     );
     temporaryDirectories.push(directory);
     const store = new FileTaskStore(path.join(directory, 'store'));
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const adapter = scriptedRuntime.adapter;
     const service = new TaskManagerService(store, directory, undefined, {
-      agentRuntimeAdapters: [adapter]
+      ...scriptedRuntime.serviceOptions
     });
     const settings: AgentExecutionSettings = {
       runtimeId: 'codex',
@@ -51,62 +111,73 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const createdSession = await store.createAgentSession({
+    const createdSession = await scriptedRuntime.createSession({
       task,
       iteration,
       worktree,
       runtimeId: 'codex',
-      requestedSettings: settings
+      settings
     });
-    const session = await store.updateAgentSession(createdSession.id, {
-      providerSessionId: 'thread-one',
-      providerSessionTreeId: 'thread-one',
-      status: 'ACTIVE',
-      materialized: true
-    });
-    const server = await store.createAgentServer({
+    const session = await scriptedRuntime.taskRuntime.updateAgentSession(
+      createdSession.id,
+      {
+        providerSessionId: 'thread-one',
+        providerSessionTreeId: 'thread-one',
+        status: 'ACTIVE',
+        materialized: true
+      },
+      `interaction-session-active:${createdSession.id}`
+    );
+    const server = await scriptedRuntime.runtimeStore.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
       argv: ['app-server', '--stdio']
     });
-    const createdRun = await store.createRun({
+    const createdRun = await scriptedRuntime.createRun({
       task,
       session,
-      serverInstanceId: server.id,
       mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      requestedSettings: settings
+      prompt: task.prompt
     });
-    const run = await store.updateRun(createdRun.id, {
-      providerTurnId: 'turn-one',
-      status: 'RUNNING'
-    });
-    const requestRawMessage = await store.appendProtocolMessage(
+    await scriptedRuntime.taskRuntime.updateRun(
+      createdRun.id,
+      { serverInstanceId: server.id, status: 'STARTING' },
+      `interaction-run-starting:${createdRun.id}`
+    );
+    const run = await scriptedRuntime.transitionRun(
+      createdRun.id,
+      { providerTurnId: 'turn-one', status: 'RUNNING' },
+      `interaction-run-running:${createdRun.id}`
+    );
+    const requestRawMessage = await scriptedRuntime.runtimeStore.appendProtocolMessage(
       server.id,
       'INBOUND',
       '{"method":"item/commandExecution/requestApproval","id":1}'
     );
-    const interaction = await store.createInteractionRequest({
-      runtimeId: 'codex',
-      serverInstanceId: server.id,
-      providerRequestId: 1,
-      taskId: task.id,
-      iterationId: iteration.id,
-      runId: run.id,
-      sessionId: session.id,
-      providerTurnId: run.providerTurnId,
-      type: 'COMMAND_APPROVAL',
-      request: {
-        startedAtMs: Date.now(),
-        command: 'npm test',
-        cwd: directory
+    const interaction = await scriptedRuntime.taskRuntime.createInteractionRequest(
+      {
+        runtimeId: 'codex',
+        serverInstanceId: server.id,
+        providerRequestId: 1,
+        taskId: task.id,
+        iterationId: iteration.id,
+        runId: run.id,
+        sessionId: session.id,
+        providerTurnId: run.providerTurnId,
+        type: 'COMMAND_APPROVAL',
+        request: {
+          startedAtMs: Date.now(),
+          command: 'npm test',
+          cwd: directory
+        },
+        allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
+        policyWarnings: [],
+        requestRawMessage
       },
-      allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
-      policyWarnings: [],
-      requestRawMessage
-    });
+      `interaction-request:${run.id}`
+    );
 
     let releaseCancellation!: () => void;
     const cancellationReleased = new Promise<void>((resolve) => {

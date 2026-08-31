@@ -11,6 +11,7 @@ import {
   discourseResponderToggleDisabled,
   eligibleDiscourseRuntimeCatalog
 } from '../model/discourse';
+import { runtimeExecutionUnavailableReason } from '../model/runtimeReadiness';
 import { AgentModelSelector } from './AgentModelSelector';
 import { DiscourseCheckIcon, DiscourseSlidersIcon } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
@@ -195,13 +196,16 @@ export function DiscourseAgentConfigurationBar({
                   <small>{capitalize(entry.profile.roleTemplate)}</small>
                 </div>
                 <AgentModelSelector
-                  presentation={compact ? 'icon' : 'compact'}
+                  presentation="compact"
                   label={`${entry.profile.displayName} provider and model`}
                   runtimeId={selection.runtimeId ?? ''}
                   modelId={selection.modelId ?? ''}
                   reasoningEffort={selection.reasoningEffort}
-                  models={eligible.models}
-                  runtimes={eligible.runtimes}
+                  models={catalog.runtimeCatalog.models}
+                  runtimes={catalog.runtimeCatalog.runtimes}
+                  runtimeUnavailableReason={(runtime) =>
+                    runtimeExecutionUnavailableReason(runtime, 'DISCOURSE')
+                  }
                   disabled={disabled}
                   fallbackSummary={fallbackSummary}
                   selectionUnavailable={!selectedModel}

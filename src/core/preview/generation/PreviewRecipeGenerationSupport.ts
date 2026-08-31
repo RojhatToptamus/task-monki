@@ -1,7 +1,7 @@
 import { PREVIEW_FRAMEWORK_CAPABILITIES_VERSION } from './PreviewFrameworkCapabilities';
 
 export const PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION =
-  'task-monki-preview-recipe-generation/v3' as const;
+  'task-monki-preview-recipe-generation/v4' as const;
 
 /**
  * Authoring contract supplied to the generator. The strict Preview parser is
@@ -33,6 +33,10 @@ export const PREVIEW_RECIPE_GENERATION_CONTRACT = {
     ]
   },
   native: {
+    portDelivery: {
+      rule: 'A ports entry only injects the allocated value through its declared environment key. It does not add command arguments, expand variables, or change framework configuration.',
+      requirement: 'Use a routed port only when repository evidence proves that the exact command binds its listener from that exact environment key, or when frameworkCapabilities supplies a matching portBinding and compatiblePreviewCommand.'
+    },
     service: {
       required: ['command', 'ports', 'ready'],
       optional: ['label', 'cwd', 'needs', 'env', 'critical', 'restart', 'liveness']
@@ -97,7 +101,44 @@ export const PREVIEW_RECIPE_GENERATION_CONTRACT = {
       'Never use npm exec, npx, or package-manager dlx as an implicit substitute for dependency preparation.',
       'npm ci already runs applicable package lifecycle scripts; add a separate custom script job only when repository evidence proves it is required.',
       'When yamlCommentLines are present, copy them exactly immediately before the compatible command.',
-      'Do not use a repository script whose listed conflicts remain active.'
+      'Do not use a repository script whose listed conflicts remain active.',
+      'The npmNext example applies only when compatiblePreviewCommand is exactly [npm, run, dev] and portBinding proves PORT delivery.'
+    ]
+  },
+  evidencePaths: {
+    allowed: [
+      'files[].path',
+      'frameworkCapabilities.analyses[].dependencyPreparation.lockfilePath',
+      'publicEnvironment.templates[].path'
+    ],
+    forbidden: [
+      'repository-evidence.json',
+      'frameworkCapabilities',
+      'publicEnvironment',
+      'another metadata container name'
+    ],
+    rule: 'Each report evidence path must exactly match one allowed relative path from the current evidence bundle.'
+  },
+  output: {
+    format: 'Exactly one JSON object and no markdown, commentary, planning, progress, or other text.',
+    requiredFields: [
+      'schemaVersion',
+      'status',
+      'yaml',
+      'summary',
+      'evidence',
+      'assumptions',
+      'omissions',
+      'unresolvedDecisions',
+      'publicEnvironmentDecisions'
+    ],
+    unknownFields: 'Do not add unknown top-level, evidence-item, or public-environment-decision fields.',
+    reportText: 'Every report string must be nonempty, single-line, and at most 1200 UTF-8 bytes.',
+    reportListLimit: 'evidence, assumptions, omissions, and unresolvedDecisions each contain at most 40 items.',
+    statusRules: [
+      'draft requires a complete YAML string and at least one evidence item.',
+      'insufficient-evidence requires yaml: null and at least one unresolvedDecisions item.',
+      'Every array field is required even when its valid value is empty.'
     ]
   },
   publicEnvironment: {
@@ -107,6 +148,7 @@ export const PREVIEW_RECIPE_GENERATION_CONTRACT = {
       'Use HTTP_ATTACHMENT when a browser-facing key selects an API or backend origin.',
       'Prefer target: local when repository evidence provides conflicting targets or does not prove one intended Preview target.',
       'SOURCE_DEFAULT is valid only when the candidate includes a trusted credential-free sourceDefault.',
+      'Include attachmentId only for HTTP_ATTACHMENT. Omit it for SOURCE_DEFAULT and OMIT.',
       'targetPolicy is deterministic authority: LOCAL_REQUIRED forbids a literal endpoint; LITERAL_ALLOWED permits only its exact target or target: local.',
       'NEXT_PUBLIC values are public capability, never private inputs.',
       'Environment-only delivery does not require needs: ready; add a check only when startup gating and a safe path are evidenced.'
@@ -236,6 +278,8 @@ export function buildPreviewRecipeGenerationInstruction(
   input: PreviewRecipeGenerationInstructionInput
 ): string {
   return [
+    'Do not send a progress message. Your entire response must be the final JSON object.',
+    '',
     `You are generating a Task Monki Preview recipe using support contract ${PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION}.`,
     '',
     `Inspect only the sanitized, bounded repository evidence in ${input.evidenceFileName}.`,
@@ -244,9 +288,12 @@ export function buildPreviewRecipeGenerationInstruction(
     'Do not modify files. Do not commit, push, approve, or start Preview.',
     '',
     'Generate only evidence-backed configuration. Never guess commands, service ports, health paths, Compose services, migration behavior, or external dependencies.',
+    'A ports entry only injects the allocated value through its declared environment key. It does not add command arguments, expand variables, or change framework configuration.',
+    'Use a routed port only when repository evidence proves that the exact command binds its listener from that exact environment key, or when frameworkCapabilities supplies a matching portBinding and compatiblePreviewCommand.',
     'Never reproduce or infer secret values. Private data must use a declared private input and an exact typed recipient.',
     'Treat publicEnvironment as trusted derived metadata, never as raw env-file content. Do not infer any omitted value.',
     'Return exactly one publicEnvironmentDecision for every publicEnvironment candidate, including when status is insufficient-evidence.',
+    'Include attachmentId only for HTTP_ATTACHMENT. Omit the field for SOURCE_DEFAULT and OMIT.',
     'A browser-facing API origin affects functional Preview behavior even when the frontend can boot without it.',
     'When source and tracked template targets conflict, use an HTTP attachment with target: local rather than silently choosing either endpoint.',
     'Do not model NEXT_PUBLIC values as private inputs. Do not add attachment readiness unless startup gating and its check are evidenced.',
@@ -257,9 +304,14 @@ export function buildPreviewRecipeGenerationInstruction(
     'Never use npm exec, npx, pnpm dlx, or yarn dlx to acquire a missing runtime package implicitly. Add a custom package script job only when repository evidence proves that exact script is required.',
     'When yamlCommentLines are present, copy those lines exactly immediately before the service command so the Preview-only deviation is visible during review.',
     'If a framework analysis has no compatiblePreviewCommand, honor its limitation and do not invent a rewrite.',
+    'Use the npmNext example only when compatiblePreviewCommand is exactly [npm, run, dev] and portBinding proves PORT delivery.',
     'If the evidence is insufficient for a valid minimal recipe, return insufficient-evidence and explain the unresolved decisions instead of inventing authority.',
     '',
-    'Return exactly one JSON object and no markdown fence. It must match:',
+    'Your response must contain exactly one JSON object. Do not include markdown, commentary, planning, progress, or any other text.',
+    'Include every required top-level field and array. Use an empty array when a report list has no items. Do not add unknown fields.',
+    'Every report string must be nonempty, single-line, and at most 1200 UTF-8 bytes. evidence, assumptions, omissions, and unresolvedDecisions can each contain at most 40 items.',
+    'A draft requires a complete YAML string and at least one evidence item. insufficient-evidence requires yaml: null and at least one unresolvedDecisions item.',
+    'The JSON object must match:',
     JSON.stringify(
       {
         schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
@@ -282,7 +334,9 @@ export function buildPreviewRecipeGenerationInstruction(
       2
     ),
     '',
-    'Every evidence path must exist in the evidence bundle. Keep all report entries concise and omit empty speculation.',
+    'Every evidence path must exactly match files[].path, frameworkCapabilities.analyses[].dependencyPreparation.lockfilePath, or publicEnvironment.templates[].path in the evidence bundle.',
+    'Do not cite repository-evidence.json, frameworkCapabilities, publicEnvironment, or another metadata container name as an evidence path.',
+    'Keep all report entries concise and omit empty speculation.',
     'The YAML must be complete, minimal, readable, and below 64 KiB. Use short comments only for non-obvious fields.',
     '',
     'Current machine-readable authoring contract:',

@@ -1,20 +1,50 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AgentExecutionSettings,
+  AgentRunMode,
+  AgentSessionRecord,
   GitSnapshotRecord,
   PreviewGenerationRecord,
-  PreviewPlanRecord
+  PreviewPlanRecord,
+  RunRecord,
+  Task,
+  TaskIteration,
+  WorktreeRecord
 } from '../../shared/contracts';
 import { FileTaskStore, type ManagedDesignRepositoryInput } from './FileTaskStore';
+import { FileAgentRuntimeStore } from './FileAgentRuntimeStore';
+import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
+import { toAgentAttachmentSelectionFromRecords } from '../agent/AgentAttachmentDelivery';
 
 const COMMIT = 'a'.repeat(40);
 const EXECUTION_DIGEST = 'b'.repeat(64);
+const DESIGN_AGENT_SETTINGS = {
+  runtimeId: 'codex',
+  model: 'gpt-5.5',
+  reasoningEffort: 'high',
+  sandbox: 'WORKSPACE_WRITE',
+  networkAccess: false,
+  approvalPolicy: 'never',
+  approvalsReviewer: 'user'
+} satisfies AgentExecutionSettings;
+
+const runtimeFixtures = new Set<FileAgentRuntimeStore>();
+const runtimeByTaskStore = new WeakMap<
+  FileTaskStore,
+  { store: FileAgentRuntimeStore; task: TaskAgentRuntimeAccess }
+>();
+
+afterEach(async () => {
+  await Promise.all([...runtimeFixtures].map((runtime) => runtime.close()));
+  runtimeFixtures.clear();
+});
 
 describe('FileTaskStore Design ownership', () => {
-  it('creates an idempotent Codex-owned Design bundle and excludes it from boards', async () => {
+  it('creates an idempotent runtime-owned Design bundle and excludes it from boards', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-store-'));
     const store = new FileTaskStore(dir);
     const draft = await store.createAttachmentDraft();
@@ -34,14 +64,23 @@ describe('FileTaskStore Design ownership', () => {
       brief:
         '  Create a calm dashboard for monitoring a small greenhouse with clear status.  ',
       creationToken: 'design-request-0001',
+      runtimeId: 'codex',
       model: '  gpt-5.5  ',
       reasoningEffort: ' high ',
       attachmentDraftId: draft.id
     };
     const repository = managedRepository(dir);
 
-    const created = await store.createDesignBundle({ request, repository });
-    const retry = await store.createDesignBundle({ request, repository });
+    const created = await store.createDesignBundle({
+      request,
+      agentSettings: DESIGN_AGENT_SETTINGS,
+      repository
+    });
+    const retry = await store.createDesignBundle({
+      request,
+      agentSettings: DESIGN_AGENT_SETTINGS,
+      repository
+    });
 
     expect(retry).toEqual(created);
     expect(created.task).toMatchObject({
@@ -120,17 +159,66 @@ describe('FileTaskStore Design ownership', () => {
     await expect(
       store.createDesignBundle({
         request: { ...request, brief: 'A different request' },
+        agentSettings: DESIGN_AGENT_SETTINGS,
+        repository
+      })
+    ).rejects.toThrow('already used for a different request');
+    await expect(
+      store.createDesignBundle({
+        request: { ...request, runtimeId: 'another-runtime' },
+        agentSettings: { ...DESIGN_AGENT_SETTINGS, runtimeId: 'another-runtime' },
         repository
       })
     ).rejects.toThrow('already used for a different request');
     await store.close();
   });
 
+  it('persists provider-resolved Design settings without rewriting their policy', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-provider-store-'));
+    const store = new FileTaskStore(dir);
+    const agentSettings: AgentExecutionSettings = {
+      runtimeId: 'opencode',
+      model: 'provider/model',
+      reasoningEffort: 'medium',
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
+    };
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create a compact product page.',
+        creationToken: 'design-provider-settings',
+        runtimeId: 'opencode',
+        model: 'provider/model',
+        reasoningEffort: 'medium'
+      },
+      agentSettings,
+      repository: managedRepository(dir)
+    });
+
+    expect(created.task).toMatchObject({
+      runtimeId: 'opencode',
+      agentSettings
+    });
+    await store.close();
+    const reopened = new FileTaskStore(dir);
+    await expect(reopened.getDesignDetail(created.task.id)).resolves.toMatchObject({
+      task: { runtimeId: 'opencode', agentSettings }
+    });
+    await reopened.close();
+  });
+
   it('stores inline turns as an idempotent FIFO message queue', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-message-'));
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create the initial page.', creationToken: 'design-request-0002' },
+      request: {
+        brief: 'Create the initial page.',
+        creationToken: 'design-request-0002',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.settleDesignTurn({
@@ -204,8 +292,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
-        creationToken: 'design-reference-create'
+        creationToken: 'design-reference-create',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.settleDesignTurn({
@@ -285,14 +375,14 @@ describe('FileTaskStore Design ownership', () => {
       worktreePath: path.join(dir, 'worktree'),
       baseSha: COMMIT
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task: created.task,
       iteration,
       worktree,
       runtimeId: 'codex',
       requestedSettings: created.task.agentSettings
     });
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task: created.task,
       session,
       mode: 'DESIGN',
@@ -319,7 +409,7 @@ describe('FileTaskStore Design ownership', () => {
       generationKey: turn.id
     }))[0]!;
     const submittedAt = new Date().toISOString();
-    await store.updateRun(run.id, {
+    await updateTestRun(store, run.id, {
       providerTurnId: 'provider-design-reference-turn',
       attachmentSubmissions: [{
         attachmentId: attachment.id,
@@ -328,9 +418,12 @@ describe('FileTaskStore Design ownership', () => {
         mediaType: attachment.mediaType,
         byteCount: attachment.byteCount,
         sha256: attachment.sha256,
-        submittedAs: 'prompt-file-reference',
+        transport: 'managed-path',
         verifiedAt: submittedAt,
-        providerTurnId: 'provider-design-reference-turn',
+        correlation: {
+          kind: 'provider-turn',
+          id: 'provider-design-reference-turn'
+        },
         submittedAt
       }]
     });
@@ -372,8 +465,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
-        creationToken: 'design-turn-files-create'
+        creationToken: 'design-turn-files-create',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     const reusableDraft = await store.createAttachmentDraft();
@@ -455,7 +550,12 @@ describe('FileTaskStore Design ownership', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-paging-'));
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create the initial page.', creationToken: 'design-paging-create' },
+      request: {
+        brief: 'Create the initial page.',
+        creationToken: 'design-paging-create',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     for (let index = 1; index <= 55; index += 1) {
@@ -513,8 +613,10 @@ describe('FileTaskStore Design ownership', () => {
           request: {
             brief: 'Create a page from the supplied reference.',
             creationToken: 'design-request-create-rollback',
+            runtimeId: 'codex',
             attachmentDraftId: draft.id
           },
+          agentSettings: DESIGN_AGENT_SETTINGS,
           repository
         })
       ).rejects.toThrow('Design creation persistence failure');
@@ -540,8 +642,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create a page.',
-        creationToken: 'design-reference-rollback-create'
+        creationToken: 'design-reference-rollback-create',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     const draft = await store.createAttachmentDraft();
@@ -585,8 +689,10 @@ describe('FileTaskStore Design ownership', () => {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
-        creationToken: 'design-request-turn-rollback'
+        creationToken: 'design-request-turn-rollback',
+        runtimeId: 'codex'
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.settleDesignTurn({
@@ -635,21 +741,26 @@ describe('FileTaskStore Design ownership', () => {
     await store.close();
   });
 
-  it('rejects a persisted Design that weakens its restricted execution settings', async () => {
+  it('rejects a persisted Design whose execution settings name another runtime', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-policy-'));
     const storePath = path.join(dir, 'store.json');
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create a safe page.', creationToken: 'design-request-0004' },
+      request: {
+        brief: 'Create a safe page.',
+        creationToken: 'design-request-0004',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.close();
 
     const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      tasks: Array<{ id: string; agentSettings: { approvalPolicy?: string } }>;
+      tasks: Array<{ id: string; agentSettings: { runtimeId?: string } }>;
     };
-    persisted.tasks.find((task) => task.id === created.task.id)!.agentSettings.approvalPolicy =
-      'on-request';
+    persisted.tasks.find((task) => task.id === created.task.id)!.agentSettings.runtimeId =
+      'another-runtime';
     await fs.writeFile(storePath, `${JSON.stringify(persisted)}\n`, 'utf8');
 
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
@@ -662,7 +773,12 @@ describe('FileTaskStore Design ownership', () => {
     const storePath = path.join(dir, 'store.json');
     const store = new FileTaskStore(dir);
     const created = await store.createDesignBundle({
-      request: { brief: 'Create a safe page.', creationToken: 'design-request-lineage' },
+      request: {
+        brief: 'Create a safe page.',
+        creationToken: 'design-request-lineage',
+        runtimeId: 'codex'
+      },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     await store.close();
@@ -695,72 +811,6 @@ describe('FileTaskStore Design ownership', () => {
     );
   });
 
-  it.each(['session', 'run'] as const)(
-    'rejects a persisted Design whose %s weakens restricted execution settings',
-    async (owner) => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-design-${owner}-policy-`));
-      const storePath = path.join(dir, 'store.json');
-      const store = new FileTaskStore(dir);
-      const created = await store.createDesignBundle({
-        request: {
-          brief: 'Create a restricted page.',
-          creationToken: `design-request-${owner}-policy`
-        },
-        repository: managedRepository(dir)
-      });
-      const { iteration, worktree } = await store.createIterationAndWorktree({
-        task: created.task,
-        branchName: `task-monki/design-${owner}-policy`,
-        worktreePath: path.join(dir, 'worktree'),
-        baseSha: COMMIT
-      });
-      const session = await store.createAgentSession({
-        task: created.task,
-        iteration,
-        worktree,
-        runtimeId: 'codex',
-        requestedSettings: created.task.agentSettings
-      });
-      const run = await store.createRun({
-        task: created.task,
-        session,
-        mode: 'DESIGN',
-        generationKey: created.turn.id,
-        prompt: created.task.prompt,
-        requestedSettings: created.task.agentSettings
-      });
-      await store.linkDesignTurnRun({
-        designId: created.task.id,
-        turnId: created.turn.id,
-        runId: run.id
-      });
-      await store.close();
-
-      const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-        agentSessions: Array<{
-          id: string;
-          requestedSettings: { networkAccess?: boolean };
-        }>;
-        runs: Array<{
-          id: string;
-          requestedSettings: { networkAccess?: boolean };
-        }>;
-      };
-      const record =
-        owner === 'session'
-          ? persisted.agentSessions.find((candidate) => candidate.id === session.id)
-          : persisted.runs.find((candidate) => candidate.id === run.id);
-      record!.requestedSettings.networkAccess = true;
-      await fs.writeFile(storePath, `${JSON.stringify(persisted)}\n`, 'utf8');
-
-      await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
-        owner === 'session'
-          ? 'Design session execution policy is inconsistent'
-          : 'Design Run execution policy is inconsistent'
-      );
-    }
-  );
-
   it('keeps DESIGN runs out of task phases and atomically settles Preview plus revision', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-cutover-'));
     let store = new FileTaskStore(dir);
@@ -775,8 +825,10 @@ describe('FileTaskStore Design ownership', () => {
       request: {
         brief: 'Build a compact launch page.',
         creationToken: 'design-request-0003',
+        runtimeId: 'codex',
         attachmentDraftId: attachmentDraft.id
       },
+      agentSettings: DESIGN_AGENT_SETTINGS,
       repository: managedRepository(dir)
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -785,7 +837,7 @@ describe('FileTaskStore Design ownership', () => {
       worktreePath: path.join(dir, 'worktree'),
       baseSha: COMMIT
     });
-    const session = await store.createAgentSession({
+    const session = await createTestAgentSession(store, {
       task: created.task,
       iteration,
       worktree,
@@ -793,7 +845,7 @@ describe('FileTaskStore Design ownership', () => {
       requestedSettings: created.task.agentSettings
     });
     const beforeRun = await store.getTask(created.task.id);
-    const run = await store.createRun({
+    const run = await createTestRun(store, {
       task: created.task,
       session,
       mode: 'DESIGN',
@@ -806,21 +858,16 @@ describe('FileTaskStore Design ownership', () => {
       phaseVersion: beforeRun!.phaseVersion,
       currentRunId: run.id
     });
-    await expect(
-      store.createRun({
-        task: created.task,
-        session,
-        mode: 'DESIGN',
-        generationKey: created.turn.id,
-        prompt: created.task.prompt
-      })
-    ).rejects.toThrow('already exists');
     await store.linkDesignTurnRun({
       designId: created.task.id,
       turnId: created.turn.id,
       runId: run.id
     });
-    await store.updateRun(run.id, {
+    await updateTestRun(store, run.id, {
+      status: 'STARTING',
+      providerTurnId: 'design-cutover-turn'
+    });
+    await updateTestRun(store, run.id, {
       status: 'COMPLETED',
       finalMessage: 'The launch page is ready.',
       endedAt: new Date().toISOString()
@@ -833,7 +880,7 @@ describe('FileTaskStore Design ownership', () => {
       repositoryPath: created.repository.path,
       branchName: worktree.branchName
     });
-    await store.updateRun(run.id, { afterGitSnapshotId: evidence.id });
+    await updateTestRun(store, run.id, { afterGitSnapshotId: evidence.id });
     await store.updateDesignTurnCheckpoint({
       designId: created.task.id,
       turnId: created.turn.id,
@@ -888,8 +935,10 @@ describe('FileTaskStore Design ownership', () => {
       })
     ).rejects.toThrow('Invalid Design turn checkpoint transition');
     await store.savePreviewGeneration({ ...firstCandidate, state: 'STOPPED' });
+    await runtimeFixture(store).store.close();
     await store.close();
     store = new FileTaskStore(dir);
+    runtimeFixture(store);
     await expect(
       store.updateDesignTurnCheckpoint({
         designId: created.task.id,
@@ -1052,7 +1101,7 @@ describe('FileTaskStore Design ownership', () => {
     });
 
     for (let index = 0; index < 105; index += 1) {
-      await store.upsertAgentItem({
+      await upsertTestAgentItem(store, {
         taskId: created.task.id,
         iterationId: iteration.id,
         runId: run.id,
@@ -1104,8 +1153,10 @@ describe('FileTaskStore Design ownership', () => {
     await store.failDesignSourceAction(archivedCopy.action!.id, 'Stop the archived copy test.');
     await store.deleteTaskAndReleaseManagedRepository(archivedCopy.task.id);
 
+    await runtimeFixture(store).store.close();
     await store.close();
     const restarted = new FileTaskStore(dir);
+    const restartedRuntime = runtimeFixture(restarted);
     await expect(restarted.getDesignDetail(created.task.id)).resolves.toMatchObject({
       revisions: [expect.objectContaining({ id: settled.revision!.id })]
     });
@@ -1114,6 +1165,7 @@ describe('FileTaskStore Design ownership', () => {
     expect(removable.design.status).toBe('ARCHIVED');
     expect(removable.canvas.state).toBe('RESTART_REQUIRED');
     expect(removable.actions.canDelete).toBe(true);
+    await restartedRuntime.store.purgeTask(created.task.id);
     await expect(
       restarted.deleteTaskAndReleaseManagedRepository(created.task.id)
     ).resolves.toEqual({ removedManagedRepository: created.repository });
@@ -1242,6 +1294,138 @@ async function recordDesignGitSnapshot(
       status: 'CLEAN'
     },
     ''
+  );
+}
+
+function runtimeFixture(store: FileTaskStore): {
+  store: FileAgentRuntimeStore;
+  task: TaskAgentRuntimeAccess;
+} {
+  const current = runtimeByTaskStore.get(store);
+  if (current) return current;
+  const runtimeStore = new FileAgentRuntimeStore(
+    path.join(store.getStorageRoot(), '.test-agent-runtime')
+  );
+  const task = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+    store.recordAgentRuntimeEvent(event, operationId)
+  );
+  store.bindAgentRuntime(task);
+  const fixture = { store: runtimeStore, task };
+  runtimeByTaskStore.set(store, fixture);
+  runtimeFixtures.add(runtimeStore);
+  return fixture;
+}
+
+async function createTestAgentSession(
+  store: FileTaskStore,
+  input: {
+    task: Task;
+    iteration: TaskIteration;
+    worktree: WorktreeRecord;
+    runtimeId: string;
+    requestedSettings?: AgentExecutionSettings;
+  }
+): Promise<AgentSessionRecord> {
+  const id = randomUUID();
+  const operationId = `test:session:${id}`;
+  const requestedSettings = {
+    ...(input.requestedSettings ?? input.task.agentSettings),
+    runtimeId: input.runtimeId,
+    model: input.requestedSettings?.model ?? input.task.agentSettings.model ?? 'test-model'
+  };
+  const permissionProfileHash = createHash('sha256')
+    .update(JSON.stringify({ id, path: input.worktree.worktreePath, requestedSettings }))
+    .digest('hex');
+  const session = await runtimeFixture(store).task.createTaskSession({
+    id,
+    taskId: input.task.id,
+    iterationId: input.iteration.id,
+    worktreeId: input.worktree.id,
+    worktreePath: input.worktree.worktreePath,
+    runtimeId: input.runtimeId,
+    requestedSettings,
+    executionContext: {
+      attestation: { status: 'ATTESTED' },
+      repositoryAccess: 'WRITE',
+      primaryCwd: input.worktree.worktreePath,
+      readRoots: [{
+        canonicalPath: input.worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: input.worktree.id
+      }],
+      managedAttachments: [],
+      permissionProfileHash,
+      modelSettings: requestedSettings,
+      externalTools: {
+        network: requestedSettings.networkAccess === true,
+        webSearch: 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: input.task.kind === 'DESIGN'
+      },
+      clientOperationId: operationId
+    },
+    operationId
+  });
+  await store.recordAgentSessionCreated(session);
+  return session;
+}
+
+async function createTestRun(
+  store: FileTaskStore,
+  input: {
+    task: Task;
+    session: AgentSessionRecord;
+    mode: AgentRunMode;
+    prompt: string;
+    generationKey?: string;
+    requestedSettings?: AgentExecutionSettings;
+  }
+): Promise<RunRecord> {
+  const id = randomUUID();
+  const attachmentSelection = toAgentAttachmentSelectionFromRecords(
+    await store.getTurnAttachments({
+      taskId: input.task.id,
+      mode: input.mode,
+      generationKey: input.generationKey
+    })
+  );
+  const run = await runtimeFixture(store).task.createTaskRun({
+    id,
+    taskId: input.task.id,
+    iterationId: input.session.iterationId,
+    worktreeId: input.session.worktreeId,
+    sessionId: input.session.id,
+    mode: input.mode,
+    prompt: input.prompt,
+    generationKey: input.generationKey,
+    requestedSettings: input.requestedSettings,
+    attachmentSelection,
+    operationId: `test:run:${id}`
+  });
+  await store.recordAgentRunStarted(run);
+  return run;
+}
+
+function updateTestRun(
+  store: FileTaskStore,
+  runId: string,
+  update: Partial<RunRecord>
+): Promise<RunRecord> {
+  return runtimeFixture(store).task.updateRun(
+    runId,
+    update,
+    `test:run-update:${randomUUID()}`
+  );
+}
+
+function upsertTestAgentItem(
+  store: FileTaskStore,
+  item: Parameters<TaskAgentRuntimeAccess['upsertAgentItem']>[0]
+) {
+  return runtimeFixture(store).task.upsertAgentItem(
+    item,
+    `test:item:${randomUUID()}`
   );
 }
 

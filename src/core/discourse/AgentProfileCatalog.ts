@@ -3,6 +3,7 @@ import type {
   AgentRuntimeCatalog,
   AgentRuntimeState
 } from '../../shared/agent';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import type {
   AgentProfileCatalogEntry,
   AgentProfileCatalogSnapshot,
@@ -74,7 +75,7 @@ export class AgentProfileCatalog {
           catalog.runtimes.find(
             (runtime) => runtime.preflight.runtime.id === settings.defaultRuntimeId
           ) ?? catalog.runtimes[0]
-        ) ?? 'No agent can confirm the read-only, offline access required by Discourse.';
+        );
     return {
       profiles: BUILT_IN_PROFILES.map((profile): AgentProfileCatalogEntry => ({
         profile: { ...profile },
@@ -210,7 +211,7 @@ function resolveCatalogSettings(
     runtimeId: selectedRuntime.preflight.runtime.id,
     modelId: selected.id,
     model: selected.model,
-    modelProvider: selected.modelProvider ?? selected.runtimeId,
+    ...(selected.modelProvider ? { modelProvider: selected.modelProvider } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(selected.defaultServiceTier ? { serviceTier: selected.defaultServiceTier } : {})
   };
@@ -221,22 +222,13 @@ export function discourseRuntimeUnavailableReason(
 ): string | undefined {
   if (!runtime) return 'The selected agent connection is not configured.';
   if (!runtime.preflight.readiness.canStart) {
-    return 'The selected agent is unavailable. Check its connection in Settings.';
+    return runtime.preflight.readiness.detail;
   }
-  const discourseCapability = runtime.preflight.capabilities.extensions['task-monki.discourse'];
-  if (discourseCapability?.maturity !== 'stable') {
-    return 'This agent cannot confirm the read-only, offline access required by Discourse.';
-  }
-  const readOnlyPreset = runtime.preflight.capabilities.executionPolicy.presets.find(
-    (preset) =>
-      preset.sandbox === 'READ_ONLY' &&
-      preset.networkAccess === 'DISABLED' &&
-      preset.approvalPolicy.toLowerCase() === 'never'
+  const support = projectAgentExecutionSupport(
+    runtime.preflight.capabilities,
+    'DISCOURSE'
   );
-  if (!readOnlyPreset) {
-    return 'This agent cannot confirm the read-only, offline access required by Discourse.';
-  }
-  return undefined;
+  return support.supported ? undefined : support.reason;
 }
 
 function orderedRuntimes(
@@ -266,6 +258,6 @@ export function discourseModelMatches(
   return (
     model.runtimeId === revision.runtimeId &&
     model.model === revision.model &&
-    (model.modelProvider ?? model.runtimeId) === revision.modelProvider
+    model.modelProvider === revision.modelProvider
   );
 }

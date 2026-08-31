@@ -14,10 +14,13 @@ import {
   designTurnView,
   designWorkspaceLayout,
   designWorkspaceIsCompact,
+  designModelUnavailableReason,
   eligibleDesignRuntimeCatalog,
+  designRuntimeUnavailableReason,
   finiteDesignCanvasBounds,
   mergeDesignConversationPage,
   mergeDesignDetailHistory,
+  qualifiedDesignModels,
   sortedDesignProjects,
   visibleDesignProjects,
   type DesignProjectDetail
@@ -265,7 +268,7 @@ describe('Design workspace view model', () => {
     ).toMatchObject({ status: 'CANCELED', statusLabel: 'Stopped' });
   });
 
-  it('keeps only runtimes with Design instructions, attachments, skills, and Stop', () => {
+  it('keeps unsupported runtimes and models visible while qualifying Design defaults', () => {
     const supported = runtimeState('codex', codexCapabilities());
     const unsupportedStop = runtimeState('without-stop', {
       ...codexCapabilities(),
@@ -290,7 +293,18 @@ describe('Design workspace view model', () => {
           id: 'codex:model',
           runtimeId: 'codex',
           model: 'model',
-          inputModalities: ['text', 'image']
+          inputModalities: ['text', 'image'],
+          designSupport: { maturity: 'stable' }
+        },
+        {
+          id: 'codex:unqualified',
+          runtimeId: 'codex',
+          model: 'unqualified',
+          inputModalities: ['text', 'image'],
+          designSupport: {
+            maturity: 'unsupported',
+            detail: 'This exact model failed Design verification.'
+          }
         }
       ],
       defaultRuntimeId: 'without-stop'
@@ -298,9 +312,108 @@ describe('Design workspace view model', () => {
 
     expect(eligibleDesignRuntimeCatalog(catalog)).toMatchObject({
       defaultRuntimeId: 'codex',
-      runtimes: [supported],
-      models: [{ runtimeId: 'codex' }]
+      runtimes: [unsupportedStop, unsupportedAttachments, supported],
+      models: [
+        { id: 'stop:model' },
+        { id: 'attachments:model' },
+        { id: 'codex:model' },
+        { id: 'codex:unqualified' }
+      ]
     });
+    expect(qualifiedDesignModels(catalog.runtimes, catalog.models)).toEqual([
+      expect.objectContaining({ id: 'codex:model' })
+    ]);
+    expect(designRuntimeUnavailableReason(unsupportedStop, [])).toContain(
+      'cannot apply Design instructions'
+    );
+  });
+
+  it('keeps explicit model discovery available before a Design model is qualified', () => {
+    const capabilities = {
+      ...codexCapabilities(),
+      runtimeId: 'cursor-agent-acp',
+      modelCatalog: {
+        ...codexCapabilities().modelCatalog,
+        activation: 'EXPLICIT' as const
+      }
+    };
+    const runtime = runtimeState('cursor-agent-acp', capabilities);
+    runtime.models = [
+      {
+        id: 'cursor-agent-acp:auto',
+        runtimeId: 'cursor-agent-acp',
+        model: 'auto',
+        inputModalities: ['text']
+      }
+    ] as AgentRuntimeCatalog['models'];
+    runtime.preflight.readiness.checks.modelCatalog = 'UNKNOWN';
+    const catalog = {
+      runtimes: [runtime],
+      models: runtime.models,
+      defaultRuntimeId: 'cursor-agent-acp'
+    } as AgentRuntimeCatalog;
+
+    expect(eligibleDesignRuntimeCatalog(catalog)).toMatchObject({
+      runtimes: [{ preflight: { runtime: { id: 'cursor-agent-acp' } } }],
+      models: [{ id: 'cursor-agent-acp:auto' }]
+    });
+    expect(designRuntimeUnavailableReason(runtime, runtime.models)).toBeUndefined();
+  });
+
+  it('keeps an exact unqualified model reason without qualifying the model', () => {
+    const runtime = runtimeState('codex', codexCapabilities());
+    runtime.models = [{
+      id: 'codex:unqualified',
+      runtimeId: 'codex',
+      model: 'unqualified',
+      inputModalities: ['text', 'image'],
+      designSupport: {
+        maturity: 'unsupported',
+        detail: 'This exact provider version and model failed Design verification.'
+      }
+    }] as AgentRuntimeCatalog['models'];
+    const catalog = {
+      runtimes: [runtime],
+      models: runtime.models,
+      defaultRuntimeId: 'codex'
+    } as AgentRuntimeCatalog;
+
+    expect(eligibleDesignRuntimeCatalog(catalog)).toMatchObject({
+      runtimes: [{ preflight: { runtime: { id: 'codex' } } }],
+      models: [{ id: 'codex:unqualified' }]
+    });
+    expect(qualifiedDesignModels([runtime], runtime.models)).toEqual([]);
+    expect(designModelUnavailableReason(runtime, runtime.models[0]!)).toBe(
+      'This exact provider version and model failed Design verification.'
+    );
+    expect(designRuntimeUnavailableReason(runtime, runtime.models)).toBe(
+      'This exact provider version and model failed Design verification.'
+    );
+  });
+
+  it('does not choose an unavailable runtime as the Design default', () => {
+    const unavailable = runtimeState('offline', codexCapabilities());
+    unavailable.preflight.readiness.canStart = false;
+    unavailable.preflight.readiness.detail = 'Sign in to this provider.';
+    const ready = runtimeState('ready', {
+      ...codexCapabilities(),
+      runtimeId: 'ready'
+    });
+    const models = [unavailable, ready].map((runtime) => ({
+      id: `${runtime.preflight.runtime.id}:model`,
+      runtimeId: runtime.preflight.runtime.id,
+      model: 'model',
+      inputModalities: ['text', 'image'],
+      designSupport: { maturity: 'stable' as const }
+    })) as AgentRuntimeCatalog['models'];
+
+    expect(
+      eligibleDesignRuntimeCatalog({
+        runtimes: [unavailable, ready],
+        models,
+        defaultRuntimeId: 'offline'
+      } as AgentRuntimeCatalog).defaultRuntimeId
+    ).toBe('ready');
   });
 
   it('prepends transcript pages and keeps them across live detail refreshes', () => {

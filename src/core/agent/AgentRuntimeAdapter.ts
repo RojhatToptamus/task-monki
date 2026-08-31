@@ -17,8 +17,20 @@ import type {
   AgentInstructionProfile,
   InteractionRequestRecord
 } from '../../shared/agent';
-import type { RefinePromptResponse } from '../../shared/contracts';
 import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
+import type {
+  AgentAttachmentSelection,
+  AttachmentSubmissionRecord
+} from '../../shared/attachments';
+import type {
+  AgentExecutionContext,
+  AgentRuntimeRunRecord,
+  AgentRuntimeSessionRecord
+} from '../../shared/agentRuntime';
+import type {
+  AgentRuntimeTurnEvent,
+  BuildAgentRuntimeExecutionContextInput
+} from './AgentRuntimeCoordinator';
 
 export interface CreateAgentSession {
   runtimeId: AgentRuntimeId;
@@ -27,10 +39,12 @@ export interface CreateAgentSession {
   iterationId: string;
   worktreeId: string;
   worktreePath: string;
+  mode?: AgentRunMode;
+  instructionProfile?: AgentInstructionProfile;
   settings: AgentExecutionSettings;
   /**
-   * Storage-verified task attachments whose exact managed paths must be part
-   * of a provider session's initial confinement boundary.
+   * Storage-verified task attachments used to qualify the initial session.
+   * Each adapter owns any session-scoped access and turn transport.
    */
   attachments?: AgentTurnAttachment[];
 }
@@ -72,13 +86,6 @@ export interface ForkAgentSession {
   sourceSession: AgentSessionRef;
   localSessionId: string;
   settings: AgentExecutionSettings;
-}
-
-export interface StartAgentReview {
-  localRunId: string;
-  sourceSession: AgentSessionRef;
-  reviewSessionId: string;
-  target: AgentReviewTarget;
   attachments?: AgentTurnAttachment[];
 }
 
@@ -100,23 +107,15 @@ export interface AgentReconciliationResult {
 
 export interface ResolveAgentExecution {
   settings: AgentExecutionSettings;
-  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[];
+  attachments: readonly Pick<
+    AgentAttachmentSelection,
+    'kind' | 'mediaType' | 'byteCount' | 'sha256'
+  >[];
 }
 
 export interface ResolvedAgentExecution {
   settings: AgentExecutionSettings;
   model: AgentModel;
-}
-
-export interface RefineAgentPrompt {
-  requestId: string;
-  repositoryPath: string;
-  input: string;
-  title?: string;
-  settings: AgentExecutionSettings;
-  refinementModel: AgentModel;
-  targetModel?: AgentModel;
-  attachments: AgentTurnAttachment[];
 }
 
 export class AgentMutationAmbiguousError extends Error {
@@ -137,6 +136,34 @@ export class AgentProviderSessionMissingError extends Error {
     super(message);
     this.name = 'AgentProviderSessionMissingError';
   }
+}
+
+export class AgentRuntimeDeliveryError extends Error {
+  constructor(
+    readonly delivery: 'NOT_DELIVERED' | 'AMBIGUOUS',
+    message: string,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+    this.name = 'AgentRuntimeDeliveryError';
+  }
+}
+
+export interface StartAgentRuntimeTurn {
+  session: AgentRuntimeSessionRecord;
+  run: AgentRuntimeRunRecord;
+  executionContext: AgentExecutionContext;
+  prompt: string;
+  attachments: readonly AgentTurnAttachment[];
+}
+
+export interface StartedAgentRuntimeTurn {
+  serverInstanceId: string;
+  providerSessionId: string;
+  providerSessionTreeId?: string;
+  providerTurnId: string;
+  startedAt: string;
+  attachmentSubmissions?: AttachmentSubmissionRecord[];
 }
 
 export interface AgentRuntimeAdapter {
@@ -160,8 +187,20 @@ export interface AgentRuntimeAdapter {
     restart: boolean;
   }): Promise<void>;
   resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution>;
-  refinePrompt?(input: RefineAgentPrompt): Promise<RefinePromptResponse>;
-  cancelPromptRefinement?(requestId: string): Promise<void>;
+  /** Owner-neutral lifecycle used by workflows with an attested execution context. */
+  buildExecutionContext?(
+    input: BuildAgentRuntimeExecutionContextInput
+  ): Promise<AgentExecutionContext>;
+  startRuntimeTurn?(
+    input: StartAgentRuntimeTurn
+  ): Promise<StartedAgentRuntimeTurn>;
+  interruptRuntimeTurn?(input: {
+    session: AgentRuntimeSessionRecord;
+    run: AgentRuntimeRunRecord;
+  }): Promise<void>;
+  onRuntimeTurnEvent?(
+    listener: (event: AgentRuntimeTurnEvent) => void
+  ): () => void;
   createSession(input: CreateAgentSession): Promise<AgentSessionRecord>;
   attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord>;
   /** Release runtime resources without deleting the provider-owned conversation. */
@@ -171,13 +210,10 @@ export interface AgentRuntimeAdapter {
   steerTurn?(input: SteerAgentTurn): Promise<void>;
   interruptTurn?(input: InterruptAgentTurn): Promise<void>;
   forkSession?(input: ForkAgentSession): Promise<AgentSessionRecord>;
-  startReview?(input: StartAgentReview): Promise<AgentTurn>;
   syncGoal?(input: SyncAgentGoal): Promise<AgentGoalSnapshotRecord>;
   respondToInteraction(input: AgentInteractionResponse): Promise<void>;
   /** Release runtime-owned processes/streams for a task after Task Monki proves no work is active. */
   releaseTask?(taskId: string): Promise<void>;
-  /** Permanently delete provider history owned by a task. Unsupported runtimes must fail closed. */
-  deleteTaskProviderHistory?(taskId: string): Promise<void>;
   reconcile(): Promise<AgentReconciliationResult>;
   shutdown(): Promise<void>;
 }

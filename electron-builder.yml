@@ -20,10 +20,10 @@ extraResources:
     to: native-preview-launcher.mjs
   - from: src/core/preview/runtime/managed-design-static-server.mjs
     to: managed-design-static-server.mjs
+  - from: src/core/design/runtime/design-tool-mcp-server.mjs
+    to: design-tool-mcp-server.mjs
   - from: src/core/process/owned-process-launcher.mjs
     to: owned-process-launcher.mjs
-  - from: build/icon.png
-    to: icon.png
   - from: LICENSE
     to: legal/LICENSE
   - from: THIRD_PARTY_NOTICES.md

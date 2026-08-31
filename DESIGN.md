@@ -144,11 +144,11 @@ resting separation of the thing it is applied to.
 | State | Treatment |
 |---|---|
 | hover | One small fill step in the direction the element already sits — `--hover` on a transparent row, `--field-hover` on a control, `--card-hover` on a card. Never on a text surface; never a shadow change; never another role's token. |
-| focus | Text surfaces: `--field-focus` fill plus a 1px inset `--field-focus-line`. Quiet, and it fires however focus arrived — including a plain pointer click. |
+| focus | Text surfaces: `--field-focus` fill plus the resting rim strengthened to `--field-edge-focus` — **neutral, never the accent hue**. Quiet, and it fires however focus arrived — including a plain pointer click. |
 | focus-visible | Keyboard traversal only: adds the 3px `--focus-ring` halo. This is the one loud state in the system, and a mouse click must never produce it. |
 | active | `--press` over the rest fill. The primary family, whose fill is already ink, uses `--primary-press` — an ink overlay on an ink fill is invisible. |
 | selected | `--sel`, one fixed rung: above the hover step, below `--card`. Identical weight in every theme. |
-| disabled | `--field-disabled` fill and `--text-disabled` ink. **Never use opacity or a weaker boundary.** A disabled control is *inert*, not *absent*. Its `--control-edge` or `--field-edge` stays at full strength. |
+| disabled | `--field-disabled` fill and `--text-disabled` ink. **Never an opacity, and never a weaker boundary** — a disabled control reads *inert*, not *absent*, so its `--control-edge` or `--field-edge` stays at full strength. |
 
 Inactive-but-enabled is expressed as **ink** — `--muted` text with no fill — never
 as opacity on a full-strength row.
@@ -205,6 +205,7 @@ planes.
   |---|---|---|
   | `--hair` | an **interior divider** — content continuing on the same plane | rows in a list, a footer inside a card, a settings separator |
   | `--field-edge` | the **resting boundary of a filled control** | input, textarea, composer, select trigger, segmented track, secondary button |
+  | `--field-edge-focus` | the same rim while the control **holds focus** — one notch darker/lighter, same hue-free ink | focused input, textarea, composer |
   | `--edge-raised` | the boundary of an **object** resting on its plane | card, panel, response, decision block |
   | `--edge` | a **seam** between structural planes, and **floating** layers | rail↔sheet, drawer edge, menu, popover, modal, tooltip |
 
@@ -214,24 +215,25 @@ planes.
 
 - **A line states the ratio it must clear, not its alpha.** Each weight is solved
   per theme and per mode against **both** surfaces it separates — `--hair`
-  1.14:1, `--field-edge` 1.21–1.24:1, `--edge-raised` 1.22–1.30:1, `--edge`
-  1.36–1.40:1. A fixed alpha does not land the same way twice: 0.10 over ink on a
+  1.14:1, `--field-edge` 1.21–1.24:1, `--field-edge-focus` 1.75–1.90:1,
+  `--edge-raised` 1.22–1.30:1, `--edge` 1.36–1.40:1. A fixed alpha does not land the same way twice: 0.10 over ink on a
   near-black ground is a clear rim, and the same 0.10 inside a light menu at
   L* 22 is nothing.
 - **A filled control carries exactly one line: `--field-edge`.** The fill step is
   what says *recessed*; the rim is what says *where*. It is an inset 1px
-  box-shadow, never a border, so no geometry moves between rest, hover and focus,
-  and the focus ring **replaces** it rather than stacking with it. What §11 still
-  rejects is two lines on one control, or a line drawn **instead of** the fill
-  step. An object — something with a boundary that sits above its plane and could
+  box-shadow, never a border, so no geometry moves between rest, hover and focus.
+  Focus does not add a second line and does not recolour this one — it swaps the
+  same rim to `--field-edge-focus`, one notch up in the identical neutral ink.
+  What §11 still rejects is two lines on one control, or a line drawn **instead
+  of** the fill step. An object — something with a boundary that sits above its plane and could
   conceptually be picked up — gets `--edge-raised` instead.
 - **Polarity is automatic, and it is the whole reason this works in both modes.**
   All three tokens are alpha over `ink`, so the same token is a dark hairline in
   light mode and a light rim in dark mode. That is not a trick, it is the right
   physics: in light mode an object's edge is where it *casts* shade, in dark mode
   it is where it *catches* light. Light mode pairs the hairline with a soft
-  shadow. Dark mode uses the hairline alone because a cast shadow is invisible
-  on near-black at a 1px scale.
+  shadow; dark mode uses the hairline alone, because a cast shadow on near-black
+  is invisible at a 1px scale.
 - **Where the plane changes, no divider.** The fill already said it. Two lines
   within 14px of each other means one of them is wrong. A hairline over the sheet
   is a larger local step than the card step above it, so an interior line is the
@@ -243,12 +245,12 @@ planes.
   and panels cast nothing, because a shadow on near-black is invisible and the
   attempt produces mud. A hover never crosses shadow tiers: `--shadow-pop` on a
   card that has not left the sheet is the loudest mistake available here.
-- **Neither mode may depend on a cue that the other mode removes.** Dark mode
-  has no cast shadow. Light mode has a compressed fill step near white. Each
-  distinct object uses two cues in each mode, and the cues can differ by mode.
-  Dark mode uses the fill step and `--edge-raised`. Light mode uses
-  `--edge-raised` and the shadow. A container with only `--shadow-panel` is
-  invisible in dark. A container with only a fill step is invisible in light.
+- **Neither mode may depend on a cue the other one zeroes out.** Dark has no cast
+  shadow; light has a compressed fill step near white. So anything that must read
+  as a distinct object carries **two** cues in each mode, and they are not the
+  same two: dark leans on the fill step plus `--edge-raised`, light on
+  `--edge-raised` plus the shadow. A container drawn only with `--shadow-panel`
+  is invisible in dark; one drawn only with a fill step is invisible in light.
 - **Every light-mode shadow is two layers**: a 1–4px contact shadow that sets the
   object *on* the plane, plus a wider ambient one. One blurred layer at the same
   total weight reads as a smudge; two read as a resting object. In dark mode a
@@ -257,10 +259,21 @@ planes.
   near-black.
 - **Focus, two treatments, and the loud one is keyboard-only:**
   1. Any focus on a text surface, including a pointer click, moves the fill to
-     `--field-focus` and draws a 1px inset `--field-focus-line`. That is the
-     quiet confirmation the caret landed; it is not a ring.
+     `--field-focus` and strengthens the resting rim from `--field-edge` to
+     `--field-edge-focus` — the same neutral ink, one notch up, same 1px inset
+     box-shadow. That is the quiet confirmation the caret landed; it is not a
+     ring, and it carries **no hue**.
   2. `:focus-visible` — keyboard traversal — adds the 3px `--focus-ring` halo,
-     where the job is to *find* the caret rather than confirm it.
+     where the job is to *find* the caret rather than confirm it. This is the
+     only place the accent hue appears in a focus state, it sits **outside** the
+     control, and a pointer click must never produce it.
+
+  **The accent hue is not a focus cue on a resting control.** A coloured rim
+  around whatever the caret happens to be in reads as an alert, not as focus: it
+  puts the loudest colour in the theme on the most ordinary event in the app, and
+  every field on screen competes with it. Hue on a control boundary is reserved
+  for meaning that is *about the value* — `--blocked` for a failed field,
+  `--waiting` for one under review. Retired: `--field-focus-line`.
 
   Buttons and other non-text controls show nothing from a pointer click and the
   halo from the keyboard. Geometry never shifts when focus appears. Heavy
@@ -527,7 +540,8 @@ inset 1px box-shadow — separated from its host by ≥2.5 L* so the fill still
 carries it on both a sheet and a card, with the rim making the boundary
 unambiguous where the two planes are close. Single-line controls are
 `--h-control` tall with `--r-sm`. Hover lifts to `--field-hover`; focus per §2.6
-and the focus line replaces the resting rim rather than stacking; placeholder is
+— `--field-focus` fill and the same rim swapped to the neutral
+`--field-edge-focus`, never an accent border; placeholder is
 `--placeholder` (= `--muted`). Label above at `--t-label`/600, help text below at
 `--t-help` `--muted`, error text replaces help text and carries `--blocked-ink`.
 Never rely on placeholder as the label.
@@ -746,6 +760,9 @@ invisible to review and trivial to check in the inspector.
 - [ ] `--muted`, `--placeholder` and every status ink measured ≥4.5:1 against the
       actual surface behind them, in both modes — pills against their own tint.
 - [ ] No control shifts size or position between rest, hover, focus and active.
+- [ ] No focused field carries an accent-coloured rim: the focus boundary is
+      `--field-edge-focus`, and the only hue in a focus state is the keyboard-only
+      `--focus-ring` sitting outside the control.
 - [ ] No `opacity` expressing a state. Disabled uses `--field-disabled` and
       `--text-disabled`.
 - [ ] Every state step measured smaller than the resting separation of the thing
@@ -809,7 +826,12 @@ invisible to review and trivial to check in the inspector.
   another role's token (`--field-hover` on a card).
 - A shadow tier change on hover; any shadow at all on a dark card.
 - A focus ring, heavy outline or border-width change from a pointer click.
+- **An accent-coloured border, rim or outline on a focused input, textarea,
+  composer or select.** The focus rim is neutral (`--field-edge-focus`); hue on a
+  control boundary means the value is blocked or waiting, nothing else.
 - `--field-focus` equal to `--field-hover`: focus must outrank hover.
+- `--field-edge-focus` within 0.25 of `--field-edge`'s ratio: the swap must be
+  visible without being loud.
 - A new token that resolves to an existing one in every theme.
 
 **Borders**
@@ -942,7 +964,7 @@ correct answer far more often than a border is).
 | Any other button, disabled | `--field-disabled` | `--text-disabled` | — |
 | Input / textarea, rest | `--field` | `--text` | `--field-edge` inset 1px |
 | Input, hover (single-line only) | `--field-hover` | `--text` | — |
-| Input, focus (any) | `--field-focus` | `--text` | `--field-focus-line` inset 1px |
+| Input, focus (any) | `--field-focus` | `--text` | `--field-edge-focus` inset 1px (neutral) |
 | Input, focus-visible | `--field-focus` | `--text` | + `--focus-ring` 3px |
 | Input, error | `--field` | `--text` | `--blocked` inset 1px |
 | Input, disabled | `--field-disabled` | `--text-disabled` | — |
@@ -955,21 +977,16 @@ correct answer far more often than a border is).
 | Select trigger | `--field` | `--text`, chevron `--muted` | as input |
 | Checkbox / radio, unchecked | `--field` | — | `--control-edge` inset 1px |
 | Checkbox / radio, checked | `--accent` | `--on-primary` | — |
+| Toggle track, off | `--field` | `--control-edge` inset 1px | — |
+| Toggle track, on | `--accent` | — (the fill is unmistakable) | — |
+| Toggle track, disabled | `--field-disabled` | `--control-edge` inset 1px | — |
+| Toggle knob, off / disabled | `--overlay` | `--edge-raised` inset 1px | `--shadow-card` |
+| Toggle knob, on | `--on-primary` | `--edge-raised` inset 1px | `--shadow-card` |
 | Slider track / fill / knob | `--field` / `--accent` / `--card` | — | — |
 | Search field | `--field` | `--text`, icon `--faint` | as input |
 | Filter chip, rest / active | `--field` / `--sel` | `--muted` / `--text` | — |
 | Tab, inactive / active | — / `--sel` | `--muted` / `--text` | — |
 | Keyboard hint (⌘↵) | `--field` | `--faint` | — |
-
-Toggle roles keep fill, rim, and shadow separate:
-
-| Element | Fill | Rim | Shadow |
-|---|---|---|---|
-| Track, off | `--field` | `--control-edge` inset 1px | — |
-| Track, on | `--accent` | — (the fill is unmistakable) | — |
-| Track, disabled | `--field-disabled` | `--control-edge` inset 1px | — |
-| Knob, off / disabled | `--overlay` | `--edge-raised` inset 1px | `--shadow-card` |
-| Knob, on | `--on-primary` | `--edge-raised` inset 1px | `--shadow-card` |
 
 ### A.5 Rows and tables
 
@@ -1009,7 +1026,7 @@ inside it reads as a second fact.
 | Accent-tinted surface (selected filter, active pill, `@`-mention chip) | `--accent-soft` | `--accent-ink` |
 | Categorical dot / bar (repo, agent, saved view) | `--id-1` … `--id-6` (§2.8) | label stays `--text` / `--muted` |
 | Avatar fallback | `--field` | `--muted` |
-| Focus line, text entry | — | `--field-focus-line` inset 1px |
+| Focus rim, text entry | — | `--field-edge-focus` inset 1px (neutral) |
 | Focus halo, keyboard only | — | `--focus-ring` 3px |
 
 `--id-*` are derived from the `skill` seed by the rotation in §2.8, carry no

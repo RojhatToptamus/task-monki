@@ -10,11 +10,12 @@ import type {
 } from '../../shared/agent';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import {
-  ScriptedAgentRuntimeAdapter,
+  createScriptedAgentRuntimeFixture,
   TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { AppEventBus } from '../runner/AppEventBus';
+import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
@@ -208,7 +209,7 @@ describe('TaskManagerService evidence flow', () => {
       await evidenceGate;
       return originalRecordGitSnapshot(...input);
     });
-    const updateRun = vi.spyOn(scenario.store, 'updateRun');
+    const updateRun = vi.spyOn(scenario.taskRuntime, 'updateRun');
     const closeStore = vi.spyOn(scenario.store, 'close');
 
     await scenario.completeRun(run.id, 'Implementation finished during shutdown.');
@@ -221,7 +222,8 @@ describe('TaskManagerService evidence flow', () => {
     await expect(shutdown).resolves.toBeUndefined();
     expect(updateRun).toHaveBeenCalledWith(
       run.id,
-      expect.objectContaining({ afterGitSnapshotId: expect.any(String) })
+      expect.objectContaining({ afterGitSnapshotId: expect.any(String) }),
+      expect.any(String)
     );
     expect(closeStore).toHaveBeenCalledOnce();
   });
@@ -250,14 +252,14 @@ describe('TaskManagerService evidence flow', () => {
     await scenario.service.shutdown();
 
     const reopenedStore = new FileTaskStore(path.join(scenario.rootDir, 'store'));
-    const recoveredAgent = new ScriptedAgentRuntimeAdapter(reopenedStore);
+    const recoveredRuntime = createScriptedAgentRuntimeFixture(reopenedStore);
     const recoveredService = new TaskManagerService(
       reopenedStore,
       scenario.repositoryPath,
       new AppEventBus(),
       {
         worktreeRoot: scenario.worktreeRoot,
-        agentRuntimeAdapters: [recoveredAgent]
+        ...recoveredRuntime.serviceOptions
       }
     );
     await recoveredService.init();
@@ -450,15 +452,19 @@ async function recordResolvedInteraction(
     status: 'DECLINED' | 'CANCELED';
   }
 ): Promise<void> {
-  const server = await scenario.store.createAgentServer({
+  const server = await scenario.runtimeStore.createAgentServer({
     runtimeId: run.runtimeId,
     runtimeKind: 'APP_SERVER',
     transport: 'STDIO',
     executable: 'scenario-agent',
     argv: ['serve']
   });
-  await scenario.store.updateRun(run.id, { serverInstanceId: server.id });
-  const rawMessage = await scenario.store.appendProtocolMessage(
+  await scenario.taskRuntime.updateRun(
+    run.id,
+    { serverInstanceId: server.id },
+    `evidence-run-server:${run.id}`
+  );
+  const rawMessage = await scenario.runtimeStore.appendProtocolMessage(
     server.id,
     'INBOUND',
     JSON.stringify({
@@ -466,29 +472,61 @@ async function recordResolvedInteraction(
       id: `resolved-${input.type.toLowerCase()}`
     })
   );
-  const interaction = await scenario.store.createInteractionRequest({
-    runtimeId: run.runtimeId,
-    serverInstanceId: server.id,
-    providerRequestId: `resolved-${input.type.toLowerCase()}`,
+  const interaction = await scenario.taskRuntime.createInteractionRequest(
+    {
+      runtimeId: run.runtimeId,
+      serverInstanceId: server.id,
+      providerRequestId: `resolved-${input.type.toLowerCase()}`,
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      sessionId: run.sessionId,
+      providerTurnId: run.providerTurnId,
+      type: input.type,
+      request: input.request,
+      allowedActions: [input.status === 'CANCELED' ? 'CANCEL' : 'DECLINE'],
+      policyWarnings: [],
+      requestRawMessage: rawMessage
+    },
+    `evidence-interaction:${run.id}:${input.type}`
+  );
+  await scenario.taskRuntime.transitionInteractionRequest(
+    interaction.id,
+    'PENDING',
+    {
+      status: 'RESPONDING',
+      decision: input.decision,
+      respondedAt: new Date().toISOString()
+    },
+    `evidence-interaction-responding:${interaction.id}`
+  );
+  await scenario.taskRuntime.transitionInteractionRequest(
+    interaction.id,
+    'RESPONDING',
+    {
+      status: input.status,
+      resolution: { outcome: input.status === 'CANCELED' ? 'canceled' : 'declined' },
+      resolvedAt: new Date().toISOString()
+    },
+    `evidence-interaction-resolved:${interaction.id}`
+  );
+  const resolvedEvent = createDomainEvent({
+    type: 'AGENT_INTERACTION_RESOLVED',
     taskId: run.taskId,
     iterationId: run.iterationId,
     runId: run.id,
-    sessionId: run.sessionId,
-    providerTurnId: run.providerTurnId,
-    type: input.type,
-    request: input.request,
-    allowedActions: [input.status === 'CANCELED' ? 'CANCEL' : 'DECLINE'],
-    policyWarnings: [],
-    requestRawMessage: rawMessage
+    worktreeId: run.worktreeId,
+    agentSessionId: run.sessionId,
+    serverInstanceId: server.id,
+    source: 'provider',
+    payload: {
+      interactionId: interaction.id,
+      status: input.status,
+      resumeConfirmed: true
+    }
   });
-  await scenario.store.transitionInteractionRequest(interaction.id, 'PENDING', {
-    status: 'RESPONDING',
-    decision: input.decision,
-    respondedAt: new Date().toISOString()
-  });
-  await scenario.store.transitionInteractionRequest(interaction.id, 'RESPONDING', {
-    status: input.status,
-    resolution: { outcome: input.status === 'CANCELED' ? 'canceled' : 'declined' },
-    resolvedAt: new Date().toISOString()
-  });
+  await scenario.taskRuntime.applyTaskRuntimeEvent(
+    resolvedEvent,
+    `evidence-interaction-event:${interaction.id}`
+  );
 }

@@ -804,6 +804,7 @@ function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
     promptArtifactId: 'prompt',
     outputArtifactId: 'output',
     diagnosticArtifactId: 'diagnostic',
+    attachmentSelection: [],
     startedAt: now,
     eventCount: 0,
     ...overrides,

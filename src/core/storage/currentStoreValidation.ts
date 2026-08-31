@@ -1,5 +1,6 @@
 import {
   ARTIFACT_KINDS,
+  ATTACHMENT_MAX_COUNT,
   DOMAIN_EVENT_TYPES,
   TASK_STORE_SCHEMA_VERSION,
   isTaskCreationToken
@@ -251,26 +252,71 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     if (run.providerTerminalRawMessage !== undefined) {
       protocolReference(run.providerTerminalRawMessage, 'runs.providerTerminalRawMessage');
     }
+    if (!Array.isArray(run.attachmentSelection)) invalid('runs');
+    if (run.attachmentSelection.length > ATTACHMENT_MAX_COUNT) invalid('runs');
+    const selection = run.attachmentSelection.map((attachment) =>
+      persistedRecord(attachment, 'runs')
+    );
+    const attachmentIds = new Set<string>();
+    const attachmentOrdinals = new Set<number>();
+    for (const record of selection) {
+      strings(record, 'runs', ['attachmentId', 'kind', 'mediaType', 'sha256']);
+      sha256Field(record, 'sha256', 'runs');
+      enumField(record, 'kind', ['image', 'text'] as const, 'runs');
+      integer(record, 'ordinal', 'runs', 0);
+      integer(record, 'byteCount', 'runs', 0);
+      if (
+        attachmentIds.has(record.attachmentId as string) ||
+        attachmentOrdinals.has(record.ordinal as number)
+      ) invalid('runs');
+      attachmentIds.add(record.attachmentId as string);
+      attachmentOrdinals.add(record.ordinal as number);
+    }
     if (run.attachmentSubmissions !== undefined) {
       if (!Array.isArray(run.attachmentSubmissions)) invalid('runs');
-      for (const submission of run.attachmentSubmissions) {
+      if (run.attachmentSubmissions.length !== selection.length) invalid('runs');
+      for (const [index, submission] of run.attachmentSubmissions.entries()) {
         const record = persistedRecord(submission, 'runs');
         strings(record, 'runs', [
-          'attachmentId', 'kind', 'mediaType', 'sha256', 'submittedAs',
-          'verifiedAt', 'providerTurnId', 'submittedAt'
+          'attachmentId', 'kind', 'mediaType', 'sha256', 'transport',
+          'verifiedAt', 'submittedAt'
         ]);
         sha256Field(record, 'sha256', 'runs');
         enumField(record, 'kind', ['image', 'text'] as const, 'runs');
         enumField(
           record,
-          'submittedAs',
-          ['localImage', 'nativeFile', 'prompt-file-reference'] as const,
+          'transport',
+          [
+            'native-image', 'native-file', 'embedded-resource', 'text-block',
+            'managed-path'
+          ] as const,
+          'runs'
+        );
+        const correlation = persistedRecord(record.correlation, 'runs');
+        strings(correlation, 'runs', ['kind', 'id']);
+        enumField(
+          correlation,
+          'kind',
+          ['provider-turn', 'provider-message', 'client-request'] as const,
           'runs'
         );
         integer(record, 'ordinal', 'runs', 0);
-        integer(record, 'byteCount', 'runs', 1);
+        integer(record, 'byteCount', 'runs', 0);
         timestamp(record, 'verifiedAt', 'runs');
         timestamp(record, 'submittedAt', 'runs');
+        const selected = selection[index];
+        if (
+          !selected ||
+          record.attachmentId !== selected.attachmentId ||
+          record.ordinal !== selected.ordinal ||
+          record.kind !== selected.kind ||
+          record.mediaType !== selected.mediaType ||
+          record.byteCount !== selected.byteCount ||
+          record.sha256 !== selected.sha256 ||
+          (correlation.kind === 'provider-turn' &&
+            run.providerTurnId !== undefined &&
+            correlation.id !== run.providerTurnId)
+        ) invalid('runs');
       }
     }
   });

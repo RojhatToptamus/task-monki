@@ -44,7 +44,6 @@ import type {
   TombstoneDiscourseMessageRequest
 } from '../../shared/discourse';
 import type { AppEventBus } from '../runner/AppEventBus';
-import type { AgentScopedTurnProvider } from '../agent/AgentScopedTurnProvider';
 import {
   AgentProfileCatalog,
   discourseModelMatches,
@@ -74,7 +73,6 @@ export interface DiscourseServiceOptions {
   runtime?: {
     coordinator: DiscourseRuntimeCoordinator;
     contextSnapshots: DiscourseContextSnapshotService;
-    provider: AgentScopedTurnProvider;
     notifySchedulerWorkAvailable(): void;
   };
 }
@@ -187,7 +185,9 @@ export class DiscourseService {
           displayNameSnapshot: entry.profile.displayName,
           runtimeId: resolved.runtimeId,
           model: resolved.model,
-          modelProvider: resolved.modelProvider,
+          ...(resolved.modelProvider
+            ? { modelProvider: resolved.modelProvider }
+            : {}),
           ...(resolved.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
           ...(resolved.serviceTier ? { serviceTier: resolved.serviceTier } : {}),
           configuredRole: entry.profile.roleTemplate,
@@ -1586,7 +1586,7 @@ export class DiscourseService {
     if (!wave) throw new Error(`Discourse wave not found: ${input.waveId}`);
     const stopped = ['PLANNED', 'SNAPSHOTTING', 'QUEUED'].includes(wave.status)
       ? await runtime.coordinator.cancelQueuedWave(input)
-      : await runtime.coordinator.stopActiveWave(input, runtime.provider);
+      : await runtime.coordinator.stopActiveWave(input);
     if (stopped.status === 'SETTLED') {
       await this.activateNextWave(
         input.conversationId,
@@ -1645,7 +1645,9 @@ function assignmentFromRevision(
     displayNameSnapshot: revision.displayNameSnapshot,
     runtimeId: revision.runtimeId,
     model: revision.model,
-    modelProvider: revision.modelProvider,
+    ...(revision.modelProvider
+      ? { modelProvider: revision.modelProvider }
+      : {}),
     ...(revision.reasoningEffort ? { reasoningEffort: revision.reasoningEffort } : {}),
     ...(revision.serviceTier ? { serviceTier: revision.serviceTier } : {}),
     configuredRole: revision.configuredRole,
@@ -1679,13 +1681,6 @@ function assertParticipantRevisionAvailable(
     throw new Error(
       `${displayName} cannot respond because its saved model (${revision.model}) is unavailable. ` +
       'Refresh agent models or choose another model for this conversation.'
-    );
-  }
-  const modelProvider = model.modelProvider ?? model.runtimeId;
-  if (revision.modelProvider !== modelProvider) {
-    throw new Error(
-      `${displayName} cannot respond because its saved model provider is no longer valid. ` +
-      'Choose another model for this conversation.'
     );
   }
   if (
@@ -1824,7 +1819,9 @@ function resolvedSettingsFromRevision(
     runtimeId: revision.runtimeId,
     modelId: model.id,
     model: revision.model,
-    modelProvider: revision.modelProvider,
+    ...(revision.modelProvider
+      ? { modelProvider: revision.modelProvider }
+      : {}),
     ...(revision.reasoningEffort
       ? { reasoningEffort: revision.reasoningEffort }
       : {}),
@@ -1872,7 +1869,9 @@ function participantRevisionFromSettings(input: {
     displayNameSnapshot: input.entry.profile.displayName,
     runtimeId: input.resolved.runtimeId,
     model: input.resolved.model,
-    modelProvider: input.resolved.modelProvider,
+    ...(input.resolved.modelProvider
+      ? { modelProvider: input.resolved.modelProvider }
+      : {}),
     ...(input.resolved.reasoningEffort
       ? { reasoningEffort: input.resolved.reasoningEffort }
       : {}),

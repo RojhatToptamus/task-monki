@@ -5,11 +5,13 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  createScriptedAgentRuntimeFixture,
+  type TaskMonkiScenario,
   TaskMonkiScenarioRegistry
 } from '../../testSupport/taskMonkiScenario';
+import type { Task } from '../../shared/contracts';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 const exec = promisify(execFile);
@@ -104,11 +106,89 @@ describe('TaskManagerService task deletion', () => {
     expect(closeStore).toHaveBeenCalledOnce();
   });
 
+  it('keeps canonical runtime records when domain deletion does not commit', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-manager-delete-domain-failure'
+    });
+    const task = await scenario.createTask({
+      title: 'Failed domain deletion',
+      prompt: 'Keep the provider history until the Task is gone.'
+    });
+    const session = await createDeletionSession(
+      scenario,
+      task,
+      'delete-domain-failure-session'
+    );
+    vi.spyOn(scenario.store, 'deleteTask').mockRejectedValueOnce(
+      new Error('domain write failed')
+    );
+
+    await expect(scenario.service.deleteTask({ taskId: task.id })).rejects.toThrow(
+      'domain write failed'
+    );
+    await expect(scenario.store.getTask(task.id)).resolves.toBeDefined();
+    expect((await scenario.runtimeStore.snapshot()).sessions).toContainEqual(
+      expect.objectContaining({ id: session.id })
+    );
+  });
+
+  it('removes orphaned runtime records on restart after deletion cleanup fails', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-manager-delete-runtime-recovery'
+    });
+    const task = await scenario.createTask({
+      title: 'Runtime cleanup recovery',
+      prompt: 'Finish Task deletion even if runtime cleanup needs restart.'
+    });
+    const session = await createDeletionSession(
+      scenario,
+      task,
+      'delete-runtime-recovery-session'
+    );
+    vi.spyOn(scenario.runtimeStore, 'purgeTask').mockRejectedValueOnce(
+      new Error('runtime cleanup failed')
+    );
+
+    await expect(scenario.service.deleteTask({ taskId: task.id })).resolves.toEqual({
+      taskId: task.id,
+      removedWorktree: false
+    });
+    await expect(scenario.store.getTask(task.id)).resolves.toBeUndefined();
+    await expect(scenario.store.snapshot()).resolves.toMatchObject({
+      tasks: [],
+      agentSessions: []
+    });
+    expect((await scenario.runtimeStore.snapshot()).sessions).toContainEqual(
+      expect.objectContaining({ id: session.id })
+    );
+
+    await scenario.service.shutdown();
+    const restartedStore = new FileTaskStore(path.join(scenario.rootDir, 'store'));
+    const restartedRuntime = createScriptedAgentRuntimeFixture(restartedStore);
+    const restartedService = new TaskManagerService(
+      restartedStore,
+      scenario.repositoryPath,
+      undefined,
+      {
+        worktreeRoot: scenario.worktreeRoot,
+        ...restartedRuntime.serviceOptions
+      }
+    );
+    try {
+      await restartedService.init();
+      expect((await restartedRuntime.runtimeStore.snapshot()).sessions).toEqual([]);
+    } finally {
+      await restartedService.shutdown();
+    }
+  });
+
   it('blocks deletion while an agent run is active', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-active-'));
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
     const service = new TaskManagerService(store, dir, undefined, {
-      codexPath: 'codex-not-used'
+      codexPath: 'codex-not-used',
+      ...scriptedRuntime.serviceOptions
     });
 
     const task = await store.createTask({
@@ -122,13 +202,13 @@ describe('TaskManagerService task deletion', () => {
       worktreePath: path.join(dir, 'worktree'),
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await scriptedRuntime.createSession({
       task,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    await store.createRun({
+    await scriptedRuntime.createRun({
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -149,9 +229,10 @@ describe('TaskManagerService task deletion', () => {
     await initRepository(repositoryPath);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+      ...scriptedRuntime.serviceOptions
     });
     const repository = await service.addRepository(repositoryPath);
     const task = await service.createTask({
@@ -177,9 +258,10 @@ describe('TaskManagerService task deletion', () => {
     await initRepository(repositoryPath);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+      ...scriptedRuntime.serviceOptions
     });
     const repository = await service.addRepository(repositoryPath);
     const task = await service.createTask({
@@ -197,6 +279,57 @@ describe('TaskManagerService task deletion', () => {
     await expect(fs.access(path.join(repositoryPath, 'README.md'))).resolves.toBeUndefined();
   });
 });
+
+async function createDeletionSession(
+  scenario: TaskMonkiScenario,
+  task: Task,
+  sessionId: string
+) {
+  const { iteration, worktree } = await scenario.store.createIterationAndWorktree({
+    task,
+    branchName: `codex/${sessionId}`,
+    worktreePath: path.join(scenario.rootDir, `${sessionId}-worktree`),
+    baseSha: 'base'
+  });
+  const settings = { runtimeId: 'codex', model: 'scenario-model' };
+  const session = await scenario.runtimeStore
+    .taskAgentRuntimeAccess()
+    .createTaskSession({
+      id: sessionId,
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      worktreePath: worktree.worktreePath,
+      runtimeId: 'codex',
+      requestedSettings: settings,
+      executionContext: {
+        attestation: { status: 'ATTESTED' },
+        repositoryAccess: 'WRITE',
+        primaryCwd: worktree.worktreePath,
+        readRoots: [
+          {
+            canonicalPath: worktree.worktreePath,
+            kind: 'WORKTREE',
+            entityId: worktree.id
+          }
+        ],
+        managedAttachments: [],
+        permissionProfileHash: 'a'.repeat(64),
+        modelSettings: settings,
+        externalTools: {
+          network: false,
+          webSearch: 'disabled',
+          mcpServers: false,
+          apps: false,
+          dynamicTools: false
+        },
+        clientOperationId: sessionId
+      },
+      operationId: sessionId
+    });
+  await scenario.store.recordAgentSessionCreated(session);
+  return session;
+}
 
 async function initRepository(repositoryPath: string): Promise<string> {
   await exec('git', ['init'], { cwd: repositoryPath });

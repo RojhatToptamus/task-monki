@@ -5,7 +5,7 @@ import type {
   RunRecord
 } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import type { TaskAgentRuntimeAccess } from './AgentRuntimeStore';
 import {
   AgentMutationAmbiguousError,
   type AgentRuntimeAdapter
@@ -30,7 +30,7 @@ describe('AgentInteractionService permission decisions', () => {
         interaction = { ...interaction, ...update } as InteractionRequestRecord;
         return interaction;
       })
-    } as unknown as FileTaskStore;
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn().mockResolvedValue(undefined)
     } as unknown as AgentRuntimeAdapter;
@@ -76,7 +76,7 @@ describe('AgentInteractionService permission decisions', () => {
       getRun: vi.fn().mockResolvedValue(run),
       getAgentSession: vi.fn().mockResolvedValue(session),
       transitionInteractionRequest
-    } as unknown as FileTaskStore;
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn().mockRejectedValue(new Error('connection not opened'))
     } as unknown as AgentRuntimeAdapter;
@@ -96,7 +96,8 @@ describe('AgentInteractionService permission decisions', () => {
     expect(transitionInteractionRequest).toHaveBeenLastCalledWith(
       interaction.id,
       'RESPONDING',
-      expect.objectContaining({ status: 'PENDING' })
+      expect.objectContaining({ status: 'PENDING' }),
+      expect.any(String)
     );
   });
 
@@ -105,7 +106,7 @@ describe('AgentInteractionService permission decisions', () => {
     const session = sessionFixture();
     let interaction = interactionFixture('/tmp/worktree/file.txt');
     interaction = { ...interaction, allowedActions: ['DECLINE'] };
-    const appendRunEventIfStatus = vi.fn().mockResolvedValue(true);
+    const applyTaskRuntimeEventIfRunStatus = vi.fn().mockResolvedValue(true);
     const store = {
       getInteractionRequest: vi.fn().mockImplementation(async () => interaction),
       getRun: vi.fn().mockResolvedValue(run),
@@ -118,8 +119,8 @@ describe('AgentInteractionService permission decisions', () => {
         interaction = { ...interaction, ...update } as InteractionRequestRecord;
         return interaction;
       }),
-      appendRunEventIfStatus
-    } as unknown as FileTaskStore;
+      applyTaskRuntimeEventIfRunStatus
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn().mockRejectedValue(
         new AgentMutationAmbiguousError(
@@ -143,9 +144,10 @@ describe('AgentInteractionService permission decisions', () => {
     ).rejects.toThrow('reply may have reached the runtime');
 
     expect(interaction.status).toBe('STALE');
-    expect(appendRunEventIfStatus).toHaveBeenCalledWith(
+    expect(applyTaskRuntimeEventIfRunStatus).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'AGENT_MUTATION_AMBIGUOUS', runId: run.id }),
-      expect.arrayContaining(['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'])
+      expect.arrayContaining(['AWAITING_APPROVAL', 'AWAITING_USER_INPUT']),
+      expect.any(String)
     );
     expect(updates).toContain('run.state.updated');
   });
@@ -157,7 +159,7 @@ describe('AgentInteractionService permission decisions', () => {
       ...interactionFixture('/tmp/worktree/file.txt'),
       allowedActions: ['DECLINE'] as const
     };
-    const appendRunEventIfStatus = vi.fn().mockImplementation(
+    const applyTaskRuntimeEventIfRunStatus = vi.fn().mockImplementation(
       async (_event: unknown, allowedStatuses: readonly RunRecord['status'][]) =>
         allowedStatuses.includes(run.status)
     );
@@ -173,8 +175,8 @@ describe('AgentInteractionService permission decisions', () => {
         interaction = { ...interaction, ...update } as typeof interaction;
         return interaction;
       }),
-      appendRunEventIfStatus
-    } as unknown as FileTaskStore;
+      applyTaskRuntimeEventIfRunStatus
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn().mockImplementation(async () => {
         run.status = 'COMPLETED';
@@ -200,7 +202,7 @@ describe('AgentInteractionService permission decisions', () => {
 
     expect(run.status).toBe('COMPLETED');
     expect(interaction.status).toBe('STALE');
-    expect(appendRunEventIfStatus).toHaveBeenCalledOnce();
+    expect(applyTaskRuntimeEventIfRunStatus).toHaveBeenCalledOnce();
     expect(emitted).not.toContain('run.activity');
   });
 
@@ -214,7 +216,7 @@ describe('AgentInteractionService permission decisions', () => {
       getRun: vi.fn().mockResolvedValue(run),
       getAgentSession: vi.fn().mockResolvedValue(session),
       transitionInteractionRequest
-    } as unknown as FileTaskStore;
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn().mockResolvedValue(undefined)
     } as unknown as AgentRuntimeAdapter;
@@ -247,7 +249,7 @@ describe('AgentInteractionService permission decisions', () => {
       getRun: vi.fn().mockResolvedValue(run),
       getAgentSession: vi.fn().mockResolvedValue(session),
       transitionInteractionRequest
-    } as unknown as FileTaskStore;
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn().mockResolvedValue(undefined)
     } as unknown as AgentRuntimeAdapter;
@@ -289,7 +291,7 @@ describe('AgentInteractionService permission decisions', () => {
         interaction = { ...interaction, ...update } as InteractionRequestRecord;
         return interaction;
       })
-    } as unknown as FileTaskStore;
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn().mockRejectedValue(
         new Error('provider connection closed before write')
@@ -332,7 +334,7 @@ describe('AgentInteractionService permission decisions', () => {
       getRun: vi.fn().mockResolvedValue(run),
       getAgentSession: vi.fn().mockResolvedValue(session),
       transitionInteractionRequest: vi.fn()
-    } as unknown as FileTaskStore;
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn()
     } as unknown as AgentRuntimeAdapter;
@@ -366,7 +368,7 @@ describe('AgentInteractionService permission decisions', () => {
       getRun: vi.fn().mockResolvedValue(run),
       getAgentSession: vi.fn().mockResolvedValue(session),
       transitionInteractionRequest: vi.fn()
-    } as unknown as FileTaskStore;
+    } as unknown as TaskAgentRuntimeAccess;
     const adapter = {
       respondToInteraction: vi.fn()
     } as unknown as AgentRuntimeAdapter;
@@ -451,6 +453,7 @@ function runFixture(): RunRecord {
     promptArtifactId: 'prompt-one',
     outputArtifactId: 'output-one',
     diagnosticArtifactId: 'diagnostic-one',
+    attachmentSelection: [],
     startedAt: '2026-07-10T00:00:00.000Z',
     eventCount: 0
   };

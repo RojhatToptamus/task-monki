@@ -1,8 +1,29 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentModel, AgentRuntimeCatalog } from '../shared/agent';
+import type {
+  AgentCapability,
+  AgentModel,
+  AgentRuntimeCatalog
+} from '../shared/agent';
+import type {
+  AttachmentKind,
+  AttachmentSubmissionRecord,
+  AttachmentDraftSnapshot,
+  StageTaskAttachmentBatchRequest,
+  StagedAttachmentRecord
+} from '../shared/attachments';
+import type {
+  AgentRuntimeRunRecord,
+  AgentRuntimeStoreState
+} from '../shared/agentRuntime';
+import type {
+  DiscourseAgentJobRecord,
+  DiscourseConversationAggregateRecord,
+  DiscourseResponseWaveRecord
+} from '../shared/discourse';
 import type {
   CancelRunRequest,
   CreateTaskRequest,
@@ -54,6 +75,8 @@ describe('parseProviderSmokeArguments', () => {
         'codex:openai/gpt-test',
         '--timeout-seconds',
         '45',
+        '--qualify-read-only',
+        '--qualify-attachments',
         '--confirm-throwaway',
         '--confirm-provider-usage'
       ])
@@ -63,7 +86,9 @@ describe('parseProviderSmokeArguments', () => {
       modelIds: ['codex:openai/gpt-test'],
       timeoutMs: 45_000,
       confirmThrowaway: true,
-      confirmProviderUsage: true
+      confirmProviderUsage: true,
+      qualifyReadOnly: true,
+      qualifyAttachments: true
     });
   });
 
@@ -193,6 +218,550 @@ describe('runProviderSmoke', () => {
     ]);
     expect(report.authoritative).toBe(true);
     expect(providerSmokeSucceeded(report)).toBe(true);
+    expect(service.readOnlySendCount).toBe(0);
+    expect(service.attachmentStageCount).toBe(0);
+    expect(report.readOnlyQualifications).toEqual([]);
+  });
+
+  it('qualifies real text and image content with exact path-free run evidence', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'codex:openai/attachment-capable',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'codex',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' }
+        )
+      ])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(service.attachmentStageCount).toBe(1);
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        requestedKinds: ['text', 'image'],
+        textContentUsed: true,
+        imageContentUsed: true,
+        evidenceMatches: true,
+        selection: [
+          expect.objectContaining({ ordinal: 0, kind: 'text' }),
+          expect.objectContaining({ ordinal: 1, kind: 'image' })
+        ],
+        submissions: [
+          expect.objectContaining({ ordinal: 0, transport: 'managed-path' }),
+          expect.objectContaining({ ordinal: 1, transport: 'native-image' })
+        ]
+      }
+    });
+    const evidence = JSON.stringify(report.results[0]?.attachmentQualification);
+    expect(evidence).not.toContain('displayName');
+    expect(evidence).not.toContain('"path"');
+    expect(evidence).not.toContain('"bytes"');
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('expects Claude ACP text and image submissions through its native transports', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'claude-agent-acp:anthropic/sonnet',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [
+        catalogWith([
+          runtime(
+            'claude-agent-acp',
+            'READY',
+            true,
+            [candidate],
+            false,
+            { maturity: 'stable' },
+            {
+              kind: 'ACP_AGENT',
+              runtimeVersion: '0.70.0',
+              advertisedImageInput: true
+            }
+          )
+        ])
+      ]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        submissions: [
+          expect.objectContaining({
+            transport: 'embedded-resource',
+            correlation: { kind: 'client-request', id: expect.any(String) }
+          }),
+          expect.objectContaining({
+            transport: 'native-image',
+            correlation: { kind: 'client-request', id: expect.any(String) }
+          })
+        ]
+      }
+    });
+  });
+
+  it('reports a verified ACP image path that contradicts the advertised capability', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        advertisedImageInput: false,
+        capabilityDrift: 'ADVERTISED_FALSE_VERIFIED_TRUE'
+      }
+    });
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('accepts an equivalent positional image observation', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])],
+      imageObservation:
+        'The image shows Q7 on a yellow triangle, with a cyan circle on the left and a pink square on the right, on a dark navy background.'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        imageContentUsed: true,
+        capabilityDrift: 'ADVERTISED_FALSE_VERIFIED_TRUE'
+      }
+    });
+  });
+
+  it('rejects a positional image observation with the wrong shape order', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])],
+      imageObservation:
+        'The image shows Q7. The triangle is far left, the circle is left of the square, and the square is on the right, on a navy background.'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]?.attachmentQualification).toMatchObject({
+      status: 'FAILED',
+      textContentUsed: true,
+      imageContentUsed: false
+    });
+    expect(
+      report.results[0]?.attachmentQualification?.capabilityDrift
+    ).toBeUndefined();
+  });
+
+  it('does not accept an image guess as false-advertisement qualification', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])],
+      finalMessage:
+        'TASK_MONKI_PROVIDER_SMOKE_OK Q7 appears over a circle, triangle, and square on a dark blue background.'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]?.attachmentQualification).toMatchObject({
+      status: 'FAILED',
+      advertisedImageInput: false,
+      textContentUsed: false,
+      imageContentUsed: true
+    });
+    expect(
+      report.results[0]?.attachmentQualification?.capabilityDrift
+    ).toBeUndefined();
+  });
+
+  it('reports an advertised ACP image path when real content qualification fails', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'cursor-agent-acp:cursor/gpt-5.6-luna',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'cursor-agent-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: '2026.08.25-3e8eec8',
+            advertisedImageInput: true
+          }
+        )
+      ])],
+      omitImageObservation: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      attachmentQualification: {
+        status: 'FAILED',
+        advertisedImageInput: true,
+        capabilityDrift: 'ADVERTISED_TRUE_VERIFICATION_FAILED'
+      }
+    });
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('does not label a general provider failure as image capability drift', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'cursor-agent-acp:cursor/gpt-5.6-luna',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'cursor-agent-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: '2026.08.25-3e8eec8',
+            advertisedImageInput: true
+          }
+        )
+      ])],
+      finalMessage: 'Upgrade your plan to continue'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]?.attachmentQualification).toMatchObject({
+      status: 'FAILED',
+      advertisedImageInput: true,
+      textContentUsed: false,
+      imageContentUsed: false
+    });
+    expect(
+      report.results[0]?.attachmentQualification?.capabilityDrift
+    ).toBeUndefined();
+  });
+
+  it('fails attachment qualification when submission evidence differs from selection', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/attachment-mismatch');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'codex',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' }
+        )
+      ])],
+      mismatchAttachmentEvidence: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      attachmentQualification: {
+        status: 'FAILED',
+        evidenceMatches: false,
+        textContentUsed: true
+      }
+    });
+    expect(report.results[0]?.error).toContain(
+      'did not exactly match the staged batch'
+    );
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('fails attachment qualification when the provider transport is wrong', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/attachment-transport');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'codex',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' }
+        )
+      ])],
+      mismatchAttachmentTransport: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      attachmentQualification: {
+        status: 'FAILED',
+        evidenceMatches: false,
+        textContentUsed: true
+      }
+    });
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('keeps the normal Task smoke when a profile does not support attachments', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('claude-agent-acp:anthropic/claude-test');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime('claude-agent-acp', 'READY', true, [candidate])
+      ])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(service.attachmentStageCount).toBe(0);
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'UNSUPPORTED',
+        requestedKinds: [],
+        evidenceMatches: false
+      }
+    });
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('qualifies a supported profile through one DIRECT read-only Discourse turn', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/read-only');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('codex', 'READY', true, [candidate])])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+
+    expect(service.readOnlySendCount).toBe(1);
+    expect(report.readOnlyQualifications).toEqual([
+      expect.objectContaining({
+        runtimeId: 'codex',
+        modelId: candidate.id,
+        status: 'PASSED',
+        repositoryIntegrity: 'UNCHANGED',
+        probeAbsent: true,
+        repositoryClean: true,
+        repositoryIdentityUnchanged: true,
+        executionContained: true
+      })
+    ]);
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('reports an unsupported profile without sending a qualification turn', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('grok-acp:xai/grok-build');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('grok-acp', 'READY', true, [candidate])])]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+
+    expect(service.readOnlySendCount).toBe(0);
+    expect(report.readOnlyQualifications).toEqual([
+      expect.objectContaining({
+        runtimeId: 'grok-acp',
+        status: 'UNSUPPORTED',
+        reason: expect.stringContaining('no qualified native policy')
+      })
+    ]);
+    expect(report.authoritative).toBe(true);
+  });
+
+  it('requires shared runtime integrity evidence even when the independent Git check is clean', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/read-only-changed');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('codex', 'READY', true, [candidate])])],
+      readOnlyIntegrity: 'CHANGED'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+
+    expect(report.readOnlyQualifications[0]).toMatchObject({
+      status: 'FAILED',
+      repositoryIntegrity: 'CHANGED',
+      probeAbsent: true,
+      repositoryClean: true
+    });
+    expect(report.authoritative).toBe(false);
+  });
+
+  it('retains a created probe as failure evidence and stops with the source repository dirty', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/read-only-mutation');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('codex', 'READY', true, [candidate])])],
+      mutateReadOnlyProbe: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyReadOnly: true
+    });
+    const qualification = report.readOnlyQualifications[0]!;
+
+    expect(qualification).toMatchObject({
+      status: 'FAILED',
+      probeAbsent: false,
+      repositoryClean: false,
+      repositoryIdentityUnchanged: true
+    });
+    await expect(
+      fs.readFile(path.join(repositoryPath, qualification.probeFileName!), 'utf8')
+    ).resolves.toBe('TASK_MONKI_READ_ONLY_PROBE');
+    expect(report.completionStatus).toBe('STOPPED_EARLY');
+    expect(report.authoritative).toBe(false);
   });
 
   it('activates an explicitly selected runtime catalog once before queuing models', async () => {
@@ -288,6 +857,76 @@ describe('runProviderSmoke', () => {
     });
   });
 
+  it('accepts an acknowledged exact prompt resolution when provider evidence omits reasoning', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'opencode:anthropic/claude-test',
+      ['high', 'low'],
+      'high'
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      observation: 'acknowledged-prompt'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      selectionAttestation: 'ADAPTER_RESOLVED',
+      observationSource: 'TASK_MONKI_RESOLUTION',
+      observedModelProvider: 'anthropic',
+      observedModel: 'claude-test',
+      observedReasoningEffort: 'low'
+    });
+  });
+
+  it('does not use an unacknowledged prompt resolution to fill missing provider evidence', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'opencode:anthropic/claude-test',
+      ['high', 'low'],
+      'high'
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      observation: 'unacknowledged-prompt'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'UNATTESTED',
+      selectionAttestation: 'REQUESTED_ONLY',
+      observationSource: 'RECOVERY_RESUME_RESPONSE',
+      observedModelProvider: 'anthropic',
+      observedModel: 'claude-test',
+      observedReasoningEffort: undefined
+    });
+  });
+
+  it('keeps later conflicting provider evidence authoritative over an acknowledged prompt', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'opencode:anthropic/claude-test',
+      ['high', 'low'],
+      'high'
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      observation: 'acknowledged-prompt-then-conflict'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      selectionAttestation: 'OBSERVED_MISMATCH',
+      observationSource: 'MODEL_REROUTED_NOTIFICATION',
+      observedModel: 'different-model'
+    });
+  });
+
   it('reports acknowledged ACP post-configuration selection as adapter-resolved', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model('grok-acp:xai/grok-build');
@@ -335,6 +974,40 @@ describe('runProviderSmoke', () => {
     expect(report.results[0]).toMatchObject({
       verdict: 'PASSED',
       receivedSentinel: true,
+      worktreeChangeVerified: true
+    });
+  });
+
+  it('accepts one exact sentinel line without requiring a trailing newline', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('opencode:opencode/no-trailing-newline');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      omitTrailingNewline: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      receivedSentinel: true,
+      worktreeChangeVerified: true
+    });
+  });
+
+  it('accepts the exact smoke file when the provider stages it', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('opencode:opencode/staged-change');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      stageTaskChange: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      gitStatus: 'DIRTY',
       worktreeChangeVerified: true
     });
   });
@@ -598,7 +1271,8 @@ describe('runProviderSmoke', () => {
 function model(
   id: string,
   supportedReasoningEfforts: string[] = [],
-  defaultReasoningEffort?: string
+  defaultReasoningEffort?: string,
+  inputModalities: string[] = ['text']
 ): AgentModel {
   const colon = id.indexOf(':');
   const slash = id.indexOf('/');
@@ -615,7 +1289,7 @@ function model(
     supportedReasoningEfforts,
     defaultReasoningEffort,
     serviceTiers: [],
-    inputModalities: ['text'],
+    inputModalities,
     isDefault: false
   };
 }
@@ -625,11 +1299,24 @@ function runtime(
   status: string,
   canStart: boolean,
   models: AgentModel[],
-  explicitModelDiscovery = false
+  explicitModelDiscovery = false,
+  attachmentDelivery: AgentCapability = { maturity: 'unsupported' },
+  options: {
+    kind?: 'ACP_AGENT';
+    runtimeVersion?: string;
+    advertisedImageInput?: boolean;
+  } = {}
 ) {
+  const readOnlyTurns: AgentCapability = runtimeId === 'codex'
+    ? { maturity: 'stable' }
+    : { maturity: 'unsupported' };
   return {
     preflight: {
-      runtime: { id: runtimeId, displayName: runtimeId },
+      runtime: {
+        id: runtimeId,
+        displayName: runtimeId,
+        ...(options.kind ? { kind: options.kind } : {})
+      },
       readiness: {
         status,
         canStart,
@@ -639,14 +1326,38 @@ function runtime(
       capabilities: explicitModelDiscovery
         ? {
             modelCatalog: { activation: 'EXPLICIT' },
-            executionPolicy: runtimeId === 'codex' ? smokeExecutionPolicy() : undefined
+            attachmentDelivery,
+            executionPolicy:
+              runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
+            extensions: {},
+            readOnlyTurns
           }
         : {
             modelCatalog: {},
-            executionPolicy: runtimeId === 'codex' ? smokeExecutionPolicy() : undefined
-          }
+            attachmentDelivery,
+            executionPolicy:
+              runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
+            extensions: {},
+            readOnlyTurns
+          },
+      ...(
+        options.runtimeVersion || runtimeId === 'codex'
+          ? { runtimeVersion: options.runtimeVersion ?? '0.146.0' }
+          : {}
+      )
     },
     models,
+    ...(options.advertisedImageInput === undefined
+      ? {}
+      : {
+          native: {
+            initialize: {
+              agentCapabilities: {
+                promptCapabilities: { image: options.advertisedImageInput }
+              }
+            }
+          }
+        }),
     refreshedAt: '2026-07-14T00:00:00.000Z'
   };
 }
@@ -661,10 +1372,24 @@ function smokeExecutionPolicy() {
         sandbox: 'WORKSPACE_WRITE' as const,
         approvalPolicy: 'never' as const,
         approvalsReviewer: 'user' as const,
-        networkAccess: 'DISABLED' as const
+        networkAccess: 'DISABLED' as const,
+        repositoryMutation: 'ALLOW' as const
+      },
+      {
+        id: 'read-only',
+        label: 'Read only',
+        sandbox: 'READ_ONLY' as const,
+        approvalPolicy: 'never' as const,
+        approvalsReviewer: 'user' as const,
+        networkAccess: 'DISABLED' as const,
+        repositoryMutation: 'DENY' as const
       }
     ]
   };
+}
+
+function unsupportedExecutionPolicy() {
+  return { defaultPresetId: 'normal', presets: [] };
 }
 
 function catalogWith(runtimes: ReturnType<typeof runtime>[]): AgentRuntimeCatalog {
@@ -684,11 +1409,16 @@ interface FakeProviderBehavior {
     | 'adapter'
     | 'provider-then-adapter'
     | 'acp-post-configuration'
+    | 'acknowledged-prompt'
+    | 'unacknowledged-prompt'
+    | 'acknowledged-prompt-then-conflict'
     | 'none';
   interactionStatus?: 'RESOLVED';
   gitStatus?: 'CLEAN' | 'DIRTY';
   committedTaskChange?: boolean;
+  stageTaskChange?: boolean;
   wrongWorktreeChange?: boolean;
+  omitTrailingNewline?: boolean;
   retainDifferentStoredGitSnapshot?: boolean;
   hangStart?: boolean;
   timedOutRunCount?: number;
@@ -696,6 +1426,12 @@ interface FakeProviderBehavior {
   cancelTerminalStatus?: 'INTERRUPTED' | 'RECOVERY_REQUIRED' | 'LOST';
   hangCancel?: boolean;
   onStart?: () => Promise<void>;
+  readOnlyIntegrity?: 'UNCHANGED' | 'CHANGED' | 'UNVERIFIABLE';
+  mutateReadOnlyProbe?: boolean;
+  mismatchAttachmentEvidence?: boolean;
+  mismatchAttachmentTransport?: boolean;
+  omitImageObservation?: boolean;
+  imageObservation?: string;
 }
 
 class FakeProviderSmokeService implements ProviderSmokeService {
@@ -703,7 +1439,17 @@ class FakeProviderSmokeService implements ProviderSmokeService {
   private catalogIndex = 0;
   private taskSequence = 0;
   private runSequence = 0;
+  private attachmentDraftSequence = 0;
+  private attachmentSequence = 0;
   private readonly worktreePaths = new Map<string, string>();
+  private readonly attachmentDrafts = new Map<
+    string,
+    { snapshot: AttachmentDraftSnapshot; bytes: Map<string, Uint8Array> }
+  >();
+  private readonly taskAttachments = new Map<
+    string,
+    { records: StagedAttachmentRecord[]; bytes: Map<string, Uint8Array> }
+  >();
   cancelCount = 0;
   readonly discoveredRuntimeIds: string[] = [];
   readonly cancellationTransitions: Array<{
@@ -711,6 +1457,11 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     status: RunRecord['status'];
   }> = [];
   readonly startedModels: Array<{ model?: string; reasoningEffort?: string }> = [];
+  readOnlySendCount = 0;
+  attachmentStageCount = 0;
+  readOnlyProbeFileName?: string;
+  private discourseAggregate?: DiscourseConversationAggregateRecord;
+  private readonly runtimeRuns: AgentRuntimeRunRecord[] = [];
 
   constructor(
     private readonly repositoryPath: string,
@@ -756,6 +1507,116 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     return structuredClone(repository);
   }
 
+  async stageTaskAttachmentBatch(
+    input: StageTaskAttachmentBatchRequest
+  ): Promise<AttachmentDraftSnapshot> {
+    this.attachmentStageCount += 1;
+    const now = new Date().toISOString();
+    const draftId = `attachment-draft-${++this.attachmentDraftSequence}`;
+    const bytes = new Map<string, Uint8Array>();
+    const attachments = input.attachments.map((candidate, ordinal) => {
+      const attachmentBytes = new Uint8Array(candidate.bytes.slice(0));
+      const id = `attachment-${++this.attachmentSequence}`;
+      bytes.set(id, attachmentBytes);
+      return {
+        id,
+        draftId,
+        clientToken: candidate.clientToken,
+        ordinal,
+        displayName: candidate.displayName,
+        kind: candidate.displayName.endsWith('.png') ? 'image' : 'text',
+        mediaType: candidate.displayName.endsWith('.png')
+          ? 'image/png'
+          : 'text/plain',
+        byteCount: attachmentBytes.byteLength,
+        sha256: createHash('sha256').update(attachmentBytes).digest('hex'),
+        createdAt: now
+      } satisfies StagedAttachmentRecord;
+    });
+    const snapshot = { id: draftId, attachments, createdAt: now, updatedAt: now };
+    this.attachmentDrafts.set(draftId, { snapshot, bytes });
+    return structuredClone(snapshot);
+  }
+
+  async createDiscourseConversation(input: Parameters<
+    NonNullable<ProviderSmokeService['createDiscourseConversation']>
+  >[0]) {
+    this.discourseAggregate = {
+      waves: [],
+      jobs: []
+    } as unknown as DiscourseConversationAggregateRecord;
+    return { id: 'conversation-read-only', title: input.title } as never;
+  }
+
+  async previewDiscourseContext() {
+    return { fingerprint: 'read-only-preview' } as never;
+  }
+
+  async sendDiscourseMessage(input: Parameters<
+    NonNullable<ProviderSmokeService['sendDiscourseMessage']>
+  >[0]) {
+    this.readOnlySendCount += 1;
+    const probe = input.body.match(/\.task-monki-read-only-probe-[a-f0-9-]+/u)?.[0];
+    if (!probe) throw new Error('Read-only qualification prompt omitted its probe path.');
+    this.readOnlyProbeFileName = probe;
+    if (this.behavior.mutateReadOnlyProbe) {
+      await fs.writeFile(path.join(this.repositoryPath, probe), 'TASK_MONKI_READ_ONLY_PROBE');
+    }
+    const now = new Date().toISOString();
+    const wave = {
+      id: 'wave-read-only',
+      conversationId: input.conversationId,
+      triggerMessageId: 'message-read-only',
+      policy: 'DIRECT' as const,
+      status: 'SETTLED' as const,
+      outcome: 'COMPLETE' as const
+    } as DiscourseResponseWaveRecord;
+    const job = {
+      id: 'job-read-only',
+      conversationId: input.conversationId,
+      waveId: wave.id,
+      role: 'ANSWER' as const,
+      runId: 'runtime-run-read-only',
+      status: 'COMPLETED' as const
+    } as DiscourseAgentJobRecord;
+    this.discourseAggregate = {
+      ...this.discourseAggregate!,
+      waves: [wave],
+      jobs: [job]
+    };
+    const selected = input.agents[0]!;
+    const selectedModel = selected.modelId?.split('/').at(-1);
+    this.runtimeRuns.push({
+      id: job.runId!,
+      purpose: 'DISCOURSE_ANSWER',
+      status: 'COMPLETED',
+      requestedSettings: {
+        runtimeId: selected.runtimeId,
+        model: selectedModel,
+        reasoningEffort: selected.reasoningEffort
+      },
+      repositoryIntegrity: {
+        status: this.behavior.readOnlyIntegrity ?? 'UNCHANGED',
+        checkedAt: now
+      }
+    } as AgentRuntimeRunRecord);
+    return { wave, jobs: [job] } as never;
+  }
+
+  async getDiscourseConversation() {
+    if (!this.discourseAggregate) throw new Error('Fake Discourse conversation is missing.');
+    return structuredClone(this.discourseAggregate);
+  }
+
+  async stopDiscourseWave() {
+    if (!this.discourseAggregate) throw new Error('Fake Discourse conversation is missing.');
+    return structuredClone(this.discourseAggregate.waves[0]!);
+  }
+
+  async runtimeSnapshot(): Promise<AgentRuntimeStoreState> {
+    return { runs: structuredClone(this.runtimeRuns) } as AgentRuntimeStoreState;
+  }
+
   async createTask(input: CreateTaskRequest): Promise<Task> {
     const now = new Date().toISOString();
     const task = {
@@ -776,6 +1637,17 @@ class FakeProviderSmokeService implements ProviderSmokeService {
       projection: createInitialProjection(now)
     } satisfies Task;
     this.snapshot.tasks.push(task);
+    if (input.attachmentDraftId) {
+      const draft = this.attachmentDrafts.get(input.attachmentDraftId);
+      if (!draft) throw new Error(`Fake attachment draft is missing: ${input.attachmentDraftId}`);
+      this.taskAttachments.set(task.id, {
+        records: structuredClone(draft.snapshot.attachments),
+        bytes: new Map(
+          [...draft.bytes].map(([id, value]) => [id, new Uint8Array(value)])
+        )
+      });
+      this.attachmentDrafts.delete(input.attachmentDraftId);
+    }
     return structuredClone(task);
   }
 
@@ -784,6 +1656,22 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     if (!task) throw new Error(`Fake task is missing: ${input.taskId}`);
     const now = new Date().toISOString();
     const timesOut = this.runSequence < (this.behavior.timedOutRunCount ?? 0);
+    const selectedAttachments = this.taskAttachments.get(task.id);
+    const attachmentSelection = (selectedAttachments?.records ?? []).map(
+      (attachment) => ({
+        attachmentId: attachment.id,
+        ordinal: attachment.ordinal,
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        byteCount: attachment.byteCount,
+        sha256: attachment.sha256
+      })
+    );
+    const defaultFinalMessage = attachmentSmokeFinalMessage(
+      selectedAttachments,
+      !this.behavior.omitImageObservation,
+      this.behavior.imageObservation
+    );
     const run = {
       id: `run-${++this.runSequence}`,
       runtimeId: task.runtimeId,
@@ -804,7 +1692,24 @@ class FakeProviderSmokeService implements ProviderSmokeService {
       eventCount: 1,
       finalMessage: this.behavior.hangStart || timesOut
         ? undefined
-        : (this.behavior.finalMessage ?? 'TASK_MONKI_PROVIDER_SMOKE_OK')
+        : (this.behavior.finalMessage ?? defaultFinalMessage),
+      attachmentSelection,
+      attachmentSubmissions: attachmentSelection.map((attachment, index) => ({
+        ...attachment,
+        ...(this.behavior.mismatchAttachmentEvidence && index === 0
+          ? { attachmentId: 'different-attachment' }
+          : {}),
+        transport:
+          this.behavior.mismatchAttachmentTransport && index === 0
+            ? 'text-block'
+            : fakeAttachmentTransport(task.runtimeId, attachment.kind),
+        verifiedAt: now,
+        correlation: {
+          kind: fakeAttachmentCorrelation(task.runtimeId),
+          id: `provider-turn-${task.id}`
+        },
+        submittedAt: now
+      }))
     } as RunRecord;
     this.snapshot.runs.push(run);
     this.startedModels.push({
@@ -814,31 +1719,11 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     if ((this.behavior.observation ?? 'provider') !== 'none') {
       const acpPostConfiguration =
         this.behavior.observation === 'acp-post-configuration';
-      this.snapshot.agentSettingsObservations.push({
-        id: `observation-${run.id}`,
-        taskId: task.id,
-        iterationId: run.iterationId,
-        sessionId: run.sessionId,
-        runId: run.id,
-        runtimeId: run.runtimeId,
-        source:
-          this.behavior.observation === 'adapter'
-            ? ('TASK_MONKI_RESOLUTION' as never)
-            : acpPostConfiguration
-              ? 'THREAD_START_RESPONSE'
-              : 'THREAD_SETTINGS_NOTIFICATION',
-        settings: acpPostConfiguration
-          ? { ...task.agentSettings, model: 'grok-composer-2.5-fast' }
-          : task.agentSettings,
-        ...(acpPostConfiguration
-          ? { rawMessage: protocolReference(run, 2, now) }
-          : {}),
-        observedAt: now
-      });
-      if (
-        this.behavior.observation === 'provider-then-adapter' ||
-        acpPostConfiguration
-      ) {
+      const promptResolution =
+        this.behavior.observation === 'acknowledged-prompt' ||
+        this.behavior.observation === 'unacknowledged-prompt' ||
+        this.behavior.observation === 'acknowledged-prompt-then-conflict';
+      if (promptResolution) {
         this.snapshot.agentSettingsObservations.push({
           id: `adapter-observation-${run.id}`,
           taskId: task.id,
@@ -848,11 +1733,72 @@ class FakeProviderSmokeService implements ProviderSmokeService {
           runtimeId: run.runtimeId,
           source: 'TASK_MONKI_RESOLUTION' as never,
           settings: task.agentSettings,
-          ...(acpPostConfiguration
-            ? { rawMessage: protocolReference(run, 4, now) }
-            : {}),
+          ...(this.behavior.observation === 'unacknowledged-prompt'
+            ? {}
+            : { rawMessage: protocolReference(run, 2, now) }),
+          observedAt: now
+        });
+        const { reasoningEffort: _reasoningEffort, ...providerSettings } =
+          task.agentSettings;
+        this.snapshot.agentSettingsObservations.push({
+          id: `provider-observation-${run.id}`,
+          taskId: task.id,
+          iterationId: run.iterationId,
+          sessionId: run.sessionId,
+          runId: run.id,
+          runtimeId: run.runtimeId,
+          source:
+            this.behavior.observation === 'acknowledged-prompt-then-conflict'
+              ? 'MODEL_REROUTED_NOTIFICATION'
+              : 'RECOVERY_RESUME_RESPONSE',
+          settings:
+            this.behavior.observation === 'acknowledged-prompt-then-conflict'
+              ? { ...providerSettings, model: 'different-model' }
+              : providerSettings,
+          rawMessage: protocolReference(run, 4, now),
           observedAt: new Date(Date.parse(now) + 1).toISOString()
         });
+      } else {
+        this.snapshot.agentSettingsObservations.push({
+          id: `observation-${run.id}`,
+          taskId: task.id,
+          iterationId: run.iterationId,
+          sessionId: run.sessionId,
+          runId: run.id,
+          runtimeId: run.runtimeId,
+          source:
+            this.behavior.observation === 'adapter'
+              ? ('TASK_MONKI_RESOLUTION' as never)
+              : acpPostConfiguration
+                ? 'THREAD_START_RESPONSE'
+                : 'THREAD_SETTINGS_NOTIFICATION',
+          settings: acpPostConfiguration
+            ? { ...task.agentSettings, model: 'grok-composer-2.5-fast' }
+            : task.agentSettings,
+          ...(acpPostConfiguration
+            ? { rawMessage: protocolReference(run, 2, now) }
+            : {}),
+          observedAt: now
+        });
+        if (
+          this.behavior.observation === 'provider-then-adapter' ||
+          acpPostConfiguration
+        ) {
+          this.snapshot.agentSettingsObservations.push({
+            id: `adapter-observation-${run.id}`,
+            taskId: task.id,
+            iterationId: run.iterationId,
+            sessionId: run.sessionId,
+            runId: run.id,
+            runtimeId: run.runtimeId,
+            source: 'TASK_MONKI_RESOLUTION' as never,
+            settings: task.agentSettings,
+            ...(acpPostConfiguration
+              ? { rawMessage: protocolReference(run, 4, now) }
+              : {}),
+            observedAt: new Date(Date.parse(now) + 1).toISOString()
+          });
+        }
       }
     }
     if (this.behavior.interactionStatus) {
@@ -892,7 +1838,9 @@ class FakeProviderSmokeService implements ProviderSmokeService {
             commitsAheadOfBase: 1,
             committedDiffFileCount: 1
           }
-        : undefined
+        : this.behavior.stageTaskChange
+          ? { stagedCount: 1, workingDiffFileCount: 0 }
+          : undefined
     );
     if (this.behavior.retainDifferentStoredGitSnapshot) {
       this.snapshot.gitSnapshots.push(
@@ -957,15 +1905,63 @@ class FakeProviderSmokeService implements ProviderSmokeService {
         : 'task-monki-provider-smoke.txt';
       await fs.writeFile(
         path.join(worktreePath, fileName),
-        'TASK_MONKI_PROVIDER_SMOKE_OK\n'
+        this.behavior.omitTrailingNewline
+          ? 'TASK_MONKI_PROVIDER_SMOKE_OK'
+          : 'TASK_MONKI_PROVIDER_SMOKE_OK\n'
       );
     }
     if (committed) {
       await git(worktreePath, ['add', 'task-monki-provider-smoke.txt']);
       await git(worktreePath, ['commit', '-m', 'Provider committed smoke change']);
+    } else if (this.behavior.stageTaskChange) {
+      await git(worktreePath, ['add', 'task-monki-provider-smoke.txt']);
     }
     return worktreePath;
   }
+}
+
+function attachmentSmokeFinalMessage(
+  attachments:
+    | { records: readonly StagedAttachmentRecord[]; bytes: ReadonlyMap<string, Uint8Array> }
+    | undefined,
+  includeImageObservation = true,
+  imageObservation?: string
+): string {
+  if (!attachments || attachments.records.length === 0) {
+    return 'TASK_MONKI_PROVIDER_SMOKE_OK';
+  }
+  const text = attachments.records.find((attachment) => attachment.kind === 'text');
+  const token = text
+    ? Buffer.from(attachments.bytes.get(text.id) ?? []).toString('utf8')
+      .match(/TM_ATTACHMENT_FACT_[A-F0-9]+/u)?.[0]
+    : undefined;
+  const imageDetail = includeImageObservation && attachments.records.some(
+    (attachment) => attachment.kind === 'image'
+  )
+    ? `\n${imageObservation ?? 'The code is Q7, with a circle, triangle, and square from left to right on a navy background.'}`
+    : '';
+  return `TASK_MONKI_PROVIDER_SMOKE_OK${token ? `\n${token}` : ''}${imageDetail}`;
+}
+
+function fakeAttachmentTransport(
+  runtimeId: string,
+  kind: AttachmentKind
+): AttachmentSubmissionRecord['transport'] {
+  if (kind === 'image') return runtimeId === 'opencode' ? 'native-file' : 'native-image';
+  if (runtimeId === 'opencode') return 'native-file';
+  if (runtimeId === 'grok-acp' || runtimeId === 'claude-agent-acp') {
+    return 'embedded-resource';
+  }
+  if (runtimeId === 'cursor-agent-acp') return 'text-block';
+  return 'managed-path';
+}
+
+function fakeAttachmentCorrelation(
+  runtimeId: string
+): AttachmentSubmissionRecord['correlation']['kind'] {
+  if (runtimeId === 'opencode') return 'provider-message';
+  if (runtimeId.endsWith('-acp')) return 'client-request';
+  return 'provider-turn';
 }
 
 function protocolReference(run: RunRecord, sequence: number, recordedAt: string) {
@@ -1041,11 +2037,14 @@ async function runHarness(
       timeoutMs: 5_000,
       confirmThrowaway: true,
       confirmProviderUsage: true,
+      qualifyReadOnly: false,
+      qualifyAttachments: false,
       help: false,
       ...optionOverrides
     },
     {
       createService: () => service,
+      runtimeStore: { snapshot: () => service.runtimeSnapshot() },
       pollIntervalMs: 2,
       cancelTimeoutMs: 1_000,
       ...dependencyOverrides

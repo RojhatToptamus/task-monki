@@ -320,6 +320,7 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     diagnosticArtifactId: 'diagnostic-1',
     startedAt: now,
     eventCount: 0,
-    ...overrides
+    ...overrides,
+    attachmentSelection: overrides.attachmentSelection ?? []
   };
 }

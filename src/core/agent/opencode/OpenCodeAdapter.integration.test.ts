@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,13 +17,19 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../../shared/contracts';
+import type { AgentAttachmentSelection } from '../../../shared/attachments';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
-import {
-  ArtifactAppendAmbiguousError,
-  FileTaskStore
-} from '../../storage/FileTaskStore';
+import { FileTaskStore } from '../../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import type {
+  AgentProviderRuntimeStore,
+  TaskAgentRuntimeAccess
+} from '../AgentRuntimeStore';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
+import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
+import type { AgentRuntimeTurnEvent } from '../AgentRuntimeCoordinator';
 import { AgentInteractionService } from '../AgentInteractionService';
 import {
   createOpenCodeMessageId,
@@ -40,7 +47,10 @@ import {
   OpenCodeAmbiguousMutationError,
   OpenCodeHttpError
 } from './OpenCodeHttpClient';
-import { openCodePermissionRules } from './OpenCodeInteractionMapper';
+import {
+  openCodePermissionRules,
+  openCodeReadOnlyPermissionRules
+} from './OpenCodeInteractionMapper';
 import type { OpenCodeMessage, OpenCodeSession } from './OpenCodeProtocol';
 import type {
   OpenCodeServerSupervisorOptions,
@@ -49,6 +59,7 @@ import type {
   RunningOpenCodeServer
 } from './OpenCodeServerSupervisor';
 import type { ResolvedOpenCodeRuntime } from './OpenCodeRuntimeResolver';
+import type { DesignClientToolBridge } from '../../design/DesignClientToolBridge';
 
 const SETTINGS: AgentExecutionSettings = {
   runtimeId: 'opencode',
@@ -82,6 +93,948 @@ describe('OpenCodeAdapter', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('runs Design in pure mode with one registered MCP bridge and bounded turn grants', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+
+    expect(fixture.harness.sessionSupervisor.currentServer?.argv).toContain('--pure');
+    expect(fixture.harness.mcpRegistrations).toEqual([
+      {
+        name: 'task_monki_design',
+        config: {
+          type: 'local',
+          command: ['/app/Task Monki', '/resources/design-tool-mcp-server.mjs'],
+          environment: {
+            TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'session-credential',
+            TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: '/private/grant-file'
+          },
+          timeout: 120_000
+        }
+      }
+    ]);
+    expect(fixture.harness.mcpSensitiveValues).toEqual([
+      ['session-credential', '/private/grant-file']
+    ]);
+    expect(bridge.createSessionGrant).toHaveBeenCalledWith({
+      runtimeId: 'opencode',
+      sessionId: session.id,
+      worktreeId: fixture.worktree.id,
+      providerGeneration: fixture.harness.sessionSupervisor.currentServer?.id
+    });
+    expect(bridge.activateGrant).toHaveBeenCalledWith({
+      grantId: 'design-grant-1',
+      authority: {
+        runtimeId: 'opencode',
+        sessionId: session.id,
+        runId: run.id,
+        worktreeId: fixture.worktree.id,
+        providerGeneration: fixture.harness.sessionSupervisor.currentServer?.id
+      }
+    });
+    expect(fixture.harness.promptBodies[0]).toMatchObject({
+      system: expect.stringContaining('Task Monki Design agent')
+    });
+    expect(JSON.stringify(fixture.harness.promptBodies[0])).toContain(
+      'Read each matching Task Monki skill with the normal file-reading tool at its exact Path.'
+    );
+
+    const activeSession = (await fixture.runtime.getAgentSession(session.id))!;
+    const assistantId = createOpenCodeMessageId();
+    fixture.harness.messages.set(activeSession.providerSessionId!, [
+      {
+        info: {
+          id: turn.providerTurnId!,
+          sessionID: activeSession.providerSessionId!,
+          role: 'user',
+          time: { created: Date.now() }
+        },
+        parts: []
+      },
+      {
+        info: {
+          id: assistantId,
+          sessionID: activeSession.providerSessionId!,
+          role: 'assistant',
+          parentID: turn.providerTurnId,
+          providerID: 'anthropic',
+          modelID: 'claude-test',
+          finish: 'stop',
+          time: { created: Date.now(), completed: Date.now() }
+        },
+        parts: [{
+          id: 'prt_design_done',
+          sessionID: activeSession.providerSessionId!,
+          messageID: assistantId,
+          type: 'text',
+          text: 'READY'
+        }]
+      }
+    ]);
+    fixture.harness.statuses[activeSession.providerSessionId!] = { type: 'idle' };
+    await fixture.harness.emit({
+      type: 'session.idle',
+      properties: { sessionID: activeSession.providerSessionId }
+    });
+
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+    expect(bridge.revokeGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.releaseSession({
+      localSessionId: session.id,
+      providerSessionId: activeSession.providerSessionId
+    });
+    expect(fixture.harness.mcpDisconnects).toEqual([
+      '/mcp/task_monki_design/disconnect'
+    ]);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('quarantines an uncertain Design MCP registration and releases its grant', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    fixture.harness.failNextMcpRegistrationAfterAccept = true;
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    })).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('rejects a definite failed Design MCP registration before prompt delivery', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    fixture.harness.nextMcpRegistrationStatus = {
+      status: 'failed',
+      error: 'simulated child launch failure'
+    };
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    })).rejects.toThrow('reported failed for the Design MCP server');
+
+    expect(fixture.harness.promptBodies).toHaveLength(0);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('stops a newly created Design runtime when session setup fails', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    fixture.harness.failProviderGetAt = fixture.harness.providerGetCount + 2;
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(
+      fixture.adapter.startTurn({
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: 'Create and verify the Design.',
+        authoritativeGoal: 'Create and verify the Design.',
+        settings: SETTINGS,
+        attachments: []
+      })
+    ).rejects.toThrow('simulated provider catalog failure');
+
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('enables Design for connected catalog models that report image input', async () => {
+    const runtime = {
+      ...fakeRuntime(),
+      version: '1.99.0',
+      diagnostics: {
+        ...fakeRuntime().diagnostics,
+        selectedVersion: '1.99.0'
+      }
+    };
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      runtimeResolver: async () => runtime,
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    const catalog = {
+      connected: ['opencode', 'openai'],
+      default: {
+        opencode: 'catalog-image-model',
+        openai: 'gpt-5.6-luna'
+      },
+      all: [
+        {
+          id: 'opencode',
+          name: 'OpenCode',
+          models: {
+            'catalog-image-model': {
+              id: 'catalog-image-model',
+              name: 'Catalog image model',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            },
+            'catalog-text-model': {
+              id: 'catalog-text-model',
+              name: 'Catalog text model',
+              status: 'active',
+              capabilities: { input: { text: true, image: false } }
+            }
+          }
+        },
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          models: {
+            'gpt-5.6-luna': {
+              id: 'gpt-5.6-luna',
+              name: 'GPT-5.6 Luna',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            },
+            'second-image-model': {
+              id: 'second-image-model',
+              name: 'Second image model',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } },
+              cost: { input: 0, output: 0 }
+            }
+          }
+        }
+      ]
+    };
+    fixture.harness.catalogs.set(path.resolve(fixture.appCwd), catalog);
+    fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), catalog);
+
+    await fixture.adapter.initialize();
+
+    expect(await fixture.adapter.capabilities()).toMatchObject({
+      extensions: {
+        'task-monki.design-instructions': { maturity: 'stable' },
+        'task-monki.design-skill-access': { maturity: 'stable' },
+        'task-monki.design-browser-verification': { maturity: 'stable' }
+      }
+    });
+    expect(await fixture.adapter.listModels()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          modelProvider: 'opencode',
+          model: 'catalog-image-model',
+          designSupport: {
+            maturity: 'stable',
+            detail: expect.stringContaining('reports image input support')
+          }
+        }),
+        expect.objectContaining({
+          modelProvider: 'openai',
+          model: 'second-image-model',
+          designSupport: {
+            maturity: 'stable',
+            detail: expect.stringContaining('reports image input support')
+          }
+        }),
+        expect.objectContaining({
+          modelProvider: 'opencode',
+          model: 'catalog-text-model',
+          designSupport: {
+            maturity: 'unsupported',
+            detail: expect.stringContaining('reports no image input support')
+          }
+        })
+      ])
+    );
+    await fixture.adapter.shutdown();
+  });
+
+  it('rejects Design before provider mutation when the worktree catalog loses image support', async () => {
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: fakeDesignToolBridge().api
+    });
+    await fixture.adapter.initialize();
+    fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), {
+      connected: ['anthropic'],
+      default: { anthropic: 'claude-test' },
+      all: [{
+        id: 'anthropic',
+        name: 'Anthropic',
+        models: {
+          'claude-test': {
+            id: 'claude-test',
+            name: 'Claude Test',
+            status: 'active',
+            capabilities: { input: { text: true } },
+            variants: { high: {} }
+          }
+        }
+      }]
+    });
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(
+      fixture.adapter.startTurn({
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: 'Create and verify the Design.',
+        authoritativeGoal: 'Create and verify the Design.',
+        settings: SETTINGS
+      })
+    ).rejects.toThrow('reports no image input support');
+    expect(fixture.harness.promptBodies).toHaveLength(0);
+    expect(fixture.harness.sessions.size).toBe(0);
+    await fixture.adapter.shutdown();
+  });
+
+  it('revokes the Design grant before cancellation reaches OpenCode', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      interruptCompletionTimeoutMs: 80,
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    fixture.harness.settleAbort = true;
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+    const activeSession = (await fixture.runtime.getAgentSession(session.id))!;
+
+    await fixture.adapter.interruptTurn({
+      session: {
+        localSessionId: session.id,
+        providerSessionId: activeSession.providerSessionId
+      },
+      providerTurnId: turn.providerTurnId!
+    });
+
+    expect(bridge.revokeGrant).toHaveBeenCalledWith('design-grant-1');
+    expect(fixture.harness.abortedSessionIds).toEqual([
+      activeSession.providerSessionId
+    ]);
+    await fixture.adapter.shutdown();
+  });
+
+  it('releases a Design grant when its exact OpenCode generation exits', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+
+    await fixture.harness.sessionSupervisor.lose();
+    await waitForCondition(() => bridge.releaseSessionGrant.mock.calls.length === 1);
+
+    expect(bridge.revokeGrant).toHaveBeenCalledWith('design-grant-1');
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('releases the Design grant before an unconfirmed quarantine shutdown', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+
+    const lifecycle: string[] = [];
+    bridge.releaseSessionGrant.mockImplementation(async () => {
+      lifecycle.push('release-design-grant');
+    });
+    const supervisor = fixture.harness.sessionSupervisor;
+    supervisor.shutdownFailure = new Error('old OpenCode child may still be live');
+    const shutdown = supervisor.shutdown.bind(supervisor);
+    vi.spyOn(supervisor, 'shutdown').mockImplementation(async () => {
+      lifecycle.push('shutdown');
+      await shutdown();
+    });
+    const internals = fixture.adapter as unknown as {
+      quarantineSessionRuntime(
+        sessionId: string,
+        operation: string,
+        detail: string
+      ): Promise<void>;
+    };
+
+    await expect(
+      internals.quarantineSessionRuntime(
+        session.id,
+        'test/quarantine',
+        'Delivery could not be confirmed.'
+      )
+    ).rejects.toThrow('session process quarantine was incomplete');
+    expect(lifecycle.slice(0, 2)).toEqual(['release-design-grant', 'shutdown']);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+
+    supervisor.shutdownFailure = undefined;
+    await expect(fixture.adapter.shutdown()).rejects.toThrow(
+      'OpenCode runtimes failed to shut down'
+    );
+  });
+
+  it('maps the shared read-only request to native denial without claiming confinement', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+
+    await expect(
+      fixture.adapter.resolveExecution({
+        settings: {
+          ...SETTINGS,
+          sandbox: 'READ_ONLY',
+          approvalPolicy: 'NEVER',
+          networkAccess: false
+        },
+        attachments: []
+      })
+    ).resolves.toMatchObject({
+      settings: {
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'never',
+        networkAccess: true
+      }
+    });
+    await fixture.adapter.shutdown();
+  });
+
+  it('runs an owner-neutral turn with exact native read-only rules and bounded output', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const context = await fixture.adapter.buildExecutionContext({
+      sessionId: 'runtime-session',
+      primaryCwd: fixture.worktree.worktreePath,
+      readRoots: [{
+        canonicalPath: fixture.worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: fixture.worktree.id
+      }],
+      modelSettings: SETTINGS,
+      clientOperationId: 'runtime-context'
+    });
+    const owner = {
+      kind: 'DISCOURSE' as const,
+      conversationId: 'conversation-1',
+      stableParticipantId: 'participant-1'
+    };
+    expect(context.modelSettings.approvalPolicy).toBe('NEVER');
+    const session = await fixture.runtimeStore.createSession({
+      id: 'runtime-session',
+      owner,
+      accessEpoch: createAgentSessionAccessEpoch({
+        owner,
+        sessionId: 'runtime-session',
+        epoch: 1,
+        runtimeId: 'opencode',
+        model: context.modelSettings.model!,
+        executionContext: context,
+        createdAt: new Date().toISOString()
+      }),
+      executionContext: context,
+      clientOperationId: 'runtime-session-create',
+      runtimeId: 'opencode',
+      role: 'PRIMARY',
+      relationshipState: 'ROOT',
+      status: 'NOT_MATERIALIZED',
+      materialized: false,
+      requestedSettings: context.modelSettings
+    });
+    let run = await fixture.runtimeStore.createRun({
+      id: 'runtime-run',
+      owner,
+      scope: {
+        kind: 'DISCOURSE',
+        conversationId: 'conversation-1',
+        waveId: 'wave-1',
+        jobId: 'job-1',
+        contextSnapshotId: 'snapshot-1',
+        attemptId: 'attempt-1'
+      },
+      sessionId: session.id,
+      sessionAccessEpoch: 1,
+      purpose: 'DISCOURSE_ANSWER',
+      generationKey: 'runtime-generation',
+      clientOperationId: 'runtime-run-create',
+      requestedSettings: context.modelSettings,
+      promptArtifactId: 'runtime-prompt',
+      outputArtifactId: 'runtime-output',
+      diagnosticArtifactId: 'runtime-diagnostic'
+    });
+    await Promise.all([
+      fixture.runtimeStore.createArtifact({
+        id: run.promptArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'PROMPT',
+        clientOperationId: 'runtime-prompt-create',
+        content: 'Inspect this repository.'
+      }),
+      fixture.runtimeStore.createArtifact({
+        id: run.outputArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'OUTPUT',
+        clientOperationId: 'runtime-output-create',
+        content: ''
+      }),
+      fixture.runtimeStore.createArtifact({
+        id: run.diagnosticArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'DIAGNOSTIC',
+        clientOperationId: 'runtime-diagnostic-create',
+        content: ''
+      })
+    ]);
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: new Date().toISOString()
+      },
+      'runtime-starting'
+    );
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const started = await fixture.adapter.startRuntimeTurn({
+      session,
+      run,
+      executionContext: context,
+      prompt: 'Inspect this repository.',
+      attachments: []
+    });
+    const providerSession = fixture.harness.sessions.get(started.providerSessionId)!;
+    expect(providerSession.permission).toEqual(openCodeReadOnlyPermissionRules());
+    await expect(fixture.runtimeStore.getAgentServer(started.serverInstanceId)).resolves.toMatchObject({
+      argv: expect.arrayContaining(['--pure'])
+    });
+
+    const assistant: OpenCodeMessage = {
+      info: {
+        id: 'msg_runtime_assistant',
+        sessionID: providerSession.id,
+        role: 'assistant',
+        parentID: started.providerTurnId,
+        finish: 'stop',
+        time: { created: Date.now(), completed: Date.now() }
+      },
+      parts: [{
+        id: 'prt_runtime_answer',
+        sessionID: providerSession.id,
+        messageID: 'msg_runtime_assistant',
+        type: 'text',
+        text: 'The repository is consistent.'
+      }]
+    };
+    fixture.harness.messages.get(providerSession.id)!.push(assistant);
+    fixture.harness.statuses[providerSession.id] = { type: 'idle' };
+    await fixture.harness.emit({
+      type: 'message.updated',
+      properties: { info: assistant.info }
+    });
+    await fixture.harness.emit({
+      type: 'session.idle',
+      properties: { sessionID: providerSession.id }
+    });
+
+    expect(await fixture.runtimeStore.readArtifact(run.outputArtifactId)).toBe(
+      'The repository is consistent.'
+    );
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'COMPLETED',
+      delivery: 'TERMINAL',
+      providerTurnId: started.providerTurnId
+    });
+    expect(await fixture.runtimeStore.getSession(session.id)).toMatchObject({
+      requestedSettings: { approvalPolicy: 'NEVER' },
+      observedSettings: { approvalPolicy: 'never' }
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: run.id, status: 'completed' })
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('fails a denied read-only permission request only after provider settlement', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    fixture.harness.settleAbort = true;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-edit',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(fixture.harness.statusReadCount).toBeGreaterThan(0);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'FAILED',
+      delivery: 'TERMINAL',
+      terminalReason: expect.stringContaining('request was denied')
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: fixture.run.id, status: 'failed' })
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('finishes a shared read-only cancellation only after OpenCode reports idle', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({
+      interruptCompletionTimeoutMs: 40
+    });
+    fixture.harness.settleAbort = true;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const session = (await fixture.runtimeStore.getSession(fixture.session.id))!;
+    let run = (await fixture.runtimeStore.getRun(fixture.run.id))!;
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      'runtime-denial-interrupting'
+    );
+
+    await fixture.adapter.interruptRuntimeTurn({ session, run });
+
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(fixture.harness.statusReadCount).toBeGreaterThan(0);
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'INTERRUPTED',
+      delivery: 'TERMINAL',
+      interruptDelivery: 'TERMINAL'
+    });
+    expect(await fixture.runtimeStore.getSession(session.id)).toMatchObject({
+      status: 'IDLE',
+      materialized: true
+    });
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: run.id, status: 'interrupted' })
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('stops the session process when a shared read-only cancellation never settles', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({
+      interruptCompletionTimeoutMs: 40
+    });
+    const oldClient = fixture.harness.sessionSupervisor.client!;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const session = (await fixture.runtimeStore.getSession(fixture.session.id))!;
+    let run = (await fixture.runtimeStore.getRun(fixture.run.id))!;
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      'runtime-denial-interrupting'
+    );
+
+    await fixture.adapter.interruptRuntimeTurn({ session, run });
+
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(fixture.harness.statusReadCount).toBeGreaterThan(0);
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(fixture.harness.stoppedStreams).toBe(1);
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'INTERRUPTED',
+      delivery: 'TERMINAL',
+      interruptDelivery: 'TERMINAL',
+      providerTerminalSource: 'OPENCODE_PROCESS_STOP',
+      terminalReason: expect.stringContaining('stopped the owning OpenCode session process')
+    });
+    expect(await fixture.runtimeStore.getSession(session.id)).toMatchObject({
+      status: 'NOT_LOADED'
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'TERMINAL', runId: run.id, status: 'interrupted' })
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'RECOVERY_REQUIRED' }));
+
+    await oldClient.emitLate({
+      type: 'session.idle',
+      properties: { sessionID: fixture.started.providerSessionId }
+    });
+    expect((await fixture.runtimeStore.getRun(run.id))?.status).toBe('INTERRUPTED');
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('does not cross the repository boundary when read-only cancellation cannot stop the process', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({
+      interruptCompletionTimeoutMs: 40
+    });
+    fixture.harness.sessionSupervisor.shutdownFailure = new Error(
+      'simulated session shutdown failure'
+    );
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+    const session = (await fixture.runtimeStore.getSession(fixture.session.id))!;
+    let run = (await fixture.runtimeStore.getRun(fixture.run.id))!;
+    run = await fixture.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: new Date().toISOString()
+      },
+      'runtime-denial-interrupting'
+    );
+
+    await expect(
+      fixture.adapter.interruptRuntimeTurn({ session, run })
+    ).rejects.toMatchObject({ delivery: 'AMBIGUOUS' });
+
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(await fixture.runtimeStore.getRun(run.id)).toMatchObject({
+      status: 'INTERRUPTING'
+    });
+    expect((await fixture.runtimeStore.getRun(run.id))?.repositoryIntegrity).toBeUndefined();
+    expect((await fixture.runtimeStore.getSession(session.id))?.status).not.toBe(
+      'NOT_LOADED'
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'RECOVERY_REQUIRED', runId: run.id })
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'TERMINAL' }));
+    fixture.harness.sessionSupervisor.shutdownFailure = undefined;
+    unsubscribe();
+    await expect(fixture.adapter.shutdown()).rejects.toThrow(
+      'OpenCode runtimes failed to shut down'
+    );
+  });
+
+  it('does not emit recovery when an inbound read-only quarantine cannot stop the process', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    fixture.harness.sessionSupervisor.shutdownFailure = new Error(
+      'simulated inbound session shutdown failure'
+    );
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-unconfirmed-quarantine',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([
+      fixture.started.providerSessionId
+    ]);
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'STARTING'
+    });
+    expect(
+      (await fixture.runtimeStore.getRun(fixture.run.id))?.repositoryIntegrity
+    ).toBeUndefined();
+    expect((await fixture.runtimeStore.getSession(fixture.session.id))?.status).not.toBe(
+      'NOT_LOADED'
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'RECOVERY_REQUIRED', runId: fixture.run.id })
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'TERMINAL' }));
+
+    fixture.harness.sessionSupervisor.shutdownFailure = undefined;
+    unsubscribe();
+    await expect(fixture.adapter.shutdown()).rejects.toThrow(
+      'OpenCode runtimes failed to shut down'
+    );
+  });
+
+  it('quarantines a read-only turn when abort does not reach provider settlement', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    const oldClient = fixture.harness.sessionSupervisor.client!;
+    const events: AgentRuntimeTurnEvent[] = [];
+    const unsubscribe = fixture.adapter.onRuntimeTurnEvent((event) => events.push(event));
+
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-unsettled',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION'
+    });
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(fixture.harness.stoppedStreams).toBe(1);
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'TERMINAL' }));
+
+    await oldClient.emitLate({
+      type: 'session.idle',
+      properties: { sessionID: fixture.started.providerSessionId }
+    });
+    expect((await fixture.runtimeStore.getRun(fixture.run.id))?.status).toBe(
+      'RECOVERY_REQUIRED'
+    );
+    unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('quarantines a read-only turn when the provider abort request fails', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture();
+    fixture.harness.failNextAbort = true;
+
+    await fixture.harness.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'permission-runtime-abort-failed',
+        sessionID: fixture.started.providerSessionId,
+        permission: 'edit',
+        source: { messageID: fixture.started.providerTurnId }
+      }
+    });
+
+    expect(fixture.harness.permissionReplies).toEqual([{ reply: 'reject' }]);
+    expect(fixture.harness.abortedSessionIds).toEqual([fixture.started.providerSessionId]);
+    expect(await fixture.runtimeStore.getRun(fixture.run.id)).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION'
+    });
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(fixture.harness.stoppedStreams).toBe(1);
+    await fixture.adapter.shutdown();
   });
 
   it('stops after one assistant response when OpenCode compares message IDs', async () => {
@@ -153,7 +1106,7 @@ describe('OpenCodeAdapter', () => {
       properties: { sessionID: session.providerSessionId }
     });
 
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'COMPLETED',
       finalMessage: 'TASK_MONKI_PROVIDER_SMOKE_OK'
     });
@@ -235,7 +1188,7 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    const interaction = (await fixture.store.snapshot()).interactionRequests.find(
+    const interaction = (await fixture.runtime.snapshot()).interactionRequests.find(
       (candidate) => candidate.providerRequestId === 'que_native_input'
     )!;
     expect(interaction).toMatchObject({
@@ -250,16 +1203,16 @@ describe('OpenCodeAdapter', () => {
         ]
       }
     });
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'AWAITING_USER_INPUT',
       providerTurnId: turn.providerTurnId
     });
-    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+    expect(await fixture.runtime.getAgentSession(session.id)).toMatchObject({
       status: 'AWAITING_USER_INPUT'
     });
 
     const service = new AgentInteractionService(
-      fixture.store,
+      fixture.runtime,
       fixture.appEvents,
       () => fixture.adapter
     );
@@ -286,15 +1239,15 @@ describe('OpenCodeAdapter', () => {
         ]
       }
     ]);
-    expect(await fixture.store.getInteractionRequest(interaction.id)).toMatchObject({
+    expect(await fixture.runtime.getInteractionRequest(interaction.id)).toMatchObject({
       status: 'RESOLVED',
       resolution: { provider: 'opencode', acknowledged: true }
     });
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'RUNNING',
       providerTurnId: turn.providerTurnId
     });
-    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+    expect(await fixture.runtime.getAgentSession(session.id)).toMatchObject({
       status: 'ACTIVE'
     });
     await expect(service.respond(input)).rejects.toThrow('expected PENDING');
@@ -344,7 +1297,7 @@ describe('OpenCodeAdapter', () => {
 
     expect(fixture.harness.questionReplies).toEqual([{ answers: [[]] }]);
     expect(
-      (await fixture.store.snapshot()).interactionRequests.find(
+      (await fixture.runtime.snapshot()).interactionRequests.find(
         (candidate) => candidate.providerRequestId === 'que_secret_recovery'
       )
     ).toMatchObject({
@@ -352,8 +1305,8 @@ describe('OpenCodeAdapter', () => {
       allowedActions: [],
       policyWarnings: [expect.stringContaining('secret-safe response channel')]
     });
-    expect(await fixture.store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
-    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await fixture.runtime.getAgentSession(session.id)).toMatchObject({
       status: 'ACTIVE'
     });
     await fixture.adapter.shutdown();
@@ -488,8 +1441,8 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    const storedRun = (await fixture.store.getRun(run.id))!;
-    const storedSession = (await fixture.store.getAgentSession(session.id))!;
+    const storedRun = (await fixture.runtime.getRun(run.id))!;
+    const storedSession = (await fixture.runtime.getAgentSession(session.id))!;
     expect(storedRun.observedSettings?.modelProvider).toBeUndefined();
     expect(storedRun.observedSettings?.model).toBeUndefined();
     expect(storedRun.observedSettings?.reasoningEffort).toBeUndefined();
@@ -517,7 +1470,7 @@ describe('OpenCodeAdapter', () => {
       settings: SETTINGS
     });
 
-    let observations = (await fixture.store.snapshot()).agentSettingsObservations.filter(
+    let observations = (await fixture.runtime.snapshot()).agentSettingsObservations.filter(
       (observation) => observation.runId === run.id
     );
     expect(observations).toEqual([
@@ -527,7 +1480,8 @@ describe('OpenCodeAdapter', () => {
           modelProvider: 'anthropic',
           model: 'claude-test',
           reasoningEffort: 'high'
-        })
+        }),
+        rawMessage: expect.objectContaining({ direction: 'INBOUND' })
       })
     ]);
 
@@ -547,7 +1501,7 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    observations = (await fixture.store.snapshot()).agentSettingsObservations.filter(
+    observations = (await fixture.runtime.snapshot()).agentSettingsObservations.filter(
       (observation) => observation.runId === run.id
     );
     expect(observations.map((observation) => observation.source)).toEqual([
@@ -596,7 +1550,7 @@ describe('OpenCodeAdapter', () => {
       recoveryRequiredSessionIds: []
     });
 
-    const observations = (await fixture.store.snapshot()).agentSettingsObservations.filter(
+    const observations = (await fixture.runtime.snapshot()).agentSettingsObservations.filter(
       (observation) => observation.runId === run.id
     );
     expect(observations.map((observation) => observation.source)).toEqual([
@@ -662,7 +1616,7 @@ describe('OpenCodeAdapter', () => {
       recoveryRequiredSessionIds: [session.id]
     });
 
-    const recoveredRun = await fixture.store.getRun(run.id);
+    const recoveredRun = await fixture.runtime.getRun(run.id);
     expect(recoveredRun).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       recoveryState: 'REQUIRES_USER_ACTION',
@@ -671,7 +1625,7 @@ describe('OpenCodeAdapter', () => {
       )
     });
     expect(recoveredRun?.observedSettings?.approvalPolicy).toBeUndefined();
-    const recoveredSession = await fixture.store.getAgentSession(session.id);
+    const recoveredSession = await fixture.runtime.getAgentSession(session.id);
     expect(recoveredSession).toMatchObject({ status: 'NOT_LOADED' });
     expect(recoveredSession?.observedSettings?.approvalPolicy).toBeUndefined();
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
@@ -705,7 +1659,7 @@ describe('OpenCodeAdapter', () => {
       { permission: openCodePermissionRules(SETTINGS) }
     ]);
     expect(fixture.harness.promptBodies).toHaveLength(1);
-    expect((await fixture.store.getAgentSession(session.id))?.observedSettings)
+    expect((await fixture.runtime.getAgentSession(session.id))?.observedSettings)
       .toMatchObject({ approvalPolicy: 'on-request' });
     await fixture.adapter.shutdown();
   });
@@ -737,7 +1691,7 @@ describe('OpenCodeAdapter', () => {
       operation: 'session/update-permission'
     });
     expect(fixture.harness.promptBodies).toEqual([]);
-    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+    expect(await fixture.runtime.getAgentSession(session.id)).toMatchObject({
       status: 'NOT_LOADED'
     });
     await fixture.adapter.shutdown();
@@ -835,7 +1789,7 @@ describe('OpenCodeAdapter', () => {
       settings: SETTINGS
     })).resolves.toMatchObject({ localRunId: run.id });
 
-    expect(await fixture.store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
     await fixture.adapter.shutdown();
   });
 
@@ -877,7 +1831,7 @@ describe('OpenCodeAdapter', () => {
     );
 
     const createdSessionSupervisor = fixture.harness.sessionSupervisor;
-    const localSession = (await fixture.store.snapshot()).agentSessions.find(
+    const localSession = (await fixture.runtime.snapshot()).agentSessions.find(
       (session) => session.runtimeId === 'opencode'
     )!;
     expect(createdSessionSupervisor.shutdownCount).toBe(1);
@@ -904,7 +1858,7 @@ describe('OpenCodeAdapter', () => {
     expect(discoverySupervisor).not.toBe(createdSessionSupervisor);
     expect(discoverySupervisor.shutdownCount).toBe(1);
     expect(createdSessionSupervisor.startCount).toBe(1);
-    expect((await fixture.store.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
+    expect((await fixture.runtime.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
     expect(fixture.harness.sessions.size).toBe(1);
     await fixture.adapter.shutdown();
   });
@@ -945,14 +1899,14 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    const failed = (await fixture.store.getRun(run.id))!;
+    const failed = (await fixture.runtime.getRun(run.id))!;
     expect(failed).toMatchObject({
       status: 'FAILED',
       terminalReason:
         'APIError: token expired or incorrect for [REDACTED] (status 401; not retryable)'
     });
-    expect((await fixture.store.getAgentSession(session.id))?.status).toBe('SYSTEM_ERROR');
-    expect(await fixture.store.readArtifact(failed.finalArtifactId!)).toContain(
+    expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('SYSTEM_ERROR');
+    expect(await fixture.runtimeStore.readArtifact(failed.finalArtifactId!)).toContain(
       'APIError: token expired or incorrect for [REDACTED] (status 401; not retryable)'
     );
     expect(JSON.stringify((await fixture.store.snapshot()).events)).not.toContain(opaque);
@@ -987,9 +1941,9 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    expect(await fixture.store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
     expect(
-      (await fixture.store.snapshot()).artifacts.filter(
+      (await fixture.runtime.snapshot()).artifacts.filter(
         (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
       )
     ).toEqual([]);
@@ -1021,7 +1975,7 @@ describe('OpenCodeAdapter', () => {
       properties: { sessionID: session.providerSessionId }
     });
 
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'COMPLETED',
       finalMessage: 'Completed after automatic compaction.'
     });
@@ -1053,11 +2007,11 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'FAILED',
       terminalReason: 'MessageAbortedError: Aborted'
     });
-    expect((await fixture.store.getAgentSession(session.id))?.status).toBe('SYSTEM_ERROR');
+    expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('SYSTEM_ERROR');
     await fixture.adapter.shutdown();
   });
 
@@ -1086,7 +2040,7 @@ describe('OpenCodeAdapter', () => {
       providerTurnId: turn.providerTurnId!
     });
 
-    expect((await fixture.store.getRun(run.id))?.status).toBe('INTERRUPTING');
+    expect((await fixture.runtime.getRun(run.id))?.status).toBe('INTERRUPTING');
     await fixture.harness.emit({
       type: 'session.error',
       properties: {
@@ -1095,13 +2049,14 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'INTERRUPTED',
       terminalReason: 'MessageAbortedError: Aborted'
     });
-    expect((await fixture.store.getAgentSession(session.id))?.status).toBe('IDLE');
+    expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('IDLE');
     await wait(100);
     const snapshot = await fixture.store.snapshot();
+    const runtimeSnapshot = await fixture.runtime.snapshot();
     expect(
       snapshot.events.filter(
         (event) =>
@@ -1110,7 +2065,7 @@ describe('OpenCodeAdapter', () => {
       )
     ).toHaveLength(1);
     expect(
-      snapshot.artifacts.filter(
+      runtimeSnapshot.artifacts.filter(
         (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
       )
     ).toHaveLength(1);
@@ -1165,9 +2120,9 @@ describe('OpenCodeAdapter', () => {
     delete fixture.harness.statuses[session.providerSessionId!];
 
     await waitForCondition(
-      async () => (await fixture.store.getRun(run.id))?.status === 'INTERRUPTED'
+      async () => (await fixture.runtime.getRun(run.id))?.status === 'INTERRUPTED'
     );
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'INTERRUPTED',
       terminalReason: 'MessageAbortedError: Aborted'
     });
@@ -1201,9 +2156,9 @@ describe('OpenCodeAdapter', () => {
     fixture.harness.statuses[session.providerSessionId!] = { type: 'idle' };
 
     await waitForCondition(
-      async () => (await fixture.store.getRun(run.id))?.status === 'INTERRUPTED'
+      async () => (await fixture.runtime.getRun(run.id))?.status === 'INTERRUPTED'
     );
-    expect((await fixture.store.getRun(run.id))?.terminalReason).toContain(
+    expect((await fixture.runtime.getRun(run.id))?.terminalReason).toContain(
       'reported the provider session idle'
     );
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(0);
@@ -1257,11 +2212,11 @@ describe('OpenCodeAdapter', () => {
     delete fixture.harness.statuses[session.providerSessionId!];
 
     await wait(40);
-    expect((await fixture.store.getRun(run.id))?.status).toBe('INTERRUPTING');
+    expect((await fixture.runtime.getRun(run.id))?.status).toBe('INTERRUPTING');
     await waitForCondition(
-      async () => (await fixture.store.getRun(run.id))?.status === 'INTERRUPTED'
+      async () => (await fixture.runtime.getRun(run.id))?.status === 'INTERRUPTED'
     );
-    expect((await fixture.store.getRun(run.id))?.terminalReason).toContain(
+    expect((await fixture.runtime.getRun(run.id))?.terminalReason).toContain(
       'could not prove a terminal provider state'
     );
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
@@ -1302,7 +2257,7 @@ describe('OpenCodeAdapter', () => {
     fixture.harness.statuses[session.providerSessionId!] = { type: 'idle' };
 
     await waitForCondition(
-      async () => (await fixture.store.getRun(run.id))?.status === 'INTERRUPTED',
+      async () => (await fixture.runtime.getRun(run.id))?.status === 'INTERRUPTED',
       6_000
     );
     expect(fixture.harness.statusReadCount).toBeGreaterThan(
@@ -1338,7 +2293,7 @@ describe('OpenCodeAdapter', () => {
     })).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
     expect(stalledAbort.harness.abortDeadlineWindowsMs).toHaveLength(1);
     expect(Math.max(...stalledAbort.harness.abortDeadlineWindowsMs)).toBeLessThanOrEqual(20);
-    expect((await stalledAbort.store.getRun(abortRun.id))?.status).toBe(
+    expect((await stalledAbort.runtime.getRun(abortRun.id))?.status).toBe(
       'RECOVERY_REQUIRED'
     );
     await stalledAbort.adapter.shutdown();
@@ -1369,7 +2324,7 @@ describe('OpenCodeAdapter', () => {
       providerTurnId: reconcileTurn.providerTurnId!
     });
     await waitForCondition(async () =>
-      (await stalledReconciliation.store.getRun(reconcileRun.id))?.status === 'INTERRUPTED'
+      (await stalledReconciliation.runtime.getRun(reconcileRun.id))?.status === 'INTERRUPTED'
     );
     expect(stalledReconciliation.harness.messageReadDeadlineWindowsMs.length).toBeGreaterThan(0);
     expect(
@@ -1407,7 +2362,7 @@ describe('OpenCodeAdapter', () => {
     await wait(100);
     const after = await fixture.store.snapshot();
     expect(after.events).toHaveLength(before.events.length);
-    expect(after.runs.find((candidate) => candidate.id === run.id)?.status).toBe(
+    expect((await fixture.runtime.getRun(run.id))?.status).toBe(
       'INTERRUPTING'
     );
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
@@ -1439,14 +2394,15 @@ describe('OpenCodeAdapter', () => {
     const oldSupervisor = fixture.harness.sessionSupervisor;
     await oldSupervisor.lose();
     await waitForCondition(
-      async () => (await fixture.store.getRun(oldRun.id))?.status === 'RECOVERY_REQUIRED'
+      async () => (await fixture.runtime.getRun(oldRun.id))?.status === 'RECOVERY_REQUIRED'
     );
-    const finalArtifact = await fixture.store.writeFinalArtifact(
+    const finalArtifact = await fixture.runtime.writeFinalArtifact(
       oldRun.taskId,
       oldRun.id,
-      '# Interrupted after runtime loss\n'
+      '# Interrupted after runtime loss\n',
+      `test:old-run-final:${oldRun.id}`
     );
-    await fixture.store.appendEvent(createDomainEvent({
+    await fixture.runtime.applyTaskRuntimeEvent(createDomainEvent({
       type: 'AGENT_RUN_INTERRUPTED',
       taskId: oldRun.taskId,
       iterationId: oldRun.iterationId,
@@ -1459,9 +2415,9 @@ describe('OpenCodeAdapter', () => {
         terminalReason: 'Explicitly closed before replacement.',
         finalArtifactId: finalArtifact.id
       }
-    }));
+    }), `test:old-run-interrupted:${oldRun.id}`);
 
-    const replacementSession = (await fixture.store.getAgentSession(session.id))!;
+    const replacementSession = (await fixture.runtime.getAgentSession(session.id))!;
     const replacementRun = await createRun(fixture, replacementSession);
     const replacementStart = fixture.adapter.startTurn({
       localRunId: replacementRun.id,
@@ -1479,7 +2435,7 @@ describe('OpenCodeAdapter', () => {
     expect(replacementSupervisor).not.toBe(oldSupervisor);
     await wait(140);
 
-    expect((await fixture.store.getRun(replacementRun.id))?.status).toBe('RUNNING');
+    expect((await fixture.runtime.getRun(replacementRun.id))?.status).toBe('RUNNING');
     expect(replacementSupervisor.shutdownCount).toBe(0);
     expect(
       (await fixture.store.snapshot()).events.filter(
@@ -1531,12 +2487,12 @@ describe('OpenCodeAdapter', () => {
 
     await waitForCondition(
       async () => {
-        const stored = await fixture.store.getRun(run.id);
+        const stored = await fixture.runtime.getRun(run.id);
         return stored?.status === 'RECOVERY_REQUIRED' &&
           stored.recoveryState === 'REQUIRES_USER_ACTION';
       }
     );
-    expect((await fixture.store.getRun(run.id))?.recoveryState).toBe(
+    expect((await fixture.runtime.getRun(run.id))?.recoveryState).toBe(
       'REQUIRES_USER_ACTION'
     );
     await expect(
@@ -1599,7 +2555,7 @@ describe('OpenCodeAdapter', () => {
     ]);
     fixture.harness.statuses[session.providerSessionId!] = { type: 'idle' };
 
-    const originalWriteFinalArtifact = fixture.store.writeFinalArtifact.bind(fixture.store);
+    const originalWriteFinalArtifact = fixture.runtime.writeFinalArtifact.bind(fixture.runtime);
     let finalArtifactWrites = 0;
     let releaseFirstWrite!: () => void;
     const firstWriteGate = new Promise<void>((resolve) => {
@@ -1609,7 +2565,7 @@ describe('OpenCodeAdapter', () => {
     const firstWrite = new Promise<void>((resolve) => {
       firstWriteStarted = resolve;
     });
-    fixture.store.writeFinalArtifact = async (...args) => {
+    fixture.runtime.writeFinalArtifact = async (...args) => {
       finalArtifactWrites += 1;
       if (finalArtifactWrites === 1) {
         firstWriteStarted();
@@ -1631,12 +2587,13 @@ describe('OpenCodeAdapter', () => {
     expect(finalArtifactWrites).toBe(1);
     releaseFirstWrite();
     await Promise.all([reconciliation, terminalEvent]);
-    fixture.store.writeFinalArtifact = originalWriteFinalArtifact;
+    fixture.runtime.writeFinalArtifact = originalWriteFinalArtifact;
 
     const snapshot = await fixture.store.snapshot();
-    expect(snapshot.runs.find((candidate) => candidate.id === run.id)?.status).toBe('COMPLETED');
+    const runtimeSnapshot = await fixture.runtime.snapshot();
+    expect(runtimeSnapshot.runs.find((candidate) => candidate.id === run.id)?.status).toBe('COMPLETED');
     expect(
-      snapshot.artifacts.filter(
+      runtimeSnapshot.artifacts.filter(
         (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
       )
     ).toHaveLength(1);
@@ -1669,7 +2626,7 @@ describe('OpenCodeAdapter', () => {
 
     const updates: AppUpdateEvent[] = [];
     const unsubscribe = fixture.appEvents.on((event) => updates.push(event));
-    const writeFinalArtifact = fixture.store.writeFinalArtifact.bind(fixture.store);
+    const writeFinalArtifact = fixture.runtime.writeFinalArtifact.bind(fixture.runtime);
     let releaseStaleWrite!: () => void;
     const staleWriteGate = new Promise<void>((resolve) => {
       releaseStaleWrite = resolve;
@@ -1680,7 +2637,7 @@ describe('OpenCodeAdapter', () => {
     });
     let firstWrite = true;
     const writeFinalArtifactSpy = vi
-      .spyOn(fixture.store, 'writeFinalArtifact')
+      .spyOn(fixture.runtime, 'writeFinalArtifact')
       .mockImplementation(async (...args) => {
         if (firstWrite) {
           firstWrite = false;
@@ -1698,12 +2655,13 @@ describe('OpenCodeAdapter', () => {
       }
     });
     await staleWriteStarted;
-    const winnerArtifact = await fixture.store.writeFinalArtifact(
+    const winnerArtifact = await fixture.runtime.writeFinalArtifact(
       run.taskId,
       run.id,
-      '# Concurrent terminal winner\n'
+      '# Concurrent terminal winner\n',
+      `test:concurrent-terminal-winner:${run.id}`
     );
-    await fixture.store.appendEvent(
+    await fixture.runtime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_RUN_INTERRUPTED',
         taskId: run.taskId,
@@ -1711,19 +2669,20 @@ describe('OpenCodeAdapter', () => {
         runId: run.id,
         worktreeId: run.worktreeId,
         agentSessionId: run.sessionId,
-        serverInstanceId: (await fixture.store.getRun(run.id))!.serverInstanceId,
+        serverInstanceId: (await fixture.runtime.getRun(run.id))!.serverInstanceId,
         source: 'ui',
         payload: {
           terminalReason: 'Concurrent terminal winner.',
           finalArtifactId: winnerArtifact.id
         }
-      })
+      }),
+      `test:concurrent-terminal-event:${run.id}`
     );
     releaseStaleWrite();
     await staleFailure;
 
     const snapshot = await fixture.store.snapshot();
-    expect(snapshot.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'INTERRUPTED',
       terminalReason: 'Concurrent terminal winner.',
       finalArtifactId: winnerArtifact.id
@@ -1737,11 +2696,11 @@ describe('OpenCodeAdapter', () => {
           )
       )
     ).toHaveLength(1);
-    expect((await fixture.store.getAgentSession(session.id))?.status).toBe('ACTIVE');
+    expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('ACTIVE');
     expect(
       updates.filter((event) => event.type === 'run.terminal' && event.runId === run.id)
     ).toHaveLength(0);
-    expect(await fixture.store.readArtifact(winnerArtifact.id)).toBe(
+    expect(await fixture.runtimeStore.readArtifact(winnerArtifact.id)).toBe(
       '# Concurrent terminal winner\n'
     );
     writeFinalArtifactSpy.mockRestore();
@@ -1774,9 +2733,13 @@ describe('OpenCodeAdapter', () => {
       }
     };
     const originalAppendRunEventIfStatus =
-      fixture.store.appendRunEventIfStatus.bind(fixture.store);
+      fixture.runtime.applyTaskRuntimeEventIfRunStatus.bind(fixture.runtime);
     let rejectedTerminalEvent = false;
-    fixture.store.appendRunEventIfStatus = async (event, allowedStatuses) => {
+    fixture.runtime.applyTaskRuntimeEventIfRunStatus = async (
+      event,
+      allowedStatuses,
+      operationId
+    ) => {
       if (
         !rejectedTerminalEvent &&
         ['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'].includes(event.type)
@@ -1784,7 +2747,7 @@ describe('OpenCodeAdapter', () => {
         rejectedTerminalEvent = true;
         throw new Error('simulated failure after final artifact persistence');
       }
-      return originalAppendRunEventIfStatus(event, allowedStatuses);
+      return originalAppendRunEventIfStatus(event, allowedStatuses, operationId);
     };
 
     await fixture.harness.emit({
@@ -1796,11 +2759,12 @@ describe('OpenCodeAdapter', () => {
     });
 
     const partial = await fixture.store.snapshot();
-    const partialArtifacts = partial.artifacts.filter(
+    const partialRuntime = await fixture.runtime.snapshot();
+    const partialArtifacts = partialRuntime.artifacts.filter(
       (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
     );
     expect(rejectedTerminalEvent).toBe(true);
-    expect(partial.runs.find((candidate) => candidate.id === run.id)?.status).toBe('RUNNING');
+    expect(partialRuntime.runs.find((candidate) => candidate.id === run.id)?.status).toBe('RUNNING');
     expect(partialArtifacts).toHaveLength(1);
     expect(
       partial.events.filter(
@@ -1838,16 +2802,17 @@ describe('OpenCodeAdapter', () => {
       reconciledSessionIds: [session.id],
       recoveryRequiredSessionIds: []
     });
-    fixture.store.appendRunEventIfStatus = originalAppendRunEventIfStatus;
+    fixture.runtime.applyTaskRuntimeEventIfRunStatus = originalAppendRunEventIfStatus;
 
     const recovered = await fixture.store.snapshot();
-    const recoveredArtifacts = recovered.artifacts.filter(
+    const recoveredRuntime = await fixture.runtime.snapshot();
+    const recoveredArtifacts = recoveredRuntime.artifacts.filter(
       (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
     );
     const terminalEvents = recovered.events.filter(
       (event) => event.runId === run.id && event.type === 'AGENT_RUN_FAILED'
     );
-    expect(recovered.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
+    expect(recoveredRuntime.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
       status: 'FAILED',
       finalArtifactId: partialArtifacts[0]!.id
     });
@@ -1877,7 +2842,7 @@ describe('OpenCodeAdapter', () => {
       authoritativeGoal: fixture.task.prompt,
       settings: SETTINGS
     });
-    const startedOldRun = (await fixture.store.getRun(oldRun.id))!;
+    const startedOldRun = (await fixture.runtime.getRun(oldRun.id))!;
     const oldServerId = startedOldRun.serverInstanceId!;
     const messages = fixture.harness.messages.get(session.providerSessionId!)!;
     messages.push({
@@ -1899,16 +2864,16 @@ describe('OpenCodeAdapter', () => {
       }]
     });
     fixture.harness.statuses[session.providerSessionId!] = { type: 'idle' };
-    const originalUpdateSession = fixture.store.updateAgentSession.bind(fixture.store);
+    const originalUpdateSession = fixture.runtime.updateAgentSession.bind(fixture.runtime);
     let failInboundStatus = true;
-    fixture.store.updateAgentSession = async (sessionId, update) => {
+    fixture.runtime.updateAgentSession = async (sessionId, update, operationId) => {
       if (sessionId === session.id && update.status === 'IDLE' && failInboundStatus) {
         failInboundStatus = false;
         throw new Error('simulated inbound status persistence failure');
       }
-      return originalUpdateSession(sessionId, update);
+      return originalUpdateSession(sessionId, update, operationId);
     };
-    const originalItemLookup = fixture.store.getAgentItemByProviderId.bind(fixture.store);
+    const originalItemLookup = fixture.runtime.getAgentItemByProviderId.bind(fixture.runtime);
     let releaseOldSnapshot!: () => void;
     const oldSnapshotGate = new Promise<void>((resolve) => {
       releaseOldSnapshot = resolve;
@@ -1918,7 +2883,7 @@ describe('OpenCodeAdapter', () => {
       markOldSnapshotEntered = resolve;
     });
     let blockOldSnapshot = true;
-    fixture.store.getAgentItemByProviderId = async (...args) => {
+    fixture.runtime.getAgentItemByProviderId = async (...args) => {
       if (blockOldSnapshot && args[1] === 'prt_stale_snapshot') {
         blockOldSnapshot = false;
         markOldSnapshotEntered();
@@ -1949,11 +2914,11 @@ describe('OpenCodeAdapter', () => {
     ).rejects.toThrow('does not match its Task Monki worktree');
     providerSession.directory = expectedDirectory;
 
-    expect(await fixture.store.getRun(oldRun.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(oldRun.id)).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       serverInstanceId: oldServerId
     });
-    const replacementSession = (await fixture.store.getAgentSession(session.id))!;
+    const replacementSession = (await fixture.runtime.getAgentSession(session.id))!;
     const replacementRun = await createRun(fixture, replacementSession);
     let replacementStarted = false;
     const replacementStart = fixture.adapter.startTurn({
@@ -1978,27 +2943,28 @@ describe('OpenCodeAdapter', () => {
     releaseOldSnapshot();
     await oldRecovery;
     await replacementStart;
-    const runningReplacement = (await fixture.store.getRun(replacementRun.id))!;
+    const runningReplacement = (await fixture.runtime.getRun(replacementRun.id))!;
     expect(runningReplacement.status).toBe('RUNNING');
     expect(runningReplacement.serverInstanceId).not.toBe(oldServerId);
 
-    fixture.store.updateAgentSession = originalUpdateSession;
-    fixture.store.getAgentItemByProviderId = originalItemLookup;
+    fixture.runtime.updateAgentSession = originalUpdateSession;
+    fixture.runtime.getAgentItemByProviderId = originalItemLookup;
 
     const snapshot = await fixture.store.snapshot();
-    const storedReplacement = snapshot.runs.find((run) => run.id === replacementRun.id)!;
+    const runtimeSnapshot = await fixture.runtime.snapshot();
+    const storedReplacement = runtimeSnapshot.runs.find((run) => run.id === replacementRun.id)!;
     expect(storedReplacement.status).toBe('RUNNING');
     expect(storedReplacement.finalArtifactId).toBeUndefined();
-    const storedOldRun = snapshot.runs.find((run) => run.id === oldRun.id)!;
+    const storedOldRun = runtimeSnapshot.runs.find((run) => run.id === oldRun.id)!;
     expect(storedOldRun).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       serverInstanceId: oldServerId
     });
     expect(storedOldRun.finalArtifactId).toBeUndefined();
     expect(
-      snapshot.agentItems.some((item) => item.providerItemId === 'prt_stale_snapshot')
+      runtimeSnapshot.agentItems.some((item) => item.providerItemId === 'prt_stale_snapshot')
     ).toBe(false);
-    expect(snapshot.agentUsageSnapshots.some((usage) => usage.runId === oldRun.id)).toBe(false);
+    expect(runtimeSnapshot.agentUsageSnapshots.some((usage) => usage.runId === oldRun.id)).toBe(false);
     expect(
       snapshot.events.filter(
         (event) =>
@@ -2006,7 +2972,7 @@ describe('OpenCodeAdapter', () => {
           ['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'].includes(event.type)
       )
     ).toHaveLength(0);
-    expect((await fixture.store.getAgentSession(session.id))?.status).toBe('ACTIVE');
+    expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('ACTIVE');
     await fixture.adapter.shutdown();
   });
 
@@ -2051,13 +3017,13 @@ describe('OpenCodeAdapter', () => {
       reconciledSessionIds: [session.id],
       recoveryRequiredSessionIds: []
     });
-    expect((await fixture.store.getRun(run.id))?.status).toBe('RUNNING');
+    expect((await fixture.runtime.getRun(run.id))?.status).toBe('RUNNING');
     await fixture.adapter.shutdown();
   });
 
   it('owns one runtime per session and durably maps turns, interactions, output, and shutdown', async () => {
     const fixture = await createFixture();
-    const { adapter, harness, store } = fixture;
+    const { adapter, harness, runtime } = fixture;
     await adapter.initialize();
     expect((await adapter.preflight()).readiness.canStart).toBe(true);
 
@@ -2072,7 +3038,7 @@ describe('OpenCodeAdapter', () => {
       settings: SETTINGS
     });
 
-    const running = (await store.getRun(run.id))!;
+    const running = (await runtime.getRun(run.id))!;
     expect(turn.providerTurnId).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
     expect(running.status).toBe('RUNNING');
     expect(running.serverInstanceId).toBe(harness.sessionSupervisor.currentServer?.id);
@@ -2100,9 +3066,9 @@ describe('OpenCodeAdapter', () => {
       localSessionId: session.id,
       providerSessionId: session.providerSessionId
     });
-    const pending = (await store.snapshot()).interactionRequests;
+    const pending = (await runtime.snapshot()).interactionRequests;
     expect(pending.map((item) => item.type)).toEqual(['COMMAND_APPROVAL']);
-    expect((await store.getAgentSession(session.id))?.status).toBe(
+    expect((await runtime.getAgentSession(session.id))?.status).toBe(
       'AWAITING_APPROVAL'
     );
     const permission = pending.find((item) => item.type === 'COMMAND_APPROVAL')!;
@@ -2138,21 +3104,21 @@ describe('OpenCodeAdapter', () => {
       providerSessionId: session.providerSessionId
     });
     await adapter.reconcile();
-    expect(await store.getRun(run.id)).toMatchObject({ status: 'AWAITING_APPROVAL' });
-    expect(await store.getAgentSession(session.id)).toMatchObject({
+    expect(await runtime.getRun(run.id)).toMatchObject({ status: 'AWAITING_APPROVAL' });
+    expect(await runtime.getAgentSession(session.id)).toMatchObject({
       status: 'AWAITING_APPROVAL'
     });
     const decision = { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' } as const;
-    await store.transitionInteractionRequest(permission.id, 'PENDING', {
+    await runtime.transitionInteractionRequest(permission.id, 'PENDING', {
       status: 'RESPONDING',
       decision,
       respondedAt: new Date().toISOString()
-    });
+    }, `test:permission-response:${permission.id}`);
     await adapter.respondToInteraction({ interaction: permission, decision });
-    expect((await store.getInteractionRequest(permission.id))?.status).toBe('RESOLVED');
+    expect((await runtime.getInteractionRequest(permission.id))?.status).toBe('RESOLVED');
     expect(harness.permissionReplies).toEqual([{ reply: 'once' }]);
-    expect(await store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
-    expect(await store.getAgentSession(session.id)).toMatchObject({ status: 'ACTIVE' });
+    expect(await runtime.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await runtime.getAgentSession(session.id)).toMatchObject({ status: 'ACTIVE' });
 
     harness.permissions = [];
     harness.questions = [
@@ -2174,11 +3140,11 @@ describe('OpenCodeAdapter', () => {
       providerSessionId: session.providerSessionId
     });
     expect(
-      (await store.snapshot()).interactionRequests.find(
+      (await runtime.snapshot()).interactionRequests.find(
         (item) => item.type === 'USER_INPUT'
       )?.status
     ).toBe('PENDING');
-    expect((await store.getAgentSession(session.id))?.status).toBe(
+    expect((await runtime.getAgentSession(session.id))?.status).toBe(
       'AWAITING_USER_INPUT'
     );
     await harness.emit({
@@ -2192,8 +3158,8 @@ describe('OpenCodeAdapter', () => {
         }
       }
     });
-    expect(await store.getRun(run.id)).toMatchObject({ status: 'AWAITING_USER_INPUT' });
-    expect(await store.getAgentSession(session.id)).toMatchObject({
+    expect(await runtime.getRun(run.id)).toMatchObject({ status: 'AWAITING_USER_INPUT' });
+    expect(await runtime.getAgentSession(session.id)).toMatchObject({
       status: 'AWAITING_USER_INPUT'
     });
     harness.questions = [];
@@ -2205,12 +3171,12 @@ describe('OpenCodeAdapter', () => {
       }
     });
     expect(
-      (await store.snapshot()).interactionRequests.find(
+      (await runtime.snapshot()).interactionRequests.find(
         (item) => item.providerRequestId === 'que_1'
       )?.status
     ).toBe('STALE');
-    expect(await store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
-    expect(await store.getAgentSession(session.id)).toMatchObject({ status: 'ACTIVE' });
+    expect(await runtime.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await runtime.getAgentSession(session.id)).toMatchObject({ status: 'ACTIVE' });
 
     const assistant: OpenCodeMessage = {
       info: {
@@ -2263,14 +3229,14 @@ describe('OpenCodeAdapter', () => {
       properties: { sessionID: session.providerSessionId }
     });
 
-    const completed = (await store.getRun(run.id))!;
+    const completed = (await runtime.getRun(run.id))!;
     expect(completed.status).toBe('COMPLETED');
     expect(completed.finalMessage).toBe('Implemented and verified.');
-    expect((await store.getAgentItemsForRun(run.id))[0]).toEqual(
+    expect((await runtime.getAgentItemsForRun(run.id))[0]).toEqual(
       expect.objectContaining({ providerItemId: 'prt_text_1', status: 'COMPLETED' })
     );
     expect(
-      (await store.snapshot()).interactionRequests.find((item) => item.type === 'USER_INPUT')?.status
+      (await runtime.snapshot()).interactionRequests.find((item) => item.type === 'USER_INPUT')?.status
     ).toBe('STALE');
 
     await adapter.shutdown();
@@ -2281,13 +3247,13 @@ describe('OpenCodeAdapter', () => {
 
   it('never resends an accepted prompt when post-ack persistence fails and reconciles by message id', async () => {
     const fixture = await createFixture();
-    const { adapter, harness, store } = fixture;
+    const { adapter, harness, store, runtime } = fixture;
     await adapter.initialize();
     const session = await materializeSession(fixture);
     const run = await createRun(fixture, session);
-    const originalUpdateRun = store.updateRun.bind(store);
+    const originalUpdateRun = runtime.updateRun.bind(runtime);
     let failedAcknowledgementWrite = false;
-    store.updateRun = async (runId, update) => {
+    runtime.updateRun = async (runId, update, operationId) => {
       if (
         harness.promptBodies.length === 1 &&
         update.status === 'RUNNING' &&
@@ -2296,7 +3262,7 @@ describe('OpenCodeAdapter', () => {
         failedAcknowledgementWrite = true;
         throw new Error('simulated durable store failure');
       }
-      return originalUpdateRun(runId, update);
+      return originalUpdateRun(runId, update, operationId);
     };
 
     await expect(
@@ -2310,11 +3276,11 @@ describe('OpenCodeAdapter', () => {
       })
     ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
     expect(harness.promptBodies).toHaveLength(1);
-    const providerMessageId = (await store.getRun(run.id))?.providerTurnId;
+    const providerMessageId = (await runtime.getRun(run.id))?.providerTurnId;
     expect(providerMessageId).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
 
-    store.updateRun = originalUpdateRun;
-    await store.appendEvent(
+    runtime.updateRun = originalUpdateRun;
+    await runtime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_MUTATION_AMBIGUOUS',
         taskId: run.taskId,
@@ -2328,7 +3294,8 @@ describe('OpenCodeAdapter', () => {
           reason: 'acknowledgement persistence failed',
           automaticResubmission: false
         }
-      })
+      }),
+      `test:ambiguous-prompt-event:${run.id}`
     );
     harness.messages.set(session.providerSessionId!, [
       {
@@ -2365,14 +3332,14 @@ describe('OpenCodeAdapter', () => {
     const reconciled = await adapter.reconcile();
 
     expect(reconciled.reconciledSessionIds).toContain(session.id);
-    expect((await store.getRun(run.id))?.status).toBe('COMPLETED');
+    expect((await runtime.getRun(run.id))?.status).toBe('COMPLETED');
     expect(harness.promptBodies).toHaveLength(1);
     await adapter.shutdown();
   });
 
   it('coalesces high-volume text deltas while preserving ordered output and a terminal item', async () => {
     const fixture = await createFixture();
-    const { adapter, harness, store, appEvents } = fixture;
+    const { adapter, harness, runtime, runtimeStore, appEvents } = fixture;
     const updates: AppUpdateEvent[] = [];
     const unsubscribe = appEvents.on((event) => updates.push(event));
     await adapter.initialize();
@@ -2386,7 +3353,7 @@ describe('OpenCodeAdapter', () => {
       authoritativeGoal: fixture.task.prompt,
       settings: SETTINGS
     });
-    const upsert = vi.spyOn(store, 'upsertAgentItem');
+    const upsert = vi.spyOn(runtime, 'upsertAgentItem');
 
     await harness.emit({
       id: 'evt_stream_assistant',
@@ -2476,10 +3443,10 @@ describe('OpenCodeAdapter', () => {
     });
 
     expect(upsert).toHaveBeenCalledTimes(1);
-    expect((await store.getAgentItemsForRun(run.id))[0]).toEqual(
+    expect((await runtime.getAgentItemsForRun(run.id))[0]).toEqual(
       expect.objectContaining({ providerItemId: 'prt_stream', status: 'COMPLETED' })
     );
-    const output = await store.readArtifact(run.outputArtifactId);
+    const output = await runtimeStore.readArtifact(run.outputArtifactId);
     expect(output.replaceAll('\n[text]\n', '')).toBe('x'.repeat(100));
     const outputUpdates = updates.filter(
       (event) => event.type === 'run.output' && event.runId === run.id
@@ -2497,7 +3464,8 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture();
     const { session, run } = await startStreamingRun(fixture);
     const oldSupervisor = fixture.harness.sessionSupervisor;
-    const appendProtocolMessage = fixture.store.appendProtocolMessage.bind(fixture.store);
+    const appendProtocolMessage =
+      fixture.runtimeStore.appendProtocolMessage.bind(fixture.runtimeStore);
     let releaseJournal!: () => void;
     const journalGate = new Promise<void>((resolve) => {
       releaseJournal = resolve;
@@ -2506,7 +3474,7 @@ describe('OpenCodeAdapter', () => {
     const journalStarted = new Promise<void>((resolve) => {
       markJournalStarted = resolve;
     });
-    vi.spyOn(fixture.store, 'appendProtocolMessage').mockImplementation(
+    vi.spyOn(fixture.runtimeStore, 'appendProtocolMessage').mockImplementation(
       async (...args) => {
         if (args[2].includes('evt_exit_drain')) {
           markJournalStarted();
@@ -2555,7 +3523,7 @@ describe('OpenCodeAdapter', () => {
     );
     expect(itemActivityIndex).toBeGreaterThanOrEqual(0);
     expect(runtimeLossIndex).toBeGreaterThan(itemActivityIndex);
-    expect(await fixture.store.readArtifact(run.outputArtifactId)).toContain(
+    expect(await fixture.runtimeStore.readArtifact(run.outputArtifactId)).toContain(
       'drained before runtime loss'
     );
     expect(fixture.harness.supervisors).toHaveLength(3);
@@ -2578,10 +3546,11 @@ describe('OpenCodeAdapter', () => {
       authoritativeGoal: fixture.task.prompt,
       settings: SETTINGS
     });
-    const winnerArtifact = await fixture.store.writeFinalArtifact(
+    const winnerArtifact = await fixture.runtime.writeFinalArtifact(
       run.taskId,
       run.id,
-      '# Concurrent completion winner\n'
+      '# Concurrent completion winner\n',
+      `test:concurrent-completion-winner:${run.id}`
     );
     const updates: AppUpdateEvent[] = [];
     const unsubscribe = fixture.appEvents.on((event) => updates.push(event));
@@ -2613,7 +3582,7 @@ describe('OpenCodeAdapter', () => {
     await staleRuntimeLossStarted;
     const exitDrain = internals.sessionExitDrains.get(session.id);
     expect(exitDrain).toBeDefined();
-    await fixture.store.appendEvent(
+    await fixture.runtime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_RUN_COMPLETED',
         taskId: run.taskId,
@@ -2621,20 +3590,21 @@ describe('OpenCodeAdapter', () => {
         runId: run.id,
         worktreeId: run.worktreeId,
         agentSessionId: run.sessionId,
-        serverInstanceId: (await fixture.store.getRun(run.id))!.serverInstanceId,
+        serverInstanceId: (await fixture.runtime.getRun(run.id))!.serverInstanceId,
         source: 'provider',
         payload: {
           terminalStatus: 'completed',
           finalArtifactId: winnerArtifact.id
         }
-      })
+      }),
+      `test:concurrent-completion-event:${run.id}`
     );
     releaseStaleRuntimeLoss();
     await exitDrain;
     internals.materializeRunStreamBuffer = materializeRunStreamBuffer;
 
     const snapshot = await fixture.store.snapshot();
-    expect(snapshot.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'COMPLETED',
       finalArtifactId: winnerArtifact.id
     });
@@ -2643,7 +3613,7 @@ describe('OpenCodeAdapter', () => {
         (event) => event.runId === run.id && event.type === 'AGENT_RUNTIME_LOST'
       )
     ).toHaveLength(0);
-    expect((await fixture.store.getAgentSession(session.id))?.status).toBe('ACTIVE');
+    expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('ACTIVE');
     expect(
       updates.filter(
         (event) =>
@@ -2660,7 +3630,7 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture();
     const { session, run } = await startStreamingRun(fixture);
     const appendArtifact = vi
-      .spyOn(fixture.store, 'appendArtifact')
+      .spyOn(fixture.runtime, 'appendArtifact')
       .mockRejectedValue(new Error('simulated persistent output failure'));
 
     await fixture.harness.emit({
@@ -2674,9 +3644,11 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    await waitForCondition(async () =>
-      appendArtifact.mock.calls.length === 2 &&
-      (await fixture.store.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
+    await waitForCondition(
+      async () =>
+        appendArtifact.mock.calls.length === 2 &&
+        (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED',
+      4_000
     );
     await wait(250);
     expect(appendArtifact).toHaveBeenCalledTimes(2);
@@ -2687,8 +3659,8 @@ describe('OpenCodeAdapter', () => {
   it('records runtime loss while a transient output failure retries within its bound', async () => {
     const fixture = await createFixture();
     const { session, run } = await startStreamingRun(fixture);
-    const appendArtifact = fixture.store.appendArtifact.bind(fixture.store);
-    const append = vi.spyOn(fixture.store, 'appendArtifact');
+    const appendArtifact = fixture.runtime.appendArtifact.bind(fixture.runtime);
+    const append = vi.spyOn(fixture.runtime, 'appendArtifact');
     append.mockRejectedValueOnce(new Error('simulated transient output failure'));
     append.mockImplementation((...args) => appendArtifact(...args));
     let outputPersisted = false;
@@ -2716,14 +3688,40 @@ describe('OpenCodeAdapter', () => {
     await fixture.harness.sessionSupervisor.lose();
 
     await waitForCondition(async () =>
-      (await fixture.store.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
+      (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
     );
     await waitForCondition(() => outputPersisted);
-    expect(await fixture.store.readArtifact(run.outputArtifactId)).toContain(
+    expect(await fixture.runtimeStore.readArtifact(run.outputArtifactId)).toContain(
       'output retained across runtime loss'
     );
     expect(append).toHaveBeenCalledTimes(2);
     unsubscribe();
+    await fixture.adapter.shutdown();
+  });
+
+  it('persists identical text from distinct protocol events across separate flushes', async () => {
+    const fixture = await createFixture();
+    const { session, run } = await startStreamingRun(fixture);
+    const text = 'same provider chunk';
+
+    for (let index = 1; index <= 2; index += 1) {
+      await fixture.harness.emit({
+        id: `evt_repeated_chunk_${index}`,
+        type: 'message.part.delta',
+        properties: {
+          sessionID: session.providerSessionId,
+          messageID: 'msg_assistant_stream',
+          partID: 'prt_stream',
+          field: 'text',
+          delta: text
+        }
+      });
+      await waitForCondition(async () =>
+        (await fixture.runtimeStore.readArtifact(run.outputArtifactId))
+          .replaceAll('\n[text]\n', '') === text.repeat(index)
+      );
+    }
+
     await fixture.adapter.shutdown();
   });
 
@@ -2758,7 +3756,7 @@ describe('OpenCodeAdapter', () => {
         ]
       }
     });
-    const originalServerId = (await fixture.store.getRun(run.id))!.serverInstanceId;
+    const originalServerId = (await fixture.runtime.getRun(run.id))!.serverInstanceId;
     fixture.harness.messages.set(session.providerSessionId!, [
       {
         info: {
@@ -2805,17 +3803,17 @@ describe('OpenCodeAdapter', () => {
 
     await fixture.harness.sessionSupervisor.lose();
     await waitForCondition(
-      async () => (await fixture.store.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
+      async () => (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
     );
     await fixture.adapter.shutdown();
 
     const replacement = createAdapterForFixture(fixture);
     await expect(replacement.initialize()).resolves.toBeUndefined();
-    const recoveredRun = (await fixture.store.getRun(run.id))!;
+    const recoveredRun = (await fixture.runtime.getRun(run.id))!;
     expect(recoveredRun).toMatchObject({ status: 'RECOVERY_REQUIRED' });
     expect(recoveredRun.finalArtifactId).toBeUndefined();
     expect(
-      (await fixture.store.snapshot()).interactionRequests.find(
+      (await fixture.runtime.snapshot()).interactionRequests.find(
         (interaction) => interaction.providerRequestId === 'que_restart'
       )
     ).toMatchObject({
@@ -2823,12 +3821,13 @@ describe('OpenCodeAdapter', () => {
       serverInstanceId: originalServerId
     });
 
-    const finalArtifact = await fixture.store.writeFinalArtifact(
+    const finalArtifact = await fixture.runtime.writeFinalArtifact(
       run.taskId,
       run.id,
-      '# Recovery run closed\n\nExplicitly abandoned before retry.\n'
+      '# Recovery run closed\n\nExplicitly abandoned before retry.\n',
+      `test:recovery-run-final:${run.id}`
     );
-    await fixture.store.appendEvent(createDomainEvent({
+    await fixture.runtime.applyTaskRuntimeEvent(createDomainEvent({
       type: 'AGENT_RUN_INTERRUPTED',
       taskId: run.taskId,
       iterationId: run.iterationId,
@@ -2841,10 +3840,10 @@ describe('OpenCodeAdapter', () => {
         terminalReason: 'Recovery-required run was explicitly abandoned.',
         finalArtifactId: finalArtifact.id
       }
-    }));
+    }), `test:recovery-run-interrupted:${run.id}`);
     const nextRun = await createRun(
       fixture,
-      (await fixture.store.getAgentSession(session.id))!
+      (await fixture.runtime.getAgentSession(session.id))!
     );
     await replacement.startTurn({
       localRunId: nextRun.id,
@@ -2858,11 +3857,19 @@ describe('OpenCodeAdapter', () => {
       settings: SETTINGS
     });
 
-    expect(await fixture.store.getRun(nextRun.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await fixture.runtime.getRun(nextRun.id)).toMatchObject({ status: 'RUNNING' });
     expect(fixture.harness.promptBodies).toHaveLength(2);
     await replacement.shutdown();
     await fixture.store.close();
     const reopenedStore = new FileTaskStore(path.join(fixture.root, 'store'));
+    const reopenedRuntimeStore = new FileAgentRuntimeStore(
+      path.join(fixture.root, 'runtime-store')
+    );
+    await reopenedRuntimeStore.init();
+    const reopenedRuntime = reopenedRuntimeStore.taskAgentRuntimeAccess(async (event) => {
+      await reopenedStore.appendEvent(event);
+    });
+    reopenedStore.bindAgentRuntime(reopenedRuntime);
     await expect(reopenedStore.snapshot()).resolves.toMatchObject({
       runs: expect.arrayContaining([
         expect.objectContaining({ id: run.id, status: 'INTERRUPTED' }),
@@ -2870,16 +3877,16 @@ describe('OpenCodeAdapter', () => {
       ])
     });
     await reopenedStore.close();
+    await reopenedRuntimeStore.close();
   });
 
   it('never retries an output append with ambiguous durable state', async () => {
     const fixture = await createFixture();
     const { session, run } = await startStreamingRun(fixture);
-    const appendArtifact = vi.spyOn(fixture.store, 'appendArtifact').mockRejectedValue(
-      new ArtifactAppendAmbiguousError(
-        run.outputArtifactId,
-        new Error('simulated snapshot failure'),
-        new Error('simulated rollback failure')
+    const appendArtifact = vi.spyOn(fixture.runtime, 'appendArtifact').mockRejectedValue(
+      new AgentRuntimeArtifactMutationAmbiguousError(
+        'simulated ambiguous artifact append',
+        { cause: new Error('simulated snapshot failure and rollback failure') }
       )
     );
 
@@ -2895,7 +3902,7 @@ describe('OpenCodeAdapter', () => {
     });
 
     await waitForCondition(async () =>
-      (await fixture.store.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
+      (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
     );
     await wait(200);
     expect(appendArtifact).toHaveBeenCalledTimes(1);
@@ -2919,16 +3926,16 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    expect(await healthy.store.readArtifact(healthyStream.run.outputArtifactId)).toContain(
+    expect(await healthy.runtimeStore.readArtifact(healthyStream.run.outputArtifactId)).toContain(
       largeDelta
     );
-    expect((await healthy.store.getRun(healthyStream.run.id))?.status).toBe('RUNNING');
+    expect((await healthy.runtime.getRun(healthyStream.run.id))?.status).toBe('RUNNING');
     await healthy.adapter.shutdown();
 
     const failing = await createFixture();
     const failingStream = await startStreamingRun(failing);
     const appendArtifact = vi
-      .spyOn(failing.store, 'appendArtifact')
+      .spyOn(failing.runtime, 'appendArtifact')
       .mockRejectedValue(new Error('simulated unavailable output store'));
     await failing.harness.emit({
       type: 'message.part.delta',
@@ -2942,7 +3949,7 @@ describe('OpenCodeAdapter', () => {
     });
 
     await waitForCondition(async () =>
-      (await failing.store.getRun(failingStream.run.id))?.status === 'RECOVERY_REQUIRED'
+      (await failing.runtime.getRun(failingStream.run.id))?.status === 'RECOVERY_REQUIRED'
     );
     await wait(200);
     expect(appendArtifact).toHaveBeenCalledTimes(1);
@@ -2975,9 +3982,9 @@ describe('OpenCodeAdapter', () => {
 
     await emitDelta('safe opaque-provider-');
     await waitForCondition(async () =>
-      (await fixture.store.readArtifact(run.outputArtifactId)).includes('safe ')
+      (await fixture.runtimeStore.readArtifact(run.outputArtifactId)).includes('safe ')
     );
-    expect(await fixture.store.readArtifact(run.outputArtifactId)).not.toContain(
+    expect(await fixture.runtimeStore.readArtifact(run.outputArtifactId)).not.toContain(
       'opaque-provider-'
     );
     await emitDelta('credential-1742 / ');
@@ -2998,7 +4005,7 @@ describe('OpenCodeAdapter', () => {
     });
 
     const expected = 'safe [REDACTED] / [REDACTED]';
-    const artifact = await fixture.store.readArtifact(run.outputArtifactId);
+    const artifact = await fixture.runtimeStore.readArtifact(run.outputArtifactId);
     const emitted = outputUpdates
       .filter((event) => event.runId === run.id)
       .map((event) => (event.payload as { text: string }).text)
@@ -3063,7 +4070,7 @@ describe('OpenCodeAdapter', () => {
       properties: { info: second }
     });
 
-    const usage = (await fixture.store.snapshot()).agentUsageSnapshots.filter(
+    const usage = (await fixture.runtime.snapshot()).agentUsageSnapshots.filter(
       (snapshot) => snapshot.runId === run.id
     );
     expect(usage).toHaveLength(2);
@@ -3157,7 +4164,7 @@ describe('OpenCodeAdapter', () => {
     });
 
     expect(fixture.harness.messageReadCount).toBe(messageReadsBeforeReplay + 1);
-    const usage = (await fixture.store.snapshot()).agentUsageSnapshots.filter(
+    const usage = (await fixture.runtime.snapshot()).agentUsageSnapshots.filter(
       (snapshot) => snapshot.runId === run.id
     );
     expect(usage).toHaveLength(1);
@@ -3186,7 +4193,7 @@ describe('OpenCodeAdapter', () => {
     });
 
     expect(fixture.harness.messageReadCount).toBe(messageReadsBeforeFreshTerminal);
-    const updatedUsage = (await fixture.store.snapshot()).agentUsageSnapshots.filter(
+    const updatedUsage = (await fixture.runtime.snapshot()).agentUsageSnapshots.filter(
       (snapshot) => snapshot.runId === run.id
     );
     expect(updatedUsage).toHaveLength(2);
@@ -3261,7 +4268,7 @@ describe('OpenCodeAdapter', () => {
       localSessionId: session.id,
       providerSessionId: session.providerSessionId
     });
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       serverInstanceId: fixture.harness.sessionSupervisor.currentServer?.id
     });
@@ -3272,7 +4279,7 @@ describe('OpenCodeAdapter', () => {
       properties: { info: terminal }
     });
 
-    const usage = (await fixture.store.snapshot()).agentUsageSnapshots.filter(
+    const usage = (await fixture.runtime.snapshot()).agentUsageSnapshots.filter(
       (snapshot) => snapshot.runId === run.id
     );
     expect(fixture.harness.messageReadCount).toBe(messageReadsBeforeReplay + 1);
@@ -3433,14 +4440,14 @@ describe('OpenCodeAdapter', () => {
       question: fixture.harness.questionReadCount,
       todo: fixture.harness.todoReadCount
     };
-    const originalUpdate = fixture.store.updateAgentSession.bind(fixture.store);
+    const originalUpdate = fixture.runtime.updateAgentSession.bind(fixture.runtime);
     let remainingFailures = 2;
-    fixture.store.updateAgentSession = async (sessionId, update) => {
+    fixture.runtime.updateAgentSession = async (sessionId, update, operationId) => {
       if (sessionId === session.id && update.status === 'ACTIVE' && remainingFailures > 0) {
         remainingFailures -= 1;
         throw new Error('simulated inbound persistence failure');
       }
-      return originalUpdate(sessionId, update);
+      return originalUpdate(sessionId, update, operationId);
     };
 
     await fixture.harness.emitConcurrent([
@@ -3453,7 +4460,7 @@ describe('OpenCodeAdapter', () => {
         properties: { sessionID: session.providerSessionId, status: { type: 'busy' } }
       }
     ]);
-    fixture.store.updateAgentSession = originalUpdate;
+    fixture.runtime.updateAgentSession = originalUpdate;
 
     expect(remainingFailures).toBe(0);
     expect(fixture.harness.sessionReadCount - baseline.session).toBe(1);
@@ -3462,7 +4469,7 @@ describe('OpenCodeAdapter', () => {
     expect(fixture.harness.permissionReadCount - baseline.permission).toBe(1);
     expect(fixture.harness.questionReadCount - baseline.question).toBe(1);
     expect(fixture.harness.todoReadCount - baseline.todo).toBe(1);
-    const snapshot = await fixture.store.snapshot();
+    const snapshot = await fixture.runtime.snapshot();
     expect(snapshot.agentItems.filter((item) => item.runId === run.id)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ providerItemId: 'prt_recovered_user' }),
@@ -3500,11 +4507,11 @@ describe('OpenCodeAdapter', () => {
         })
       ])
     );
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'AWAITING_APPROVAL',
       recoveryState: 'RECOVERED'
     });
-    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+    expect(await fixture.runtime.getAgentSession(session.id)).toMatchObject({
       status: 'AWAITING_APPROVAL'
     });
     expect(fixture.harness.promptBodies).toHaveLength(1);
@@ -3528,14 +4535,14 @@ describe('OpenCodeAdapter', () => {
     fixture.harness.todos.set(session.providerSessionId!, [
       { content: 'Persist provider plan', status: 'in_progress' }
     ]);
-    const originalRecordPlan = fixture.store.recordAgentPlanRevision.bind(fixture.store);
+    const originalRecordPlan = fixture.runtime.recordAgentPlanRevision.bind(fixture.runtime);
     let remainingFailures = 2;
-    fixture.store.recordAgentPlanRevision = async (record) => {
+    fixture.runtime.recordAgentPlanRevision = async (record, operationId) => {
       if (record.runId === run.id && remainingFailures > 0) {
         remainingFailures -= 1;
         throw new Error('simulated repeated plan persistence failure');
       }
-      return originalRecordPlan(record);
+      return originalRecordPlan(record, operationId);
     };
 
     await expect(fixture.harness.emit({
@@ -3545,13 +4552,13 @@ describe('OpenCodeAdapter', () => {
         todos: [{ content: 'Persist provider plan', status: 'in_progress' }]
       }
     })).rejects.toThrow('inbound persistence recovery failed');
-    fixture.store.recordAgentPlanRevision = originalRecordPlan;
+    fixture.runtime.recordAgentPlanRevision = originalRecordPlan;
 
     expect(remainingFailures).toBe(0);
-    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+    expect(await fixture.runtime.getAgentSession(session.id)).toMatchObject({
       status: 'NOT_LOADED'
     });
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       recoveryState: 'REQUIRES_USER_ACTION'
     });
@@ -3584,20 +4591,16 @@ describe('OpenCodeAdapter', () => {
     });
     await fixture.adapter.initialize();
     expect((await fixture.adapter.listModels()).map((model) => model.model)).not.toContain('grok-code');
-    const session = await fixture.store.createAgentSession({
-      task: fixture.task,
-      iteration: fixture.iteration,
-      worktree: fixture.worktree,
-      runtimeId: 'opencode',
-      requestedSettings: SETTINGS
-    });
-    const run = await createRun(fixture, session);
     const projectSettings: AgentExecutionSettings = {
       ...SETTINGS,
       modelProvider: 'xai',
       model: 'grok-code',
       reasoningEffort: 'fast'
     };
+    const session = await createLocalSession(fixture, {
+      requestedSettings: projectSettings
+    });
+    const run = await createRun(fixture, session, projectSettings);
     const deferred = await fixture.adapter.resolveExecution({
       settings: projectSettings,
       attachments: []
@@ -3621,13 +4624,7 @@ describe('OpenCodeAdapter', () => {
       })
     );
 
-    const staleSession = await fixture.store.createAgentSession({
-      task: fixture.task,
-      iteration: fixture.iteration,
-      worktree: fixture.worktree,
-      runtimeId: 'opencode',
-      requestedSettings: SETTINGS
-    });
+    const staleSession = await createLocalSession(fixture);
     const staleRun = await createRun(fixture, staleSession);
     await expect(
       fixture.adapter.startTurn({
@@ -3669,7 +4666,7 @@ describe('OpenCodeAdapter', () => {
       stoppedStreamsBeforeIdleEviction
     );
 
-    const providerMessageId = (await fixture.store.getRun(run.id))!.providerTurnId!;
+    const providerMessageId = (await fixture.runtime.getRun(run.id))!.providerTurnId!;
     fixture.harness.messages.set(session.providerSessionId!, [
       {
         info: {
@@ -3703,7 +4700,7 @@ describe('OpenCodeAdapter', () => {
       stoppedStreamsBeforeIdleEviction + 1
     );
 
-    const continuedSession = (await fixture.store.getAgentSession(session.id))!;
+    const continuedSession = (await fixture.runtime.getAgentSession(session.id))!;
     const nextRun = await createRun(fixture, continuedSession);
     await fixture.adapter.startTurn({
       localRunId: nextRun.id,
@@ -3730,7 +4727,7 @@ describe('OpenCodeAdapter', () => {
     expect(supervisor.shutdownCount).toBe(1);
     expect(fixture.harness.stoppedStreams).toBe(1);
     expect(fixture.harness.sessions.has(session.providerSessionId!)).toBe(true);
-    expect((await fixture.store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+    expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
     await fixture.adapter.shutdown();
   });
 
@@ -3792,11 +4789,10 @@ describe('OpenCodeAdapter', () => {
       worktreePath: targetWorktreePath,
       baseSha: 'base-sha'
     });
-    const target = await fixture.store.createAgentSession({
+    const target = await createLocalSession(fixture, {
       task: targetTask,
       iteration: targetOwnership.iteration,
       worktree: targetOwnership.worktree,
-      runtimeId: 'opencode',
       requestedSettings: SETTINGS,
       forkedFromSessionId: source.id
     });
@@ -3838,21 +4834,17 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture({ sessionIdleTimeoutMs: 20 });
     await fixture.adapter.initialize();
     const source = await materializeSession(fixture);
-    const target = await fixture.store.createAgentSession({
-      task: fixture.task,
-      iteration: fixture.iteration,
-      worktree: fixture.worktree,
-      runtimeId: 'opencode',
+    const target = await createLocalSession(fixture, {
       role: 'ALTERNATIVE',
       requestedSettings: SETTINGS,
       forkedFromSessionId: source.id
     });
-    const originalUpdate = fixture.store.updateAgentSession.bind(fixture.store);
-    fixture.store.updateAgentSession = async (sessionId, update) => {
+    const originalUpdate = fixture.runtime.updateAgentSession.bind(fixture.runtime);
+    fixture.runtime.updateAgentSession = async (sessionId, update, operationId) => {
       if (sessionId === target.id && update.providerSessionId) {
         throw new Error('simulated durable fork ownership failure');
       }
-      return originalUpdate(sessionId, update);
+      return originalUpdate(sessionId, update, operationId);
     };
 
     await expect(
@@ -3869,11 +4861,11 @@ describe('OpenCodeAdapter', () => {
     const forkedSessionId = fixture.harness.deletedSessionIds[0];
     expect(forkedSessionId).toMatch(/^ses_/u);
     expect(fixture.harness.sessions.has(forkedSessionId!)).toBe(false);
-    expect((await fixture.store.getAgentSession(target.id))?.providerSessionId).toBeUndefined();
+    expect((await fixture.runtime.getAgentSession(target.id))?.providerSessionId).toBeUndefined();
     await waitForCondition(
       () => fixture.harness.sessionSupervisor.shutdownCount === 1
     );
-    fixture.store.updateAgentSession = originalUpdate;
+    fixture.runtime.updateAgentSession = originalUpdate;
     await fixture.adapter.shutdown();
   });
 
@@ -3881,11 +4873,7 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture();
     await fixture.adapter.initialize();
     const source = await materializeSession(fixture);
-    const target = await fixture.store.createAgentSession({
-      task: fixture.task,
-      iteration: fixture.iteration,
-      worktree: fixture.worktree,
-      runtimeId: 'opencode',
+    const target = await createLocalSession(fixture, {
       role: 'ALTERNATIVE',
       requestedSettings: SETTINGS,
       forkedFromSessionId: source.id
@@ -3908,12 +4896,12 @@ describe('OpenCodeAdapter', () => {
     expect(fixture.harness.deletedSessionIds).toEqual([]);
     expect(fixture.harness.sessions.has(source.providerSessionId!)).toBe(true);
     expect(
-      await fixture.store.getAgentSessionByProviderId(
+      await fixture.runtime.getAgentSessionByProviderId(
         'opencode',
         source.providerSessionId!
       )
     ).toMatchObject({ id: source.id });
-    expect((await fixture.store.getAgentSession(target.id))?.providerSessionId).toBeUndefined();
+    expect((await fixture.runtime.getAgentSession(target.id))?.providerSessionId).toBeUndefined();
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
     await fixture.adapter.shutdown();
   });
@@ -3922,28 +4910,24 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture();
     await fixture.adapter.initialize();
     const source = await materializeSession(fixture);
-    const target = await fixture.store.createAgentSession({
-      task: fixture.task,
-      iteration: fixture.iteration,
-      worktree: fixture.worktree,
-      runtimeId: 'opencode',
+    const target = await createLocalSession(fixture, {
       role: 'ALTERNATIVE',
       requestedSettings: SETTINGS,
       forkedFromSessionId: source.id
     });
-    const originalUpdate = fixture.store.updateAgentSession.bind(fixture.store);
-    const originalGet = fixture.store.getAgentSession.bind(fixture.store);
+    const originalUpdate = fixture.runtime.updateAgentSession.bind(fixture.runtime);
+    const originalGet = fixture.runtime.getAgentSession.bind(fixture.runtime);
     let committedForkId: string | undefined;
     let failConfirmationRead = true;
-    fixture.store.updateAgentSession = async (sessionId, update) => {
-      const stored = await originalUpdate(sessionId, update);
+    fixture.runtime.updateAgentSession = async (sessionId, update, operationId) => {
+      const stored = await originalUpdate(sessionId, update, operationId);
       if (sessionId === target.id && update.providerSessionId) {
         committedForkId = update.providerSessionId;
         throw new Error('simulated lost ownership-write acknowledgement');
       }
       return stored;
     };
-    fixture.store.getAgentSession = async (sessionId) => {
+    fixture.runtime.getAgentSession = async (sessionId) => {
       if (sessionId === target.id && committedForkId && failConfirmationRead) {
         failConfirmationRead = false;
         throw new Error('simulated ownership confirmation read failure');
@@ -3967,9 +4951,9 @@ describe('OpenCodeAdapter', () => {
     expect(committedForkId).toMatch(/^ses_/u);
     expect(fixture.harness.deletedSessionIds).toEqual([]);
     expect(fixture.harness.sessions.has(committedForkId!)).toBe(true);
-    fixture.store.updateAgentSession = originalUpdate;
-    fixture.store.getAgentSession = originalGet;
-    expect(await fixture.store.getAgentSession(target.id)).toMatchObject({
+    fixture.runtime.updateAgentSession = originalUpdate;
+    fixture.runtime.getAgentSession = originalGet;
+    expect(await fixture.runtime.getAgentSession(target.id)).toMatchObject({
       providerSessionId: committedForkId
     });
     await fixture.adapter.shutdown();
@@ -3979,21 +4963,17 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture();
     await fixture.adapter.initialize();
     const source = await materializeSession(fixture);
-    const target = await fixture.store.createAgentSession({
-      task: fixture.task,
-      iteration: fixture.iteration,
-      worktree: fixture.worktree,
-      runtimeId: 'opencode',
+    const target = await createLocalSession(fixture, {
       role: 'ALTERNATIVE',
       requestedSettings: SETTINGS,
       forkedFromSessionId: source.id
     });
-    const originalUpdate = fixture.store.updateAgentSession.bind(fixture.store);
-    fixture.store.updateAgentSession = async (sessionId, update) => {
+    const originalUpdate = fixture.runtime.updateAgentSession.bind(fixture.runtime);
+    fixture.runtime.updateAgentSession = async (sessionId, update, operationId) => {
       if (sessionId === target.id && update.providerSessionId) {
         throw new Error('simulated durable fork ownership failure');
       }
-      return originalUpdate(sessionId, update);
+      return originalUpdate(sessionId, update, operationId);
     };
     fixture.harness.failNextSessionDeleteBeforeAccept = true;
 
@@ -4013,7 +4993,7 @@ describe('OpenCodeAdapter', () => {
     expect(fixture.harness.forkRequests).toHaveLength(1);
     expect(fixture.harness.deletedSessionIds).toEqual([]);
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
-    fixture.store.updateAgentSession = originalUpdate;
+    fixture.runtime.updateAgentSession = originalUpdate;
     await fixture.adapter.shutdown();
   });
 
@@ -4043,7 +5023,7 @@ describe('OpenCodeAdapter', () => {
         source: { messageID: turn.providerTurnId }
       }
     });
-    expect(await fixture.store.getRun(run.id)).toMatchObject({
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({
       status: 'AWAITING_APPROVAL'
     });
 
@@ -4053,15 +5033,15 @@ describe('OpenCodeAdapter', () => {
     });
 
     expect(
-      (await fixture.store.snapshot()).interactionRequests.find(
+      (await fixture.runtime.snapshot()).interactionRequests.find(
         (interaction) => interaction.providerRequestId === 'per_missing_from_queue'
       )
     ).toMatchObject({
       status: 'STALE',
       resolution: { providerQueueAbsent: true }
     });
-    expect(await fixture.store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
-    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({ status: 'ACTIVE' });
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+    expect(await fixture.runtime.getAgentSession(session.id)).toMatchObject({ status: 'ACTIVE' });
     await fixture.adapter.shutdown();
   });
 
@@ -4088,16 +5068,17 @@ describe('OpenCodeAdapter', () => {
         source: { messageID: turn.providerTurnId }
       }
     });
-    const interaction = (await fixture.store.snapshot()).interactionRequests[0];
+    const interaction = (await fixture.runtime.snapshot()).interactionRequests[0];
     const decision = { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' } as const;
-    await fixture.store.transitionInteractionRequest(interaction.id, 'PENDING', {
+    await fixture.runtime.transitionInteractionRequest(interaction.id, 'PENDING', {
       status: 'RESPONDING',
       decision,
       respondedAt: new Date().toISOString()
-    });
-    const originalTransition = fixture.store.transitionInteractionRequest.bind(fixture.store);
+    }, `test:interaction-responding:${interaction.id}`);
+    const originalTransition =
+      fixture.runtime.transitionInteractionRequest.bind(fixture.runtime);
     let failedResolutionWrite = false;
-    fixture.store.transitionInteractionRequest = async (...args) => {
+    fixture.runtime.transitionInteractionRequest = async (...args) => {
       if (fixture.harness.permissionReplies.length === 1 && !failedResolutionWrite) {
         failedResolutionWrite = true;
         throw new Error('simulated durable response failure');
@@ -4109,7 +5090,7 @@ describe('OpenCodeAdapter', () => {
       fixture.adapter.respondToInteraction({ interaction, decision })
     ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
     expect(fixture.harness.permissionReplies).toHaveLength(1);
-    fixture.store.transitionInteractionRequest = originalTransition;
+    fixture.runtime.transitionInteractionRequest = originalTransition;
     await fixture.adapter.shutdown();
   });
 
@@ -4139,7 +5120,7 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    expect((await fixture.store.snapshot()).interactionRequests).toHaveLength(0);
+    expect((await fixture.runtime.snapshot()).interactionRequests).toHaveLength(0);
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBeGreaterThan(0);
     expect(JSON.stringify((await fixture.store.snapshot()).events)).not.toContain(opaque);
     await fixture.adapter.shutdown();
@@ -4165,16 +5146,17 @@ describe('OpenCodeAdapter', () => {
 
     const oldSupervisor = fixture.harness.sessionSupervisor;
     const oldClient = oldSupervisor.client!;
-    const oldProviderTurnId = (await fixture.store.getRun(oldRun.id))!.providerTurnId!;
+    const oldProviderTurnId = (await fixture.runtime.getRun(oldRun.id))!.providerTurnId!;
     expect(oldSupervisor.shutdownCount).toBe(1);
-    expect((await fixture.store.getRun(oldRun.id))?.status).toBe('RECOVERY_REQUIRED');
+    expect((await fixture.runtime.getRun(oldRun.id))?.status).toBe('RECOVERY_REQUIRED');
 
-    const finalArtifact = await fixture.store.writeFinalArtifact(
+    const finalArtifact = await fixture.runtime.writeFinalArtifact(
       oldRun.taskId,
       oldRun.id,
-      '# Ambiguous provider turn\n\nExplicitly closed before replacement.\n'
+      '# Ambiguous provider turn\n\nExplicitly closed before replacement.\n',
+      `test:ambiguous-run-final:${oldRun.id}`
     );
-    await fixture.store.appendEvent(
+    await fixture.runtime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_RUN_INTERRUPTED',
         taskId: oldRun.taskId,
@@ -4188,10 +5170,11 @@ describe('OpenCodeAdapter', () => {
           terminalReason: 'Ambiguous run explicitly abandoned.',
           finalArtifactId: finalArtifact.id
         }
-      })
+      }),
+      `test:ambiguous-run-interrupted:${oldRun.id}`
     );
 
-    const replacementSession = (await fixture.store.getAgentSession(session.id))!;
+    const replacementSession = (await fixture.runtime.getAgentSession(session.id))!;
     const replacementRun = await createRun(fixture, replacementSession);
     const replacementTurn = await fixture.adapter.startTurn({
       localRunId: replacementRun.id,
@@ -4254,22 +5237,22 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    expect((await fixture.store.getRun(replacementRun.id))?.providerTurnId).toBe(
+    expect((await fixture.runtime.getRun(replacementRun.id))?.providerTurnId).toBe(
       replacementTurn.providerTurnId
     );
-    expect((await fixture.store.getRun(replacementRun.id))?.status).toBe('RUNNING');
-    expect(await fixture.store.getAgentItemsForRun(replacementRun.id)).toEqual([]);
+    expect((await fixture.runtime.getRun(replacementRun.id))?.status).toBe('RUNNING');
+    expect(await fixture.runtime.getAgentItemsForRun(replacementRun.id)).toEqual([]);
     expect(
-      (await fixture.store.snapshot()).agentPlanRevisions.filter(
+      (await fixture.runtime.snapshot()).agentPlanRevisions.filter(
         (revision) => revision.runId === replacementRun.id
       )
     ).toEqual([]);
     expect(
-      (await fixture.store.snapshot()).interactionRequests.filter(
+      (await fixture.runtime.snapshot()).interactionRequests.filter(
         (request) => request.runId === replacementRun.id
       )
     ).toEqual([]);
-    expect(await fixture.store.readArtifact(replacementRun.outputArtifactId)).not.toContain(
+    expect(await fixture.runtimeStore.readArtifact(replacementRun.outputArtifactId)).not.toContain(
       'late old output'
     );
     await fixture.adapter.shutdown();
@@ -4427,17 +5410,18 @@ describe('OpenCodeAdapter', () => {
     });
     await lostSupervisor.lose();
     await waitForCondition(
-      async () => (await fixture.store.getRun(lostRun.id))?.status === 'RECOVERY_REQUIRED'
+      async () => (await fixture.runtime.getRun(lostRun.id))?.status === 'RECOVERY_REQUIRED'
     );
     await fixture.adapter.resolveExecution({ settings: SETTINGS, attachments: [] });
     expect(observedExecutables).toEqual(['/fake/opencode']);
 
-    const finalArtifact = await fixture.store.writeFinalArtifact(
+    const finalArtifact = await fixture.runtime.writeFinalArtifact(
       lostRun.taskId,
       lostRun.id,
-      '# Recovery run closed\n\nExplicitly abandoned for replacement.\n'
+      '# Recovery run closed\n\nExplicitly abandoned for replacement.\n',
+      `test:lost-run-final:${lostRun.id}`
     );
-    await fixture.store.appendEvent(
+    await fixture.runtime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_RUN_INTERRUPTED',
         taskId: lostRun.taskId,
@@ -4451,9 +5435,10 @@ describe('OpenCodeAdapter', () => {
           terminalReason: 'Recovery-required run was explicitly abandoned.',
           finalArtifactId: finalArtifact.id
         }
-      })
+      }),
+      `test:lost-run-interrupted:${lostRun.id}`
     );
-    const continuedSession = (await fixture.store.getAgentSession(session.id))!;
+    const continuedSession = (await fixture.runtime.getAgentSession(session.id))!;
     const nextRun = await createRun(fixture, continuedSession);
 
     await fixture.adapter.startTurn({
@@ -4477,48 +5462,180 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
-  it('rejects managed attachments before starting or mutating OpenCode state', async () => {
+  it('sends verified text and image attachments as native data parts', async () => {
     const fixture = await createFixture();
     await fixture.adapter.initialize();
+    const textBytes = Buffer.from('The launch code is MONKI-42.');
+    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const textPath = path.join(fixture.root, 'brief.txt');
+    const imagePath = path.join(fixture.root, 'reference.png');
+    await Promise.all([
+      fs.writeFile(textPath, textBytes, { mode: 0o400 }),
+      fs.writeFile(imagePath, imageBytes, { mode: 0o400 })
+    ]);
+    const attachments = [
+      {
+        attachmentId: 'att_text',
+        ordinal: 0,
+        displayName: 'brief.txt',
+        kind: 'text' as const,
+        mediaType: 'text/markdown',
+        byteCount: textBytes.byteLength,
+        sha256: createHash('sha256').update(textBytes).digest('hex'),
+        path: textPath,
+        verifiedAt: new Date().toISOString()
+      },
+      {
+        attachmentId: 'att_image',
+        ordinal: 1,
+        displayName: 'reference.png',
+        kind: 'image' as const,
+        mediaType: 'image/png',
+        byteCount: imageBytes.byteLength,
+        sha256: createHash('sha256').update(imageBytes).digest('hex'),
+        path: imagePath,
+        verifiedAt: new Date().toISOString()
+      }
+    ];
     await expect(
       fixture.adapter.resolveExecution({
         settings: SETTINGS,
-        attachments: [{ kind: 'image' }]
+        attachments
       })
-    ).rejects.toThrow('managed attachments are unavailable');
-    const session = await fixture.store.createAgentSession({
-      task: fixture.task,
-      iteration: fixture.iteration,
-      worktree: fixture.worktree,
-      runtimeId: 'opencode',
-      requestedSettings: SETTINGS
+    ).resolves.toMatchObject({ model: { inputModalities: ['text', 'image'] } });
+    const session = await createLocalSession(fixture);
+    const run = await createRun(
+      fixture,
+      session,
+      SETTINGS,
+      attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        ordinal: attachment.ordinal,
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        byteCount: attachment.byteCount,
+        sha256: attachment.sha256
+      }))
+    );
+    const started = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS,
+      attachments
     });
-    const run = await createRun(fixture, session);
-    await expect(
-      fixture.adapter.startTurn({
-        localRunId: run.id,
-        session: { localSessionId: session.id },
-        mode: 'IMPLEMENTATION',
-        prompt: fixture.task.prompt,
-        authoritativeGoal: fixture.task.prompt,
-        settings: SETTINGS,
-        attachments: [
-          {
-            attachmentId: 'att_1',
-            ordinal: 0,
-            displayName: 'secret.png',
-            kind: 'image',
-            mediaType: 'image/png',
-            byteCount: 1,
-            sha256: '0'.repeat(64),
-            path: path.join(fixture.root, 'secret.png'),
-            verifiedAt: new Date().toISOString()
+
+    const body = fixture.harness.promptBodies[0] as {
+      parts: Array<{
+        type: string;
+        text?: string;
+        mime?: string;
+        filename?: string;
+        url?: string;
+      }>;
+    };
+    expect(body.parts).toHaveLength(3);
+    expect(body.parts[0]).toEqual({ type: 'text', text: fixture.task.prompt });
+    expect(body.parts[1]).toMatchObject({
+      type: 'file',
+      mime: 'text/plain',
+      filename: 'brief.txt'
+    });
+    expect(body.parts[2]).toMatchObject({
+      type: 'file',
+      mime: 'image/png',
+      filename: 'reference.png'
+    });
+    expect(decodeDataUrl(body.parts[1]!.url!)).toEqual(textBytes);
+    expect(decodeDataUrl(body.parts[2]!.url!)).toEqual(imageBytes);
+    expect(JSON.stringify(body)).not.toContain(textPath);
+    expect(JSON.stringify(body)).not.toContain(imagePath);
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(textPath).slice(1, -1)
+    );
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(imagePath).slice(1, -1)
+    );
+    await expect(fixture.runtime.getRun(run.id)).resolves.toMatchObject({
+      attachmentSubmissions: attachments.map((attachment) =>
+        expect.objectContaining({
+          attachmentId: attachment.attachmentId,
+          transport: 'native-file',
+          correlation: { kind: 'provider-message', id: started.providerTurnId }
+        })
+      )
+    });
+    expect(fixture.harness.supervisors).toHaveLength(2);
+    expect(fixture.harness.promptBodies).toHaveLength(1);
+    await fixture.adapter.shutdown();
+  });
+
+  it('rejects an image before provider mutation when the selected model is text-only', async () => {
+    const fixture = await createFixture();
+    fixture.harness.catalogs.set(path.resolve(fixture.appCwd), {
+      connected: ['anthropic'],
+      default: { anthropic: 'claude-test' },
+      all: [{
+        id: 'anthropic',
+        name: 'Anthropic',
+        models: {
+          'claude-test': {
+            id: 'claude-test',
+            name: 'Claude Test',
+            status: 'active',
+            capabilities: { input: { text: true } },
+            variants: { high: {} }
           }
-        ]
+        }
+      }]
+    });
+    await fixture.adapter.initialize();
+
+    await expect(
+      fixture.adapter.resolveExecution({
+        settings: SETTINGS,
+        attachments: [{
+          kind: 'image',
+          mediaType: 'image/png',
+          byteCount: 4,
+          sha256: createHash('sha256')
+            .update(Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+            .digest('hex')
+        }]
       })
-    ).rejects.toThrow('managed attachments are unavailable');
-    expect(fixture.harness.supervisors).toHaveLength(1);
+    ).rejects.toThrow('does not accept image attachments');
     expect(fixture.harness.promptBodies).toHaveLength(0);
+    await fixture.adapter.shutdown();
+  });
+
+  it('uses the same native attachment mapping for owner-neutral turns', async () => {
+    const fixture = await createOwnerNeutralRuntimeFixture({}, true);
+    const body = fixture.harness.promptBodies[0] as {
+      parts: Array<{ type: string; mime?: string; filename?: string; url?: string }>;
+    };
+
+    expect(body.parts[1]).toMatchObject({
+      type: 'file',
+      mime: 'text/plain',
+      filename: 'review-context.txt'
+    });
+    expect(decodeDataUrl(body.parts[1]!.url!)).toEqual(fixture.attachmentBytes);
+    expect(JSON.stringify(body)).not.toContain(fixture.attachmentPath);
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(fixture.attachmentPath).slice(1, -1)
+    );
+    expect(fixture.started.attachmentSubmissions).toEqual([
+      expect.objectContaining({
+        attachmentId: fixture.attachments[0]!.attachmentId,
+        transport: 'native-file',
+        correlation: {
+          kind: 'provider-message',
+          id: fixture.started.providerTurnId
+        }
+      })
+    ]);
     await fixture.adapter.shutdown();
   });
 });
@@ -4527,6 +5644,8 @@ interface AdapterFixture {
   root: string;
   appCwd: string;
   store: FileTaskStore;
+  runtimeStore: FileAgentRuntimeStore;
+  runtime: TaskAgentRuntimeAccess;
   adapter: OpenCodeAdapter;
   appEvents: AppEventBus;
   harness: FakeOpenCodeHarness;
@@ -4540,6 +5659,165 @@ interface AdapterFixtureOptions {
   interruptCompletionTimeoutMs?: number;
   runtimeResolver?: OpenCodeAdapterOptions['runtimeResolver'];
   environment?: NodeJS.ProcessEnv;
+  designSkillRoot?: string;
+  designClientToolBridge?: Pick<
+    DesignClientToolBridge,
+    'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
+  >;
+}
+
+async function createOwnerNeutralRuntimeFixture(
+  options: AdapterFixtureOptions = {},
+  withAttachment = false
+) {
+  const fixture = await createFixture(options);
+  await fixture.adapter.initialize();
+  const attachmentBytes = Buffer.from('The owner-neutral code is MONKI-READ-42.');
+  const attachmentPath = path.join(fixture.root, 'review-context.txt');
+  const attachments = withAttachment
+    ? [{
+        attachmentId: 'att_runtime_text',
+        ordinal: 0,
+        displayName: 'review-context.txt',
+        kind: 'text' as const,
+        mediaType: 'text/plain',
+        byteCount: attachmentBytes.byteLength,
+        sha256: createHash('sha256').update(attachmentBytes).digest('hex'),
+        path: attachmentPath,
+        verifiedAt: new Date().toISOString()
+      }]
+    : [];
+  if (withAttachment) {
+    await fs.writeFile(attachmentPath, attachmentBytes, { mode: 0o400 });
+  }
+  const context = await fixture.adapter.buildExecutionContext({
+    sessionId: 'runtime-session-denial',
+    primaryCwd: fixture.worktree.worktreePath,
+    readRoots: [{
+      canonicalPath: fixture.worktree.worktreePath,
+      kind: 'WORKTREE',
+      entityId: fixture.worktree.id
+    }],
+    modelSettings: SETTINGS,
+    clientOperationId: 'runtime-context-denial',
+    attachments
+  });
+  const owner = withAttachment
+    ? {
+        kind: 'PROMPT_REFINEMENT' as const,
+        requestId: 'refinement-attachment'
+      }
+    : {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-denial',
+        stableParticipantId: 'participant-denial'
+      };
+  const session = await fixture.runtimeStore.createSession({
+    id: 'runtime-session-denial',
+    owner,
+    accessEpoch: createAgentSessionAccessEpoch({
+      owner,
+      sessionId: 'runtime-session-denial',
+      epoch: 1,
+      runtimeId: 'opencode',
+      model: context.modelSettings.model!,
+      executionContext: context,
+      createdAt: new Date().toISOString()
+    }),
+    executionContext: context,
+    clientOperationId: 'runtime-session-denial-create',
+    runtimeId: 'opencode',
+    role: 'PRIMARY',
+    relationshipState: 'ROOT',
+    status: 'NOT_MATERIALIZED',
+    materialized: false,
+    requestedSettings: context.modelSettings
+  });
+  let run = await fixture.runtimeStore.createRun({
+    id: 'runtime-run-denial',
+    owner,
+    scope: withAttachment
+      ? { kind: 'PROMPT_REFINEMENT', requestId: 'refinement-attachment' }
+      : {
+          kind: 'DISCOURSE',
+          conversationId: 'conversation-denial',
+          waveId: 'wave-denial',
+          jobId: 'job-denial',
+          contextSnapshotId: 'snapshot-denial',
+          attemptId: 'attempt-denial'
+        },
+    sessionId: session.id,
+    sessionAccessEpoch: 1,
+    purpose: withAttachment ? 'PROMPT_REFINEMENT' : 'DISCOURSE_ANSWER',
+    generationKey: 'runtime-generation-denial',
+    clientOperationId: 'runtime-run-denial-create',
+    requestedSettings: context.modelSettings,
+    promptArtifactId: 'runtime-prompt-denial',
+    outputArtifactId: 'runtime-output-denial',
+    diagnosticArtifactId: 'runtime-diagnostic-denial',
+    attachmentSelection: attachments.map((attachment) => ({
+      attachmentId: attachment.attachmentId,
+      ordinal: attachment.ordinal,
+      kind: attachment.kind,
+      mediaType: attachment.mediaType,
+      byteCount: attachment.byteCount,
+      sha256: attachment.sha256
+    }))
+  });
+  await Promise.all([
+    fixture.runtimeStore.createArtifact({
+      id: run.promptArtifactId,
+      owner,
+      runId: run.id,
+      kind: 'PROMPT',
+      clientOperationId: 'runtime-prompt-denial-create',
+      content: 'Inspect without changing files.'
+    }),
+    fixture.runtimeStore.createArtifact({
+      id: run.outputArtifactId,
+      owner,
+      runId: run.id,
+      kind: 'OUTPUT',
+      clientOperationId: 'runtime-output-denial-create',
+      content: ''
+    }),
+    fixture.runtimeStore.createArtifact({
+      id: run.diagnosticArtifactId,
+      owner,
+      runId: run.id,
+      kind: 'DIAGNOSTIC',
+      clientOperationId: 'runtime-diagnostic-denial-create',
+      content: ''
+    })
+  ]);
+  run = await fixture.runtimeStore.updateRun(
+    run.id,
+    run.recordRevision,
+    {
+      status: 'STARTING',
+      delivery: 'SENDING',
+      startedAt: new Date().toISOString()
+    },
+    'runtime-denial-starting'
+  );
+  const started = await fixture.adapter.startRuntimeTurn({
+    session,
+    run,
+    executionContext: context,
+    prompt: 'Inspect without changing files.',
+    attachments
+  });
+  return {
+    ...fixture,
+    owner,
+    session,
+    run,
+    context,
+    started,
+    attachments,
+    attachmentBytes,
+    attachmentPath
+  };
 }
 
 async function createFixture(options: AdapterFixtureOptions = {}): Promise<AdapterFixture> {
@@ -4549,6 +5827,12 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
   await fs.mkdir(appCwd, { recursive: true });
   await fs.mkdir(worktreePath, { recursive: true });
   const store = new FileTaskStore(path.join(root, 'store'));
+  const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime-store'));
+  await runtimeStore.init();
+  const runtimeAccess = runtimeStore.taskAgentRuntimeAccess(async (event) => {
+    await store.appendEvent(event);
+  });
+  store.bindAgentRuntime(runtimeAccess);
   const task = await store.createTask({
     runtimeId: 'opencode',
     title: 'OpenCode adapter lifecycle',
@@ -4571,6 +5855,8 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
     root,
     appCwd,
     store,
+    runtimeStore,
+    runtime: runtimeAccess,
     appEvents,
     harness,
     task,
@@ -4586,7 +5872,7 @@ function createAdapterForFixture(
   options: AdapterFixtureOptions = {}
 ): OpenCodeAdapter {
   const runtime = fakeRuntime();
-  return new OpenCodeAdapter(fixture.store, fixture.appEvents, {
+  return new OpenCodeAdapter(fixture.runtime, fixture.runtimeStore, fixture.appEvents, {
     cwd: fixture.appCwd,
     executable: runtime.executable,
     runtimeResolver: options.runtimeResolver ?? (async () => runtime),
@@ -4594,7 +5880,9 @@ function createAdapterForFixture(
     supervisorFactory: (runtimeStore, supervisorOptions) =>
       fixture.harness.createSupervisor(runtimeStore, supervisorOptions),
     sessionIdleTimeoutMs: options.sessionIdleTimeoutMs,
-    interruptCompletionTimeoutMs: options.interruptCompletionTimeoutMs
+    interruptCompletionTimeoutMs: options.interruptCompletionTimeoutMs,
+    designSkillRoot: options.designSkillRoot,
+    designClientToolBridge: options.designClientToolBridge
   });
 }
 
@@ -4615,13 +5903,7 @@ function fakeRuntime(): ResolvedOpenCodeRuntime {
 }
 
 async function materializeSession(fixture: AdapterFixture): Promise<AgentSessionRecord> {
-  const session = await fixture.store.createAgentSession({
-    task: fixture.task,
-    iteration: fixture.iteration,
-    worktree: fixture.worktree,
-    runtimeId: 'opencode',
-    requestedSettings: SETTINGS
-  });
+  const session = await createLocalSession(fixture);
   return fixture.adapter.createSession({
     runtimeId: 'opencode',
     localSessionId: session.id,
@@ -4635,15 +5917,168 @@ async function materializeSession(fixture: AdapterFixture): Promise<AgentSession
 
 async function createRun(
   fixture: AdapterFixture,
-  session: AgentSessionRecord
+  session: AgentSessionRecord,
+  requestedSettings: AgentExecutionSettings = SETTINGS,
+  attachmentSelection: AgentAttachmentSelection[] = [],
+  options: {
+    purpose?: 'TASK_IMPLEMENTATION' | 'TASK_DESIGN';
+    clientToolGrants?: string[];
+  } = {}
 ): Promise<RunRecord> {
-  return fixture.store.createRun({
-    task: fixture.task,
-    session,
-    mode: 'IMPLEMENTATION',
-    prompt: fixture.task.prompt,
-    requestedSettings: SETTINGS
+  const id = nextRuntimeTestId('run');
+  const owner = { kind: 'TASK' as const, taskId: fixture.task.id };
+  const created = await fixture.runtimeStore.createRun({
+    id,
+    owner,
+    scope: {
+      kind: 'TASK',
+      taskId: fixture.task.id,
+      iterationId: fixture.iteration.id,
+      worktreeId: fixture.worktree.id
+    },
+    sessionId: session.id,
+    sessionAccessEpoch: 1,
+    purpose: options.purpose ?? 'TASK_IMPLEMENTATION',
+    generationKey: `opencode-test:${id}`,
+    clientOperationId: `create:${id}`,
+    requestedSettings,
+    promptArtifactId: `${id}-prompt`,
+    outputArtifactId: `${id}-output`,
+    diagnosticArtifactId: `${id}-diagnostics`,
+    clientToolGrants: options.clientToolGrants,
+    attachmentSelection,
+    taskDetails: { eventCount: 0 }
   });
+  await Promise.all([
+    fixture.runtimeStore.createArtifact({
+      id: created.promptArtifactId,
+      owner,
+      runId: created.id,
+      kind: 'PROMPT',
+      clientOperationId: `artifact:${id}:prompt`,
+      content: fixture.task.prompt
+    }),
+    fixture.runtimeStore.createArtifact({
+      id: created.outputArtifactId,
+      owner,
+      runId: created.id,
+      kind: 'OUTPUT',
+      clientOperationId: `artifact:${id}:output`,
+      content: ''
+    }),
+    fixture.runtimeStore.createArtifact({
+      id: created.diagnosticArtifactId,
+      owner,
+      runId: created.id,
+      kind: 'DIAGNOSTIC',
+      clientOperationId: `artifact:${id}:diagnostics`,
+      content: ''
+    })
+  ]);
+  return (await fixture.runtime.getRun(id))!;
+}
+
+async function createLocalSession(
+  fixture: AdapterFixture,
+  input: {
+    task?: Task;
+    iteration?: TaskIteration;
+    worktree?: WorktreeRecord;
+    role?: AgentSessionRecord['role'];
+    forkedFromSessionId?: string;
+    requestedSettings?: AgentExecutionSettings;
+  } = {}
+): Promise<AgentSessionRecord> {
+  const task = input.task ?? fixture.task;
+  const iteration = input.iteration ?? fixture.iteration;
+  const worktree = input.worktree ?? fixture.worktree;
+  const requestedSettings = input.requestedSettings ?? SETTINGS;
+  const id = nextRuntimeTestId('session');
+  const owner = { kind: 'TASK' as const, taskId: task.id };
+  const operationId = `create:${id}`;
+  const executionContext = {
+    attestation: { status: 'ATTESTED' as const },
+    repositoryAccess: 'WRITE' as const,
+    primaryCwd: worktree.worktreePath,
+    readRoots: [{
+      canonicalPath: worktree.worktreePath,
+      kind: 'WORKTREE' as const,
+      entityId: worktree.id
+    }],
+    managedAttachments: [],
+    permissionProfileHash: 'a'.repeat(64),
+    modelSettings: requestedSettings,
+    externalTools: {
+      network: requestedSettings.networkAccess === true,
+      webSearch: requestedSettings.networkAccess === true ? 'live' as const : 'disabled' as const,
+      mcpServers: false,
+      apps: false,
+      dynamicTools: false
+    },
+    clientOperationId: operationId
+  };
+  await fixture.runtimeStore.createSession({
+    id,
+    owner,
+    accessEpoch: createAgentSessionAccessEpoch({
+      owner,
+      sessionId: id,
+      epoch: 1,
+      runtimeId: 'opencode',
+      model: requestedSettings.model!,
+      executionContext
+    }),
+    executionContext,
+    clientOperationId: operationId,
+    runtimeId: 'opencode',
+    role: input.role ?? 'PRIMARY',
+    ...(input.forkedFromSessionId
+      ? { forkedFromSessionId: input.forkedFromSessionId }
+      : {}),
+    relationshipState: input.forkedFromSessionId ? 'RESOLVED' : 'ROOT',
+    status: 'NOT_MATERIALIZED',
+    materialized: false,
+    requestedSettings,
+    taskContext: {
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      worktreePath: worktree.worktreePath
+    }
+  });
+  return (await fixture.runtime.getAgentSession(id))!;
+}
+
+function nextRuntimeTestId(_prefix: string): string {
+  return randomUUID();
+}
+
+function fakeDesignToolBridge() {
+  const createSessionGrant = vi.fn(async () => ({
+    id: 'design-grant-1',
+    launch: {
+      executablePath: '/app/Task Monki',
+      argv: ['/resources/design-tool-mcp-server.mjs'],
+      environment: {
+        TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'session-credential',
+        TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: '/private/grant-file'
+      }
+    }
+  }));
+  const activateGrant = vi.fn(async () => undefined);
+  const revokeGrant = vi.fn(async () => undefined);
+  const releaseSessionGrant = vi.fn(async () => undefined);
+  return {
+    api: {
+      createSessionGrant,
+      activateGrant,
+      revokeGrant,
+      releaseSessionGrant
+    },
+    createSessionGrant,
+    activateGrant,
+    revokeGrant,
+    releaseSessionGrant
+  };
 }
 
 async function startStreamingRun(fixture: AdapterFixture): Promise<{
@@ -4700,6 +6135,9 @@ class FakeOpenCodeHarness {
   permissions: unknown[] = [];
   questions: unknown[] = [];
   readonly promptBodies: unknown[] = [];
+  readonly mcpRegistrations: unknown[] = [];
+  readonly mcpSensitiveValues: string[][] = [];
+  readonly mcpDisconnects: string[] = [];
   readonly permissionReplies: unknown[] = [];
   readonly questionReplies: unknown[] = [];
   readonly permissionPatchBodies: unknown[] = [];
@@ -4708,13 +6146,20 @@ class FakeOpenCodeHarness {
   readonly supervisors: FakeOpenCodeSupervisor[] = [];
   readonly supervisorShutdownFailures = new Map<number, Error>();
   providerGetCount = 0;
+  failProviderGetAt?: number;
   stoppedStreams = 0;
   failNextPromptAfterAccept = false;
+  failNextMcpRegistrationAfterAccept = false;
+  nextMcpRegistrationStatus?: Record<string, unknown>;
+  failNextMcpDisconnectAfterAccept = false;
   failNextPermissionPatchAfterAccept = false;
   failNextSessionDeleteBeforeAccept = false;
   ignorePermissionPatches = false;
+  settleAbort = false;
+  failNextAbort = false;
   stallAbort = false;
   stallMessageReads = false;
+  readonly abortedSessionIds: string[] = [];
   readonly abortDeadlineWindowsMs: number[] = [];
   readonly messageReadDeadlineWindowsMs: number[] = [];
   messageReadCount = 0;
@@ -4737,7 +6182,7 @@ class FakeOpenCodeHarness {
   }
 
   createSupervisor(
-    store: FileTaskStore,
+    store: AgentProviderRuntimeStore,
     options: OpenCodeServerSupervisorOptions
   ): FakeOpenCodeSupervisor {
     const supervisor = new FakeOpenCodeSupervisor(store, options, this);
@@ -4822,7 +6267,7 @@ class FakeOpenCodeSupervisor implements OpenCodeSessionSupervisor {
   startCount = 0;
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProviderRuntimeStore,
     private readonly options: OpenCodeServerSupervisorOptions,
     private readonly harness: FakeOpenCodeHarness
   ) {}
@@ -4839,7 +6284,7 @@ class FakeOpenCodeSupervisor implements OpenCodeSessionSupervisor {
         runtimeKind: 'HTTP_AGENT',
         transport: 'HTTP_SSE',
         executable: this.options.runtime.executable,
-        argv: ['serve'],
+        argv: ['serve', ...(this.options.pure ? ['--pure'] : [])],
         runtimeVersion: this.options.runtime.version,
         runtimeResolution: this.options.runtime.diagnostics
       });
@@ -4915,7 +6360,7 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
   private lastStream?: FakeOpenCodeEventStream;
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProviderRuntimeStore,
     private readonly directory: string,
     private readonly serverId: () => string,
     private readonly harness: FakeOpenCodeHarness
@@ -4928,6 +6373,9 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
     let data: unknown;
     if (requestPath === '/provider') {
       this.harness.providerGetCount += 1;
+      if (this.harness.providerGetCount === this.harness.failProviderGetAt) {
+        throw new Error('simulated provider catalog failure');
+      }
       data = this.harness.providerCatalog(this.directory);
     } else if (requestPath === '/session') {
       data = [...this.harness.sessions.values()].filter(
@@ -4984,6 +6432,31 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
     let data: unknown;
     if (requestPath === '/session') {
       data = this.harness.createProviderSession(this.directory, body);
+    } else if (requestPath === '/mcp') {
+      this.harness.mcpRegistrations.push(structuredClone(body));
+      this.harness.mcpSensitiveValues.push([...(options?.sensitiveValues ?? [])]);
+      if (this.harness.failNextMcpRegistrationAfterAccept) {
+        this.harness.failNextMcpRegistrationAfterAccept = false;
+        throw new OpenCodeAmbiguousMutationError(
+          'POST /mcp',
+          'simulated MCP registration response loss'
+        );
+      }
+      const status = this.harness.nextMcpRegistrationStatus ?? {
+        status: 'connected'
+      };
+      this.harness.nextMcpRegistrationStatus = undefined;
+      data = { task_monki_design: status };
+    } else if (requestPath.startsWith('/mcp/') && requestPath.endsWith('/disconnect')) {
+      this.harness.mcpDisconnects.push(requestPath);
+      if (this.harness.failNextMcpDisconnectAfterAccept) {
+        this.harness.failNextMcpDisconnectAfterAccept = false;
+        throw new OpenCodeAmbiguousMutationError(
+          `POST ${requestPath}`,
+          'simulated MCP disconnect response loss'
+        );
+      }
+      data = true;
     } else if (requestPath.endsWith('/fork')) {
       data = this.harness.forkProviderSession(
         this.directory,
@@ -5020,6 +6493,15 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
       this.harness.questionReplies.push(body);
       data = true;
     } else if (requestPath.endsWith('/abort')) {
+      const sessionId = providerSessionId(requestPath);
+      this.harness.abortedSessionIds.push(sessionId);
+      if (this.harness.failNextAbort) {
+        this.harness.failNextAbort = false;
+        throw new OpenCodeAmbiguousMutationError(
+          'POST session/abort',
+          'simulated abort response loss'
+        );
+      }
       if (this.harness.stallAbort) {
         this.harness.abortDeadlineWindowsMs.push(remainingDeadlineMs(options));
         await rejectAtDeadline(
@@ -5029,6 +6511,9 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
             'simulated stalled abort'
           )
         );
+      }
+      if (this.harness.settleAbort) {
+        this.harness.statuses[sessionId] = { type: 'idle' };
       }
       data = true;
     } else {
@@ -5169,6 +6654,14 @@ function providerSessionId(requestPath: string): string {
   const match = requestPath.match(/^\/session\/([^/]+)/u);
   if (!match) throw new Error(`Missing provider session id in ${requestPath}`);
   return decodeURIComponent(match[1]);
+}
+
+function decodeDataUrl(value: string): Buffer {
+  const separator = value.indexOf(',');
+  if (separator < 0 || !value.slice(0, separator).endsWith(';base64')) {
+    throw new Error('Expected a base64 data URL.');
+  }
+  return Buffer.from(value.slice(separator + 1), 'base64');
 }
 
 function defaultProviderCatalog(): unknown {

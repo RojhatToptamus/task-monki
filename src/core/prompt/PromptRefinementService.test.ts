@@ -3,31 +3,16 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentModel } from '../../shared/agent';
+import type { AgentExecutionSettings, AgentModel } from '../../shared/agent';
 import type { AgentTurnAttachment } from '../agent/AgentAttachmentDelivery';
 import {
-  CodexEphemeralRunError,
-  type CodexEphemeralReadOnlyRun
-} from '../agent/codex/CodexEphemeralReadOnlyRunner';
-import {
-  buildRefinementCommand,
-  imageAttachmentLooksRelevant,
+  type PromptRefinementRun,
   PromptRefinementCanceledError,
   PromptRefinementService,
   PromptRefinementTerminationUnconfirmedError
 } from './PromptRefinementService';
 
 describe('PromptRefinementService', () => {
-  it('selects image inspection from task relevance instead of attachment presence alone', () => {
-    expect(
-      imageAttachmentLooksRelevant('Fix the database connection timeout.', 'unrelated.png')
-    ).toBe(false);
-    expect(imageAttachmentLooksRelevant('Fix this.', 'reference.png')).toBe(true);
-    expect(
-      imageAttachmentLooksRelevant('Match the attached UI screenshot.', 'reference.png')
-    ).toBe(true);
-  });
-
   it('accepts a concise rewrite without forcing repository inspection or headings', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
     let capturedInstruction = '';
@@ -57,6 +42,90 @@ describe('PromptRefinementService', () => {
     expect(capturedInstruction).toContain('A clear, simple task may require no repository inspection');
     expect(capturedInstruction).toContain('Keep simple tasks simple');
     expect(capturedInstruction).toContain('Preserve every explicit requirement');
+  });
+
+  it('accepts one fenced JSON result when a provider adds surrounding progress text', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to:\n```\nready\n```',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`I will return the refined request.\n\`\`\`json\n${payload}\n\`\`\`\nThe request is ready.`)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined).toMatchObject({
+      source: 'model',
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to:\n```\nready\n```'
+    });
+  });
+
+  it('accepts one final JSON result after a bounded progress message', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`I will return the refined request.\n${payload}`)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined).toMatchObject({
+      source: 'model',
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.'
+    });
+  });
+
+  it('rejects more than one fenced JSON result', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`\`\`\`json\n${payload}\n\`\`\`\n\`\`\`json\n${payload}\n\`\`\``)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined.source).toBe('unchanged-fallback');
+  });
+
+  it('rejects a fenced result followed by another raw JSON result', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`\`\`\`json\n${payload}\n\`\`\`\n${payload}`)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined.source).toBe('unchanged-fallback');
   });
 
   it('accepts only repository facts backed by inspected files', async () => {
@@ -107,18 +176,16 @@ describe('PromptRefinementService', () => {
   it('sends relevant images natively only to an image-capable refinement model', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
     const attachment = await createAttachment(repositoryPath, 'screenshot.png', 'image');
-    let capturedImagePaths: readonly string[] = [];
-    let capturedDirectories: readonly string[] = [];
+    let capturedAttachments: readonly AgentTurnAttachment[] = [];
     const service = new PromptRefinementService(async (request) => {
-      capturedImagePaths = request.imagePaths;
-      capturedDirectories = request.additionalDirectories;
+      capturedAttachments = request.attachments;
       return completedRun(refinementJson({
         titleSuggestion: 'Match the screenshot',
         prompt: 'Match the empty state shown in screenshot.png while preserving current interactions.',
         repositoryInspection: 'none',
         attachmentIdsInspected: [attachment.attachmentId],
         attachmentIdsReferenced: [attachment.attachmentId]
-      }));
+      }), [submission(attachment, 'native-image')]);
     });
 
     const refined = await service.refine(refinementInput({
@@ -129,8 +196,13 @@ describe('PromptRefinementService', () => {
     }));
 
     expect(refined.source).toBe('model');
-    expect(capturedImagePaths).toEqual([attachment.path]);
-    expect(capturedDirectories).toEqual([]);
+    expect(capturedAttachments).toEqual([
+      expect.objectContaining({
+        attachmentId: attachment.attachmentId,
+        path: attachment.path,
+        sha256: attachment.sha256
+      })
+    ]);
     expect(refined.evidence.attachmentIdsInspected).toEqual([attachment.attachmentId]);
   });
 
@@ -159,7 +231,7 @@ describe('PromptRefinementService', () => {
         repositoryInspection: 'none',
         attachmentIdsInspected: [first.attachmentId, second.attachmentId],
         attachmentIdsReferenced: [first.attachmentId, second.attachmentId]
-      }));
+      }), [submission(first, 'native-image'), submission(second, 'native-image')]);
     });
 
     const refined = await service.refine(refinementInput({
@@ -174,13 +246,20 @@ describe('PromptRefinementService', () => {
     expect(capturedInstruction).toContain('Attachment 2 (image.png)');
   });
 
-  it('preserves relevant images without claiming inspection for a text-only refiner', async () => {
+  it('keeps provider attachment transport out of the refinement prompt', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
     const attachment = await createAttachment(repositoryPath, 'screenshot.png', 'image');
     let capturedInstruction = '';
     const service = new PromptRefinementService(async (request) => {
       capturedInstruction = request.instruction;
-      expect(request.imagePaths).toEqual([]);
+      expect(request.attachments).toEqual([
+        expect.objectContaining({
+          attachmentId: attachment.attachmentId,
+          path: attachment.path,
+          sha256: attachment.sha256,
+          byteCount: attachment.byteCount
+        })
+      ]);
       return completedRun(refinementJson({
         titleSuggestion: 'Use the screenshot',
         prompt: 'Use screenshot.png as the visual reference; inspect it with the downstream image-capable agent before editing.',
@@ -196,9 +275,8 @@ describe('PromptRefinementService', () => {
     }));
 
     expect(refined.source).toBe('model');
-    expect(refined.warning).toContain('cannot inspect');
     expect(refined.evidence.attachmentIdsInspected).toEqual([]);
-    expect(capturedInstruction).toContain('"providedAsImage":false');
+    expect(capturedInstruction).not.toContain('providedAsImage');
     expect(capturedInstruction).not.toContain(attachment.path);
   });
 
@@ -212,7 +290,7 @@ describe('PromptRefinementService', () => {
         repositoryInspection: 'none',
         attachmentIdsInspected: [attachment.attachmentId],
         attachmentIdsReferenced: [attachment.attachmentId]
-      }))
+      }), [submission(attachment, 'text-block')])
     );
 
     const refined = await service.refine(refinementInput({
@@ -223,6 +301,29 @@ describe('PromptRefinementService', () => {
 
     expect(refined.source).toBe('unchanged-fallback');
     expect(refined.prompt).toBe('Apply the attached requirements.');
+  });
+
+  it('keeps ephemeral attachment paths out of accepted titles', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const attachment = await createAttachment(repositoryPath, 'requirements.txt', 'text');
+    const service = new PromptRefinementService(async () =>
+      completedRun(refinementJson({
+        titleSuggestion: `Apply ${attachment.path}`,
+        prompt: 'Apply requirements.txt.',
+        repositoryInspection: 'none',
+        attachmentIdsInspected: [attachment.attachmentId],
+        attachmentIdsReferenced: [attachment.attachmentId]
+      }), [submission(attachment, 'text-block')])
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Apply the attached requirements.',
+      attachments: [attachment]
+    }));
+
+    expect(refined.source).toBe('unchanged-fallback');
+    expect(refined.titleSuggestion).toBe('Apply the attached requirements');
   });
 
   it('cancels an obsolete refinement run', async () => {
@@ -239,7 +340,7 @@ describe('PromptRefinementService', () => {
       signalStarted();
       return {
         cancel,
-        result: new Promise<string>((_resolve, reject) => {
+        result: new Promise<never>((_resolve, reject) => {
           rejectRun = reject;
         })
       };
@@ -262,12 +363,12 @@ describe('PromptRefinementService', () => {
 
   it('cancels a run whose process handle arrives after the cancel request', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
-    let releaseRunner: (run: CodexEphemeralReadOnlyRun) => void = () => undefined;
+    let releaseRunner: (run: PromptRefinementRun) => void = () => undefined;
     let signalRunnerStarted: () => void = () => undefined;
     const runnerStarted = new Promise<void>((resolve) => {
       signalRunnerStarted = resolve;
     });
-    const waitingForHandle = new Promise<CodexEphemeralReadOnlyRun>((resolve) => {
+    const waitingForHandle = new Promise<PromptRefinementRun>((resolve) => {
       releaseRunner = resolve;
     });
     const service = new PromptRefinementService(async () => {
@@ -280,19 +381,51 @@ describe('PromptRefinementService', () => {
       input: 'This request became obsolete before the provider started.'
     }));
     await runnerStarted;
-    await service.cancel('cancel-before-handle');
+    const canceling = service.cancel('cancel-before-handle');
 
     let rejectResult: (cause: unknown) => void = () => undefined;
     const cancel = vi.fn(async () => rejectResult(new Error('canceled')));
     releaseRunner({
       cancel,
-      result: new Promise<string>((_resolve, reject) => {
+      result: new Promise<never>((_resolve, reject) => {
         rejectResult = reject;
       })
     });
+    await canceling;
 
     await expect(refining).rejects.toBeInstanceOf(PromptRefinementCanceledError);
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('cancels active work and rejects new refinements during shutdown', async () => {
+    let rejectResult: (cause: unknown) => void = () => undefined;
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const cancel = vi.fn(async () => rejectResult(new Error('canceled')));
+    const service = new PromptRefinementService(async () => {
+      markStarted();
+      return {
+        cancel,
+        result: new Promise<never>((_resolve, reject) => {
+          rejectResult = reject;
+        })
+      };
+    });
+    const refining = service.refine(refinementInput({ requestId: 'active-at-shutdown' }));
+    const canceled = expect(refining).rejects.toBeInstanceOf(PromptRefinementCanceledError);
+    await started;
+
+    const firstShutdown = service.beginShutdown();
+    expect(service.beginShutdown()).toBe(firstShutdown);
+    await firstShutdown;
+    await canceled;
+
+    expect(cancel).toHaveBeenCalledOnce();
+    await expect(
+      service.refine(refinementInput({ requestId: 'after-shutdown' }))
+    ).rejects.toThrow('Prompt refinement is shutting down');
   });
 
   it('fails closed after process termination becomes unconfirmed', async () => {
@@ -321,77 +454,6 @@ describe('PromptRefinementService', () => {
     expect(launches).toBe(1);
   });
 
-  it('reports a safe, specific reason when the refinement model times out', async () => {
-    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
-    const service = new PromptRefinementService(async () => ({
-      cancel: async () => undefined,
-      result: Promise.reject(
-        new CodexEphemeralRunError('TIMED_OUT', 'The agent generation timed out.')
-      )
-    }));
-
-    const refined = await service.refine(refinementInput({
-      repositoryPath,
-      input: 'Refine this request.'
-    }));
-
-    expect(refined.source).toBe('unchanged-fallback');
-    expect(refined.warning).toBe(
-      'Prompt refinement timed out before the model finished. The original request was kept unchanged.'
-    );
-  });
-
-  it('configures low reasoning and read-only repository access', () => {
-    const command = buildRefinementCommand('/tmp/example repo');
-
-    expect(command).toEqual({
-      executable: 'codex',
-      argv: [
-        '--ask-for-approval',
-        'never',
-        'exec',
-        '--json',
-        '--ephemeral',
-        '--skip-git-repo-check',
-        '--sandbox',
-        'read-only',
-        '--cd',
-        '/tmp/example repo',
-        '--model',
-        'gpt-5.3-codex-spark',
-        '-c',
-        'model_reasoning_effort="low"',
-        '-c',
-        'features.apps=false',
-        '-c',
-        'web_search="disabled"',
-        '-c',
-        'features.plugins=false',
-        '-'
-      ]
-    });
-  });
-
-  it('propagates fail-closed MCP discovery to the bounded model run', async () => {
-    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
-    let observed = false;
-    const service = new PromptRefinementService(async ({ failClosedMcpDiscovery }) => {
-      observed = failClosedMcpDiscovery === true;
-      return completedRun(refinementJson({
-        titleSuggestion: 'Safe refinement',
-        prompt: 'Refine safely.',
-        repositoryInspection: 'none'
-      }));
-    });
-
-    await service.refine(refinementInput({
-      repositoryPath,
-      input: 'refine safely',
-      failClosedMcpDiscovery: true
-    }));
-
-    expect(observed).toBe(true);
-  });
 });
 
 function refinementInput(
@@ -402,7 +464,20 @@ function refinementInput(
     repositoryPath: '/tmp/example',
     input: 'Refine this request.',
     refinementModel: model(['text']),
+    settings: readOnlySettings(),
     ...overrides
+  };
+}
+
+function readOnlySettings(): AgentExecutionSettings {
+  return {
+    runtimeId: 'codex',
+    model: 'test-model',
+    reasoningEffort: 'low',
+    sandbox: 'READ_ONLY',
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user',
+    networkAccess: false
   };
 }
 
@@ -437,10 +512,31 @@ function refinementJson(input: {
   });
 }
 
-function completedRun(output: string): CodexEphemeralReadOnlyRun {
+function completedRun(
+  output: string,
+  attachmentSubmissions: import('../../shared/attachments').AttachmentSubmissionRecord[] = []
+): PromptRefinementRun {
   return {
-    result: Promise.resolve(output),
+    result: Promise.resolve({ output, attachmentSubmissions }),
     cancel: async () => undefined
+  };
+}
+
+function submission(
+  attachment: AgentTurnAttachment,
+  transport: import('../../shared/attachments').AttachmentTransport
+): import('../../shared/attachments').AttachmentSubmissionRecord {
+  return {
+    attachmentId: attachment.attachmentId,
+    ordinal: attachment.ordinal,
+    kind: attachment.kind,
+    mediaType: attachment.mediaType,
+    byteCount: attachment.byteCount,
+    sha256: attachment.sha256,
+    transport,
+    verifiedAt: attachment.verifiedAt,
+    correlation: { kind: 'provider-turn', id: 'turn-1' },
+    submittedAt: attachment.verifiedAt
   };
 }
 

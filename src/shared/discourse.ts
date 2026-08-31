@@ -94,7 +94,7 @@ export interface AgentProfileCatalogEntry {
     runtimeId: string;
     modelId: string;
     model: string;
-    modelProvider: string;
+    modelProvider?: string;
     reasoningEffort?: string;
     serviceTier?: string;
   };
@@ -124,7 +124,7 @@ export interface DiscourseParticipantRevisionRecord {
   displayNameSnapshot: string;
   runtimeId: string;
   model: string;
-  modelProvider: string;
+  modelProvider?: string;
   reasoningEffort?: string;
   serviceTier?: string;
   configuredRole: DiscourseParticipantRole;
@@ -143,7 +143,7 @@ export interface AgentAssignmentSnapshot {
   displayNameSnapshot: string;
   runtimeId: string;
   model: string;
-  modelProvider: string;
+  modelProvider?: string;
   reasoningEffort?: string;
   serviceTier?: string;
   configuredRole: DiscourseParticipantRole;
@@ -835,7 +835,7 @@ export interface DiscourseAuditEventRecord {
 
 export type DiscourseIdempotencyDecision = 'NEW' | 'REPLAY';
 
-export const DISCOURSE_STORE_SCHEMA_VERSION = 2 as const;
+export const DISCOURSE_STORE_SCHEMA_VERSION = 3 as const;
 
 export interface DiscourseConversationSummary {
   id: string;

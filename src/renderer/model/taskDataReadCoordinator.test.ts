@@ -3,6 +3,7 @@ import type {
   BoardSnapshot,
   TaskDetailSnapshot
 } from '../../shared/contracts';
+import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { createTaskDataReadCoordinator } from './taskDataReadCoordinator';
 
 describe('createTaskDataReadCoordinator', () => {
@@ -136,7 +137,7 @@ describe('createTaskDataReadCoordinator', () => {
 
 function board(title: string): BoardSnapshot {
   return {
-    schemaVersion: 23,
+    schemaVersion: TASK_STORE_SCHEMA_VERSION,
     repositories: [],
     boards: [],
     tasks: [{

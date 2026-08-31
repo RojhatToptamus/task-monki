@@ -58,6 +58,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import type { TaskAttachmentRecord } from '../../shared/attachments';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import {
   canCreateDeliveryCommit,
   canPrepareWorktree,
@@ -119,7 +120,7 @@ import {
   projectDebugTaskActivity,
   projectOverviewTaskActivity
 } from '../model/taskActivity';
-import { buildRunProgressViewModel } from '../model/runProgress';
+import { buildRunProgressViewModel, canStopTaskRun } from '../model/runProgress';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { buildReviewActivityViewModel } from '../model/reviewActivity';
 import {
@@ -198,6 +199,7 @@ interface TaskDetailProps {
   previewRecipeGeneration?: PreviewRecipeGenerationSnapshot;
   showMascot: boolean;
   reviewDisabledReason?: string;
+  previewRecipeGenerationDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
@@ -452,6 +454,13 @@ export function TaskDetail(props: TaskDetailProps) {
   }
 
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
+  const activeTurnSteeringSupported = Boolean(
+    props.runtimeState &&
+    projectAgentExecutionSupport(
+      props.runtimeState.preflight.capabilities,
+      'ACTIVE_TURN_STEERING'
+    ).supported
+  );
   const promptLineCount = task.prompt.split(/\r?\n/).length;
   const reviewFindings = reviewGate.result?.findings ?? [];
   const reviewActivity = buildReviewActivityViewModel({
@@ -952,6 +961,7 @@ export function TaskDetail(props: TaskDetailProps) {
     executionReadiness: props.previewExecutionReadiness,
     resolution: props.previewResolution,
     recipeGeneration: props.previewRecipeGeneration,
+    recipeGenerationDisabledReason: props.previewRecipeGenerationDisabledReason,
     onResolve: props.onResolvePreview,
     onSetLocalBinding: props.onSetPreviewLocalBinding,
     onGetRecipeGeneration: props.onGetPreviewRecipeGeneration,
@@ -1159,7 +1169,7 @@ export function TaskDetail(props: TaskDetailProps) {
                     }
                     onShowDebug={() => setTab('debug')}
                     onStop={
-                      runProgress.state === 'RUNNING' && progressRun
+                      canStopTaskRun(progressRun)
                         ? () => void props.onCancel(runProgress.runId)
                         : undefined
                     }
@@ -1199,6 +1209,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 <AgentControlPanel
                   run={run}
                   requiresRecovery={implementationRetryRequired}
+                  activeTurnSteeringSupported={activeTurnSteeringSupported}
                   interactions={interactions}
                   onSteer={props.onSteer}
                   onInterrupt={props.onCancel}

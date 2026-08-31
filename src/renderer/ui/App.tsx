@@ -76,6 +76,7 @@ import {
   eligibleDesignRuntimeCatalog,
   mergeDesignConversationPage,
   mergeDesignDetailHistory,
+  qualifiedDesignModels,
   type DesignCanvasExternalLinkRequest
 } from '../model/designs';
 import {
@@ -90,6 +91,7 @@ import {
   resolveSelectedRepositoryId
 } from '../model/repositories';
 import { appendUniqueNotification } from '../model/notifications';
+import { selectConfiguredRuntimeForOperation } from '../model/runtimeReadiness';
 import {
   focusedPanelWidth,
   focusedWorkspaceHistoryCollapsed,
@@ -769,7 +771,13 @@ export function App() {
     async (
       input: Pick<
         CreateBlankDesignRequest,
-        'brief' | 'creationToken' | 'model' | 'reasoningEffort' | 'attachmentDraftId'
+        | 'brief'
+        | 'creationToken'
+        | 'runtimeId'
+        | 'model'
+        | 'modelProvider'
+        | 'reasoningEffort'
+        | 'attachmentDraftId'
       >
     ) => {
       const brief = input.brief.trim();
@@ -777,7 +785,9 @@ export function App() {
         const detail = await taskManagerApi.createBlankDesign({
           brief,
           creationToken: input.creationToken,
+          runtimeId: input.runtimeId,
           model: input.model,
+          modelProvider: input.modelProvider,
           reasoningEffort: input.reasoningEffort,
           ...(input.attachmentDraftId
             ? { attachmentDraftId: input.attachmentDraftId }
@@ -1740,7 +1750,10 @@ export function App() {
     () =>
       designRuntimeCatalog
         ? resolveModelExecutionSettings(
-            designRuntimeCatalog.models,
+            qualifiedDesignModels(
+              designRuntimeCatalog.runtimes,
+              designRuntimeCatalog.models
+            ),
             appSettings.defaultModel,
             appSettings.defaultReasoningEffort,
             designRuntimeCatalog.defaultRuntimeId,
@@ -1754,37 +1767,59 @@ export function App() {
       designRuntimeCatalog
     ]
   );
-  const readyPromptRefinementRuntimes = enabledRuntimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
-  );
   const configuredPromptRefinementRuntimeId =
     appSettings.promptRefinementRuntimeId ?? appSettings.defaultRuntimeId;
-  const promptRefinementRuntime =
-    readyPromptRefinementRuntimes.find(
-      (runtime) =>
-        runtime.preflight.runtime.id === configuredPromptRefinementRuntimeId
-    ) ?? readyPromptRefinementRuntimes[0];
-  const readyReviewRuntimes = enabledRuntimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-        runtime.preflight.capabilities.detachedReview.maturity === 'stable')
+  const promptRefinementSelection = selectConfiguredRuntimeForOperation(
+    enabledRuntimes,
+    configuredPromptRefinementRuntimeId,
+    'PROMPT_REFINEMENT'
   );
+  const promptRefinementRuntime = promptRefinementSelection.runtime;
+  const configuredPreviewRecipeGenerationRuntimeId =
+    appSettings.previewRecipeGenerationRuntimeId ?? appSettings.defaultRuntimeId;
+  const configuredPreviewRecipeGenerationModel = appSettings.previewRecipeGenerationModel
+    ? enabledRuntimeModels.find(
+        (model) =>
+          model.runtimeId === configuredPreviewRecipeGenerationRuntimeId &&
+          (model.id === appSettings.previewRecipeGenerationModel ||
+            model.model === appSettings.previewRecipeGenerationModel) &&
+          (!appSettings.previewRecipeGenerationModelProvider ||
+            model.modelProvider === appSettings.previewRecipeGenerationModelProvider)
+      )
+    : selectModel(
+        enabledRuntimeModels,
+        undefined,
+        configuredPreviewRecipeGenerationRuntimeId,
+        appSettings.previewRecipeGenerationModelProvider
+      );
+  const previewRuntimeSelection = selectConfiguredRuntimeForOperation(
+    enabledRuntimes,
+    configuredPreviewRecipeGenerationRuntimeId,
+    'PREVIEW_RECIPE_GENERATION',
+    { model: configuredPreviewRecipeGenerationModel }
+  );
+  const previewRecipeGenerationSelection =
+    (appSettings.previewRecipeGenerationModel ||
+      appSettings.previewRecipeGenerationModelProvider) &&
+    !configuredPreviewRecipeGenerationModel &&
+    previewRuntimeSelection.runtime
+      ? {
+          unavailableReason:
+            'The selected Preview agent or model is no longer available. Choose another selection.'
+        }
+      : previewRuntimeSelection;
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
-  const reviewRuntime =
-    readyReviewRuntimes.find(
-      (runtime) => runtime.preflight.runtime.id === configuredReviewRuntimeId
-    ) ??
-    readyReviewRuntimes.find(
-      (runtime) => runtime.preflight.runtime.id === selectedTask?.runtimeId
-    ) ??
-    readyReviewRuntimes[0];
-  const refineDisabledReason = promptRefinementRuntime
-    ? undefined
-    : 'No ready agent runtime supports isolated prompt refinement.';
+  const reviewSelection = selectConfiguredRuntimeForOperation(
+    enabledRuntimes,
+    configuredReviewRuntimeId,
+    'REVIEW'
+  );
+  const reviewRuntime = reviewSelection.runtime;
+  const refineDisabledReason = promptRefinementSelection.unavailableReason;
+  const reviewDisabledReason = selectedTask && !reviewRuntime
+    ? reviewSelection.unavailableReason
+    : undefined;
   const selectedTaskRuntimeState = selectedTask
     ? runtimeCatalog?.runtimes.find(
         (runtime) => runtime.preflight.runtime.id === selectedTask.runtimeId
@@ -2018,11 +2053,7 @@ export function App() {
 
   const generatePreviewRecipe = async (taskId: string) => {
     try {
-      const refinementModel = selectModel(enabledRuntimeModels, appSettings.promptRefinementModel);
-      const state = await taskManagerApi.generatePreviewRecipe({
-        taskId,
-        model: refinementModel?.model
-      });
+      const state = await taskManagerApi.generatePreviewRecipe({ taskId });
       setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
       return state;
     } catch (caught) {
@@ -2990,6 +3021,10 @@ export function App() {
             settingsObservations={selectedSettings}
             subagentObservations={selectedSubagentObservations}
             runtimeState={selectedTaskRuntimeState}
+            reviewDisabledReason={reviewDisabledReason}
+            previewRecipeGenerationDisabledReason={
+              previewRecipeGenerationSelection.unavailableReason
+            }
             server={taskDetail.agentServers.find(
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}

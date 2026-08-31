@@ -4,10 +4,32 @@ import {
   mapOpenCodePermission,
   mapOpenCodeQuestion,
   openCodePermissionRules,
+  openCodeReadOnlyPermissionRules,
   openCodePermissionRulesEndWith
 } from './OpenCodeInteractionMapper';
 
 describe('OpenCodeInteractionMapper', () => {
+  it('uses one deny-by-default suffix for provider-native read-only turns', () => {
+    const rules = openCodeReadOnlyPermissionRules();
+
+    expect(rules).toEqual([
+      { permission: '*', pattern: '*', action: 'deny' },
+      { permission: 'read', pattern: '*', action: 'allow' },
+      { permission: 'glob', pattern: '*', action: 'allow' },
+      { permission: 'grep', pattern: '*', action: 'allow' },
+      { permission: 'list', pattern: '*', action: 'allow' },
+      { permission: 'lsp', pattern: '*', action: 'allow' },
+      { permission: 'question', pattern: '*', action: 'deny' },
+      { permission: 'task', pattern: '*', action: 'deny' },
+      { permission: 'external_directory', pattern: '*', action: 'deny' },
+      { permission: 'edit', pattern: '*', action: 'deny' },
+      { permission: 'bash', pattern: '*', action: 'deny' },
+      { permission: 'webfetch', pattern: '*', action: 'deny' },
+      { permission: 'websearch', pattern: '*', action: 'deny' }
+    ]);
+    expect(openCodePermissionRulesEndWith(rules, rules)).toBe(true);
+  });
+
   it('keeps mutation and external-directory tools approval-gated without claiming confinement', () => {
     const rules = openCodePermissionRules({
       runtimeId: 'opencode',

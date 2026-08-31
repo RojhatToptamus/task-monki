@@ -7,9 +7,14 @@ import {
   GROK_SESSION_MODEL_EXTENSION,
   CLAUDE_AGENT_ACP_PROFILE,
   acpCapabilities,
+  acpDesignSupport,
+  acpImageInputSupport,
+  acpModelInputModalities,
+  acpPreviewRecipeGenerationSupport,
   defaultAcpModel
 } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
+import { normalizeAcpReadOnlyExecutionSettings } from './AcpRuntimeAdapter';
 
 describe('ACP runtime profiles', () => {
   it('defines unique first-class runtime identities', () => {
@@ -32,6 +37,41 @@ describe('ACP runtime profiles', () => {
       'stdio'
     ]);
     expect(GROK_ACP_PROFILE.defaultModel).toBe('grok-build');
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      kind: 'DEDICATED_PROCESS',
+      launchArgv: expect.arrayContaining([
+        '--no-leader',
+        '--sandbox',
+        'read-only',
+        '--no-subagents'
+      ])
+    });
+    if (GROK_ACP_PROFILE.readOnlyTurnPolicy?.kind !== 'DEDICATED_PROCESS') {
+      throw new Error('Expected the Grok dedicated read-only process policy.');
+    }
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy.launchArgv).toEqual([
+      '--no-auto-update',
+      '--sandbox',
+      'read-only',
+      '--permission-mode',
+      'dontAsk',
+      '--deny',
+      'Edit(*)',
+      '--deny',
+      'Write(*)',
+      '--deny',
+      'MCPTool(*)',
+      '--no-subagents',
+      '--disable-web-search',
+      'agent',
+      '--no-leader',
+      'stdio'
+    ]);
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy.launchArgv.slice(-3)).toEqual([
+      'agent',
+      '--no-leader',
+      'stdio'
+    ]);
     expect(CURSOR_ACP_PROFILE.argv).toEqual(['acp']);
     expect(CURSOR_ACP_PROFILE.executableCandidates).toEqual(['cursor-agent']);
     expect(CURSOR_ACP_PROFILE.launchContractProbe.argv).toEqual(['help', 'acp']);
@@ -114,9 +154,6 @@ describe('ACP runtime profiles', () => {
       )
     ).toEqual(['grok-acp']);
     expect(
-      acpCapabilities(GROK_ACP_PROFILE).extensions.grokSessionModels
-    ).toMatchObject({ maturity: 'experimental' });
-    expect(
       ACP_RUNTIME_PROFILES.filter((profile) => profile.parameterizedModelCatalog).map(
         (profile) => profile.descriptor.id
       )
@@ -131,64 +168,6 @@ describe('ACP runtime profiles', () => {
     });
   });
 
-  it('enables optional lifecycle features only after negotiation', () => {
-    expect(acpCapabilities(TEST_ACP_PROFILE).sessionResume.maturity).toBe('inferred');
-    expect(acpCapabilities(TEST_ACP_PROFILE).persistentSessions.maturity).toBe(
-      'inferred'
-    );
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        resume: false,
-        loadSession: false,
-        close: false,
-        prompt: {}
-      }).persistentSessions.maturity
-    ).toBe('unsupported');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        resume: false,
-        loadSession: false,
-        close: false,
-        prompt: {}
-      }).sessionResume.maturity
-    ).toBe('unsupported');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        resume: true,
-        close: true,
-        prompt: { image: true }
-      }).sessionResume.maturity
-    ).toBe('stable');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        loadSession: true,
-        close: true,
-        prompt: {}
-      }).persistentSessions.maturity
-    ).toBe('stable');
-    expect(
-      acpCapabilities(TEST_ACP_PROFILE, {
-        close: true,
-        prompt: {}
-      }).extensions.sessionClose?.maturity
-    ).toBe('stable');
-  });
-
-  it('never claims Task Monki client terminal execution', () => {
-    for (const profile of ACP_RUNTIME_PROFILES) {
-      expect(acpCapabilities(profile).backgroundTerminals.maturity).toBe('unsupported');
-    }
-  });
-
-  it('keeps general mid-turn input unsupported on every stable ACP profile', () => {
-    for (const profile of ACP_RUNTIME_PROFILES) {
-      expect(acpCapabilities(profile).userInputRequests).toMatchObject({
-        maturity: 'unsupported',
-        detail: expect.stringContaining('no general user-input request method')
-      });
-    }
-  });
-
   it('exposes only the access policies each provider profile can enforce', () => {
     const policy = acpCapabilities(CURSOR_ACP_PROFILE).executionPolicy;
     expect(policy.defaultPresetId).toBe('ask-for-approval');
@@ -197,19 +176,29 @@ describe('ACP runtime profiles', () => {
         id: 'ask-for-approval',
         label: 'Ask for approval',
         sandbox: 'DANGER_FULL_ACCESS',
-        approvalPolicy: 'on-request'
+        approvalPolicy: 'on-request',
+        repositoryMutation: 'ASK'
       }),
       expect.objectContaining({
         id: 'auto-accept-edits',
         label: 'Auto-accept edits',
         sandbox: 'DANGER_FULL_ACCESS',
-        approvalPolicy: 'auto-accept-edits'
+        approvalPolicy: 'auto-accept-edits',
+        repositoryMutation: 'ALLOW'
       }),
       expect.objectContaining({
         id: 'full-access',
         label: 'Full access',
         sandbox: 'DANGER_FULL_ACCESS',
-        approvalPolicy: 'never'
+        approvalPolicy: 'never',
+        repositoryMutation: 'ALLOW'
+      }),
+      expect.objectContaining({
+        id: 'native-read-only',
+        label: 'Read-only',
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'NEVER',
+        repositoryMutation: 'DENY'
       })
     ]);
     expect(policy.detail).toContain('does not provide an enforceable process sandbox');
@@ -222,12 +211,134 @@ describe('ACP runtime profiles', () => {
         expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' })
       ]
     });
+    expect(acpCapabilities(GROK_ACP_PROFILE).readOnlyTurns).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('unknown runtime version')
+    });
+    const qualifiedGrok = acpCapabilities(GROK_ACP_PROFILE, {
+      runtimeVersion: GROK_ACP_PROFILE.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS'
+        ? GROK_ACP_PROFILE.readOnlyTurnPolicy.runtimeVersion
+        : undefined,
+      platform: 'darwin'
+    });
+    expect(qualifiedGrok.readOnlyTurns).toMatchObject({ maturity: 'stable' });
+    expect(qualifiedGrok.executionPolicy.presets).not.toContainEqual(
+      expect.objectContaining({ repositoryMutation: 'DENY' })
+    );
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
-      expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
+      expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' }),
+      expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' })
     ]);
     expect(acpCapabilities(TEST_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
     ]);
+  });
+
+  it('qualifies only proven native read-only modes and exact process policies', () => {
+    expect(CURSOR_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      modeId: 'ask',
+      policyId: 'cursor-agent-acp/ask-read-only@v1'
+    });
+    expect(acpCapabilities(CURSOR_ACP_PROFILE)).toMatchObject({
+      readOnlyTurns: { maturity: 'stable' }
+    });
+    expect(CLAUDE_AGENT_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      modeId: 'plan',
+      policyId: 'claude-agent-acp/plan-preview-generation@v1'
+    });
+    expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE)).toMatchObject({
+      readOnlyTurns: {
+        maturity: 'unsupported',
+        detail: expect.stringContaining('executed a file write')
+      },
+      extensions: {
+        'task-monki.preview-recipe-generation': { maturity: 'unsupported' }
+      }
+    });
+    expect(
+      acpCapabilities(CLAUDE_AGENT_ACP_PROFILE, { runtimeVersion: '0.70.0' })
+    ).toMatchObject({
+      readOnlyTurns: { maturity: 'unsupported' },
+      extensions: {
+        'task-monki.preview-recipe-generation': { maturity: 'stable' }
+      }
+    });
+    expect(
+      acpPreviewRecipeGenerationSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'sonnet'
+      })
+    ).toMatchObject({ maturity: 'stable' });
+    expect(
+      acpPreviewRecipeGenerationSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'default'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('0.70.0 with sonnet')
+    });
+    expect(GROK_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
+      kind: 'DEDICATED_PROCESS',
+      runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+      platform: 'darwin'
+    });
+    expect(acpCapabilities(GROK_ACP_PROFILE)).toMatchObject({
+      readOnlyTurns: { maturity: 'unsupported' }
+    });
+    expect(
+      acpCapabilities(GROK_ACP_PROFILE, {
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        platform: 'darwin'
+      })
+    ).toMatchObject({ readOnlyTurns: { maturity: 'stable' } });
+  });
+
+  it('maps provider-neutral read-only resolution to Cursor Ask without changing normal Tasks', () => {
+    expect(
+      normalizeAcpReadOnlyExecutionSettings(CURSOR_ACP_PROFILE, {
+        runtimeId: CURSOR_ACP_PROFILE.descriptor.id,
+        sandbox: 'READ_ONLY',
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user',
+        networkAccess: false
+      })
+    ).toMatchObject({
+      sandbox: 'DANGER_FULL_ACCESS',
+      approvalPolicy: 'NEVER',
+      approvalsReviewer: 'user',
+      networkAccess: true,
+      runtimeOptions: {
+        'cursor-agent-acp': { modeId: 'ask' }
+      }
+    });
+    const normal = {
+      runtimeId: CURSOR_ACP_PROFILE.descriptor.id,
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user' as const,
+      networkAccess: true
+    };
+    expect(normalizeAcpReadOnlyExecutionSettings(CURSOR_ACP_PROFILE, normal)).toBe(
+      normal
+    );
+    expect(
+      normalizeAcpReadOnlyExecutionSettings(GROK_ACP_PROFILE, {
+        ...normal,
+        runtimeId: GROK_ACP_PROFILE.descriptor.id,
+        sandbox: 'READ_ONLY'
+      })
+    ).toMatchObject({
+      sandbox: 'READ_ONLY',
+      approvalPolicy: 'NEVER',
+      runtimeOptions: {
+        'grok-acp': {
+          processPolicyId: 'grok-build/read-only-process@1.0.13'
+        }
+      }
+    });
   });
 
   it('gates provider-owned remembered permission choices to Cursor and Grok', () => {
@@ -258,5 +369,169 @@ describe('ACP runtime profiles', () => {
     expect(defaultAcpModel(CURSOR_ACP_PROFILE).description).not.toContain(
       'task-owned session'
     );
+  });
+
+  it('intersects ACP image negotiation with exact profile version and model evidence', () => {
+    expect(
+      acpModelInputModalities({
+        profile: CURSOR_ACP_PROFILE,
+        promptCapabilities: { image: true },
+        runtimeVersion: '2026.08.25-3e8eec8',
+        modelId: 'composer-2.5'
+      })
+    ).toEqual(['text', 'image']);
+    expect(
+      acpModelInputModalities({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        promptCapabilities: { image: true },
+        runtimeVersion: '0.70.0',
+        modelId: 'sonnet'
+      })
+    ).toEqual(['text', 'image']);
+    for (const input of [
+      { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'default', image: true },
+      { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'other', image: true },
+      { runtimeVersion: 'other-version', modelId: 'composer-2.5', image: true },
+      { runtimeVersion: '2026.08.25-3e8eec8', modelId: 'composer-2.5', image: false }
+    ]) {
+      expect(
+        acpModelInputModalities({
+          profile: CURSOR_ACP_PROFILE,
+          promptCapabilities: { image: input.image },
+          runtimeVersion: input.runtimeVersion,
+          modelId: input.modelId
+        })
+      ).toEqual(['text']);
+    }
+    expect(
+      acpImageInputSupport({
+        profile: GROK_ACP_PROFILE,
+        promptCapabilities: { image: false },
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.6'
+      })
+    ).toMatchObject({
+      advertised: false,
+      enabled: true,
+      capabilityDrift: true,
+      qualification: {
+        allowWhenNotAdvertised: true,
+        mediaTypes: ['image/png']
+      }
+    });
+    expect(
+      acpImageInputSupport({
+        profile: GROK_ACP_PROFILE,
+        promptCapabilities: {},
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.6'
+      })
+    ).toMatchObject({
+      advertised: undefined,
+      enabled: false,
+      capabilityDrift: false,
+      unavailableReason: expect.stringContaining('did not report ACP image support')
+    });
+    for (const input of [
+      {
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.5'
+      },
+      { runtimeVersion: 'grok 1.0.13', modelId: 'grok-4.6' }
+    ]) {
+      expect(
+        acpImageInputSupport({
+          profile: GROK_ACP_PROFILE,
+          promptCapabilities: { image: false },
+          ...input
+        })
+      ).toMatchObject({
+        advertised: false,
+        enabled: false,
+        capabilityDrift: false,
+        unavailableReason: expect.stringContaining('no verified compatibility exception')
+      });
+    }
+    expect(GROK_ACP_PROFILE.attachmentTextTransport).toBe('embedded-resource');
+    expect(CURSOR_ACP_PROFILE.attachmentTextTransport).toBe('text-block');
+    expect(CLAUDE_AGENT_ACP_PROFILE.attachmentTextTransport).toBe('embedded-resource');
+    expect(
+      acpCapabilities(GROK_ACP_PROFILE, {
+        prompt: { embeddedContext: true }
+      }).attachmentDelivery.maturity
+    ).toBe('stable');
+    expect(
+      acpCapabilities(GROK_ACP_PROFILE, {
+        prompt: { embeddedContext: false }
+      }).attachmentDelivery.maturity
+    ).toBe('unsupported');
+    expect(acpCapabilities(CURSOR_ACP_PROFILE).attachmentDelivery.maturity).toBe(
+      'stable'
+    );
+    expect(
+      acpCapabilities(CLAUDE_AGENT_ACP_PROFILE, {
+        prompt: { embeddedContext: true }
+      }).attachmentDelivery
+    ).toMatchObject({ maturity: 'stable' });
+  });
+
+  it('qualifies Design only for exact ACP version and model pairs', () => {
+    expect(
+      acpDesignSupport({
+        profile: CURSOR_ACP_PROFILE,
+        runtimeVersion: '2026.08.25-3e8eec8',
+        modelId: 'composer-2.5'
+      })
+    ).toMatchObject({ maturity: 'stable' });
+    expect(
+      acpDesignSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'sonnet'
+      })
+    ).toMatchObject({ maturity: 'stable' });
+    expect(
+      CLAUDE_AGENT_ACP_PROFILE.designSkillAdditionalDirectoryRequired
+    ).toBe(true);
+    expect(
+      acpDesignSupport({
+        profile: CURSOR_ACP_PROFILE,
+        runtimeVersion: 'other-version',
+        modelId: 'composer-2.5'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
+    });
+    expect(
+      acpDesignSupport({
+        profile: GROK_ACP_PROFILE,
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.6'
+      })
+    ).toMatchObject({
+      maturity: 'stable',
+      defaultReasoningEffort: 'low'
+    });
+    expect(
+      acpDesignSupport({
+        profile: GROK_ACP_PROFILE,
+        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+        modelId: 'grok-4.5'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
+    });
+    expect(
+      acpDesignSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'haiku'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('has not passed')
+    });
   });
 });

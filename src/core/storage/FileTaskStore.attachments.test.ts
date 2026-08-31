@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,10 +8,28 @@ import {
   AttachmentFileStore
 } from './AttachmentFileStore';
 import { FileTaskStore } from './FileTaskStore';
+import { FileAgentRuntimeStore } from './FileAgentRuntimeStore';
+import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 function createStore(storeDir: string): FileTaskStore {
   return new FileTaskStore(storeDir);
+}
+
+const runtimeByTaskStore = new WeakMap<FileTaskStore, TaskAgentRuntimeAccess>();
+
+function taskRuntime(store: FileTaskStore): TaskAgentRuntimeAccess {
+  const current = runtimeByTaskStore.get(store);
+  if (current) return current;
+  const runtimeStore = new FileAgentRuntimeStore(
+    path.join(store.getStorageRoot(), '.test-agent-runtime')
+  );
+  const runtime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
+    store.recordAgentRuntimeEvent(event, operationId)
+  );
+  store.bindAgentRuntime(runtime);
+  runtimeByTaskStore.set(store, runtime);
+  return runtime;
 }
 
 describe('FileTaskStore attachments', () => {
@@ -465,18 +484,60 @@ async function createRun(
     worktreePath,
     baseSha: 'base'
   });
-  const session = await store.createAgentSession({
-    task,
-    iteration,
-    worktree,
-    runtimeId: 'codex'
+  const sessionId = randomUUID();
+  const operationId = `test:attachment-session:${sessionId}`;
+  const requestedSettings = {
+    ...task.agentSettings,
+    runtimeId: 'codex',
+    model: task.agentSettings.model ?? 'test-model'
+  };
+  const session = await taskRuntime(store).createTaskSession({
+    id: sessionId,
+    taskId: task.id,
+    iterationId: iteration.id,
+    worktreeId: worktree.id,
+    worktreePath: worktree.worktreePath,
+    runtimeId: 'codex',
+    requestedSettings,
+    executionContext: {
+      attestation: { status: 'ATTESTED' },
+      repositoryAccess: 'WRITE',
+      primaryCwd: worktree.worktreePath,
+      readRoots: [{
+        canonicalPath: worktree.worktreePath,
+        kind: 'WORKTREE',
+        entityId: worktree.id
+      }],
+      managedAttachments: [],
+      permissionProfileHash: createHash('sha256')
+        .update(JSON.stringify({ sessionId, path: worktree.worktreePath }))
+        .digest('hex'),
+      modelSettings: requestedSettings,
+      externalTools: {
+        network: requestedSettings.networkAccess === true,
+        webSearch: 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: operationId
+    },
+    operationId
   });
-  return store.createRun({
-    task,
-    session,
+  await store.recordAgentSessionCreated(session);
+  const runId = randomUUID();
+  const run = await taskRuntime(store).createTaskRun({
+    id: runId,
+    taskId: task.id,
+    iterationId: iteration.id,
+    worktreeId: worktree.id,
+    sessionId: session.id,
     mode: 'IMPLEMENTATION',
-    prompt: task.prompt
+    prompt: task.prompt,
+    operationId: `test:attachment-run:${runId}`
   });
+  await store.recordAgentRunStarted(run);
+  return run;
 }
 
 function temporaryDirectory(): Promise<string> {

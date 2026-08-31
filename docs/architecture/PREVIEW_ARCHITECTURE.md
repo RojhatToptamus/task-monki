@@ -127,8 +127,10 @@ prepare a transient agent draft from sanitized bounded evidence. The complete
 YAML and structured generation report stay reviewable until explicit
 acceptance. Acceptance exclusively creates only the recipe and then returns to
 this same loader/resolver path; it cannot approve or start Preview. Agent
-generation has no durable task-store record and no parallel parser or runtime
-lifecycle. See [Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
+generation has no durable task-store record, second Preview parser, or second
+Preview execution lifecycle. It uses the shared agent runtime only for its
+transient read-only turn. See
+[Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
 
 For the bounded Next.js/npm profile, trusted authoring facts include a safely
 reduced root lockfile record. A compatible draft must declare one exact generic
@@ -178,6 +180,10 @@ the live worktree. An approved generic installation job may create them inside
 the captured generation workspace. The job runs once for that generation,
 before explicit consumers, and the generated files share the generation's
 exact cleanup boundary.
+
+Cleanup removes the exact owned generation first. It removes the per-task
+parent directory only when that directory is empty. A sibling generation keeps
+the shared parent in place.
 
 A `PreviewGenerationRecord` is immutable execution evidence plus a state
 machine. It binds:

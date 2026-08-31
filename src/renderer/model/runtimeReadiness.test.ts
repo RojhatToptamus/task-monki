@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentRuntimeState } from '../../shared/contracts';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
-import { runtimeReadinessView } from './runtimeReadiness';
+import {
+  runtimeExecutionUnavailableReason,
+  runtimeReadinessView,
+  selectConfiguredRuntimeForOperation
+} from './runtimeReadiness';
 
 describe('runtimeReadinessView', () => {
   it('keeps a discovered on-demand runtime startable without calling it ready', () => {
@@ -110,6 +114,99 @@ describe('runtimeReadinessView', () => {
       optionSuffix: ' (unavailable)'
     });
   });
+
+  it('does not replace an unavailable configured workflow runtime with another provider', () => {
+    const configured = state(createRuntimeReadiness('READY', 'Ready'));
+    configured.preflight.runtime = {
+      ...configured.preflight.runtime,
+      id: 'configured',
+      displayName: 'Configured'
+    };
+    configured.preflight.capabilities = {
+      ...configured.preflight.capabilities,
+      runtimeId: 'configured',
+      executionPolicy: {
+        defaultPresetId: 'write',
+        detail: 'Write access only.',
+        presets: [
+          {
+            id: 'write',
+            label: 'Write',
+            detail: 'Write access.',
+            sandbox: 'WORKSPACE_WRITE',
+            repositoryMutation: 'ALLOW',
+            approvalPolicy: 'never',
+            approvalsReviewer: 'user',
+            networkAccess: 'DISABLED'
+          }
+        ]
+      },
+      readOnlyTurns: {
+        maturity: 'unsupported',
+        detail: 'Configured cannot deny repository changes.'
+      }
+    };
+    const fallback = state(createRuntimeReadiness('READY', 'Ready'));
+    fallback.preflight.runtime = {
+      ...fallback.preflight.runtime,
+      id: 'fallback',
+      displayName: 'Fallback'
+    };
+    fallback.preflight.capabilities = {
+      ...fallback.preflight.capabilities,
+      runtimeId: 'fallback'
+    };
+
+    expect(
+      selectConfiguredRuntimeForOperation(
+        [configured, fallback],
+        'configured',
+        'PROMPT_REFINEMENT'
+      )
+    ).toEqual({
+      unavailableReason:
+        'Configured cannot deny repository changes. Normal Tasks remain available.'
+    });
+  });
+
+  it('uses typed runtime readiness detail before workflow capability support', () => {
+    const runtime = state(
+      createRuntimeReadiness(
+        'AUTHENTICATION_REQUIRED',
+        'Sign in before starting this workflow.'
+      )
+    );
+
+    expect(runtimeExecutionUnavailableReason(runtime, 'REVIEW')).toBe(
+      'Sign in before starting this workflow.'
+    );
+  });
+
+  it('projects an exact model qualification failure for Preview generation', () => {
+    const runtime = state(createRuntimeReadiness('READY', 'Ready'));
+    runtime.preflight.capabilities.extensions['task-monki.preview-recipe-generation'] = {
+      maturity: 'stable'
+    };
+
+    expect(
+      selectConfiguredRuntimeForOperation(
+        [runtime],
+        'test',
+        'PREVIEW_RECIPE_GENERATION',
+        {
+          model: {
+            inputModalities: ['text'],
+            previewRecipeGenerationSupport: {
+              maturity: 'unsupported',
+              detail: 'Preview generation requires the qualified model.'
+            }
+          }
+        }
+      )
+    ).toEqual({
+      unavailableReason: 'Preview generation requires the qualified model.'
+    });
+  });
 });
 
 function state(
@@ -135,6 +232,7 @@ function state(
               label: 'Test',
               detail: 'Test',
               sandbox: 'READ_ONLY',
+              repositoryMutation: 'DENY',
               approvalPolicy: 'never',
               approvalsReviewer: 'user',
               networkAccess: 'DISABLED'
@@ -142,26 +240,11 @@ function state(
           ],
           detail: 'Test'
         },
-        promptRefinement: { maturity: 'unsupported' },
+        readOnlyTurns: { maturity: 'unsupported' },
         modelCatalog: { maturity: 'unsupported' },
-        reasoningEffort: { maturity: 'unsupported' },
-        persistentSessions: { maturity: 'unsupported' },
-        sessionResume: { maturity: 'unsupported' },
-        sessionFork: { maturity: 'unsupported' },
         activeTurnSteering: { maturity: 'unsupported' },
         turnInterruption: { maturity: 'unsupported' },
-        truePause: { maturity: 'unsupported' },
-        interactiveApprovals: { maturity: 'unsupported' },
-        userInputRequests: { maturity: 'unsupported' },
-        goals: { maturity: 'unsupported' },
-        plans: { maturity: 'unsupported' },
-        detachedReview: { maturity: 'unsupported' },
-        review: { maturity: 'unsupported' },
-        subagents: { maturity: 'unsupported' },
-        backgroundTerminals: { maturity: 'unsupported' },
-        dynamicTools: { maturity: 'unsupported' },
         attachmentDelivery: { maturity: 'unsupported' },
-        runtimeRecovery: { maturity: 'unsupported' },
         extensions: {}
       }
     },

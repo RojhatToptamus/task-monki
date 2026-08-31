@@ -136,6 +136,7 @@ import {
 } from '../core/process/ownedProcess';
 import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
 import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
+import { resolveDesignToolMcpServerPath } from '../core/design/DesignClientToolBridge';
 import {
   resolveDesignBrowserRuntimePaths,
   resolveDesignBrowserSocketRoot
@@ -400,10 +401,9 @@ function configureMacDockIcon(): void {
 
   const iconPath = getMacDockIconPath({
     appPath: app.getAppPath(),
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath
+    isPackaged: app.isPackaged
   });
-  if (fs.existsSync(iconPath)) {
+  if (iconPath !== undefined && fs.existsSync(iconPath)) {
     app.dock?.setIcon(iconPath);
   }
 }
@@ -1232,6 +1232,16 @@ void app.whenReady().then(async () => {
             ),
             designBrowserSocketRoot: resolveDesignBrowserSocketRoot(userDataDir),
             designBrowserRequireCodeSignature: app.isPackaged,
+            designToolMcpExecutablePath: process.execPath,
+            designToolMcpServerPath: resolveDesignToolMcpServerPath({
+              isPackaged: app.isPackaged,
+              resourcesPath: process.resourcesPath,
+              appPath: app.getAppPath()
+            }),
+            designToolCredentialRoot: path.join(
+              userDataDir,
+              'design-tool-credentials'
+            ),
             designCanvasFence: designCanvasHost
           }
         : {})

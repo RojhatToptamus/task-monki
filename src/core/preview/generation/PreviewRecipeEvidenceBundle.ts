@@ -1,6 +1,5 @@
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import {
   analyzePreviewFrameworkCapabilities,
@@ -13,6 +12,7 @@ import {
 } from './PreviewPublicEnvironmentEvidence';
 
 const EVIDENCE_FILE_NAME = 'repository-evidence.json';
+const EVIDENCE_DIRECTORY_PREFIX = 'generation-';
 const MAX_DISCOVERED_ENTRIES = 20_000;
 const MAX_INCLUDED_FILES = 600;
 const MAX_FILE_BYTES = 384 * 1024;
@@ -71,6 +71,7 @@ const DERIVED_ONLY_BASENAMES = new Set([
 export interface PreparedPreviewRecipeEvidenceBundle {
   directoryPath: string;
   fileName: typeof EVIDENCE_FILE_NAME;
+  fileByteCount: number;
   includedPaths: ReadonlySet<string>;
   safeOmissions: string[];
   frameworkCapabilities: PreviewFrameworkCapabilities;
@@ -94,11 +95,21 @@ interface OmissionCounts {
 }
 
 export async function preparePreviewRecipeEvidenceBundle(
-  worktreePath: string
+  worktreePath: string,
+  options: {
+    rootDirectory: string;
+    generationId: string;
+    signal?: AbortSignal;
+  }
 ): Promise<PreparedPreviewRecipeEvidenceBundle> {
+  throwIfAborted(options.signal);
   const root = await fs.realpath(path.resolve(worktreePath));
+  await ensureEvidenceRoot(options.rootDirectory);
   const directoryPath = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'task-monki-preview-recipe-')
+    path.join(
+      options.rootDirectory,
+      `${EVIDENCE_DIRECTORY_PREFIX}${requireGenerationId(options.generationId)}-`
+    )
   );
   const files: EvidenceFile[] = [];
   const includedPaths = new Set<string>();
@@ -115,6 +126,7 @@ export async function preparePreviewRecipeEvidenceBundle(
   let totalBytes = 0;
 
   const walk = async (directory: string, relativeDirectory: string): Promise<void> => {
+    throwIfAborted(options.signal);
     if (discoveredEntries >= MAX_DISCOVERED_ENTRIES) {
       omissions.capacity += 1;
       return;
@@ -122,6 +134,7 @@ export async function preparePreviewRecipeEvidenceBundle(
     const entries = await fs.readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
+      throwIfAborted(options.signal);
       discoveredEntries += 1;
       if (discoveredEntries > MAX_DISCOVERED_ENTRIES) {
         omissions.capacity += 1;
@@ -182,6 +195,7 @@ export async function preparePreviewRecipeEvidenceBundle(
 
   try {
     await walk(root, '');
+    throwIfAborted(options.signal);
     const safeOmissions = describeOmissions(omissions);
     const repositoryFacts = await inspectPreviewFrameworkRepositoryFacts(root);
     const frameworkCapabilities = analyzePreviewFrameworkCapabilities(files, repositoryFacts);
@@ -192,25 +206,27 @@ export async function preparePreviewRecipeEvidenceBundle(
       }
     }
     for (const template of publicEnvironment.templates) includedPaths.add(template.path);
+    const evidenceBody = JSON.stringify(
+      {
+        schemaVersion: 'task-monki-preview-repository-evidence/v2',
+        source: 'sanitized task worktree snapshot',
+        files,
+        frameworkCapabilities,
+        publicEnvironment,
+        omissions: safeOmissions
+      },
+      null,
+      2
+    );
     await fs.writeFile(
       path.join(directoryPath, EVIDENCE_FILE_NAME),
-      JSON.stringify(
-        {
-          schemaVersion: 'task-monki-preview-repository-evidence/v2',
-          source: 'sanitized task worktree snapshot',
-          files,
-          frameworkCapabilities,
-          publicEnvironment,
-          omissions: safeOmissions
-        },
-        null,
-        2
-      ),
+      evidenceBody,
       { encoding: 'utf8', mode: 0o600, flag: 'wx' }
     );
     return {
       directoryPath,
       fileName: EVIDENCE_FILE_NAME,
+      fileByteCount: Buffer.byteLength(evidenceBody, 'utf8'),
       includedPaths,
       safeOmissions,
       frameworkCapabilities,
@@ -221,6 +237,46 @@ export async function preparePreviewRecipeEvidenceBundle(
     await fs.rm(directoryPath, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+export async function recoverPreviewRecipeEvidenceRoot(
+  rootDirectory: string,
+  retainedGenerationIds: ReadonlySet<string> = new Set()
+): Promise<void> {
+  await ensureEvidenceRoot(rootDirectory);
+  const retainedPrefixes = [...retainedGenerationIds].map(
+    (generationId) =>
+      `${EVIDENCE_DIRECTORY_PREFIX}${requireGenerationId(generationId)}-`
+  );
+  const entries = await fs.readdir(rootDirectory, { withFileTypes: true });
+  await Promise.all(
+    entries
+      .filter(
+        (entry) =>
+          entry.name.startsWith(EVIDENCE_DIRECTORY_PREFIX) &&
+          !retainedPrefixes.some((prefix) => entry.name.startsWith(prefix))
+      )
+      .map((entry) =>
+        fs.rm(path.join(rootDirectory, entry.name), { recursive: true, force: true })
+      )
+  );
+}
+
+async function ensureEvidenceRoot(rootDirectory: string): Promise<void> {
+  await fs.mkdir(rootDirectory, { recursive: true, mode: 0o700 });
+  await fs.chmod(rootDirectory, 0o700);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new DOMException('Preview recipe evidence preparation was canceled.', 'AbortError');
+}
+
+function requireGenerationId(value: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(value)) {
+    throw new Error('Preview recipe generation id is invalid.');
+  }
+  return value;
 }
 
 function isSupportedTextPath(relativePath: string): boolean {

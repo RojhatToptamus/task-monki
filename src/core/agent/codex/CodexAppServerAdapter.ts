@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -13,7 +13,6 @@ import type {
   AgentRuntimeDiagnostic,
   AgentRuntimeCapabilities,
   AgentGoalSnapshotRecord,
-  AgentReviewTarget,
   AgentSessionRecord,
   AgentSessionSnapshot,
   AgentSubagentStatus,
@@ -25,12 +24,14 @@ import type {
   AgentRuntimeRunRecord,
   AgentRuntimeSessionRecord
 } from '../../../shared/agentRuntime';
+import {
+  AGENT_RUNTIME_LIMITS,
+  agentOwnerScopeKey
+} from '../../../shared/agentRuntime';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
-import {
-  ArtifactAppendAmbiguousError,
-  type FileTaskStore
-} from '../../storage/FileTaskStore';
+import type { FileTaskStore } from '../../storage/FileTaskStore';
+import { AgentRuntimeDeliveryError } from '../AgentRuntimeAdapter';
 import type {
   AgentInteractionResponse,
   AgentRuntimeAdapter,
@@ -40,24 +41,28 @@ import type {
   CreateAgentSession,
   ForkAgentSession,
   InterruptAgentTurn,
-  StartAgentReview,
   StartAgentTurn,
   SyncAgentGoal,
   SteerAgentTurn,
   ResolveAgentExecution,
   ResolvedAgentExecution,
-  RefineAgentPrompt
+  StartAgentRuntimeTurn,
+  StartedAgentRuntimeTurn
 } from '../AgentRuntimeAdapter';
-import type { AgentRuntimeStore } from '../AgentRuntimeStore';
 import {
-  AgentScopedMutationError,
-  type AgentScopedTurnEvent,
-  type AgentScopedRuntimeAdapter,
-  type BuildScopedAgentExecutionContextInput,
-  type StartScopedAgentTurnInput,
-  type StartedScopedAgentTurn
-} from '../AgentScopedTurnProvider';
-import { assertDiscourseExecutionContext } from '../AgentRuntimeOwnership';
+  AgentRuntimeArtifactMutationAmbiguousError,
+  type AgentProviderRuntimeStore,
+  type AgentRuntimeStore,
+  type TaskAgentRuntimeAccess
+} from '../AgentRuntimeStore';
+import type {
+  AgentRuntimeTurnEvent,
+  BuildAgentRuntimeExecutionContextInput
+} from '../AgentRuntimeCoordinator';
+import {
+  assertReadOnlyExecutionContext,
+  createAgentSessionAccessEpoch
+} from '../AgentRuntimeOwnership';
 import { agentServersRequiringLossRecovery } from '../AgentRuntimeRecovery';
 import {
   AgentMutationAmbiguousError,
@@ -71,9 +76,8 @@ import {
 } from '../AgentRuntimeReadiness';
 import { assertBrowserDevSettingsSafe } from '../BrowserDevAgentBoundary';
 import {
-  assertAttachmentSandboxSupportsDelivery,
+  assertAgentTurnAttachmentSelection,
   assertModelSupportsAttachments,
-  prepareAgentAttachmentDelivery,
   toAgentTurnAttachments,
   verifyAgentTurnAttachments,
   type AgentTurnAttachment
@@ -91,8 +95,10 @@ import {
   assertCodexPermissionProfileEvidence,
   assertCodexReadOnlyScopeEvidence,
   codexPermissionProfileConfig,
+  codexPermissionProfileHash,
   codexPermissionProfileId,
   codexReadOnlyScopeProfile,
+  codexReadOnlyScopeProfileId,
   type CodexPermissionProfileEvidence
 } from './CodexPermissionProfile';
 import {
@@ -112,9 +118,10 @@ import type {
 } from '../../../shared/agent';
 import { isImplementationRunMode } from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
-import type { ThreadSourceKind } from './protocol/generated/v2/ThreadSourceKind';
-import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
-import { normalizeCodexExternalToolSettings } from './CodexToolConfig';
+import {
+  listDisabledCodexMcpServerThreadConfig,
+  normalizeCodexExternalToolSettings
+} from './CodexToolConfig';
 import {
   resolveAgentGitExecutablePath,
   resolveAgentGitMetadata
@@ -135,8 +142,10 @@ import type { TurnPlanStep } from './protocol/generated/v2/TurnPlanStep';
 import type { CollabAgentStatus } from './protocol/generated/v2/CollabAgentStatus';
 import type { SubAgentActivityKind } from './protocol/generated/v2/SubAgentActivityKind';
 import type { TurnStatus } from './protocol/generated/v2/TurnStatus';
-import type { ReviewTarget } from './protocol/generated/v2/ReviewTarget';
 import type { TurnStartParams } from './protocol/generated/v2/TurnStartParams';
+import type { ThreadStartResponse } from './protocol/generated/v2/ThreadStartResponse';
+import type { ThreadResumeResponse } from './protocol/generated/v2/ThreadResumeResponse';
+import type { TurnStartResponse } from './protocol/generated/v2/TurnStartResponse';
 import type { JsonValue } from './protocol/generated/serde_json/JsonValue';
 import type { DynamicToolSpec } from './protocol/generated/v2/DynamicToolSpec';
 import type { DynamicToolCallResponse } from './protocol/generated/v2/DynamicToolCallResponse';
@@ -162,25 +171,29 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
-import {
-  AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
-  buildDesignAgentDeveloperInstructions
-} from '../../../shared/promptTemplates';
+import { buildDesignAgentDeveloperInstructions } from '../../../shared/promptTemplates';
 import {
   loadDesignSkillPack,
   type DesignSkillPack
 } from '../../design/DesignSkillPack';
 import {
-  agentReviewStatusFromResult,
-  parseAgentReviewResult
-} from '../../review/AgentReviewContract';
-import { PromptRefinementService } from '../../prompt/PromptRefinementService';
-import { DesignToolProtocolSanitizer } from '../journal/AgentProtocolRedaction';
+  assertCodexInlineRequestSize,
+  codexAttachmentSupport,
+  codexExactGrantAttachments,
+  prepareCodexAttachmentDelivery,
+  type CodexAttachmentSupport
+} from './CodexAttachmentDelivery';
+import { CodexProtocolSanitizer } from './CodexProtocolSanitizer';
 import {
   parseInspectDesignOperation,
   type DesignBrowserToolResult,
   type InspectDesignOperation
 } from '../../design/AgentBrowserRuntime';
+import {
+  INSPECT_DESIGN_TOOL_DEFINITION,
+  INSPECT_DESIGN_TOOL_NAME,
+  safeDesignClientToolFailure
+} from '../../design/DesignClientToolContract';
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -208,13 +221,11 @@ function isTerminalRunStatus(status: RunRecord['status']): boolean {
 
 const RUNTIME_CONFIG_PENDING_RESTART_WARNING =
   'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.';
-const STREAM_OUTPUT_FLUSH_MS = 75;
+const STREAM_OUTPUT_FLUSH_MS = 1_000;
 const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
 const RECOVERY_CONTINUATION_WAIT_MS = 1_000;
-const DESIGN_BROWSER_TOOL_NAME = 'inspect_design';
-
 export type CodexDesignBrowserToolHandler = (input: {
   runId: string;
   operation: InspectDesignOperation;
@@ -236,21 +247,6 @@ class BrowserDevBoundaryViolationError extends Error {
   }
 }
 
-function canRetargetReviewTurn(
-  run: RunRecord,
-  session: AgentSessionRecord
-): boolean {
-  return (
-    session.role === 'REVIEW' &&
-    run.mode === 'REVIEW' &&
-    ACTIVE_RUN_STATES.includes(run.status)
-  );
-}
-
-function isNoActiveTurnToInterrupt(error: Error): boolean {
-  return /no active turn to interrupt/i.test(error.message);
-}
-
 export interface CodexAppServerAdapterOptions
   extends Omit<CodexAppServerSupervisorOptions, 'appVersion'> {
   appVersion?: string;
@@ -258,9 +254,17 @@ export interface CodexAppServerAdapterOptions
   interruptRequestTimeoutMs?: number;
   interruptCompletionTimeoutMs?: number;
   enforceBrowserDevBoundary?: boolean;
-  scopedRuntimeStore?: AgentRuntimeStore;
   designSkillRoot?: string;
 }
+
+type CodexTaskDomainStore = Pick<
+  FileTaskStore,
+  | 'getTask'
+  | 'getWorktree'
+  | 'getRepository'
+  | 'verifyRunAttachments'
+  | 'verifyTaskAttachments'
+>;
 
 interface UnmaterializedThreadAttestation {
   providerSessionId: string;
@@ -274,7 +278,64 @@ interface InboundNotificationRecoveryTarget {
   providerTurnId?: string;
 }
 
-export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRuntimeAdapter {
+type CodexThreadMutationResponse = ThreadStartResponse | ThreadResumeResponse;
+
+interface CodexThreadTransportInput {
+  operation: 'thread/start' | 'thread/resume';
+  threadId?: string;
+  cwd: string;
+  settings: AgentExecutionSettings;
+  approvalPolicy: NonNullable<TurnStartParams['approvalPolicy']>;
+  approvalsReviewer: NonNullable<TurnStartParams['approvalsReviewer']>;
+  config: { [key: string]: JsonValue };
+  dynamicTools: readonly DynamicToolSpec[];
+  validateResponse?: (response: CodexThreadMutationResponse) => Promise<void> | void;
+}
+
+interface CodexTurnTransportInput {
+  client: CodexRpcClient;
+  localRunId: string;
+  threadId: string;
+  cwd: string;
+  settings: AgentExecutionSettings;
+  prompt: string;
+  localImagePaths: readonly string[];
+  enforceInlineRequestSize?: boolean;
+  approvalPolicy: NonNullable<TurnStartParams['approvalPolicy']>;
+  approvalsReviewer: NonNullable<TurnStartParams['approvalsReviewer']>;
+  collaborationMode?: CollaborationMode;
+}
+
+interface CodexThreadTransportResult {
+  client: CodexRpcClient;
+  serverInstanceId: string;
+  response: CodexThreadMutationResponse;
+}
+
+type CodexProviderTurnTarget =
+  | {
+      kind: 'TASK';
+      session: AgentSessionRecord;
+      run: RunRecord;
+    }
+  | {
+      kind: 'RUNTIME';
+      session: AgentRuntimeSessionRecord;
+      run: AgentRuntimeRunRecord;
+    };
+
+class CodexProviderMutationDeliveryError extends Error {
+  constructor(
+    readonly operation: 'thread/start' | 'thread/resume' | 'turn/start',
+    readonly delivery: 'NOT_DELIVERED' | 'AMBIGUOUS',
+    readonly providerCause: unknown
+  ) {
+    super(errorMessage(providerCause), { cause: providerCause });
+    this.name = 'CodexProviderMutationDeliveryError';
+  }
+}
+
+export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   private supervisor: CodexAppServerSupervisor;
   private readonly supervisorOptions: CodexAppServerSupervisorOptions;
@@ -312,8 +373,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   private readonly enforceBrowserDevBoundary: boolean;
   private readonly sensitiveValues: string[];
   private externalToolSettings: CodexExternalToolSettings;
-  private promptRefinementExecutable?: string;
-  private readonly promptRefiner = new PromptRefinementService();
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private readonly streamBuffers = new Map<string, CodexRunOutputBuffer>();
   private readonly runSettlementQueues = new Map<string, Promise<unknown>>();
@@ -334,20 +393,27 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   private securityBoundaryViolation?: string;
   private inboundMaterializationRecoveryFailure?: string;
   private outputPersistenceFence?: Promise<void>;
-  private readonly scopedRuntimeStore?: AgentRuntimeStore;
+  private readonly providerRuntime: AgentProviderRuntimeStore;
   private readonly designSkillRoot?: string;
   private designSkillPack?: DesignSkillPack;
   private designSkillFailure?: string;
   private designSkillLoadAttempted = false;
-  private readonly scopedTurnListeners = new Set<(event: AgentScopedTurnEvent) => void>();
-  private readonly scopedRunByProviderTurn = new Map<string, string>();
-  private readonly scopedRunByProviderThread = new Map<string, string>();
-  private readonly designToolProtocolSanitizer = new DesignToolProtocolSanitizer();
+  private readonly runtimeTurnListeners = new Set<(event: AgentRuntimeTurnEvent) => void>();
+  /**
+   * Short-lived correlation for provider notifications that can arrive before
+   * the durable acknowledgement write. The canonical runtime store replaces
+   * these entries as soon as the caller persists the provider identities.
+   */
+  private readonly pendingRunByProviderTurn = new Map<string, string>();
+  private readonly pendingRunByProviderThread = new Map<string, string>();
+  private readonly protocolSanitizer = new CodexProtocolSanitizer();
   private designBrowserToolHandler?: CodexDesignBrowserToolHandler;
   private readonly activeDesignBrowserCalls = new Map<string, string>();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly taskStore: CodexTaskDomainStore,
+    private readonly taskRuntime: TaskAgentRuntimeAccess,
+    private readonly runtimeStore: AgentRuntimeStore,
     private readonly appEvents: AppEventBus,
     options: CodexAppServerAdapterOptions
   ) {
@@ -356,7 +422,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       interruptRequestTimeoutMs,
       interruptCompletionTimeoutMs,
       enforceBrowserDevBoundary,
-      scopedRuntimeStore,
       designSkillRoot,
       appVersion,
       ...supervisorOptions
@@ -365,13 +430,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     this.interruptRequestTimeoutMs = interruptRequestTimeoutMs ?? 5_000;
     this.interruptCompletionTimeoutMs = interruptCompletionTimeoutMs ?? 15_000;
     this.enforceBrowserDevBoundary = enforceBrowserDevBoundary === true;
-    this.scopedRuntimeStore = scopedRuntimeStore;
+    this.providerRuntime = runtimeStore;
     this.designSkillRoot = designSkillRoot;
     this.sensitiveValues = codexSensitiveEnvironmentValues(
       options.environment ?? process.env
     );
     this.externalToolSettings = normalizeCodexExternalToolSettings(options.toolSettings);
-    this.promptRefinementExecutable = options.executable;
     this.supervisorOptions = {
       ...supervisorOptions,
       appVersion: appVersion ?? '0.1.0'
@@ -380,7 +444,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }
 
   private createSupervisor(): CodexAppServerSupervisor {
-    const supervisor = new CodexAppServerSupervisor(this.store, {
+    const supervisor = new CodexAppServerSupervisor(this.providerRuntime, {
       ...this.supervisorOptions,
       toolSettings: this.supervisorOptions.toolSettings
         ? { ...this.supervisorOptions.toolSettings }
@@ -395,8 +459,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         // server-loss sweep has already completed.
         this.enqueueInbound(async () => {
           try {
-            await this.handleScopedRuntimeLoss(server.id, server.exitReason);
-            await this.handleRuntimeLoss(server.id, {
+            await this.handleCanonicalServerLoss(server.id, {
               reason: server.exitReason,
               confirmedStopped: processTreeExited
             });
@@ -422,22 +485,78 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     return supervisor;
   }
 
-  private async handleScopedRuntimeLoss(
+  private async handleCanonicalServerLoss(
     serverInstanceId: string,
-    exitReason?: string
+    options: {
+      reason?: string;
+      restarting?: boolean;
+      confirmedStopped?: boolean;
+    } = {}
   ): Promise<void> {
-    if (!this.scopedRuntimeStore) return;
-    const reason = exitReason ?? 'Codex App Server exited before the scoped turn reached a terminal state.';
-    const snapshot = await this.scopedRuntimeStore.snapshot();
+    const reason =
+      options.reason ??
+      'Codex App Server exited before the runtime turn reached a terminal state.';
+    const snapshot = await this.runtimeStore.snapshot();
     const affected = snapshot.runs.filter(
       (run) =>
-        run.owner.kind === 'DISCOURSE' &&
+        isSharedReadOnlyRuntimePurpose(run.purpose) &&
         run.serverInstanceId === serverInstanceId &&
-        !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)
+        !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status) &&
+        !(
+          run.status === 'RECOVERY_REQUIRED' &&
+          run.providerTerminalSource === 'PROVIDER_PROCESS_LOSS'
+        )
     );
     for (const run of affected) {
       const observedAt = new Date().toISOString();
-      const updated = await this.scopedRuntimeStore.updateRun(
+      if (
+        options.confirmedStopped === true &&
+        run.status === 'INTERRUPTING' &&
+        run.providerTurnId
+      ) {
+        const forcedFailure = isReadOnlyViolationSource(
+          run.providerTerminalSource
+        );
+        const terminal = await this.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            status: forcedFailure ? 'FAILED' : 'INTERRUPTED',
+            delivery: 'TERMINAL',
+            ...(run.interruptDelivery
+              ? { interruptDelivery: 'TERMINAL' as const }
+              : {}),
+            recoveryState: 'NONE',
+            providerTerminalSource: confirmedStopSource(
+              run.providerTerminalSource
+            ),
+            lastEventAt: observedAt,
+            endedAt: observedAt
+          },
+          `codex-runtime-confirmed-stop:${serverInstanceId}:${run.id}`
+        );
+        const session = await this.runtimeStore.getSession(run.sessionId);
+        if (session && session.status !== 'NOT_LOADED') {
+          await this.runtimeStore.updateSession(
+            session.id,
+            session.recordRevision,
+            { status: 'NOT_LOADED', materialized: true, lastAttachedAt: observedAt },
+            `codex-runtime-confirmed-stop-session:${run.id}`
+          );
+        }
+        this.emitRuntimeTurnEvent({
+          type: 'TERMINAL',
+          runId: terminal.id,
+          providerTurnId: run.providerTurnId,
+          status: forcedFailure ? 'failed' : 'interrupted',
+          ...(forcedFailure && terminal.terminalReason
+            ? { error: terminal.terminalReason }
+            : {}),
+          completedAt: observedAt
+        });
+        continue;
+      }
+      const updated = await this.runtimeStore.updateRun(
         run.id,
         run.recordRevision,
         {
@@ -448,9 +567,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           providerTerminalSource: 'PROVIDER_PROCESS_LOSS',
           lastEventAt: observedAt
         },
-        `codex-scoped-runtime-loss:${serverInstanceId}:${run.id}`
+        `codex-runtime-runtime-loss:${serverInstanceId}:${run.id}`
       );
-      this.emitScopedTurnEvent({
+      this.emitRuntimeTurnEvent({
         type: 'RECOVERY_REQUIRED',
         runId: updated.id,
         ...(updated.providerTurnId ? { providerTurnId: updated.providerTurnId } : {}),
@@ -458,8 +577,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         observedAt
       });
     }
-    this.scopedRunByProviderTurn.clear();
-    this.scopedRunByProviderThread.clear();
+    await this.handleTaskRuntimeLoss(serverInstanceId, options);
+    this.pendingRunByProviderTurn.clear();
+    this.pendingRunByProviderThread.clear();
   }
 
   get currentRuntimeExecutable(): string | undefined {
@@ -521,26 +641,37 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     return structuredClone(this.models);
   }
 
-  async buildScopedExecutionContext(
-    input: BuildScopedAgentExecutionContextInput
+  async buildExecutionContext(
+    input: BuildAgentRuntimeExecutionContextInput
   ): Promise<AgentExecutionContext> {
-    if (!this.scopedRuntimeStore) {
-      throw new Error('Codex scoped runtime composition is not configured.');
-    }
     const primaryCwd = path.resolve(input.primaryCwd);
+    await this.ensureClient();
+    const support = this.currentAttachmentSupport();
+    const attachments = await verifyAgentTurnAttachments(input.attachments ?? []);
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: 'restricted',
+      attachments,
+      support
+    });
+    const readRoots = input.readRoots.map((root) => ({
+      ...root,
+      canonicalPath: path.resolve(root.canonicalPath)
+    }));
     const profile = await codexReadOnlyScopeProfile({
       sessionId: input.sessionId,
       scope: {
         primaryCwd,
-        readOnlyRoots: input.readRoots.map((root) => root.canonicalPath)
+        readOnlyRoots: readRoots.map((root) => root.canonicalPath)
       },
+      attachmentPaths: grantAttachments.map((attachment) => attachment.path),
       reasoningEffort: input.modelSettings.reasoningEffort
     });
     const context: AgentExecutionContext = {
       attestation: { status: 'ATTESTED' },
       primaryCwd,
-      readRoots: input.readRoots.map((root) => ({ ...root })),
-      managedAttachments: [],
+      repositoryAccess: 'READ_ONLY',
+      readRoots,
+      managedAttachments: managedAttachmentAccess(grantAttachments),
       permissionProfileHash: profile.scopeHash,
       modelSettings: {
         ...input.modelSettings,
@@ -559,108 +690,251 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       },
       clientOperationId: input.clientOperationId
     };
-    assertDiscourseExecutionContext(context);
+    assertReadOnlyExecutionContext(context);
     return context;
   }
 
-  onScopedTurnEvent(listener: (event: AgentScopedTurnEvent) => void): () => void {
-    this.scopedTurnListeners.add(listener);
-    return () => this.scopedTurnListeners.delete(listener);
+  onRuntimeTurnEvent(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
+    this.runtimeTurnListeners.add(listener);
+    return () => this.runtimeTurnListeners.delete(listener);
   }
 
-  async startScopedTurn(input: StartScopedAgentTurnInput): Promise<StartedScopedAgentTurn> {
-    if (!this.scopedRuntimeStore) {
-      throw new Error('Codex scoped runtime composition is not configured.');
-    }
-    assertDiscourseExecutionContext(input.executionContext);
-    if (
-      input.run.owner.kind !== 'DISCOURSE' ||
-      input.session.owner.kind !== 'DISCOURSE' ||
-      input.run.sessionId !== input.session.id ||
-      input.session.runtimeId !== this.descriptor.id ||
-      input.executionContext.managedAttachments.length > 0
-    ) {
-      throw new Error('Codex scoped turns require one attachment-free discourse owner/session.');
-    }
-    const profile = await codexReadOnlyScopeProfile({
-      sessionId: input.session.id,
-      scope: {
-        primaryCwd: input.executionContext.primaryCwd,
-        readOnlyRoots: input.executionContext.readRoots.map((root) => root.canonicalPath)
-      },
-      reasoningEffort: input.executionContext.modelSettings.reasoningEffort
-    });
-    if (profile.scopeHash !== input.executionContext.permissionProfileHash) {
-      throw new Error('Codex scoped permission profile does not match the attested execution context.');
-    }
+  /**
+   * The App Server thread mutation is the same protocol operation for every
+   * Task Monki workflow. Workflow policy supplies the concrete permission
+   * profile and validates the returned evidence, but transport delivery has
+   * one ambiguity rule: a response or an uncertain transport failure is never
+   * safe to submit again automatically.
+   */
+  private async openCodexThread(
+    input: CodexThreadTransportInput
+  ): Promise<CodexThreadTransportResult> {
     const client = await this.ensureClient();
     const server = this.supervisor.currentServer;
     if (!server || client.serverInstanceId !== server.id) {
-      throw new AgentScopedMutationError(
+      throw new CodexProviderMutationDeliveryError(
+        input.operation,
         'NOT_DELIVERED',
-        'Codex App Server changed before the scoped turn could start.'
+        new Error('Codex App Server changed before the thread mutation could start.')
       );
     }
-    const settings = input.executionContext.modelSettings;
-    let threadId = input.session.providerSessionId;
-    let threadSessionId = input.session.providerSessionTreeId;
-    let threadAcknowledged = false;
+    let acknowledged = false;
     try {
-      const response = threadId
-        ? await client.requestMutation('thread/resume', withDynamicTools({
-            threadId,
-            model: settings.model ?? null,
-            modelProvider: settings.modelProvider ?? null,
-            serviceTier: settings.serviceTier ?? null,
-            cwd: input.executionContext.primaryCwd,
-            approvalPolicy: 'never',
-            approvalsReviewer: 'user',
-            config: profile.config
-          }, []))
-        : await client.requestMutation('thread/start', withDynamicTools({
-            model: settings.model ?? null,
-            modelProvider: settings.modelProvider ?? null,
-            serviceTier: settings.serviceTier ?? null,
-            cwd: input.executionContext.primaryCwd,
-            approvalPolicy: 'never',
-            approvalsReviewer: 'user',
-            config: profile.config,
-            ephemeral: false
-          }, []));
-      threadAcknowledged = true;
-      assertCodexReadOnlyScopeEvidence({
-        profileId: profile.profileId,
-        primaryCwd: input.executionContext.primaryCwd,
-        response: response as CodexPermissionProfileEvidence
-      });
-      threadId = response.thread.id;
-      threadSessionId = response.thread.sessionId;
-    } catch (error) {
-      if (error instanceof CodexAmbiguousMutationError) {
-        throw new AgentScopedMutationError('AMBIGUOUS', error.message, { cause: error });
+      const common = {
+        model: input.settings.model ?? null,
+        modelProvider: input.settings.modelProvider ?? null,
+        serviceTier: input.settings.serviceTier ?? null,
+        cwd: input.cwd,
+        approvalPolicy: input.approvalPolicy,
+        approvalsReviewer: input.approvalsReviewer,
+        config: input.config
+      };
+      const response: CodexThreadMutationResponse = input.operation === 'thread/resume'
+        ? await client.requestMutation(
+            'thread/resume',
+            withDynamicTools(
+              {
+                threadId: requireProviderThreadId(input.threadId),
+                ...common
+              },
+              input.dynamicTools
+            )
+          )
+        : await client.requestMutation(
+            'thread/start',
+            withDynamicTools(
+              {
+                ...common,
+                ephemeral: false
+              },
+              input.dynamicTools
+            )
+          );
+      acknowledged = true;
+      if (
+        this.boundClient !== client ||
+        this.supervisor.currentServer?.id !== server.id
+      ) {
+        throw new Error(
+          'Codex App Server changed after it acknowledged the thread mutation.'
+        );
       }
-      throw new AgentScopedMutationError(
-        threadAcknowledged ? 'AMBIGUOUS' : 'NOT_DELIVERED',
-        error instanceof Error ? error.message : String(error),
-        { cause: error }
+      await input.validateResponse?.(response);
+      return { client, serverInstanceId: server.id, response };
+    } catch (error) {
+      if (error instanceof CodexProviderMutationDeliveryError) throw error;
+      throw new CodexProviderMutationDeliveryError(
+        input.operation,
+        acknowledged || error instanceof CodexAmbiguousMutationError
+          ? 'AMBIGUOUS'
+          : 'NOT_DELIVERED',
+        error
       );
     }
-    const durableSession = await this.scopedRuntimeStore.getSession(input.session.id);
+  }
+
+  /** Submit one Codex turn and establish the common pre-ack correlation. */
+  private async startCodexProviderTurn(
+    input: CodexTurnTransportInput
+  ): Promise<TurnStartResponse> {
+    const server = this.supervisor.currentServer;
+    if (
+      !server ||
+      this.boundClient !== input.client ||
+      input.client.serverInstanceId !== server.id
+    ) {
+      throw new CodexProviderMutationDeliveryError(
+        'turn/start',
+        'NOT_DELIVERED',
+        new Error('Codex App Server changed before the turn could start.')
+      );
+    }
+    this.pendingRunByProviderThread.set(input.threadId, input.localRunId);
+    try {
+      const params: TurnStartParams & { collaborationMode?: CollaborationMode } = {
+        threadId: input.threadId,
+        clientUserMessageId: input.localRunId,
+        input: [
+          { type: 'text', text: input.prompt, text_elements: [] },
+          ...input.localImagePaths.map((imagePath) => ({
+            type: 'localImage' as const,
+            path: imagePath
+          }))
+        ],
+        cwd: input.cwd,
+        approvalPolicy: input.approvalPolicy,
+        approvalsReviewer: input.approvalsReviewer,
+        model: input.settings.model ?? null,
+        serviceTier: input.settings.serviceTier ?? null,
+        effort: input.settings.reasoningEffort ?? null,
+        summary: 'auto',
+        personality: null,
+        outputSchema: null,
+        ...(input.collaborationMode
+          ? { collaborationMode: input.collaborationMode }
+          : {})
+      };
+      if (input.enforceInlineRequestSize) {
+        assertCodexInlineRequestSize(params);
+      }
+      const response = await input.client.requestMutation('turn/start', params);
+      this.pendingRunByProviderTurn.set(response.turn.id, input.localRunId);
+      return response;
+    } catch (error) {
+      const delivery = error instanceof CodexAmbiguousMutationError
+        ? 'AMBIGUOUS'
+        : 'NOT_DELIVERED';
+      if (delivery === 'NOT_DELIVERED') {
+        this.clearPendingRunForThread(input.threadId, input.localRunId);
+      }
+      throw new CodexProviderMutationDeliveryError(
+        'turn/start',
+        delivery,
+        error
+      );
+    }
+  }
+
+  async startRuntimeTurn(input: StartAgentRuntimeTurn): Promise<StartedAgentRuntimeTurn> {
+    assertReadOnlyExecutionContext(input.executionContext);
+    if (
+      !isSharedReadOnlyRuntimePurpose(input.run.purpose) ||
+      agentOwnerScopeKey(input.run.owner) !== agentOwnerScopeKey(input.session.owner) ||
+      input.run.sessionId !== input.session.id ||
+      input.session.runtimeId !== this.descriptor.id
+    ) {
+      throw new Error('Codex runtime turns require one attested read-only owner/session.');
+    }
+    const { attachmentDelivery, profile } = await (async () => {
+      try {
+        assertAgentTurnAttachmentSelection(
+          input.run.attachmentSelection,
+          input.attachments
+        );
+        const support = this.currentAttachmentSupport();
+        const attachmentDelivery = prepareCodexAttachmentDelivery({
+          prompt: input.prompt,
+          sandbox: 'restricted',
+          attachments: await verifyAgentTurnAttachments(input.attachments, {
+            includeBytes: () => !support.exactFileAccess
+          }),
+          support
+        });
+        const profile = await codexReadOnlyScopeProfile({
+          sessionId: input.session.id,
+          scope: {
+            primaryCwd: input.executionContext.primaryCwd,
+            readOnlyRoots: input.executionContext.readRoots.map(
+              (root) => root.canonicalPath
+            )
+          },
+          attachmentPaths: attachmentDelivery.exactGrantPaths,
+          reasoningEffort: input.executionContext.modelSettings.reasoningEffort
+        });
+        if (profile.scopeHash !== input.executionContext.permissionProfileHash) {
+          throw new Error(
+            'Codex permission profile does not match the attested execution context.'
+          );
+        }
+        assertManagedAttachmentAccess(
+          input.executionContext.managedAttachments,
+          codexExactGrantAttachments({
+            sandbox: 'restricted',
+            attachments: input.attachments,
+            support
+          })
+        );
+        return { attachmentDelivery, profile };
+      } catch (error) {
+        throw runtimeDeliveryError(error);
+      }
+    })();
+    const settings = input.executionContext.modelSettings;
+    const readOnlyMcpConfig = await this.readOnlyMcpConfig(
+      input.executionContext.primaryCwd
+    );
+    let opened: CodexThreadTransportResult;
+    try {
+      opened = await this.openCodexThread({
+        operation: input.session.providerSessionId ? 'thread/resume' : 'thread/start',
+        threadId: input.session.providerSessionId,
+        cwd: input.executionContext.primaryCwd,
+        settings,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user',
+        config: { ...profile.config, ...readOnlyMcpConfig },
+        dynamicTools: [],
+        validateResponse: (response) => {
+          assertCodexReadOnlyModel(settings, settingsFromThreadResponse(response));
+          assertCodexReadOnlyScopeEvidence({
+            profileId: profile.profileId,
+            primaryCwd: input.executionContext.primaryCwd,
+            response: response as CodexPermissionProfileEvidence
+          });
+        }
+      });
+    } catch (error) {
+      throw runtimeDeliveryError(error);
+    }
+    const { client, serverInstanceId } = opened;
+    const threadId = opened.response.thread.id;
+    const threadSessionId = opened.response.thread.sessionId;
+    const durableSession = await this.runtimeStore.getSession(input.session.id);
     if (!durableSession) {
-      throw new AgentScopedMutationError(
+      throw new AgentRuntimeDeliveryError(
         'AMBIGUOUS',
-        `Scoped runtime session disappeared after Codex created thread ${threadId}.`
+        `Agent runtime session disappeared after Codex created thread ${threadId}.`
       );
     }
     if (durableSession.providerSessionId && durableSession.providerSessionId !== threadId) {
-      throw new Error('Codex returned a different thread for the scoped runtime session.');
+      throw new Error('Codex returned a different thread for the agent runtime session.');
     }
     if (
       durableSession.providerSessionId !== threadId ||
       durableSession.providerSessionTreeId !== threadSessionId ||
       !durableSession.materialized
     ) {
-      await this.scopedRuntimeStore.updateSession(
+      await this.runtimeStore.updateSession(
         durableSession.id,
         durableSession.recordRevision,
         {
@@ -670,63 +944,102 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           materialized: true,
           lastAttachedAt: new Date().toISOString()
         },
-        `codex-scoped-thread:${input.run.id}`
+        `codex-runtime-thread:${input.run.id}`
       );
     }
-    this.scopedRunByProviderThread.set(threadId, input.run.id);
     try {
-      const response = await client.requestMutation('turn/start', {
+      const response = await this.startCodexProviderTurn({
+        client,
+        localRunId: input.run.id,
         threadId,
-        clientUserMessageId: input.run.id,
-        input: [{ type: 'text', text: input.prompt, text_elements: [] }],
         cwd: input.executionContext.primaryCwd,
+        settings,
+        prompt: attachmentDelivery.prompt,
+        localImagePaths: attachmentDelivery.localImagePaths,
+        enforceInlineRequestSize: attachmentDelivery.hasInlineText,
         approvalPolicy: 'never',
-        approvalsReviewer: 'user',
-        model: settings.model ?? null,
-        serviceTier: settings.serviceTier ?? null,
-        effort: settings.reasoningEffort ?? null,
-        summary: 'auto',
-        personality: null,
-        outputSchema: null
+        approvalsReviewer: 'user'
       });
-      this.scopedRunByProviderTurn.set(response.turn.id, input.run.id);
+      // A protocol violation can arrive in the same stdout batch as
+      // turn/start's response. Materialize it before the shared orchestrator
+      // persists its acknowledgement so the stop cannot be overwritten as
+      // RUNNING.
+      await this.drainInbound();
+      const latest = await this.runtimeStore.getRun(input.run.id);
+      if (
+        latest &&
+        isReadOnlyViolationSource(latest.providerTerminalSource) &&
+        latest.status === 'INTERRUPTING'
+      ) {
+        let terminationFailure: unknown;
+        try {
+          await this.supervisor.terminateUnresponsive(
+            latest.terminalReason ??
+              'Codex violated the requested read-only turn before its acknowledgement was persisted.'
+          );
+        } catch (error) {
+          terminationFailure = error;
+        }
+        await this.drainInbound();
+        await this.settleRuntimeInterruptDeadline(
+          latest.id,
+          latest.providerTurnId ?? response.turn.id,
+          terminationFailure
+        );
+      }
+      const settled = await this.runtimeStore.getRun(input.run.id);
+      if (
+        settled &&
+        isReadOnlyViolationTerminalSource(settled.providerTerminalSource)
+      ) {
+        throw new AgentRuntimeDeliveryError(
+          'AMBIGUOUS',
+          settled.terminalReason ??
+            'Codex violated the requested read-only turn.'
+        );
+      }
       return {
-        serverInstanceId: server.id,
+        serverInstanceId,
         providerSessionId: threadId,
         ...(threadSessionId ? { providerSessionTreeId: threadSessionId } : {}),
         providerTurnId: response.turn.id,
+        ...(attachmentDelivery.submissions.length > 0
+          ? {
+              attachmentSubmissions: attachmentDelivery.submissions.map(
+                (submission) => ({
+                  ...submission,
+                  correlation: {
+                    kind: 'provider-turn' as const,
+                    id: response.turn.id
+                  },
+                  submittedAt: new Date().toISOString()
+                })
+              )
+            }
+          : {}),
         startedAt: response.turn.startedAt
           ? new Date(response.turn.startedAt * 1_000).toISOString()
           : new Date().toISOString()
       };
     } catch (error) {
-      if (error instanceof CodexAmbiguousMutationError) {
-        throw new AgentScopedMutationError('AMBIGUOUS', error.message, { cause: error });
-      }
-      this.scopedRunByProviderThread.delete(threadId);
-      throw new AgentScopedMutationError(
-        'NOT_DELIVERED',
-        error instanceof Error ? error.message : String(error),
-        { cause: error }
-      );
+      throw runtimeDeliveryError(error);
     }
   }
 
-  async interruptScopedTurn(input: {
+  async interruptRuntimeTurn(input: {
     session: AgentRuntimeSessionRecord;
     run: AgentRuntimeRunRecord;
   }): Promise<void> {
     if (
-      !this.scopedRuntimeStore ||
-      input.session.owner.kind !== 'DISCOURSE' ||
-      input.run.owner.kind !== 'DISCOURSE' ||
+      !isSharedReadOnlyRuntimePurpose(input.run.purpose) ||
+      agentOwnerScopeKey(input.run.owner) !== agentOwnerScopeKey(input.session.owner) ||
       input.run.sessionId !== input.session.id ||
       !input.session.providerSessionId ||
       !input.run.providerTurnId
     ) {
-      throw new AgentScopedMutationError(
+      throw new AgentRuntimeDeliveryError(
         'NOT_DELIVERED',
-        'A scoped interrupt requires one materialized discourse session and turn.'
+        'A runtime interrupt requires one materialized read-only session and turn.'
       );
     }
     const client = await this.ensureClient();
@@ -739,15 +1052,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         },
         this.interruptRequestTimeoutMs
       );
-      this.armScopedInterruptDeadline(
+      this.armRuntimeInterruptDeadline(
         input.run.id,
         input.run.providerTurnId
       );
     } catch (error) {
       if (error instanceof CodexAmbiguousMutationError) {
-        throw new AgentScopedMutationError('AMBIGUOUS', error.message, { cause: error });
+        throw new AgentRuntimeDeliveryError('AMBIGUOUS', error.message, { cause: error });
       }
-      throw new AgentScopedMutationError(
+      throw new AgentRuntimeDeliveryError(
         'NOT_DELIVERED',
         error instanceof Error ? error.message : String(error),
         { cause: error }
@@ -800,32 +1113,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       reasoningEffort: effort,
       serviceTier: input.settings.serviceTier ?? model.defaultServiceTier
     };
-    assertAttachmentSandboxSupportsDelivery(settings, input.attachments);
     return { settings, model: resolvedModel };
-  }
-
-  refinePrompt(input: RefineAgentPrompt) {
-    const activeServer = this.supervisor.currentServer;
-    const activeExecutable =
-      activeServer && ['READY', 'RUNNING', 'DEGRADED'].includes(activeServer.status)
-        ? activeServer.executable
-        : undefined;
-    return this.promptRefiner.refine({
-      requestId: input.requestId,
-      repositoryPath: input.repositoryPath,
-      input: input.input,
-      title: input.title,
-      refinementModel: input.refinementModel,
-      targetModel: input.targetModel,
-      attachments: input.attachments,
-      codexExecutable: activeExecutable ?? this.promptRefinementExecutable,
-      toolSettings: this.externalToolSettings,
-      failClosedMcpDiscovery: this.enforceBrowserDevBoundary
-    });
-  }
-
-  cancelPromptRefinement(requestId: string) {
-    return this.promptRefiner.cancel(requestId);
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -861,49 +1149,47 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     settings: AgentExecutionSettings,
     attachments: readonly AgentTurnAttachment[]
   ): Promise<AgentSessionRecord> {
-    assertAttachmentSandboxSupportsDelivery(settings, attachments);
-
-    const client = await this.ensureClient();
-    const server = this.supervisor.currentServer;
-    if (!server || client.serverInstanceId !== server.id) {
-      throw new Error('Codex App Server changed while starting an empty thread.');
-    }
-    const attachmentPaths = attachments
-      .map((attachment) => attachment.path)
-      .sort((left, right) => left.localeCompare(right));
+    await this.ensureClient();
+    const support = this.currentAttachmentSupport();
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(settings),
+      attachments,
+      support
+    });
     const config = await this.permissionProfileConfigForSession(
       session,
       settings,
-      attachmentPaths
+      grantAttachments.map((attachment) => attachment.path)
     );
     const expectedProfileId = permissionProfileIdFromConfig(config);
     const dynamicTools = await this.dynamicToolsForSession(session);
     const inboundFailureGeneration =
       this.inboundMaterializationFailureGeneration;
-    let response;
+    let opened: CodexThreadTransportResult;
     try {
-      response = await client.requestMutation('thread/start', withDynamicTools({
-        model: settings.model ?? null,
-        modelProvider: settings.modelProvider ?? null,
-        serviceTier: settings.serviceTier ?? null,
+      opened = await this.openCodexThread({
+        operation: 'thread/start',
         cwd: session.worktreePath,
+        settings,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
         config,
-        ephemeral: false
-      }, dynamicTools));
+        dynamicTools,
+        validateResponse: (response) =>
+          this.assertProviderPermissionProfileOrFence({
+            sessionId: session.id,
+            settings,
+            worktreePath: session.worktreePath,
+            expectedProfileId,
+            operation: 'thread/start',
+            providerReference: response.thread.id,
+            response
+          })
+      });
     } catch (error) {
-      throw mapMutationError('thread/start', error);
+      throw taskMutationError(error);
     }
-    await this.assertProviderPermissionProfileOrFence({
-      sessionId: session.id,
-      settings,
-      worktreePath: session.worktreePath,
-      expectedProfileId,
-      operation: 'thread/start',
-      providerReference: response.thread.id,
-      response
-    });
+    const response = opened.response;
     this.activePermissionProfiles.set(session.id, {
       providerSessionId: response.thread.id,
       profileId: expectedProfileId
@@ -914,7 +1200,13 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     );
 
     try {
-      const stored = await this.store.updateAgentSession(session.id, {
+      await this.persistAttachmentAccessContext(
+        session.id,
+        settings,
+        config,
+        grantAttachments
+      );
+      const stored = await this.persistAgentSession(session.id, {
         providerSessionId: response.thread.id,
         providerSessionTreeId: response.thread.sessionId,
         status: mapThreadStatus(response.thread.status),
@@ -930,7 +1222,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       );
       this.unmaterializedThreadAttestations.set(session.id, {
         providerSessionId: response.thread.id,
-        serverInstanceId: server.id,
+        serverInstanceId: opened.serverInstanceId,
         profileFingerprint: threadStartProfileFingerprint(settings, config),
         inboundFailureGeneration
       });
@@ -955,18 +1247,19 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       );
     }
 
+    const attachments = await this.attachmentsForStoredAccess(session.id, session.taskId);
     const response = await this.resumeSessionWithProfile(
       session,
       providerSessionId,
       session.requestedSettings,
-      []
+      attachments
     );
     const observedSettings = await this.prepareObservedSettings(
       settingsFromThreadResponse(response),
       'Resumed session observed settings'
     );
 
-    const stored = await this.store.updateAgentSession(session.id, {
+    const stored = await this.persistAgentSession(session.id, {
       providerSessionId: response.thread.id,
       providerSessionTreeId: response.thread.sessionId,
       status: mapThreadStatus(response.thread.status),
@@ -977,9 +1270,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     this.unmaterializedThreadAttestations.delete(session.id);
     await this.recordSettingsObservation(
       stored,
-      response.taskMonkiProfileOperation === 'FORK'
-        ? 'THREAD_FORK_RESPONSE'
-        : 'THREAD_RESUME_RESPONSE',
+      'THREAD_RESUME_RESPONSE',
       observedSettings
     );
     return stored;
@@ -988,7 +1279,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   async readSession(ref: AgentSessionRef): Promise<AgentSessionSnapshot> {
     const session = await this.requireSession(ref.localSessionId);
     const providerSessionId = ref.providerSessionId ?? session.providerSessionId;
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const runs = snapshot.runs
       .filter((run) => run.sessionId === session.id)
       .map((run) => ({
@@ -1012,7 +1303,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     // submitted first turn. A temporarily empty provider read must never
     // downgrade that local safety fact.
     const materialized = session.materialized || response.thread.turns.length > 0;
-    const stored = await this.store.updateAgentSession(session.id, {
+    const stored = await this.persistAgentSession(session.id, {
       status: mapThreadStatus(response.thread.status),
       materialized
     });
@@ -1025,11 +1316,32 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     };
   }
 
+  private async readOnlyMcpConfig(
+    cwd: string
+  ): Promise<Record<string, JsonValue>> {
+    const executable = this.supervisor.currentServer?.executable;
+    if (!executable) {
+      throw runtimeDeliveryError(
+        new Error('Codex MCP configuration could not be inspected for this read-only turn.')
+      );
+    }
+    try {
+      return await listDisabledCodexMcpServerThreadConfig(
+        executable,
+        cwd,
+        this.supervisorOptions.environment
+      );
+    } catch {
+      throw runtimeDeliveryError(
+        new Error('Codex MCP configuration could not be inspected for this read-only turn.')
+      );
+    }
+  }
+
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
     const attachments = input.attachments ?? [];
     let session = await this.requireSession(input.session.localSessionId);
     const settings = input.settings ?? session.requestedSettings;
-    assertAttachmentSandboxSupportsDelivery(settings, attachments);
     if (attachments.length > 0 || input.mode === 'DESIGN') {
       const selectedModel =
         this.models.find((candidate) => candidate.model === settings.model) ??
@@ -1052,7 +1364,16 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         assertModelSupportsAttachments(selectedModel, attachments);
       }
     }
-    const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
+    const run = await this.taskRuntime.getRun(input.localRunId);
+    if (!run) {
+      throw new Error(`Cannot submit missing Codex run ${input.localRunId}.`);
+    }
+    assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
+    const support = this.currentAttachmentSupport();
+    const verifiedAttachments = await verifyAgentTurnAttachments(attachments, {
+      includeBytes: () =>
+        settings.sandbox !== 'DANGER_FULL_ACCESS' && !support.exactFileAccess
+    });
     if (!session.providerSessionId) {
       session = await this.createSession({
         runtimeId: this.descriptor.id,
@@ -1066,10 +1387,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       });
     }
 
-    const attachmentDelivery = prepareAgentAttachmentDelivery({
+    const attachmentDelivery = prepareCodexAttachmentDelivery({
       prompt: input.prompt,
+      sandbox: codexAttachmentSandbox(settings),
       attachments: verifiedAttachments,
-      includeLocalImages: !session.materialized
+      support
     });
     const requiresFirstTurnFence = !session.materialized;
     let client: CodexRpcClient;
@@ -1087,7 +1409,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         session,
         session.providerSessionId,
         settings,
-        verifiedAttachments.map((attachment) => attachment.path)
+        verifiedAttachments
       );
       if (this.boundClient !== client || this.supervisor.currentServer?.id !== server.id) {
         throw new Error(
@@ -1098,7 +1420,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         settingsFromThreadResponse(profileResponse),
         'Turn permission profile observed settings'
       );
-      session = await this.store.updateAgentSession(session.id, {
+      session = await this.persistAgentSession(session.id, {
         providerSessionId: profileResponse.thread.id,
         providerSessionTreeId: profileResponse.thread.sessionId,
         requestedSettings: settings,
@@ -1107,9 +1429,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       });
       await this.recordSettingsObservation(
         session,
-        profileResponse.taskMonkiProfileOperation === 'FORK'
-          ? 'THREAD_FORK_RESPONSE'
-          : 'THREAD_RESUME_RESPONSE',
+        'THREAD_RESUME_RESPONSE',
         observedSettings,
         input.localRunId
       );
@@ -1128,7 +1448,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       firstTurnProfileFingerprint = prepared.profileFingerprint;
       firstTurnInboundFailureGeneration = prepared.inboundFailureGeneration;
     }
-    await this.store.updateRun(input.localRunId, {
+    await this.persistRun(input.localRunId, {
       serverInstanceId,
       status: 'STARTING',
       lastEventAt: new Date().toISOString()
@@ -1138,7 +1458,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       // the `turn/start` acknowledgement, this session must resume/reconcile
       // the possible rollout; it must never be mistaken for a replaceable
       // empty thread after restart or explicit recovery resolution.
-      session = await this.store.updateAgentSession(session.id, { materialized: true });
+      session = await this.persistAgentSession(session.id, { materialized: true });
 
       // Store writes above yield to already parsed App Server notifications.
       // Drain them before the mutation boundary, then synchronously prove that
@@ -1179,39 +1499,32 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         throw new Error(boundaryFailure);
       }
     }
-    let response;
+    let response: TurnStartResponse;
     try {
-      const turnStartParams: TurnStartParams & {
-        collaborationMode?: CollaborationMode;
-      } = {
+      const collaboration = await this.codexInteractiveCollaborationModeForSession(
+        session,
+        input,
+        settings
+      );
+      response = await this.startCodexProviderTurn({
+        client,
+        localRunId: input.localRunId,
         threadId: providerThreadId,
-        clientUserMessageId: input.localRunId,
-        input: [
-          { type: 'text', text: attachmentDelivery.prompt, text_elements: [] },
-          ...attachmentDelivery.localImagePaths.map((imagePath) => ({
-            type: 'localImage' as const,
-            path: imagePath
-          }))
-        ],
         cwd: session.worktreePath,
+        settings,
+        prompt: attachmentDelivery.prompt,
+        localImagePaths: attachmentDelivery.localImagePaths,
+        enforceInlineRequestSize: attachmentDelivery.hasInlineText,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        model: settings.model ?? null,
-        serviceTier: settings.serviceTier ?? null,
-        effort: settings.reasoningEffort ?? null,
-        summary: 'auto',
-        personality: null,
-        outputSchema: null,
-        ...(await this.codexInteractiveCollaborationModeForSession(
-          session,
-          input,
-          settings
-        ))
-      };
-      response = await client.requestMutation('turn/start', turnStartParams);
+        ...(collaboration
+          ? { collaborationMode: collaboration.collaborationMode }
+          : {})
+      });
     } catch (error) {
-      const mapped = mapMutationError('turn/start', error);
-      if (requiresFirstTurnFence && error instanceof CodexRpcError) {
+      const providerCause = providerMutationCause(error);
+      const mapped = taskMutationError(error);
+      if (requiresFirstTurnFence && providerCause instanceof CodexRpcError) {
         const restored = await this.restoreEmptyThreadAfterFirstTurnDidNotStart({
           localRunId: input.localRunId,
           localSessionId: session.id,
@@ -1238,16 +1551,19 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     }
 
     try {
-      await this.store.updateRun(input.localRunId, {
+      await this.persistRun(input.localRunId, {
         providerTurnId: response.turn.id,
         serverInstanceId,
         status: 'RUNNING',
-        ...(attachmentDelivery.submissionCandidates.length > 0
+        ...(attachmentDelivery.submissions.length > 0
           ? {
-              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
+              attachmentSubmissions: attachmentDelivery.submissions.map(
                 (submission) => ({
                   ...submission,
-                  providerTurnId: response.turn.id,
+                  correlation: {
+                    kind: 'provider-turn' as const,
+                    id: response.turn.id
+                  },
                   submittedAt: new Date().toISOString()
                 })
               )
@@ -1255,12 +1571,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           : {}),
         lastEventAt: new Date().toISOString()
       });
-      await this.store.updateAgentSession(session.id, {
+      await this.persistAgentSession(session.id, {
         status: 'ACTIVE',
         materialized: true,
         requestedSettings: settings,
         lastAttachedAt: new Date().toISOString()
       });
+      this.pendingRunByProviderTurn.delete(response.turn.id);
+      this.clearPendingRunForThread(providerThreadId, input.localRunId);
       this.unmaterializedThreadAttestations.delete(session.id);
     } catch (persistenceError) {
       const fenceReason =
@@ -1269,8 +1587,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       // such as attachment submission evidence. This best-effort write lets a
       // replacement App Server reconcile the acknowledged turn without ever
       // resending its prompt.
-      await this.store
-        .updateRun(input.localRunId, {
+      await this.persistRun(input.localRunId, {
           providerTurnId: response.turn.id,
           serverInstanceId,
           lastEventAt: new Date().toISOString()
@@ -1332,7 +1649,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     } catch (error) {
       throw mapMutationError('turn/steer', error);
     }
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
+    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
     if (run) {
       await this.recordRunActivity(run, 'turn/steered', {
         clientMessageId: input.clientMessageId
@@ -1357,24 +1674,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         this.interruptRequestTimeoutMs
       );
     };
-    const stopAlreadyInactiveReview = async (
-      providerTurnId: string,
-      error: Error
-    ): Promise<boolean> => {
-      if (!isNoActiveTurnToInterrupt(error)) {
-        return false;
-      }
-      const run = await this.store.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
-      if (!run || !canRetargetReviewTurn(run, session)) {
-        return false;
-      }
-      await this.recordLocalInterruption(
-        run,
-        'Codex reported no active turn to interrupt; treating the review as already stopped.'
-      );
-      await this.store.updateAgentSession(run.sessionId, { status: 'IDLE' });
-      return true;
-    };
     try {
       await interrupt(input.providerTurnId);
     } catch (error) {
@@ -1384,13 +1683,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         this.armInterruptDeadline(input.providerTurnId);
         return;
       }
-      if (await stopAlreadyInactiveReview(input.providerTurnId, mapped)) {
-        return;
-      }
       const activeTurnId = activeTurnIdFromInterruptMismatch(mapped);
       if (activeTurnId && activeTurnId !== input.providerTurnId) {
-        const run = await this.store.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
-        const activeTurnOwner = await this.store.getRunByProviderTurnId(
+        const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
+        const activeTurnOwner = await this.taskRuntime.getRunByProviderTurnId(
           this.descriptor.id,
           activeTurnId
         );
@@ -1399,7 +1695,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           ACTIVE_RUN_STATES.includes(run.status) &&
           (!activeTurnOwner || activeTurnOwner.id === run.id)
         ) {
-          const updatedRun = await this.store.updateRun(run.id, {
+          const updatedRun = await this.persistRun(run.id, {
             providerTurnId: activeTurnId,
             lastEventAt: new Date().toISOString()
           });
@@ -1416,9 +1712,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
               this.armInterruptDeadline(activeTurnId);
               return;
             }
-            if (await stopAlreadyInactiveReview(activeTurnId, retryMapped)) {
-              return;
-            }
             throw retryMapped;
           }
           this.armInterruptDeadline(activeTurnId);
@@ -1433,15 +1726,23 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   async forkSession(input: ForkAgentSession): Promise<AgentSessionRecord> {
     const source = await this.requireSession(input.sourceSession.localSessionId);
     const target = await this.requireSession(input.localSessionId);
+    const client = await this.ensureClient();
+    const attachments = input.attachments ?? [];
+    const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(input.settings),
+      attachments: verifiedAttachments,
+      support: this.currentAttachmentSupport()
+    });
     const providerSessionId =
       input.sourceSession.providerSessionId ?? source.providerSessionId;
     if (!providerSessionId) {
       throw new Error('Cannot fork a session without a provider thread id.');
     }
-    const client = await this.ensureClient();
     const config = await this.permissionProfileConfigForSession(
       target,
-      input.settings
+      input.settings,
+      grantAttachments.map((attachment) => attachment.path)
     );
     const expectedProfileId = permissionProfileIdFromConfig(config);
     const dynamicTools = await this.dynamicToolsForSession(target);
@@ -1470,6 +1771,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       providerReference: response.thread.id,
       response
     });
+    if (response.thread.id !== providerSessionId) {
+      await client
+        .requestMutation(
+          'thread/unsubscribe',
+          { threadId: providerSessionId },
+          2_000
+        )
+        .catch(() => undefined);
+    }
     this.activePermissionProfiles.set(target.id, {
       providerSessionId: response.thread.id,
       profileId: expectedProfileId
@@ -1479,7 +1789,13 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       'Forked session observed settings'
     );
     try {
-      const stored = await this.store.updateAgentSession(target.id, {
+      await this.persistAttachmentAccessContext(
+        target.id,
+        input.settings,
+        config,
+        grantAttachments
+      );
+      const stored = await this.persistAgentSession(target.id, {
         providerSessionId: response.thread.id,
         providerSessionTreeId: response.thread.sessionId,
         status: mapThreadStatus(response.thread.status),
@@ -1501,6 +1817,45 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
 
   async releaseSession(ref: AgentSessionRef): Promise<void> {
     await this.drainInbound();
+    const runtimeSession = await this.runtimeStore.getSession(ref.localSessionId);
+    if (
+      runtimeSession &&
+      (await this.isSharedReadOnlyRuntimeSession(runtimeSession))
+    ) {
+      if (
+        ref.providerSessionId &&
+        runtimeSession.providerSessionId &&
+        ref.providerSessionId !== runtimeSession.providerSessionId
+      ) {
+        throw new Error('Codex session release does not match the stored provider thread.');
+      }
+      const activeRun = await this.runtimeStore.getActiveRunForSession(runtimeSession.id);
+      if (activeRun) {
+        throw new Error(
+          `Cannot release Codex session ${runtimeSession.id} while run ${activeRun.id} is ${activeRun.status}.`
+        );
+      }
+      const providerSessionId =
+        ref.providerSessionId ?? runtimeSession.providerSessionId;
+      const client = this.supervisor.currentClient;
+      if (providerSessionId && client) {
+        await client.requestMutation('thread/unsubscribe', {
+          threadId: providerSessionId
+        });
+      }
+      if (providerSessionId && runtimeSession.status !== 'NOT_LOADED') {
+        await this.runtimeStore.updateSession(
+          runtimeSession.id,
+          runtimeSession.recordRevision,
+          { status: 'NOT_LOADED' },
+          `codex-runtime-release:${runtimeSession.id}`
+        );
+      }
+      this.activePermissionProfiles.delete(runtimeSession.id);
+      this.recoveryRunBySession.delete(runtimeSession.id);
+      this.unmaterializedThreadAttestations.delete(runtimeSession.id);
+      return;
+    }
     const session = await this.requireSession(ref.localSessionId);
     if (
       ref.providerSessionId &&
@@ -1509,7 +1864,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     ) {
       throw new Error('Codex session release does not match the stored provider thread.');
     }
-    const activeRun = (await this.store.snapshot()).runs.find(
+    const activeRun = (await this.taskRuntime.snapshot()).runs.find(
       (run) =>
         run.sessionId === session.id &&
         ACTIVE_RUN_STATES.includes(run.status)
@@ -1527,7 +1882,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       });
     }
     if (providerSessionId) {
-      await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+      await this.persistAgentSession(session.id, { status: 'NOT_LOADED' });
     }
     this.activePermissionProfiles.delete(session.id);
     this.recoveryRunBySession.delete(session.id);
@@ -1535,7 +1890,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }
 
   async releaseTask(taskId: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const sessions = snapshot.agentSessions.filter(
       (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
     );
@@ -1547,244 +1902,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     }
   }
 
-  async deleteDesignTaskThreads(taskId: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
-    const task = snapshot.tasks.find(
-      (candidate) => candidate.id === taskId && candidate.kind === 'DESIGN'
-    );
-    if (!task) throw new Error('Design not found for Codex thread cleanup.');
-    const sessions = snapshot.agentSessions.filter(
-      (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
-    );
-    if (
-      snapshot.runs.some(
-        (run) => run.taskId === taskId && ACTIVE_RUN_STATES.includes(run.status)
-      )
-    ) {
-      throw new Error('Stop the active Design Run before deleting its Codex threads.');
-    }
-    const treeIds = new Set(
-      sessions.flatMap((session) =>
-        session.providerSessionTreeId ? [session.providerSessionTreeId] : []
-      )
-    );
-    const explicitIds = new Set(
-      sessions.flatMap((session) =>
-        session.providerSessionId ? [session.providerSessionId] : []
-      )
-    );
-    if (treeIds.size === 0 && explicitIds.size === 0) {
-      await this.releaseTask(taskId);
-      return;
-    }
-    const ownedWorktreePaths = new Set(
-      await Promise.all(
-        snapshot.worktrees
-          .filter((worktree) => worktree.taskId === taskId)
-          .map((worktree) => canonicalPath(worktree.worktreePath))
-      )
-    );
-    const client = await this.ensureClient();
-    const listOwned = async (): Promise<Thread[]> => {
-      const all = await listAllCodexThreads(client);
-      const selected = all.filter(
-        (thread) => treeIds.has(thread.sessionId) || explicitIds.has(thread.id)
-      );
-      const canonicalThreadPaths = new Map(
-        await Promise.all(
-          selected.map(async (thread) => [thread.id, await canonicalPath(thread.cwd)] as const)
-        )
-      );
-      for (const treeId of treeIds) {
-        const tree = selected.filter((thread) => thread.sessionId === treeId);
-        if (
-          tree.length > 0 &&
-          !tree.some(
-            (thread) =>
-              explicitIds.has(thread.id) &&
-              ownedWorktreePaths.has(canonicalThreadPaths.get(thread.id)!)
-          )
-        ) {
-          throw new Error('Codex thread tree does not match the Design worktree.');
-        }
-      }
-      if (
-        selected.some(
-          (thread) =>
-            !treeIds.has(thread.sessionId) &&
-            !ownedWorktreePaths.has(canonicalThreadPaths.get(thread.id)!)
-        )
-      ) {
-        throw new Error('Codex thread does not match the Design worktree.');
-      }
-      return selected;
-    };
-    let owned = await listOwned();
-    const byId = new Map(owned.map((thread) => [thread.id, thread]));
-    owned = owned.sort(
-      (left, right) => threadDepth(right, byId) - threadDepth(left, byId)
-    );
-    for (const thread of owned) {
-      try {
-        await client.requestMutation('thread/delete', { threadId: thread.id });
-      } catch (error) {
-        const remaining = await listOwned();
-        if (remaining.some((candidate) => candidate.id === thread.id)) throw error;
-      }
-    }
-    for (const session of sessions) {
-      this.activePermissionProfiles.delete(session.id);
-      this.recoveryRunBySession.delete(session.id);
-      this.unmaterializedThreadAttestations.delete(session.id);
-    }
-  }
-
-  deleteTaskProviderHistory(taskId: string): Promise<void> {
-    return this.deleteDesignTaskThreads(taskId);
-  }
-
-  async startReview(input: StartAgentReview): Promise<AgentTurn> {
-    const attachments = input.attachments ?? [];
-    const source = await this.requireSession(input.sourceSession.localSessionId);
-    const reviewSession = await this.requireSession(input.reviewSessionId);
-    const providerSessionId =
-      input.sourceSession.providerSessionId ?? source.providerSessionId;
-    if (!providerSessionId) {
-      throw new Error('Cannot review a session without a provider thread id.');
-    }
-    const client = await this.ensureClient();
-    const server = this.supervisor.currentServer;
-    if (!server) {
-      throw new Error('Codex App Server is not ready to start a review.');
-    }
-    await this.store.updateRun(input.localRunId, {
-      serverInstanceId: server.id,
-      status: 'STARTING',
-      lastEventAt: new Date().toISOString()
-    });
-    const settings = reviewSession.requestedSettings;
-    assertAttachmentSandboxSupportsDelivery(settings, attachments);
-    if (attachments.length > 0) {
-      const selectedModel =
-        this.models.find((candidate) => candidate.model === settings.model) ??
-        this.models.find((candidate) => candidate.id === settings.model) ??
-        this.models.find((candidate) => candidate.isDefault);
-      if (!selectedModel) {
-        throw new Error('Codex did not report an available model for attachment delivery.');
-      }
-      assertModelSupportsAttachments(selectedModel, attachments);
-    }
-    const attachmentDelivery = prepareAgentAttachmentDelivery({
-      prompt: AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
-      attachments: await verifyAgentTurnAttachments(attachments),
-      includeLocalImages: false
-    });
-    const config = await this.permissionProfileConfigForSession(
-      reviewSession,
-      settings,
-      attachmentDelivery.attachments.map((attachment) => attachment.path)
-    );
-    const expectedProfileId = permissionProfileIdFromConfig(config);
-    let reviewBase;
-    try {
-      reviewBase = await client.requestMutation('thread/fork', withDynamicTools({
-        threadId: providerSessionId,
-        model: settings.model ?? null,
-        modelProvider: settings.modelProvider ?? null,
-        serviceTier: settings.serviceTier ?? null,
-        cwd: reviewSession.worktreePath,
-        approvalPolicy: toApprovalPolicy(settings),
-        approvalsReviewer: toApprovalsReviewer(settings),
-        config,
-        developerInstructions: attachmentDelivery.prompt,
-        ephemeral: false
-      }, []));
-    } catch (error) {
-      throw mapMutationError('thread/fork', error);
-    }
-    await this.assertProviderPermissionProfileOrFence({
-      sessionId: reviewSession.id,
-      settings,
-      worktreePath: reviewSession.worktreePath,
-      expectedProfileId,
-      operation: 'thread/fork',
-      providerReference: reviewBase.thread.id,
-      response: reviewBase
-    });
-    this.activePermissionProfiles.set(reviewSession.id, {
-      providerSessionId: reviewBase.thread.id,
-      profileId: expectedProfileId
-    });
-    const observedSettings = await this.prepareObservedSettings(
-      settingsFromThreadResponse(reviewBase),
-      'Review fork observed settings'
-    );
-    let storedReviewBase: AgentSessionRecord;
-    try {
-      storedReviewBase = await this.store.updateAgentSession(reviewSession.id, {
-        providerSessionId: reviewBase.thread.id,
-        providerSessionTreeId: reviewBase.thread.sessionId,
-        status: mapThreadStatus(reviewBase.thread.status),
-        materialized: true,
-        requestedSettings: settings,
-        observedSettings,
-        lastAttachedAt: new Date().toISOString()
-      });
-      await this.recordSettingsObservation(
-        storedReviewBase,
-        'THREAD_FORK_RESPONSE',
-        observedSettings
-      );
-    } catch {
-      throw postAcknowledgementPersistenceError(
-        'thread/fork',
-        reviewBase.thread.id
-      );
-    }
-    let response;
-    try {
-      response = await client.requestMutation('review/start', {
-        threadId: reviewBase.thread.id,
-        target: toReviewTarget(input.target),
-        delivery: 'inline'
-      });
-    } catch (error) {
-      throw mapMutationError('review/start', error);
-    }
-    try {
-      await this.store.updateAgentSession(reviewSession.id, {
-        providerSessionId: response.reviewThreadId,
-        providerSessionTreeId: response.reviewThreadId,
-        status: 'ACTIVE',
-        materialized: true,
-        lastAttachedAt: new Date().toISOString()
-      });
-      await this.store.updateRun(input.localRunId, {
-        providerTurnId: response.turn.id,
-        serverInstanceId: server.id,
-        status: 'RUNNING',
-        ...(attachmentDelivery.submissionCandidates.length > 0
-          ? {
-              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
-                (submission) => ({
-                  ...submission,
-                  providerTurnId: response.turn.id,
-                  submittedAt: new Date().toISOString()
-                })
-              )
-            }
-          : {}),
-        lastEventAt: new Date().toISOString()
-      });
-    } catch {
-      throw postAcknowledgementPersistenceError('review/start', response.turn.id);
-    }
-    return {
-      localRunId: input.localRunId,
-      providerTurnId: response.turn.id
-    };
-  }
-
   async syncGoal(input: SyncAgentGoal): Promise<AgentGoalSnapshotRecord> {
     const session = await this.requireSession(input.session.localSessionId);
     const providerSessionId =
@@ -1792,7 +1909,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (!providerSessionId || !session.materialized) {
       throw new Error('The provider thread must be materialized before goal sync.');
     }
-    const latest = await this.store.getLatestAgentGoalSnapshot(session.id);
+    const latest = await this.taskRuntime.getLatestAgentGoalSnapshot(session.id);
     const taskGoalHash = hashGoal(input.authoritativeGoal);
     if (
       !input.force &&
@@ -1818,7 +1935,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       return stored;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      const stored = await this.store.recordAgentGoalSnapshot({
+      const stored = await this.persistGoalSnapshot({
         taskId: session.taskId,
         iterationId: session.iterationId,
         sessionId: session.id,
@@ -1862,7 +1979,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         interaction.providerRequestId,
         mapCodexInteractionResponse(decision),
         async (reference) => {
-          await this.store.transitionInteractionRequest(
+          await this.persistInteractionTransition(
             interaction.id,
             'RESPONDING',
             {
@@ -1894,7 +2011,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (claimed.status !== 'RECOVERY_REQUIRED') {
       return claimed.status === 'RUNNING' ? claimed : undefined;
     }
-    const recovered = await this.store.updateRun(claimed.id, {
+    const recovered = await this.persistRun(claimed.id, {
       status: 'RUNNING',
       recoveryState: 'RECOVERED',
       serverInstanceId,
@@ -1906,7 +2023,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       'RECOVERED',
       false
     );
-    return (await this.store.getRun(recovered.id)) ?? recovered;
+    return (await this.taskRuntime.getRun(recovered.id)) ?? recovered;
   }
 
   private async waitForRecoveredProviderTurn(
@@ -1915,7 +2032,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   ): Promise<RunRecord | undefined> {
     const deadline = Date.now() + RECOVERY_CONTINUATION_WAIT_MS;
     do {
-      const current = await this.store.getRun(runId);
+      const current = await this.taskRuntime.getRun(runId);
       if (
         current?.providerTurnId &&
         current.providerTurnId !== previousProviderTurnId &&
@@ -1933,7 +2050,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     targetRunIds?: ReadonlySet<string>
   ): Promise<AgentReconciliationResult> {
     const runs = (
-      await this.store.getRunsRequiringRecovery({
+      await this.taskRuntime.getRunsRequiringRecovery({
         includeQueued: includePersistedQueuedRuns,
         runtimeId: this.descriptor.id
       })
@@ -1946,7 +2063,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
 
     const client = await this.ensureClient();
     for (const run of runs) {
-      const session = await this.store.getAgentSession(run.sessionId);
+      const session = await this.taskRuntime.getAgentSession(run.sessionId);
       if (!session?.providerSessionId) {
         await this.recordReconciliation(run, 'LOST', 'UNRECOVERABLE', true);
         recoveryRequiredSessionIds.add(run.sessionId);
@@ -1968,20 +2085,21 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       let retainRecoveryClaim = false;
       try {
         const attachments = toAgentTurnAttachments(
-          await this.store.verifyRunAttachments(run.id, run.taskId)
+          await this.taskStore.verifyRunAttachments(run.id, run.taskId)
         );
+        assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
         const response = await this.resumeSessionWithProfile(
           session,
           session.providerSessionId,
           session.requestedSettings,
-          attachments.map((attachment) => attachment.path),
+          attachments,
           { allowProfileFork: false }
         );
         const observedSettings = await this.prepareObservedSettings(
           settingsFromThreadResponse(response),
           'Recovery resume observed settings'
         );
-        await this.store.updateAgentSession(session.id, {
+        await this.persistAgentSession(session.id, {
           status: mapThreadStatus(response.thread.status),
           materialized: true,
           observedSettings,
@@ -2150,14 +2268,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       } else {
         let ownershipEnded = !shutdownFailure || this.supervisor.currentClient === undefined;
         if (!ownershipEnded) {
-          const storedServer = await this.store.getAgentServer(serverInstanceId);
+          const storedServer = await this.providerRuntime.getAgentServer(serverInstanceId);
           ownershipEnded =
             storedServer !== undefined &&
             ['EXITED', 'FAILED', 'LOST'].includes(storedServer.status);
         }
         if (ownershipEnded) {
           const settlement = this.inboundQueue.then(() =>
-            this.handleRuntimeLoss(serverInstanceId, {
+            this.handleCanonicalServerLoss(serverInstanceId, {
               reason: 'Codex App Server shut down.',
               restarting: false,
               confirmedStopped: !this.supervisor.processTreeRunning
@@ -2217,7 +2335,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     restart: boolean;
   }): Promise<void> {
     this.externalToolSettings = normalizeCodexExternalToolSettings(input.toolSettings);
-    this.promptRefinementExecutable = input.executable;
     this.supervisorOptions.executable = input.executable;
     this.supervisorOptions.toolSettings = this.externalToolSettings;
     if (!this.initialized) {
@@ -2267,7 +2384,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (!this.runtimeConfigRestartPending) {
       return false;
     }
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     if (
       snapshot.runs.some(
         (run) =>
@@ -2476,21 +2593,21 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       if (!run) {
         return;
       }
-      const session = await this.store.getAgentSession(run.sessionId);
+      const session = await this.taskRuntime.getAgentSession(run.sessionId);
       activeTarget = {
         threadId: target.threadId ?? session?.providerSessionId,
         providerTurnId: target.providerTurnId ?? run.providerTurnId
       };
       this.activeInboundRecoveryTarget = activeTarget;
       if (['COMPLETED', 'FAILED', 'INTERRUPTED'].includes(run.status)) {
-        // `FileTaskStore` updates its immutable in-memory projection before the
-        // atomic snapshot publish. If that publish failed, a reconciliation
-        // event republishes the already-terminal provider fact durably.
+        // The runtime store updates its in-memory state before the atomic
+        // snapshot publish. A reconciliation event republishes an already
+        // terminal provider fact if that publish failed.
         await this.recordReconciliation(run, run.status, 'RECOVERED', true);
       } else {
         await this.reconcileRuns(false, new Set([run.id]));
       }
-      const reconciled = await this.store.getRun(run.id);
+      const reconciled = await this.taskRuntime.getRun(run.id);
       if (reconciled && SUBMITTED_RUN_STATES.includes(reconciled.status)) {
         throw new Error(
           `Codex inbound recovery left run ${run.id} in submitted state ${reconciled.status}.`
@@ -2513,20 +2630,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     target: InboundNotificationRecoveryTarget
   ): Promise<RunRecord | undefined> {
     let run = target.providerTurnId
-      ? await this.store.getRunByProviderTurnId(
+      ? await this.taskRuntime.getRunByProviderTurnId(
           this.descriptor.id,
           target.providerTurnId
         )
       : undefined;
     if (!run && target.threadId) {
-      const session = await this.store.getAgentSessionByProviderId(
+      const session = await this.taskRuntime.getAgentSessionByProviderId(
         this.descriptor.id,
         target.threadId
       );
       if (!session) {
         return undefined;
       }
-      const candidates = (await this.store.snapshot()).runs.filter(
+      const candidates = (await this.taskRuntime.snapshot()).runs.filter(
         (candidate) =>
           candidate.runtimeId === this.descriptor.id &&
           candidate.sessionId === session.id &&
@@ -2540,7 +2657,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       }
       run = candidates[0];
       if (run && target.providerTurnId && !run.providerTurnId) {
-        run = await this.store.updateRun(run.id, {
+        run = await this.persistRun(run.id, {
           providerTurnId: target.providerTurnId,
           serverInstanceId: this.supervisor.currentServer?.id,
           lastEventAt: new Date().toISOString()
@@ -2575,7 +2692,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       fenceFailures.push(`process fence: ${errorMessage(error)}`);
     }
     try {
-      await this.handleRuntimeLoss(serverInstanceId, {
+      await this.handleCanonicalServerLoss(serverInstanceId, {
         reason: 'Codex App Server was fenced after an inbound event could not be materialized.',
         restarting: false,
         confirmedStopped: !this.supervisor.processTreeRunning
@@ -2758,7 +2875,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       models.push(...response.data);
       cursor = response.nextCursor;
     } while (cursor);
-    this.models = models.map(mapModel);
+    this.models = models.map((model) =>
+      mapModel(model, this.supervisor.currentServer?.runtimeVersion)
+    );
   }
 
   private async handleNotification(
@@ -2813,7 +2932,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       case 'item/reasoning/summaryTextDelta':
       case 'item/plan/delta':
         if (
-          await this.emitScopedDelta(
+          await this.emitRuntimeDelta(
             notification.params.turnId,
             notification.params.delta
           )
@@ -2872,6 +2991,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         return;
       case 'model/rerouted':
         await this.handleModelReroute(
+          notification.params.threadId,
           notification.params.turnId,
           notification.params.fromModel,
           notification.params.toModel,
@@ -2914,12 +3034,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         await this.handleThreadStatus(notification.params.threadId, notification.params.status);
         return;
       case 'thread/closed': {
-        const session = await this.store.getAgentSessionByProviderId(this.descriptor.id,
-          notification.params.threadId
-        );
-        if (session) {
-          await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
-        }
+        await this.handleThreadClosed(notification.params.threadId);
         return;
       }
       case 'serverRequest/resolved':
@@ -2934,7 +3049,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     thread: Thread,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const existing = await this.store.getAgentSessionByProviderId(this.descriptor.id, thread.id);
+    const existing = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, thread.id);
     const sourceMetadata = getSubagentThreadMetadata(thread);
     const providerParentSessionId =
       thread.parentThreadId ??
@@ -2942,12 +3057,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       (sourceMetadata.isSpawnedSubagent ? thread.forkedFromId : null);
 
     if (providerParentSessionId) {
-      const parent = await this.store.getAgentSessionByProviderId(this.descriptor.id,
+      const parent = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id,
         providerParentSessionId
       );
       if (parent) {
-        const parentRun = await this.store.getActiveRunForSession(parent.id);
-        const observed = await this.store.observeSubagent({
+        const parentRun = await this.taskRuntime.getActiveRunForSession(parent.id);
+        const observed = await this.persistObservedSubagent({
           parentSessionId: parent.id,
           parentRunId: parentRun?.id,
           providerChildSessionId: thread.id,
@@ -2976,7 +3091,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           materialized: true,
           rawMessage: raw
         });
-        await this.store.updateAgentSession(observed.session.id, {
+        await this.persistAgentSession(observed.session.id, {
           status: mapThreadStatus(thread.status),
           materialized: true,
           lastAttachedAt: new Date().toISOString()
@@ -2990,7 +3105,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         existing.role === 'SUBAGENT' &&
         existing.relationshipState !== 'RESOLVED' &&
         existing.relationshipState !== 'CONTRADICTORY';
-      await this.store.updateAgentSession(existing.id, {
+      await this.persistAgentSession(existing.id, {
         providerSessionTreeId: thread.sessionId,
         providerParentSessionId:
           thread.parentThreadId ?? sourceMetadata.parentThreadId,
@@ -3033,7 +3148,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   ): Promise<void> {
     if (item.type === 'collabAgentToolCall') {
       const parent =
-        (await this.store.getAgentSessionByProviderId(this.descriptor.id, item.senderThreadId)) ??
+        (await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, item.senderThreadId)) ??
         (item.senderThreadId === session.providerSessionId ? session : undefined);
       if (!parent) {
         return;
@@ -3043,7 +3158,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         reasoningEffort: item.reasoningEffort ?? undefined
       });
       for (const childThreadId of new Set(item.receiverThreadIds)) {
-        await this.store.observeSubagent({
+        await this.persistObservedSubagent({
           parentSessionId: parent.id,
           parentRunId: run.id,
           providerChildSessionId: childThreadId,
@@ -3061,7 +3176,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         if (!state) {
           continue;
         }
-        await this.store.observeSubagent({
+        await this.persistObservedSubagent({
           parentSessionId: parent.id,
           parentRunId: run.id,
           providerChildSessionId: childThreadId,
@@ -3074,7 +3189,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       return;
     }
     if (item.type === 'subAgentActivity') {
-      await this.store.observeSubagent({
+      await this.persistObservedSubagent({
         parentSessionId: session.id,
         parentRunId: run.id,
         providerChildSessionId: item.agentThreadId,
@@ -3093,33 +3208,38 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     session: AgentSessionRecord,
     providerTurnId: string
   ): Promise<RunRecord | undefined> {
-    const existing = await this.store.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
+    const existing = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
     if (existing) {
       return existing;
     }
+    const acknowledgedRunId = this.pendingRunByProviderTurn.get(providerTurnId);
+    if (acknowledgedRunId) {
+      const acknowledgedRun = await this.taskRuntime.getRun(acknowledgedRunId);
+      if (
+        acknowledgedRun?.runtimeId === this.descriptor.id &&
+        acknowledgedRun.sessionId === session.id &&
+        acknowledgedRun.status === 'STARTING'
+      ) {
+        return acknowledgedRun;
+      }
+    }
     const recoveringRunId = this.recoveryRunBySession.get(session.id);
     if (recoveringRunId) {
-      const recoveringRun = await this.store.getRun(recoveringRunId);
+      const recoveringRun = await this.taskRuntime.getRun(recoveringRunId);
       if (
         recoveringRun?.runtimeId === this.descriptor.id &&
         recoveringRun.sessionId === session.id &&
         recoveringRun.status === 'RECOVERY_REQUIRED'
       ) {
-        return this.store.updateRun(recoveringRun.id, {
+        return this.persistRun(recoveringRun.id, {
           providerTurnId,
           serverInstanceId: this.supervisor.currentServer?.id,
           lastEventAt: new Date().toISOString()
         });
       }
     }
-    if (session.role === 'REVIEW') {
-      const activeReviewRun = await this.store.getActiveRunForSession(session.id);
-      if (activeReviewRun?.mode === 'REVIEW') {
-        return activeReviewRun;
-      }
-    }
     if (session.role !== 'SUBAGENT') {
-      const snapshot = await this.store.snapshot();
+      const snapshot = await this.taskRuntime.snapshot();
       const uncorrelated = snapshot.runs.filter(
         (run) =>
           run.sessionId === session.id &&
@@ -3128,7 +3248,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           !run.providerTurnId
       );
       if (uncorrelated.length === 1) {
-        return this.store.updateRun(uncorrelated[0]!.id, {
+        return this.persistRun(uncorrelated[0]!.id, {
           providerTurnId,
           serverInstanceId: this.supervisor.currentServer?.id,
           lastEventAt: new Date().toISOString()
@@ -3142,7 +3262,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (!server) {
       return undefined;
     }
-    return this.store.createObservedSubagentRun({
+    return this.persistObservedSubagentRun({
       session,
       providerTurnId,
       serverInstanceId: server.id,
@@ -3150,6 +3270,74 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       prompt: session.delegatedPrompt,
       requestedSettings: session.requestedSettings
     });
+  }
+
+  /**
+   * Resolve provider identity once from the canonical runtime store. The
+   * returned branch contains only the owner-specific projection needed to
+   * publish Task domain events or a shared read-only runtime event.
+   */
+  private async resolveProviderTurnTarget(
+    providerTurnId: string,
+    providerThreadId?: string
+  ): Promise<CodexProviderTurnTarget | undefined> {
+    let runtimeRun = providerTurnId
+      ? await this.runtimeStore.getRunByProviderTurnId(
+          providerTurnId,
+          this.descriptor.id
+        )
+      : undefined;
+    if (!runtimeRun && providerTurnId) {
+      const pendingRunId = this.pendingRunByProviderTurn.get(providerTurnId);
+      if (pendingRunId) runtimeRun = await this.runtimeStore.getRun(pendingRunId);
+    }
+    if (!runtimeRun && providerThreadId) {
+      const pendingRunId = this.pendingRunByProviderThread.get(providerThreadId);
+      if (pendingRunId) {
+        const pendingRun = await this.runtimeStore.getRun(pendingRunId);
+        if (
+          pendingRun &&
+          (!providerTurnId ||
+            !pendingRun.providerTurnId ||
+            pendingRun.providerTurnId === providerTurnId)
+        ) {
+          runtimeRun = pendingRun;
+        }
+      }
+    }
+
+    let runtimeSession = runtimeRun
+      ? await this.runtimeStore.getSession(runtimeRun.sessionId)
+      : providerThreadId
+        ? await this.runtimeStore.getSessionByProviderId(
+            providerThreadId,
+            this.descriptor.id
+          )
+        : undefined;
+    if (!runtimeSession || runtimeSession.runtimeId !== this.descriptor.id) {
+      return undefined;
+    }
+
+    if (runtimeRun && isSharedReadOnlyRuntimePurpose(runtimeRun.purpose)) {
+      if (
+        agentOwnerScopeKey(runtimeRun.owner) !==
+        agentOwnerScopeKey(runtimeSession.owner)
+      ) {
+        return undefined;
+      }
+      return { kind: 'RUNTIME', session: runtimeSession, run: runtimeRun };
+    }
+
+    const taskSession = await this.taskRuntime.getAgentSession(runtimeSession.id);
+    if (!taskSession) return undefined;
+    let taskRun = runtimeRun
+      ? await this.taskRuntime.getRun(runtimeRun.id)
+      : undefined;
+    if (!taskRun && providerTurnId) {
+      taskRun = await this.ensureRunForSession(taskSession, providerTurnId);
+    }
+    if (!taskRun) return undefined;
+    return { kind: 'TASK', session: taskSession, run: taskRun };
   }
 
   /**
@@ -3161,14 +3349,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     run: RunRecord,
     serverInstanceId: string
   ): Promise<RunRecord | undefined> {
-    const current = await this.store.getRun(run.id);
+    const current = await this.taskRuntime.getRun(run.id);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) {
       return undefined;
     }
     if (current.serverInstanceId === serverInstanceId) {
       return current;
     }
-    return this.store.updateRun(current.id, {
+    return this.persistRun(current.id, {
       serverInstanceId,
       lastEventAt: new Date().toISOString()
     });
@@ -3228,7 +3416,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     ) {
       return;
     }
-    if (await this.handleScopedServerRequest(client, request, raw)) return;
+    if (await this.handleRuntimeServerRequest(client, request, raw)) return;
     if (await this.handleDesignBrowserToolRequest(client, request, raw)) return;
     const mapped = mapCodexInteractionRequest(request);
     if (!mapped) {
@@ -3251,12 +3439,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       });
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, params.threadId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, params.threadId);
     let run =
       session && params.turnId
         ? await this.ensureRunForSession(session, params.turnId)
         : session
-          ? await this.store.getActiveRunForSession(session.id)
+          ? await this.taskRuntime.getActiveRunForSession(session.id)
           : undefined;
     if (run) {
       await this.waitForRunReconciliation(run.id);
@@ -3285,20 +3473,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     }
 
     const item = params.itemId
-      ? await this.store.getAgentItemByProviderId(run.id, params.itemId)
+      ? await this.taskRuntime.getAgentItemByProviderId(run.id, params.itemId)
       : undefined;
-    const providerInteractionRequest = withProviderItemContext(
-      mapped.type,
-      this.redactProviderValue(mapped.request),
-      item?.payload
-    );
-    const interactionRequest =
+    const mappedRequest =
       mapped.type === 'PERMISSION_APPROVAL'
         ? redactExternalPermissionPaths(
-            providerInteractionRequest as AgentPermissionApprovalRequest,
+            mapped.request as AgentPermissionApprovalRequest,
             session.worktreePath
           )
-        : providerInteractionRequest;
+        : mapped.request;
+    const interactionRequest = withProviderItemContext(
+      mapped.type,
+      this.redactProviderValue(mappedRequest),
+      item?.payload
+    );
     const policy = buildInteractionPolicy({
       type: mapped.type,
       request: interactionRequest,
@@ -3306,7 +3494,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       run,
       providerItemPayload: item?.payload
     });
-    const interaction = await this.store.createInteractionRequest({
+    const interaction = await this.persistInteraction({
       runtimeId: this.descriptor.id,
       serverInstanceId: server.id,
       providerRequestId: request.id,
@@ -3348,19 +3536,25 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (
       request.method !== 'item/tool/call' ||
       request.params.namespace !== null ||
-      request.params.tool !== DESIGN_BROWSER_TOOL_NAME
+      request.params.tool !== INSPECT_DESIGN_TOOL_NAME
     ) {
       return false;
     }
     const params = request.params;
-    const session = await this.store.getAgentSessionByProviderId(
+    const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       params.threadId
     );
-    const run = await this.store.getRunByProviderTurnId(
+    const persistedRun = await this.taskRuntime.getRunByProviderTurnId(
       this.descriptor.id,
       params.turnId
     );
+    const pendingRunId = this.pendingRunByProviderTurn.get(params.turnId);
+    const run = persistedRun ?? (pendingRunId
+      ? await this.taskRuntime.getRun(pendingRunId)
+      : undefined);
+    const acknowledgedStartPending =
+      pendingRunId !== undefined && pendingRunId === run?.id;
     const server = this.supervisor.currentServer;
     if (
       !this.designBrowserToolHandler ||
@@ -3368,10 +3562,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       !run ||
       !server ||
       run.mode !== 'DESIGN' ||
-      run.status !== 'RUNNING' ||
+      (run.status !== 'RUNNING' &&
+        !(acknowledgedStartPending && run.status === 'STARTING')) ||
       run.sessionId !== session.id ||
       run.worktreeId !== session.worktreeId ||
-      run.providerTurnId !== params.turnId ||
+      (!acknowledgedStartPending && run.providerTurnId !== params.turnId) ||
       session.providerSessionId !== params.threadId ||
       session.role !== 'PRIMARY' ||
       client.serverInstanceId !== server.id ||
@@ -3382,8 +3577,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       ));
       return true;
     }
-    const task = await this.store.getTask(run.taskId);
-    const worktree = await this.store.getWorktree(run.worktreeId);
+    const task = await this.taskStore.getTask(run.taskId);
+    const worktree = await this.taskStore.getWorktree(run.worktreeId);
     if (
       task?.kind !== 'DESIGN' ||
       task.currentWorktreeId !== run.worktreeId ||
@@ -3395,7 +3590,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       ));
       return true;
     }
-    const existing = await this.store.getAgentItemByProviderId(run.id, params.callId);
+    const existing = await this.taskRuntime.getAgentItemByProviderId(run.id, params.callId);
     if (
       hasDesignToolAdmission(existing?.payload) ||
       (existing && ['COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED'].includes(existing.status))
@@ -3421,7 +3616,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       );
       return true;
     }
-    await this.store.upsertAgentItem({
+    await this.persistAgentItem({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -3472,12 +3667,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       });
       response = successfulDesignToolResponse(result);
     } catch (error) {
-      response = failedDesignToolResponse(safeDesignToolFailure(error));
+      response = failedDesignToolResponse(safeDesignClientToolFailure(error));
     }
     try {
       if (!this.isCurrentClientEvent(input.client, input.raw)) return;
       const responseRaw = await input.client.respond(input.requestId, response);
-      await this.store.upsertAgentItem({
+      await this.persistAgentItem({
         taskId: input.run.taskId,
         iterationId: input.run.iterationId,
         runId: input.run.id,
@@ -3489,7 +3684,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           {
             callId: input.callId,
             namespace: null,
-            tool: DESIGN_BROWSER_TOOL_NAME,
+            tool: INSPECT_DESIGN_TOOL_NAME,
             arguments: input.operation
           },
           input.operation,
@@ -3527,14 +3722,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     ) {
       return;
     }
-    if (await this.handleScopedServerRequest(client, request, raw)) return;
+    if (await this.handleRuntimeServerRequest(client, request, raw)) return;
     await client.respondError(request.id, {
       code: -32601,
       message: `Task Monki does not support server request ${request.method}.`
     });
   }
 
-  private async handleScopedServerRequest(
+  private async handleRuntimeServerRequest(
     client: CodexRpcClient,
     request: Pick<ServerRequest, 'id' | 'method' | 'params'> | UnsupportedCodexServerRequest,
     raw: AgentProtocolMessageReference
@@ -3542,58 +3737,224 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     const params = request.params as { threadId?: unknown; turnId?: unknown };
     const threadId = typeof params.threadId === 'string' ? params.threadId : undefined;
     if (!threadId) return false;
-    const session = await this.findScopedSessionByProviderId(threadId);
+    const session = await this.findRuntimeSessionByProviderId(threadId);
     if (!session) return false;
     const turnId = typeof params.turnId === 'string' ? params.turnId : '';
-    const run = await this.findScopedRun(turnId, threadId);
-    const reason =
-      `Codex requested ${request.method} during an offline read-only Discourse turn.`;
+    const run = await this.findRuntimeRun(turnId, threadId);
+    const reason = `Codex requested ${utf8Prefix(
+      redactCredentialText(request.method, this.sensitiveValues),
+      512
+    )} during a read-only turn.`;
     await client.respondError(request.id, {
       code: -32000,
-      message: 'Discourse turns cannot request approvals, tools, or user input.'
+      message: 'Read-only turns cannot request approvals, tools, or user input.'
     });
-    if (!run || !this.scopedRuntimeStore) return true;
-    const artifact = await this.scopedRuntimeStore.getArtifact(run.diagnosticArtifactId);
-    if (artifact) {
-      const existing = await this.scopedRuntimeStore.readArtifact(artifact.id);
-      await this.scopedRuntimeStore.updateArtifact({
-        artifactId: artifact.id,
-        expectedRevision: artifact.recordRevision,
-        clientOperationId: `codex-scoped-request:${run.id}:${String(request.id)}`,
-        content: `${existing}${existing ? '\n' : ''}${reason}`
-      });
+    if (!run) return true;
+    // Diagnostic storage must not prevent the stop path from running.
+    await this.appendUnexpectedRuntimeRequestDiagnostic(run, reason, raw).catch(
+      () => undefined
+    );
+    let latest = (await this.runtimeStore.getRun(run.id)) ?? run;
+    if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(latest.status)) {
+      return true;
     }
-    let latest = (await this.scopedRuntimeStore.getRun(run.id)) ?? run;
-    const completedAt = new Date().toISOString();
-    if (!['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(latest.status)) {
-      latest = await this.scopedRuntimeStore.updateRun(
+    if (
+      latest.status === 'RECOVERY_REQUIRED' ||
+      latest.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST'
+    ) {
+      return true;
+    }
+    if (latest.status === 'INTERRUPTING') {
+      await this.runtimeStore.updateRun(
         latest.id,
         latest.recordRevision,
         {
-          status: 'FAILED',
-          delivery: latest.providerTurnId ? 'TERMINAL' : 'AMBIGUOUS',
-          recoveryState: latest.providerTurnId ? 'NONE' : 'REQUIRES_USER_ACTION',
           terminalReason: reason,
           providerTerminalSource: 'UNEXPECTED_SERVER_REQUEST',
-          lastEventAt: completedAt,
-          ...(latest.providerTurnId ? { endedAt: completedAt } : {})
+          lastEventAt: new Date().toISOString()
         },
-        `codex-scoped-request-run:${run.id}:${String(request.id)}`
+        `codex-runtime-request-existing-stop:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
       );
+      return true;
     }
     const providerTurnId = latest.providerTurnId ?? turnId;
-    if (providerTurnId) {
-      this.emitScopedTurnEvent({
-        type: 'TERMINAL',
-        runId: latest.id,
-        providerTurnId,
-        status: 'failed',
-        error: reason,
-        completedAt
-      });
+    if (!providerTurnId) {
+      await this.stopAfterReadOnlyRuntimeViolation(
+        latest,
+        reason,
+        'AMBIGUOUS',
+        raw,
+        'UNEXPECTED_SERVER_REQUEST'
+      );
+      return true;
     }
-    void raw;
+    if (latest.providerTurnId && latest.providerTurnId !== providerTurnId) {
+      await this.stopAfterReadOnlyRuntimeViolation(
+        latest,
+        `${reason} The request identified a different provider turn.`,
+        'AMBIGUOUS',
+        raw,
+        'UNEXPECTED_SERVER_REQUEST'
+      );
+      return true;
+    }
+    await this.requestReadOnlyRuntimeStop({
+      session,
+      run: latest,
+      providerTurnId,
+      reason,
+      source: 'UNEXPECTED_SERVER_REQUEST',
+      raw
+    });
     return true;
+  }
+
+  private async requestReadOnlyRuntimeStop(input: {
+    session: AgentRuntimeSessionRecord;
+    run: AgentRuntimeRunRecord;
+    providerTurnId: string;
+    reason: string;
+    source: string;
+    raw: AgentProtocolMessageReference;
+  }): Promise<void> {
+    const requestedAt = new Date().toISOString();
+    const stopping = await this.runtimeStore.updateRun(
+      input.run.id,
+      input.run.recordRevision,
+      {
+        providerTurnId: input.providerTurnId,
+        serverInstanceId: input.run.serverInstanceId ?? input.raw.serverInstanceId,
+        status: 'INTERRUPTING',
+        delivery: 'ACKNOWLEDGED',
+        interruptDelivery: 'SENDING',
+        stopRequestedAt: requestedAt,
+        terminalReason: input.reason,
+        providerTerminalSource: input.source,
+        lastEventAt: requestedAt
+      },
+      `codex-runtime-stop:${input.source}:${input.run.id}:${input.raw.serverInstanceId}:${input.raw.sequence}`
+    );
+    try {
+      await this.interruptRuntimeTurn({ session: input.session, run: stopping });
+      const current = (await this.runtimeStore.getRun(stopping.id)) ?? stopping;
+      if (
+        current.status === 'INTERRUPTING' &&
+        current.interruptDelivery === 'SENDING'
+      ) {
+        await this.runtimeStore.updateRun(
+          current.id,
+          current.recordRevision,
+          {
+            interruptDelivery: 'ACKNOWLEDGED',
+            lastEventAt: new Date().toISOString()
+          },
+          `codex-runtime-stop-ack:${input.source}:${input.run.id}:${input.raw.serverInstanceId}:${input.raw.sequence}`
+        );
+      }
+    } catch (error) {
+      await this.stopAfterReadOnlyRuntimeViolation(
+        stopping,
+        input.reason,
+        error instanceof AgentRuntimeDeliveryError ? error.delivery : 'AMBIGUOUS',
+        input.raw,
+        input.source
+      );
+    }
+  }
+
+  private async stopAfterReadOnlyRuntimeViolation(
+    run: AgentRuntimeRunRecord,
+    reason: string,
+    interruptDelivery: 'ACKNOWLEDGED' | 'NOT_DELIVERED' | 'AMBIGUOUS',
+    raw: AgentProtocolMessageReference,
+    source: string
+  ): Promise<void> {
+    try {
+      await this.supervisor.terminateUnresponsive(reason);
+      const current = (await this.runtimeStore.getRun(run.id)) ?? run;
+      if (current.serverInstanceId !== raw.serverInstanceId) {
+        await this.markReadOnlyRuntimeViolationRecovery(
+          current,
+          reason,
+          interruptDelivery,
+          raw,
+          source
+        );
+        return;
+      }
+      await this.handleCanonicalServerLoss(raw.serverInstanceId, {
+        reason,
+        restarting: false,
+        confirmedStopped: true
+      });
+    } catch (terminationError) {
+      const current = (await this.runtimeStore.getRun(run.id)) ?? run;
+      await this.markReadOnlyRuntimeViolationRecovery(
+        current,
+        `${reason} Task Monki could not confirm that Codex stopped: ${redactCredentialText(
+          errorMessage(terminationError),
+          this.sensitiveValues
+        )}`,
+        interruptDelivery,
+        raw,
+        source
+      );
+    }
+  }
+
+  private async appendUnexpectedRuntimeRequestDiagnostic(
+    run: AgentRuntimeRunRecord,
+    reason: string,
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
+    const artifact = await this.runtimeStore.getArtifact(run.diagnosticArtifactId);
+    if (!artifact || artifact.byteCount >= AGENT_RUNTIME_LIMITS.maxArtifactBytes) return;
+    const prefix = artifact.byteCount > 0 ? '\n' : '';
+    const text = utf8Prefix(
+      `${prefix}${redactCredentialText(reason, this.sensitiveValues)}`,
+      AGENT_RUNTIME_LIMITS.maxArtifactBytes - artifact.byteCount
+    );
+    if (!text) return;
+    await this.runtimeStore.appendArtifact(
+      artifact.id,
+      text,
+      `codex-runtime-request-diagnostic:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+    );
+  }
+
+  private async markReadOnlyRuntimeViolationRecovery(
+    run: AgentRuntimeRunRecord,
+    reason: string,
+    interruptDelivery: 'ACKNOWLEDGED' | 'NOT_DELIVERED' | 'AMBIGUOUS',
+    raw: AgentProtocolMessageReference | undefined,
+    source: string
+  ): Promise<void> {
+    const observedAt = new Date().toISOString();
+    const current = (await this.runtimeStore.getRun(run.id)) ?? run;
+    if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(current.status)) return;
+    const updated = await this.runtimeStore.updateRun(
+      current.id,
+      current.recordRevision,
+      {
+        status: 'RECOVERY_REQUIRED',
+        delivery: current.delivery === 'SENDING' ? 'AMBIGUOUS' : current.delivery,
+        ...(current.interruptDelivery ? { interruptDelivery } : {}),
+        recoveryState: 'REQUIRES_USER_ACTION',
+        terminalReason: reason,
+        providerTerminalSource: source,
+        lastEventAt: observedAt
+      },
+      raw
+        ? `codex-runtime-request-recovery:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+        : `codex-runtime-request-start-recovery:${run.id}`
+    );
+    this.emitRuntimeTurnEvent({
+      type: 'RECOVERY_REQUIRED',
+      runId: updated.id,
+      ...(updated.providerTurnId ? { providerTurnId: updated.providerTurnId } : {}),
+      reason,
+      observedAt
+    });
   }
 
   private async handleServerRequestResolved(
@@ -3603,7 +3964,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (!server) {
       return;
     }
-    const interaction = await this.store.getInteractionRequestByProviderId(
+    const interaction = await this.taskRuntime.getInteractionRequestByProviderId(
       server.id,
       providerRequestId
     );
@@ -3616,7 +3977,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         : interaction.decision
           ? interactionTerminalStatus(interaction.decision)
           : 'STALE';
-    const resolved = await this.store.transitionInteractionRequest(
+    const resolved = await this.persistInteractionTransition(
       interaction.id,
       interaction.status,
       {
@@ -3635,7 +3996,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   private async resumeAfterInteractionResolution(
     interaction: InteractionRequestRecord
   ): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     if (
       snapshot.interactionRequests.some(
         (candidate) =>
@@ -3647,6 +4008,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     ) {
       return;
     }
+    const session = snapshot.agentSessions.find(
+      (candidate) => candidate.id === interaction.sessionId
+    );
+    if (
+      session?.status === 'AWAITING_APPROVAL' ||
+      session?.status === 'AWAITING_USER_INPUT'
+    ) {
+      await this.persistAgentSession(session.id, { status: 'ACTIVE' });
+    }
     const run = snapshot.runs.find((candidate) => candidate.id === interaction.runId);
     if (
       run?.status === 'AWAITING_APPROVAL' ||
@@ -3656,66 +4026,74 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         resumeConfirmed: true
       });
     }
-    const session = snapshot.agentSessions.find(
-      (candidate) => candidate.id === interaction.sessionId
-    );
-    if (
-      session?.status === 'AWAITING_APPROVAL' ||
-      session?.status === 'AWAITING_USER_INPUT'
-    ) {
-      await this.store.updateAgentSession(session.id, { status: 'ACTIVE' });
-    }
   }
 
   private async handleTurnStarted(threadId: string, turn: Turn): Promise<void> {
-    if (await this.handleScopedTurnStarted(threadId, turn)) return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
-    if (!session) {
+    const target = await this.resolveProviderTurnTarget(turn.id, threadId);
+    if (!target) return;
+    if (target.kind === 'RUNTIME') {
+      await this.handleRuntimeTurnStarted(target, threadId, turn);
       return;
     }
-    let run = await this.ensureRunForSession(session, turn.id);
-    if (!run) {
-      run = await this.store.getActiveRunForSession(session.id);
-      if (run) {
-        if (!run.providerTurnId) {
-          run = await this.store.updateRun(run.id, {
-            providerTurnId: turn.id,
-            status: 'RUNNING',
-            lastEventAt: new Date().toISOString()
-          });
-        } else if (run.providerTurnId === turn.id) {
-          run = await this.store.updateRun(run.id, {
-            status: 'RUNNING',
-            lastEventAt: new Date().toISOString()
-          });
-        } else {
-          await this.store.appendEvent(
-            createDomainEvent({
-              type: 'AGENT_PROTOCOL_INCIDENT',
-              taskId: run.taskId,
-              iterationId: run.iterationId,
-              runId: run.id,
-              worktreeId: run.worktreeId,
-              agentSessionId: run.sessionId,
-              serverInstanceId: run.serverInstanceId,
-              source: 'provider',
-              payload: {
-                parseError: `Ignoring turn/started for ${turn.id}; active run already tracks ${run.providerTurnId}.`
-              }
-            })
-          );
-          return;
-        }
-      }
+    const session = target.session;
+    let run = target.run;
+    const acknowledgedTurnId = this.pendingProviderTurnForRun(run.id);
+    if (
+      !run.providerTurnId &&
+      acknowledgedTurnId &&
+      acknowledgedTurnId !== turn.id
+    ) {
+      await this.persistRuntimeEvent(
+        createDomainEvent({
+          type: 'AGENT_PROTOCOL_INCIDENT',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
+          source: 'provider',
+          payload: {
+            parseError: `Ignoring turn/started for ${turn.id}; provider acknowledgement identifies ${acknowledgedTurnId}.`
+          }
+        })
+      );
+      return;
     }
-    if (!run) {
+    if (!run.providerTurnId) {
+      run = await this.persistRun(run.id, {
+        providerTurnId: turn.id,
+        status: 'RUNNING',
+        lastEventAt: new Date().toISOString()
+      });
+    } else if (run.providerTurnId === turn.id && run.status === 'STARTING') {
+      run = await this.persistRun(run.id, {
+        status: 'RUNNING',
+        lastEventAt: new Date().toISOString()
+      });
+    } else if (run.providerTurnId !== turn.id) {
+      await this.persistRuntimeEvent(
+        createDomainEvent({
+          type: 'AGENT_PROTOCOL_INCIDENT',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
+          source: 'provider',
+          payload: {
+            parseError: `Ignoring turn/started for ${turn.id}; active run already tracks ${run.providerTurnId}.`
+          }
+        })
+      );
       return;
     }
     if (run.status === 'RECOVERY_REQUIRED') {
       const recoveryRun = run;
       const adoptedDuringRecovery =
         this.recoveryRunBySession.get(session.id) === run.id;
-      run = await this.store.updateRun(run.id, {
+      run = await this.persistRun(run.id, {
         status: 'RUNNING',
         recoveryState: adoptedDuringRecovery ? 'RECOVERED' : 'NONE',
         serverInstanceId: this.supervisor.currentServer?.id,
@@ -3731,7 +4109,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         this.recoveryRunBySession.delete(session.id);
       }
     }
-    await this.store.updateAgentSession(session.id, {
+    await this.persistAgentSession(session.id, {
       status: 'ACTIVE',
       materialized: true,
       subagentStatus: session.role === 'SUBAGENT' ? 'RUNNING' : session.subagentStatus
@@ -3740,21 +4118,31 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     await this.recordRunActivity(run, 'turn/started', { providerTurnId: turn.id });
   }
 
+  private pendingProviderTurnForRun(runId: string): string | undefined {
+    for (const [providerTurnId, pendingRunId] of this.pendingRunByProviderTurn) {
+      if (pendingRunId === runId) return providerTurnId;
+    }
+    return undefined;
+  }
+
   private async handleTurnCompleted(
     threadId: string,
     turn: Turn,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    if (await this.handleScopedTurnCompleted(threadId, turn)) {
+    const target = await this.resolveProviderTurnTarget(turn.id, threadId);
+    if (!target) return;
+    if (target.kind === 'RUNTIME') {
+      await this.handleRuntimeTurnCompleted(target, threadId, turn);
       this.clearInterruptDeadline(turn.id);
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
+    const session = target.session;
     const recoveryRunId = session
       ? this.recoveryRunBySession.get(session.id)
       : undefined;
     if (recoveryRunId) {
-      const recoveryRun = await this.store.getRun(recoveryRunId);
+      const recoveryRun = await this.taskRuntime.getRun(recoveryRunId);
       if (
         recoveryRun?.status === 'RECOVERY_REQUIRED' &&
         recoveryRun.providerTurnId === turn.id
@@ -3762,12 +4150,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         return;
       }
     }
-    const run = session
-      ? await this.ensureRunForSession(session, turn.id)
-      : undefined;
-    if (!session || !run) {
-      return;
-    }
+    const run = target.run;
     await this.finalizeTurn(
       run,
       turn,
@@ -3777,7 +4160,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (this.recoveryRunBySession.get(session.id) === run.id) {
       this.recoveryRunBySession.delete(session.id);
     }
-    await this.store.updateAgentSession(session.id, {
+    await this.persistAgentSession(session.id, {
       status: turn.status === 'failed' ? 'SYSTEM_ERROR' : 'IDLE',
       materialized: true,
       subagentStatus:
@@ -3785,6 +4168,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           ? mapSubagentTurnStatus(turn.status)
           : session.subagentStatus
     });
+    this.pendingRunByProviderTurn.delete(turn.id);
+    this.clearPendingRunForThread(threadId, run.id);
     this.clearInterruptDeadline(turn.id);
   }
 
@@ -3795,18 +4180,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     this.interruptTimers.delete(providerTurnId);
   }
 
-  private async handleScopedTurnStarted(threadId: string, turn: Turn): Promise<boolean> {
-    if (!this.scopedRuntimeStore) return false;
-    let run = await this.findScopedRun(turn.id, threadId);
-    if (!run) return false;
-    this.scopedRunByProviderTurn.set(turn.id, run.id);
-    let session = await this.scopedRuntimeStore.getSession(run.sessionId);
-    if (!session) throw new Error(`Scoped runtime session not found for turn ${turn.id}.`);
+  private async handleRuntimeTurnStarted(
+    target: Extract<CodexProviderTurnTarget, { kind: 'RUNTIME' }>,
+    threadId: string,
+    turn: Turn
+  ): Promise<void> {
+    if (isTerminalRunStatus(target.run.status)) return;
+    let run = target.run;
+    this.pendingRunByProviderTurn.set(turn.id, run.id);
+    let session = target.session;
     const startedAt = turn.startedAt
       ? new Date(turn.startedAt * 1_000).toISOString()
       : new Date().toISOString();
     if (session.status !== 'ACTIVE') {
-      session = await this.scopedRuntimeStore.updateSession(
+      session = await this.runtimeStore.updateSession(
         session.id,
         session.recordRevision,
         {
@@ -3815,11 +4202,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           materialized: true,
           lastAttachedAt: startedAt
         },
-        `codex-scoped-started-session:${turn.id}`
+        `codex-runtime-started-session:${turn.id}`
       );
     }
     if (run.status === 'STARTING' && run.delivery === 'SENDING') {
-      run = await this.scopedRuntimeStore.updateRun(
+      run = await this.runtimeStore.updateRun(
         run.id,
         run.recordRevision,
         {
@@ -3829,60 +4216,67 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           delivery: 'ACKNOWLEDGED',
           lastEventAt: startedAt
         },
-        `codex-scoped-started-run:${turn.id}`
+        `codex-runtime-started-run:${turn.id}`
       );
     } else if (run.providerTurnId && run.providerTurnId !== turn.id) {
       throw new Error(
-        `Scoped runtime run ${run.id} already tracks provider turn ${run.providerTurnId}.`
+        `Agent runtime run ${run.id} already tracks provider turn ${run.providerTurnId}.`
       );
     }
     void session;
-    return true;
   }
 
-  private async handleScopedItem(
-    threadId: string,
+  private async handleRuntimeItem(
+    target: Extract<CodexProviderTurnTarget, { kind: 'RUNTIME' }>,
     turnId: string,
     item: ThreadItem,
     status: AgentItemStatus
-  ): Promise<boolean> {
-    const run = await this.findScopedRun(turnId, threadId);
-    if (!run || !this.scopedRuntimeStore) return false;
+  ): Promise<void> {
+    const run = target.run;
+    if (isTerminalRunStatus(run.status)) return;
     if (item.type === 'agentMessage' && status === 'COMPLETED') {
       const text = redactCredentialText(item.text, this.sensitiveValues);
-      const artifact = await this.scopedRuntimeStore.getArtifact(run.outputArtifactId);
+      const artifact = await this.runtimeStore.getArtifact(run.outputArtifactId);
       if (artifact && artifact.contentSha256 !== hashString(text)) {
-        await this.scopedRuntimeStore.updateArtifact({
+        await this.runtimeStore.updateArtifact({
           artifactId: artifact.id,
           expectedRevision: artifact.recordRevision,
-          clientOperationId: `codex-scoped-item:${turnId}:${item.id}`,
+          clientOperationId: `codex-runtime-item:${turnId}:${item.id}`,
           content: text
         });
       }
     }
-    return true;
   }
 
-  private async emitScopedDelta(turnId: string, text: string): Promise<boolean> {
-    const run = await this.findScopedRun(turnId);
-    if (!run) return false;
-    const event: AgentScopedTurnEvent = {
+  private async emitRuntimeDelta(turnId: string, text: string): Promise<boolean> {
+    const target = await this.resolveProviderTurnTarget(turnId);
+    if (!target || target.kind !== 'RUNTIME') return false;
+    const run = target.run;
+    if (isTerminalRunStatus(run.status)) return true;
+    const event: AgentRuntimeTurnEvent = {
       type: 'DELTA',
       runId: run.id,
       providerTurnId: turnId,
       text: redactCredentialText(text, this.sensitiveValues),
       observedAt: new Date().toISOString()
     };
-    this.emitScopedTurnEvent(event);
+    this.emitRuntimeTurnEvent(event);
     return true;
   }
 
-  private async handleScopedTurnCompleted(threadId: string, turn: Turn): Promise<boolean> {
-    if (!this.scopedRuntimeStore) return false;
-    let run = await this.findScopedRun(turn.id, threadId);
-    if (!run) return false;
-    let session = await this.scopedRuntimeStore.getSession(run.sessionId);
-    if (!session) throw new Error(`Scoped runtime session not found for turn ${turn.id}.`);
+  private async handleRuntimeTurnCompleted(
+    target: Extract<CodexProviderTurnTarget, { kind: 'RUNTIME' }>,
+    threadId: string,
+    turn: Turn
+  ): Promise<void> {
+    if (isTerminalRunStatus(target.run.status)) {
+      this.pendingRunByProviderTurn.delete(turn.id);
+      this.clearPendingRunForThread(threadId, target.run.id);
+      return;
+    }
+    if (turn.status === 'inProgress') return;
+    let run = target.run;
+    let session = target.session;
     const finalMessage = redactCredentialText(
       [...turn.items]
         .reverse()
@@ -3893,12 +4287,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       this.sensitiveValues
     );
     if (finalMessage) {
-      const artifact = await this.scopedRuntimeStore.getArtifact(run.outputArtifactId);
+      const artifact = await this.runtimeStore.getArtifact(run.outputArtifactId);
       if (artifact && artifact.contentSha256 !== hashString(finalMessage)) {
-        await this.scopedRuntimeStore.updateArtifact({
+        await this.runtimeStore.updateArtifact({
           artifactId: artifact.id,
           expectedRevision: artifact.recordRevision,
-          clientOperationId: `codex-scoped-terminal-output:${turn.id}`,
+          clientOperationId: `codex-runtime-terminal-output:${turn.id}`,
           content: finalMessage
         });
       }
@@ -3906,21 +4300,25 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     const completedAt = turn.completedAt
       ? new Date(turn.completedAt * 1_000).toISOString()
       : new Date().toISOString();
+    const forcedFailureReason = readOnlyViolationReason(run);
     if (session.status !== 'IDLE' || !session.materialized) {
-      session = await this.scopedRuntimeStore.updateSession(
+      session = await this.runtimeStore.updateSession(
         session.id,
         session.recordRevision,
         {
           providerSessionId: session.providerSessionId ?? threadId,
-          status: turn.status === 'failed' ? 'SYSTEM_ERROR' : 'IDLE',
+          status:
+            forcedFailureReason || turn.status === 'failed'
+              ? 'SYSTEM_ERROR'
+              : 'IDLE',
           materialized: true,
           lastAttachedAt: completedAt
         },
-        `codex-scoped-terminal-session:${turn.id}`
+        `codex-runtime-terminal-session:${turn.id}`
       );
     }
     if (run.delivery === 'SENDING') {
-      run = await this.scopedRuntimeStore.updateRun(
+      run = await this.runtimeStore.updateRun(
         run.id,
         run.recordRevision,
         {
@@ -3930,21 +4328,23 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           delivery: 'ACKNOWLEDGED',
           lastEventAt: completedAt
         },
-        `codex-scoped-terminal-ack:${turn.id}`
+        `codex-runtime-terminal-ack:${turn.id}`
       );
     }
-    const artifactBody = await this.scopedRuntimeStore.readArtifact(run.outputArtifactId);
+    const artifactBody = await this.runtimeStore.readArtifact(run.outputArtifactId);
     const hasOutput = Boolean(finalMessage.trim() || artifactBody.trim());
     const status =
-      turn.status === 'completed' && hasOutput
-        ? 'COMPLETED'
-        : turn.status === 'interrupted'
-          ? 'INTERRUPTED'
-          : 'FAILED';
+      forcedFailureReason
+        ? 'FAILED'
+        : turn.status === 'completed' && hasOutput
+          ? 'COMPLETED'
+          : turn.status === 'interrupted'
+            ? 'INTERRUPTED'
+            : 'FAILED';
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) break;
       try {
-        run = await this.scopedRuntimeStore.updateRun(
+        run = await this.runtimeStore.updateRun(
           run.id,
           run.recordRevision,
           {
@@ -3953,23 +4353,26 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
             delivery: 'TERMINAL',
             ...(run.interruptDelivery ? { interruptDelivery: 'TERMINAL' as const } : {}),
             recoveryState: 'NONE',
-            ...(status === 'COMPLETED'
+            ...(status === 'COMPLETED' && run.scope.kind === 'DISCOURSE'
               ? { contextFreshnessAtCompletion: 'UNKNOWN' as const }
               : {}),
             terminalReason:
+              forcedFailureReason ??
               turn.error?.message ??
               (turn.status === 'completed' && !hasOutput
-                ? 'Codex completed the scoped turn without a response.'
+                ? 'Codex completed the runtime turn without a response.'
                 : undefined),
-            providerTerminalSource: 'TURN_COMPLETED_NOTIFICATION',
+            providerTerminalSource: turnCompletedSource(
+              run.providerTerminalSource
+            ),
             lastEventAt: completedAt,
             endedAt: completedAt
           },
-          `codex-scoped-terminal-run:${turn.id}`
+          `codex-runtime-terminal-run:${turn.id}`
         );
         break;
       } catch (error) {
-        const latest = await this.scopedRuntimeStore.getRun(run.id);
+        const latest = await this.runtimeStore.getRun(run.id);
         if (
           !latest ||
           latest.providerTurnId !== turn.id ||
@@ -3981,45 +4384,57 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         run = latest;
       }
     }
-    this.emitScopedTurnEvent({
+    this.emitRuntimeTurnEvent({
       type: 'TERMINAL',
       runId: run.id,
       providerTurnId: turn.id,
-      status: turn.status,
-      ...(finalMessage ? { finalMessage } : {}),
-      ...(turn.error?.message ? { error: turn.error.message } : {}),
+      status: forcedFailureReason ? 'failed' : turn.status,
+      ...(forcedFailureReason || turn.error?.message
+        ? { error: forcedFailureReason ?? turn.error!.message }
+        : {}),
       completedAt
     });
-    this.scopedRunByProviderTurn.delete(turn.id);
-    this.scopedRunByProviderThread.delete(threadId);
+    this.pendingRunByProviderTurn.delete(turn.id);
+    this.clearPendingRunForThread(threadId, run.id);
     void session;
-    return true;
   }
 
-  private async findScopedRun(
+  private clearPendingRunForThread(threadId: string, runId: string): void {
+    if (this.pendingRunByProviderThread.get(threadId) === runId) {
+      this.pendingRunByProviderThread.delete(threadId);
+    }
+  }
+
+  private async findRuntimeRun(
     turnId: string,
     threadId?: string
   ): Promise<AgentRuntimeRunRecord | undefined> {
-    if (!this.scopedRuntimeStore) return undefined;
-    const run =
-      (turnId ? await this.scopedRuntimeStore.getRunByProviderTurnId(turnId) : undefined) ??
-      (turnId && this.scopedRunByProviderTurn.has(turnId)
-        ? await this.scopedRuntimeStore.getRun(this.scopedRunByProviderTurn.get(turnId)!)
-        : threadId && this.scopedRunByProviderThread.has(threadId)
-          ? await this.scopedRuntimeStore.getRun(this.scopedRunByProviderThread.get(threadId)!)
-          : undefined);
-    return run?.owner.kind === 'DISCOURSE' ? run : undefined;
+    const target = await this.resolveProviderTurnTarget(turnId, threadId);
+    return target?.kind === 'RUNTIME' ? target.run : undefined;
   }
 
-  private async findScopedSessionByProviderId(
+  private async findRuntimeSessionByProviderId(
     providerSessionId: string
   ): Promise<AgentRuntimeSessionRecord | undefined> {
-    const session = await this.scopedRuntimeStore?.getSessionByProviderId(providerSessionId);
-    return session?.owner.kind === 'DISCOURSE' ? session : undefined;
+    const session = await this.runtimeStore.getSessionByProviderId(providerSessionId);
+    if (!session) return undefined;
+    return (await this.isSharedReadOnlyRuntimeSession(session))
+      ? session
+      : undefined;
   }
 
-  private emitScopedTurnEvent(event: AgentScopedTurnEvent): void {
-    for (const listener of this.scopedTurnListeners) listener(event);
+  private async isSharedReadOnlyRuntimeSession(
+    session: AgentRuntimeSessionRecord
+  ): Promise<boolean> {
+    const runs = await this.runtimeStore.listRunsByOwner(session.owner);
+    return runs.some(
+      (run) =>
+        run.sessionId === session.id && isSharedReadOnlyRuntimePurpose(run.purpose)
+    );
+  }
+
+  private emitRuntimeTurnEvent(event: AgentRuntimeTurnEvent): void {
+    for (const listener of this.runtimeTurnListeners) listener(event);
   }
 
   private async handleItem(
@@ -4031,16 +4446,27 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     startedAtMs?: number,
     completedAtMs?: number
   ): Promise<void> {
-    if (await this.handleScopedItem(threadId, turnId, item, status)) return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
-    const run = session
-      ? await this.ensureRunForSession(session, turnId)
-      : undefined;
-    if (!session || !run) {
+    const target = await this.resolveProviderTurnTarget(turnId, threadId);
+    if (!target) return;
+    if (target.kind === 'RUNTIME') {
+      await this.handleRuntimeItem(target, turnId, item, status);
       return;
     }
+    const { session } = target;
+    let { run } = target;
+    if (run.serverInstanceId !== raw.serverInstanceId) {
+      // Recovery can resume the provider before its durable run ownership is
+      // rebound to the replacement server. Let turn/started drive recovery,
+      // but do not attach current-generation item evidence to the prior
+      // server occurrence.
+      await this.waitForRunReconciliation(run.id);
+      const rebound = await this.taskRuntime.getRun(run.id);
+      if (!rebound || rebound.serverInstanceId !== raw.serverInstanceId) return;
+      run = rebound;
+    }
+    if (isTerminalRunStatus(run.status)) return;
     const safeItem = this.redactProviderValue(item);
-    await this.store.upsertAgentItem({
+    await this.persistAgentItem({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -4056,7 +4482,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         : undefined
     });
     if (safeItem.type === 'agentMessage' && status === 'COMPLETED') {
-      await this.store.updateRun(run.id, {
+      await this.persistRun(run.id, {
         finalMessage: safeItem.text,
         lastEventAt: new Date().toISOString()
       });
@@ -4077,12 +4503,27 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     threadId: string,
     status: ThreadStatus
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
-    if (!session) {
+    const runtimeSession = await this.runtimeStore.getSessionByProviderId(
+      threadId,
+      this.descriptor.id
+    );
+    if (!runtimeSession) return;
+    if (await this.isSharedReadOnlyRuntimeSession(runtimeSession)) {
+      const mapped = mapThreadStatus(status);
+      if (runtimeSession.status !== mapped) {
+        await this.runtimeStore.updateSession(
+          runtimeSession.id,
+          runtimeSession.recordRevision,
+          { status: mapped },
+          `codex-runtime-thread-status:${threadId}:${status.type}`
+        );
+      }
       return;
     }
-    await this.store.updateAgentSession(session.id, { status: mapThreadStatus(status) });
-    const run = await this.store.getActiveRunForSession(session.id);
+    const session = await this.taskRuntime.getAgentSession(runtimeSession.id);
+    if (!session) return;
+    await this.persistAgentSession(session.id, { status: mapThreadStatus(status) });
+    const run = await this.taskRuntime.getActiveRunForSession(session.id);
     if (run && status.type === 'active' && status.activeFlags.length === 0) {
       await this.recordRunActivity(run, 'thread/status/changed', {
         status: status.type,
@@ -4092,18 +4533,38 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     }
   }
 
+  private async handleThreadClosed(threadId: string): Promise<void> {
+    const runtimeSession = await this.runtimeStore.getSessionByProviderId(
+      threadId,
+      this.descriptor.id
+    );
+    if (!runtimeSession) return;
+    if (await this.isSharedReadOnlyRuntimeSession(runtimeSession)) {
+      if (runtimeSession.status !== 'NOT_LOADED') {
+        await this.runtimeStore.updateSession(
+          runtimeSession.id,
+          runtimeSession.recordRevision,
+          { status: 'NOT_LOADED' },
+          `codex-runtime-thread-closed:${threadId}`
+        );
+      }
+      return;
+    }
+    await this.persistAgentSession(runtimeSession.id, { status: 'NOT_LOADED' });
+  }
+
   private async handlePlanRevision(
     turnId: string,
     explanation: string | undefined,
     plan: TurnPlanStep[],
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
+    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, turnId);
     if (!run) {
       return;
     }
     const safePlan = this.redactProviderValue(plan);
-    await this.store.recordAgentPlanRevision({
+    await this.persistPlanRevision({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -4127,12 +4588,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     usage: ThreadTokenUsage,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
-    const stored = await this.store.recordAgentUsageSnapshot({
+    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, turnId);
+    const stored = await this.persistUsageSnapshot({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
@@ -4156,11 +4617,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     goal: ThreadGoal,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
-    const task = await this.store.getTask(session.taskId);
+    const task = await this.taskStore.getTask(session.taskId);
     if (!task) {
       return;
     }
@@ -4181,19 +4642,19 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     threadId: string,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
     this.recoveryRunBySession.delete(session.id);
     const [task, latest] = await Promise.all([
-      this.store.getTask(session.taskId),
-      this.store.getLatestAgentGoalSnapshot(session.id)
+      this.taskStore.getTask(session.taskId),
+      this.taskRuntime.getLatestAgentGoalSnapshot(session.id)
     ]);
     if (!task) {
       return;
     }
-    const stored = await this.store.recordAgentGoalSnapshot({
+    const stored = await this.persistGoalSnapshot({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
@@ -4213,80 +4674,59 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     const observed = settingsFromThreadSettings(settings);
-    const scopedSession = await this.findScopedSessionByProviderId(threadId);
-    if (scopedSession && this.scopedRuntimeStore) {
+    const runtimeSession = await this.findRuntimeSessionByProviderId(threadId);
+    if (runtimeSession) {
       try {
-        const profile = await codexReadOnlyScopeProfile({
-          sessionId: scopedSession.id,
-          scope: {
-            primaryCwd: scopedSession.executionContext.primaryCwd,
-            readOnlyRoots: scopedSession.executionContext.readRoots.map(
-              (root) => root.canonicalPath
-            )
-          },
-          reasoningEffort: scopedSession.executionContext.modelSettings.reasoningEffort
-        });
-        if (profile.scopeHash !== scopedSession.executionContext.permissionProfileHash) {
-          throw new Error('Codex Discourse permission scope no longer matches its access epoch.');
-        }
+        assertCodexReadOnlyModel(
+          runtimeSession.executionContext.modelSettings,
+          observed
+        );
+      } catch (error) {
+        await this.failReadOnlyRuntimeTurn(
+          runtimeSession,
+          error instanceof Error ? error.message : String(error),
+          raw,
+          'CODEX_MODEL_SELECTION'
+        );
+        return;
+      }
+      try {
         assertCodexActivePermissionProfileId(
-          profile.profileId,
+          codexReadOnlyScopeProfileId(
+            runtimeSession.id,
+            runtimeSession.executionContext.permissionProfileHash
+          ),
           settings.activePermissionProfile
         );
         if (
-          path.relative(scopedSession.executionContext.primaryCwd, settings.cwd) !== '' ||
+          path.relative(runtimeSession.executionContext.primaryCwd, settings.cwd) !== '' ||
           observed.sandbox !== 'READ_ONLY' ||
           observed.networkAccess !== false ||
           observed.approvalPolicy?.toLowerCase() !== 'never' ||
           observed.approvalsReviewer !== 'user'
         ) {
-          throw new Error('Codex changed the offline read-only settings for a Discourse turn.');
+          throw new Error('Codex changed the settings for a read-only turn.');
         }
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         this.latchSecurityBoundary(reason);
-        await this.supervisor.terminateAndFence(reason);
-        const run = (await this.scopedRuntimeStore.listRunsByOwner(scopedSession.owner))
-          .find((candidate) => candidate.sessionId === scopedSession.id &&
-            !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(candidate.status));
-        if (run) {
-          const completedAt = new Date().toISOString();
-          const failed = await this.scopedRuntimeStore.updateRun(
-            run.id,
-            run.recordRevision,
-            {
-              status: 'FAILED',
-              delivery: run.providerTurnId ? 'TERMINAL' : 'AMBIGUOUS',
-              recoveryState: run.providerTurnId ? 'NONE' : 'REQUIRES_USER_ACTION',
-              terminalReason: reason,
-              providerTerminalSource: 'CODEX_PERMISSION_PROFILE',
-              lastEventAt: completedAt,
-              ...(run.providerTurnId ? { endedAt: completedAt } : {})
-            },
-            `codex-scoped-settings-violation:${raw.serverInstanceId}:${raw.sequence}`
-          );
-          if (failed.providerTurnId) {
-            this.emitScopedTurnEvent({
-              type: 'TERMINAL',
-              runId: failed.id,
-              providerTurnId: failed.providerTurnId,
-              status: 'failed',
-              error: reason,
-              completedAt
-            });
-          }
-        }
+        await this.failReadOnlyRuntimeTurn(
+          runtimeSession,
+          reason,
+          raw,
+          'CODEX_PERMISSION_PROFILE'
+        );
         return;
       }
-      await this.scopedRuntimeStore.updateSession(
-        scopedSession.id,
-        scopedSession.recordRevision,
+      await this.runtimeStore.updateSession(
+        runtimeSession.id,
+        runtimeSession.recordRevision,
         { observedSettings: this.sanitizeProviderSettings(observed) },
-        `codex-scoped-settings:${raw.serverInstanceId}:${raw.sequence}`
+        `codex-runtime-settings:${raw.serverInstanceId}:${raw.sequence}`
       );
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (session) {
       try {
         const activeProfile = this.activePermissionProfiles.get(session.id);
@@ -4358,7 +4798,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     const safeObserved = this.sanitizeProviderSettings(observed);
-    await this.store.updateAgentSession(session.id, {
+    await this.persistAgentSession(session.id, {
       observedSettings: safeObserved
     });
     await this.recordSettingsObservation(
@@ -4390,21 +4830,21 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     reason: string,
     boundary: 'BROWSER_DEV_LIVE_SETTINGS' | 'CODEX_PERMISSION_PROFILE'
   ): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const affectedRuns = snapshot.runs.filter((run) =>
       run.runtimeId === this.descriptor.id && ACTIVE_RUN_STATES.includes(run.status)
     );
     for (const run of affectedRuns) {
       await this.serializeRunSettlement(run.id, async () => {
-        const current = await this.store.getRun(run.id);
+        const current = await this.taskRuntime.getRun(run.id);
         if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
         await this.flushBufferedOutput(current.id, true);
-        const finalArtifact = await this.store.writeFinalArtifact(
+        const finalArtifact = await this.persistFinalArtifact(
           current.taskId,
           current.id,
           `# Agent turn blocked by provider security boundary\n\n${reason}\n`
         );
-        const published = await this.store.appendRunEventIfStatus(
+        const published = await this.persistEventIfRunStatus(
           createDomainEvent({
             type: 'AGENT_RUN_FAILED',
             taskId: current.taskId,
@@ -4424,7 +4864,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           ACTIVE_RUN_STATES
         );
         if (!published) return;
-        await this.store.updateAgentSession(current.sessionId, { status: 'NOT_LOADED' });
+        await this.persistAgentSession(current.sessionId, { status: 'NOT_LOADED' });
         this.appEvents.emit({
           type: 'run.terminal',
           taskId: current.taskId,
@@ -4441,7 +4881,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         affectedRuns.some((run) => run.id === request.runId) &&
         (request.status === 'PENDING' || request.status === 'RESPONDING')
     )) {
-      const stale = await this.store.transitionInteractionRequest(
+      const stale = await this.persistInteractionTransition(
         interaction.id,
         interaction.status,
         {
@@ -4462,9 +4902,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (!threadId) {
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, threadId);
     const run = session
-      ? await this.store.getActiveRunForSession(session.id)
+      ? await this.taskRuntime.getActiveRunForSession(session.id)
       : undefined;
     if (run) {
       await this.recordRunActivity(run, 'warning', {
@@ -4475,21 +4915,33 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }
 
   private async handleModelReroute(
+    threadId: string,
     turnId: string,
     fromModel: string,
     model: string,
     reason: unknown,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
-    if (!run) {
+    const target = await this.resolveProviderTurnTarget(turnId, threadId);
+    if (!target) return;
+    if (target.kind === 'RUNTIME') {
+      if (target.session.executionContext.modelSettings.model === model) return;
+      await this.failReadOnlyRuntimeTurn(
+        target.session,
+        'Codex changed the selected model for a read-only turn.',
+        raw,
+        'CODEX_MODEL_SELECTION',
+        turnId,
+        target.run
+      );
       return;
     }
+    const run = target.run;
     const observedSettings = this.sanitizeProviderSettings({
       ...run.observedSettings,
       model
     });
-    await this.store.updateRun(run.id, {
+    await this.persistRun(run.id, {
       observedSettings,
       lastEventAt: new Date().toISOString()
     });
@@ -4513,13 +4965,128 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     });
   }
 
+  private async failReadOnlyRuntimeTurn(
+    session: AgentRuntimeSessionRecord,
+    reason: string,
+    raw: AgentProtocolMessageReference,
+    source: 'CODEX_MODEL_SELECTION' | 'CODEX_PERMISSION_PROFILE',
+    providerTurnId?: string,
+    resolvedRun?: AgentRuntimeRunRecord
+  ): Promise<void> {
+    const run =
+      resolvedRun ??
+      (await this.runtimeStore.listRunsByOwner(session.owner)).find(
+        (candidate) =>
+          candidate.sessionId === session.id &&
+          !isTerminalRunStatus(candidate.status)
+      );
+    if (source === 'CODEX_PERMISSION_PROFILE') {
+      await this.supervisor.terminateAndFence(reason);
+    }
+    if (
+      !run ||
+      run.sessionId !== session.id ||
+      agentOwnerScopeKey(run.owner) !== agentOwnerScopeKey(session.owner) ||
+      isTerminalRunStatus(run.status)
+    ) {
+      return;
+    }
+    if (source === 'CODEX_MODEL_SELECTION') {
+      if (
+        run.status === 'RECOVERY_REQUIRED'
+      ) {
+        return;
+      }
+      if (run.status === 'INTERRUPTING') {
+        let current: AgentRuntimeRunRecord = run;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (
+            current.status !== 'INTERRUPTING' ||
+            current.providerTerminalSource === source
+          ) {
+            return;
+          }
+          try {
+            await this.runtimeStore.updateRun(
+              current.id,
+              current.recordRevision,
+              {
+                terminalReason: reason,
+                providerTerminalSource: source,
+                lastEventAt: new Date().toISOString()
+              },
+              `codex-runtime-existing-stop:${source}:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+            );
+            return;
+          } catch (error) {
+            const latest = await this.runtimeStore.getRun(current.id);
+            if (
+              !latest ||
+              latest.recordRevision === current.recordRevision ||
+              attempt === 2
+            ) {
+              throw error;
+            }
+            current = latest;
+          }
+        }
+        return;
+      }
+      const turnId = run.providerTurnId ?? providerTurnId;
+      if (turnId) {
+        await this.requestReadOnlyRuntimeStop({
+          session,
+          run,
+          providerTurnId: turnId,
+          reason,
+          source,
+          raw
+        });
+        return;
+      }
+      await this.stopAfterReadOnlyRuntimeViolation(
+        run,
+        reason,
+        'AMBIGUOUS',
+        raw,
+        source
+      );
+      return;
+    }
+    const completedAt = new Date().toISOString();
+    const failed = await this.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'FAILED',
+        delivery: run.providerTurnId ? 'TERMINAL' : 'AMBIGUOUS',
+        recoveryState: run.providerTurnId ? 'NONE' : 'REQUIRES_USER_ACTION',
+        terminalReason: reason,
+        providerTerminalSource: source,
+        lastEventAt: completedAt,
+        ...(run.providerTurnId ? { endedAt: completedAt } : {})
+      },
+      `codex-runtime-boundary:${source}:${raw.serverInstanceId}:${raw.sequence}`
+    );
+    if (failed.providerTurnId) {
+      this.emitRuntimeTurnEvent({
+        type: 'TERMINAL',
+        runId: failed.id,
+        providerTurnId: failed.providerTurnId,
+        status: 'failed',
+        error: reason,
+        completedAt
+      });
+    }
+  }
+
   private async appendTurnOutput(
     turnId: string,
     source: string,
     text: string
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
-    if (!run) {
+    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, turnId);
+    if (!run || isTerminalRunStatus(run.status)) {
       return;
     }
     if (!text) return;
@@ -4596,7 +5163,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     const byteCount = buffer.byteCount;
     buffer.groups = [];
     buffer.byteCount = 0;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       if (this.streamBuffers.get(runId) === buffer) {
         this.streamBuffers.delete(runId);
@@ -4611,12 +5178,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       .map(({ source, text }) => `\n[${source}]\n${text}`)
       .join('');
     try {
-      await this.store.appendArtifact(run.outputArtifactId, artifactText);
+      await this.persistArtifactChunk(run.outputArtifactId, artifactText);
     } catch (error) {
       const nextFailureCount = buffer.failureCount + 1;
       const restoredByteCount = buffer.byteCount + byteCount;
       if (
-        error instanceof ArtifactAppendAmbiguousError ||
+        error instanceof AgentRuntimeArtifactMutationAmbiguousError ||
         nextFailureCount >= STREAM_OUTPUT_MAX_FAILURES ||
         restoredByteCount > STREAM_OUTPUT_MAX_BUFFER_BYTES
       ) {
@@ -4730,7 +5297,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   ): void {
     if (!this.outputPersistenceFence) {
       const reason =
-        error instanceof ArtifactAppendAmbiguousError
+        error instanceof AgentRuntimeArtifactMutationAmbiguousError
           ? `Codex output persistence for run ${run.id} became ambiguous and cannot be retried safely.`
           : `Codex output persistence for run ${run.id} failed repeatedly.`;
       const serverInstanceId =
@@ -4750,8 +5317,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     eventType: string,
     payload: Record<string, unknown>
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
-    if (run) {
+    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, turnId);
+    if (run && !isTerminalRunStatus(run.status)) {
       await this.recordRunActivity(run, eventType, payload);
     }
   }
@@ -4761,7 +5328,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     eventType: string,
     payload: Record<string, unknown>
   ): Promise<void> {
-    await this.store.appendEvent(
+    await this.persistRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',
         taskId: run.taskId,
@@ -4780,7 +5347,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     providerTurnId: string,
     reason: string
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
+    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
     if (!run) {
       return;
     }
@@ -4810,17 +5377,17 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     run: RunRecord,
     terminalReason: string
   ): Promise<void> {
-    const current = (await this.store.getRun(run.id)) ?? run;
+    const current = (await this.taskRuntime.getRun(run.id)) ?? run;
     if (!ACTIVE_RUN_STATES.includes(current.status)) {
       return;
     }
     await this.flushBufferedOutput(current.id, true);
-    const finalArtifact = await this.store.writeFinalArtifact(
+    const finalArtifact = await this.persistFinalArtifact(
       current.taskId,
       current.id,
       `# Agent turn interrupted\n\n${terminalReason}\n`
     );
-    const published = await this.store.appendRunEventIfStatus(
+    const published = await this.persistEventIfRunStatus(
       createDomainEvent({
         type: 'AGENT_RUN_INTERRUPTED',
         taskId: current.taskId,
@@ -4869,7 +5436,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   ): Promise<RunRecord | undefined> {
     return this.serializeRunSettlement(run.id, async () => {
       await this.finalizeTurnOwned(run, turn, 'RECOVERY_RESUME_RESPONSE');
-      const current = await this.store.getRun(run.id);
+      const current = await this.taskRuntime.getRun(run.id);
       const expectedStatus = mapTurnStatus(turn.status);
       if (!current || current.status !== expectedStatus) {
         return current;
@@ -4891,12 +5458,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       | 'RECOVERY_RESUME_RESPONSE',
     rawMessage?: AgentProtocolMessageReference
   ): Promise<void> {
-    const current = await this.store.getRun(run.id);
+    const current = await this.taskRuntime.getRun(run.id);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) {
       return;
     }
     await this.flushBufferedOutput(current.id, true);
-    const items = await this.store.getAgentItemsForRun(run.id);
+    const items = await this.taskRuntime.getAgentItemsForRun(run.id);
     const finalMessage =
       current.finalMessage ??
       [...items]
@@ -4913,15 +5480,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       ? redactCredentialText(finalMessage, this.sensitiveValues)
       : undefined;
     const safeTurn = this.redactProviderValue(turn);
-    const reviewResult =
-      run.mode === 'REVIEW' ? parseAgentReviewResult(safeFinalMessage) : undefined;
-    const agentReviewStatus = agentReviewStatusFromResult(reviewResult);
-    const finalArtifact = await this.store.writeFinalArtifact(
+    const finalArtifact = await this.persistFinalArtifact(
       run.taskId,
       run.id,
       formatFinalArtifact(run, safeTurn, safeFinalMessage)
     );
-    await this.store.updateRun(run.id, {
+    await this.persistRun(run.id, {
       providerTerminalSource: source,
       providerTerminalRawMessage: rawMessage
     });
@@ -4931,7 +5495,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         : turn.status === 'interrupted'
           ? 'AGENT_RUN_INTERRUPTED'
           : 'AGENT_RUN_FAILED';
-    const published = await this.store.appendRunEventIfStatus(
+    const published = await this.persistEventIfRunStatus(
       createDomainEvent({
         type,
         taskId: run.taskId,
@@ -4945,9 +5509,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           terminalStatus: safeTurn.status,
           error: safeTurn.error?.message,
           finalArtifactId: finalArtifact.id,
-          terminalReason: safeTurn.error?.message,
-          agentReviewStatus,
-          agentReviewResult: reviewResult
+          terminalReason: safeTurn.error?.message
         }
       }),
       ACTIVE_RUN_STATES
@@ -4964,7 +5526,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     });
   }
 
-  private async handleRuntimeLoss(
+  private async handleTaskRuntimeLoss(
     serverInstanceId: string,
     options: {
       reason?: string;
@@ -5004,7 +5566,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       };
       this.emitProviderUpdate();
     }
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const affected = snapshot.runs.filter(
       (run) =>
         run.serverInstanceId === serverInstanceId && ACTIVE_RUN_STATES.includes(run.status)
@@ -5021,14 +5583,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       } else {
         await this.recordRuntimeLoss(run, reason, serverInstanceId);
       }
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      await this.persistAgentSession(run.sessionId, { status: 'NOT_LOADED' });
     }
     for (const interaction of snapshot.interactionRequests.filter(
       (request) =>
         request.serverInstanceId === serverInstanceId &&
         ['PENDING', 'RESPONDING'].includes(request.status)
     )) {
-      const aborted = await this.store.transitionInteractionRequest(
+      const aborted = await this.persistInteractionTransition(
         interaction.id,
         interaction.status,
         {
@@ -5042,21 +5604,25 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.runtimeStore.snapshot();
     const orphaned = agentServersRequiringLossRecovery(
-      snapshot,
+      {
+        agentServers: snapshot.servers,
+        runs: snapshot.runs,
+        interactionRequests: snapshot.interactions
+      },
       this.descriptor.id
     );
     for (const server of orphaned) {
       if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
-        await this.store.updateAgentServer(server.id, {
+        await this.providerRuntime.updateAgentServer(server.id, {
           status: 'LOST',
           disconnectedAt: new Date().toISOString(),
           exitedAt: new Date().toISOString(),
           exitReason: 'Task Monki restarted without the prior App Server process.'
         });
       }
-      await this.handleRuntimeLoss(server.id);
+      await this.handleCanonicalServerLoss(server.id);
     }
   }
 
@@ -5067,7 +5633,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     }
     const timer = setTimeout(() => {
       this.interruptTimers.delete(providerTurnId);
-      void this.store
+      void this.taskRuntime
         .getRunByProviderTurnId(this.descriptor.id, providerTurnId)
         .then(async (run) => {
           if (
@@ -5098,7 +5664,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     this.interruptTimers.set(providerTurnId, timer);
   }
 
-  private armScopedInterruptDeadline(
+  private armRuntimeInterruptDeadline(
     runId: string,
     providerTurnId: string
   ): void {
@@ -5106,22 +5672,47 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
       this.interruptTimers.delete(providerTurnId);
-      void this.settleScopedInterruptDeadline(runId, providerTurnId)
-        .catch((error: unknown) => this.handleInboundMaterializationFailure(error));
+      const reason =
+        'Codex acknowledged the interruption but did not confirm a terminal turn before the interruption deadline.';
+      this.enqueueInbound(async () => {
+        const run = await this.runtimeStore.getRun(runId);
+        if (
+          !run ||
+          run.providerTurnId !== providerTurnId ||
+          run.status !== 'INTERRUPTING'
+        ) {
+          return;
+        }
+        let terminationFailure: unknown;
+        try {
+          await this.supervisor.terminateUnresponsive(reason);
+        } catch (error) {
+          terminationFailure = error;
+        }
+        // Process exit queues canonical server-loss handling immediately.
+        // Settle behind it so only confirmed stop can become terminal.
+        this.enqueueInbound(() =>
+          this.settleRuntimeInterruptDeadline(
+            runId,
+            providerTurnId,
+            terminationFailure
+          )
+        );
+      });
     }, this.interruptCompletionTimeoutMs);
     timer.unref();
     this.interruptTimers.set(providerTurnId, timer);
   }
 
-  private async settleScopedInterruptDeadline(
+  private async settleRuntimeInterruptDeadline(
     runId: string,
-    providerTurnId: string
+    providerTurnId: string,
+    terminationFailure?: unknown
   ): Promise<void> {
-    if (!this.scopedRuntimeStore) return;
     const observedAt = new Date().toISOString();
-    const reason =
+    const deadlineReason =
       'Codex acknowledged the interruption but did not confirm a terminal turn before the interruption deadline.';
-    let run = await this.scopedRuntimeStore.getRun(runId);
+    let run = await this.runtimeStore.getRun(runId);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (
         !run ||
@@ -5131,7 +5722,21 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         return;
       }
       try {
-        const updated = await this.scopedRuntimeStore.updateRun(
+        if (terminationFailure === undefined && run.serverInstanceId) {
+          await this.handleCanonicalServerLoss(run.serverInstanceId, {
+            reason: deadlineReason,
+            restarting: false,
+            confirmedStopped: true
+          });
+          return;
+        }
+        const reason = terminationFailure
+          ? `${deadlineReason} Task Monki could not confirm that Codex stopped: ${redactCredentialText(
+              errorMessage(terminationFailure),
+              this.sensitiveValues
+            )}`
+          : `${deadlineReason} Task Monki could not identify the owning App Server.`;
+        const updated = await this.runtimeStore.updateRun(
           run.id,
           run.recordRevision,
           {
@@ -5141,9 +5746,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
             terminalReason: reason,
             lastEventAt: observedAt
           },
-          `codex-scoped-interrupt-deadline:${run.id}`
+          `codex-runtime-interrupt-deadline:${run.id}`
         );
-        this.emitScopedTurnEvent({
+        this.emitRuntimeTurnEvent({
           type: 'RECOVERY_REQUIRED',
           runId: updated.id,
           providerTurnId,
@@ -5152,7 +5757,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         });
         return;
       } catch (error) {
-        const latest = await this.scopedRuntimeStore.getRun(run.id);
+        const latest = await this.runtimeStore.getRun(run.id);
         if (
           !latest ||
           latest.providerTurnId !== providerTurnId ||
@@ -5171,7 +5776,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     reason: string,
     terminationFailure: unknown
   ): Promise<void> {
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (
       !run ||
       !['INTERRUPTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
@@ -5192,18 +5797,18 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         this.sensitiveValues
       )}`;
     if (run.serverInstanceId) {
-      await this.handleRuntimeLoss(run.serverInstanceId, {
+      await this.handleCanonicalServerLoss(run.serverInstanceId, {
         reason: failureReason,
         restarting: false,
         confirmedStopped: !this.supervisor.processTreeRunning
       });
     } else {
       await this.recordRuntimeLoss(run, failureReason);
-      await this.store.updateAgentSession(run.sessionId, {
+      await this.persistAgentSession(run.sessionId, {
         status: 'NOT_LOADED'
       });
     }
-    const recoveryRun = await this.store.getRun(run.id);
+    const recoveryRun = await this.taskRuntime.getRun(run.id);
     if (recoveryRun?.status === 'RECOVERY_REQUIRED') {
       await this.recordReconciliation(
         recoveryRun,
@@ -5220,9 +5825,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     serverInstanceId = run.serverInstanceId
   ): Promise<void> {
     await this.serializeRunSettlement(run.id, async () => {
-      const current = await this.store.getRun(run.id);
+      const current = await this.taskRuntime.getRun(run.id);
       if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
-      await this.store.appendRunEventIfStatus(
+      await this.persistEventIfRunStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
           taskId: current.taskId,
@@ -5268,7 +5873,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     terminal: boolean
   ): Promise<RunRecord | undefined> {
     return this.serializeRunSettlement(run.id, async () => {
-      const current = await this.store.getRun(run.id);
+      const current = await this.taskRuntime.getRun(run.id);
       if (
         !current ||
         (!ACTIVE_RUN_STATES.includes(current.status) &&
@@ -5291,7 +5896,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     recoveryState: RunRecord['recoveryState'],
     terminal: boolean
   ): Promise<RunRecord | undefined> {
-    await this.store.appendRunEventIfStatus(
+    await this.persistEventIfRunStatus(
       createDomainEvent({
         type: 'AGENT_RUNTIME_RECONCILED',
         taskId: run.taskId,
@@ -5305,7 +5910,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       }),
       [run.status]
     );
-    return this.store.getRun(run.id);
+    return this.taskRuntime.getRun(run.id);
   }
 
   private async syncGoalIfNeeded(
@@ -5334,10 +5939,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     rawMessage?: AgentProtocolMessageReference;
   }): Promise<AgentGoalSnapshotRecord> {
     const taskGoalHash = hashGoal(input.authoritativeGoal);
-    const latest = await this.store.getLatestAgentGoalSnapshot(input.session.id);
+    const latest = await this.taskRuntime.getLatestAgentGoalSnapshot(input.session.id);
     const providerGoalHash = hashGoal(input.goal.objective);
     const safeGoal = this.redactProviderValue(input.goal);
-    return this.store.recordAgentGoalSnapshot({
+    return this.persistGoalSnapshot({
       taskId: input.session.taskId,
       iterationId: input.session.iterationId,
       sessionId: input.session.id,
@@ -5368,7 +5973,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     rawMessage?: AgentProtocolMessageReference,
     detail?: string
   ): Promise<void> {
-    await this.store.recordAgentSettingsObservation({
+    await this.persistSettingsRecord({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
@@ -5397,7 +6002,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
 
   private redactProviderValue<T>(value: T): T {
     return redactCredentialValue(
-      this.designToolProtocolSanitizer.sanitizeValue(value),
+      this.protocolSanitizer.sanitizeValue(value),
       this.sensitiveValues
     );
   }
@@ -5441,8 +6046,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
    * `thread/start` allocates an empty thread on the live App Server, but Codex
    * does not write a resumable rollout until the first turn starts. Reuse that
    * empty thread only while its permission profile is attested on the current
-   * server generation. After a restart (or any profile change), replacing the
-   * empty thread is safe because no provider input has been submitted yet.
+   * server generation. After a restart or profile change, the orchestrator
+   * must create a replacement local session because provider identity is
+   * immutable once it is recorded.
    */
   private async prepareUnmaterializedThreadForTurn(
     inputSession: AgentSessionRecord,
@@ -5457,13 +6063,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     inboundFailureGeneration: number;
   }> {
     let session = inputSession;
-    const attachmentPaths = attachments
-      .map((attachment) => attachment.path)
-      .sort((left, right) => left.localeCompare(right));
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(settings),
+      attachments,
+      support: this.currentAttachmentSupport()
+    });
     const config = await this.permissionProfileConfigForSession(
       session,
       settings,
-      attachmentPaths
+      grantAttachments.map((attachment) => attachment.path)
     );
     const requiredFingerprint = threadStartProfileFingerprint(settings, config);
     let client = await this.ensureClient();
@@ -5481,6 +6089,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       );
 
     if (!isCurrentAttestation()) {
+      if (session.providerSessionId) {
+        throw new AgentProviderSessionMissingError(
+          'thread/start',
+          'The empty Codex thread belongs to an earlier runtime or permission profile. Start a replacement local session.'
+        );
+      }
       session = await this.startUnmaterializedProviderThread(
         session,
         settings,
@@ -5527,20 +6141,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   }): Promise<boolean> {
     let restored = false;
     let failure: unknown;
-    // Put the proof and write on the same queue as provider notifications so
-    // a newly parsed turn event cannot race between the evidence check and the
+    // Put the proof on the same queue as provider notifications so a newly
+    // parsed turn event cannot race between the evidence check and the durable
     // materialization update.
     this.enqueueInbound(async () => {
       try {
         const [run, session] = await Promise.all([
-          this.store.getRun(input.localRunId),
-          this.store.getAgentSession(input.localSessionId)
+          this.taskRuntime.getRun(input.localRunId),
+          this.taskRuntime.getAgentSession(input.localSessionId)
         ]);
         if (
           !run ||
           run.sessionId !== input.localSessionId ||
           run.providerTurnId ||
-          !session ||
+          !session?.materialized ||
           session.providerSessionId !== input.providerSessionId ||
           input.expectedInboundFailureGeneration === undefined ||
           this.inboundMaterializationFailureGeneration !==
@@ -5548,7 +6162,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         ) {
           return;
         }
-        await this.store.updateAgentSession(session.id, { materialized: false });
+        await this.persistAgentSession(session.id, { materialized: false });
         restored = true;
       } catch (cause) {
         failure = cause;
@@ -5569,10 +6183,16 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     session: AgentSessionRecord,
     providerSessionId: string,
     settings: AgentExecutionSettings,
-    attachmentPaths: readonly string[],
+    attachments: readonly AgentTurnAttachment[],
     options: { allowProfileFork?: boolean } = {}
   ) {
     const client = await this.ensureClient();
+    const grantAttachments = codexExactGrantAttachments({
+      sandbox: codexAttachmentSandbox(settings),
+      attachments,
+      support: this.currentAttachmentSupport()
+    });
+    const attachmentPaths = grantAttachments.map((attachment) => attachment.path);
     const config = await this.permissionProfileConfigForSession(
       session,
       settings,
@@ -5584,77 +6204,76 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       activeProfile?.providerSessionId === providerSessionId
         ? activeProfile.profileId
         : undefined;
-    const task = await this.store.getTask(session.taskId);
+    const task = await this.taskStore.getTask(session.taskId);
+    const storedGrantMatches = await this.storedAttachmentAccessMatches(
+      session.id,
+      grantAttachments
+    );
+    if (
+      options.allowProfileFork === false &&
+      settings.sandbox !== 'DANGER_FULL_ACCESS' &&
+      !storedGrantMatches
+    ) {
+      throw new Error(
+        'Codex recovery attachment access does not match the stored session grant.'
+      );
+    }
     const shouldFork =
       options.allowProfileFork !== false &&
       settings.sandbox !== 'DANGER_FULL_ACCESS' &&
       (currentProfileId
         ? currentProfileId !== expectedProfileId
-        : task?.kind === 'DESIGN' || attachmentPaths.length > 0);
-    const operation = shouldFork ? 'thread/fork' : 'thread/resume';
-    const dynamicTools = await this.dynamicToolsForSession(session);
-    if (!shouldFork) {
-      this.activePermissionProfiles.set(session.id, {
-        providerSessionId,
-        profileId: expectedProfileId
-      });
+        : task?.kind === 'DESIGN' || !storedGrantMatches);
+    if (shouldFork) {
+      throw new AgentProviderSessionMissingError(
+        'thread/fork',
+        'The Codex permission scope changed. Start a replacement local session before provider delivery.'
+      );
     }
-    let response;
+    const operation = 'thread/resume';
+    const dynamicTools = await this.dynamicToolsForSession(session);
+    this.activePermissionProfiles.set(session.id, {
+      providerSessionId,
+      profileId: expectedProfileId
+    });
+    let opened: CodexThreadTransportResult;
     try {
-      const params = {
+      opened = await this.openCodexThread({
+        operation,
         threadId: providerSessionId,
-        model: settings.model ?? null,
-        modelProvider: settings.modelProvider ?? null,
-        serviceTier: settings.serviceTier ?? null,
         cwd: session.worktreePath,
+        settings,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        config
-      };
-      response = shouldFork
-        ? await client.requestMutation(
-            'thread/fork',
-            withDynamicTools({ ...params, ephemeral: false }, dynamicTools)
-          )
-        : await client.requestMutation(
-            'thread/resume',
-            withDynamicTools(params, dynamicTools)
-          );
+        config,
+        dynamicTools,
+        validateResponse: (response) =>
+          this.assertProviderPermissionProfileOrFence({
+            sessionId: session.id,
+            settings,
+            worktreePath: session.worktreePath,
+            expectedProfileId,
+            operation,
+            providerReference: response.thread.id,
+            response
+          })
+      });
     } catch (error) {
-      throw mapMutationError(operation, error);
+      throw taskMutationError(error);
     }
-    await this.assertProviderPermissionProfileOrFence({
-      sessionId: session.id,
-      settings,
-      worktreePath: session.worktreePath,
-      expectedProfileId,
-      operation,
-      providerReference: response.thread.id,
-      response
-    });
-    if (shouldFork && response.thread.id !== providerSessionId) {
-      // The fork is already acknowledged and attested. Failure to unload its
-      // source must not make Task Monki retry the fork and create another thread.
-      await client
-        .requestMutation(
-          'thread/unsubscribe',
-          { threadId: providerSessionId },
-          2_000
-        )
-        .catch(() => undefined);
-    }
+    const response = opened.response;
     this.activePermissionProfiles.set(session.id, {
       providerSessionId: response.thread.id,
       profileId: expectedProfileId
     });
     return {
       ...response,
-      taskMonkiProfileOperation: shouldFork ? 'FORK' as const : 'RESUME' as const
+      taskMonkiProfileOperation: 'RESUME' as const
     };
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
-    const session = await this.store.getAgentSession(sessionId);
+    const session = await this.taskRuntime.getAgentSession(sessionId);
     if (!session) {
       throw new Error(`Agent session not found: ${sessionId}`);
     }
@@ -5710,7 +6329,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
   private async dynamicToolsForSession(
     session: AgentSessionRecord
   ): Promise<DynamicToolSpec[]> {
-    const task = await this.store.getTask(session.taskId);
+    const task = await this.taskStore.getTask(session.taskId);
     if (task?.kind !== 'DESIGN' || session.role !== 'PRIMARY') return [];
     this.requireDesignSkillPack();
     if (!this.designBrowserToolHandler) {
@@ -5729,7 +6348,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') {
       return codexInteractiveCollaborationMode(input, settings);
     }
-    const task = await this.store.getTask(session.taskId);
+    const task = await this.taskStore.getTask(session.taskId);
     if (task?.kind !== 'DESIGN' || session.role !== 'PRIMARY') {
       throw new Error(
         'The DESIGN instruction profile is valid only for a primary Design session.'
@@ -5748,7 +6367,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     settings: AgentExecutionSettings,
     attachmentPaths: readonly string[] = []
   ) {
-    const task = await this.store.getTask(session.taskId);
+    const task = await this.taskStore.getTask(session.taskId);
     const designPack =
       task?.kind === 'DESIGN' && session.role === 'PRIMARY'
         ? this.requireDesignSkillPack()
@@ -5768,7 +6387,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     if (settings.sandbox === 'DANGER_FULL_ACCESS') {
       return permissionProfile;
     }
-    const worktree = await this.store.getWorktree(session.worktreeId);
+    const worktree = await this.taskStore.getWorktree(session.worktreeId);
     if (
       !worktree ||
       worktree.taskId !== session.taskId ||
@@ -5779,7 +6398,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         'Cannot resolve trusted Git metadata for agent session: the session worktree ownership is inconsistent.'
       );
     }
-    const repository = await this.store.getRepository(worktree.repositoryId);
+    const repository = await this.taskStore.getRepository(worktree.repositoryId);
     if (!repository || repository.status !== 'AVAILABLE') {
       throw new Error(
         'Cannot resolve trusted Git metadata for agent session: the selected repository is unavailable.'
@@ -5809,6 +6428,88 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     };
   }
 
+  private currentAttachmentSupport(): CodexAttachmentSupport {
+    return codexAttachmentSupport(this.supervisor.currentServer?.runtimeVersion);
+  }
+
+  private async persistAttachmentAccessContext(
+    sessionId: string,
+    settings: AgentExecutionSettings,
+    config: Record<string, JsonValue>,
+    grantAttachments: readonly AgentTurnAttachment[]
+  ): Promise<void> {
+    const session = await this.runtimeStore.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Cannot update missing Codex runtime session ${sessionId}.`);
+    }
+    const executionContext: AgentExecutionContext = {
+      ...session.executionContext,
+      managedAttachments: managedAttachmentAccess(grantAttachments),
+      permissionProfileHash: codexPermissionProfileHash(config),
+      modelSettings: { ...settings, runtimeId: this.descriptor.id },
+      externalTools: {
+        ...session.executionContext.externalTools,
+        network: settings.networkAccess === true
+      }
+    };
+    const accessEpoch = createAgentSessionAccessEpoch({
+      owner: session.owner,
+      sessionId: session.id,
+      epoch: session.accessEpoch.epoch,
+      runtimeId: session.runtimeId,
+      model: settings.model ?? session.accessEpoch.model,
+      executionContext,
+      createdAt: session.accessEpoch.createdAt
+    });
+    await this.taskRuntime.updateAgentSessionAccess(
+      session.id,
+      { executionContext, accessEpoch },
+      codexRuntimeOperationId('session/attachment-access', session.id, executionContext)
+    );
+  }
+
+  private async storedAttachmentAccessMatches(
+    sessionId: string,
+    grantAttachments: readonly AgentTurnAttachment[]
+  ): Promise<boolean> {
+    const session = await this.runtimeStore.getSession(sessionId);
+    if (!session) return false;
+    return sameManagedAttachmentAccess(
+      session.executionContext.managedAttachments,
+      managedAttachmentAccess(grantAttachments)
+    );
+  }
+
+  private async attachmentsForStoredAccess(
+    sessionId: string,
+    taskId: string
+  ): Promise<AgentTurnAttachment[]> {
+    const runtimeSession = await this.runtimeStore.getSession(sessionId);
+    if (!runtimeSession) {
+      throw new Error(`Cannot attach missing Codex runtime session ${sessionId}.`);
+    }
+    const expected = runtimeSession.executionContext.managedAttachments;
+    if (expected.length === 0) return [];
+
+    const verified = toAgentTurnAttachments(
+      await this.taskStore.verifyTaskAttachments(taskId)
+    );
+    const byId = new Map(verified.map((attachment) => [attachment.attachmentId, attachment]));
+    return expected.map((access) => {
+      const attachment = byId.get(access.attachmentId);
+      if (
+        !attachment ||
+        attachment.sha256 !== access.contentSha256 ||
+        attachment.byteCount !== access.byteCount
+      ) {
+        throw new Error(
+          `Stored Codex attachment access cannot be reconstructed for ${access.attachmentId}.`
+        );
+      }
+      return attachment;
+    });
+  }
+
   private emitProviderUpdate(): void {
     this.appEvents.emit({
       type: 'runtime.updated',
@@ -5832,7 +6533,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
             action: 'ANSWER',
             answers: {}
           };
-    const responding = await this.store.transitionInteractionRequest(
+    const responding = await this.persistInteractionTransition(
       interaction.id,
       'PENDING',
       {
@@ -5845,9 +6546,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     try {
       await this.respondToInteraction({ interaction: responding, decision });
     } catch (error) {
-      const latest = await this.store.getInteractionRequest(interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (latest?.status === 'RESPONDING') {
-        const stale = await this.store.transitionInteractionRequest(
+        const stale = await this.persistInteractionTransition(
           latest.id,
           'RESPONDING',
           {
@@ -5859,10 +6560,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
           }
         );
         this.emitInteractionUpdate(stale);
-        const run = await this.store.getRun(interaction.runId);
+        const run = await this.taskRuntime.getRun(interaction.runId);
         if (run) {
           const reason = error instanceof Error ? error.message : String(error);
-          await this.store.appendEvent(
+          await this.persistRuntimeEvent(
             createDomainEvent({
               type: 'AGENT_MUTATION_AMBIGUOUS',
               taskId: run.taskId,
@@ -5901,6 +6602,206 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       }
       throw error;
     }
+  }
+
+  private async persistAgentSession(
+    sessionId: string,
+    update: Parameters<TaskAgentRuntimeAccess['updateAgentSession']>[1]
+  ) {
+    const operationId = codexRuntimeOperationId('session/update', sessionId, update);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.taskRuntime.updateAgentSession(sessionId, update, operationId);
+      } catch (error) {
+        if (attempt === 2 || !isRuntimeRevisionConflict(error)) throw error;
+      }
+    }
+  }
+
+  private async persistRun(
+    runId: string,
+    update: Parameters<TaskAgentRuntimeAccess['updateRun']>[1]
+  ) {
+    const operationId = codexRuntimeOperationId('run/update', runId, update);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.taskRuntime.updateRun(runId, update, operationId);
+      } catch (error) {
+        if (attempt === 2 || !isRuntimeRevisionConflict(error)) throw error;
+      }
+    }
+  }
+
+  private persistAgentItem(
+    item: Parameters<TaskAgentRuntimeAccess['upsertAgentItem']>[0]
+  ) {
+    return this.taskRuntime.upsertAgentItem(
+      item,
+      codexRuntimeOperationId(
+        'item/upsert',
+        item.runId,
+        item.providerItemId,
+        item.rawMessage,
+        item
+      )
+    );
+  }
+
+  private persistInteraction(
+    input: Parameters<TaskAgentRuntimeAccess['createInteractionRequest']>[0]
+  ) {
+    return this.taskRuntime.createInteractionRequest(
+      input,
+      codexRuntimeOperationId(
+        'interaction/create',
+        input.serverInstanceId,
+        input.providerRequestId,
+        input.requestRawMessage
+      )
+    );
+  }
+
+  private persistInteractionTransition(
+    id: string,
+    expectedStatus: Parameters<
+      TaskAgentRuntimeAccess['transitionInteractionRequest']
+    >[1],
+    update: Parameters<
+      TaskAgentRuntimeAccess['transitionInteractionRequest']
+    >[2]
+  ) {
+    return this.taskRuntime.transitionInteractionRequest(
+      id,
+      expectedStatus,
+      update,
+      codexRuntimeOperationId(
+        'interaction/transition',
+        id,
+        expectedStatus,
+        update
+      )
+    );
+  }
+
+  private persistGoalSnapshot(
+    record: Parameters<TaskAgentRuntimeAccess['recordAgentGoalSnapshot']>[0]
+  ) {
+    return this.taskRuntime.recordAgentGoalSnapshot(
+      record,
+      codexRuntimeOperationId('goal/observe', record.sessionId, record.rawMessage, record)
+    );
+  }
+
+  private persistPlanRevision(
+    record: Parameters<TaskAgentRuntimeAccess['recordAgentPlanRevision']>[0]
+  ) {
+    return this.taskRuntime.recordAgentPlanRevision(
+      record,
+      codexRuntimeOperationId('plan/observe', record.runId, record.rawMessage, record)
+    );
+  }
+
+  private persistUsageSnapshot(
+    record: Parameters<TaskAgentRuntimeAccess['recordAgentUsageSnapshot']>[0]
+  ) {
+    return this.taskRuntime.recordAgentUsageSnapshot(
+      record,
+      codexRuntimeOperationId('usage/observe', record.runId, record.rawMessage, record)
+    );
+  }
+
+  private persistSettingsRecord(
+    record: Parameters<
+      TaskAgentRuntimeAccess['recordAgentSettingsObservation']
+    >[0]
+  ) {
+    return this.taskRuntime.recordAgentSettingsObservation(
+      record,
+      codexRuntimeOperationId(
+        'settings/observe',
+        record.sessionId,
+        record.runId,
+        record.rawMessage,
+        record
+      )
+    );
+  }
+
+  private persistObservedSubagent(
+    input: Parameters<TaskAgentRuntimeAccess['observeSubagent']>[0]
+  ) {
+    return this.taskRuntime.observeSubagent(
+      input,
+      codexRuntimeOperationId(
+        'subagent/observe',
+        input.parentSessionId,
+        input.providerChildSessionId,
+        input.rawMessage,
+        input
+      )
+    );
+  }
+
+  private persistObservedSubagentRun(
+    input: Parameters<TaskAgentRuntimeAccess['createObservedSubagentRun']>[0]
+  ) {
+    return this.taskRuntime.createObservedSubagentRun(
+      input,
+      codexRuntimeOperationId(
+        'subagent/run-observe',
+        input.session.id,
+        input.providerTurnId,
+        input.serverInstanceId,
+        input
+      )
+    );
+  }
+
+  private persistArtifactChunk(artifactId: string, chunk: string) {
+    return this.taskRuntime.appendArtifact(
+      artifactId,
+      chunk,
+      codexRuntimeOperationId(
+        'artifact/append',
+        artifactId,
+        randomUUID(),
+        createHash('sha256').update(chunk).digest('hex')
+      )
+    );
+  }
+
+  private persistFinalArtifact(taskId: string, runId: string, content: string) {
+    return this.taskRuntime.writeFinalArtifact(
+      taskId,
+      runId,
+      content,
+      codexRuntimeOperationId(
+        'artifact/final',
+        taskId,
+        runId,
+        createHash('sha256').update(content).digest('hex')
+      )
+    );
+  }
+
+  private persistRuntimeEvent(
+    event: Parameters<TaskAgentRuntimeAccess['applyTaskRuntimeEvent']>[0]
+  ) {
+    return this.taskRuntime.applyTaskRuntimeEvent(
+      event,
+      codexRuntimeOperationId('event/apply', event.id, event.type)
+    );
+  }
+
+  private persistEventIfRunStatus(
+    event: Parameters<TaskAgentRuntimeAccess['applyTaskRuntimeEventIfRunStatus']>[0],
+    statuses: Parameters<TaskAgentRuntimeAccess['applyTaskRuntimeEventIfRunStatus']>[1]
+  ) {
+    return this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
+      event,
+      statuses,
+      codexRuntimeOperationId('event/apply-if-status', event.id, event.type, statuses)
+    );
   }
 
   private emitInteractionUpdate(interaction: InteractionRequestRecord): void {
@@ -5958,166 +6859,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function codexRuntimeOperationId(action: string, ...identity: unknown[]): string {
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify(identity))
+    .digest('hex');
+  return `codex:${action}:${fingerprint}`;
+}
+
 const INSPECT_DESIGN_TOOL_SPEC: DynamicToolSpec = {
   type: 'function',
-  name: DESIGN_BROWSER_TOOL_NAME,
-  description:
-    'Open and inspect the exact current Design candidate. Use only the operations needed for this change.',
-  inputSchema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['operation'],
-    properties: {
-      operation: {
-        type: 'string',
-        description:
-          'Choose one bridge operation. Browser actions use operation "act" plus an action.',
-        enum: [
-          'open_candidate',
-          'observe',
-          'act',
-          'set_viewport',
-          'set_media',
-          'screenshot',
-          'accessibility'
-        ]
-      },
-      action: {
-        type: 'string',
-        description: 'Required only when operation is "act".',
-        enum: [
-          'click',
-          'double_click',
-          'hover',
-          'focus',
-          'fill',
-          'type',
-          'key',
-          'select',
-          'check',
-          'uncheck',
-          'scroll',
-          'scroll_into_view',
-          'drag',
-          'wait'
-        ]
-      },
-      ref: {
-        type: 'string',
-        description: 'A current snapshot reference including its @ prefix, for example @e4.',
-        pattern: '^@e[1-9][0-9]{0,4}$'
-      },
-      targetRef: {
-        type: 'string',
-        description: 'A second current snapshot reference including its @ prefix.',
-        pattern: '^@e[1-9][0-9]{0,4}$'
-      },
-      value: { type: 'string', maxLength: 4096 },
-      values: {
-        type: 'array',
-        minItems: 1,
-        maxItems: 20,
-        items: { type: 'string', maxLength: 4096 }
-      },
-      direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
-      amount: { type: 'integer', minimum: 1, maximum: 2000 },
-      milliseconds: { type: 'integer', minimum: 0, maximum: 2000 },
-      width: {
-        type: 'integer',
-        description: 'Required only for set_viewport.',
-        minimum: 320,
-        maximum: 2560
-      },
-      height: {
-        type: 'integer',
-        description: 'Required only for set_viewport.',
-        minimum: 320,
-        maximum: 2000
-      },
-      colorScheme: {
-        type: 'string',
-        enum: ['light', 'dark']
-      },
-      reducedMotion: { type: 'boolean' },
-      fullPage: { type: 'boolean' }
-    },
-    oneOf: [
-      {
-        title: 'Open the exact current candidate',
-        properties: { operation: { const: 'open_candidate' } },
-        required: ['operation']
-      },
-      {
-        title: 'Refresh the snapshot, console, and runtime errors',
-        properties: { operation: { const: 'observe' } },
-        required: ['operation']
-      },
-      {
-        title: 'Perform one browser action, then observe',
-        properties: {
-          operation: { const: 'act' },
-          action: {
-            enum: [
-              'click',
-              'double_click',
-              'hover',
-              'focus',
-              'fill',
-              'type',
-              'key',
-              'select',
-              'check',
-              'uncheck',
-              'scroll',
-              'scroll_into_view',
-              'drag',
-              'wait'
-            ]
-          },
-          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          targetRef: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          value: { type: 'string' },
-          values: { type: 'array' },
-          direction: { enum: ['up', 'down', 'left', 'right'] },
-          amount: { type: 'integer' },
-          milliseconds: { type: 'integer' }
-        },
-        required: ['operation', 'action']
-      },
-      {
-        title: 'Set the viewport, then observe',
-        properties: {
-          operation: { const: 'set_viewport' },
-          width: { type: 'integer' },
-          height: { type: 'integer' }
-        },
-        required: ['operation', 'width', 'height']
-      },
-      {
-        title: 'Set color and motion media, then observe',
-        properties: {
-          operation: { const: 'set_media' },
-          colorScheme: { enum: ['light', 'dark'] },
-          reducedMotion: { type: 'boolean' }
-        },
-        required: ['operation', 'colorScheme', 'reducedMotion']
-      },
-      {
-        title: 'Capture a transient screenshot',
-        properties: {
-          operation: { const: 'screenshot' },
-          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          fullPage: { type: 'boolean' }
-        },
-        required: ['operation']
-      },
-      {
-        title: 'Run the bounded accessibility audit',
-        properties: { operation: { const: 'accessibility' } },
-        required: ['operation']
-      }
-    ]
-  } as JsonValue
+  ...INSPECT_DESIGN_TOOL_DEFINITION,
+  inputSchema: INSPECT_DESIGN_TOOL_DEFINITION.inputSchema as JsonValue
 };
 
 function withDynamicTools<T extends object>(
@@ -6151,19 +6903,6 @@ function failedDesignToolResponse(message: string): DynamicToolCallResponse {
     success: false,
     contentItems: [{ type: 'inputText', text: message.slice(0, 1_000) }]
   };
-}
-
-function safeDesignToolFailure(error: unknown): string {
-  const message = errorMessage(error).trim();
-  if (
-    message.length > 0 &&
-    message.length <= 1_000 &&
-    !message.includes('/') &&
-    !message.includes('\\')
-  ) {
-    return message;
-  }
-  return 'The Design browser operation failed. Correct the source or open a fresh candidate.';
 }
 
 function designToolItemPayload(
@@ -6266,20 +7005,138 @@ function toApprovalsReviewer(settings: AgentExecutionSettings): ApprovalsReviewe
     : 'user';
 }
 
-function toReviewTarget(target: AgentReviewTarget): ReviewTarget {
-  switch (target.type) {
-    case 'UNCOMMITTED_CHANGES':
-      return { type: 'uncommittedChanges' };
-    case 'BASE_BRANCH':
-      return { type: 'baseBranch', branch: target.branch };
-    case 'COMMIT':
-      return {
-        type: 'commit',
-        sha: target.sha,
-        title: target.title ?? null
-      };
-    case 'CUSTOM':
-      return { type: 'custom', instructions: target.instructions };
+function isSharedReadOnlyRuntimePurpose(
+  purpose: AgentRuntimeRunRecord['purpose']
+): boolean {
+  return (
+    purpose === 'TASK_REVIEW' ||
+    purpose === 'PROMPT_REFINEMENT' ||
+    purpose === 'PREVIEW_RECIPE_GENERATION' ||
+    purpose.startsWith('DISCOURSE_')
+  );
+}
+
+function isReadOnlyViolationSource(source: string | undefined): boolean {
+  return (
+    source === 'UNEXPECTED_SERVER_REQUEST' ||
+    source === 'CODEX_MODEL_SELECTION'
+  );
+}
+
+function isReadOnlyViolationTerminalSource(
+  source: string | undefined
+): boolean {
+  return (
+    isReadOnlyViolationSource(source) ||
+    source === 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST' ||
+    source === 'CONFIRMED_STOP_AFTER_MODEL_SELECTION_CHANGE' ||
+    source === 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST' ||
+    source === 'TURN_COMPLETED_NOTIFICATION_AFTER_MODEL_SELECTION_CHANGE'
+  );
+}
+
+function readOnlyViolationReason(
+  run: AgentRuntimeRunRecord
+): string | undefined {
+  if (run.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST') {
+    return (
+      run.terminalReason ??
+      'Codex requested an unsupported action during the read-only turn.'
+    );
+  }
+  if (run.providerTerminalSource === 'CODEX_MODEL_SELECTION') {
+    return (
+      run.terminalReason ??
+      'Codex changed the selected model for a read-only turn.'
+    );
+  }
+  return undefined;
+}
+
+function confirmedStopSource(source: string | undefined): string {
+  if (source === 'UNEXPECTED_SERVER_REQUEST') {
+    return 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST';
+  }
+  if (source === 'CODEX_MODEL_SELECTION') {
+    return 'CONFIRMED_STOP_AFTER_MODEL_SELECTION_CHANGE';
+  }
+  return 'CONFIRMED_STOP_AFTER_RUNTIME_INTERRUPT';
+}
+
+function turnCompletedSource(source: string | undefined): string {
+  if (source === 'UNEXPECTED_SERVER_REQUEST') {
+    return 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST';
+  }
+  if (source === 'CODEX_MODEL_SELECTION') {
+    return 'TURN_COMPLETED_NOTIFICATION_AFTER_MODEL_SELECTION_CHANGE';
+  }
+  return 'TURN_COMPLETED_NOTIFICATION';
+}
+
+function assertCodexReadOnlyModel(
+  expected: AgentExecutionSettings,
+  observed: AgentExecutionSettings
+): void {
+  if (expected.model && observed.model !== expected.model) {
+    throw new Error('Codex changed the selected model for a read-only turn.');
+  }
+  if (
+    expected.modelProvider &&
+    observed.modelProvider !== expected.modelProvider
+  ) {
+    throw new Error('Codex changed the selected model provider for a read-only turn.');
+  }
+}
+
+function codexAttachmentSandbox(
+  settings: AgentExecutionSettings
+): 'restricted' | 'danger-full-access' {
+  return settings.sandbox === 'DANGER_FULL_ACCESS'
+    ? 'danger-full-access'
+    : 'restricted';
+}
+
+function managedAttachmentAccess(
+  attachments: readonly AgentTurnAttachment[]
+): AgentExecutionContext['managedAttachments'] {
+  return attachments
+    .map((attachment) => ({
+      attachmentId: attachment.attachmentId,
+      contentSha256: attachment.sha256,
+      byteCount: attachment.byteCount
+    }))
+    .sort((left, right) => left.attachmentId.localeCompare(right.attachmentId));
+}
+
+function sameManagedAttachmentAccess(
+  left: readonly AgentExecutionContext['managedAttachments'][number][],
+  right: readonly AgentExecutionContext['managedAttachments'][number][]
+): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort((a, b) =>
+    a.attachmentId.localeCompare(b.attachmentId)
+  );
+  const sortedRight = [...right].sort((a, b) =>
+    a.attachmentId.localeCompare(b.attachmentId)
+  );
+  return sortedLeft.every((attachment, index) => {
+    const candidate = sortedRight[index];
+    return (
+      candidate?.attachmentId === attachment.attachmentId &&
+      candidate.contentSha256 === attachment.contentSha256 &&
+      candidate.byteCount === attachment.byteCount
+    );
+  });
+}
+
+function assertManagedAttachmentAccess(
+  actual: readonly AgentExecutionContext['managedAttachments'][number][],
+  attachments: readonly AgentTurnAttachment[]
+): void {
+  if (!sameManagedAttachmentAccess(actual, managedAttachmentAccess(attachments))) {
+    throw new Error(
+      'Codex managed attachment access does not match the attested execution context.'
+    );
   }
 }
 
@@ -6295,6 +7152,49 @@ function mapMutationError(operation: string, error: unknown): Error {
     return new AgentProviderSessionMissingError(operation, mapped.message);
   }
   return mapped;
+}
+
+function providerMutationCause(error: unknown): unknown {
+  return error instanceof CodexProviderMutationDeliveryError
+    ? error.providerCause
+    : error;
+}
+
+function taskMutationError(error: unknown): Error {
+  if (!(error instanceof CodexProviderMutationDeliveryError)) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  if (error.delivery === 'AMBIGUOUS') {
+    return error.providerCause instanceof AgentMutationAmbiguousError
+      ? error.providerCause
+      : new AgentMutationAmbiguousError(error.operation, error.message);
+  }
+  return mapMutationError(error.operation, error.providerCause);
+}
+
+function runtimeDeliveryError(error: unknown): AgentRuntimeDeliveryError {
+  if (error instanceof CodexProviderMutationDeliveryError) {
+    return new AgentRuntimeDeliveryError(error.delivery, error.message, {
+      cause: error.providerCause
+    });
+  }
+  if (error instanceof CodexAmbiguousMutationError) {
+    return new AgentRuntimeDeliveryError('AMBIGUOUS', error.message, {
+      cause: error
+    });
+  }
+  return new AgentRuntimeDeliveryError(
+    'NOT_DELIVERED',
+    error instanceof Error ? error.message : String(error),
+    { cause: error }
+  );
+}
+
+function requireProviderThreadId(threadId: string | undefined): string {
+  if (!threadId) {
+    throw new Error('Codex thread/resume requires a provider thread id.');
+  }
+  return threadId;
 }
 
 function postAcknowledgementPersistenceError(
@@ -6484,77 +7384,24 @@ function mapThreadToSubagentStatus(
   }
 }
 
-const ALL_CODEX_THREAD_SOURCES: readonly ThreadSourceKind[] = [
-  'cli',
-  'vscode',
-  'exec',
-  'appServer',
-  'subAgent',
-  'subAgentReview',
-  'subAgentCompact',
-  'subAgentThreadSpawn',
-  'subAgentOther',
-  'unknown'
-];
-
-async function listAllCodexThreads(client: CodexRpcClient): Promise<Thread[]> {
-  const threads = [
-    ...(await listCodexThreads(client, false)),
-    ...(await listCodexThreads(client, true))
-  ];
-  return [...new Map(threads.map((thread) => [thread.id, thread])).values()];
-}
-
-async function listCodexThreads(
-  client: CodexRpcClient,
-  archived: boolean
-): Promise<Thread[]> {
-  const threads: Thread[] = [];
-  const seenCursors = new Set<string>();
-  let cursor: string | null = null;
-  for (let page = 0; page < 100; page += 1) {
-    const response: ThreadListResponse = await client.request('thread/list', {
-      cursor,
-      limit: 100,
-      sortKey: 'updated_at',
-      sortDirection: 'desc',
-      sourceKinds: [...ALL_CODEX_THREAD_SOURCES],
-      archived,
-      useStateDbOnly: false
-    });
-    threads.push(...response.data);
-    if (!response.nextCursor) break;
-    if (seenCursors.has(response.nextCursor)) {
-      throw new Error('Codex thread pagination repeated a cursor.');
-    }
-    seenCursors.add(response.nextCursor);
-    cursor = response.nextCursor;
-    if (page === 99) {
-      throw new Error('Codex thread cleanup exceeded its safe page limit.');
-    }
-  }
-  return threads;
-}
-
-function threadDepth(thread: Thread, threads: ReadonlyMap<string, Thread>): number {
-  let depth = 0;
-  let parentId = thread.forkedFromId ?? thread.parentThreadId;
-  const visited = new Set([thread.id]);
-  while (parentId && !visited.has(parentId)) {
-    visited.add(parentId);
-    depth += 1;
-    const parent = threads.get(parentId);
-    parentId = parent?.forkedFromId ?? parent?.parentThreadId ?? null;
-  }
-  return depth;
-}
-
-async function canonicalPath(input: string): Promise<string> {
-  return fs.realpath(input).catch(() => path.resolve(input));
-}
-
 function hashString(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  if (!value || maxBytes <= 0) return '';
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.byteLength <= maxBytes) return value;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+function isRuntimeRevisionConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /^Agent runtime (?:run|session) changed before the requested update\.$/.test(error.message)
+  );
 }
 
 function codexGitSubprocessConfig(input: {

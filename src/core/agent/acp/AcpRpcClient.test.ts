@@ -1,6 +1,7 @@
 import { PassThrough, Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
+import { ACP_MAX_FRAME_BYTES } from './AcpProtocol';
 import { AcpAmbiguousMutationError, AcpRpcClient } from './AcpRpcClient';
 
 describe('AcpRpcClient', () => {
@@ -71,6 +72,22 @@ describe('AcpRpcClient', () => {
     await harness.outbound.next();
     harness.client.close('test disconnect');
     await expect(started.response).rejects.toBeInstanceOf(AcpAmbiguousMutationError);
+  });
+
+  it('keeps an oversized mutation retryable when no bytes were written', async () => {
+    const harness = rpcHarness();
+
+    const error = await harness.client.startMutation('session/prompt', {
+      sessionId: 'session-1',
+      prompt: [{ type: 'text', text: 'x'.repeat(ACP_MAX_FRAME_BYTES) }]
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(AcpAmbiguousMutationError);
+    expect(error).toMatchObject({
+      message: `ACP outbound message exceeds ${ACP_MAX_FRAME_BYTES} bytes.`
+    });
+    expect(harness.journal).toEqual([]);
   });
 
   it('lets an explicitly long-lived prompt outlast the bounded control timeout', async () => {
@@ -242,11 +259,128 @@ describe('AcpRpcClient', () => {
       message: 'ACP mutation delivery is ambiguous: write failed with [REDACTED]'
     });
   });
+
+  it('writes attachment bytes to the agent but omits them from the journal', async () => {
+    const harness = rpcHarness();
+    const secretContent = 'managed attachment bytes must not persist';
+    const started = await harness.client.startMutation('session/prompt', {
+      sessionId: 'session-1',
+      prompt: [
+        {
+          type: 'resource',
+          resource: {
+            uri: 'task-monki-attachment:attachment-1',
+            mimeType: 'text/plain',
+            text: secretContent
+          }
+        }
+      ]
+    }, { timeoutMs: null });
+    const wire = await harness.outbound.next();
+    expect(wire).toContain(secretContent);
+    expect(harness.journal.map((entry) => entry.raw).join('\n')).not.toContain(
+      secretContent
+    );
+    void started.response.catch(() => undefined);
+    harness.client.close('test complete');
+  });
+
+  it('sanitizes echoed structured attachment bytes before events and journals', async () => {
+    const harness = rpcHarness();
+    const echoed = 'echoed-managed-content';
+    const received = new Promise<unknown>((resolve) => {
+      harness.client.events.once('notification', (_method, params) => resolve(params));
+    });
+    harness.agentOutput.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'resource',
+              resource: {
+                uri: 'task-monki-attachment:attachment-1',
+                text: echoed
+              }
+            }
+          }
+        }
+      })}\n`
+    );
+    expect(JSON.stringify(await received)).not.toContain(echoed);
+    expect(harness.journal.map((entry) => entry.raw).join('\n')).not.toContain(echoed);
+  });
+
+  it('does not expose echoed attachment bytes when inbound journaling fails', async () => {
+    const harness = rpcHarness(1_000, [], new Error('journal unavailable'));
+    const secret = 'attachment-content-on-journal-failure';
+    const protocolError = new Promise<{ error: Error; rawLine?: string }>((resolve) => {
+      harness.client.events.once('protocolError', (error, rawLine) =>
+        resolve({ error, rawLine })
+      );
+    });
+    harness.agentOutput.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          update: {
+            content: {
+              type: 'resource',
+              resource: {
+                uri: 'task-monki-attachment:attachment-1',
+                text: secret
+              }
+            }
+          }
+        }
+      })}\n`
+    );
+    const failure = await protocolError;
+    expect(failure.error.message).toContain('Could not durably journal ACP input');
+    expect(failure.rawLine).not.toContain(secret);
+  });
+
+  it('accepts frames above the former two MiB limit and rejects frames above 32 MiB', async () => {
+    expect(ACP_MAX_FRAME_BYTES).toBe(32 * 1024 * 1024);
+    const accepted = rpcHarness();
+    const received = new Promise<void>((resolve) => {
+      accepted.client.events.once('notification', () => resolve());
+    });
+    accepted.agentOutput.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        method: '_test/large',
+        params: { text: 'x'.repeat(2 * 1024 * 1024 + 1) }
+      })}\n`
+    );
+    await received;
+
+    const rejected = rpcHarness();
+    await expect(
+      rejected.client.notify('_test/oversized', {
+        text: 'x'.repeat(ACP_MAX_FRAME_BYTES)
+      })
+    ).rejects.toThrow(`exceeds ${ACP_MAX_FRAME_BYTES} bytes`);
+
+    const rejectedInbound = rpcHarness();
+    const protocolError = new Promise<Error>((resolve) => {
+      rejectedInbound.client.events.once('protocolError', resolve);
+    });
+    rejectedInbound.agentOutput.write('x'.repeat(ACP_MAX_FRAME_BYTES + 1));
+    await expect(protocolError).resolves.toMatchObject({
+      message: `ACP message exceeds ${ACP_MAX_FRAME_BYTES} bytes.`
+    });
+  });
 });
 
 function rpcHarness(
   requestTimeoutMs = 1_000,
-  sensitiveValues: readonly string[] = []
+  sensitiveValues: readonly string[] = [],
+  journalFailure?: Error
 ) {
   const clientInput = new PassThrough();
   const agentOutput = new PassThrough();
@@ -257,6 +391,7 @@ function rpcHarness(
     clientInput,
     agentOutput,
     async (direction, raw) => {
+      if (journalFailure) throw journalFailure;
       sequence += 1;
       const reference: AgentProtocolMessageReference = {
         serverInstanceId: 'server-1',

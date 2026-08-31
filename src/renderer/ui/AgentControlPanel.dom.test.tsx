@@ -7,6 +7,7 @@ describe('AgentControlPanel actions', () => {
   it('submits retry and fork controls with their distinct strategies', async () => {
     const onRetry = vi.fn().mockResolvedValue(undefined);
     const callbacks = {
+      activeTurnSteeringSupported: true,
       interactions: [],
       onSteer: vi.fn(),
       onInterrupt: vi.fn(),
@@ -39,5 +40,21 @@ describe('AgentControlPanel actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Fork alternative' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start alternative' }));
     await waitFor(() => expect(onRetry).toHaveBeenCalledWith('run-2', 'FORK', undefined));
+  });
+
+  it('does not offer live steering when the selected runtime cannot do it', () => {
+    render(
+      <AgentControlPanel
+        run={makeRunRecord({ status: 'RUNNING' })}
+        activeTurnSteeringSupported={false}
+        interactions={[]}
+        onSteer={vi.fn()}
+        onInterrupt={vi.fn()}
+        onContinue={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByRole('button', { name: 'Add instruction' })).toBeNull();
   });
 });

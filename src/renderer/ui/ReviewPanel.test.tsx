@@ -221,6 +221,7 @@ function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
     diagnosticArtifactId: 'diag-1',
     startedAt: '2026-07-07T10:00:00.000Z',
     eventCount: 1,
-    ...overrides
+    ...overrides,
+    attachmentSelection: overrides.attachmentSelection ?? []
   };
 }

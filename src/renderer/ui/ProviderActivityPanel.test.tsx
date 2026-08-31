@@ -68,9 +68,9 @@ describe('ProviderActivityPanel', () => {
           mediaType: 'image/png',
           byteCount: 1_024,
           sha256: 'a'.repeat(64),
-          submittedAs: 'localImage',
+          transport: 'native-image',
           verifiedAt: '2026-07-07T10:00:30.000Z',
-          providerTurnId: 'turn-1',
+          correlation: { kind: 'provider-turn', id: 'turn-1' },
           submittedAt: '2026-07-07T10:00:31.000Z'
         }
       ]
@@ -113,7 +113,8 @@ function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
     diagnosticArtifactId: 'diagnostic-1',
     startedAt: '2026-07-07T10:00:00.000Z',
     eventCount: 0,
-    ...overrides
+    ...overrides,
+    attachmentSelection: overrides.attachmentSelection ?? []
   };
 }
 

@@ -51,12 +51,16 @@ describe('TaskManagerService prompt composition', () => {
       prompt: 'Recover the task after provider ambiguity.'
     });
     const run = await scenario.service.startRun({ taskId: task.id });
-    await scenario.store.updateRun(run.id, {
-      status: 'RECOVERY_REQUIRED',
-      recoveryState: 'REQUIRES_USER_ACTION',
-      terminalReason: 'Provider lost the turn/start response.',
-      finalMessage: 'The previous attempt inspected the agent panel but did not verify the fix.'
-    });
+    await scenario.transitionRun(
+      run.id,
+      {
+        status: 'RECOVERY_REQUIRED',
+        recoveryState: 'REQUIRES_USER_ACTION',
+        terminalReason: 'Provider lost the turn/start response.',
+        finalMessage: 'The previous attempt inspected the agent panel but did not verify the fix.'
+      },
+      `prompt-recovery-required:${run.id}`
+    );
 
     const continued = await scenario.service.continueRun({
       taskId: task.id,
@@ -64,7 +68,9 @@ describe('TaskManagerService prompt composition', () => {
       instruction: 'Continue from the current local state.'
     });
 
-    const prompt = await scenario.store.readArtifact(continued.promptArtifactId);
+    const prompt = await scenario.service.readArtifact({
+      artifactId: continued.promptArtifactId
+    });
     expect(continued.mode).toBe('FOLLOW_UP');
     expect(continued.continuedFromRunId).toBe(run.id);
     expect(prompt).toContain('Previous run status: RECOVERY_REQUIRED.');
@@ -78,7 +84,7 @@ describe('TaskManagerService prompt composition', () => {
         'Additional continuation guidance:\nContinue from the current local state.'
       )
     ).toBe(true);
-    await expect(scenario.store.getRun(run.id)).resolves.toMatchObject({
+    await expect(scenario.taskRuntime.getRun(run.id)).resolves.toMatchObject({
       status: 'INTERRUPTED',
       recoveryState: 'NONE',
       terminalReason:
@@ -95,10 +101,11 @@ describe('TaskManagerService prompt composition', () => {
       prompt: 'Complete the original implementation safely.'
     });
     const run = await scenario.service.startRun({ taskId: task.id });
-    await scenario.store.updateRun(run.id, {
-      status: 'FAILED',
-      terminalReason: 'Provider process exited.'
-    });
+    await scenario.transitionRun(
+      run.id,
+      { status: 'FAILED', terminalReason: 'Provider process exited.' },
+      `prompt-run-failed:${run.id}`
+    );
 
     const retry = await scenario.service.retryRun({
       taskId: task.id,
@@ -107,7 +114,9 @@ describe('TaskManagerService prompt composition', () => {
       instruction: 'Keep the correction focused.'
     });
 
-    const prompt = await scenario.store.readArtifact(retry.promptArtifactId);
+    const prompt = await scenario.service.readArtifact({
+      artifactId: retry.promptArtifactId
+    });
     expect(retry.mode).toBe('RETRY');
     expect(retry.retryOfRunId).toBe(run.id);
     expect(prompt).toContain('Retry the implementation after unsuccessful run');
@@ -132,10 +141,11 @@ describe('TaskManagerService prompt composition', () => {
       prompt: 'Complete this implementation once.'
     });
     const run = await scenario.service.startRun({ taskId: task.id });
-    await scenario.store.updateRun(run.id, {
-      status: 'COMPLETED',
-      endedAt: new Date().toISOString()
-    });
+    await scenario.transitionRun(
+      run.id,
+      { status: 'COMPLETED', endedAt: new Date().toISOString() },
+      `prompt-run-completed:${run.id}`
+    );
 
     await expect(
       scenario.service.retryRun({

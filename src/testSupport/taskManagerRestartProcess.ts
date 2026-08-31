@@ -4,7 +4,7 @@ import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { WorktreeService, listGitWorktrees } from '../core/worktree/WorktreeService';
-import { ScriptedAgentRuntimeAdapter } from './taskMonkiScenario';
+import { createScriptedAgentRuntimeFixture } from './taskMonkiScenario';
 
 const [mode, root] = process.argv.slice(2);
 if (!mode || !root) {
@@ -25,9 +25,10 @@ if (mode === 'prepare') {
   await git(repositoryPath, ['commit', '-m', 'Initial fixture commit']);
 
   const store = new FileTaskStore(storePath);
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
   const service = new TaskManagerService(store, repositoryPath, undefined, {
     worktreeRoot,
-    agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+    ...scriptedRuntime.serviceOptions
   });
   await service.init();
   const repository = await service.addRepository(repositoryPath);
@@ -63,9 +64,10 @@ if (mode === 'prepare') {
   setInterval(() => undefined, 30_000);
 } else if (mode === 'recover') {
   const store = new FileTaskStore(storePath);
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
   const service = new TaskManagerService(store, repositoryPath, undefined, {
     worktreeRoot,
-    agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+    ...scriptedRuntime.serviceOptions
   });
   await service.init();
   const snapshot = await store.snapshot();

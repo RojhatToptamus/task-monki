@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -16,14 +16,27 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../../shared/contracts';
+import { AGENT_RUNTIME_LIMITS } from '../../../shared/agentRuntime';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
+import type {
+  AgentProviderRuntimeStore,
+  AgentRuntimeStore,
+  TaskAgentRuntimeSnapshot,
+  TaskAgentRuntimeAccess
+} from '../AgentRuntimeStore';
+import type {
+  AgentExecutionContext,
+  AgentRuntimeRunRecord,
+  AgentRuntimeSessionRecord
+} from '../../../shared/agentRuntime';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import {
-  ArtifactAppendAmbiguousError,
-  type FileTaskStore
-} from '../../storage/FileTaskStore';
-import {
-  type AgentTurnAttachment
+  assertModelSupportsAttachments,
+  completeAttachmentSubmissions,
+  type AgentTurnAttachment,
+  type AttachmentSubmissionCandidate,
+  verifyAgentTurnAttachments
 } from '../AgentAttachmentDelivery';
 import {
   REDACTED_CREDENTIAL,
@@ -34,6 +47,7 @@ import {
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
+  AgentRuntimeDeliveryError,
   type AgentInteractionResponse,
   type AgentReconciliationResult,
   type AgentRuntimeAdapter,
@@ -44,8 +58,15 @@ import {
   type InterruptAgentTurn,
   type ResolvedAgentExecution,
   type ResolveAgentExecution,
+  type StartAgentRuntimeTurn,
+  type StartedAgentRuntimeTurn,
   type StartAgentTurn
 } from '../AgentRuntimeAdapter';
+import type {
+  AgentRuntimeTurnEvent,
+  BuildAgentRuntimeExecutionContextInput
+} from '../AgentRuntimeCoordinator';
+import { assertReadOnlyExecutionContext } from '../AgentRuntimeOwnership';
 import {
   appendRuntimeDiagnostic,
   createRuntimeReadiness,
@@ -62,6 +83,7 @@ import {
   mapOpenCodePermission,
   mapOpenCodeQuestion,
   openCodePermissionRules,
+  openCodeReadOnlyPermissionRules,
   openCodePermissionRulesEndWith,
   assertOpenCodeExecutionSettings,
   type MappedOpenCodeInteraction
@@ -81,6 +103,7 @@ import {
   mapOpenCodeTodoSteps,
   mapOpenCodeUsage,
   normalizeOpenCodeEvent,
+  OPENCODE_DESIGN_MCP_SERVER_NAME,
   openCodeErrorDiagnostic,
   parseOpenCodeMessages,
   parseOpenCodePermissions,
@@ -93,6 +116,7 @@ import {
   type OpenCodeMessage,
   type OpenCodeMessageInfo,
   type OpenCodePart,
+  type OpenCodePromptPart,
   type OpenCodePermissionRequest,
   type OpenCodeQuestionRequest,
   type OpenCodeSession
@@ -114,10 +138,14 @@ import {
   type ResolvedOpenCodeRuntime
 } from './OpenCodeRuntimeResolver';
 import { openCodeSensitiveEnvironmentValues } from './OpenCodeEnvironmentPolicy';
+import { buildDesignAgentDeveloperInstructions } from '../../../shared/promptTemplates';
 import {
-  agentReviewStatusFromResult,
-  parseAgentReviewResult
-} from '../../review/AgentReviewContract';
+  loadDesignSkillPack,
+  type DesignSkillPack
+} from '../../design/DesignSkillPack';
+import type {
+  DesignClientToolBridge
+} from '../../design/DesignClientToolBridge';
 
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
@@ -135,7 +163,7 @@ const TERMINAL_RUN_STATES: RunRecord['status'][] = [
   'LOST'
 ];
 const RECOVERY_DELAYS_MS = [500, 1_000, 2_000, 5_000];
-const STREAM_OUTPUT_FLUSH_MS = 75;
+const STREAM_OUTPUT_FLUSH_MS = 1_000;
 const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 512 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
@@ -148,6 +176,8 @@ const MAX_TRACKED_ASSISTANT_MESSAGES_PER_SESSION = 2_048;
 const MAX_TRACKED_ASSISTANT_USAGE_EVICTIONS_PER_SESSION = 2_048;
 const MAX_TRACKED_ASSISTANT_USAGE_RUNS = 2_048;
 const MAX_INBOUND_RESYNC_MS = 15_000;
+const MAX_RUNTIME_DELTA_BYTES = 64 * 1024;
+const OPENCODE_DESIGN_MCP_TIMEOUT_MS = 120_000;
 const OPENCODE_CATALOG_EVENTS = new Set([
   'models-dev.refreshed',
   'catalog.updated',
@@ -180,9 +210,9 @@ interface OpenCodeRunStreamBuffer {
   runId: string;
   sessionId: string;
   parts: Map<string, BufferedOpenCodeStreamPart>;
-  output: Array<{ source: string; chunks: string[] }>;
+  output: Array<{ source: string; chunks: string[]; evidence: string[] }>;
   outputBytes: number;
-  credentialCarry?: { source: string; text: string };
+  credentialCarry?: { source: string; text: string; evidence: string[] };
   failureCount: number;
   timer?: NodeJS.Timeout;
   flushing?: Promise<void>;
@@ -211,6 +241,24 @@ interface OpenCodeInterruptDeadline {
   timer?: NodeJS.Timeout;
 }
 
+interface OpenCodeSessionRuntimeOwner {
+  id: string;
+  runtimeId: string;
+  worktreePath: string;
+  pure?: boolean;
+  design?: boolean;
+}
+
+interface OpenCodeDesignToolRegistration {
+  serverId: string;
+  grantId: string;
+}
+
+interface PreparedOpenCodeAttachmentDelivery {
+  parts: OpenCodePromptPart[];
+  submissionCandidates: AttachmentSubmissionCandidate[];
+}
+
 export interface OpenCodeAdapterOptions
   extends Omit<OpenCodeRuntimeResolverOptions, 'cwd'>,
     Pick<OpenCodeServerSupervisorOptions, 'requestTimeoutMs' | 'startupTimeoutMs'> {
@@ -219,13 +267,18 @@ export interface OpenCodeAdapterOptions
   runtimeResolver?: typeof resolveOpenCodeRuntime;
   /** Explicit construction seam; production uses OpenCodeServerSupervisor. */
   supervisorFactory?: (
-    store: FileTaskStore,
+    store: AgentProviderRuntimeStore,
     options: OpenCodeServerSupervisorOptions
   ) => OpenCodeSessionSupervisor;
   /** Keeps inactive per-session loopback processes bounded; primarily shortened by lifecycle tests. */
   sessionIdleTimeoutMs?: number;
   /** Total post-acknowledgement window for OpenCode to prove interruption. */
   interruptCompletionTimeoutMs?: number;
+  designSkillRoot?: string;
+  designClientToolBridge?: Pick<
+    DesignClientToolBridge,
+    'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
+  >;
 }
 
 export class OpenCodeAdapter implements AgentRuntimeAdapter {
@@ -267,6 +320,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private readonly assistantUsageEvictedMessageIds = new Map<string, Set<string>>();
   private readonly assistantUsageTotals = new Map<string, AgentTokenUsageBreakdown>();
   private readonly inboundResyncs = new Map<string, Promise<void>>();
+  private readonly runtimeTurnListeners = new Set<
+    (event: AgentRuntimeTurnEvent) => void
+  >();
   private catalogSupervisor?: OpenCodeSessionSupervisor;
   private catalogRefreshTimer?: NodeJS.Timeout;
   private catalogRefreshPromise?: Promise<void>;
@@ -278,9 +334,17 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private shuttingDown = false;
   private readonly sensitiveValues: readonly string[];
   private readonly interruptCompletionTimeoutMs: number;
+  private designSkillPack?: DesignSkillPack;
+  private designSkillFailure?: string;
+  private designSkillLoadAttempted = false;
+  private readonly designToolRegistrations = new Map<
+    string,
+    OpenCodeDesignToolRegistration
+  >();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly taskRuntime: TaskAgentRuntimeAccess,
+    private readonly providerRuntime: AgentRuntimeStore,
     private readonly appEvents: AppEventBus,
     private readonly options: OpenCodeAdapterOptions
   ) {
@@ -303,6 +367,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.initialized = true;
     this.shuttingDown = false;
     try {
+      await this.prepareDesignSkillPack();
       await this.recoverPersistedRuntimeLosses();
       this.runtime = await (this.options.runtimeResolver ?? resolveOpenCodeRuntime)({
         ...this.options,
@@ -315,7 +380,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.preflightState = {
         runtime: this.descriptor,
         readiness: openCodeFailureReadiness(cause, this.sensitiveValues),
-        capabilities: opencodeCapabilities(),
+        capabilities: this.runtimeCapabilities(),
       };
       await this.shutdown().catch(() => undefined);
       this.initialized = false;
@@ -332,7 +397,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   capabilities(): Promise<AgentRuntimeCapabilities> {
-    return Promise.resolve(opencodeCapabilities());
+    return Promise.resolve(this.runtimeCapabilities());
   }
 
   async listModels(): Promise<AgentModel[]> {
@@ -376,14 +441,357 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
     await this.applyPendingRuntimeConfiguration();
-    assertOpenCodeManagedAttachmentsUnsupported(input.attachments);
     const models = await this.listModels();
     return this.resolveExecutionFromModels(
-      input,
+      {
+        ...input,
+        settings: isProviderNeutralReadOnlySettings(input.settings)
+          ? {
+              ...input.settings,
+              sandbox: 'DANGER_FULL_ACCESS',
+              approvalPolicy: 'never',
+              approvalsReviewer: 'user',
+              networkAccess: true
+            }
+          : input.settings
+      },
       models,
       'application OpenCode catalog',
       true
     );
+  }
+
+  async buildExecutionContext(
+    input: BuildAgentRuntimeExecutionContextInput
+  ): Promise<AgentExecutionContext> {
+    const primaryCwd = await canonicalExistingDirectory(
+      input.primaryCwd,
+      'read-only working directory'
+    );
+    const readRoots = await Promise.all(
+      input.readRoots.map(async (root) => ({
+        ...root,
+        canonicalPath: await canonicalExistingDirectory(
+          root.canonicalPath,
+          'read-only root'
+        )
+      }))
+    );
+    if (
+      readRoots.length !== 1 ||
+      readRoots[0]?.canonicalPath !== primaryCwd
+    ) {
+      throw new Error(
+        'OpenCode read-only turns support one repository working directory and no additional readable path.'
+      );
+    }
+    const modelSettings: AgentExecutionSettings = {
+      ...input.modelSettings,
+      runtimeId: this.descriptor.id,
+      sandbox: 'DANGER_FULL_ACCESS',
+      approvalPolicy: 'NEVER',
+      approvalsReviewer: 'user',
+      networkAccess: true
+    };
+    const permissionProfileHash = openCodeReadOnlyProfileHash(
+      primaryCwd,
+      readRoots,
+      modelSettings
+    );
+    const context: AgentExecutionContext = {
+      attestation: { status: 'ATTESTED' },
+      primaryCwd,
+      readRoots,
+      managedAttachments: [],
+      permissionProfileHash,
+      modelSettings,
+      externalTools: {
+        // This records provider-process reachability. Web tools are denied by
+        // the native permission policy below.
+        network: true,
+        webSearch: 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      repositoryAccess: 'READ_ONLY',
+      clientOperationId: input.clientOperationId
+    };
+    assertReadOnlyExecutionContext(context);
+    return context;
+  }
+
+  onRuntimeTurnEvent(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
+    this.runtimeTurnListeners.add(listener);
+    return () => this.runtimeTurnListeners.delete(listener);
+  }
+
+  async startRuntimeTurn(input: StartAgentRuntimeTurn): Promise<StartedAgentRuntimeTurn> {
+    await this.applyPendingRuntimeConfiguration(input.run.id);
+    this.assertRuntimeExecutionContext(input);
+    return this.enqueueSessionOperation(input.session.id, async () => {
+      let session = (await this.providerRuntime.getSession(input.session.id)) ?? input.session;
+      if (
+        session.runtimeId !== this.descriptor.id ||
+        input.run.sessionId !== session.id
+      ) {
+        throw new Error('OpenCode received an invalid owner-neutral read-only turn.');
+      }
+      const settings = openCodeNativeReadOnlySettings(
+        input.executionContext.modelSettings
+      );
+      if (!settings.model || !settings.modelProvider) {
+        throw new Error('OpenCode read-only turns require a resolved model and provider.');
+      }
+      const selectedModel = this.resolveExecutionFromModels(
+        { settings, attachments: input.attachments },
+        this.models,
+        'application OpenCode catalog'
+      ).model;
+      const running = await this.ensureSessionRuntime(runtimeSessionOwner(session));
+      let providerSession: OpenCodeSession;
+      if (session.providerSessionId) {
+        providerSession = parseOpenCodeSession(
+          (await running.client.get<unknown>(sessionPath(session.providerSessionId))).data
+        );
+      } else {
+        try {
+          providerSession = parseOpenCodeSession(
+            (
+              await running.client.post<unknown>('/session', {
+                title: openCodeOwnershipTitle(session.id),
+                model: modelReference(settings),
+                metadata: { taskMonkiSessionId: session.id },
+                permission: openCodeReadOnlyPermissionRules()
+              })
+            ).data
+          );
+        } catch (cause) {
+          throw runtimeDeliveryErrorFromOpenCode('session/create', cause);
+        }
+      }
+      if (!this.isSafeOperationalIdentifier(providerSession.id)) {
+        await this.quarantineSessionRuntime(
+          session.id,
+          'runtime/session-identity',
+          'OpenCode returned a read-only session identifier matching a runtime credential.'
+        );
+        throw new Error('OpenCode returned an unsafe read-only session identity.');
+      }
+      await this.assertSessionDirectoryOrQuarantine(
+        session.id,
+        'runtime/session-directory',
+        providerSession,
+        session.executionContext.primaryCwd
+      );
+      providerSession = await this.synchronizeRuntimeSessionPermissionPolicy(
+        session,
+        providerSession,
+        running.client
+      );
+      session = await this.providerRuntime.updateSession(
+        session.id,
+        session.recordRevision,
+        {
+          providerSessionId: providerSession.id,
+          providerSessionTreeId: providerSession.id,
+          materialized: true,
+          status: 'IDLE',
+          requestedSettings: input.executionContext.modelSettings,
+          observedSettings: settings,
+          lastAttachedAt: new Date().toISOString()
+        },
+        runtimeOperationId('runtime/session-attested', session.id, providerSession.id)
+      );
+      await this.bindEventStream(runtimeSessionOwner(session), running.client, running.server.id);
+      if (!this.isCurrentSessionServerGeneration(session.id, running.server.id)) {
+        throw new AgentRuntimeDeliveryError(
+          'NOT_DELIVERED',
+          'OpenCode replaced the read-only session runtime before prompt submission.'
+        );
+      }
+      let attachmentDelivery: PreparedOpenCodeAttachmentDelivery;
+      try {
+        attachmentDelivery = await prepareOpenCodeAttachmentDelivery(
+          input.prompt,
+          selectedModel,
+          input.attachments
+        );
+      } catch (cause) {
+        throw new AgentRuntimeDeliveryError(
+          'NOT_DELIVERED',
+          errorMessage(cause),
+          { cause }
+        );
+      }
+      const providerMessageId = createOpenCodeMessageId();
+      await this.updateRuntimeRun(
+        input.run.id,
+        {
+          serverInstanceId: running.server.id,
+          providerTurnId: providerMessageId,
+          observedSettings: settings,
+          lastEventAt: new Date().toISOString()
+        },
+        runtimeOperationId(
+          'runtime/turn-send-intent',
+          input.run.id,
+          providerMessageId,
+          running.server.id
+        )
+      );
+      try {
+        await running.client.post<void>(`${sessionPath(providerSession.id)}/prompt_async`, {
+          messageID: providerMessageId,
+          model: {
+            providerID: settings.modelProvider,
+            modelID: settings.model
+          },
+          ...(settings.reasoningEffort
+            ? { variant: settings.reasoningEffort }
+            : {}),
+          parts: attachmentDelivery.parts
+        });
+      } catch (cause) {
+        throw runtimeDeliveryErrorFromOpenCode('session/prompt_async', cause);
+      }
+      if (!this.isCurrentSessionServerGeneration(session.id, running.server.id)) {
+        throw new AgentRuntimeDeliveryError(
+          'AMBIGUOUS',
+          `OpenCode accepted message ${providerMessageId}, but its owning runtime generation changed before acknowledgement.`
+        );
+      }
+      const startedAt = new Date().toISOString();
+      return {
+        serverInstanceId: running.server.id,
+        providerSessionId: providerSession.id,
+        providerSessionTreeId: providerSession.id,
+        providerTurnId: providerMessageId,
+        startedAt,
+        attachmentSubmissions: completeAttachmentSubmissions(
+          attachmentDelivery.submissionCandidates,
+          { kind: 'provider-message', id: providerMessageId },
+          startedAt
+        )
+      };
+    });
+  }
+
+  async interruptRuntimeTurn(input: {
+    session: AgentRuntimeSessionRecord;
+    run: AgentRuntimeRunRecord;
+  }): Promise<void> {
+    await this.enqueueSessionOperation(input.session.id, async () => {
+      const providerSessionId = input.session.providerSessionId;
+      const providerTurnId = input.run.providerTurnId;
+      const supervisor = this.supervisors.get(input.session.id);
+      const client = supervisor?.currentClient;
+      const server = supervisor?.currentServer;
+      if (
+        !providerSessionId ||
+        !providerTurnId ||
+        !client ||
+        !server ||
+        input.run.serverInstanceId !== server.id ||
+        !isOpenCodeReadOnlyRuntimeSession(input.session)
+      ) {
+        throw new AgentRuntimeDeliveryError(
+          'AMBIGUOUS',
+          'The OpenCode process that owns this read-only turn is unavailable; cancellation delivery cannot be confirmed.'
+        );
+      }
+      const deadlineAt = Date.now() + this.interruptCompletionTimeoutMs;
+      let unsettledReason: string | undefined;
+      try {
+        await client.post<boolean>(
+          `${sessionPath(providerSessionId)}/abort`,
+          undefined,
+          {
+            deadlineAt: Math.min(
+              deadlineAt,
+              Date.now() + this.interruptReconciliationWindowMs()
+            )
+          }
+        );
+      } catch (cause) {
+        unsettledReason =
+          `OpenCode did not confirm cancellation delivery: ${this.redactProviderText(errorMessage(cause))}`;
+      }
+      while (!unsettledReason && Date.now() < deadlineAt) {
+        if (!this.isCurrentSessionServerGeneration(input.session.id, server.id)) {
+          throw new AgentRuntimeDeliveryError(
+            'AMBIGUOUS',
+            'The OpenCode process that owns this read-only turn changed before cancellation settled.'
+          );
+        }
+        const current = await this.providerRuntime.getRun(input.run.id);
+        if (!current || TERMINAL_RUN_STATES.includes(current.status)) return;
+        let status: 'IDLE' | 'ACTIVE' | 'UNKNOWN';
+        try {
+          status = await this.readProviderInterruptStatus(
+            client,
+            providerSessionId,
+            deadlineAt
+          );
+        } catch (cause) {
+          unsettledReason =
+            `Task Monki could not confirm OpenCode cancellation settlement: ${this.redactProviderText(errorMessage(cause))}`;
+          break;
+        }
+        if (status === 'IDLE') {
+          await this.finalizeRuntimeRun(
+            current,
+            input.session,
+            'interrupted',
+            'OpenCode acknowledged cancellation and reported the provider session idle.',
+            ''
+          );
+          return;
+        }
+        const remainingMs = deadlineAt - Date.now();
+        if (remainingMs <= 0) {
+          unsettledReason =
+            `OpenCode acknowledged cancellation but still reported the provider session as ${status.toLowerCase()} at the interruption deadline.`;
+          break;
+        }
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, Math.min(250, remainingMs))
+        );
+      }
+      unsettledReason ??=
+        'OpenCode acknowledged cancellation but Task Monki could not prove provider settlement before the interruption deadline.';
+      if (!this.isCurrentSessionServerGeneration(input.session.id, server.id)) {
+        throw new AgentRuntimeDeliveryError(
+          'AMBIGUOUS',
+          'The OpenCode process that owns this read-only turn changed before Task Monki could stop it.'
+        );
+      }
+      try {
+        await this.quarantineSessionRuntime(
+          input.session.id,
+          'runtime/session-abort-completion',
+          unsettledReason,
+          false,
+          input.run.id
+        );
+      } catch (cause) {
+        throw new AgentRuntimeDeliveryError(
+          'AMBIGUOUS',
+          `${unsettledReason} Task Monki fenced the session, but could not confirm process termination: ${this.redactProviderText(errorMessage(cause))}`,
+          { cause }
+        );
+      }
+      const current = await this.providerRuntime.getRun(input.run.id);
+      if (!current || TERMINAL_RUN_STATES.includes(current.status)) return;
+      await this.finalizeRuntimeRun(
+        current,
+        input.session,
+        'interrupted',
+        `${unsettledReason} Task Monki stopped the owning OpenCode session process.`,
+        '',
+        { sessionStopped: true }
+      );
+    });
   }
 
   private resolveExecutionFromModels(
@@ -460,6 +868,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       serviceTier: undefined
     };
     assertOpenCodeExecutionSettings(settings);
+    assertModelSupportsAttachments(model, input.attachments);
     return { settings, model };
   }
 
@@ -474,159 +883,199 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         providerSessionId: session.providerSessionId
       });
     }
-    const { client, server } = await this.ensureSessionRuntime(session);
-    const projectCatalog = parseOpenCodeProviderCatalog(
-      (await client.get<unknown>('/provider')).data
-    );
-    const selectedSettings = this.resolveExecutionFromModels(
-      { settings: input.settings, attachments: [] },
-      this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
-      `worktree catalog for ${session.worktreePath}`
-    ).settings;
-    const ownershipTitle = openCodeOwnershipTitle(session.id);
-    const existingProviderSession = parseOpenCodeSessions(
-      (await client.get<unknown>('/session')).data
-    ).find(
-      (candidate) =>
-        candidate.metadata?.taskMonkiSessionId === session.id ||
-        candidate.title === ownershipTitle
-    );
-    if (existingProviderSession) {
-      if (!this.isSafeOperationalIdentifier(existingProviderSession.id)) {
-        await this.quarantineSessionRuntime(
+    const startedSessionRuntime = !this.supervisors.has(session.id);
+    try {
+      const { client, server } = await this.ensureSessionRuntime({
+        ...session,
+        pure: input.mode === 'DESIGN',
+        design: input.mode === 'DESIGN'
+      });
+      const projectCatalog = parseOpenCodeProviderCatalog(
+        (await client.get<unknown>('/provider')).data
+      );
+      const selectedSettings = this.resolveExecutionFromModels(
+        { settings: input.settings, attachments: input.attachments ?? [] },
+        this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
+        `worktree catalog for ${session.worktreePath}`
+      ).settings;
+      const ownershipTitle = openCodeOwnershipTitle(session.id);
+      const existingProviderSession = parseOpenCodeSessions(
+        (await client.get<unknown>('/session')).data
+      ).find(
+        (candidate) =>
+          candidate.metadata?.taskMonkiSessionId === session.id ||
+          candidate.title === ownershipTitle
+      );
+      if (existingProviderSession) {
+        if (!this.isSafeOperationalIdentifier(existingProviderSession.id)) {
+          await this.quarantineSessionRuntime(
+            session.id,
+            'session/discovery',
+            'OpenCode returned a session identifier matching a runtime credential.'
+          );
+          throw new Error(
+            'OpenCode cannot attach the discovered session because its identifier matches a runtime credential.'
+          );
+        }
+        await this.assertSessionDirectoryOrQuarantine(
           session.id,
           'session/discovery',
-          'OpenCode returned a session identifier matching a runtime credential.'
+          existingProviderSession,
+          session.worktreePath
         );
-        throw new Error(
-          'OpenCode cannot attach the discovered session because its identifier matches a runtime credential.'
+        session = await this.taskRuntime.updateAgentSession(
+          session.id,
+          {
+            providerSessionId: existingProviderSession.id,
+            providerSessionTreeId: existingProviderSession.id,
+            status: await this.readProviderSessionStatus(
+              client,
+              existingProviderSession.id
+            ),
+            materialized: true,
+            requestedSettings: selectedSettings,
+            observedSettings: this.safeObservedSettings(
+              settingsFromSession(existingProviderSession, selectedSettings)
+            ),
+            lastAttachedAt: new Date().toISOString()
+          },
+          runtimeOperationId(
+            'session/discovery',
+            session.id,
+            existingProviderSession.id,
+            server.id
+          )
         );
+        const verified = await this.synchronizeSessionPermissionPolicy(
+          session,
+          client,
+          selectedSettings,
+          'session/discovery-permission'
+        );
+        session = await this.persistPermissionAttestation(
+          session,
+          verified,
+          selectedSettings,
+          'session/discovery-permission'
+        );
+        await this.bindEventStream(session, client, server.id);
+        if (session.status === 'IDLE') {
+          this.scheduleSessionIdleEviction(session.id);
+        }
+        return session;
+      }
+
+      let response: OpenCodeSession;
+      try {
+        response = parseOpenCodeSession(
+          (
+            await client.post<unknown>('/session', {
+              title: ownershipTitle,
+              model: modelReference(selectedSettings),
+              metadata: {
+                taskMonkiSessionId: session.id,
+                taskMonkiTaskId: input.taskId
+              },
+              permission: openCodePermissionRules(selectedSettings)
+            })
+          ).data
+        );
+      } catch (cause) {
+        const error = mapOpenCodeMutationError('session/create', cause);
+        if (error instanceof AgentMutationAmbiguousError) {
+          await this.throwAmbiguousAfterQuarantine(
+            session.id,
+            'session/create',
+            'The provider may have created a session whose identity was not confirmed.',
+            error
+          );
+        }
+        throw error;
       }
       await this.assertSessionDirectoryOrQuarantine(
         session.id,
-        'session/discovery',
-        existingProviderSession,
+        'session/create',
+        response,
         session.worktreePath
       );
-      session = await this.store.updateAgentSession(session.id, {
-        providerSessionId: existingProviderSession.id,
-        providerSessionTreeId: existingProviderSession.id,
-        status: await this.readProviderSessionStatus(client, existingProviderSession.id),
-        materialized: true,
-        requestedSettings: selectedSettings,
-        observedSettings: this.safeObservedSettings(
-          settingsFromSession(existingProviderSession, selectedSettings)
-        ),
-        lastAttachedAt: new Date().toISOString()
-      });
+      if (!this.isSafeOperationalIdentifier(response.id)) {
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          'session/create',
+          'OpenCode created a session whose identifier cannot be persisted safely.',
+          new AgentMutationAmbiguousError(
+            'session/create',
+            'OpenCode created a session whose identifier matches a runtime credential.'
+          )
+        );
+      }
+      try {
+        session = await this.taskRuntime.updateAgentSession(
+          session.id,
+          {
+            providerSessionId: response.id,
+            providerSessionTreeId: response.id,
+            status: 'IDLE',
+            materialized: false,
+            requestedSettings: selectedSettings,
+            observedSettings: this.safeObservedSettings(
+              settingsFromSession(response, selectedSettings)
+            ),
+            lastAttachedAt: new Date().toISOString()
+          },
+          runtimeOperationId('session/create', session.id, response.id)
+        );
+      } catch (cause) {
+        const persisted = await this.taskRuntime
+          .getAgentSession(session.id)
+          .catch(() => undefined);
+        if (persisted?.providerSessionId === response.id) {
+          session = persisted;
+        } else {
+          await this.throwAmbiguousAfterQuarantine(
+            session.id,
+            'session/create',
+            `OpenCode created session ${response.id}, but Task Monki could not persist its ownership.`,
+            new AgentMutationAmbiguousError(
+              'session/create',
+              `OpenCode created session ${response.id}, but Task Monki could not persist its ownership. A retry will recover it by Task Monki metadata instead of creating another session.`
+            )
+          );
+        }
+      }
       const verified = await this.synchronizeSessionPermissionPolicy(
         session,
         client,
         selectedSettings,
-        'session/discovery-permission'
+        'session/create-permission'
       );
       session = await this.persistPermissionAttestation(
         session,
         verified,
         selectedSettings,
-        'session/discovery-permission'
+        'session/create-permission'
+      );
+      await this.recordSettingsObservation(
+        session,
+        'THREAD_START_RESPONSE',
+        session.observedSettings ?? selectedSettings
       );
       await this.bindEventStream(session, client, server.id);
-      if (session.status === 'IDLE') this.scheduleSessionIdleEviction(session.id);
+      this.scheduleSessionIdleEviction(session.id);
       return session;
-    }
-    let response: OpenCodeSession;
-    try {
-      response = parseOpenCodeSession(
-        (
-          await client.post<unknown>('/session', {
-          title: ownershipTitle,
-          model: modelReference(selectedSettings),
-          metadata: {
-            taskMonkiSessionId: session.id,
-            taskMonkiTaskId: input.taskId
-          },
-          permission: openCodePermissionRules(selectedSettings)
-          })
-        ).data
-      );
     } catch (cause) {
-      const error = mapOpenCodeMutationError('session/create', cause);
-      if (error instanceof AgentMutationAmbiguousError) {
-        await this.throwAmbiguousAfterQuarantine(
-          session.id,
-          'session/create',
-          'The provider may have created a session whose identity was not confirmed.',
-          error
-        );
+      if (startedSessionRuntime && this.supervisors.has(session.id)) {
+        try {
+          await this.closeSessionRuntime(session.id, false);
+        } catch (cleanupCause) {
+          throw new AggregateError(
+            [cause, cleanupCause],
+            'OpenCode session creation and runtime cleanup both failed.'
+          );
+        }
       }
-      throw error;
+      throw cause;
     }
-    await this.assertSessionDirectoryOrQuarantine(
-      session.id,
-      'session/create',
-      response,
-      session.worktreePath
-    );
-    if (!this.isSafeOperationalIdentifier(response.id)) {
-      await this.throwAmbiguousAfterQuarantine(
-        session.id,
-        'session/create',
-        'OpenCode created a session whose identifier cannot be persisted safely.',
-        new AgentMutationAmbiguousError(
-          'session/create',
-          'OpenCode created a session whose identifier matches a runtime credential.'
-        )
-      );
-    }
-    try {
-      session = await this.store.updateAgentSession(session.id, {
-        providerSessionId: response.id,
-        providerSessionTreeId: response.id,
-        status: 'IDLE',
-        materialized: false,
-        requestedSettings: selectedSettings,
-        observedSettings: this.safeObservedSettings(
-          settingsFromSession(response, selectedSettings)
-        ),
-        lastAttachedAt: new Date().toISOString()
-      });
-    } catch (cause) {
-      const persisted = await this.store.getAgentSession(session.id).catch(() => undefined);
-      if (persisted?.providerSessionId === response.id) {
-        session = persisted;
-      } else {
-        await this.throwAmbiguousAfterQuarantine(
-          session.id,
-          'session/create',
-          `OpenCode created session ${response.id}, but Task Monki could not persist its ownership.`,
-          new AgentMutationAmbiguousError(
-            'session/create',
-            `OpenCode created session ${response.id}, but Task Monki could not persist its ownership. A retry will recover it by Task Monki metadata instead of creating another session.`
-          )
-        );
-      }
-    }
-    const verified = await this.synchronizeSessionPermissionPolicy(
-      session,
-      client,
-      selectedSettings,
-      'session/create-permission'
-    );
-    session = await this.persistPermissionAttestation(
-      session,
-      verified,
-      selectedSettings,
-      'session/create-permission'
-    );
-    await this.recordSettingsObservation(
-      session,
-      'THREAD_START_RESPONSE',
-      session.observedSettings ?? selectedSettings
-    );
-    await this.bindEventStream(session, client, server.id);
-    this.scheduleSessionIdleEviction(session.id);
-    return session;
   }
 
   async attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord> {
@@ -642,12 +1091,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         'The persisted OpenCode session identifier matches a runtime credential and cannot be attached safely.'
       );
     }
-    const { client, server } = await this.ensureSessionRuntime(session);
+    const { client, server } = await this.ensureSessionRuntime(
+      await this.runtimeSessionOwnerForSession(session)
+    );
     let response: OpenCodeSession;
+    let responseRaw: AgentProtocolMessageReference;
     try {
-      response = parseOpenCodeSession(
-        (await client.get<unknown>(sessionPath(providerSessionId))).data
-      );
+      const result = await client.get<unknown>(sessionPath(providerSessionId));
+      response = parseOpenCodeSession(result.data);
+      responseRaw = result.raw;
     } catch (cause) {
       if (cause instanceof OpenCodeHttpError && cause.status === 404) {
         throw new AgentProviderSessionMissingError(
@@ -678,7 +1130,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       await this.readProviderSessionStatus(client, providerSessionId),
       activeRun
     );
-    session = await this.store.updateAgentSession(session.id, {
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       providerSessionId: response.id,
       providerSessionTreeId: response.id,
       status,
@@ -687,9 +1139,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         settingsFromSession(response, session.requestedSettings)
       ),
       lastAttachedAt: new Date().toISOString()
-    });
+    }, protocolOperationId(
+      'session/attach',
+      responseRaw,
+      session.id,
+      response.id,
+      server.id,
+      status
+    ));
     if (activeRun && activeRun.serverInstanceId !== server.id) {
-      await this.store.updateRun(activeRun.id, { serverInstanceId: server.id });
+      await this.taskRuntime.updateRun(
+        activeRun.id,
+        { serverInstanceId: server.id },
+        runtimeOperationId('run/attach-server', activeRun.id, server.id)
+      );
     }
     await this.bindEventStream(session, client, server.id);
     await this.reconcilePendingInteractions(session, client, server.id);
@@ -698,9 +1161,16 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   async releaseSession(ref: AgentSessionRef): Promise<void> {
-    const session = await this.requireSession(ref.localSessionId);
+    const taskSession = await this.taskRuntime.getAgentSession(ref.localSessionId);
+    const runtimeSession = taskSession
+      ? undefined
+      : await this.providerRuntime.getSession(ref.localSessionId);
+    const session = taskSession ?? runtimeSession;
+    if (!session) throw new Error(`Agent session not found: ${ref.localSessionId}`);
     this.assertSessionOwnership(session);
-    const activeRun = await this.getCurrentRunForSession(session.id);
+    const activeRun = taskSession
+      ? await this.getCurrentRunForSession(session.id)
+      : await this.providerRuntime.getActiveRunForSession(session.id);
     if (activeRun) {
       throw new Error(
         `Cannot release OpenCode session ${session.id} while run ${activeRun.id} is ${activeRun.status}.`
@@ -710,7 +1180,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   async releaseTask(taskId: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const sessions = snapshot.agentSessions.filter(
       (session) => session.runtimeId === this.descriptor.id && session.taskId === taskId
     );
@@ -731,7 +1201,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         'The OpenCode session identifier matches a runtime credential and cannot be read safely.'
       );
     }
-    const { client } = await this.ensureSessionRuntime(session);
+    const { client } = await this.ensureSessionRuntime(
+      await this.runtimeSessionOwnerForSession(session)
+    );
     const response = parseOpenCodeSession(
       (await client.get<unknown>(sessionPath(providerSessionId))).data
     );
@@ -752,7 +1224,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       session.worktreePath
     );
     const activeRun = await this.getCurrentRunForSession(session.id);
-    session = await this.store.updateAgentSession(session.id, {
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       status: await this.sessionStatusWithInteractionAuthority(
         await this.readProviderSessionStatus(client, providerSessionId),
         activeRun
@@ -762,8 +1234,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         settingsFromSession(response, session.requestedSettings)
       ),
       lastAttachedAt: new Date().toISOString()
-    });
-    const snapshot = await this.store.snapshot();
+    }, runtimeOperationId('session/read', session.id, response.id, session.updatedAt));
+    const snapshot = await this.taskRuntime.snapshot();
     if (session.status === 'IDLE') this.scheduleSessionIdleEviction(session.id);
     return {
       session,
@@ -785,153 +1257,220 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (quarantine) await quarantine;
     let session = await this.requireSession(input.session.localSessionId);
     this.assertSessionOwnership(session);
-    assertOpenCodeManagedAttachmentsUnsupported(input.attachments ?? []);
+    const attachments = input.attachments ?? [];
     const settings = input.settings ?? session.requestedSettings;
     assertOpenCodeExecutionSettings(settings);
     const hadProviderSession = Boolean(session.providerSessionId);
     const previousSupervisor = this.supervisors.get(session.id);
-    let running = await this.ensureSessionRuntime(session);
-    const projectCatalog = parseOpenCodeProviderCatalog(
-      (await running.client.get<unknown>('/provider')).data
-    );
-    const selectedModel = this.resolveExecutionFromModels(
-      { settings, attachments: [] },
-      this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
-      `worktree catalog for ${session.worktreePath}`
-    );
-    if (!session.providerSessionId) {
-      session = await this.createSession({
-        runtimeId: this.descriptor.id,
-        localSessionId: session.id,
-        taskId: session.taskId,
-        iterationId: session.iterationId,
-        worktreeId: session.worktreeId,
-        worktreePath: session.worktreePath,
-        settings: selectedModel.settings
-      });
-    }
-    if (
-      hadProviderSession &&
-      session.providerSessionId &&
-      this.supervisors.get(session.id) !== previousSupervisor
-    ) {
-      session = await this.attachSession({
-        localSessionId: session.id,
-        providerSessionId: session.providerSessionId
-      });
-    }
-    const providerSessionId = session.providerSessionId!;
-    if (!this.isSafeOperationalIdentifier(providerSessionId)) {
-      throw new Error(
-        'The persisted OpenCode session identifier matches a runtime credential and cannot be used safely.'
-      );
-    }
-    running = await this.ensureSessionRuntime(session);
-    const { client, server } = running;
-    await this.bindEventStream(session, client, server.id);
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new Error('OpenCode replaced the session runtime before prompt submission.');
-    }
-    const verifiedPermissionSession = await this.synchronizeSessionPermissionPolicy(
-      session,
-      client,
-      selectedModel.settings,
-      'session/pre-prompt-permission'
-    );
-    session = await this.persistPermissionAttestation(
-      session,
-      verifiedPermissionSession,
-      selectedModel.settings,
-      'session/pre-prompt-permission'
-    );
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new Error('OpenCode replaced the session runtime before prompt submission.');
-    }
-    const providerMessageId = createOpenCodeMessageId();
-    await this.store.updateRun(input.localRunId, {
-      providerTurnId: providerMessageId,
-      serverInstanceId: server.id,
-      status: 'STARTING',
-      lastEventAt: new Date().toISOString()
-    });
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new Error('OpenCode replaced the session runtime before prompt submission.');
-    }
+    let promptAcknowledged = false;
     try {
-      await client.post<void>(`${sessionPath(providerSessionId)}/prompt_async`, {
-        messageID: providerMessageId,
-        model: {
-          providerID: selectedModel.model.modelProvider,
-          modelID: selectedModel.model.model
-        },
-        ...(selectedModel.settings.reasoningEffort
-          ? { variant: selectedModel.settings.reasoningEffort }
-          : {}),
-        parts: [{ type: 'text', text: input.prompt }]
+      const designInstructions = this.designInstructions(input);
+      const runtimeOwner = {
+        ...session,
+        pure: input.mode === 'DESIGN',
+        design: input.mode === 'DESIGN'
+      };
+      let running = await this.ensureSessionRuntime(runtimeOwner);
+      const projectCatalog = parseOpenCodeProviderCatalog(
+        (await running.client.get<unknown>('/provider')).data
+      );
+      const projectModels = mapOpenCodeModels(projectCatalog).map(
+        withOpenCodeDesignSupport
+      );
+      const selectedModel = this.resolveExecutionFromModels(
+        { settings, attachments },
+        this.safePublishedModels(projectModels),
+        `worktree catalog for ${session.worktreePath}`
+      );
+      if (
+        input.mode === 'DESIGN' &&
+        selectedModel.model.designSupport?.maturity !== 'stable'
+      ) {
+        throw new Error(
+          selectedModel.model.designSupport?.detail ??
+            'OpenCode reports that the selected model cannot accept images required by Design Mode.'
+        );
+      }
+      if (!session.providerSessionId) {
+        session = await this.createSession({
+          runtimeId: this.descriptor.id,
+          localSessionId: session.id,
+          taskId: session.taskId,
+          iterationId: session.iterationId,
+          worktreeId: session.worktreeId,
+          worktreePath: session.worktreePath,
+          mode: input.mode,
+          instructionProfile: input.instructionProfile,
+          settings: selectedModel.settings,
+          attachments
+        });
+      }
+      if (
+        hadProviderSession &&
+        session.providerSessionId &&
+        this.supervisors.get(session.id) !== previousSupervisor
+      ) {
+        session = await this.attachSession({
+          localSessionId: session.id,
+          providerSessionId: session.providerSessionId
+        });
+      }
+      const providerSessionId = session.providerSessionId!;
+      if (!this.isSafeOperationalIdentifier(providerSessionId)) {
+        throw new Error(
+          'The persisted OpenCode session identifier matches a runtime credential and cannot be used safely.'
+        );
+      }
+      running = await this.ensureSessionRuntime({
+        ...session,
+        pure: input.mode === 'DESIGN',
+        design: input.mode === 'DESIGN'
       });
-    } catch (cause) {
-      const error = mapOpenCodeMutationError('session/prompt_async', cause);
-      if (error instanceof AgentMutationAmbiguousError) {
+      const { client, server } = running;
+      await this.bindEventStream(session, client, server.id);
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        throw new Error('OpenCode replaced the session runtime before prompt submission.');
+      }
+      const verifiedPermissionSession = await this.synchronizeSessionPermissionPolicy(
+        session,
+        client,
+        selectedModel.settings,
+        'session/pre-prompt-permission'
+      );
+      session = await this.persistPermissionAttestation(
+        session,
+        verifiedPermissionSession,
+        selectedModel.settings,
+        'session/pre-prompt-permission'
+      );
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        throw new Error('OpenCode replaced the session runtime before prompt submission.');
+      }
+      const attachmentDelivery = await prepareOpenCodeAttachmentDelivery(
+        input.prompt,
+        selectedModel.model,
+        attachments
+      );
+      const providerMessageId = createOpenCodeMessageId();
+      await this.taskRuntime.updateRun(input.localRunId, {
+        providerTurnId: providerMessageId,
+        serverInstanceId: server.id,
+        status: 'STARTING',
+        lastEventAt: new Date().toISOString()
+      }, runtimeOperationId('turn/send-intent', input.localRunId, providerMessageId, server.id));
+      if (input.mode === 'DESIGN') {
+        await this.activateDesignToolGrant(session, input.localRunId, server.id);
+      }
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        throw new Error('OpenCode replaced the session runtime before prompt submission.');
+      }
+      let promptAcknowledgement: AgentProtocolMessageReference;
+      try {
+        promptAcknowledgement = (
+          await client.post<void>(`${sessionPath(providerSessionId)}/prompt_async`, {
+            messageID: providerMessageId,
+            model: {
+              providerID: selectedModel.model.modelProvider,
+              modelID: selectedModel.model.model
+            },
+            ...(selectedModel.settings.reasoningEffort
+              ? { variant: selectedModel.settings.reasoningEffort }
+              : {}),
+            ...(designInstructions ? { system: designInstructions } : {}),
+            parts: attachmentDelivery.parts
+          })
+        ).raw;
+        promptAcknowledged = true;
+      } catch (cause) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        const error = mapOpenCodeMutationError('session/prompt_async', cause);
+        if (error instanceof AgentMutationAmbiguousError) {
+          await this.throwAmbiguousAfterQuarantine(
+            session.id,
+            'session/prompt_async',
+            `Prompt ${providerMessageId} may have been accepted without an authoritative acknowledgement.`,
+            error
+          );
+        }
+        throw error;
+      }
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        throw new AgentMutationAmbiguousError(
+          'session/prompt_async',
+          `OpenCode accepted message ${providerMessageId}, but its owning runtime generation was replaced before Task Monki could persist the acknowledgement.`
+        );
+      }
+      const submittedAt = new Date().toISOString();
+      try {
+        await this.taskRuntime.updateRun(input.localRunId, {
+          status: 'RUNNING',
+          observedSettings: selectedModel.settings,
+          attachmentSubmissions: completeAttachmentSubmissions(
+            attachmentDelivery.submissionCandidates,
+            { kind: 'provider-message', id: providerMessageId },
+            submittedAt
+          ),
+          lastEventAt: submittedAt
+        }, runtimeOperationId('turn/acknowledged', input.localRunId, providerMessageId, server.id));
+        if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+          throw new OpenCodeRuntimeGenerationChangedError();
+        }
+        session = await this.taskRuntime.updateAgentSession(session.id, {
+          status: 'ACTIVE',
+          materialized: true,
+          requestedSettings: selectedModel.settings,
+          observedSettings: selectedModel.settings,
+          lastAttachedAt: submittedAt
+        }, runtimeOperationId('session/turn-active', session.id, providerMessageId, server.id));
+        if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+          throw new OpenCodeRuntimeGenerationChangedError();
+        }
+        await this.recordSettingsObservation(
+          session,
+          'TASK_MONKI_RESOLUTION',
+          selectedModel.settings,
+          input.localRunId,
+          promptAcknowledgement
+        );
+      } catch (cause) {
+        await this.revokeDesignToolGrant(session.id).catch(() => undefined);
+        if (cause instanceof OpenCodeRuntimeGenerationChangedError) {
+          throw new AgentMutationAmbiguousError(
+            'session/prompt_async',
+            `OpenCode accepted message ${providerMessageId}, but its owning runtime generation changed during durable acknowledgement.`
+          );
+        }
         await this.throwAmbiguousAfterQuarantine(
           session.id,
           'session/prompt_async',
-          `Prompt ${providerMessageId} may have been accepted without an authoritative acknowledgement.`,
-          error
+          `OpenCode accepted message ${providerMessageId}, but Task Monki could not persist the acknowledgement.`,
+          new AgentMutationAmbiguousError(
+            'session/prompt_async',
+            `OpenCode accepted message ${providerMessageId}, but Task Monki could not durably record the acknowledgement: ${errorMessage(cause)} Automatic resubmission is disabled.`
+          )
         );
       }
-      throw error;
-    }
-    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-      throw new AgentMutationAmbiguousError(
-        'session/prompt_async',
-        `OpenCode accepted message ${providerMessageId}, but its owning runtime generation was replaced before Task Monki could persist the acknowledgement.`
-      );
-    }
-    const submittedAt = new Date().toISOString();
-    try {
-      await this.store.updateRun(input.localRunId, {
-        status: 'RUNNING',
-        observedSettings: selectedModel.settings,
-        attachmentSubmissions: [],
-        lastEventAt: submittedAt
-      });
-      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-        throw new OpenCodeRuntimeGenerationChangedError();
-      }
-      session = await this.store.updateAgentSession(session.id, {
-        status: 'ACTIVE',
-        materialized: true,
-        requestedSettings: selectedModel.settings,
-        observedSettings: selectedModel.settings,
-        lastAttachedAt: submittedAt
-      });
-      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
-        throw new OpenCodeRuntimeGenerationChangedError();
-      }
-      await this.recordSettingsObservation(
-        session,
-        'TASK_MONKI_RESOLUTION',
-        selectedModel.settings,
-        input.localRunId
-      );
+
+      return { localRunId: input.localRunId, providerTurnId: providerMessageId };
     } catch (cause) {
-      if (cause instanceof OpenCodeRuntimeGenerationChangedError) {
-        throw new AgentMutationAmbiguousError(
-          'session/prompt_async',
-          `OpenCode accepted message ${providerMessageId}, but its owning runtime generation changed during durable acknowledgement.`
-        );
+      if (
+        !previousSupervisor &&
+        !promptAcknowledged &&
+        this.supervisors.has(session.id)
+      ) {
+        try {
+          await this.closeSessionRuntime(session.id, false);
+        } catch (cleanupCause) {
+          throw new AggregateError(
+            [cause, cleanupCause],
+            'OpenCode turn setup and runtime cleanup both failed.'
+          );
+        }
       }
-      await this.throwAmbiguousAfterQuarantine(
-        session.id,
-        'session/prompt_async',
-        `OpenCode accepted message ${providerMessageId}, but Task Monki could not persist the acknowledgement.`,
-        new AgentMutationAmbiguousError(
-          'session/prompt_async',
-          `OpenCode accepted message ${providerMessageId}, but Task Monki could not durably record the acknowledgement: ${errorMessage(cause)} Automatic resubmission is disabled.`
-        )
-      );
+      throw cause;
     }
-    return { localRunId: input.localRunId, providerTurnId: providerMessageId };
   }
 
   async interruptTurn(input: InterruptAgentTurn): Promise<void> {
@@ -946,12 +1485,17 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           'The OpenCode session identifier matches a runtime credential and cannot be interrupted safely.'
         );
       }
-      const run = await this.store.getRunByProviderTurnId(
+      const run = await this.taskRuntime.getRunByProviderTurnId(
         this.descriptor.id,
         input.providerTurnId
       );
       if (!run || run.sessionId !== session.id) {
         throw new Error('The OpenCode turn does not belong to the selected session.');
+      }
+      if (run.mode === 'DESIGN') {
+        await this.revokeDesignToolGrant(session.id).catch((cause) =>
+          this.recordProtocolIncident(session.id, cause).catch(() => undefined)
+        );
       }
       const supervisor = this.supervisors.get(session.id);
       const client = supervisor?.currentClient;
@@ -982,12 +1526,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         throw error;
       }
       if (run && ACTIVE_RUN_STATES.includes(run.status)) {
-        await this.store.updateRun(run.id, {
+        await this.taskRuntime.updateRun(run.id, {
           status: 'INTERRUPTING',
           lastEventAt: new Date().toISOString()
-        });
+        }, runtimeOperationId('turn/interrupt-acknowledged', run.id, input.providerTurnId, server.id));
       }
-      const interrupting = await this.store.getRun(run.id);
+      const interrupting = await this.taskRuntime.getRun(run.id);
       if (!interrupting || interrupting.status !== 'INTERRUPTING') return;
       const deadline = this.armInterruptDeadline(interrupting, server.id);
       try {
@@ -999,7 +1543,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           Math.min(deadline.deadlineAt, Date.now() + controlWindowMs)
         );
       } catch (cause) {
-        const current = await this.store.getRun(run.id);
+        const current = await this.taskRuntime.getRun(run.id);
         if (current?.status === 'INTERRUPTING') {
           await this.recordRunActivity(current, 'session/abort/reconcile-deferred', {
             error: this.redactProviderText(errorMessage(cause))
@@ -1078,7 +1622,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     deadline: OpenCodeInterruptDeadline
   ): Promise<void> {
     if (!this.isCurrentInterruptDeadline(deadline)) return;
-    const run = await this.store.getRun(deadline.runId);
+    const run = await this.taskRuntime.getRun(deadline.runId);
     if (!run || run.status !== 'INTERRUPTING') {
       this.clearInterruptDeadline(deadline.runId, deadline);
       return;
@@ -1102,7 +1646,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       deadline.evidence = result === 'ACTIVE' ? 'ACTIVE' : 'UNCERTAIN';
     } catch (cause) {
       deadline.evidence = 'UNCERTAIN';
-      const current = await this.store.getRun(deadline.runId);
+      const current = await this.taskRuntime.getRun(deadline.runId);
       if (current?.status === 'INTERRUPTING') {
         await this.recordRunActivity(current, 'session/abort/reconcile-failed', {
           error: this.redactProviderText(errorMessage(cause))
@@ -1110,7 +1654,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
     }
     if (!this.isCurrentInterruptDeadline(deadline)) return;
-    const current = await this.store.getRun(deadline.runId);
+    const current = await this.taskRuntime.getRun(deadline.runId);
     if (!current || current.status !== 'INTERRUPTING') {
       this.clearInterruptDeadline(deadline.runId, deadline);
       return;
@@ -1135,7 +1679,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     deadline: OpenCodeInterruptDeadline
   ): Promise<void> {
     if (!this.isCurrentInterruptDeadline(deadline)) return;
-    const run = await this.store.getRun(deadline.runId);
+    const run = await this.taskRuntime.getRun(deadline.runId);
     if (!run || run.status !== 'INTERRUPTING') {
       this.clearInterruptDeadline(deadline.runId, deadline);
       return;
@@ -1154,7 +1698,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     } catch (cause) {
       quarantineFailure = cause;
     }
-    const current = await this.store.getRun(deadline.runId);
+    const current = await this.taskRuntime.getRun(deadline.runId);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
     if (!quarantineFailure) {
       await this.finalizeRun(
@@ -1235,19 +1779,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         finalized &&
         this.isCurrentSessionServerGeneration(session.id, serverInstanceId)
       ) {
-        await this.store.updateAgentSession(session.id, {
+        await this.taskRuntime.updateAgentSession(session.id, {
           status: 'IDLE',
           materialized: true
-        });
+        }, runtimeOperationId('session/interrupt-idle', session.id, run.id, serverInstanceId));
         this.scheduleSessionIdleEviction(session.id);
       }
       return finalized ? 'TERMINAL' : 'UNCERTAIN';
     }
     if (status === 'ACTIVE') {
-      await this.store.updateAgentSession(session.id, {
+      await this.taskRuntime.updateAgentSession(session.id, {
         status: 'ACTIVE',
         materialized: true
-      });
+      }, runtimeOperationId('session/interrupt-active', session.id, run.id, serverInstanceId));
       return 'ACTIVE';
     }
     return 'UNCERTAIN';
@@ -1355,7 +1899,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     let stored: AgentSessionRecord;
     try {
       await assertSessionDirectory(forked, target.worktreePath);
-      stored = await this.store.updateAgentSession(target.id, {
+      stored = await this.taskRuntime.updateAgentSession(target.id, {
         providerSessionId: forked.id,
         providerSessionTreeId: forked.id,
         providerForkedFromSessionId: sourceProviderId,
@@ -1367,11 +1911,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           settingsFromSession(forked, input.settings)
         ),
         lastAttachedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId('session/fork', target.id, forked.id, sourceProviderId));
     } catch (cause) {
       let persisted: AgentSessionRecord | undefined;
       try {
-        persisted = await this.store.getAgentSession(target.id);
+        persisted = await this.taskRuntime.getAgentSession(target.id);
       } catch (confirmationCause) {
         await this.throwAmbiguousAfterQuarantine(
           target.id,
@@ -1422,7 +1966,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     let existingOwner: AgentSessionRecord | undefined;
     try {
-      existingOwner = await this.store.getAgentSessionByProviderId(
+      existingOwner = await this.taskRuntime.getAgentSessionByProviderId(
         this.descriptor.id,
         providerSessionId
       );
@@ -1493,7 +2037,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!server || server.id !== input.interaction.serverInstanceId) {
       throw new Error('OpenCode interaction belongs to a no-longer-active runtime instance.');
     }
-    const { client } = await this.ensureSessionRuntime(session);
+    const { client } = await this.ensureSessionRuntime(
+      await this.runtimeSessionOwnerForSession(session)
+    );
     const mapped = mapOpenCodeInteractionResponse(input.decision, input.interaction.request);
     const endpoint = mapped.path === 'question'
       ? `/question/${encodeURIComponent(String(input.interaction.providerRequestId))}/reply`
@@ -1515,7 +2061,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       throw error;
     }
     try {
-      const latest = await this.store.getInteractionRequest(input.interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(input.interaction.id);
       if (!latest) {
         throw new Error('The acknowledged interaction no longer has a durable Task Monki record.');
       }
@@ -1523,12 +2069,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         throw new Error('The acknowledged interaction unexpectedly returned to pending state.');
       }
       if (latest.status !== 'RESPONDING') return;
-      const resolved = await this.store.transitionInteractionRequest(latest.id, 'RESPONDING', {
+      const resolved = await this.taskRuntime.transitionInteractionRequest(latest.id, 'RESPONDING', {
         status: interactionTerminalStatus(input.decision),
         responseRawMessage: responseRaw,
         resolution: { provider: OPENCODE_RUNTIME_ID, acknowledged: true },
         resolvedAt: new Date().toISOString()
-      });
+      }, protocolOperationId('interaction/response-acknowledged', responseRaw, latest.id));
       this.emitInteractionUpdate(resolved);
       await this.resumeAfterInteractionResolution(resolved);
     } catch (cause) {
@@ -1547,7 +2093,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   async reconcile(): Promise<AgentReconciliationResult> {
     const reconciledSessionIds = new Set<string>();
     const recoveryRequiredSessionIds = new Set<string>();
-    const runs = await this.store.getRunsRequiringRecovery({
+    const runs = await this.taskRuntime.getRunsRequiringRecovery({
       includeQueued: true,
       runtimeId: this.descriptor.id
     });
@@ -1582,6 +2128,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (buffer.timer) clearTimeout(buffer.timer);
       buffer.timer = undefined;
     }
+    const designToolReleaseResults = await Promise.allSettled(
+      [...this.designToolRegistrations.keys()].map((sessionId) =>
+        this.releaseDesignToolRegistration(sessionId)
+      )
+    );
     const streams = [...this.eventStreams.values()]
       .map((binding) => binding.stream)
       .filter((stream): stream is OpenCodeEventStream => stream !== undefined);
@@ -1601,6 +2152,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.assistantUsageTotals.clear();
     if (this.catalogRefreshPromise) await this.catalogRefreshPromise.catch(() => undefined);
     const failures: unknown[] = [
+      ...designToolReleaseResults
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason),
       ...streamResults
         .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
         .map((result) => result.reason),
@@ -1720,7 +2274,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     catalog: ReturnType<typeof parseOpenCodeProviderCatalog>,
     runtime: ResolvedOpenCodeRuntime
   ): void {
-    this.operationalModels = mapOpenCodeModels(catalog);
+    this.operationalModels = mapOpenCodeModels(catalog).map(withOpenCodeDesignSupport);
     this.models = this.safePublishedModels(this.operationalModels);
     const safeProviderIds = new Set(
       catalog.providers
@@ -1853,7 +2407,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.preflightState = {
       runtime: this.descriptor,
       readiness,
-      capabilities: opencodeCapabilities(),
+      capabilities: this.runtimeCapabilities(),
       runtimeVersion: runtime.version,
       accountLabel: providerCount > 0
         ? `${providerCount} connected provider${providerCount === 1 ? '' : 's'}`
@@ -1926,7 +2480,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async ensureSessionRuntime(
-    session: AgentSessionRecord
+    session: OpenCodeSessionRuntimeOwner
   ): Promise<{ client: OpenCodeClientTransport; server: { id: string } }> {
     const exitDrain = this.sessionExitDrains.get(session.id);
     if (exitDrain) await exitDrain;
@@ -1945,7 +2499,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.cancelSessionIdleEviction(session.id);
     let supervisor = this.supervisors.get(session.id);
     if (!supervisor) {
-      supervisor = this.createSupervisor(this.requireRuntime(), session.worktreePath);
+      supervisor = this.createSupervisor(
+        this.requireRuntime(),
+        session.worktreePath,
+        session.pure === true
+      );
       const ownedSupervisor = supervisor;
       supervisor.events.on('exit', (server, unexpected) => {
         if (!unexpected || this.shuttingDown) return;
@@ -1958,7 +2516,157 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.supervisors.set(session.id, supervisor);
     }
     const running = await supervisor.start();
+    if (session.pure) {
+      const server = await this.providerRuntime.getAgentServer(running.server.id);
+      if (!server?.argv.includes('--pure')) {
+        await this.quarantineSessionRuntime(
+          session.id,
+          'runtime/pure-mode',
+          'The OpenCode pure process did not start with external plugins disabled.'
+        );
+        throw new Error(
+          'OpenCode could not attest that external plugins were disabled for this pure session.'
+        );
+      }
+    }
+    if (session.design) {
+      await this.ensureDesignToolRegistration(
+        session,
+        running.client,
+        running.server.id
+      );
+    }
     return { client: running.client, server: running.server };
+  }
+
+  private async ensureDesignToolRegistration(
+    session: OpenCodeSessionRuntimeOwner,
+    client: OpenCodeClientTransport,
+    serverId: string
+  ): Promise<void> {
+    const bridge = this.options.designClientToolBridge;
+    if (!bridge) {
+      throw new Error('The packaged inspect_design MCP bridge is not configured.');
+    }
+    const existing = this.designToolRegistrations.get(session.id);
+    if (existing?.serverId === serverId) return;
+    if (existing) {
+      await bridge.releaseSessionGrant(existing.grantId);
+      this.designToolRegistrations.delete(session.id);
+    }
+
+    const grant = await bridge.createSessionGrant({
+      runtimeId: this.descriptor.id,
+      sessionId: session.id,
+      worktreeId: await this.requireSessionWorktreeId(session.id),
+      providerGeneration: serverId
+    });
+    const environment = grant.launch.environment;
+    const sensitiveValues = Object.entries(environment)
+      .filter(([name]) => name.startsWith('TASK_MONKI_DESIGN_TOOL_'))
+      .map(([, value]) => value);
+    try {
+      const registration = await client.post<unknown>('/mcp', {
+        name: OPENCODE_DESIGN_MCP_SERVER_NAME,
+        config: {
+          type: 'local',
+          command: [grant.launch.executablePath, ...grant.launch.argv],
+          environment,
+          timeout: OPENCODE_DESIGN_MCP_TIMEOUT_MS
+        }
+      }, { sensitiveValues });
+      assertOpenCodeMcpConnected(
+        registration.data,
+        OPENCODE_DESIGN_MCP_SERVER_NAME
+      );
+    } catch (cause) {
+      await bridge.releaseSessionGrant(grant.id).catch(() => undefined);
+      const error = mapOpenCodeMutationError('mcp/register', cause);
+      if (error instanceof AgentMutationAmbiguousError) {
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          'mcp/register',
+          'OpenCode may have registered the Design MCP server without an authoritative acknowledgement.',
+          error
+        );
+      }
+      throw error;
+    }
+    const registration = { serverId, grantId: grant.id };
+    this.designToolRegistrations.set(session.id, registration);
+  }
+
+  private async requireSessionWorktreeId(sessionId: string): Promise<string> {
+    const session = await this.requireSession(sessionId);
+    if (!session.worktreeId) {
+      throw new Error('The OpenCode Design session has no worktree identity.');
+    }
+    return session.worktreeId;
+  }
+
+  private async activateDesignToolGrant(
+    session: AgentSessionRecord,
+    runId: string,
+    serverId: string
+  ): Promise<void> {
+    const registration = this.designToolRegistrations.get(session.id);
+    const bridge = this.options.designClientToolBridge;
+    if (!registration || registration.serverId !== serverId || !bridge) {
+      throw new Error('The OpenCode Design MCP server is not registered for this runtime.');
+    }
+    await bridge.activateGrant({
+      grantId: registration.grantId,
+      authority: {
+        runtimeId: this.descriptor.id,
+        sessionId: session.id,
+        runId,
+        worktreeId: session.worktreeId,
+        providerGeneration: serverId
+      }
+    });
+  }
+
+  private async revokeDesignToolGrant(sessionId: string): Promise<void> {
+    const registration = this.designToolRegistrations.get(sessionId);
+    if (!registration || !this.options.designClientToolBridge) return;
+    await this.options.designClientToolBridge.revokeGrant(registration.grantId);
+  }
+
+  private async releaseDesignToolRegistration(sessionId: string): Promise<void> {
+    const registration = this.designToolRegistrations.get(sessionId);
+    if (!registration) return;
+    await this.options.designClientToolBridge?.releaseSessionGrant(
+      registration.grantId
+    );
+    this.designToolRegistrations.delete(sessionId);
+  }
+
+  private async releaseDesignToolRegistrationSafely(sessionId: string): Promise<void> {
+    try {
+      await this.releaseDesignToolRegistration(sessionId);
+    } catch (cause) {
+      await this.recordProtocolIncident(sessionId, cause).catch(() => undefined);
+    }
+  }
+
+  private async disconnectDesignToolRegistration(
+    sessionId: string,
+    client: OpenCodeClientTransport,
+    serverId: string
+  ): Promise<void> {
+    const registration = this.designToolRegistrations.get(sessionId);
+    if (!registration || registration.serverId !== serverId) return;
+    await this.revokeDesignToolGrant(sessionId);
+    let failure: unknown;
+    try {
+      await client.post(
+        `/mcp/${encodeURIComponent(OPENCODE_DESIGN_MCP_SERVER_NAME)}/disconnect`
+      );
+    } catch (cause) {
+      failure = mapOpenCodeMutationError('mcp/disconnect', cause);
+    }
+    await this.releaseDesignToolRegistration(sessionId);
+    if (failure) throw failure;
   }
 
   private beginUnexpectedSessionExitDrain(
@@ -1989,6 +2697,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const operation = (async () => {
       let completed = false;
       try {
+        await this.revokeDesignToolGrant(sessionId).catch(() => undefined);
         await stream?.settled;
         if (this.eventStreams.get(sessionId) === binding) {
           this.eventStreams.delete(sessionId);
@@ -1996,13 +2705,16 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         if (this.supervisors.get(sessionId) === supervisor) {
           this.supervisors.delete(sessionId);
         }
+        await this.releaseDesignToolRegistrationSafely(sessionId);
         await this.enqueueSessionOperation(sessionId, async () => {
           await this.handleRuntimeLoss(
             serverId,
             'OpenCode session runtime exited unexpectedly.',
             sessionId
           );
-          this.scheduleSessionRecovery(sessionId);
+          if (await this.taskRuntime.getAgentSession(sessionId)) {
+            this.scheduleSessionRecovery(sessionId);
+          }
         });
         completed = true;
       } catch (cause) {
@@ -2032,7 +2744,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     sessionId: string,
     operation: string,
     detail: string,
-    drainAcceptedEvents = false
+    drainAcceptedEvents = false,
+    runtimeRunToSettleAfterShutdownId?: string
   ): Promise<void> {
     const exitDrain = this.sessionExitDrains.get(sessionId);
     if (exitDrain) return exitDrain;
@@ -2047,10 +2760,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const stream = this.eventStreams.get(sessionId)?.stream;
       stream?.stop();
       quarantine = (stream?.settled ?? Promise.resolve()).then(() =>
-        this.performSessionQuarantine(sessionId, operation, detail)
+        this.performSessionQuarantine(
+          sessionId,
+          operation,
+          detail,
+          runtimeRunToSettleAfterShutdownId
+        )
       );
     } else {
-      quarantine = this.performSessionQuarantine(sessionId, operation, detail);
+      quarantine = this.performSessionQuarantine(
+        sessionId,
+        operation,
+        detail,
+        runtimeRunToSettleAfterShutdownId
+      );
     }
     this.sessionQuarantinePromises.set(sessionId, quarantine);
     void quarantine.then(
@@ -2119,31 +2842,52 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!providerSessionId) {
       throw new Error('Cannot attest an unmaterialized OpenCode session permission policy.');
     }
-    const desired = openCodePermissionRules(settings);
+    return this.synchronizeNativePermissionPolicy({
+      sessionId: session.id,
+      providerSessionId,
+      directory: session.worktreePath,
+      client,
+      desired: openCodePermissionRules(settings),
+      operation
+    });
+  }
+
+  private async synchronizeNativePermissionPolicy(input: {
+    sessionId: string;
+    providerSessionId: string;
+    directory: string;
+    client: OpenCodeClientTransport;
+    desired: ReturnType<typeof openCodePermissionRules>;
+    operation: string;
+  }): Promise<OpenCodeSession> {
     const deadlineAt = Date.now() + positiveTimeout(this.options.requestTimeoutMs, 30_000);
     const readSession = async (): Promise<OpenCodeSession> => {
       const providerSession = parseOpenCodeSession(
-        (await client.get<unknown>(sessionPath(providerSessionId), { deadlineAt })).data
+        (
+          await input.client.get<unknown>(sessionPath(input.providerSessionId), {
+            deadlineAt
+          })
+        ).data
       );
       if (
-        providerSession.id !== providerSessionId ||
+        providerSession.id !== input.providerSessionId ||
         !this.isSafeOperationalIdentifier(providerSession.id)
       ) {
         throw new Error(
           'OpenCode returned a different or unsafe session identity during permission attestation.'
         );
       }
-      await assertSessionDirectory(providerSession, session.worktreePath);
+      await assertSessionDirectory(providerSession, input.directory);
       return providerSession;
     };
 
     try {
       let providerSession = await readSession();
-      if (!openCodePermissionRulesEndWith(providerSession.permission, desired)) {
+      if (!openCodePermissionRulesEndWith(providerSession.permission, input.desired)) {
         try {
-          await client.patch<unknown>(
-            sessionPath(providerSessionId),
-            { permission: desired },
+          await input.client.patch<unknown>(
+            sessionPath(input.providerSessionId),
+            { permission: input.desired },
             { deadlineAt }
           );
         } catch (cause) {
@@ -2151,7 +2895,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         }
         providerSession = await readSession();
       }
-      if (!openCodePermissionRulesEndWith(providerSession.permission, desired)) {
+      if (!openCodePermissionRulesEndWith(providerSession.permission, input.desired)) {
         throw new Error(
           'OpenCode did not attest the requested permission policy after synchronization.'
         );
@@ -2161,8 +2905,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const diagnostic = this.redactProviderText(errorMessage(cause));
       try {
         await this.quarantineSessionRuntime(
-          session.id,
-          operation,
+          input.sessionId,
+          input.operation,
           `The OpenCode permission policy could not be attested: ${diagnostic}`
         );
       } catch (quarantineCause) {
@@ -2175,6 +2919,79 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
   }
 
+  private assertRuntimeExecutionContext(input: StartAgentRuntimeTurn): void {
+    const context = input.executionContext;
+    assertReadOnlyExecutionContext(context);
+    const expectedHash = openCodeReadOnlyProfileHash(
+      context.primaryCwd,
+      context.readRoots,
+      context.modelSettings
+    );
+    if (
+      context.permissionProfileHash !== expectedHash ||
+      context.managedAttachments.length > 0 ||
+      context.readRoots.length !== 1 ||
+      context.readRoots[0]?.canonicalPath !== context.primaryCwd ||
+      context.modelSettings.runtimeId !== this.descriptor.id ||
+      context.modelSettings.sandbox !== 'DANGER_FULL_ACCESS' ||
+      context.modelSettings.approvalPolicy !== 'NEVER' ||
+      context.modelSettings.networkAccess !== true ||
+      context.externalTools.network !== true ||
+      context.externalTools.webSearch !== 'disabled' ||
+      context.externalTools.mcpServers ||
+      context.externalTools.apps ||
+      context.externalTools.dynamicTools ||
+      !isDeepStrictEqual(input.session.executionContext, context) ||
+      !isDeepStrictEqual(input.session.owner, input.run.owner)
+    ) {
+      throw new Error(
+        'OpenCode read-only execution does not match its attested provider-native permission policy.'
+      );
+    }
+  }
+
+  private async synchronizeRuntimeSessionPermissionPolicy(
+    session: AgentRuntimeSessionRecord,
+    providerSession: OpenCodeSession,
+    client: OpenCodeClientTransport
+  ): Promise<OpenCodeSession> {
+    return this.synchronizeNativePermissionPolicy({
+      sessionId: session.id,
+      providerSessionId: providerSession.id,
+      directory: session.executionContext.primaryCwd,
+      client,
+      desired: openCodeReadOnlyPermissionRules(),
+      operation: 'runtime/session-permission'
+    });
+  }
+
+  private async updateRuntimeRun(
+    runId: string,
+    update: Parameters<AgentRuntimeStore['updateRun']>[2],
+    operationId: string
+  ): Promise<AgentRuntimeRunRecord> {
+    let current = await this.providerRuntime.getRun(runId);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (!current) throw new Error(`Agent runtime run not found: ${runId}`);
+      try {
+        return await this.providerRuntime.updateRun(
+          current.id,
+          current.recordRevision,
+          update,
+          `${operationId}:${attempt}`
+        );
+      } catch (cause) {
+        const latest = await this.providerRuntime.getRun(runId);
+        if (!latest || latest.recordRevision === current.recordRevision || attempt === 3) {
+          throw cause;
+        }
+        current = latest;
+      }
+    }
+    throw new Error(`Agent runtime run update failed: ${runId}`);
+  }
+
+
   private async persistPermissionAttestation(
     session: AgentSessionRecord,
     providerSession: OpenCodeSession,
@@ -2183,13 +3000,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     update: Partial<Pick<AgentSessionRecord, 'status' | 'materialized'>> = {}
   ): Promise<AgentSessionRecord> {
     try {
-      return await this.store.updateAgentSession(session.id, {
+      return await this.taskRuntime.updateAgentSession(session.id, {
         ...update,
         requestedSettings: settings,
         observedSettings: this.safeObservedSettings(
           settingsFromSession(providerSession, settings)
         )
-      });
+      }, runtimeOperationId('session/permission-attestation', session.id, providerSession.id, operation));
     } catch (cause) {
       const diagnostic = this.redactProviderText(errorMessage(cause));
       await this.quarantineSessionRuntime(
@@ -2204,7 +3021,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async performSessionQuarantine(
     sessionId: string,
     operation: string,
-    detail: string
+    detail: string,
+    runtimeRunToSettleAfterShutdownId?: string
   ): Promise<void> {
     const fence = new Error(
       `OpenCode session runtime is quarantined after ${operation}.`
@@ -2220,6 +3038,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     stream?.stop();
     const supervisor = this.supervisors.get(sessionId);
     const serverId = supervisor?.currentServer?.id;
+    // The provider process may outlive an unconfirmed shutdown. Remove its
+    // generation-bound bridge credentials before waiting on that shutdown.
+    await this.releaseDesignToolRegistrationSafely(sessionId);
     let shutdownFailure: unknown;
     try {
       await supervisor?.shutdown();
@@ -2232,18 +3053,43 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     } catch (cause) {
       shutdownFailure = cause;
     }
+    await this.releaseDesignToolRegistrationSafely(sessionId);
     this.clearAssistantMessageParents(sessionId);
-    const reason = `Task Monki quarantined the OpenCode session process after ${operation}. ${detail}`;
-    if (serverId) await this.handleRuntimeLoss(serverId, reason, sessionId);
-    const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
-    if (session?.status !== 'NOT_LOADED') {
-      await this.store.updateAgentSession(sessionId, { status: 'NOT_LOADED' });
-    }
     if (shutdownFailure) {
+      // Keep the run active behind the session fence. A recovery event is a
+      // repository-verification boundary, so it must not be emitted while the
+      // old provider process may still be able to change the repository.
       throw new Error(
         `OpenCode session process quarantine was incomplete: ${errorMessage(shutdownFailure)}`,
         { cause: shutdownFailure }
       );
+    }
+    const reason = `Task Monki quarantined the OpenCode session process after ${operation}. ${detail}`;
+    if (serverId) {
+      await this.handleRuntimeLoss(
+        serverId,
+        reason,
+        sessionId,
+        runtimeRunToSettleAfterShutdownId
+      );
+    }
+    const session = await this.taskRuntime.getAgentSession(sessionId).catch(() => undefined);
+    if (session && session.status !== 'NOT_LOADED') {
+      await this.taskRuntime.updateAgentSession(
+        sessionId,
+        { status: 'NOT_LOADED' },
+        runtimeOperationId('session/quarantine', sessionId, serverId, operation)
+      );
+    } else if (!session) {
+      const runtimeSession = await this.providerRuntime.getSession(sessionId);
+      if (runtimeSession && runtimeSession.status !== 'NOT_LOADED') {
+        await this.providerRuntime.updateSession(
+          runtimeSession.id,
+          runtimeSession.recordRevision,
+          { status: 'NOT_LOADED' },
+          runtimeOperationId('runtime/session-quarantine', sessionId, serverId, operation)
+        );
+      }
     }
     if (this.sessionRuntimeFences.get(sessionId) === fence) {
       this.sessionRuntimeFences.delete(sessionId);
@@ -2255,7 +3101,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     providerMessageId: string,
     serverId: string
   ): Promise<RunRecord | undefined> {
-    const run = await this.store.getRunByProviderTurnId(
+    const run = await this.taskRuntime.getRunByProviderTurnId(
       this.descriptor.id,
       providerMessageId
     );
@@ -2336,7 +3182,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       createdAt: info.time?.created ?? 0
     };
     const currentTotal = this.assistantUsageTotals.get(run.id) ??
-      latestUsageForRun(await this.store.snapshot(), run.id)?.total ??
+      latestUsageForRun(await this.taskRuntime.snapshot(), run.id)?.total ??
       emptyUsage();
     const total = replaceUsageInTotal(
       currentTotal,
@@ -2352,7 +3198,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const last = runUsage.sort(
       (left, right) => left.createdAt - right.createdAt
     ).at(-1)?.usage ?? usage;
-    await this.store.recordAgentUsageSnapshot({
+    await this.taskRuntime.recordAgentUsageSnapshot({
       taskId: run.taskId,
       iterationId: run.iterationId,
       sessionId: session.id,
@@ -2361,7 +3207,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       total,
       last,
       rawMessage: raw
-    });
+    }, protocolOperationId('usage/assistant', raw, run.id, info.id));
     this.rememberAssistantUsageTotal(run.id, total);
     this.rememberAssistantUsage(session.id, info.id, nextTracked);
   }
@@ -2439,7 +3285,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private createSupervisor(
     runtime: ResolvedOpenCodeRuntime,
-    cwd: string
+    cwd: string,
+    pure = false
   ): OpenCodeSessionSupervisor {
     const supervisorOptions: OpenCodeServerSupervisorOptions = {
       runtime,
@@ -2448,15 +3295,16 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       requestTimeoutMs: this.options.requestTimeoutMs,
       startupTimeoutMs: this.options.startupTimeoutMs,
       minimumVersion: this.options.minimumVersion,
-      maximumMajor: this.options.maximumMajor
+      maximumMajor: this.options.maximumMajor,
+      pure
     };
     return this.options.supervisorFactory
-      ? this.options.supervisorFactory(this.store, supervisorOptions)
-      : new OpenCodeServerSupervisor(this.store, supervisorOptions);
+      ? this.options.supervisorFactory(this.providerRuntime, supervisorOptions)
+      : new OpenCodeServerSupervisor(this.providerRuntime, supervisorOptions);
   }
 
   private async bindEventStream(
-    session: AgentSessionRecord,
+    session: OpenCodeSessionRuntimeOwner,
     client: OpenCodeClientTransport,
     serverId: string
   ): Promise<void> {
@@ -2575,6 +3423,32 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       ) {
         return;
       }
+      const runtimeSession = await this.providerRuntime.getSession(sessionId);
+      if (runtimeSession) {
+        const run = await this.providerRuntime.getActiveRunForSession(sessionId);
+        if (run && isOpenCodeReadOnlyRuntimeSession(runtimeSession)) {
+          const reason = this.redactProviderText(errorMessage(cause));
+          const observedAt = new Date().toISOString();
+          const updated = await this.updateRuntimeRun(
+            run.id,
+            {
+              status: 'RECOVERY_REQUIRED',
+              recoveryState: 'REQUIRES_USER_ACTION',
+              terminalReason: reason,
+              lastEventAt: observedAt
+            },
+            runtimeOperationId('runtime/inbound-failed', run.id, reason)
+          );
+          this.emitRuntimeTurnEvent({
+            type: 'RECOVERY_REQUIRED',
+            runId: updated.id,
+            providerTurnId: updated.providerTurnId,
+            reason,
+            observedAt
+          });
+          return;
+        }
+      }
       await this.recordProtocolIncident(sessionId, cause).catch(() => undefined);
       if (serverId) await this.scheduleInboundResync(sessionId, serverId);
     });
@@ -2599,7 +3473,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
             'inbound/persistence-resync',
             `OpenCode inbound persistence failed and its read-only recovery snapshot also failed: ${diagnostic}`
           );
-          const current = run ? await this.store.getRun(run.id) : undefined;
+          const current = run ? await this.taskRuntime.getRun(run.id) : undefined;
           if (current?.status === 'RECOVERY_REQUIRED') {
             await this.recordReconciliation(
               current,
@@ -2654,6 +3528,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.scheduleCatalogRefresh();
       return;
     }
+    if (await this.handleRuntimeTurnEvent(event, serverId)) return;
     switch (event.type) {
       case 'server.connected':
         return;
@@ -2701,7 +3576,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       default: {
         const sessionId = stringProperty(event.properties, 'sessionID');
         const session = sessionId
-          ? await this.store.getAgentSessionByProviderId(this.descriptor.id, sessionId)
+          ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, sessionId)
           : undefined;
         const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
         if (
@@ -2715,15 +3590,341 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
   }
 
+  private async handleRuntimeTurnEvent(
+    event: OpenCodeEvent,
+    serverId: string
+  ): Promise<boolean> {
+    const providerSessionId = openCodeEventSessionId(event);
+    if (!providerSessionId) return false;
+    const session = await this.providerRuntime.getSessionByProviderId(
+      providerSessionId,
+      this.descriptor.id
+    );
+    if (
+      !session ||
+      !isOpenCodeReadOnlyRuntimeSession(session) ||
+      !this.isCurrentSessionServerGeneration(session.id, serverId)
+    ) {
+      return false;
+    }
+    const run = await this.providerRuntime.getActiveRunForSession(session.id);
+    if (
+      !run || run.serverInstanceId !== serverId
+    ) {
+      return false;
+    }
+    switch (event.type) {
+      case 'server.connected':
+        return true;
+      case 'session.status': {
+        const status = mapOpenCodeSessionStatus(event.properties.status);
+        if (status === 'IDLE') {
+          await this.finalizeRuntimeFromSnapshot(run, session, serverId);
+        }
+        return true;
+      }
+      case 'session.idle':
+        await this.finalizeRuntimeFromSnapshot(run, session, serverId);
+        return true;
+      case 'message.updated': {
+        const info = asRecord(event.properties.info) as
+          | (OpenCodeMessageInfo & Record<string, unknown>)
+          | undefined;
+        if (!info || typeof info.id !== 'string') return true;
+        if (
+          info.role === 'assistant' &&
+          typeof info.parentID === 'string' &&
+          info.parentID === run.providerTurnId
+        ) {
+          this.rememberAssistantParent(session.id, info.id, info.parentID);
+        }
+        return true;
+      }
+      case 'message.part.delta': {
+        const delta = parseOpenCodePartDelta(event.properties);
+        const parent = this.assistantMessageParents
+          .get(session.id)
+          ?.get(delta.messageID);
+        if (
+          parent === run.providerTurnId &&
+          delta.field === 'text' &&
+          delta.delta
+        ) {
+          this.emitRuntimeTurnEvent({
+            type: 'DELTA',
+            runId: run.id,
+            providerTurnId: run.providerTurnId!,
+            text: this.redactProviderText(
+              Buffer.from(delta.delta).subarray(0, MAX_RUNTIME_DELTA_BYTES).toString()
+            ),
+            observedAt: new Date().toISOString()
+          });
+        }
+        return true;
+      }
+      case 'permission.updated':
+      case 'permission.asked':
+      case 'permission.v2.asked': {
+        const permission = event.properties as unknown as OpenCodePermissionRequest;
+        if (typeof permission.id !== 'string') return true;
+        await this.rejectRuntimeInteraction({
+          run,
+          session,
+          serverId,
+          endpoint: `/permission/${encodeURIComponent(permission.id)}/reply`,
+          body: { reply: 'reject' },
+          reason:
+            'OpenCode requested permission during a provider-native read-only turn. The request was denied and the turn failed.'
+        });
+        return true;
+      }
+      case 'question.asked':
+      case 'question.v2.asked': {
+        const question = event.properties as unknown as OpenCodeQuestionRequest;
+        if (typeof question.id !== 'string') return true;
+        await this.rejectRuntimeInteraction({
+          run,
+          session,
+          serverId,
+          endpoint: `/question/${encodeURIComponent(question.id)}/reply`,
+          body: { answers: question.questions.map(() => []) },
+          reason:
+            'OpenCode asked for user input during a provider-native read-only turn. The request was denied and the turn failed.'
+        });
+        return true;
+      }
+      case 'session.error': {
+        const diagnostic = openCodeErrorDiagnostic(
+          event.properties.error ?? 'OpenCode read-only session error.',
+          this.sensitiveValues
+        );
+        await this.finalizeRuntimeRun(run, session, 'failed', diagnostic, '');
+        return true;
+      }
+      default:
+        // Read-only workflows intentionally retain only bounded output and
+        // terminal evidence. Task-specific items, plans, and subagents remain
+        // owned by the normal Task path.
+        return true;
+    }
+  }
+
+  private async finalizeRuntimeFromSnapshot(
+    run: AgentRuntimeRunRecord,
+    session: AgentRuntimeSessionRecord,
+    serverId: string
+  ): Promise<void> {
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    const client = this.supervisors.get(session.id)?.currentClient;
+    if (!client || !session.providerSessionId || !run.providerTurnId) return;
+    const result = await client.get<unknown>(
+      `${sessionPath(session.providerSessionId)}/message`
+    );
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    const messages = parseOpenCodeMessages(result.data);
+    const user = messages.find(
+      (message) =>
+        message.info.role === 'user' && message.info.id === run.providerTurnId
+    );
+    if (!user) {
+      await this.finalizeRuntimeRun(
+        run,
+        session,
+        'failed',
+        'OpenCode became idle without retaining the submitted read-only prompt.',
+        ''
+      );
+      return;
+    }
+    const assistant = latestAssistantFor(messages, user.info.id);
+    if (!assistant || !isTerminalAssistantMessage(assistant)) {
+      await this.finalizeRuntimeRun(
+        run,
+        session,
+        run.status === 'INTERRUPTING' ? 'interrupted' : 'failed',
+        run.status === 'INTERRUPTING'
+          ? undefined
+          : 'OpenCode became idle without a terminal read-only response.',
+        ''
+      );
+      return;
+    }
+    const message = assistant.parts
+      .filter((part) => part.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text)
+      .join('\n')
+      .trim();
+    const diagnostic = assistant.info.error
+      ? openCodeErrorDiagnostic(assistant.info.error, this.sensitiveValues)
+      : undefined;
+    await this.finalizeRuntimeRun(
+      run,
+      session,
+      run.status === 'INTERRUPTING'
+        ? 'interrupted'
+        : diagnostic
+          ? 'failed'
+          : message
+            ? 'completed'
+            : 'failed',
+      diagnostic ?? (message ? undefined : 'OpenCode returned no final text.'),
+      message
+    );
+  }
+
+  private async rejectRuntimeInteraction(input: {
+    run: AgentRuntimeRunRecord;
+    session: AgentRuntimeSessionRecord;
+    serverId: string;
+    endpoint: string;
+    body: unknown;
+    reason: string;
+  }): Promise<void> {
+    const client = this.supervisors.get(input.session.id)?.currentClient;
+    const providerSessionId = input.session.providerSessionId;
+    if (!this.isCurrentSessionServerGeneration(input.session.id, input.serverId)) {
+      return;
+    }
+    if (!client || !providerSessionId) {
+      await this.quarantineSessionRuntime(
+        input.session.id,
+        'runtime/read-only-policy-violation',
+        `${input.reason} Task Monki could not reach the owning OpenCode session to stop it.`
+      );
+      return;
+    }
+    let rejectionError: unknown;
+    try {
+      await client.post<boolean>(input.endpoint, input.body);
+    } catch (cause) {
+      rejectionError = cause;
+    }
+    const reason = rejectionError
+      ? `${input.reason} OpenCode did not confirm the denial: ${this.redactProviderText(errorMessage(rejectionError))}`
+      : input.reason;
+    const deadlineAt = Date.now() + this.interruptReconciliationWindowMs();
+    try {
+      await client.post<boolean>(
+        `${sessionPath(providerSessionId)}/abort`,
+        undefined,
+        { deadlineAt }
+      );
+      if (!this.isCurrentSessionServerGeneration(input.session.id, input.serverId)) return;
+      const status = await this.readProviderInterruptStatus(
+        client,
+        providerSessionId,
+        deadlineAt
+      );
+      if (!this.isCurrentSessionServerGeneration(input.session.id, input.serverId)) return;
+      if (status !== 'IDLE') {
+        throw new Error(
+          `OpenCode did not confirm provider settlement after abort; session status was ${status.toLowerCase()}.`
+        );
+      }
+    } catch (cause) {
+      if (!this.isCurrentSessionServerGeneration(input.session.id, input.serverId)) return;
+      await this.quarantineSessionRuntime(
+        input.session.id,
+        'runtime/read-only-policy-violation',
+        `${reason} Task Monki could not confirm provider settlement after abort: ${this.redactProviderText(errorMessage(cause))}`
+      );
+      return;
+    }
+    await this.finalizeRuntimeRun(input.run, input.session, 'failed', reason, '');
+  }
+
+  private async finalizeRuntimeRun(
+    run: AgentRuntimeRunRecord,
+    session: AgentRuntimeSessionRecord,
+    status: 'completed' | 'interrupted' | 'failed',
+    error: string | undefined,
+    finalMessage: string,
+    options: { sessionStopped?: boolean } = {}
+  ): Promise<void> {
+    const current = await this.providerRuntime.getRun(run.id);
+    if (!current || TERMINAL_RUN_STATES.includes(current.status)) return;
+    const safeMessage = this.redactProviderText(finalMessage);
+    if (safeMessage) {
+      const artifact = await this.providerRuntime.getArtifact(current.outputArtifactId);
+      if (artifact && artifact.contentSha256 !== hashText(safeMessage)) {
+        await this.providerRuntime.updateArtifact({
+          artifactId: artifact.id,
+          expectedRevision: artifact.recordRevision,
+          clientOperationId: runtimeOperationId(
+            'runtime/output-final',
+            current.id,
+            current.providerTurnId,
+            safeMessage
+          ),
+          content: safeMessage
+        });
+      }
+    }
+    const completedAt = new Date().toISOString();
+    const terminalStatus =
+      status === 'completed'
+        ? 'COMPLETED'
+        : status === 'interrupted'
+          ? 'INTERRUPTED'
+          : 'FAILED';
+    const updated = await this.updateRuntimeRun(
+      current.id,
+      {
+        status: terminalStatus,
+        delivery: 'TERMINAL',
+        ...(current.interruptDelivery ? { interruptDelivery: 'TERMINAL' as const } : {}),
+        recoveryState: 'NONE',
+        terminalReason: error ? this.redactProviderText(error) : undefined,
+        providerTerminalSource: options.sessionStopped
+          ? 'OPENCODE_PROCESS_STOP'
+          : 'OPENCODE_SESSION_SNAPSHOT',
+        lastEventAt: completedAt,
+        endedAt: completedAt
+      },
+      runtimeOperationId('runtime/terminal', current.id, terminalStatus, completedAt)
+    );
+    const durableSession = await this.providerRuntime.getSession(session.id);
+    if (durableSession && !options.sessionStopped) {
+      await this.providerRuntime.updateSession(
+        durableSession.id,
+        durableSession.recordRevision,
+        {
+          status: status === 'failed' ? 'SYSTEM_ERROR' : 'IDLE',
+          materialized: true,
+          lastAttachedAt: completedAt
+        },
+        runtimeOperationId('runtime/session-terminal', durableSession.id, updated.id)
+      );
+    }
+    this.emitRuntimeTurnEvent({
+      type: 'TERMINAL',
+      runId: updated.id,
+      providerTurnId: updated.providerTurnId!,
+      status,
+      ...(error ? { error: this.redactProviderText(error) } : {}),
+      completedAt
+    });
+    if (!options.sessionStopped) this.scheduleSessionIdleEviction(session.id);
+    this.schedulePendingRuntimeReset();
+  }
+
+  private emitRuntimeTurnEvent(event: AgentRuntimeTurnEvent): void {
+    for (const listener of this.runtimeTurnListeners) listener(event);
+  }
+
   private async handleSessionStatus(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     if (!providerSessionId) return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const status = mapOpenCodeSessionStatus(event.properties.status);
     const run = await this.getCurrentRunForSession(session.id);
     const sessionStatus = await this.sessionStatusWithInteractionAuthority(status, run);
-    await this.store.updateAgentSession(session.id, { status: sessionStatus });
+    await this.taskRuntime.updateAgentSession(
+      session.id,
+      { status: sessionStatus },
+      runtimeOperationId('session/status-event', serverId, event.id, session.id, sessionStatus)
+    );
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     if (run?.serverInstanceId === serverId) {
       await this.recordRunActivity(run, 'session/status', {
@@ -2742,7 +3943,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async handleSessionIdle(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
-      ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
+      ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     if (session && this.isCurrentSessionServerGeneration(session.id, serverId)) {
       await this.reconcileSessionOwned(session.id, serverId);
@@ -2758,7 +3959,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const info = asRecord(event.properties.info) as unknown as OpenCodeMessageInfo | undefined;
     if (!info || typeof info.id !== 'string' || typeof info.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, info.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, info.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     if (info.role === 'user') {
       const run = await this.runForProviderMessage(session, info.id, serverId);
@@ -2776,15 +3977,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         sessionStatus === 'AWAITING_APPROVAL' || sessionStatus === 'AWAITING_USER_INPUT'
           ? sessionStatus
           : 'RUNNING';
-      await this.store.updateRun(run.id, {
+      await this.taskRuntime.updateRun(run.id, {
         observedSettings: observed,
         status: runStatus
-      });
+      }, protocolOperationId('turn/message-observed', raw, run.id, info.id));
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      await this.store.updateAgentSession(session.id, {
+      await this.taskRuntime.updateAgentSession(session.id, {
         observedSettings: observed,
         status: sessionStatus
-      });
+      }, protocolOperationId('session/message-observed', raw, session.id, info.id));
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       if (providerSettings) {
         await this.recordSettingsObservation(
@@ -2811,7 +4012,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         !cachedUsage?.has(info.id) &&
         Boolean(this.assistantUsageEvictedMessageIds.get(session.id)?.has(info.id));
       if (!cacheHasRun || exactUsageMayHaveBeenEvicted) {
-        const latestUsage = latestUsageForRun(await this.store.snapshot(), run.id);
+        const latestUsage = latestUsageForRun(await this.taskRuntime.snapshot(), run.id);
         if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
         if (latestUsage) {
           const client = this.supervisors.get(session.id)?.currentClient;
@@ -2858,7 +4059,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const part = asRecord(event.properties.part) as unknown as OpenCodePart | undefined;
     if (!part || typeof part.id !== 'string' || typeof part.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, part.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, part.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     let run = await this.runForProviderMessage(session, part.messageID, serverId);
     const isUserPart = Boolean(run);
@@ -2878,7 +4079,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     serverId: string
   ): Promise<void> {
     const delta = parseOpenCodePartDelta(event.properties);
-    const session = await this.store.getAgentSessionByProviderId(
+    const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       delta.sessionID
     );
@@ -2894,7 +4095,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!run || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const previous =
       this.streamBuffers.get(run.id)?.parts.get(delta.partID)?.part ??
-      asRecord((await this.store.getAgentItemByProviderId(run.id, delta.partID))?.payload);
+      asRecord((await this.taskRuntime.getAgentItemByProviderId(run.id, delta.partID))?.payload);
     if (
       !previous ||
       previous.id !== delta.partID ||
@@ -2945,7 +4146,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       );
       return;
     }
-    await this.store.upsertAgentItem({
+    await this.taskRuntime.upsertAgentItem({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -2953,14 +4154,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       providerItemId: part.id,
       type,
       status,
-      payload: this.redactProviderValue(part),
+      payload: this.boundedItemPayload(part),
       rawMessage: raw,
       providerStartedAt: providerTimestamp(part.state?.time?.start),
       providerCompletedAt: providerTimestamp(part.state?.time?.end)
-    });
+    }, protocolOperationId('item/upsert', raw, run.id, part.id));
     const interactionPending =
       typeof part.callID === 'string' &&
-      (await this.store.snapshot()).interactionRequests.some(
+      (await this.taskRuntime.snapshot()).interactionRequests.some(
         (interaction) =>
           interaction.runId === run.id &&
           interaction.sessionId === session.id &&
@@ -2997,7 +4198,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
     const previousBuffered = buffer.parts.get(part.id);
     const previousPayload = previousBuffered?.part ??
-      (await this.store.getAgentItemByProviderId(run.id, part.id))?.payload;
+      (await this.taskRuntime.getAgentItemByProviderId(run.id, part.id))?.payload;
     const delta = explicitOutputDelta ?? outputDelta(previousPayload, part);
 
     if (!previousBuffered && buffer.parts.size >= MAX_BUFFERED_STREAM_PARTS_PER_RUN) {
@@ -3013,7 +4214,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       eventCount: (previousBuffered?.eventCount ?? 0) + 1
     });
     if (delta) {
-      this.bufferStreamOutput(buffer, part.type, delta);
+      this.bufferStreamOutput(buffer, part.type, delta, raw);
       if (this.bufferedStreamOutputBytes(buffer) > STREAM_OUTPUT_MAX_BUFFER_BYTES) {
         const terminal = streamPartIsTerminal(part, status);
         await this.flushBufferedStreamOutput(run.id, terminal);
@@ -3053,7 +4254,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
-      ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
+      ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
     if (
@@ -3064,7 +4265,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       return;
     }
     const steps = mapOpenCodeTodoSteps(event.properties.todos);
-    await this.store.recordAgentPlanRevision({
+    await this.taskRuntime.recordAgentPlanRevision({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
@@ -3072,7 +4273,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       runtimeId: this.descriptor.id,
       steps: this.redactProviderValue(steps),
       rawMessage: raw
-    });
+    }, protocolOperationId('plan/todo', raw, run.id));
     this.emitRunActivity(run, { eventType: 'turn/plan/updated', stepCount: steps.length });
   }
 
@@ -3083,7 +4284,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const permission = event.properties as unknown as OpenCodePermissionRequest;
     if (typeof permission.id !== 'string' || typeof permission.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, permission.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, permission.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.materializeInteraction(
       session,
@@ -3102,7 +4303,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const question = event.properties as unknown as OpenCodeQuestionRequest;
     if (typeof question.id !== 'string' || typeof question.sessionID !== 'string') return;
-    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, question.sessionID);
+    const session = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, question.sessionID);
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.materializeInteraction(
       session,
@@ -3170,7 +4371,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         action !== 'GRANT_SESSION' &&
         action !== 'DECLINE_FOR_SESSION'
     );
-    const interaction = await this.store.createInteractionRequest({
+    const interaction = await this.taskRuntime.createInteractionRequest({
       runtimeId: this.descriptor.id,
       serverInstanceId: serverId,
       providerRequestId,
@@ -3185,7 +4386,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       allowedActions,
       policyWarnings: policy.warnings,
       requestRawMessage: raw
-    });
+    }, protocolOperationId('interaction/create', raw, run.id, providerRequestId));
     this.emitInteractionUpdate(interaction);
     if (mapped.type === 'USER_INPUT' && allowedActions.length === 0) {
       await this.resolveBlockedUserInput(interaction);
@@ -3200,23 +4401,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       action: 'ANSWER',
       answers: {}
     };
-    const responding = await this.store.transitionInteractionRequest(
+    const responding = await this.taskRuntime.transitionInteractionRequest(
       interaction.id,
       'PENDING',
       {
         status: 'RESPONDING',
         decision,
         respondedAt: new Date().toISOString()
-      }
+      },
+      runtimeOperationId('interaction/auto-response', interaction.id, interaction.requestedAt)
     );
     this.emitInteractionUpdate(responding);
     try {
       await this.respondToInteraction({ interaction: responding, decision });
     } catch (cause) {
-      const latest = await this.store.getInteractionRequest(interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (latest?.status === 'RESPONDING') {
         const reason = errorMessage(cause);
-        const stale = await this.store.transitionInteractionRequest(
+        const stale = await this.taskRuntime.transitionInteractionRequest(
           latest.id,
           'RESPONDING',
           {
@@ -3226,12 +4428,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
               automaticResubmission: false
             },
             resolvedAt: new Date().toISOString()
-          }
+          },
+          runtimeOperationId('interaction/auto-response-failed', latest.id, latest.respondedAt, reason)
         );
         this.emitInteractionUpdate(stale);
-        const run = await this.store.getRun(interaction.runId);
+        const run = await this.taskRuntime.getRun(interaction.runId);
         if (run) {
-          await this.store.appendEvent(
+          await this.taskRuntime.applyTaskRuntimeEvent(
             createDomainEvent({
               type: 'AGENT_MUTATION_AMBIGUOUS',
               taskId: run.taskId,
@@ -3246,7 +4449,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
                 reason,
                 automaticResubmission: false
               }
-            })
+            }),
+            runtimeOperationId('event/mutation-ambiguous', run.id, latest.id, reason)
           );
           this.emitRunStateUpdate(run, {
             eventType: 'mutation/ambiguous',
@@ -3265,7 +4469,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const requestId = stringProperty(event.properties, 'requestID') ?? stringProperty(event.properties, 'permissionID');
     if (!requestId) return;
-    const interaction = await this.store.getInteractionRequestByProviderId(serverId, requestId);
+    const interaction = await this.taskRuntime.getInteractionRequestByProviderId(serverId, requestId);
     if (
       !interaction ||
       interaction.status !== 'PENDING' ||
@@ -3273,12 +4477,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     ) {
       return;
     }
-    const stale = await this.store.transitionInteractionRequest(interaction.id, 'PENDING', {
+    const stale = await this.taskRuntime.transitionInteractionRequest(interaction.id, 'PENDING', {
       status: 'STALE',
       responseRawMessage: raw,
       resolution: { providerResolvedExternally: true, eventType: event.type },
       resolvedAt: new Date().toISOString()
-    });
+    }, protocolOperationId('interaction/provider-resolved', raw, interaction.id, event.type));
     this.emitInteractionUpdate(stale);
     await this.resumeAfterInteractionResolution(stale);
   }
@@ -3297,7 +4501,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       return;
     }
     if (!child.parentID) return;
-    const parent = await this.store.getAgentSessionByProviderId(this.descriptor.id, child.parentID);
+    const parent = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, child.parentID);
     if (!parent || !this.isCurrentSessionServerGeneration(parent.id, serverId)) return;
     const parentRun = await this.getCurrentRunForSession(parent.id);
     if (
@@ -3315,7 +4519,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
       return;
     }
-    await this.store.observeSubagent({
+    await this.taskRuntime.observeSubagent({
       parentSessionId: parent.id,
       parentRunId: parentRun?.id,
       providerChildSessionId: child.id,
@@ -3324,13 +4528,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       status: 'RUNNING',
       materialized: true,
       rawMessage: raw
-    });
+    }, protocolOperationId('subagent/observed', raw, parent.id, child.id));
   }
 
   private async handleSessionError(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
-      ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
+      ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
@@ -3359,9 +4563,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const finalized = await this.finalizeRun(run, status, diagnostic);
     if (!finalized) return;
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-    await this.store.updateAgentSession(session.id, {
+    await this.taskRuntime.updateAgentSession(session.id, {
       status: status === 'INTERRUPTED' ? 'IDLE' : 'SYSTEM_ERROR'
-    });
+    }, runtimeOperationId('session/error', serverId, event.id, session.id, status));
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     this.scheduleSessionIdleEviction(session.id);
   }
@@ -3391,7 +4595,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     run: RunRecord,
     expectedServerId?: string
   ): Promise<'reconciled' | 'recovery-required'> {
-    const storedRun = await this.store.getRun(run.id);
+    const storedRun = await this.taskRuntime.getRun(run.id);
     if (!storedRun || TERMINAL_RUN_STATES.includes(storedRun.status)) return 'reconciled';
     run = storedRun;
     let session = await this.requireSession(run.sessionId);
@@ -3411,12 +4615,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     let client: OpenCodeClientTransport;
     let serverId: string;
     try {
-      const running = await this.ensureSessionRuntime(session);
+      const running = await this.ensureSessionRuntime(
+        await this.runtimeSessionOwnerForSession(session)
+      );
       client = running.client;
       serverId = running.server.id;
       if (expectedServerId && serverId !== expectedServerId) return 'recovery-required';
       if (run.serverInstanceId !== serverId) {
-        run = await this.store.updateRun(run.id, { serverInstanceId: serverId });
+        run = await this.taskRuntime.updateRun(
+          run.id,
+          { serverInstanceId: serverId },
+          runtimeOperationId('run/reconcile-server', run.id, serverId)
+        );
       }
       await this.bindEventStream(session, client, serverId);
     } catch {
@@ -3492,15 +4702,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         settingsFromSession(providerSession, run.requestedSettings)
     );
     if (!isDeepStrictEqual(run.observedSettings, observed)) {
-      run = await this.store.updateRun(run.id, { observedSettings: observed });
+      run = await this.taskRuntime.updateRun(
+        run.id,
+        { observedSettings: observed },
+        protocolOperationId('run/reconcile-settings', messagesResult.raw, run.id)
+      );
     }
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
-    session = await this.store.updateAgentSession(session.id, {
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       observedSettings: observed,
       materialized: true
-    });
+    }, protocolOperationId('session/reconcile', sessionResult.raw, session.id, serverId));
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
@@ -3515,7 +4729,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       } catch (cause) {
         quarantineFailure = cause;
       }
-      const currentRun = await this.store.getRun(run.id);
+      const currentRun = await this.taskRuntime.getRun(run.id);
       if (currentRun && !TERMINAL_RUN_STATES.includes(currentRun.status)) {
         await this.recordReconciliation(
           currentRun,
@@ -3528,7 +4742,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       return 'recovery-required';
     }
     if (recoveredSettings) {
-      const duplicate = (await this.store.snapshot()).agentSettingsObservations.some(
+      const duplicate = (await this.taskRuntime.snapshot()).agentSettingsObservations.some(
         (observation) =>
           observation.runId === run.id &&
           observation.source === 'RECOVERY_RESUME_RESPONSE' &&
@@ -3559,7 +4773,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
         return 'recovery-required';
       }
-      const latestPlan = (await this.store.snapshot()).agentPlanRevisions
+      const latestPlan = (await this.taskRuntime.snapshot()).agentPlanRevisions
         .filter((revision) => revision.runId === run.id)
         .sort((left, right) => left.revision - right.revision)
         .at(-1);
@@ -3567,7 +4781,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         (latestPlan && !isDeepStrictEqual(latestPlan.steps, steps)) ||
         (!latestPlan && steps.length > 0)
       ) {
-        await this.store.recordAgentPlanRevision({
+        await this.taskRuntime.recordAgentPlanRevision({
           taskId: run.taskId,
           iterationId: run.iterationId,
           runId: run.id,
@@ -3575,7 +4789,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           runtimeId: this.descriptor.id,
           steps,
           rawMessage: todosResult.raw
-        });
+        }, protocolOperationId('plan/reconcile', todosResult.raw, run.id));
       }
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
         return 'recovery-required';
@@ -3592,13 +4806,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
-    const currentRunAfterInteractions = (await this.store.getRun(run.id)) ?? run;
-    session = await this.store.updateAgentSession(session.id, {
+    const currentRunAfterInteractions = (await this.taskRuntime.getRun(run.id)) ?? run;
+    session = await this.taskRuntime.updateAgentSession(session.id, {
       status: await this.sessionStatusWithInteractionAuthority(
         status,
         currentRunAfterInteractions
       )
-    });
+    }, protocolOperationId('session/reconcile-status', statusesResult.raw, session.id, serverId));
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
@@ -3610,8 +4824,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (assistant && status === 'IDLE' && isTerminalAssistantMessage(assistant)) {
       await this.finalizeFromSnapshot(run, session, assistant, messagesResult.raw, serverId);
     } else if (status === 'ACTIVE') {
-      const currentRun = (await this.store.getRun(run.id)) ?? run;
-      const hasPendingInteraction = (await this.store.snapshot()).interactionRequests.some(
+      const currentRun = (await this.taskRuntime.getRun(run.id)) ?? run;
+      const hasPendingInteraction = (await this.taskRuntime.snapshot()).interactionRequests.some(
         (interaction) =>
           interaction.runId === run.id &&
           interaction.serverInstanceId === serverId &&
@@ -3672,7 +4886,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         const providerCompletedAt = providerTimestamp(
           part.state?.time?.end ?? (terminal ? message.info.time?.completed : undefined)
         );
-        const existing = await this.store.getAgentItemByProviderId(run.id, part.id);
+        const existing = await this.taskRuntime.getAgentItemByProviderId(run.id, part.id);
         if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
         if (
           existing?.type === type &&
@@ -3683,7 +4897,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         ) {
           continue;
         }
-        await this.store.upsertAgentItem({
+        await this.taskRuntime.upsertAgentItem({
           taskId: run.taskId,
           iterationId: run.iterationId,
           runId: run.id,
@@ -3695,7 +4909,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           rawMessage: raw,
           providerStartedAt,
           providerCompletedAt
-        });
+        }, protocolOperationId('item/recovered', raw, run.id, message.info.id, part.id));
       }
     }
     const assistants = related
@@ -3715,7 +4929,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       emptyUsage()
     );
     const last = mapOpenCodeUsage(assistant.info);
-    const latestUsage = latestUsageForRun(await this.store.snapshot(), run.id);
+    const latestUsage = latestUsageForRun(await this.taskRuntime.snapshot(), run.id);
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     if (
       latestUsage &&
@@ -3726,7 +4940,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.replaceAssistantUsageForRun(session.id, run.id, assistants);
       return;
     }
-    await this.store.recordAgentUsageSnapshot({
+    await this.taskRuntime.recordAgentUsageSnapshot({
       taskId: run.taskId,
       iterationId: run.iterationId,
       sessionId: session.id,
@@ -3735,7 +4949,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       total,
       last,
       rawMessage: raw
-    });
+    }, protocolOperationId('usage/recovered', raw, run.id, assistant.info.id));
     this.rememberAssistantUsageTotal(run.id, total);
     this.replaceAssistantUsageForRun(session.id, run.id, assistants);
   }
@@ -3816,7 +5030,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const providerRequestIds = new Set(pending.map((request) => request.id));
     for (const request of pending) {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      const existing = await this.store.getInteractionRequestByProviderId(
+      const existing = await this.taskRuntime.getInteractionRequestByProviderId(
         serverId,
         request.id
       );
@@ -3838,7 +5052,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         true
       );
     }
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) =>
         candidate.sessionId === session.id &&
@@ -3847,14 +5061,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         !providerRequestIds.has(String(candidate.providerRequestId))
     )) {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      const current = await this.store.getInteractionRequest(interaction.id);
+      const current = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (!current || (current.status !== 'PENDING' && current.status !== 'RESPONDING')) continue;
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      const stale = await this.store.transitionInteractionRequest(current.id, current.status, {
+      const stale = await this.taskRuntime.transitionInteractionRequest(current.id, current.status, {
         status: 'STALE',
         resolution: { providerQueueAbsent: true },
         resolvedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId(
+        'interaction/provider-queue-absent',
+        current.id,
+        serverId,
+        permissionsRaw.sha256,
+        questionsRaw.sha256
+      ));
       this.emitInteractionUpdate(stale);
       await this.resumeAfterInteractionResolution(stale);
     }
@@ -3867,19 +5087,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference,
     serverId: string
   ): Promise<boolean> {
-    const current = await this.store.getRun(run.id);
+    const current = await this.taskRuntime.getRun(run.id);
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return false;
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return false;
     await this.flushBufferedStreamOutput(current.id, true);
     for (const part of assistant.parts) {
       const type = mapOpenCodePartType(part);
       const status = terminalPartStatus(part);
-      const payload = this.redactProviderValue(part);
+      const payload = this.boundedItemPayload(part);
       const providerStartedAt = providerTimestamp(part.state?.time?.start);
       const providerCompletedAt = providerTimestamp(
         part.state?.time?.end ?? assistant.info.time?.completed
       );
-      const existing = await this.store.getAgentItemByProviderId(current.id, part.id);
+      const existing = await this.taskRuntime.getAgentItemByProviderId(current.id, part.id);
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return false;
       if (
         existing?.type === type &&
@@ -3890,7 +5110,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       ) {
         continue;
       }
-      await this.store.upsertAgentItem({
+      await this.taskRuntime.upsertAgentItem({
         taskId: current.taskId,
         iterationId: current.iterationId,
         runId: current.id,
@@ -3902,7 +5122,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         rawMessage: raw,
         providerStartedAt,
         providerCompletedAt
-      });
+      }, protocolOperationId('item/finalized', raw, current.id, assistant.info.id, part.id));
     }
     this.discardStreamBuffer(current.id);
     const finalMessage = assistant.parts
@@ -3933,7 +5153,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     );
     if (!finalized) return false;
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return false;
-    await this.store.updateAgentSession(session.id, { status: 'IDLE', materialized: true });
+    await this.taskRuntime.updateAgentSession(
+      session.id,
+      { status: 'IDLE', materialized: true },
+      protocolOperationId('session/finalized', raw, session.id, current.id, assistant.info.id)
+    );
     this.scheduleSessionIdleEviction(session.id);
     return true;
   }
@@ -3948,10 +5172,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     error = error === undefined ? undefined : this.redactProviderText(error);
     finalMessage = this.redactProviderText(finalMessage);
     await this.materializeRunStreamBuffer(run.id);
-    const current = await this.store.getRun(run.id);
+    const current = await this.taskRuntime.getRun(run.id);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return false;
-    const reviewResult = current.mode === 'REVIEW' ? parseAgentReviewResult(finalMessage) : undefined;
-    const finalArtifact = await this.store.writeFinalArtifact(
+    const finalArtifact = await this.taskRuntime.writeFinalArtifact(
       current.taskId,
       current.id,
       [
@@ -3961,14 +5184,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         `Model: ${current.observedSettings?.modelProvider ?? current.requestedSettings.modelProvider ?? 'unknown'}/${current.observedSettings?.model ?? current.requestedSettings.model ?? 'unknown'}`,
         '',
         finalMessage || error || 'OpenCode returned no final text.'
-      ].join('\n')
+      ].join('\n'),
+      runtimeOperationId('artifact/final', current.id, status, finalMessage, error)
     );
     const eventType = status === 'COMPLETED'
       ? 'AGENT_RUN_COMPLETED'
       : status === 'INTERRUPTED'
         ? 'AGENT_RUN_INTERRUPTED'
         : 'AGENT_RUN_FAILED';
-    const published = await this.store.appendRunEventIfStatus(
+    const published = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
       createDomainEvent({
         type: eventType,
         taskId: current.taskId,
@@ -3983,13 +5207,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           terminalReason: error,
           error,
           finalArtifactId: finalArtifact.id,
-          agentReviewStatus: agentReviewStatusFromResult(reviewResult),
-          agentReviewResult: reviewResult
+          agentReviewStatus: 'NOT_RUN'
         }
       }),
-      [current.status]
+      [current.status],
+      runtimeOperationId('event/run-terminal', current.id, current.status, status, finalArtifact.id)
     );
     if (!published) return false;
+    if (current.mode === 'DESIGN') {
+      await this.revokeDesignToolGrant(current.sessionId).catch((cause) =>
+        this.recordProtocolIncident(current.sessionId, cause).catch(() => undefined)
+      );
+    }
     this.clearInterruptDeadline(current.id);
     this.appEvents.emit({
       type: 'run.terminal',
@@ -4009,9 +5238,10 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async handleRuntimeLoss(
     serverInstanceId: string,
     reason = 'OpenCode session runtime exited unexpectedly.',
-    owningSessionId?: string
+    owningSessionId?: string,
+    runtimeRunToSettleAfterShutdownId?: string
   ): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const runs = snapshot.runs.filter(
       (run) => run.serverInstanceId === serverInstanceId && ACTIVE_RUN_STATES.includes(run.status)
     );
@@ -4022,7 +5252,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         // The output buffer owns its bounded retry or ambiguity fence. Runtime
         // loss must still become authoritative even when artifact I/O fails.
       }
-      const published = await this.store.appendRunEventIfStatus(
+      const published = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
           taskId: run.taskId,
@@ -4034,7 +5264,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           source: 'process',
           payload: { reason }
         }),
-        [run.status]
+        [run.status],
+        runtimeOperationId('event/runtime-lost', run.id, serverInstanceId, run.status, reason)
       );
       if (!published) continue;
       this.clearInterruptDeadline(run.id);
@@ -4042,39 +5273,96 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         eventType: 'runtime/lost',
         reason
       });
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      await this.taskRuntime.updateAgentSession(
+        run.sessionId,
+        { status: 'NOT_LOADED' },
+        runtimeOperationId('session/runtime-lost', run.sessionId, serverInstanceId, run.id)
+      );
+    }
+    const runtimeSnapshot = await this.providerRuntime.snapshot();
+    const runtimeSessions = new Map(
+      runtimeSnapshot.sessions.map((session) => [session.id, session])
+    );
+    const runtimeRuns = runtimeSnapshot.runs.filter(
+      (run) =>
+        run.serverInstanceId === serverInstanceId &&
+        run.id !== runtimeRunToSettleAfterShutdownId &&
+        ACTIVE_RUN_STATES.includes(run.status) &&
+        isOpenCodeReadOnlyRuntimeSession(runtimeSessions.get(run.sessionId))
+    );
+    for (const runtimeRun of runtimeRuns) {
+      const observedAt = new Date().toISOString();
+      const current = await this.providerRuntime.getRun(runtimeRun.id);
+      if (!current || !ACTIVE_RUN_STATES.includes(current.status)) continue;
+      const updated = await this.updateRuntimeRun(
+        current.id,
+        {
+          status: 'RECOVERY_REQUIRED',
+          delivery:
+            current.delivery === 'SENDING' ? 'AMBIGUOUS' : current.delivery,
+          recoveryState: 'REQUIRES_USER_ACTION',
+          terminalReason: reason,
+          lastEventAt: observedAt
+        },
+        runtimeOperationId('runtime/process-lost', current.id, serverInstanceId)
+      );
+      const runtimeSession = await this.providerRuntime.getSession(updated.sessionId);
+      if (runtimeSession && runtimeSession.status !== 'NOT_LOADED') {
+        await this.providerRuntime.updateSession(
+          runtimeSession.id,
+          runtimeSession.recordRevision,
+          { status: 'NOT_LOADED' },
+          runtimeOperationId(
+            'runtime/session-process-lost',
+            runtimeSession.id,
+            serverInstanceId
+          )
+        );
+      }
+      this.emitRuntimeTurnEvent({
+        type: 'RECOVERY_REQUIRED',
+        runId: updated.id,
+        providerTurnId: updated.providerTurnId,
+        reason,
+        observedAt
+      });
     }
     if (owningSessionId && !runs.some((run) => run.sessionId === owningSessionId)) {
-      const session = await this.store.getAgentSession(owningSessionId);
+      const session = await this.taskRuntime.getAgentSession(owningSessionId);
       if (session && session.status !== 'NOT_LOADED') {
-        await this.store.updateAgentSession(owningSessionId, { status: 'NOT_LOADED' });
+        await this.taskRuntime.updateAgentSession(
+          owningSessionId,
+          { status: 'NOT_LOADED' },
+          runtimeOperationId('session/runtime-lost-unowned', owningSessionId, serverInstanceId)
+        );
       }
     }
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) => candidate.serverInstanceId === serverInstanceId && ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const latest = await this.store.getInteractionRequest(interaction.id);
+      const latest = await this.taskRuntime.getInteractionRequest(interaction.id);
       if (!latest || !['PENDING', 'RESPONDING'].includes(latest.status)) continue;
       try {
-        const aborted = await this.store.transitionInteractionRequest(
+        const aborted = await this.taskRuntime.transitionInteractionRequest(
           latest.id,
           latest.status,
           {
             status: 'ABORTED_SERVER_LOST',
             resolution: { reason },
             resolvedAt: new Date().toISOString()
-          }
+          },
+          runtimeOperationId('interaction/runtime-lost', latest.id, serverInstanceId, reason)
         );
         this.emitInteractionUpdate(aborted);
       } catch (cause) {
-        const raced = await this.store.getInteractionRequest(interaction.id);
+        const raced = await this.taskRuntime.getInteractionRequest(interaction.id);
         if (raced && ['PENDING', 'RESPONDING'].includes(raced.status)) throw cause;
       }
     }
   }
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const inMemoryServerIds = new Set(
       [
         this.catalogSupervisor?.currentServer?.id,
@@ -4088,7 +5376,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       this.descriptor.id
     ).filter((candidate) => !inMemoryServerIds.has(candidate.id))) {
       if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
-        await this.store.updateAgentServer(server.id, {
+        await this.providerRuntime.updateAgentServer(server.id, {
           status: 'LOST',
           disconnectedAt: new Date().toISOString(),
           exitedAt: new Date().toISOString(),
@@ -4163,7 +5451,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
     const activeRun = await this.getCurrentRunForSession(sessionId);
     if (activeRun) return;
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     const hasPendingInteraction = snapshot.interactionRequests.some(
       (interaction) =>
         interaction.sessionId === sessionId &&
@@ -4231,6 +5519,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
     }
     const supervisor = this.supervisors.get(sessionId);
+    const client = supervisor?.currentClient;
+    const serverId = supervisor?.currentServer?.id;
+    if (client && serverId) {
+      await this.disconnectDesignToolRegistration(sessionId, client, serverId).catch(
+        () => undefined
+      );
+    } else {
+      await this.releaseDesignToolRegistrationSafely(sessionId);
+    }
     let shutdownConfirmed = false;
     try {
       if (supervisor) await supervisor.shutdown();
@@ -4241,9 +5538,30 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (this.eventStreams.get(sessionId) === binding) {
         this.eventStreams.delete(sessionId);
       }
-      const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
-      if (session) await this.store.updateAgentSession(sessionId, { status: 'NOT_LOADED' });
+      const session = await this.taskRuntime.getAgentSession(sessionId).catch(() => undefined);
+      if (session) {
+        await this.taskRuntime.updateAgentSession(
+          sessionId,
+          { status: 'NOT_LOADED' },
+          runtimeOperationId('session/close', sessionId, session.updatedAt)
+        );
+      } else {
+        const runtimeSession = await this.providerRuntime.getSession(sessionId);
+        if (runtimeSession) {
+          await this.providerRuntime.updateSession(
+            runtimeSession.id,
+            runtimeSession.recordRevision,
+            { status: 'NOT_LOADED' },
+            runtimeOperationId(
+              'runtime/session-close',
+              sessionId,
+              runtimeSession.updatedAt
+            )
+          );
+        }
+      }
     } finally {
+      await this.releaseDesignToolRegistrationSafely(sessionId);
       if (shutdownConfirmed && this.sessionRuntimeFences.get(sessionId) === fence) {
         this.sessionRuntimeFences.delete(sessionId);
       }
@@ -4276,10 +5594,21 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async hasActiveRuntimeWork(excludedQueuedRunId?: string): Promise<boolean> {
-    const snapshot = await this.store.snapshot();
+    const [snapshot, runtimeSnapshot] = await Promise.all([
+      this.taskRuntime.snapshot(),
+      this.providerRuntime.snapshot()
+    ]);
+    const runtimeSessions = new Map(
+      runtimeSnapshot.sessions.map((session) => [session.id, session])
+    );
     return snapshot.runs.some(
       (run) =>
         run.runtimeId === this.descriptor.id &&
+        ACTIVE_RUN_STATES.includes(run.status) &&
+        !(run.id === excludedQueuedRunId && run.status === 'QUEUED')
+    ) || runtimeSnapshot.runs.some(
+      (run) =>
+        isOpenCodeReadOnlyRuntimeSession(runtimeSessions.get(run.sessionId)) &&
         ACTIVE_RUN_STATES.includes(run.status) &&
         !(run.id === excludedQueuedRunId && run.status === 'QUEUED')
     );
@@ -4307,7 +5636,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           nextAction: { kind: 'RETRY', label: 'Refresh OpenCode' }
         }
       ),
-      capabilities: opencodeCapabilities(),
+      capabilities: this.runtimeCapabilities(),
     };
     this.emitRuntimeUpdate();
   }
@@ -4377,7 +5706,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     runId?: string,
     rawMessage?: AgentProtocolMessageReference
   ): Promise<void> {
-    await this.store.recordAgentSettingsObservation({
+    await this.taskRuntime.recordAgentSettingsObservation({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
@@ -4386,7 +5715,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       source,
       settings,
       rawMessage
-    });
+    }, rawMessage
+      ? protocolOperationId('settings/observed', rawMessage, session.id, runId, source)
+      : runtimeOperationId('settings/observed', session.id, runId, source, settings));
   }
 
   private async recordRunActivity(
@@ -4395,7 +5726,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     payload: Record<string, unknown>
   ): Promise<void> {
     payload = this.redactProviderValue(payload);
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',
         taskId: run.taskId,
@@ -4406,24 +5737,40 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
         payload: { eventType, ...payload }
-      })
+      }),
+      runtimeOperationId('event/activity', run.id, eventType, payload)
     );
     this.emitRunActivity(run, { eventType, ...payload });
   }
 
   private async persistRunOutputGroups(
     run: RunRecord,
-    groups: ReadonlyArray<{ source: string; chunks: readonly string[] }>
+    groups: ReadonlyArray<{
+      source: string;
+      chunks: readonly string[];
+      evidence: readonly string[];
+    }>
   ): Promise<Array<{ source: string; text: string }>> {
-    const safeGroups = groups.map(({ source, chunks }) => ({
+    const safeGroups = groups.map(({ source, chunks, evidence }) => ({
       source: this.redactProviderText(source),
-      text: this.redactProviderText(chunks.join(''))
+      text: this.redactProviderText(chunks.join('')),
+      evidence
     }));
     const artifactText = safeGroups
       .map(({ source, text }) => `\n[${source}]\n${text}`)
       .join('');
-    if (artifactText) await this.store.appendArtifact(run.outputArtifactId, artifactText);
-    return safeGroups;
+    if (artifactText) {
+      await this.taskRuntime.appendArtifact(
+        run.outputArtifactId,
+        artifactText,
+        runtimeOperationId(
+          'artifact/output',
+          run.id,
+          safeGroups.map(({ source, text, evidence }) => ({ source, text, evidence }))
+        )
+      );
+    }
+    return safeGroups.map(({ source, text }) => ({ source, text }));
   }
 
   private scheduleBufferedStreamOutputFlush(buffer: OpenCodeRunStreamBuffer): void {
@@ -4476,7 +5823,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const outputBytes = buffer.outputBytes;
     buffer.output = [];
     buffer.outputBytes = 0;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       this.discardStreamBuffer(runId);
       return;
@@ -4489,7 +5836,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       buffer.outputBytes += outputBytes;
       const failureCount = buffer.failureCount + 1;
       if (
-        cause instanceof ArtifactAppendAmbiguousError ||
+        cause instanceof AgentRuntimeArtifactMutationAmbiguousError ||
         failureCount >= STREAM_OUTPUT_MAX_FAILURES ||
         this.bufferedStreamOutputBytes(buffer) > STREAM_OUTPUT_MAX_BUFFER_BYTES
       ) {
@@ -4527,11 +5874,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private bufferStreamOutput(
     buffer: OpenCodeRunStreamBuffer,
     source: string,
-    text: string
+    text: string,
+    raw: AgentProtocolMessageReference
   ): void {
     if (buffer.credentialCarry && buffer.credentialCarry.source !== source) {
       this.redactStreamCredentialCarry(buffer);
     }
+    const evidence = uniqueStrings([
+      ...(buffer.credentialCarry?.source === source
+        ? buffer.credentialCarry.evidence
+        : []),
+      protocolReferenceIdentity(raw)
+    ]);
     const combined = (
       buffer.credentialCarry?.source === source
         ? buffer.credentialCarry.text
@@ -4542,22 +5896,28 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.appendBufferedStreamOutput(
       buffer,
       source,
-      safe.slice(0, safe.length - carryLength)
+      safe.slice(0, safe.length - carryLength),
+      evidence
     );
     buffer.credentialCarry = carryLength > 0
-      ? { source, text: safe.slice(-carryLength) }
+      ? { source, text: safe.slice(-carryLength), evidence }
       : undefined;
   }
 
   private appendBufferedStreamOutput(
     buffer: OpenCodeRunStreamBuffer,
     source: string,
-    text: string
+    text: string,
+    evidence: readonly string[]
   ): void {
     if (!text) return;
     const previous = buffer.output.at(-1);
-    if (previous?.source === source) previous.chunks.push(text);
-    else buffer.output.push({ source, chunks: [text] });
+    if (previous?.source === source) {
+      previous.chunks.push(text);
+      previous.evidence = uniqueStrings([...previous.evidence, ...evidence]);
+    } else {
+      buffer.output.push({ source, chunks: [text], evidence: [...evidence] });
+    }
     buffer.outputBytes += Buffer.byteLength(text);
   }
 
@@ -4566,7 +5926,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.appendBufferedStreamOutput(
       buffer,
       buffer.credentialCarry.source,
-      REDACTED_CREDENTIAL
+      REDACTED_CREDENTIAL,
+      buffer.credentialCarry.evidence
     );
     buffer.credentialCarry = undefined;
   }
@@ -4577,7 +5938,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private fenceStreamOutputPersistence(run: RunRecord, cause: unknown): void {
     if (this.shuttingDown) return;
-    const detail = cause instanceof ArtifactAppendAmbiguousError
+    const detail = cause instanceof AgentRuntimeArtifactMutationAmbiguousError
       ? `Output persistence for run ${run.id} became ambiguous and cannot be retried safely.`
       : `Output persistence for run ${run.id} failed repeatedly or exceeded its safety bound.`;
     void this.quarantineSessionRuntime(
@@ -4600,7 +5961,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const buffer = this.streamBuffers.get(runId);
     if (!buffer) return;
-    const run = await this.store.getRun(runId);
+    const run = await this.taskRuntime.getRun(runId);
     if (!run) {
       this.discardStreamBuffer(runId);
       return;
@@ -4612,7 +5973,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const status = streamPartIsTerminal(entry.part, entry.status)
         ? terminalPartStatus(entry.part)
         : entry.status;
-      await this.store.upsertAgentItem({
+      await this.taskRuntime.upsertAgentItem({
         taskId: run.taskId,
         iterationId: run.iterationId,
         runId: run.id,
@@ -4620,11 +5981,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         providerItemId: entry.part.id,
         type: entry.type,
         status,
-        payload: this.redactProviderValue(entry.part),
+        payload: this.boundedItemPayload(entry.part),
         rawMessage: entry.raw,
         providerStartedAt: providerTimestamp(entry.part.state?.time?.start),
         providerCompletedAt: providerTimestamp(entry.part.state?.time?.end)
-      });
+      }, protocolOperationId('item/stream-flush', entry.raw, run.id, entry.part.id));
       await this.recordRunActivity(run, `item/${entry.part.type}/${status.toLowerCase()}`, {
         providerItemId: entry.part.id,
         coalescedEvents: entry.eventCount
@@ -4641,8 +6002,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async materializeRunStreamBuffer(runId: string): Promise<void> {
-    await this.flushBufferedStreamOutput(runId, true);
-    await this.materializeBufferedStreamParts(runId);
+    let outputFailure: unknown;
+    try {
+      await this.flushBufferedStreamOutput(runId, true);
+    } catch (cause) {
+      outputFailure = cause;
+    }
+    try {
+      await this.materializeBufferedStreamParts(runId);
+    } catch (cause) {
+      if (outputFailure) {
+        throw new AggregateError(
+          [outputFailure, cause],
+          'OpenCode could not persist buffered output or item evidence.'
+        );
+      }
+      throw cause;
+    }
+    if (outputFailure) throw outputFailure;
   }
 
   private discardStreamBuffer(runId: string): void {
@@ -4664,7 +6041,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     recoveryState: RunRecord['recoveryState'],
     terminal: boolean
   ): Promise<void> {
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_RUNTIME_RECONCILED',
         taskId: run.taskId,
@@ -4675,7 +6052,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
         payload: { status, recoveryState, terminal }
-      })
+      }),
+      runtimeOperationId('event/reconciled', run.id, status, recoveryState, terminal)
     );
     this.emitRunStateUpdate(run, {
       eventType: 'runtime/reconciled',
@@ -4686,24 +6064,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async stalePendingInteractions(runId: string, reason: string): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) => candidate.runId === runId && ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const stale = await this.store.transitionInteractionRequest(interaction.id, interaction.status, {
+      const stale = await this.taskRuntime.transitionInteractionRequest(interaction.id, interaction.status, {
         status: 'STALE',
         resolution: { reason },
         resolvedAt: new Date().toISOString()
-      });
+      }, runtimeOperationId('interaction/stale-terminal', interaction.id, interaction.status, reason));
       this.emitInteractionUpdate(stale);
     }
   }
 
   private async recordProtocolIncident(sessionId: string, cause: unknown): Promise<void> {
-    const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
+    const session = await this.taskRuntime.getAgentSession(sessionId).catch(() => undefined);
     const run = session ? await this.getCurrentRunForSession(session.id).catch(() => undefined) : undefined;
     if (!session || !run) return;
-    await this.store.appendEvent(
+    await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_PROTOCOL_INCIDENT',
         taskId: run.taskId,
@@ -4714,7 +6092,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
         payload: { parseError: this.redactProviderText(errorMessage(cause)) }
-      })
+      }),
+      runtimeOperationId('event/protocol-incident', run.id, errorMessage(cause))
     );
     this.emitRunStateUpdate(run, {
       eventType: 'runtime/protocol-incident',
@@ -4763,6 +6142,35 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private redactProviderValue<T>(value: T): T {
     return redactCredentialValue(value, this.sensitiveValues);
+  }
+
+  private boundedItemPayload(part: OpenCodePart): AgentJsonValue {
+    const payload = this.redactProviderValue(part) as AgentJsonValue;
+    const encoded = JSON.stringify(payload);
+    if (
+      encoded !== undefined &&
+      Buffer.byteLength(encoded) <= AGENT_RUNTIME_LIMITS.maxTelemetryPayloadBytes
+    ) {
+      return payload;
+    }
+    const state = asRecord(part.state);
+    const time = asRecord(state?.time);
+    return {
+      type: part.type,
+      ...(part.tool ? { tool: this.redactProviderText(part.tool) } : {}),
+      ...(part.callID ? { callID: this.redactProviderText(part.callID) } : {}),
+      ...(typeof state?.status === 'string' ? { status: state.status } : {}),
+      ...(time
+        ? {
+            time: {
+              ...(typeof time.start === 'number' ? { start: time.start } : {}),
+              ...(typeof time.end === 'number' ? { end: time.end } : {})
+            }
+          }
+        : {}),
+      truncated: true,
+      byteLength: encoded === undefined ? 0 : Buffer.byteLength(encoded)
+    };
   }
 
   private isSafeOperationalIdentifier(value: string): boolean {
@@ -4830,6 +6238,60 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     };
   }
 
+  private async prepareDesignSkillPack(): Promise<void> {
+    if (this.designSkillLoadAttempted) return;
+    this.designSkillLoadAttempted = true;
+    if (!this.options.designSkillRoot) {
+      this.designSkillFailure = 'The Task Monki host did not configure a Design skill root.';
+      return;
+    }
+    try {
+      this.designSkillPack = await loadDesignSkillPack(this.options.designSkillRoot);
+      this.designSkillFailure = undefined;
+    } catch (cause) {
+      this.designSkillPack = undefined;
+      this.designSkillFailure = errorMessage(cause);
+    }
+  }
+
+  private runtimeCapabilities(): AgentRuntimeCapabilities {
+    return opencodeCapabilities({
+      designSkills: this.designSkillPack
+        ? { available: true }
+        : {
+            available: false,
+            detail:
+              this.designSkillFailure ??
+              'The app-owned Design skill pack has not been validated yet.'
+          },
+      designBrowser: {
+        available: Boolean(this.options.designClientToolBridge),
+        detail: this.options.designClientToolBridge
+          ? undefined
+          : 'The packaged inspect_design MCP bridge has not been configured yet.'
+      }
+    });
+  }
+
+  private designInstructions(input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>): string | undefined {
+    if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') return undefined;
+    if (input.mode !== 'DESIGN' || input.instructionProfile !== 'DESIGN') {
+      throw new Error('The DESIGN instruction profile is valid only for a Design turn.');
+    }
+    if (!this.designSkillPack) {
+      throw new Error(
+        `Task Monki cannot start Design work because its skill pack is unavailable. ${
+          this.designSkillFailure ?? 'The skill pack has not been validated.'
+        }`
+      );
+    }
+    return [
+      buildDesignAgentDeveloperInstructions(this.designSkillPack.catalog),
+      '',
+      'Read each matching Task Monki skill with the normal file-reading tool at its exact Path. Do not invoke a provider-native skill loader by skill name; it does not own the app skill pack.'
+    ].join('\n');
+  }
+
   private noteSensitiveIdentifierOmission(): void {
     if (
       this.preflightState.readiness.diagnostics.some(
@@ -4848,15 +6310,29 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
-    const session = await this.store.getAgentSession(sessionId);
+    const session = await this.taskRuntime.getAgentSession(sessionId);
     if (!session) throw new Error(`Agent session not found: ${sessionId}`);
     return session;
   }
 
+  private async runtimeSessionOwnerForSession(
+    session: AgentSessionRecord
+  ): Promise<OpenCodeSessionRuntimeOwner> {
+    const snapshot = await this.taskRuntime.snapshot();
+    const design = snapshot.runs.some(
+      (run) => run.sessionId === session.id && run.mode === 'DESIGN'
+    );
+    return {
+      ...session,
+      pure: design,
+      design
+    };
+  }
+
   private async getCurrentRunForSession(sessionId: string): Promise<RunRecord | undefined> {
-    const active = await this.store.getActiveRunForSession(sessionId);
+    const active = await this.taskRuntime.getActiveRunForSession(sessionId);
     if (active) return active;
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return snapshot.runs.find(
       (run) => run.sessionId === sessionId && ACTIVE_RUN_STATES.includes(run.status)
     );
@@ -4872,7 +6348,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     ) {
       return providerStatus;
     }
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     return snapshot.interactionRequests.some(
       (interaction) =>
         interaction.runId === run.id &&
@@ -4887,7 +6363,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async resumeAfterInteractionResolution(
     interaction: InteractionRequestRecord
   ): Promise<void> {
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.taskRuntime.snapshot();
     if (
       snapshot.interactionRequests.some(
         (candidate) =>
@@ -4905,6 +6381,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       run?.status === 'AWAITING_USER_INPUT'
     ) {
       await this.recordRunActivity(run, 'interaction/resolved', {
+        interactionId: interaction.id,
         resumeConfirmed: true
       });
     }
@@ -4915,11 +6392,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       session?.status === 'AWAITING_APPROVAL' ||
       session?.status === 'AWAITING_USER_INPUT'
     ) {
-      await this.store.updateAgentSession(session.id, { status: 'ACTIVE' });
+      await this.taskRuntime.updateAgentSession(
+        session.id,
+        { status: 'ACTIVE' },
+        runtimeOperationId('session/interaction-resolved', session.id, interaction.id)
+      );
     }
   }
 
-  private assertSessionOwnership(session: AgentSessionRecord): void {
+  private assertSessionOwnership(session: Pick<OpenCodeSessionRuntimeOwner, 'id' | 'runtimeId'>): void {
     if (session.runtimeId !== this.descriptor.id) {
       throw new Error(`OpenCode cannot operate session ${session.id} owned by ${session.runtimeId}.`);
     }
@@ -4933,6 +6414,130 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
 function sessionPath(providerSessionId: string): string {
   return `/session/${encodeURIComponent(providerSessionId)}`;
+}
+
+function runtimeSessionOwner(
+  session: AgentRuntimeSessionRecord
+): OpenCodeSessionRuntimeOwner {
+  return {
+    id: session.id,
+    runtimeId: session.runtimeId,
+    worktreePath: session.executionContext.primaryCwd,
+    pure: true
+  };
+}
+
+function isOpenCodeReadOnlyRuntimeSession(
+  session: AgentRuntimeSessionRecord | undefined
+): boolean {
+  return session?.runtimeId === OPENCODE_RUNTIME_ID &&
+    session.executionContext.repositoryAccess === 'READ_ONLY';
+}
+
+function isProviderNeutralReadOnlySettings(settings: AgentExecutionSettings): boolean {
+  return settings.sandbox === 'READ_ONLY' &&
+    settings.approvalPolicy?.toLowerCase() === 'never' &&
+    settings.networkAccess === false;
+}
+
+function openCodeNativeReadOnlySettings(
+  settings: AgentExecutionSettings
+): AgentExecutionSettings {
+  const native: AgentExecutionSettings = {
+    ...settings,
+    sandbox: 'DANGER_FULL_ACCESS',
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user',
+    networkAccess: true
+  };
+  assertOpenCodeExecutionSettings(native);
+  return native;
+}
+
+function openCodeReadOnlyProfileHash(
+  primaryCwd: string,
+  readRoots: AgentExecutionContext['readRoots'],
+  modelSettings: AgentExecutionSettings
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        version: 1,
+        runtimeId: OPENCODE_RUNTIME_ID,
+        primaryCwd,
+        readRoots,
+        model: {
+          provider: modelSettings.modelProvider,
+          id: modelSettings.model,
+          reasoningEffort: modelSettings.reasoningEffort
+        },
+        permission: openCodeReadOnlyPermissionRules()
+      })
+    )
+    .digest('hex');
+}
+
+function hashText(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function runtimeDeliveryErrorFromOpenCode(
+  operation: string,
+  cause: unknown
+): AgentRuntimeDeliveryError {
+  const mapped = mapOpenCodeMutationError(operation, cause);
+  return new AgentRuntimeDeliveryError(
+    mapped instanceof AgentMutationAmbiguousError ? 'AMBIGUOUS' : 'NOT_DELIVERED',
+    mapped.message,
+    { cause: mapped }
+  );
+}
+
+function openCodeEventSessionId(event: OpenCodeEvent): string | undefined {
+  if (event.type === 'message.updated') {
+    const info = asRecord(event.properties.info);
+    return typeof info?.sessionID === 'string' ? info.sessionID : undefined;
+  }
+  if (event.type === 'message.part.updated') {
+    const part = asRecord(event.properties.part);
+    return typeof part?.sessionID === 'string' ? part.sessionID : undefined;
+  }
+  return stringProperty(event.properties, 'sessionID');
+}
+
+function runtimeOperationId(action: string, ...identity: unknown[]): string {
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify(identity))
+    .digest('hex');
+  return `opencode:${action}:${fingerprint}`;
+}
+
+function protocolOperationId(
+  action: string,
+  raw: AgentProtocolMessageReference,
+  ...identity: unknown[]
+): string {
+  return runtimeOperationId(
+    action,
+    raw.serverInstanceId,
+    raw.segment ?? 0,
+    raw.sequence,
+    raw.sha256,
+    ...identity
+  );
+}
+
+function protocolReferenceIdentity(raw: AgentProtocolMessageReference): string {
+  return [
+    raw.serverInstanceId,
+    raw.segment ?? 0,
+    raw.sequence,
+    raw.sha256
+  ].join(':');
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 const OPENCODE_ID_RANDOM_ALPHABET =
@@ -4996,6 +6601,33 @@ function deferredOpenCodeModel(
       discovery: 'deferred-to-worktree-catalog'
     }
   };
+}
+
+function withOpenCodeDesignSupport(model: AgentModel): AgentModel {
+  const acceptsImages = model.inputModalities.some(
+    (modality) => modality.toLowerCase() === 'image'
+  );
+  return {
+    ...model,
+    designSupport: acceptsImages
+      ? {
+          maturity: 'stable',
+          detail: 'The connected OpenCode model catalog reports image input support required by Design Mode.'
+        }
+      : {
+          maturity: 'unsupported',
+          detail: `The connected OpenCode model catalog reports no image input support for ${model.modelProvider ?? 'unknown'}/${model.model}. Design Mode requires image input.`
+        }
+  };
+}
+
+function assertOpenCodeMcpConnected(value: unknown, serverName: string): void {
+  const status = asRecord(value)?.[serverName];
+  const state = asRecord(status)?.status;
+  if (state === 'connected') return;
+  throw new Error(
+    `OpenCode reported ${typeof state === 'string' ? state : 'an invalid status'} for the Design MCP server.`
+  );
 }
 
 function modelReference(settings: AgentExecutionSettings): { id: string; providerID: string; variant?: string } | undefined {
@@ -5092,7 +6724,7 @@ function isTerminalAssistantMessage(message: OpenCodeMessage): boolean {
 }
 
 function latestUsageForRun(
-  snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>,
+  snapshot: TaskAgentRuntimeSnapshot,
   runId: string
 ) {
   let latest: (typeof snapshot.agentUsageSnapshots)[number] | undefined;
@@ -5164,14 +6796,49 @@ function terminalPartStatus(part: OpenCodePart): ReturnType<typeof mapOpenCodePa
   return mapped;
 }
 
-function assertOpenCodeManagedAttachmentsUnsupported(
-  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[]
-): void {
-  if (attachments.length > 0) {
-    throw new Error(
-      'Task Monki managed attachments are unavailable for OpenCode because its credential-bearing process cannot attest attachment confinement. OpenCode native file parts remain available to OpenCode-owned tools and integrations.'
+async function prepareOpenCodeAttachmentDelivery(
+  prompt: string,
+  model: AgentModel,
+  attachments: readonly AgentTurnAttachment[]
+): Promise<PreparedOpenCodeAttachmentDelivery> {
+  assertModelSupportsAttachments(model, attachments);
+  const verified = await verifyAgentTurnAttachments(attachments, {
+    includeBytes: () => true
+  });
+  const parts: OpenCodePromptPart[] = [{ type: 'text', text: prompt }];
+  const submissionCandidates: AttachmentSubmissionCandidate[] = [];
+
+  for (const attachment of verified) {
+    if (!attachment.bytes) {
+      throw new Error(
+        `Attachment ${attachment.attachmentId} was not available for inline delivery.`
+      );
+    }
+    const mime = attachment.kind === 'text' ? 'text/plain' : attachment.mediaType;
+    const bytes = Buffer.from(
+      attachment.bytes.buffer,
+      attachment.bytes.byteOffset,
+      attachment.bytes.byteLength
     );
+    parts.push({
+      type: 'file',
+      mime,
+      filename: attachment.displayName,
+      url: `data:${mime};base64,${bytes.toString('base64')}`
+    });
+    submissionCandidates.push({
+      attachmentId: attachment.attachmentId,
+      ordinal: attachment.ordinal,
+      kind: attachment.kind,
+      mediaType: attachment.mediaType,
+      byteCount: attachment.byteCount,
+      sha256: attachment.sha256,
+      transport: 'native-file',
+      verifiedAt: attachment.verifiedAt
+    });
   }
+
+  return { parts, submissionCandidates };
 }
 
 function outputDelta(

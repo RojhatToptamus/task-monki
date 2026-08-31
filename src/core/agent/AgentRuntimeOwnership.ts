@@ -6,6 +6,7 @@ import {
   agentRunScopeBelongsToOwner,
   type AgentExecutionContext,
   type AgentOwnerScope,
+  type AgentRuntimePurpose,
   type AgentRunScope,
   type AgentSessionAccessEpoch
 } from '../../shared/agentRuntime';
@@ -54,6 +55,15 @@ export function assertAgentOwnerScope(scope: AgentOwnerScope): void {
     assertBoundedIdentifier(scope.taskId, 'task owner id');
     return;
   }
+  if (scope.kind === 'PROMPT_REFINEMENT') {
+    assertBoundedIdentifier(scope.requestId, 'prompt-refinement request id');
+    return;
+  }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    assertBoundedIdentifier(scope.taskId, 'preview-recipe task id');
+    assertBoundedIdentifier(scope.generationId, 'preview-recipe generation id');
+    return;
+  }
   assertBoundedIdentifier(scope.conversationId, 'conversation owner id');
   assertBoundedIdentifier(scope.stableParticipantId, 'participant owner id');
 }
@@ -72,11 +82,34 @@ export function assertAgentRunScope(
     assertBoundedIdentifier(scope.worktreeId, 'task worktree id');
     return;
   }
+  if (scope.kind === 'PROMPT_REFINEMENT') {
+    assertBoundedIdentifier(scope.requestId, 'prompt-refinement request id');
+    return;
+  }
+  if (scope.kind === 'PREVIEW_RECIPE_GENERATION') {
+    assertBoundedIdentifier(scope.taskId, 'preview-recipe task id');
+    assertBoundedIdentifier(scope.generationId, 'preview-recipe generation id');
+    return;
+  }
   assertBoundedIdentifier(scope.conversationId, 'discourse conversation id');
   assertBoundedIdentifier(scope.waveId, 'discourse wave id');
   assertBoundedIdentifier(scope.jobId, 'discourse job id');
   assertBoundedIdentifier(scope.contextSnapshotId, 'discourse context snapshot id');
   assertBoundedIdentifier(scope.attemptId, 'discourse attempt id');
+}
+
+export function assertAgentRuntimePurposeScope(
+  purpose: AgentRuntimePurpose,
+  scope: AgentRunScope
+): void {
+  if (
+    (purpose === 'PREVIEW_RECIPE_GENERATION') !==
+    (scope.kind === 'PREVIEW_RECIPE_GENERATION')
+  ) {
+    throw new Error(
+      'Preview recipe generation purpose does not match its transient run scope.'
+    );
+  }
 }
 
 export function assertAccessEpochMatches(input: {
@@ -100,7 +133,7 @@ export function assertAccessEpochMatches(input: {
   requireTimestamp(input.epoch.createdAt);
 }
 
-export function assertDiscourseExecutionContext(context: AgentExecutionContext): void {
+export function assertReadOnlyExecutionContext(context: AgentExecutionContext): void {
   normalizedExecutionDescriptor({
     owner: {
       kind: 'DISCOURSE',
@@ -112,22 +145,21 @@ export function assertDiscourseExecutionContext(context: AgentExecutionContext):
     executionContext: context
   });
   if (context.attestation.status !== 'ATTESTED') {
-    throw new Error('Discourse execution requires a provider-attested access boundary.');
+    throw new Error('Read-only execution requires a provider-attested access boundary.');
   }
   if (
-    context.externalTools.network ||
     context.externalTools.webSearch !== 'disabled' ||
     context.externalTools.mcpServers ||
     context.externalTools.apps ||
     context.externalTools.dynamicTools
   ) {
-    throw new Error('Discourse execution requires network and external tools to be disabled.');
+    throw new Error('Read-only execution requires external provider tools to be disabled.');
   }
   if (
-    context.modelSettings.sandbox !== 'READ_ONLY' ||
+    context.repositoryAccess !== 'READ_ONLY' ||
     context.modelSettings.approvalPolicy !== 'NEVER'
   ) {
-    throw new Error('Discourse execution requires read-only access and no approvals.');
+    throw new Error('Read-only execution requires mutation denial and no approvals.');
   }
 }
 
@@ -219,6 +251,7 @@ function normalizedExecutionDescriptor(input: {
     runtimeId: input.runtimeId,
     model: input.model,
     primaryCwd: path.resolve(context.primaryCwd),
+    repositoryAccess: context.repositoryAccess,
     readRoots,
     managedAttachments,
     permissionProfileHash: context.permissionProfileHash,

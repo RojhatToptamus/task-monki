@@ -1,11 +1,11 @@
 # General Agent Discourse Lifecycle
 
-Date: 2026-07-20
+Date: 2026-08-29
 
 This document is the source of truth for Task Monki's global Discourse
 workspace: human conversation, global mentions, Direct and Panel responses,
 Team review/correction, context freshness, waiting, cancellation, and recovery.
-It does not change task workflow or the detached Codex review gate.
+It does not change task workflow or the detached agent review gate.
 
 ## Authority boundary
 
@@ -59,9 +59,11 @@ unavailable.
 Before agent work, Task Monki resolves selected references, canonical repository
 roots, readable manifests, recent transcript, and permissions into an immutable
 context snapshot. At most eight references and three filesystem roots can be
-selected for one wave. Files are read-only; network, web search, MCP servers,
-apps, attachments, and approvals are disabled. Untrusted repository content is
-clearly separated from Task Monki instructions in the prompt.
+selected for one wave. Files are read-only under the selected provider profile.
+Task Monki does not grant app-owned web, MCP, app, attachment, dynamic-tool, or approval access.
+An ACP provider can still expose its own tools when its native policy permits them.
+The provider process can still use its model transport.
+Untrusted repository content is clearly separated from Task Monki instructions in the prompt.
 
 The preview fingerprint is checked again before dispatch. If selected context
 changed after preview, the wave stays planned and requires an explicit Continue
@@ -145,9 +147,9 @@ checkpointed draft keeps its shell and makes it available in the conversation
 rail. It never deletes a conversation that has acquired a message.
 
 The renderer sends only a runtime ID, runtime-qualified model ID, and optional
-reasoning choice. Core resolves the live model-provider and service-tier values,
-revalidates the read-only/offline capability, and rejects incomplete, removed,
-or unsupported selections. A changed selection appends a participant revision
+reasoning choice. Core resolves the live model-provider and service-tier values.
+It revalidates the shared read-only capability and rejects unsupported selections.
+A changed selection appends a participant revision
 and advances only that stable participant's `currentRevisionId`. Earlier
 revisions and job assignments remain immutable and attributable; the new
 revision applies to future work without rewriting conversation history.
@@ -348,29 +350,47 @@ delivered.
 
 ## Runtime compatibility
 
-Discourse execution is routed by immutable `runtimeId` through
-`AgentScopedTurnRouter`. There is no default-runtime fallback. A runtime appears
-as available only when its adapter supplies an exact scoped binding that can:
+Discourse execution uses the immutable `runtimeId` through `AgentOrchestrator`.
+There is no default-runtime fallback.
+A runtime is available only when it has a qualified native mutation-denial policy.
+The policy must have no approval exceptions.
+The adapter must use the common runtime operations to:
 
-- build and attest the read-only, offline execution context;
-- start and interrupt a turn owned by a Discourse session/run;
-- correlate deltas, terminal output, and recovery-required events back to that
+- build and attest the provider-native read-only execution context.
+- start and interrupt a turn that a Discourse session and run own.
+- correlate deltas, terminal output, and recovery-required events with that
   exact run.
 
 The conversation selector receives the attested Discourse runtime catalog, not
 the general task-runtime list. It may offer only runtimes that are ready and
-advertise a stable Discourse capability with the required read-only/offline
-execution preset. Core repeats the same validation at send time; hiding an
-unsafe option in the renderer is never the security boundary.
+provide the required native policy.
+Core repeats the same validation at send time.
+The renderer is not the security boundary.
 
-Codex currently implements this binding with an attested App Server permission
-profile. OpenCode and the registered ACP runtimes remain available for their
-normal task flows but are unavailable in Discourse because their current
-process boundaries cannot attest the required isolated read-only/offline scope.
-Task Monki does not weaken the policy, send through Codex as a substitute, or
-claim that executable discovery is sufficient. Adding another Discourse runtime
-requires implementing and testing the same scoped binding in that runtime's
-adapter.
+Codex uses an attested App Server read-only profile.
+OpenCode uses a dedicated `--pure` session and native deny rules.
+Cursor ACP uses native Ask mode and rejects every permission request.
+Claude Agent ACP 0.70.0 is unavailable for Discourse because its plan mode
+completed a native Write tool call during the packaged mutation probe.
+Grok Build 1.0.13 on macOS uses a separate process with its native read-only
+sandbox. These four profiles can participate in Discourse.
+
+OpenCode and Cursor still run with normal user permissions. Their policies are
+not operating-system sandboxes. Grok uses a separate sandboxed ACP process for
+Discourse. Normal Grok Tasks and Design turns keep the writable ACP process.
+Task Monki rejects Grok repository and Git control paths in the sandbox's
+writable temp and state locations.
+
+Before delivery, `AgentOrchestrator` records repository state for every context root.
+After terminal output, it compares the current state with that record.
+A changed or unreadable repository fails only that participant turn.
+Task Monki leaves detected changes in place as evidence.
+Other Panel or Team participants can still complete independently.
+
+Task Monki does not weaken the policy or send the request through another runtime.
+Executable discovery alone does not enable Discourse.
+Another runtime must implement the common operations and pass the same policy
+tests.
 
 ## Storage, paging, and limits
 
