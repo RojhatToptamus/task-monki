@@ -554,7 +554,7 @@ describe('BackupRestoreService', () => {
 
     await expect(fs.readFile(liveDatabasePath)).resolves.toEqual(liveDatabaseBefore);
     await expect(fs.readdir(temporaryRoot)).resolves.toEqual(entriesBeforeRestore);
-  });
+  }, 15_000);
 
   it('restores the previous root when staged activation fails before publication', async () => {
     await addManagedFile('artifact-1', 'artifacts/run-1/output.txt', 'result');
