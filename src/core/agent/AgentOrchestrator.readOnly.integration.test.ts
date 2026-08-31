@@ -192,6 +192,50 @@ describe('AgentOrchestrator read-only repository boundary', () => {
     expect(stopped.repositoryIntegrity?.afterFingerprint).toBeUndefined();
   });
 
+  it('acknowledges a stop after concurrent provider evidence changes its revision', async () => {
+    const fixture = await createFixture('stop-ack-revision-race');
+    const runId = await startReadOnlyTurn(fixture, 'stop-ack-revision-race');
+    vi.spyOn(fixture.adapter, 'interruptRuntimeTurn').mockResolvedValue();
+    const getRun = fixture.runtimeStore.getRun.bind(fixture.runtimeStore);
+    let injected = false;
+    vi.spyOn(fixture.runtimeStore, 'getRun').mockImplementation(async (id) => {
+      const run = await getRun(id);
+      if (
+        id === runId &&
+        run?.status === 'INTERRUPTING' &&
+        run.interruptDelivery === 'SENDING' &&
+        !injected
+      ) {
+        injected = true;
+        await fixture.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            terminalReason: 'Provider reported a model change during cancellation.',
+            providerTerminalSource: 'CODEX_MODEL_SELECTION',
+            lastEventAt: new Date().toISOString()
+          },
+          'stop-ack-revision-race:provider-evidence'
+        );
+      }
+      return run;
+    });
+
+    const stopped = await fixture.orchestrator.interruptTurn(
+      runId,
+      'Stop the read-only turn.',
+      'stop-ack-revision-race:interrupt'
+    );
+
+    expect(injected).toBe(true);
+    expect(stopped).toMatchObject({
+      status: 'INTERRUPTING',
+      interruptDelivery: 'ACKNOWLEDGED',
+      providerTerminalSource: 'CODEX_MODEL_SELECTION',
+      terminalReason: 'Provider reported a model change during cancellation.'
+    });
+  });
+
   it('recovers a completed read-only turn when no repository root applies', async () => {
     const fixture = await createFixture('empty-managed');
     const runId = await startReadOnlyTurn(
@@ -264,6 +308,111 @@ describe('AgentOrchestrator read-only repository boundary', () => {
       runs: [],
       artifacts: [],
       queueEntries: []
+    });
+  });
+
+  it('releases and purges a completed Preview recipe generation', async () => {
+    const fixture = await createFixture('preview-generation-cleanup');
+    fixture.adapter.nextRuntimeTurnResult = { output: 'version: 1\n' };
+    const runId = await startReadOnlyTurn(
+      fixture,
+      'preview-generation-cleanup',
+      'EMPTY_MANAGED',
+      'PREVIEW_RECIPE_GENERATION'
+    );
+
+    await expect(
+      fixture.orchestrator.waitForRuntimeTurn(runId, 3_000)
+    ).resolves.toMatchObject({
+      run: {
+        status: 'COMPLETED',
+        repositoryIntegrity: { status: 'UNCHANGED' }
+      },
+      output: 'version: 1\n'
+    });
+    await fixture.orchestrator.finishRuntimeTurn(runId);
+
+    await expect(fixture.runtimeStore.snapshot()).resolves.toMatchObject({
+      sessions: [],
+      runs: [],
+      artifacts: [],
+      queueEntries: []
+    });
+  });
+
+  it('cleans up a preverified terminal Preview recipe generation after restart', async () => {
+    const fixture = await createFixture('preview-generation-restart-cleanup');
+    const runId = await startReadOnlyTurn(
+      fixture,
+      'preview-generation-restart-cleanup',
+      'EMPTY_MANAGED',
+      'PREVIEW_RECIPE_GENERATION'
+    );
+    const running = (await fixture.runtimeStore.getRun(runId))!;
+    const completedAt = new Date().toISOString();
+    await fixture.runtimeStore.updateRun(
+      running.id,
+      running.recordRevision,
+      {
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        recoveryState: 'NONE',
+        providerTerminalSource: 'SCRIPTED_CRASH_AFTER_INTEGRITY',
+        repositoryIntegrity: {
+          status: 'UNCHANGED',
+          checkedAt: completedAt
+        },
+        lastEventAt: completedAt,
+        endedAt: completedAt
+      },
+      `simulate-preview-terminal-after-integrity:${runId}`
+    );
+
+    await fixture.orchestrator.initialize();
+
+    await expect(fixture.runtimeStore.snapshot()).resolves.toMatchObject({
+      sessions: [],
+      runs: [],
+      artifacts: [],
+      queueEntries: []
+    });
+  });
+
+  it('stops and purges an abandoned Preview recipe generation after restart', async () => {
+    const fixture = await createFixture('preview-generation-restart-stop');
+    await startReadOnlyTurn(
+      fixture,
+      'preview-generation-restart-stop',
+      'EMPTY_MANAGED',
+      'PREVIEW_RECIPE_GENERATION'
+    );
+
+    await fixture.orchestrator.initialize();
+
+    await expect(fixture.runtimeStore.snapshot()).resolves.toMatchObject({
+      sessions: [],
+      runs: [],
+      artifacts: [],
+      queueEntries: []
+    });
+  });
+
+  it('retains an abandoned Preview recipe generation when restart cannot confirm its stop', async () => {
+    const fixture = await createFixture('preview-generation-restart-uncertain');
+    const runId = await startReadOnlyTurn(
+      fixture,
+      'preview-generation-restart-uncertain',
+      'EMPTY_MANAGED',
+      'PREVIEW_RECIPE_GENERATION'
+    );
+    fixture.adapter.ambiguousRuntimeInterrupt = true;
+
+    await fixture.orchestrator.initialize();
+
+    await expect(fixture.runtimeStore.getRun(runId)).resolves.toMatchObject({
+      owner: { kind: 'PREVIEW_RECIPE_GENERATION' },
+      status: 'INTERRUPTING',
+      interruptDelivery: 'AMBIGUOUS'
     });
   });
 
@@ -353,7 +502,10 @@ async function startReadOnlyTurn(
   fixture: ReadOnlyFixture,
   operation: string,
   readRootKind: 'REPOSITORY' | 'EMPTY_MANAGED' = 'REPOSITORY',
-  workflow: 'DISCOURSE' | 'PROMPT_REFINEMENT' = 'DISCOURSE'
+  workflow:
+    | 'DISCOURSE'
+    | 'PROMPT_REFINEMENT'
+    | 'PREVIEW_RECIPE_GENERATION' = 'DISCOURSE'
 ): Promise<string> {
   const sessionId = `session-${operation}`;
   const runId = `run-${operation}`;
@@ -378,7 +530,13 @@ async function startReadOnlyTurn(
     owner:
       workflow === 'PROMPT_REFINEMENT'
         ? { kind: 'PROMPT_REFINEMENT', requestId: operation }
-        : {
+        : workflow === 'PREVIEW_RECIPE_GENERATION'
+          ? {
+              kind: 'PREVIEW_RECIPE_GENERATION',
+              taskId: `task-${operation}`,
+              generationId: operation
+            }
+          : {
             kind: 'DISCOURSE',
             conversationId: `conversation-${operation}`,
             stableParticipantId: 'participant'
@@ -386,7 +544,13 @@ async function startReadOnlyTurn(
     scope:
       workflow === 'PROMPT_REFINEMENT'
         ? { kind: 'PROMPT_REFINEMENT', requestId: operation }
-        : {
+        : workflow === 'PREVIEW_RECIPE_GENERATION'
+          ? {
+              kind: 'PREVIEW_RECIPE_GENERATION',
+              taskId: `task-${operation}`,
+              generationId: operation
+            }
+          : {
             kind: 'DISCOURSE',
             conversationId: `conversation-${operation}`,
             waveId: 'wave',
@@ -396,7 +560,12 @@ async function startReadOnlyTurn(
           },
     runtimeId: 'codex',
     model: 'scenario-model',
-    purpose: workflow === 'PROMPT_REFINEMENT' ? 'PROMPT_REFINEMENT' : 'DISCOURSE_ANSWER',
+    purpose:
+      workflow === 'PROMPT_REFINEMENT'
+        ? 'PROMPT_REFINEMENT'
+        : workflow === 'PREVIEW_RECIPE_GENERATION'
+          ? 'PREVIEW_RECIPE_GENERATION'
+          : 'DISCOURSE_ANSWER',
     generationKey: operation,
     executionContext,
     prompt: 'Inspect the repository without changing it.',

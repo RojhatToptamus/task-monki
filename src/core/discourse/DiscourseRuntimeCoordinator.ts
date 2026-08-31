@@ -646,6 +646,7 @@ export class DiscourseRuntimeCoordinator {
       if (!existingTombstone) {
         await this.assertConversationRuntimeSettled(input.conversationId);
       }
+      await this.releaseConversationRuntimeSessions(input.conversationId);
       const tombstone = await this.discourse.deleteConversation(input);
       await this.runtime.purgeDiscourseConversation(input.conversationId);
       return tombstone;
@@ -2173,6 +2174,21 @@ export class DiscourseRuntimeCoordinator {
       )
     ) {
       throw new Error('Conversation scheduler work must settle before archive or deletion.');
+    }
+  }
+
+  private async releaseConversationRuntimeSessions(
+    conversationId: string
+  ): Promise<void> {
+    const runtimeSnapshot = await this.runtime.snapshot();
+    const sessions = runtimeSnapshot.sessions.filter(
+      (session) =>
+        session.owner.kind === 'DISCOURSE' &&
+        session.owner.conversationId === conversationId &&
+        session.status !== 'NOT_LOADED'
+    );
+    for (const session of sessions) {
+      await this.agents.releaseRuntimeSession(session.id);
     }
   }
 

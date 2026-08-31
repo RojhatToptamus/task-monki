@@ -92,8 +92,8 @@ export function imageAttachmentModelError(
 ): string | undefined {
   if (!hasImageAttachments || modelAcceptsImageAttachments(selectedModel)) return undefined;
   return selectedModel
-    ? 'Image input is not qualified for the selected model and provider version. Choose an image-capable model or remove the images.'
-    : 'The selected runtime has not reported an image-capable model yet. Wait for models to load or remove the images.';
+    ? 'The selected model does not support image input. Choose an image-capable model or remove the images.'
+    : 'No image-capable model is available for the selected agent. Wait for models to load or remove the images.';
 }
 
 export function ensurePastedFileName(file: File, index: number): File {

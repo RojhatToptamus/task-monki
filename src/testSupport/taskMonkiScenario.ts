@@ -66,6 +66,7 @@ export interface ScenarioOptions {
   previewOciEnv?: NodeJS.ProcessEnv;
   previewRecipeGenerator?: PreviewRecipeGenerationService;
   designMode?: boolean;
+  allowCandidateDesignModels?: boolean;
 }
 
 interface CreateScenarioTaskInput {
@@ -339,6 +340,7 @@ export async function createTaskMonkiScenario(
       previewOciExecutablePath: options.previewOciExecutablePath,
       previewOciContextName: options.previewOciContextName,
       previewOciEnv: options.previewOciEnv,
+      allowCandidateDesignModels: options.allowCandidateDesignModels,
       ...(options.designMode
         ? {
             designRepositoryRoot: persistence.paths.designRepositoryRoot,
@@ -614,6 +616,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         defaultReasoningEffort: 'low',
         serviceTiers: [],
         inputModalities: ['text', 'image'],
+        designSupport: { maturity: 'stable' },
         isDefault: true
       }
     ]);
@@ -871,10 +874,6 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   respondToInteraction(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  deleteTaskProviderHistory(): Promise<void> {
     return Promise.resolve();
   }
 

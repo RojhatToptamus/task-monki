@@ -22,7 +22,13 @@ import type { ThreadStatus } from './protocol/generated/v2/ThreadStatus';
 import type { Turn } from './protocol/generated/v2/Turn';
 import { CODEX_RUNTIME_ID } from '../../../shared/agent';
 
-export function mapModel(model: Model): AgentModel {
+const QUALIFIED_CODEX_DESIGN_RUNTIME_VERSION = '0.151.0-alpha.7.2';
+const QUALIFIED_CODEX_DESIGN_MODEL = 'gpt-5.6-luna';
+
+export function mapModel(model: Model, runtimeVersion?: string): AgentModel {
+  const designQualified =
+    runtimeVersion === QUALIFIED_CODEX_DESIGN_RUNTIME_VERSION &&
+    model.model === QUALIFIED_CODEX_DESIGN_MODEL;
   return {
     id: `${CODEX_RUNTIME_ID}:${model.id}`,
     runtimeId: CODEX_RUNTIME_ID,
@@ -37,6 +43,15 @@ export function mapModel(model: Model): AgentModel {
     serviceTiers: model.serviceTiers.map((tier) => tier.id),
     defaultServiceTier: model.defaultServiceTier ?? undefined,
     inputModalities: model.inputModalities,
+    designSupport: designQualified
+      ? {
+          maturity: 'stable',
+          detail: `Codex ${QUALIFIED_CODEX_DESIGN_RUNTIME_VERSION} with ${QUALIFIED_CODEX_DESIGN_MODEL} passed the packaged Design instruction, skill, image-result, browser, candidate, and cleanup qualification.`
+        }
+      : {
+          maturity: 'unsupported',
+          detail: `Codex ${runtimeVersion ?? 'unknown version'} model ${model.model} has not passed the required packaged Design technical qualification.`
+        },
     isDefault: model.isDefault
   };
 }

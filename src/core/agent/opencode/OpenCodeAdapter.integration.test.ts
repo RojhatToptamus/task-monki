@@ -61,6 +61,7 @@ import type {
   RunningOpenCodeServer
 } from './OpenCodeServerSupervisor';
 import type { ResolvedOpenCodeRuntime } from './OpenCodeRuntimeResolver';
+import type { DesignClientToolBridge } from '../../design/DesignClientToolBridge';
 
 const SETTINGS: AgentExecutionSettings = {
   runtimeId: 'opencode',
@@ -94,6 +95,489 @@ describe('OpenCodeAdapter', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('runs Design in pure mode with one registered MCP bridge and bounded turn grants', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+
+    expect(fixture.harness.sessionSupervisor.currentServer?.argv).toContain('--pure');
+    expect(fixture.harness.mcpRegistrations).toEqual([
+      {
+        name: 'task_monki_design',
+        config: {
+          type: 'local',
+          command: ['/app/Task Monki', '/resources/design-tool-mcp-server.mjs'],
+          environment: {
+            TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'session-credential',
+            TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: '/private/grant-file'
+          },
+          timeout: 120_000
+        }
+      }
+    ]);
+    expect(fixture.harness.mcpSensitiveValues).toEqual([
+      ['session-credential', '/private/grant-file']
+    ]);
+    expect(bridge.createSessionGrant).toHaveBeenCalledWith({
+      runtimeId: 'opencode',
+      sessionId: session.id,
+      worktreeId: fixture.worktree.id,
+      providerGeneration: fixture.harness.sessionSupervisor.currentServer?.id
+    });
+    expect(bridge.activateGrant).toHaveBeenCalledWith({
+      grantId: 'design-grant-1',
+      authority: {
+        runtimeId: 'opencode',
+        sessionId: session.id,
+        runId: run.id,
+        worktreeId: fixture.worktree.id,
+        providerGeneration: fixture.harness.sessionSupervisor.currentServer?.id
+      }
+    });
+    expect(fixture.harness.promptBodies[0]).toMatchObject({
+      system: expect.stringContaining('Task Monki Design agent')
+    });
+    expect(JSON.stringify(fixture.harness.promptBodies[0])).toContain(
+      'Read each matching Task Monki skill with the normal file-reading tool at its exact Path.'
+    );
+
+    const activeSession = (await fixture.runtime.getAgentSession(session.id))!;
+    const assistantId = createOpenCodeMessageId();
+    fixture.harness.messages.set(activeSession.providerSessionId!, [
+      {
+        info: {
+          id: turn.providerTurnId!,
+          sessionID: activeSession.providerSessionId!,
+          role: 'user',
+          time: { created: Date.now() }
+        },
+        parts: []
+      },
+      {
+        info: {
+          id: assistantId,
+          sessionID: activeSession.providerSessionId!,
+          role: 'assistant',
+          parentID: turn.providerTurnId,
+          providerID: 'anthropic',
+          modelID: 'claude-test',
+          finish: 'stop',
+          time: { created: Date.now(), completed: Date.now() }
+        },
+        parts: [{
+          id: 'prt_design_done',
+          sessionID: activeSession.providerSessionId!,
+          messageID: assistantId,
+          type: 'text',
+          text: 'READY'
+        }]
+      }
+    ]);
+    fixture.harness.statuses[activeSession.providerSessionId!] = { type: 'idle' };
+    await fixture.harness.emit({
+      type: 'session.idle',
+      properties: { sessionID: activeSession.providerSessionId }
+    });
+
+    expect(await fixture.runtime.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+    expect(bridge.revokeGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.releaseSession({
+      localSessionId: session.id,
+      providerSessionId: activeSession.providerSessionId
+    });
+    expect(fixture.harness.mcpDisconnects).toEqual([
+      '/mcp/task_monki_design/disconnect'
+    ]);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('quarantines an uncertain Design MCP registration and releases its grant', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    fixture.harness.failNextMcpRegistrationAfterAccept = true;
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    })).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('rejects a definite failed Design MCP registration before prompt delivery', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    fixture.harness.nextMcpRegistrationStatus = {
+      status: 'failed',
+      error: 'simulated child launch failure'
+    };
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    })).rejects.toThrow('reported failed for the Design MCP server');
+
+    expect(fixture.harness.promptBodies).toHaveLength(0);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('stops a newly created Design runtime when session setup fails', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    fixture.harness.failProviderGetAt = fixture.harness.providerGetCount + 2;
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(
+      fixture.adapter.startTurn({
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: 'Create and verify the Design.',
+        authoritativeGoal: 'Create and verify the Design.',
+        settings: SETTINGS,
+        attachments: []
+      })
+    ).rejects.toThrow('simulated provider catalog failure');
+
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('enables Design for connected catalog models that report image input', async () => {
+    const runtime = {
+      ...fakeRuntime(),
+      version: '1.99.0',
+      diagnostics: {
+        ...fakeRuntime().diagnostics,
+        selectedVersion: '1.99.0'
+      }
+    };
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      runtimeResolver: async () => runtime,
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    const catalog = {
+      connected: ['opencode', 'openai'],
+      default: {
+        opencode: 'catalog-image-model',
+        openai: 'gpt-5.6-luna'
+      },
+      all: [
+        {
+          id: 'opencode',
+          name: 'OpenCode',
+          models: {
+            'catalog-image-model': {
+              id: 'catalog-image-model',
+              name: 'Catalog image model',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            },
+            'catalog-text-model': {
+              id: 'catalog-text-model',
+              name: 'Catalog text model',
+              status: 'active',
+              capabilities: { input: { text: true, image: false } }
+            }
+          }
+        },
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          models: {
+            'gpt-5.6-luna': {
+              id: 'gpt-5.6-luna',
+              name: 'GPT-5.6 Luna',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } }
+            },
+            'second-image-model': {
+              id: 'second-image-model',
+              name: 'Second image model',
+              status: 'active',
+              capabilities: { input: { text: true, image: true } },
+              cost: { input: 0, output: 0 }
+            }
+          }
+        }
+      ]
+    };
+    fixture.harness.catalogs.set(path.resolve(fixture.appCwd), catalog);
+    fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), catalog);
+
+    await fixture.adapter.initialize();
+
+    expect(await fixture.adapter.capabilities()).toMatchObject({
+      extensions: {
+        'task-monki.design-instructions': { maturity: 'stable' },
+        'task-monki.design-skill-access': { maturity: 'stable' },
+        'task-monki.design-browser-verification': { maturity: 'stable' }
+      }
+    });
+    expect(await fixture.adapter.listModels()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          modelProvider: 'opencode',
+          model: 'catalog-image-model',
+          designSupport: {
+            maturity: 'stable',
+            detail: expect.stringContaining('reports image input support')
+          }
+        }),
+        expect.objectContaining({
+          modelProvider: 'openai',
+          model: 'second-image-model',
+          designSupport: {
+            maturity: 'stable',
+            detail: expect.stringContaining('reports image input support')
+          }
+        }),
+        expect.objectContaining({
+          modelProvider: 'opencode',
+          model: 'catalog-text-model',
+          designSupport: {
+            maturity: 'unsupported',
+            detail: expect.stringContaining('reports no image input support')
+          }
+        })
+      ])
+    );
+    await fixture.adapter.shutdown();
+  });
+
+  it('rejects Design before provider mutation when the worktree catalog loses image support', async () => {
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: fakeDesignToolBridge().api
+    });
+    await fixture.adapter.initialize();
+    fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), {
+      connected: ['anthropic'],
+      default: { anthropic: 'claude-test' },
+      all: [{
+        id: 'anthropic',
+        name: 'Anthropic',
+        models: {
+          'claude-test': {
+            id: 'claude-test',
+            name: 'Claude Test',
+            status: 'active',
+            capabilities: { input: { text: true } },
+            variants: { high: {} }
+          }
+        }
+      }]
+    });
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+
+    await expect(
+      fixture.adapter.startTurn({
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'DESIGN',
+        instructionProfile: 'DESIGN',
+        prompt: 'Create and verify the Design.',
+        authoritativeGoal: 'Create and verify the Design.',
+        settings: SETTINGS
+      })
+    ).rejects.toThrow('reports no image input support');
+    expect(fixture.harness.promptBodies).toHaveLength(0);
+    expect(fixture.harness.sessions.size).toBe(0);
+    await fixture.adapter.shutdown();
+  });
+
+  it('revokes the Design grant before cancellation reaches OpenCode', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      interruptCompletionTimeoutMs: 80,
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    fixture.harness.settleAbort = true;
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+    const activeSession = (await fixture.runtime.getAgentSession(session.id))!;
+
+    await fixture.adapter.interruptTurn({
+      session: {
+        localSessionId: session.id,
+        providerSessionId: activeSession.providerSessionId
+      },
+      providerTurnId: turn.providerTurnId!
+    });
+
+    expect(bridge.revokeGrant).toHaveBeenCalledWith('design-grant-1');
+    expect(fixture.harness.abortedSessionIds).toEqual([
+      activeSession.providerSessionId
+    ]);
+    await fixture.adapter.shutdown();
+  });
+
+  it('releases a Design grant when its exact OpenCode generation exits', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+
+    await fixture.harness.sessionSupervisor.lose();
+    await waitForCondition(() => bridge.releaseSessionGrant.mock.calls.length === 1);
+
+    expect(bridge.revokeGrant).toHaveBeenCalledWith('design-grant-1');
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+    await fixture.adapter.shutdown();
+  });
+
+  it('releases the Design grant before an unconfirmed quarantine shutdown', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({
+      designSkillRoot: path.resolve('resources/design-skills'),
+      designClientToolBridge: bridge.api
+    });
+    await fixture.adapter.initialize();
+    const session = await createLocalSession(fixture);
+    const run = await createRun(fixture, session, SETTINGS, [], {
+      purpose: 'TASK_DESIGN',
+      clientToolGrants: ['inspect_design']
+    });
+    await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'DESIGN',
+      instructionProfile: 'DESIGN',
+      prompt: 'Create and verify the Design.',
+      authoritativeGoal: 'Create and verify the Design.',
+      settings: SETTINGS
+    });
+
+    const lifecycle: string[] = [];
+    bridge.releaseSessionGrant.mockImplementation(async () => {
+      lifecycle.push('release-design-grant');
+    });
+    const supervisor = fixture.harness.sessionSupervisor;
+    supervisor.shutdownFailure = new Error('old OpenCode child may still be live');
+    const shutdown = supervisor.shutdown.bind(supervisor);
+    vi.spyOn(supervisor, 'shutdown').mockImplementation(async () => {
+      lifecycle.push('shutdown');
+      await shutdown();
+    });
+    const internals = fixture.adapter as unknown as {
+      quarantineSessionRuntime(
+        sessionId: string,
+        operation: string,
+        detail: string
+      ): Promise<void>;
+    };
+
+    await expect(
+      internals.quarantineSessionRuntime(
+        session.id,
+        'test/quarantine',
+        'Delivery could not be confirmed.'
+      )
+    ).rejects.toThrow('session process quarantine was incomplete');
+    expect(lifecycle.slice(0, 2)).toEqual(['release-design-grant', 'shutdown']);
+    expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
+
+    supervisor.shutdownFailure = undefined;
+    await expect(fixture.adapter.shutdown()).rejects.toThrow(
+      'OpenCode runtimes failed to shut down'
+    );
   });
 
   it('maps the shared read-only request to native denial without claiming confinement', async () => {
@@ -3162,9 +3646,11 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    await waitForCondition(async () =>
-      appendArtifact.mock.calls.length === 2 &&
-      (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
+    await waitForCondition(
+      async () =>
+        appendArtifact.mock.calls.length === 2 &&
+        (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED',
+      4_000
     );
     await wait(250);
     expect(appendArtifact).toHaveBeenCalledTimes(2);
@@ -3206,7 +3692,7 @@ describe('OpenCodeAdapter', () => {
     await waitForCondition(async () =>
       (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
     );
-    await waitForCondition(() => outputPersisted);
+    await waitForCondition(() => outputPersisted, 4_000);
     expect(await fixture.runtimeStore.readArtifact(run.outputArtifactId)).toContain(
       'output retained across runtime loss'
     );
@@ -5059,6 +5545,12 @@ describe('OpenCodeAdapter', () => {
     expect(decodeDataUrl(body.parts[2]!.url!)).toEqual(imageBytes);
     expect(JSON.stringify(body)).not.toContain(textPath);
     expect(JSON.stringify(body)).not.toContain(imagePath);
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(textPath).slice(1, -1)
+    );
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(imagePath).slice(1, -1)
+    );
     await expect(fixture.runtime.getRun(run.id)).resolves.toMatchObject({
       attachmentSubmissions: attachments.map((attachment) =>
         expect.objectContaining({
@@ -5124,6 +5616,9 @@ describe('OpenCodeAdapter', () => {
     });
     expect(decodeDataUrl(body.parts[1]!.url!)).toEqual(fixture.attachmentBytes);
     expect(JSON.stringify(body)).not.toContain(fixture.attachmentPath);
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(fixture.attachmentPath).slice(1, -1)
+    );
     expect(fixture.started.attachmentSubmissions).toEqual([
       expect.objectContaining({
         attachmentId: fixture.attachments[0]!.attachmentId,
@@ -5149,6 +5644,7 @@ interface AdapterFixture {
   appEvents: AppEventBus;
   harness: FakeOpenCodeHarness;
   task: Task;
+  designTurnId?: string;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
 }
@@ -5158,6 +5654,11 @@ interface AdapterFixtureOptions {
   interruptCompletionTimeoutMs?: number;
   runtimeResolver?: OpenCodeAdapterOptions['runtimeResolver'];
   environment?: NodeJS.ProcessEnv;
+  designSkillRoot?: string;
+  designClientToolBridge?: Pick<
+    DesignClientToolBridge,
+    'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
+  >;
 }
 
 async function createOwnerNeutralRuntimeFixture(
@@ -5324,13 +5825,38 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
   const store = persistence.tasks;
   const runtimeStore = persistence.agentRuntime;
   const runtimeAccess = persistence.taskRuntime;
-  const task = await store.createTask({
-    runtimeId: 'opencode',
-    title: 'OpenCode adapter lifecycle',
-    prompt: 'Implement the requested change.',
-    repositoryId: (await addTestRepository(store, worktreePath)).id,
-    agentSettings: SETTINGS
-  });
+  let task: Task;
+  let designTurnId: string | undefined;
+  if (options.designClientToolBridge) {
+    const created = await store.createDesignBundle({
+      request: {
+        brief: 'Create and verify the Design.',
+        creationToken: `opencode-design-${randomUUID()}`,
+        runtimeId: 'opencode',
+        model: SETTINGS.model,
+        reasoningEffort: SETTINGS.reasoningEffort
+      },
+      agentSettings: SETTINGS,
+      repository: {
+        id: randomUUID(),
+        name: 'OpenCode adapter Design',
+        path: path.join(root, 'managed-design-repository'),
+        headSha: 'a'.repeat(40),
+        branch: 'main',
+        checkedAt: new Date().toISOString()
+      }
+    });
+    task = created.task;
+    designTurnId = created.turn.id;
+  } else {
+    task = await store.createTask({
+      runtimeId: 'opencode',
+      title: 'OpenCode adapter lifecycle',
+      prompt: 'Implement the requested change.',
+      repositoryId: (await addTestRepository(store, worktreePath)).id,
+      agentSettings: SETTINGS
+    });
+  }
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task,
     branchName: 'codex/opencode-adapter',
@@ -5352,6 +5878,7 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
     appEvents,
     harness,
     task,
+    designTurnId,
     iteration,
     worktree
   };
@@ -5372,7 +5899,9 @@ function createAdapterForFixture(
     supervisorFactory: (runtimeStore, supervisorOptions) =>
       fixture.harness.createSupervisor(runtimeStore, supervisorOptions),
     sessionIdleTimeoutMs: options.sessionIdleTimeoutMs,
-    interruptCompletionTimeoutMs: options.interruptCompletionTimeoutMs
+    interruptCompletionTimeoutMs: options.interruptCompletionTimeoutMs,
+    designSkillRoot: options.designSkillRoot,
+    designClientToolBridge: options.designClientToolBridge
   });
 }
 
@@ -5409,7 +5938,11 @@ async function createRun(
   fixture: AdapterFixture,
   session: AgentSessionRecord,
   requestedSettings: AgentExecutionSettings = SETTINGS,
-  attachmentSelection: AgentAttachmentSelection[] = []
+  attachmentSelection: AgentAttachmentSelection[] = [],
+  options: {
+    purpose?: 'TASK_IMPLEMENTATION' | 'TASK_DESIGN';
+    clientToolGrants?: string[];
+  } = {}
 ): Promise<RunRecord> {
   const id = nextRuntimeTestId('run');
   const owner = { kind: 'TASK' as const, taskId: fixture.task.id };
@@ -5424,13 +5957,17 @@ async function createRun(
     },
     sessionId: session.id,
     sessionAccessEpoch: 1,
-    purpose: 'TASK_IMPLEMENTATION',
-    generationKey: `opencode-test:${id}`,
+    purpose: options.purpose ?? 'TASK_IMPLEMENTATION',
+    generationKey:
+      options.purpose === 'TASK_DESIGN'
+        ? fixture.designTurnId ?? `opencode-test:${id}`
+        : `opencode-test:${id}`,
     clientOperationId: `create:${id}`,
     requestedSettings,
     promptArtifactId: `${id}-prompt`,
     outputArtifactId: `${id}-output`,
     diagnosticArtifactId: `${id}-diagnostics`,
+    clientToolGrants: options.clientToolGrants,
     attachmentSelection,
     taskDetails: { eventCount: 0 }
   });
@@ -5537,6 +6074,35 @@ function nextRuntimeTestId(_prefix: string): string {
   return randomUUID();
 }
 
+function fakeDesignToolBridge() {
+  const createSessionGrant = vi.fn(async () => ({
+    id: 'design-grant-1',
+    launch: {
+      executablePath: '/app/Task Monki',
+      argv: ['/resources/design-tool-mcp-server.mjs'],
+      environment: {
+        TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'session-credential',
+        TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: '/private/grant-file'
+      }
+    }
+  }));
+  const activateGrant = vi.fn(async () => undefined);
+  const revokeGrant = vi.fn(async () => undefined);
+  const releaseSessionGrant = vi.fn(async () => undefined);
+  return {
+    api: {
+      createSessionGrant,
+      activateGrant,
+      revokeGrant,
+      releaseSessionGrant
+    },
+    createSessionGrant,
+    activateGrant,
+    revokeGrant,
+    releaseSessionGrant
+  };
+}
+
 async function startStreamingRun(fixture: AdapterFixture): Promise<{
   session: AgentSessionRecord;
   run: RunRecord;
@@ -5591,6 +6157,9 @@ class FakeOpenCodeHarness {
   permissions: unknown[] = [];
   questions: unknown[] = [];
   readonly promptBodies: unknown[] = [];
+  readonly mcpRegistrations: unknown[] = [];
+  readonly mcpSensitiveValues: string[][] = [];
+  readonly mcpDisconnects: string[] = [];
   readonly permissionReplies: unknown[] = [];
   readonly questionReplies: unknown[] = [];
   readonly permissionPatchBodies: unknown[] = [];
@@ -5599,8 +6168,12 @@ class FakeOpenCodeHarness {
   readonly supervisors: FakeOpenCodeSupervisor[] = [];
   readonly supervisorShutdownFailures = new Map<number, Error>();
   providerGetCount = 0;
+  failProviderGetAt?: number;
   stoppedStreams = 0;
   failNextPromptAfterAccept = false;
+  failNextMcpRegistrationAfterAccept = false;
+  nextMcpRegistrationStatus?: Record<string, unknown>;
+  failNextMcpDisconnectAfterAccept = false;
   failNextPermissionPatchAfterAccept = false;
   failNextSessionDeleteBeforeAccept = false;
   ignorePermissionPatches = false;
@@ -5822,6 +6395,9 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
     let data: unknown;
     if (requestPath === '/provider') {
       this.harness.providerGetCount += 1;
+      if (this.harness.providerGetCount === this.harness.failProviderGetAt) {
+        throw new Error('simulated provider catalog failure');
+      }
       data = this.harness.providerCatalog(this.directory);
     } else if (requestPath === '/session') {
       data = [...this.harness.sessions.values()].filter(
@@ -5878,6 +6454,31 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
     let data: unknown;
     if (requestPath === '/session') {
       data = this.harness.createProviderSession(this.directory, body);
+    } else if (requestPath === '/mcp') {
+      this.harness.mcpRegistrations.push(structuredClone(body));
+      this.harness.mcpSensitiveValues.push([...(options?.sensitiveValues ?? [])]);
+      if (this.harness.failNextMcpRegistrationAfterAccept) {
+        this.harness.failNextMcpRegistrationAfterAccept = false;
+        throw new OpenCodeAmbiguousMutationError(
+          'POST /mcp',
+          'simulated MCP registration response loss'
+        );
+      }
+      const status = this.harness.nextMcpRegistrationStatus ?? {
+        status: 'connected'
+      };
+      this.harness.nextMcpRegistrationStatus = undefined;
+      data = { task_monki_design: status };
+    } else if (requestPath.startsWith('/mcp/') && requestPath.endsWith('/disconnect')) {
+      this.harness.mcpDisconnects.push(requestPath);
+      if (this.harness.failNextMcpDisconnectAfterAccept) {
+        this.harness.failNextMcpDisconnectAfterAccept = false;
+        throw new OpenCodeAmbiguousMutationError(
+          `POST ${requestPath}`,
+          'simulated MCP disconnect response loss'
+        );
+      }
+      data = true;
     } else if (requestPath.endsWith('/fork')) {
       data = this.harness.forkProviderSession(
         this.directory,

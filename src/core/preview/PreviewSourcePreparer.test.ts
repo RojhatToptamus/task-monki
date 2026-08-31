@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { git } from '../git/gitCli';
 import {
   capturePreviewSourceManifest,
@@ -75,6 +75,116 @@ describe('PreviewSourcePreparer', () => {
     await expect(fs.readFile(path.join(fixture.repo, 'tracked.txt'), 'utf8')).resolves.toBe(
       'changed-during-copy\n'
     );
+  });
+
+  it('removes the empty task directory after its final generation is cleaned', async () => {
+    const fixture = await createRepositoryFixture();
+    const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await fixture.preparer.prepare({
+      repositoryPath: fixture.repo,
+      taskId: 'task-1',
+      generationId: 'generation-final',
+      expectedHeadSha: head
+    });
+
+    await expect(
+      fixture.preparer.cleanupOwnedGeneration({
+        taskId: 'task-1',
+        generationId: 'generation-final'
+      })
+    ).resolves.toBe(true);
+    await expect(
+      fs.lstat(path.join(fixture.previewRoot, 'task-1'))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps the task directory while another captured generation remains', async () => {
+    const fixture = await createRepositoryFixture();
+    const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await fixture.preparer.prepare({
+      repositoryPath: fixture.repo,
+      taskId: 'task-1',
+      generationId: 'generation-first',
+      expectedHeadSha: head
+    });
+    await fixture.preparer.prepare({
+      repositoryPath: fixture.repo,
+      taskId: 'task-1',
+      generationId: 'generation-second',
+      expectedHeadSha: head
+    });
+
+    await fixture.preparer.cleanupOwnedGeneration({
+      taskId: 'task-1',
+      generationId: 'generation-first'
+    });
+    await expect(
+      fs.lstat(path.join(fixture.previewRoot, 'task-1', 'generation-second'))
+    ).resolves.toBeDefined();
+    await expect(
+      fs.lstat(path.join(fixture.previewRoot, 'task-1'))
+    ).resolves.toBeDefined();
+  });
+
+  it('tolerates final-generation cleanup racing with replacement creation', async () => {
+    const fixture = await createRepositoryFixture();
+    const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    const generationRoot = path.join(
+      await fs.realpath(fixture.root),
+      'preview-runtime',
+      'task-1',
+      'generation-replacement'
+    );
+    const mkdirActual = fs.mkdir.bind(fs);
+    const mkdir = vi.spyOn(fs, 'mkdir');
+    let raced = false;
+    mkdir.mockImplementation(async (target, options) => {
+      if (!raced && path.resolve(target.toString()) === generationRoot) {
+        raced = true;
+        throw Object.assign(new Error('task parent was removed'), { code: 'ENOENT' });
+      }
+      return mkdirActual(target, options as never);
+    });
+    try {
+      await expect(
+        fixture.preparer.prepare({
+          repositoryPath: fixture.repo,
+          taskId: 'task-1',
+          generationId: 'generation-replacement',
+          expectedHeadSha: head
+        })
+      ).resolves.toMatchObject({ generationRoot });
+      expect(raced).toBe(true);
+    } finally {
+      mkdir.mockRestore();
+    }
+  });
+
+  it('does not misreport generation cleanup when optional parent removal fails', async () => {
+    const fixture = await createRepositoryFixture();
+    const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await fixture.preparer.prepare({
+      repositoryPath: fixture.repo,
+      taskId: 'task-1',
+      generationId: 'generation-parent-error',
+      expectedHeadSha: head
+    });
+    const rmdir = vi.spyOn(fs, 'rmdir').mockRejectedValueOnce(
+      Object.assign(new Error('parent cleanup failed'), { code: 'EACCES' })
+    );
+    try {
+      await expect(
+        fixture.preparer.cleanupOwnedGeneration({
+          taskId: 'task-1',
+          generationId: 'generation-parent-error'
+        })
+      ).resolves.toBe(true);
+      await expect(
+        fs.lstat(path.join(fixture.previewRoot, 'task-1', 'generation-parent-error'))
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      rmdir.mockRestore();
+    }
   });
 
   it('refuses pre-existing or marker-mismatched paths instead of deleting by name', async () => {

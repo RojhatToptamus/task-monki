@@ -4,6 +4,7 @@ import {
   redactCredentialText
 } from '../AgentCredentialRedaction';
 import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
+import { OPENCODE_DESIGN_TOOL_NAME } from './OpenCodeProtocol';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const OPENCODE_MAX_WIRE_BYTES = 32 * 1024 * 1024;
@@ -11,6 +12,7 @@ const MAX_HTTP_BODY_BYTES = OPENCODE_MAX_WIRE_BYTES;
 const MAX_SSE_LINE_BYTES = OPENCODE_MAX_WIRE_BYTES;
 const MAX_SSE_EVENT_BYTES = OPENCODE_MAX_WIRE_BYTES;
 const REDACTED_ATTACHMENT_CONTENT = '[Task Monki attachment content omitted]';
+const REDACTED_PROVIDER_BYTES = '[Task Monki provider bytes omitted]';
 
 export interface OpenCodeJournalWriter {
   (
@@ -39,6 +41,8 @@ export interface OpenCodeHttpResult<T> {
 export interface OpenCodeRequestOptions {
   /** Absolute wall-clock deadline shared by a bounded multi-request control flow. */
   deadlineAt?: number;
+  /** Request-scoped credentials that must not reach the durable protocol journal. */
+  sensitiveValues?: readonly string[];
 }
 
 export class OpenCodeHttpError extends Error {
@@ -178,7 +182,8 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
             path,
             body: sanitizeOpenCodeInlineAttachmentContent(body ?? null)
           }),
-          { transport: 'HTTP', operation }
+          { transport: 'HTTP', operation },
+          options?.sensitiveValues
         ),
         controller.signal,
         `${operation} timed out before its outbound journal entry was persisted.`
@@ -244,7 +249,7 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
             operation,
             status: response.status,
             ...(text && !validJson ? { malformed: true } : {})
-          }),
+          }, options?.sensitiveValues),
           controller.signal,
           `${operation} timed out while journaling its acknowledgement.`
         );
@@ -264,7 +269,7 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
           operation,
           `OpenCode rejected ${operation} with HTTP ${response.status}: ${safeErrorBody(
             text,
-            this.options.sensitiveValues
+            [...(this.options.sensitiveValues ?? []), ...(options?.sensitiveValues ?? [])]
           )}`
         );
       }
@@ -402,12 +407,13 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
   private appendJournal(
     direction: AgentProtocolMessageReference['direction'],
     raw: string,
-    metadata: Record<string, unknown>
+    metadata: Record<string, unknown>,
+    requestSensitiveValues: readonly string[] = []
   ): Promise<AgentProtocolMessageReference> {
     const safe = redactProtocolJournalRecord(
       raw,
       metadata,
-      this.options.sensitiveValues
+      [...(this.options.sensitiveValues ?? []), ...requestSensitiveValues]
     );
     return this.options.journal(direction, safe.raw, safe.metadata);
   }
@@ -570,14 +576,51 @@ export function sanitizeOpenCodeInlineAttachmentContent(
 
   const record = value as Record<string, unknown>;
   const filePart = record.type === 'file';
+  const binaryContent = record.type === 'image' || record.type === 'audio';
+  const designToolState =
+    record.type === 'tool' &&
+    record.tool === OPENCODE_DESIGN_TOOL_NAME &&
+    isRecord(record.state)
+      ? record.state
+      : undefined;
   return Object.fromEntries(
     Object.entries(record).map(([key, entry]) => [
       key,
       filePart && ['url', 'data', 'content', 'source'].includes(key)
         ? REDACTED_ATTACHMENT_CONTENT
+        : binaryContent && key === 'data'
+          ? REDACTED_PROVIDER_BYTES
+        : designToolState && key === 'state'
+          ? sanitizeOpenCodeDesignToolState(designToolState, depth + 1)
         : sanitizeOpenCodeInlineAttachmentContent(entry, depth + 1)
     ])
   );
+}
+
+function sanitizeOpenCodeDesignToolState(
+  state: Record<string, unknown>,
+  depth: number
+): Record<string, unknown> {
+  const output = state.output;
+  if (typeof output !== 'string') {
+    return sanitizeOpenCodeInlineAttachmentContent(state, depth) as Record<string, unknown>;
+  }
+  let safeOutput = REDACTED_PROVIDER_BYTES;
+  try {
+    safeOutput = JSON.stringify(
+      sanitizeOpenCodeInlineAttachmentContent(JSON.parse(output), depth + 1)
+    );
+  } catch {
+    // OpenCode persists native MCP results as JSON strings. An unexpected
+    // shape must not make screenshot bytes durable.
+  }
+  return {
+    ...(sanitizeOpenCodeInlineAttachmentContent(
+      { ...state, output: undefined },
+      depth
+    ) as Record<string, unknown>),
+    output: safeOutput
+  };
 }
 
 async function readBoundedResponse(

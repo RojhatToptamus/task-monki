@@ -93,40 +93,23 @@ describe('AgentRuntimeRegistry', () => {
     );
   });
 
-  it('requires typed discovery and mutation for stable session controls', async () => {
+  it('requires typed session-control discovery and mutation together', async () => {
     const incomplete = runtime('grok-acp');
-    const capabilities = unsupportedCapabilities('grok-acp');
-    capabilities.sessionControls = { maturity: 'stable' };
-    incomplete.capabilities = vi.fn().mockResolvedValue(capabilities);
+    incomplete.listSessionControls = vi.fn().mockResolvedValue([]);
     const registry = new AgentRuntimeRegistry([incomplete], 'grok-acp');
 
     const [failure] = await registry.initializeAll();
 
     expect(failure?.error.message).toContain(
-      'does not implement typed control discovery and mutation'
+      'must implement typed session-control discovery and mutation together'
     );
     expect(incomplete.initialize).not.toHaveBeenCalled();
   });
 
-  it('rejects native mutation-denial claims without the shared turn lifecycle', async () => {
+  it('rejects stable shared read-only turns without the shared turn lifecycle', async () => {
     const incomplete = runtime('read-only-runtime');
     const capabilities = unsupportedCapabilities('read-only-runtime');
-    capabilities.executionPolicy = {
-      defaultPresetId: 'read-only',
-      detail: 'Claims native mutation denial.',
-      presets: [
-        {
-          id: 'read-only',
-          label: 'Read only',
-          detail: 'Claims native mutation denial.',
-          sandbox: 'READ_ONLY',
-          repositoryMutation: 'DENY',
-          approvalPolicy: 'never',
-          approvalsReviewer: 'user',
-          networkAccess: 'DISABLED'
-        }
-      ]
-    };
+    capabilities.readOnlyTurns = { maturity: 'stable' };
     incomplete.capabilities = vi.fn().mockResolvedValue(capabilities);
 
     const [failure] = await new AgentRuntimeRegistry(
@@ -400,26 +383,11 @@ function unsupportedCapabilities(runtimeId: string): AgentRuntimeCapabilities {
   return {
     runtimeId,
     executionPolicy: testExecutionPolicy(),
-    promptRefinement: unsupported,
+    readOnlyTurns: unsupported,
     modelCatalog: unsupported,
-    reasoningEffort: unsupported,
-    persistentSessions: unsupported,
-    sessionResume: unsupported,
-    sessionFork: unsupported,
     activeTurnSteering: unsupported,
     turnInterruption: unsupported,
-    truePause: unsupported,
-    interactiveApprovals: unsupported,
-    userInputRequests: unsupported,
-    goals: unsupported,
-    plans: unsupported,
-    detachedReview: unsupported,
-    review: unsupported,
-    subagents: unsupported,
-    backgroundTerminals: unsupported,
-    dynamicTools: unsupported,
     attachmentDelivery: unsupported,
-    runtimeRecovery: unsupported,
     extensions: {}
   };
 }

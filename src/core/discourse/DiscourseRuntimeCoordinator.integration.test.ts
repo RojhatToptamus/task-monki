@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   AgentAssignmentSnapshot,
   DiscourseAgentJobRecord,
@@ -730,6 +730,71 @@ describe('DiscourseRuntimeCoordinator', () => {
       clientOperationId: 'delete-settled-wave'
     });
     expect(tombstone.conversationId).toBe(fixture.conversationId);
+    expect(await fixture.runtime.snapshot()).toMatchObject({
+      sessions: [],
+      runs: [],
+      queueEntries: [],
+      artifacts: []
+    });
+  });
+
+  it('retries provider session cleanup before deleting a settled conversation', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Settle the turn before deleting its conversation.',
+      clientOperationId: 'prepare-delete-release'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-delete-release');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      'dispatch-delete-release'
+    );
+    await markRepositoryUnchanged(
+      fixture.runtime,
+      running.id,
+      'delete-release-integrity'
+    );
+    await fixture.coordinator.ingestContribution({
+      runId: running.id,
+      providerTurnId: running.providerTurnId!,
+      body: 'The response settled before deletion.',
+      freshnessAtCompletion: 'FRESH',
+      clientOperationId: 'terminal-delete-release',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_TERMINAL'
+    });
+    const session = (await fixture.runtime.getSession(running.sessionId))!;
+    await fixture.runtime.updateSession(
+      session.id,
+      session.recordRevision,
+      { status: 'SYSTEM_ERROR' },
+      'simulate-unconfirmed-provider-release'
+    );
+    const releaseSession = vi
+      .spyOn(fixture.provider, 'releaseRuntimeSession')
+      .mockRejectedValueOnce(new Error('provider session cleanup was not confirmed'));
+    const conversation = await fixture.discourse.getConversation(fixture.conversationId);
+    const deletion = {
+      conversationId: fixture.conversationId,
+      expectedRevision: conversation.conversation.recordRevision,
+      clientOperationId: 'delete-after-release'
+    };
+
+    await expect(fixture.coordinator.deleteConversation(deletion)).rejects.toThrow(
+      'provider session cleanup was not confirmed'
+    );
+    expect(
+      await fixture.discourse.getConversationTombstone(fixture.conversationId)
+    ).toBeUndefined();
+    await expect(fixture.runtime.getSession(session.id)).resolves.toBeDefined();
+
+    const tombstone = await fixture.coordinator.deleteConversation(deletion);
+    expect(tombstone.conversationId).toBe(fixture.conversationId);
+    expect(releaseSession).toHaveBeenCalledTimes(2);
     expect(await fixture.runtime.snapshot()).toMatchObject({
       sessions: [],
       runs: [],

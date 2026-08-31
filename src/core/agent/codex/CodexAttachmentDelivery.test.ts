@@ -43,7 +43,9 @@ describe('Codex attachment delivery', () => {
     expect(first.localImagePaths).toEqual([image.path]);
     expect(later.localImagePaths).toEqual([image.path]);
     expect(first.prompt).toContain(CODEX_ATTACHMENT_PROMPT_MARKER);
-    expect(first.prompt).toContain(text.path);
+    expect(attachmentMetadata(first.prompt, text.attachmentId)).toMatchObject({
+      readOnlyPath: text.path
+    });
     expect(first.submissions).toEqual([
       expect.objectContaining({ attachmentId: text.attachmentId, transport: 'managed-path' }),
       expect.objectContaining({ attachmentId: image.attachmentId, transport: 'native-image' })
@@ -67,6 +69,7 @@ describe('Codex attachment delivery', () => {
     expect(prepared.hasInlineText).toBe(true);
     expect(prepared.prompt).toContain('verified reference text');
     expect(prepared.prompt).not.toContain(text.path);
+    expect(prepared.prompt).not.toContain(JSON.stringify(text.path).slice(1, -1));
     expect(prepared.submissions).toEqual([
       expect.objectContaining({ attachmentId: text.attachmentId, transport: 'text-block' })
     ]);
@@ -95,7 +98,9 @@ describe('Codex attachment delivery', () => {
 
     expect(prepared.exactGrantPaths).toEqual([]);
     expect(prepared.localImagePaths).toEqual([image.path]);
-    expect(prepared.prompt).toContain(text.path);
+    expect(attachmentMetadata(prepared.prompt, text.attachmentId)).toMatchObject({
+      readOnlyPath: text.path
+    });
   });
 
   it('rejects a complete inline request above the Codex wire limit', () => {
@@ -132,4 +137,20 @@ function attachment(
     ),
     verifiedAt: '2026-08-29T10:00:00.000Z'
   };
+}
+
+function attachmentMetadata(
+  prompt: string,
+  attachmentId: string
+): Record<string, unknown> {
+  const prefix = 'Attachment metadata: ';
+  const line = prompt
+    .split('\n')
+    .find(
+      (candidate) =>
+        candidate.startsWith(prefix) &&
+        candidate.includes(`"attachmentId":"${attachmentId}"`)
+    );
+  if (!line) throw new Error(`Missing metadata for attachment ${attachmentId}.`);
+  return JSON.parse(line.slice(prefix.length)) as Record<string, unknown>;
 }

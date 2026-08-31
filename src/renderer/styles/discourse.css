@@ -15,9 +15,7 @@
 .app-shell[data-input-modality='keyboard'] .tm-discourse button:focus,
 .app-shell[data-input-modality='keyboard'] .tm-discourse [role='menu']:focus {
   outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .tm-discourse--inspector-open {
@@ -178,11 +176,17 @@
   color: var(--muted);
 }
 
+.tm-discourse-search:focus-within {
+  background: var(--field-focus);
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
+  outline: 0;
+}
+
 .app-shell[data-input-modality='keyboard'] .tm-discourse-search:focus-within {
   background: var(--field-focus);
   box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+    inset 0 0 0 1px var(--field-edge-focus),
+    0 0 0 3px var(--focus-ring);
   outline: 0;
 }
 
@@ -194,6 +198,12 @@
   background: transparent;
   color: var(--text);
   font: 12px var(--font-ui);
+}
+
+.tm-discourse-search input:focus,
+.tm-discourse-search input:focus-visible {
+  background: transparent;
+  box-shadow: none;
 }
 
 .tm-discourse-rail__filter {
@@ -385,9 +395,13 @@
   color: var(--text);
   font: 600 15px var(--font-ui);
   outline: 0;
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
+}
+
+.app-shell[data-input-modality='keyboard'] .tm-discourse-header__title input:focus {
   box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+    inset 0 0 0 1px var(--field-edge-focus),
+    0 0 0 3px var(--focus-ring);
 }
 
 .tm-discourse-header__meta {
@@ -1251,11 +1265,17 @@
   box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
+.tm-discourse-composer:focus-within {
+  background: var(--field-focus);
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
+  outline: 0;
+}
+
 .app-shell[data-input-modality='keyboard'] .tm-discourse-composer:focus-within {
   background: var(--field-focus);
   box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+    inset 0 0 0 1px var(--field-edge-focus),
+    0 0 0 3px var(--focus-ring);
   outline: 0;
 }
 
@@ -1556,8 +1576,11 @@
   scrollbar-gutter: stable;
 }
 
+.tm-discourse .discourse-mention-input__textarea:focus,
 .tm-discourse .discourse-mention-input__textarea:focus-visible {
   outline: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .discourse-mention-input__textarea::placeholder {
@@ -1610,9 +1633,7 @@
 
 .app-shell[data-input-modality='keyboard'] .discourse-mention-input__tokens button:focus {
   outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .discourse-mention-input__tokens button span {

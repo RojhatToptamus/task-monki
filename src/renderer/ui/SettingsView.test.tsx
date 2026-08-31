@@ -157,8 +157,8 @@ describe('SettingsView', () => {
 
     expect(withoutEffort).not.toContain('>Reasoning<');
     expect(withEffort).toContain('>Reasoning<');
-    expect(withEffort).toContain('>High</small>');
-    expect(withEffort).toContain('>X-high</small>');
+    expect(withEffort).toContain('aria-label="High reasoning"');
+    expect(withEffort).toContain('aria-label="X-high reasoning"');
 
     const providerDefault = renderToStaticMarkup(
       <AgentModelSetting
@@ -179,7 +179,7 @@ describe('SettingsView', () => {
         onReasoningEffortChange={() => undefined}
       />
     );
-    expect(providerDefault).toContain('>Default</small>');
+    expect(providerDefault).toContain('aria-label="Default reasoning"');
   });
 
   it('offers explicit model loading without starting discovery during render', () => {
@@ -237,7 +237,7 @@ describe('SettingsView', () => {
   it('does not offer a model for an unavailable purpose runtime', () => {
     const html = renderToStaticMarkup(
       <AgentModelSetting
-        label="Prompt refinement"
+        label="Preview generation"
         runtimeId="codex"
         modelId={codexModel.id}
         models={[codexModel]}
@@ -254,7 +254,7 @@ describe('SettingsView', () => {
     expect(html.match(/disabled=""/gu)).toHaveLength(1);
   });
 
-  it('selects refinement and review models from any capable enabled runtime', () => {
+  it('selects read-only workflow models from any capable enabled runtime', () => {
     const providerModel: AgentModel = {
       ...codexModel,
       id: 'provider-runtime:provider/model',
@@ -275,9 +275,7 @@ describe('SettingsView', () => {
         readiness: createRuntimeReadiness('READY', 'Ready'),
         capabilities: {
           ...codexCapabilities(),
-          runtimeId: 'provider-runtime',
-          review: { maturity: 'unsupported' },
-          detachedReview: { maturity: 'stable' }
+          runtimeId: 'provider-runtime'
         }
       },
       models: [providerModel],
@@ -292,6 +290,9 @@ describe('SettingsView', () => {
         promptRefinementRuntimeId: 'provider-runtime',
         promptRefinementModel: 'model',
         promptRefinementModelProvider: 'provider',
+        previewRecipeGenerationRuntimeId: 'provider-runtime',
+        previewRecipeGenerationModel: 'model',
+        previewRecipeGenerationModelProvider: 'provider',
         reviewRuntimeId: 'provider-runtime',
         reviewModel: 'model',
         reviewModelProvider: 'provider'
@@ -300,21 +301,153 @@ describe('SettingsView', () => {
 
     expect(selected.promptRefinementRuntimeId).toBe('provider-runtime');
     expect(selected.selectedPromptRefinementModel?.id).toBe(providerModel.id);
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('provider-runtime');
+    expect(selected.selectedPreviewRecipeGenerationModel?.id).toBe(providerModel.id);
     expect(selected.reviewRuntimeId).toBe('provider-runtime');
     expect(selected.selectedReviewModel?.id).toBe(providerModel.id);
+  });
+
+  it('uses the configured Preview model provider when that provider uses its default model', () => {
+    const alternateProviderModel: AgentModel = {
+      ...codexModel,
+      id: 'codex:alternate/default-model',
+      modelProvider: 'alternate',
+      model: 'default-model',
+      displayName: 'Alternate default',
+      isDefault: false
+    };
+    const selected = selectSettingsModels(
+      [codexModel, alternateProviderModel],
+      runtimes,
+      {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'codex',
+        previewRecipeGenerationModel: undefined,
+        previewRecipeGenerationModelProvider: 'alternate'
+      }
+    );
+
+    expect(selected.selectedPreviewRecipeGenerationModel?.id).toBe(
+      alternateProviderModel.id
+    );
+  });
+
+  it('does not replace a missing provider-only Preview selection', () => {
+    const selected = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      previewRecipeGenerationRuntimeId: 'codex',
+      previewRecipeGenerationModel: undefined,
+      previewRecipeGenerationModelProvider: 'removed-provider'
+    });
+
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
   });
 
   it('preserves an unavailable configured workflow provider until the user changes it', () => {
     const selected = selectSettingsModels([codexModel], runtimes, {
       ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
       promptRefinementRuntimeId: 'opencode',
+      previewRecipeGenerationRuntimeId: 'opencode',
       reviewRuntimeId: 'opencode'
     });
 
     expect(selected.promptRefinementRuntimeId).toBe('opencode');
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('opencode');
     expect(selected.reviewRuntimeId).toBe('opencode');
     expect(selected.selectedPromptRefinementModel).toBeUndefined();
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
     expect(selected.selectedReviewModel).toBeUndefined();
+  });
+
+  it('does not replace a missing configured Preview model with another model', () => {
+    const selected = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      previewRecipeGenerationRuntimeId: 'codex',
+      previewRecipeGenerationModel: 'removed-model',
+      previewRecipeGenerationModelProvider: 'openai'
+    });
+
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('codex');
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
+  });
+
+  it('does not replace a missing configured Preview agent with the default agent', () => {
+    const selected = selectSettingsModels([codexModel], [runtimes[0]!], {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      previewRecipeGenerationRuntimeId: 'removed-agent',
+      previewRecipeGenerationModel: 'removed-model',
+      previewRecipeGenerationModelProvider: 'removed-provider'
+    });
+
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('removed-agent');
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
+  });
+
+  it('keeps an unsupported default Preview provider instead of silently selecting another provider', () => {
+    const unsupportedCodex: AgentRuntimeState = {
+      ...runtimes[0]!,
+      preflight: {
+        ...runtimes[0]!.preflight,
+        capabilities: {
+          ...runtimes[0]!.preflight.capabilities,
+          executionPolicy: {
+            defaultPresetId: 'write',
+            detail: 'Write access only.',
+            presets: [
+              {
+                id: 'write',
+                label: 'Write',
+                detail: 'Write access.',
+                sandbox: 'WORKSPACE_WRITE',
+                approvalPolicy: 'never',
+                approvalsReviewer: 'user',
+                networkAccess: 'DISABLED',
+                repositoryMutation: 'ALLOW'
+              }
+            ]
+          },
+          readOnlyTurns: {
+            maturity: 'unsupported',
+            detail: 'This profile cannot deny repository changes.'
+          }
+        }
+      }
+    };
+    const alternateModel: AgentModel = {
+      ...codexModel,
+      id: 'alternate:provider/model',
+      runtimeId: 'alternate',
+      modelProvider: 'provider',
+      model: 'model',
+      displayName: 'Alternate model'
+    };
+    const alternateRuntime: AgentRuntimeState = {
+      preflight: {
+        runtime: {
+          id: 'alternate',
+          displayName: 'Alternate',
+          kind: 'HTTP_AGENT',
+          transport: 'HTTP_SSE',
+          lifecycleScope: 'APPLICATION'
+        },
+        readiness: createRuntimeReadiness('READY', 'Ready'),
+        capabilities: {
+          ...codexCapabilities(),
+          runtimeId: 'alternate'
+        }
+      },
+      models: [alternateModel],
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+
+    const selected = selectSettingsModels(
+      [codexModel, alternateModel],
+      [unsupportedCodex, alternateRuntime],
+      DEFAULT_TASK_MANAGER_APP_SETTINGS
+    );
+
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('codex');
+    expect(selected.selectedPreviewRecipeGenerationModel?.id).toBe(codexModel.id);
   });
 
   it('keeps an unsupported workflow provider visible with its reason', () => {
@@ -355,7 +488,7 @@ describe('SettingsView', () => {
               }
             ]
           },
-          promptRefinement: {
+          readOnlyTurns: {
             maturity: 'unsupported',
             detail: 'This profile cannot deny shell changes.'
           }
@@ -367,13 +500,13 @@ describe('SettingsView', () => {
 
     const html = renderToStaticMarkup(
       <AgentModelSetting
-        label="Prompt refinement"
+        label="Preview generation"
         runtimeId="codex"
         modelId={codexModel.id}
         models={[codexModel, providerModel]}
         runtimes={[runtimes[0]!, providerRuntime]}
         runtimeUnavailableReason={(runtime) =>
-          runtimeExecutionUnavailableReason(runtime, 'PROMPT_REFINEMENT')
+          runtimeExecutionUnavailableReason(runtime, 'PREVIEW_RECIPE_GENERATION')
         }
         onSelectionChange={() => undefined}
       />
@@ -383,7 +516,7 @@ describe('SettingsView', () => {
       'This profile cannot deny shell changes. Normal Tasks remain available.'
     );
     expect(html).toMatch(
-      /<button[^>]*disabled=""[^>]*><span>Provider model<\/span>/u
+      /<button[^>]*disabled=""[^>]*aria-label="Provider model via Provider runtime/u
     );
   });
 

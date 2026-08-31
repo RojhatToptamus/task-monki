@@ -609,14 +609,16 @@ export async function runAgentResourceStressWorkflow(
       const postRestartStartedAt = performance.now();
       const postRestartSnapshot = await coldStore.snapshot();
       postRestartSnapshotMs = elapsed(postRestartStartedAt);
-      assert(
-        postRestartSnapshot.tasks.length === beforeShutdownSnapshot.tasks.length &&
-          postRestartSnapshot.runs.length === beforeShutdownSnapshot.runs.length,
-        'Cold store restart did not preserve accumulated task and run history.'
-      );
+       assert(
+         postRestartSnapshot.tasks.length === beforeShutdownSnapshot.tasks.length &&
+           postRestartSnapshot.runs.length === beforeShutdownSnapshot.runs.length,
+        `Cold store restart did not preserve accumulated task and run history: ` +
+          `tasks ${beforeShutdownSnapshot.tasks.length} -> ${postRestartSnapshot.tasks.length}, ` +
+          `runs ${beforeShutdownSnapshot.runs.length} -> ${postRestartSnapshot.runs.length}.`
+       );
     } finally {
-      await coldPersistence.close();
-    }
+     await coldPersistence.close();
+   }
 
     await waitForProcessesToExit([...observedProcessIds, ...observedPreviewProcessIds], 5_000);
     const providerProcessesJoined = [...observedProcessIds].every(
@@ -1902,13 +1904,7 @@ function deterministicAcpProfile(providerScriptPath: string): AcpRuntimeProfile 
       allowedKeys: [],
       sensitiveKeys: []
     },
-    approvalPolicies: ['never'],
-    extensions: {
-      deterministicTestRuntime: {
-        maturity: 'stable',
-        detail: 'Local developer-only ACP subprocess with fixed scenario behavior.'
-      }
-    }
+    approvalPolicies: ['never']
   };
 }
 

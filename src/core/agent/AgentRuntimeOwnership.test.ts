@@ -1,8 +1,13 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { AgentExecutionContext, AgentOwnerScope } from '../../shared/agentRuntime';
+import {
+  agentOwnerScopeKey,
+  type AgentExecutionContext,
+  type AgentOwnerScope
+} from '../../shared/agentRuntime';
 import {
   assertAccessEpochMatches,
+  assertAgentRuntimePurposeScope,
   assertAgentRunScope,
   assertReadOnlyExecutionContext,
   createAgentSessionAccessEpoch
@@ -97,6 +102,32 @@ describe('AgentRuntimeOwnership', () => {
         owner: discourseOwner,
         sessionId: 'session-1'
       })
+    ).toThrow('does not match');
+  });
+
+  it('keeps each Preview recipe generation in one exact transient scope', () => {
+    const owner = {
+      kind: 'PREVIEW_RECIPE_GENERATION' as const,
+      taskId: 'task-1',
+      generationId: 'generation-1'
+    };
+    const scope = { ...owner };
+
+    expect(agentOwnerScopeKey(owner)).toBe(
+      'preview-recipe-generation:task-1:generation-1'
+    );
+    expect(() => assertAgentRunScope(scope, owner)).not.toThrow();
+    expect(() =>
+      assertAgentRunScope(
+        { ...scope, generationId: 'generation-2' },
+        owner
+      )
+    ).toThrow('does not belong');
+    expect(() =>
+      assertAgentRuntimePurposeScope('PREVIEW_RECIPE_GENERATION', scope)
+    ).not.toThrow();
+    expect(() =>
+      assertAgentRuntimePurposeScope('DISCOURSE_ANSWER', scope)
     ).toThrow('does not match');
   });
 

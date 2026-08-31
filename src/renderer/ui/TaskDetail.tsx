@@ -199,6 +199,7 @@ interface TaskDetailProps {
   previewRecipeGeneration?: PreviewRecipeGenerationSnapshot;
   showMascot: boolean;
   reviewDisabledReason?: string;
+  previewRecipeGenerationDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
@@ -960,6 +961,7 @@ export function TaskDetail(props: TaskDetailProps) {
     executionReadiness: props.previewExecutionReadiness,
     resolution: props.previewResolution,
     recipeGeneration: props.previewRecipeGeneration,
+    recipeGenerationDisabledReason: props.previewRecipeGenerationDisabledReason,
     onResolve: props.onResolvePreview,
     onSetLocalBinding: props.onSetPreviewLocalBinding,
     onGetRecipeGeneration: props.onGetPreviewRecipeGeneration,

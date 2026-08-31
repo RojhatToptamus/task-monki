@@ -16,6 +16,7 @@ const REQUIRED_APPLICATION_ENTRIES = [
   ['package.json', 'package manifest']
 ];
 const REQUIRED_DESIGN_RESOURCE_FILES = [
+  'design-tool-mcp-server.mjs',
   'design-skills/accessibility-review/SKILL.md',
   'design-skills/aesthetic-direction/SKILL.md',
   'design-skills/browser-verification/SKILL.md',

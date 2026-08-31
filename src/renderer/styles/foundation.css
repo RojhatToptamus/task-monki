@@ -198,29 +198,59 @@ button {
 
 /* Text entry is exempt from modality suppression: a caret with no visible host
    is the most reported dark-theme complaint in the product. */
-.app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea):focus,
-.app-shell :where(.field__prompt-shell, .tm-discourse-composer, .tm-design-composer__shell):focus-within {
+.app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea, select):focus,
+.app-shell :where(
+  .field__prompt-shell,
+  .tm-discourse-composer,
+  .tm-design-composer__shell,
+  .tm-discourse-search,
+  .tm-filefilter__search,
+  .tm-agent-console__search
+):focus-within,
+.app-shell :where(
+  .tm-theme-picker__trigger,
+  .tm-agent-console__trigger,
+  .tm-access-select__trigger,
+  .tm-repository-select__trigger
+):focus {
+  outline: 0;
+  background: var(--field-focus);
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
+}
+
+.app-shell[data-input-modality='keyboard'] :where(
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select,
+  .tm-theme-picker__trigger,
+  .tm-agent-console__trigger,
+  .tm-access-select__trigger,
+  .tm-repository-select__trigger
+):focus,
+.app-shell[data-input-modality='keyboard'] :where(
+  .field__prompt-shell,
+  .tm-discourse-composer,
+  .tm-design-composer__shell,
+  .tm-discourse-search,
+  .tm-filefilter__search,
+  .tm-agent-console__search
+):focus-within {
   outline: 0;
   background: var(--field-focus);
   box-shadow:
-    inset 0 0 0 1px var(--accent),
+    inset 0 0 0 1px var(--field-edge-focus),
     0 0 0 3px var(--focus-ring);
 }
 
 .app-shell[data-input-modality='keyboard'] :where(
   button,
   a,
-  input,
-  textarea,
-  select,
   summary,
   [role='menu'],
   [role='separator']
 ):focus {
   outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 @media (forced-colors: active) {

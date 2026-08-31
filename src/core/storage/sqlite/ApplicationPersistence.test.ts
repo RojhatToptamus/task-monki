@@ -39,6 +39,17 @@ async function close(persistence: ApplicationPersistence): Promise<void> {
   await persistence.close();
 }
 
+function designAgentSettings() {
+  return {
+    runtimeId: 'codex',
+    model: 'gpt-test',
+    sandbox: 'WORKSPACE_WRITE' as const,
+    networkAccess: false,
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user' as const
+  };
+}
+
 describe('ApplicationPersistence', () => {
   it('owns one database and one profile lease for every persistence facade', async () => {
     const profileRoot = await fs.mkdtemp(
@@ -469,7 +480,8 @@ describe('ApplicationPersistence', () => {
     const creationToken = 'design-backup-token-0001';
     const repository = await source.prepareBlankRepository({ creationToken });
     const created = await persistence.tasks.createDesignBundle({
-      request: { brief: 'Preserve this Design source.', creationToken },
+      request: { brief: 'Preserve this Design source.', creationToken, runtimeId: 'codex' },
+      agentSettings: designAgentSettings(),
       repository
     });
     await git(repository.path, [
@@ -584,7 +596,8 @@ describe('ApplicationPersistence', () => {
     const creationToken = 'design-corrupt-token-001';
     const repository = await source.prepareBlankRepository({ creationToken });
     await persistence.tasks.createDesignBundle({
-      request: { brief: 'Keep the live source intact.', creationToken },
+      request: { brief: 'Keep the live source intact.', creationToken, runtimeId: 'codex' },
+      agentSettings: designAgentSettings(),
       repository
     });
     const backup = await persistence.backups.createBackup();

@@ -204,6 +204,10 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     promptRefinementModel: record.promptRefinementModel,
     promptRefinementRuntimeId: record.promptRefinementRuntimeId,
     promptRefinementModelProvider: record.promptRefinementModelProvider,
+    previewRecipeGenerationModel: record.previewRecipeGenerationModel,
+    previewRecipeGenerationRuntimeId: record.previewRecipeGenerationRuntimeId,
+    previewRecipeGenerationModelProvider:
+      record.previewRecipeGenerationModelProvider,
     reviewModel: record.reviewModel,
     reviewRuntimeId: record.reviewRuntimeId,
     reviewModelProvider: record.reviewModelProvider,
@@ -269,6 +273,21 @@ export function mergeAppSettings(
   if ('promptRefinementModelProvider' in input) {
     patch.promptRefinementModelProvider = normalizeOptionalString(
       input.promptRefinementModelProvider
+    );
+  }
+  if ('previewRecipeGenerationModel' in input) {
+    patch.previewRecipeGenerationModel = normalizeOptionalString(
+      input.previewRecipeGenerationModel
+    );
+  }
+  if ('previewRecipeGenerationRuntimeId' in input) {
+    patch.previewRecipeGenerationRuntimeId = normalizeOptionalString(
+      input.previewRecipeGenerationRuntimeId
+    );
+  }
+  if ('previewRecipeGenerationModelProvider' in input) {
+    patch.previewRecipeGenerationModelProvider = normalizeOptionalString(
+      input.previewRecipeGenerationModelProvider
     );
   }
   if ('reviewModel' in input) {
@@ -445,6 +464,9 @@ function isCurrentAppSettingsRecord(
     'promptRefinementModel',
     'promptRefinementRuntimeId',
     'promptRefinementModelProvider',
+    'previewRecipeGenerationModel',
+    'previewRecipeGenerationRuntimeId',
+    'previewRecipeGenerationModelProvider',
     'reviewModel',
     'reviewRuntimeId',
     'reviewModelProvider',
@@ -462,6 +484,9 @@ function isCurrentAppSettingsRecord(
     record.promptRefinementModel,
     record.promptRefinementRuntimeId,
     record.promptRefinementModelProvider,
+    record.previewRecipeGenerationModel,
+    record.previewRecipeGenerationRuntimeId,
+    record.previewRecipeGenerationModelProvider,
     record.reviewModel,
     record.reviewRuntimeId,
     record.reviewModelProvider,

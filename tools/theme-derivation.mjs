@@ -174,16 +174,17 @@ export const LADDER = {
 
 /* Alpha overlays for state. Quieter than the structural steps they sit inside. */
 export const ALPHA = {
-  dark: { hover: 0.03, press: 0.075, focusLine: 0.5, focusRing: 0.22 },
-  light: { hover: 0.04, press: 0.075, focusLine: 0.42, focusRing: 0.18 }
+  dark: { hover: 0.03, press: 0.075, focusRing: 0.22 },
+  light: { hover: 0.04, press: 0.075, focusRing: 0.18 }
 };
 
-/* Line weights, as CONTRAST TARGETS rather than fixed alphas — four jobs:
- *   hair       a divider INSIDE a surface, where content continues
- *   fieldEdge  the resting boundary of a filled control: input, textarea,
- *              composer, select, segmented track, secondary button
- *   edgeRaised the boundary of an OBJECT resting on its plane (a card)
- *   edge       a SEAM between structural planes, and floating overlays
+/* Line weights, as CONTRAST TARGETS rather than fixed alphas — five jobs:
+ *   hair           a divider INSIDE a surface, where content continues
+ *   fieldEdge      the resting boundary of a filled control: input, textarea,
+ *                  composer, select, segmented track, secondary button
+ *   fieldEdgeFocus the strengthened neutral boundary of a focused field
+ *   edgeRaised     the boundary of an OBJECT resting on its plane (a card)
+ *   edge           a SEAM between structural planes, and floating overlays
  *
  * A fixed alpha over ink does not land the same way twice: 0.10 over a
  * near-white ink on Nocturne's #0A0C11 ground is a clear rim, and the same 0.10
@@ -192,8 +193,8 @@ export const ALPHA = {
  * theme per mode — the same discipline the inks already use, and the same reason
  * it is legitimate: a floor is a constraint, not a per-theme preference. */
 export const EDGE_TARGETS = {
-  dark: { hair: 1.14, fieldEdge: 1.24, edgeRaised: 1.3, edge: 1.4 },
-  light: { hair: 1.145, fieldEdge: 1.21, edgeRaised: 1.22, edge: 1.36 }
+  dark: { hair: 1.14, fieldEdge: 1.24, fieldEdgeFocus: 1.9, edgeRaised: 1.3, edge: 1.4 },
+  light: { hair: 1.145, fieldEdge: 1.21, fieldEdgeFocus: 1.75, edgeRaised: 1.22, edge: 1.36 }
 };
 
 /* Chroma budget for the surface ladder — an absolute lift in OKLCH C across the
@@ -228,7 +229,7 @@ const MARGIN = 1.045;
 /** The smallest alpha of `ink` that clears `target` against every host it can
  *  be drawn on. A line is composited over the plane it sits on, so the check is
  *  the composite against that same plane — done for each host, worst wins. */
-function solveEdgeAlpha(ink, hosts, target) {
+function solveEdgeAlpha(ink, hosts, target, roundUp = false) {
   let lo = 0;
   let hi = 1;
   for (let i = 0; i < 30; i += 1) {
@@ -237,7 +238,7 @@ function solveEdgeAlpha(ink, hosts, target) {
     if (ok) hi = a;
     else lo = a;
   }
-  return Math.round(hi * 1000) / 1000;
+  return (roundUp ? Math.ceil(hi * 1000) : Math.round(hi * 1000)) / 1000;
 }
 
 /* The planes an ink can land on. Solved against all of them, not just the sheet. */
@@ -497,6 +498,12 @@ export function deriveVariant(seeds, mode) {
   const target = EDGE_TARGETS[mode];
   const hairA = solveEdgeAlpha(seedInk, [panel, surface, card, overlay, field], target.hair);
   const fieldEdgeA = solveEdgeAlpha(seedInk, [field, surface, card, overlay], target.fieldEdge);
+  const fieldEdgeFocusA = solveEdgeAlpha(
+    seedInk,
+    [fieldFocus, field, surface, card, overlay].map((rgb) => hexToRgb(rgbToHex(rgb))),
+    target.fieldEdgeFocus,
+    true
+  );
   const edgeRaisedA = solveEdgeAlpha(seedInk, [panel, surface, card], target.edgeRaised);
   const edgeA = solveEdgeAlpha(seedInk, [ground, panel, surface], target.edge);
 
@@ -515,7 +522,6 @@ export function deriveVariant(seeds, mode) {
     '--field-hover': rgbToHex(fieldHover),
     '--field-focus': rgbToHex(fieldFocus),
     '--field-disabled': rgbToHex(fieldDisabled),
-    '--field-focus-line': rgba(accent, alpha.focusLine),
     '--focus-ring': rgba(accent, alpha.focusRing),
     '--field-focus-ring': 'var(--focus-ring)',
 
@@ -525,6 +531,7 @@ export function deriveVariant(seeds, mode) {
     '--press': inkAlpha(alpha.press),
     '--hair': inkAlpha(hairA),
     '--field-edge': inkAlpha(fieldEdgeA),
+    '--field-edge-focus': inkAlpha(fieldEdgeFocusA),
     '--edge-raised': inkAlpha(edgeRaisedA),
     '--edge': inkAlpha(edgeA),
     '--control-edge': rgbToHex(
@@ -627,7 +634,8 @@ export function measureVariant(tokens) {
     }
     return hexToRgb(v);
   };
-  const isDark = lstar(resolve('--overlay')) > lstar(resolve('--ground'));
+  const isDark = lstar(resolve('--surface')) < 50;
+  const edgeTarget = EDGE_TARGETS[isDark ? 'dark' : 'light'];
   const planes = PLANE_TOKENS.map(resolve);
   const check = (token, floor) => {
     const rgb = resolve(token);
@@ -640,6 +648,32 @@ export function measureVariant(tokens) {
     );
     return { token, floor, ...worstPlane, pass: worstPlane.ratio >= floor };
   };
+  const checkEdge = (token, hosts, floor) => {
+    const value = tokens[token];
+    const match = /^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/u.exec(value);
+    if (!match) throw new Error(`${token} must be an rgba color derived from ink`);
+    const line = [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4])];
+    const worstHost = hosts.reduce(
+      (acc, host) => {
+        const hostRgb = resolve(host);
+        const ratio = contrast(over(line, hostRgb), hostRgb);
+        return ratio < acc.ratio ? { ratio, plane: host } : acc;
+      },
+      { ratio: Infinity, plane: '' }
+    );
+    return { token, floor, ...worstHost, pass: worstHost.ratio >= floor };
+  };
+
+  const fieldEdge = checkEdge(
+    '--field-edge',
+    ['--field', '--surface', '--card', '--overlay'],
+    edgeTarget.fieldEdge
+  );
+  const fieldEdgeFocus = checkEdge(
+    '--field-edge-focus',
+    ['--field-focus', '--field', '--surface', '--card', '--overlay'],
+    edgeTarget.fieldEdgeFocus
+  );
 
   const results = [
     check('--text', 7),
@@ -653,6 +687,7 @@ export function measureVariant(tokens) {
     check('--waiting-ink', 4.5),
     check('--blocked-ink', 4.5),
     check('--verified-ink', 4.5),
+    fieldEdgeFocus,
     ...[1, 2, 3, 4, 5, 6].map((n) => check(`--id-${n}`, 3))
   ];
 
@@ -702,5 +737,12 @@ export function measureVariant(tokens) {
     'card-hover vs card': L('--card-hover') - L('--card')
   };
 
-  return { results, steps, monotonic, separated, failures: results.filter((r) => !r.pass) };
+  return {
+    results,
+    steps,
+    monotonic,
+    separated,
+    edgeFocusSeparated: fieldEdgeFocus.ratio - fieldEdge.ratio >= 0.25,
+    failures: results.filter((r) => !r.pass)
+  };
 }

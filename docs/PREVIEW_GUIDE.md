@@ -35,10 +35,14 @@ When **Check preview** confirms that `.taskmonki/preview.yaml` is missing, the
 Preview workspace offers **Generate with agent** and **Write manually**.
 
 Generation opens a review modal immediately and shows progress while an
-ephemeral read-only agent inspects a bounded sanitized evidence bundle. Likely
+ephemeral agent inspects only a bounded sanitized evidence bundle. The normal
+provider path uses its qualified read-only policy. An exact adapter-local
+qualification can instead permit one provider version and model to use only
+this disposable directory. Likely
 secret-bearing, binary, generated, dependency/cache, and oversized content is excluded.
-The agent cannot write the worktree and is instructed not to run the app,
-tests, scripts, Docker, or network services.
+The agent receives no worktree path. It is instructed not to run the app,
+tests, scripts, Docker, or network services. Task Monki rejects the result if
+the bounded evidence changes during the turn.
 
 For supported framework versions, Task Monki adds narrow compatibility facts
 to the evidence bundle. For example, a Next.js script that pins a port or

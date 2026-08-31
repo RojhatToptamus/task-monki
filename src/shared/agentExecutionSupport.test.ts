@@ -12,91 +12,136 @@ describe('projectAgentExecutionSupport', () => {
     expect(projectAgentExecutionSupport(capabilities, 'PROMPT_REFINEMENT')).toEqual({
       supported: true
     });
+    expect(
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+    ).toEqual({ supported: true });
     expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
       supported: true
     });
     expect(
       projectAgentExecutionSupport(capabilities, 'DESIGN', {
-        model: { inputModalities: ['text', 'image'] }
+        model: {
+          inputModalities: ['text', 'image'],
+          designSupport: { maturity: 'stable' }
+        }
       })
     ).toEqual({ supported: true });
   });
 
-  it('uses the shared read-only policy for review without coupling it to the source runtime', () => {
+  it('uses one shared read-only qualification for refinement, review, and Discourse', () => {
     const capabilities = supportedCapabilities({
-      detachedReview: { maturity: 'unsupported' }
-    });
-
-    expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
-      supported: true
-    });
-  });
-
-  it('explains the exact unqualified read-only profile without disabling normal Tasks', () => {
-    const capabilities = supportedCapabilities({
-      executionPolicy: {
-        defaultPresetId: 'write',
-        detail: 'Write access only.',
-        presets: [
-          {
-            id: 'write',
-            label: 'Write',
-            detail: 'Write access.',
-            sandbox: 'WORKSPACE_WRITE',
-            repositoryMutation: 'ALLOW',
-            approvalPolicy: 'never',
-            approvalsReviewer: 'user',
-            networkAccess: 'DISABLED'
-          }
-        ]
-      },
-      promptRefinement: {
+      readOnlyTurns: {
         maturity: 'unsupported',
-        detail: 'This profile cannot deny shell changes during refinement.'
-      },
-      detachedReview: {
-        maturity: 'unsupported',
-        detail: 'This profile has not passed the review mutation test.'
-      },
-      extensions: {
-        'task-monki.read-only-turn': {
-          maturity: 'unsupported',
-          detail: 'This profile can still mutate through child agents.'
-        }
+        detail: 'This profile can still mutate through child agents.'
       }
     });
 
-    expect(projectAgentExecutionSupport(capabilities, 'PROMPT_REFINEMENT')).toEqual({
+    for (const operation of [
+      'PROMPT_REFINEMENT',
+      'REVIEW',
+      'DISCOURSE'
+    ] as const) {
+      expect(projectAgentExecutionSupport(capabilities, operation)).toEqual({
+        supported: false,
+        reason:
+          'This profile can still mutate through child agents. Normal Tasks remain available.'
+      });
+    }
+  });
+
+  it('allows isolated Preview generation without enabling repository read-only workflows', () => {
+    const capabilities = supportedCapabilities({
+      readOnlyTurns: {
+        maturity: 'unsupported',
+        detail: 'This profile can still mutate a repository.'
+      },
+      extensions: {
+        ...supportedCapabilities().extensions,
+        'task-monki.preview-recipe-generation': { maturity: 'stable' }
+      }
+    });
+
+    expect(
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+    ).toEqual({ supported: true });
+    expect(
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION', {
+        model: {
+          inputModalities: ['text'],
+          previewRecipeGenerationSupport: {
+            maturity: 'unsupported',
+            detail: 'This exact model was not qualified.'
+          }
+        }
+      })
+    ).toEqual({
       supported: false,
-      reason:
-        'This profile cannot deny shell changes during refinement. Normal Tasks remain available.'
+      reason: 'This exact model was not qualified.'
     });
     expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
       supported: false,
       reason:
-        'This profile has not passed the review mutation test. Normal Tasks remain available.'
-    });
-    expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
-      supported: false,
-      reason:
-        'This profile can still mutate through child agents. Normal Tasks remain available.'
+        'This profile can still mutate a repository. Normal Tasks remain available.'
     });
   });
 
-  it('requires the complete current Design and Discourse contracts', () => {
+  it('requires the complete current Design contract and uses the read-only turn capability for Discourse', () => {
     const capabilities = supportedCapabilities();
 
     expect(
       projectAgentExecutionSupport(capabilities, 'DESIGN', {
-        model: { inputModalities: ['text'] }
+        model: {
+          inputModalities: ['text'],
+          designSupport: { maturity: 'stable' }
+        }
       }).supported
     ).toBe(false);
+    expect(
+      projectAgentExecutionSupport(capabilities, 'DESIGN', {
+        model: {
+          inputModalities: ['text', 'image'],
+          designSupport: {
+            maturity: 'unsupported',
+            detail: 'This exact model has not passed Design qualification.'
+          }
+        }
+      })
+    ).toEqual({
+      supported: false,
+      reason: 'This exact model has not passed Design qualification.'
+    });
     expect(
       projectAgentExecutionSupport(
         supportedCapabilities({ attachmentDelivery: { maturity: 'unsupported' } }),
         'DESIGN'
       ).supported
     ).toBe(false);
+    expect(
+      projectAgentExecutionSupport(
+        supportedCapabilities({
+          executionPolicy: {
+            defaultPresetId: 'read-only',
+            detail: 'Read-only execution only.',
+            presets: [
+              {
+                id: 'read-only',
+                label: 'Read only',
+                detail: 'Read-only execution.',
+                sandbox: 'READ_ONLY',
+                repositoryMutation: 'DENY',
+                approvalPolicy: 'never',
+                approvalsReviewer: 'user',
+                networkAccess: 'DISABLED'
+              }
+            ]
+          }
+        }),
+        'DESIGN'
+      )
+    ).toEqual({
+      supported: false,
+      reason: 'This agent has no approval-free write policy for autonomous Design work.'
+    });
     expect(
       projectAgentExecutionSupport(
         supportedCapabilities({
@@ -118,6 +163,33 @@ describe('projectAgentExecutionSupport', () => {
           }
         }),
         'DISCOURSE'
+      )
+    ).toEqual({ supported: true });
+  });
+
+  it('lets the explicit qualification harness bypass only candidate model and image gates', () => {
+    const candidateModel = {
+      inputModalities: ['text'],
+      designSupport: {
+        maturity: 'unsupported' as const,
+        detail: 'This exact model has not passed Design qualification.'
+      }
+    };
+
+    expect(
+      projectAgentExecutionSupport(supportedCapabilities(), 'DESIGN', {
+        model: candidateModel,
+        allowCandidateDesignModel: true
+      })
+    ).toEqual({ supported: true });
+    expect(
+      projectAgentExecutionSupport(
+        supportedCapabilities({ turnInterruption: { maturity: 'unsupported' } }),
+        'DESIGN',
+        {
+          model: candidateModel,
+          allowCandidateDesignModel: true
+        }
       ).supported
     ).toBe(false);
   });
@@ -142,29 +214,24 @@ function supportedCapabilities(
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
           networkAccess: 'DISABLED'
+        },
+        {
+          id: 'write',
+          label: 'Write',
+          detail: 'Autonomous write access.',
+          sandbox: 'WORKSPACE_WRITE',
+          repositoryMutation: 'ALLOW',
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          networkAccess: 'DISABLED'
         }
       ]
     },
-    promptRefinement: stable,
+    readOnlyTurns: stable,
     modelCatalog: stable,
-    reasoningEffort: stable,
-    persistentSessions: stable,
-    sessionResume: stable,
-    sessionFork: stable,
     activeTurnSteering: stable,
     turnInterruption: stable,
-    truePause: { maturity: 'unsupported' },
-    interactiveApprovals: stable,
-    userInputRequests: stable,
-    goals: stable,
-    plans: stable,
-    detachedReview: stable,
-    review: stable,
-    subagents: { maturity: 'unsupported' },
-    backgroundTerminals: { maturity: 'unsupported' },
-    dynamicTools: stable,
     attachmentDelivery: stable,
-    runtimeRecovery: stable,
     extensions: {
       'task-monki.design-instructions': stable,
       'task-monki.design-skill-access': stable,

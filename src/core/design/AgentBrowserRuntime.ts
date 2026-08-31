@@ -13,6 +13,8 @@ const MAX_RUN_SCREENSHOTS = 64;
 const COMMAND_TIMEOUT_MS = 30_000;
 const OPEN_TIMEOUT_MS = 45_000;
 const BROWSER_IDLE_TIMEOUT_MS = 60 * 60_000;
+const DAEMON_SHUTDOWN_IDLE_TIMEOUT_MS = 1_000;
+const DAEMON_SHUTDOWN_TIMEOUT_MS = 5_000;
 const REF = /^@e[1-9][0-9]{0,4}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const AGENT_BROWSER_VERSION = '0.34.0';
@@ -308,9 +310,12 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
       const socketRoot = this.runSocketRoot(marker.runId);
       const environment = this.sessionEnvironment(marker, root, socketRoot);
       try {
-        await this.runCli(environment, ['close'], undefined, 10_000);
-        await removeOwnedScratch(root, marker);
+        await this.runCli(environment, ['close', '--all'], undefined, 10_000);
+        await this.stopDaemon(environment, socketRoot, marker.session);
         await removeOwnedSocketRoot(socketRoot, marker.runId);
+        // Keep the scratch marker until every other run-owned resource is gone.
+        // A later recovery pass needs it to prove socket-directory ownership.
+        await removeOwnedScratch(root, marker);
       } catch (error) {
         failures.push(error instanceof Error ? error : new Error(String(error)));
       }
@@ -485,6 +490,13 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     operation: Extract<InspectDesignOperation, { operation: 'screenshot' }>
   ): Promise<DesignBrowserToolResult> {
     if (operation.ref) requireCurrentRef(operation.ref, session.refs);
+    const usage = this.imageUsage.get(session.runId) ?? { bytes: 0, count: 0 };
+    if (
+      usage.count >= MAX_RUN_SCREENSHOTS ||
+      usage.bytes >= MAX_RUN_IMAGE_BYTES
+    ) {
+      throw new Error('This Design Run reached its temporary screenshot limit.');
+    }
     const screenshotPath = path.join(session.root, `screenshot-${randomUUID()}.png`);
     const args = operation.ref
       ? ['screenshot', operation.ref, screenshotPath]
@@ -492,16 +504,23 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     if (operation.fullPage) args.push('--full');
     try {
       await this.runCli(session.environment, args, session.controller.signal);
-      const bytes = await fs.readFile(screenshotPath);
-      if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+      const screenshot = await fs.lstat(screenshotPath);
+      if (screenshot.isSymbolicLink() || !screenshot.isFile()) {
+        throw new Error('Design browser returned an invalid screenshot file.');
+      }
+      if (screenshot.size === 0 || screenshot.size > MAX_IMAGE_BYTES) {
         throw new Error('Design screenshot exceeds the allowed size.');
       }
-      const usage = this.imageUsage.get(session.runId) ?? { bytes: 0, count: 0 };
-      if (
-        usage.count >= MAX_RUN_SCREENSHOTS ||
-        usage.bytes + bytes.byteLength > MAX_RUN_IMAGE_BYTES
-      ) {
+      if (usage.bytes + screenshot.size > MAX_RUN_IMAGE_BYTES) {
         throw new Error('This Design Run reached its temporary screenshot limit.');
+      }
+      const bytes = await fs.readFile(screenshotPath);
+      if (
+        bytes.byteLength !== screenshot.size ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > MAX_IMAGE_BYTES
+      ) {
+        throw new Error('Design screenshot exceeds the allowed size.');
       }
       const { width, height } = pngDimensions(bytes);
       this.imageUsage.set(session.runId, {
@@ -522,19 +541,46 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     if (!session) return;
     session.controller.abort();
     const closeController = new AbortController();
-    let browserClosed = false;
+    let runtimeClosed = false;
     try {
-      await this.runCli(session.environment, ['close'], closeController.signal, 10_000);
-      browserClosed = true;
+      await this.runCli(
+        session.environment,
+        ['close', '--all'],
+        closeController.signal,
+        10_000
+      );
+      await this.stopDaemon(session.environment, session.socketRoot, session.session);
+      runtimeClosed = true;
     } finally {
       await session.lease.close().catch(() => undefined);
-      if (browserClosed) {
+      if (runtimeClosed) {
         const marker = await readMarker(session.root);
-        await removeOwnedScratch(session.root, marker);
         await removeOwnedSocketRoot(session.socketRoot, runId);
+        // Remove the ownership marker last so a failed socket cleanup remains
+        // retryable in this process and after an application restart.
+        await removeOwnedScratch(session.root, marker);
         this.sessions.delete(runId);
       }
     }
+  }
+
+  private async stopDaemon(
+    environment: NodeJS.ProcessEnv,
+    socketRoot: string,
+    session: string
+  ): Promise<void> {
+    // Version 0.34.0 keeps its daemon after close --all. A changed idle timeout
+    // uses its native configuration restart, then the no-browser daemon exits.
+    await this.runCli(
+      {
+        ...environment,
+        AGENT_BROWSER_IDLE_TIMEOUT_MS: String(DAEMON_SHUTDOWN_IDLE_TIMEOUT_MS)
+      },
+      ['close'],
+      undefined,
+      10_000
+    );
+    await waitForDaemonExit(socketRoot, session, DAEMON_SHUTDOWN_TIMEOUT_MS);
   }
 
   private runCli(
@@ -945,7 +991,7 @@ async function removeOwnedScratch(root: string, marker: BrowserMarker): Promise<
   if (path.resolve(root) !== path.resolve(expected)) {
     throw new Error('Design browser scratch path does not match its ownership marker.');
   }
-  await fs.rm(root, { recursive: true });
+  await fs.rm(root, { recursive: true, force: true });
 }
 
 async function removeOwnedSocketRoot(root: string, runId: string): Promise<void> {
@@ -956,5 +1002,35 @@ async function removeOwnedSocketRoot(root: string, runId: string): Promise<void>
   if (path.resolve(root) !== path.resolve(expected)) {
     throw new Error('Design browser socket path does not match its Run.');
   }
-  await fs.rm(root, { recursive: true });
+  await fs.rm(root, { recursive: true, force: true });
+}
+
+async function waitForDaemonExit(
+  socketRoot: string,
+  session: string,
+  timeoutMs: number
+): Promise<void> {
+  const pidPath = path.join(
+    socketRoot,
+    'namespaces',
+    session,
+    'run',
+    `${session}.pid`
+  );
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      const stat = await fs.lstat(pidPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error('Design browser daemon ownership metadata is invalid.');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('The Design browser daemon did not stop.');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }

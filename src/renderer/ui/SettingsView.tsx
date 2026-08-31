@@ -18,7 +18,10 @@ import {
   type TestExternalToolRequest,
   type UpdateAppSettingsRequest
 } from '../../shared/contracts';
-import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
+import {
+  projectAgentExecutionSupport,
+  type AgentExecutionOperation
+} from '../../shared/agentExecutionSupport';
 import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
 import {
   buildExecutableTestRequest,
@@ -308,11 +311,22 @@ function ModelSettings({
   );
   const enabledModels = models.filter((model) => enabledRuntimeIds.has(model.runtimeId));
   const selected = selectSettingsModels(enabledModels, enabledRuntimes, appSettings);
+  const selectedPreviewRuntime = enabledRuntimes.find(
+    (runtime) =>
+      runtime.preflight.runtime.id === selected.previewRecipeGenerationRuntimeId
+  );
+  const previewUnavailableReason = selectedPreviewRuntime
+      ? runtimeExecutionUnavailableReason(
+          selectedPreviewRuntime,
+          'PREVIEW_RECIPE_GENERATION',
+          { model: selected.selectedPreviewRecipeGenerationModel }
+        )
+      : undefined;
   return (
     <SettingsPane
       id="models"
       title="Models"
-      detail="Defaults for implementation, prompt refinement, and review."
+      detail="Defaults for implementation, prompt refinement, Preview generation, and review."
     >
       <div className="tm-model-defaults">
         <AgentModelSetting
@@ -362,6 +376,61 @@ function ModelSettings({
           }}
         />
         <AgentModelSetting
+          label="Preview generation"
+          runtimeId={selected.previewRecipeGenerationRuntimeId}
+          modelId={selected.selectedPreviewRecipeGenerationModel?.id ?? ''}
+          fallbackSummary={
+            selected.selectedPreviewRecipeGenerationModel
+              ? undefined
+              : enabledRuntimes.some(
+                    (runtime) =>
+                      runtime.preflight.runtime.id ===
+                      selected.previewRecipeGenerationRuntimeId
+                  )
+                ? (appSettings.previewRecipeGenerationModel ?? undefined)
+                : (appSettings.previewRecipeGenerationModel ?? 'Choose a model')
+          }
+          selectionUnavailable={Boolean(
+            !enabledRuntimes.some(
+              (runtime) =>
+                runtime.preflight.runtime.id ===
+                selected.previewRecipeGenerationRuntimeId
+            ) ||
+              ((appSettings.previewRecipeGenerationModel ||
+                appSettings.previewRecipeGenerationModelProvider) &&
+                !selected.selectedPreviewRecipeGenerationModel) ||
+              previewUnavailableReason
+          )}
+          selectionUnavailableMessage={
+            previewUnavailableReason ??
+            'The selected Preview agent or model is no longer available. Choose another selection.'
+          }
+          models={enabledModels}
+          runtimes={enabledRuntimes}
+          runtimeUnavailableReason={(runtime) =>
+            runtimeExecutionUnavailableReason(runtime, 'PREVIEW_RECIPE_GENERATION')
+          }
+          modelUnavailableReason={(model, runtime) =>
+            runtimeExecutionUnavailableReason(
+              runtime,
+              'PREVIEW_RECIPE_GENERATION',
+              { model }
+            )
+          }
+          onDiscoverModels={onDiscoverAgentRuntimeModels}
+          onSelectionChange={(runtimeId, modelId) => {
+            const nextModel =
+              enabledModels.find(
+                (candidate) => candidate.runtimeId === runtimeId && candidate.id === modelId
+              ) ?? selectModel(enabledModels, undefined, runtimeId);
+            onSetAppSettings({
+              previewRecipeGenerationRuntimeId: runtimeId,
+              previewRecipeGenerationModel: nextModel?.model ?? null,
+              previewRecipeGenerationModelProvider: nextModel?.modelProvider ?? null
+            });
+          }}
+        />
+        <AgentModelSetting
           label="Review"
           runtimeId={selected.reviewRuntimeId}
           modelId={selected.selectedReviewModel?.id ?? ''}
@@ -396,9 +465,11 @@ function ModelSettings({
 interface SelectedSettingsModels {
   defaultRuntimeId: string;
   promptRefinementRuntimeId: string;
+  previewRecipeGenerationRuntimeId: string;
   reviewRuntimeId: string;
   selectedDefaultModel?: AgentModel;
   selectedPromptRefinementModel?: AgentModel;
+  selectedPreviewRecipeGenerationModel?: AgentModel;
   selectedReviewModel?: AgentModel;
   selectedDefaultEffort: string;
   selectedReviewEffort: string;
@@ -421,30 +492,21 @@ export function selectSettingsModels(
   const defaultRuntimeId = availableRuntimeIds.has(appSettings.defaultRuntimeId)
     ? appSettings.defaultRuntimeId
     : firstRuntimeId;
-  const promptRefinementRuntimeIds = new Set(
-    runtimes
-      .filter(
-        (runtime) =>
-          runtime.preflight.readiness.canStart &&
-          projectAgentExecutionSupport(
-            runtime.preflight.capabilities,
-            'PROMPT_REFINEMENT'
-          ).supported
-      )
-      .map((runtime) => runtime.preflight.runtime.id)
-  );
-  const reviewRuntimeIds = new Set(
-    runtimes
-      .filter(
-        (runtime) =>
-          runtime.preflight.readiness.canStart &&
-          projectAgentExecutionSupport(
-            runtime.preflight.capabilities,
-            'REVIEW'
-          ).supported
-      )
-      .map((runtime) => runtime.preflight.runtime.id)
-  );
+  const supportedRuntimeIds = (operation: AgentExecutionOperation) =>
+    new Set(
+      runtimes
+        .filter(
+          (runtime) =>
+            runtime.preflight.readiness.canStart &&
+            projectAgentExecutionSupport(
+              runtime.preflight.capabilities,
+              operation
+            ).supported
+        )
+        .map((runtime) => runtime.preflight.runtime.id)
+    );
+  const promptRefinementRuntimeIds = supportedRuntimeIds('PROMPT_REFINEMENT');
+  const reviewRuntimeIds = supportedRuntimeIds('REVIEW');
   const promptRefinementRuntimeId =
     appSettings.promptRefinementRuntimeId &&
     availableRuntimeIds.has(appSettings.promptRefinementRuntimeId)
@@ -452,6 +514,8 @@ export function selectSettingsModels(
       : promptRefinementRuntimeIds.has(defaultRuntimeId)
         ? defaultRuntimeId
         : ([...promptRefinementRuntimeIds][0] ?? defaultRuntimeId);
+  const previewRecipeGenerationRuntimeId =
+    appSettings.previewRecipeGenerationRuntimeId ?? defaultRuntimeId;
   const reviewRuntimeId =
     appSettings.reviewRuntimeId && availableRuntimeIds.has(appSettings.reviewRuntimeId)
       ? appSettings.reviewRuntimeId
@@ -470,6 +534,21 @@ export function selectSettingsModels(
     promptRefinementRuntimeId,
     appSettings.promptRefinementModelProvider
   );
+  const selectedPreviewRecipeGenerationModel = appSettings.previewRecipeGenerationModel
+    ? models.find(
+        (model) =>
+          model.runtimeId === previewRecipeGenerationRuntimeId &&
+          (model.id === appSettings.previewRecipeGenerationModel ||
+            model.model === appSettings.previewRecipeGenerationModel) &&
+          (!appSettings.previewRecipeGenerationModelProvider ||
+            model.modelProvider === appSettings.previewRecipeGenerationModelProvider)
+      )
+    : selectModel(
+        models,
+        undefined,
+        previewRecipeGenerationRuntimeId,
+        appSettings.previewRecipeGenerationModelProvider
+      );
   const selectedReviewModel = selectModel(
     models,
     appSettings.reviewModel,
@@ -480,9 +559,11 @@ export function selectSettingsModels(
   return {
     defaultRuntimeId,
     promptRefinementRuntimeId,
+    previewRecipeGenerationRuntimeId,
     reviewRuntimeId,
     selectedDefaultModel,
     selectedPromptRefinementModel,
+    selectedPreviewRecipeGenerationModel,
     selectedReviewModel,
     selectedDefaultEffort:
       resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '',
@@ -1321,6 +1402,9 @@ function runtimeDisableReason(
   const purposes = [
     appSettings.defaultRuntimeId === runtimeId ? 'Implementation' : undefined,
     appSettings.promptRefinementRuntimeId === runtimeId ? 'Prompt refinement' : undefined,
+    appSettings.previewRecipeGenerationRuntimeId === runtimeId
+      ? 'Preview generation'
+      : undefined,
     appSettings.reviewRuntimeId === runtimeId ? 'Review' : undefined
   ].filter((purpose): purpose is string => Boolean(purpose));
 

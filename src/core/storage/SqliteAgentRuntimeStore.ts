@@ -39,6 +39,7 @@ import {
 import {
   assertAccessEpochMatches,
   assertAgentOwnerScope,
+  assertAgentRuntimePurposeScope,
   assertAgentRunScope,
   createAgentSessionAccessEpoch
 } from '../agent/AgentRuntimeOwnership';
@@ -222,6 +223,7 @@ interface RuntimeMetadataRecord {
 interface RuntimeOwnerRecord {
   owner_kind: string | null;
   task_id: string | null;
+  generation_id: string | null;
   request_id: string | null;
   conversation_id: string | null;
   stable_participant_id: string | null;
@@ -1175,6 +1177,9 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
           throw new Error(`Agent runtime artifact not found: ${artifactId}`);
         }
         const existing = draft.artifacts[index]!;
+        if (existing.kind !== 'OUTPUT' && existing.kind !== 'DIAGNOSTIC') {
+          throw new Error('Only streamed Agent runtime artifacts can be appended.');
+        }
         if (existing.recordRevision !== currentArtifact.recordRevision) {
           throw new Error('Agent runtime artifact changed before the requested append.');
         }
@@ -1428,6 +1433,7 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
          FROM runtime_telemetry
          WHERE coalesce(owner_kind, 'APP') = ?
            AND coalesce(task_id, '') = ?
+           AND coalesce(generation_id, '') = ?
            AND coalesce(request_id, '') = ?
            AND coalesce(conversation_id, '') = ?
            AND coalesce(stable_participant_id, '') = ?
@@ -1435,6 +1441,7 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
         [
           owner.owner_kind ?? 'APP',
           owner.task_id ?? '',
+          owner.generation_id ?? '',
           owner.request_id ?? '',
           owner.conversation_id ?? '',
           owner.stable_participant_id ?? '',
@@ -1515,16 +1522,17 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
 
       transaction.run(
         `INSERT INTO runtime_telemetry (
-           id, kind, owner_kind, task_id, request_id, conversation_id,
+           id, kind, owner_kind, task_id, generation_id, request_id, conversation_id,
            stable_participant_id, session_id, run_id, server_instance_id,
            provider_identity, client_operation_id, request_fingerprint,
            observed_at, created_at, payload_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           record.id,
           record.kind,
           owner.owner_kind,
           owner.task_id,
+          owner.generation_id,
           owner.request_id,
           owner.conversation_id,
           owner.stable_participant_id,
@@ -2526,6 +2534,7 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
           outputArtifactId: `output-${input.id}`,
           diagnosticArtifactId: `diagnostic-${input.id}`,
           instructionProfile: input.instructionProfile,
+          clientToolGrants: input.clientToolGrants,
           attachmentSelection: input.attachmentSelection,
           taskDetails: {
             retryOfRunId: input.retryOfRunId,
@@ -3096,6 +3105,30 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
         owner?.kind === 'PROMPT_REFINEMENT' && owner.requestId === requestId,
       'prompt refinement',
       { kind: 'EXACT', ownerId: `prompt-refinement:${requestId}` }
+    );
+  }
+
+  async purgePreviewRecipeGeneration(
+    taskId: string,
+    generationId: string
+  ): Promise<{
+    sessionCount: number;
+    runCount: number;
+    artifactCount: number;
+    queueEntryCount: number;
+  }> {
+    requireSafeId(taskId, 'preview-recipe task id');
+    requireSafeId(generationId, 'preview-recipe generation id');
+    return this.purgeRuntimeOwner(
+      (owner) =>
+        owner?.kind === 'PREVIEW_RECIPE_GENERATION' &&
+        owner.taskId === taskId &&
+        owner.generationId === generationId,
+      'preview-recipe generation',
+      {
+        kind: 'EXACT',
+        ownerId: `preview-recipe-generation:${taskId}:${generationId}`
+      }
     );
   }
 
@@ -3673,6 +3706,7 @@ function insertRuntimeRun(
   }
   assertAgentOwnerScope(input.owner);
   assertAgentRunScope(input.scope, input.owner);
+  assertAgentRuntimePurposeScope(input.purpose, input.scope);
   const session = requireSession(draft, input.sessionId);
   if (
     agentOwnerScopeKey(session.owner) !== agentOwnerScopeKey(input.owner) ||
@@ -4093,7 +4127,7 @@ function validateState(state: AgentRuntimeStoreState): void {
         throw new Error('Task agent runtime session context is invalid.');
       }
     } else if (session.taskContext !== undefined) {
-      throw new Error('Discourse agent runtime sessions cannot carry Task context.');
+      throw new Error('Non-Task agent runtime sessions cannot carry Task context.');
     }
     if (session.providerSessionId !== undefined) {
       providerSessionIds.add(
@@ -4117,6 +4151,7 @@ function validateState(state: AgentRuntimeStoreState): void {
   for (const run of state.runs) {
     assertAgentOwnerScope(run.owner);
     assertAgentRunScope(run.scope, run.owner);
+    assertAgentRuntimePurposeScope(run.purpose, run.scope);
     const session = sessions.get(run.sessionId);
     if (
       !session ||
@@ -5846,6 +5881,7 @@ function runtimeOwnerColumns(owner: AgentOwnerScope | undefined): RuntimeOwnerRe
     return {
       owner_kind: null,
       task_id: null,
+      generation_id: null,
       request_id: null,
       conversation_id: null,
       stable_participant_id: null
@@ -5853,7 +5889,12 @@ function runtimeOwnerColumns(owner: AgentOwnerScope | undefined): RuntimeOwnerRe
   }
   return {
     owner_kind: owner.kind,
-    task_id: owner.kind === 'TASK' ? owner.taskId : null,
+    task_id:
+      owner.kind === 'TASK' || owner.kind === 'PREVIEW_RECIPE_GENERATION'
+        ? owner.taskId
+        : null,
+    generation_id:
+      owner.kind === 'PREVIEW_RECIPE_GENERATION' ? owner.generationId : null,
     request_id: owner.kind === 'PROMPT_REFINEMENT' ? owner.requestId : null,
     conversation_id: owner.kind === 'DISCOURSE' ? owner.conversationId : null,
     stable_participant_id:
@@ -5890,7 +5931,7 @@ function assertTelemetryReferencesInDatabase(
   }
   if (input.sessionId) {
     const session = transaction.get<RuntimeOwnerRecord>(
-      `SELECT owner_kind, task_id, request_id, conversation_id, stable_participant_id
+      `SELECT owner_kind, task_id, generation_id, request_id, conversation_id, stable_participant_id
        FROM runtime_sessions WHERE id = ?`,
       [input.sessionId]
     );
@@ -5900,7 +5941,7 @@ function assertTelemetryReferencesInDatabase(
   }
   if (input.runId) {
     const run = transaction.get<RuntimeOwnerRecord & { session_id: string }>(
-      `SELECT owner_kind, task_id, request_id, conversation_id,
+      `SELECT owner_kind, task_id, generation_id, request_id, conversation_id,
               stable_participant_id, session_id
        FROM runtime_runs WHERE id = ?`,
       [input.runId]
@@ -5921,6 +5962,7 @@ function sameRuntimeOwnerColumns(
   return (
     left.owner_kind === right.owner_kind &&
     left.task_id === right.task_id &&
+    left.generation_id === right.generation_id &&
     left.request_id === right.request_id &&
     left.conversation_id === right.conversation_id &&
     left.stable_participant_id === right.stable_participant_id

@@ -719,6 +719,15 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
   }, [props.recipeGeneration]);
 
   const generate = async () => {
+    if (props.recipeGenerationDisabledReason) {
+      setLocalGeneration({
+        taskId: props.task.id,
+        status: 'FAILED',
+        failureCode: 'AGENT_UNAVAILABLE',
+        message: props.recipeGenerationDisabledReason
+      });
+      return;
+    }
     setLocalGeneration((current) => ({
       taskId: props.task.id,
       status: 'GENERATING',
@@ -728,13 +737,16 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
     }));
     try {
       setLocalGeneration(await props.onGenerateRecipe(props.task.id));
-    } catch {
+    } catch (caught) {
       setLocalGeneration((current) => ({
         taskId: props.task.id,
         status: 'FAILED',
         draft: current?.draft,
         failureCode: 'AGENT_UNAVAILABLE',
-        message: 'The Preview recipe agent could not produce a draft.'
+        message:
+          caught instanceof Error
+            ? caught.message
+            : 'The Preview recipe agent could not produce a draft.'
       }));
     }
   };
@@ -746,19 +758,35 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
       const current = await props.onGetRecipeGeneration(props.task.id);
       setLocalGeneration(current);
       if (current.status === 'EMPTY') await generate();
-    } catch {
+    } catch (caught) {
       setLocalGeneration({
         taskId: props.task.id,
         status: 'FAILED',
         failureCode: 'AGENT_UNAVAILABLE',
-        message: 'The Preview recipe agent could not be opened.'
+        message:
+          caught instanceof Error
+            ? caught.message
+            : 'The Preview recipe agent could not be opened.'
       });
     }
   };
 
   const discard = async () => {
-    setLocalGeneration(await props.onDiscardRecipeDraft(props.task.id));
-    setModalOpen(false);
+    try {
+      setLocalGeneration(await props.onDiscardRecipeDraft(props.task.id));
+      setModalOpen(false);
+    } catch (caught) {
+      setLocalGeneration((current) => ({
+        taskId: props.task.id,
+        status: 'FAILED',
+        draft: current?.draft,
+        failureCode: 'CANCELLATION_UNCONFIRMED',
+        message:
+          caught instanceof Error
+            ? caught.message
+            : 'Task Monki could not confirm that Preview recipe generation stopped.'
+      }));
+    }
   };
 
   return (
@@ -778,6 +806,8 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
           <button
             type="button"
             className="primary-button"
+            disabled={Boolean(props.recipeGenerationDisabledReason)}
+            title={props.recipeGenerationDisabledReason}
             onClick={(event) => void openGenerator(event.currentTarget)}
           >
             Generate with agent
@@ -793,6 +823,9 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
             Write manually
           </button>
         </div>
+        {props.recipeGenerationDisabledReason ? (
+          <small role="status">{props.recipeGenerationDisabledReason}</small>
+        ) : null}
       </header>
 
       <div className="tm-preview-setup">
@@ -802,8 +835,8 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
         </div>
         <div className="tm-preview-setup__rules">
           <p>
-            The agent inspects a bounded read-only evidence bundle and cannot write the
-            repository. You review the complete YAML before accepting it.
+            The agent inspects a bounded evidence bundle. You review the complete YAML
+            before accepting it.
           </p>
           <p>
             Acceptance creates only the Preview recipe, then checks it through the normal

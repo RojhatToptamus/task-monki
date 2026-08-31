@@ -1629,6 +1629,74 @@ describe('SqliteAgentRuntimeStore', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('persists and purges only the exact settled Preview recipe generation', async () => {
+    const fixture = await storeFixture();
+    const createGeneration = async (generationId: string) => {
+      const owner: AgentOwnerScope = {
+        kind: 'PREVIEW_RECIPE_GENERATION',
+        taskId: 'task-1',
+        generationId
+      };
+      const scope: AgentRunScope = { ...owner };
+      const session = await fixture.store.createSession(
+        sessionInput(`${generationId}-session`, owner, 'create-preview-session')
+      );
+      const run = await fixture.store.createRun({
+        ...runInput(`${generationId}-run`, session, scope, 'create-preview-run'),
+        purpose: 'PREVIEW_RECIPE_GENERATION'
+      });
+      const artifact = await fixture.store.createArtifact({
+        id: run.outputArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'OUTPUT',
+        clientOperationId: 'create-preview-output',
+        content: `Preview recipe ${generationId}`
+      });
+      await fixture.store.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          status: 'FAILED',
+          delivery: 'NOT_DELIVERED',
+          terminalReason: 'Synthetic terminal generation.',
+          endedAt: '2026-07-13T00:00:20.000Z'
+        },
+        'finish-preview-generation'
+      );
+      return { artifact, run, session };
+    };
+    const target = await createGeneration('generation-1');
+    const retained = await createGeneration('generation-2');
+    const targetOwner = 'preview-recipe-generation:task-1:generation-1';
+    const retainedOwner = 'preview-recipe-generation:task-1:generation-2';
+
+    await fixture.store.close();
+    const restarted = await fixture.openStore();
+    await expect(restarted.getSession(target.session.id)).resolves.toBeDefined();
+    await expect(
+      restarted.purgePreviewRecipeGeneration('task-1', 'generation-1')
+    ).resolves.toEqual({
+      sessionCount: 1,
+      runCount: 1,
+      artifactCount: 1,
+      queueEntryCount: 0
+    });
+    await expect(restarted.getSession(target.session.id)).resolves.toBeUndefined();
+    await expect(restarted.getRun(target.run.id)).resolves.toBeUndefined();
+    await expect(restarted.getSession(retained.session.id)).resolves.toBeDefined();
+    await expect(restarted.getRun(retained.run.id)).resolves.toBeDefined();
+    expect(await runtimeReceiptCount(fixture.database, targetOwner)).toBe(0);
+    expect(await runtimeReceiptCount(fixture.database, retainedOwner)).toBeGreaterThan(0);
+    await expect(
+      fs.stat(path.join(fixture.managedFiles.rootPath, target.artifact.storageKey))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fs.stat(path.join(fixture.managedFiles.rootPath, retained.artifact.storageKey))
+    ).resolves.toBeDefined();
+    await restarted.close();
+  });
+
 });
 
 const taskOwner: AgentOwnerScope = { kind: 'TASK', taskId: 'task-1' };

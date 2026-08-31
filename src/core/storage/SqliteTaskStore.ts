@@ -140,6 +140,7 @@ export interface ManagedDesignRepositoryInput {
 
 export interface CreateDesignBundleInput {
   request: CreateBlankDesignRequest;
+  agentSettings: AgentExecutionSettings;
   repository: ManagedDesignRepositoryInput;
 }
 
@@ -367,12 +368,16 @@ function designCreationMetadata(
     );
   }
   const brief = input.brief.trim();
+  const runtimeId = input.runtimeId;
   const model = normalizedOptionalString(input.model);
+  const modelProvider = normalizedOptionalString(input.modelProvider);
   const reasoningEffort = normalizedOptionalString(input.reasoningEffort);
   if (
     !brief ||
+    !isRuntimeId(runtimeId) ||
     Buffer.byteLength(brief, 'utf8') > 1024 * 1024 ||
     (input.model !== undefined && !model) ||
+    (input.modelProvider !== undefined && !modelProvider) ||
     (input.reasoningEffort !== undefined && !reasoningEffort)
   ) {
     throw new TaskCreationRequestError(
@@ -384,8 +389,9 @@ function designCreationMetadata(
   const canonicalRequest = stableJsonStringify({
     kind: 'DESIGN_BLANK',
     brief,
-    runtimeId: CODEX_RUNTIME_ID,
+    runtimeId,
     model: model ?? null,
+    modelProvider: modelProvider ?? null,
     reasoningEffort: reasoningEffort ?? null,
     attachmentDraftId: input.attachmentDraftId ?? null
   });
@@ -2457,6 +2463,10 @@ export class SqliteTaskStore {
 
       const metadata = designCreationMetadata(input.request);
       const brief = input.request.brief.trim();
+      const runtimeId = input.request.runtimeId;
+      if (input.agentSettings.runtimeId !== runtimeId) {
+        throw new Error('Design runtime and execution settings runtime must match.');
+      }
       if (!brief) throw new Error('Design brief is required.');
       const repositoryPath = path.resolve(input.repository.path);
       if (
@@ -2495,7 +2505,7 @@ export class SqliteTaskStore {
       const task: Task = {
         id: randomUUID(),
         kind: 'DESIGN',
-        runtimeId: CODEX_RUNTIME_ID,
+        runtimeId,
         title: deriveDesignTitle(brief),
         prompt: brief,
         repositoryId: repository.id,
@@ -2506,15 +2516,7 @@ export class SqliteTaskStore {
         completionPolicy: 'MANUAL',
         phaseVersion: 1,
         forkedAlternativeTaskIds: [],
-        agentSettings: {
-          runtimeId: CODEX_RUNTIME_ID,
-          model: normalizedOptionalString(input.request.model),
-          reasoningEffort: normalizedOptionalString(input.request.reasoningEffort),
-          sandbox: 'WORKSPACE_WRITE',
-          networkAccess: false,
-          approvalPolicy: 'never',
-          approvalsReviewer: 'user'
-        },
+        agentSettings: { ...input.agentSettings, runtimeId },
         createdAt: now,
         updatedAt: now,
         projection: createInitialProjection(now)
@@ -6575,8 +6577,7 @@ function validatePersistedDesignRelationships(state: StoreState): void {
       (repository?.kind !== 'DESIGN_MANAGED' ||
         !['READY', 'ARCHIVED'].includes(task.workflowPhase) ||
         task.completionPolicy !== 'MANUAL' ||
-        task.runtimeId !== CODEX_RUNTIME_ID ||
-        !hasRestrictedDesignRequestedSettings(task.agentSettings) ||
+        !hasDesignRuntimeSettings(task.runtimeId, task.agentSettings) ||
         ((task.sourceDesignId === undefined) !==
           (task.sourceDesignRevisionId === undefined)) ||
         (!state.designTurns.some((turn) => turn.designId === task.id) &&
@@ -6616,8 +6617,8 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     const task = tasks.get(session.taskId);
     if (
       task?.kind === 'DESIGN' &&
-      (!hasRestrictedDesignRequestedSettings(session.requestedSettings) ||
-        hasContradictoryDesignObservedSettings(session.observedSettings))
+      (!hasDesignRuntimeSettings(task.runtimeId, session.requestedSettings) ||
+        hasContradictoryDesignRuntime(task.runtimeId, session.observedSettings))
     ) {
       invalidPersistedRelationship('Design session execution policy');
     }
@@ -6628,8 +6629,8 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     if (!task) continue;
     if (
       task.kind === 'DESIGN' &&
-      (!hasRestrictedDesignRequestedSettings(run.requestedSettings) ||
-        hasContradictoryDesignObservedSettings(run.observedSettings))
+      (!hasDesignRuntimeSettings(task.runtimeId, run.requestedSettings) ||
+        hasContradictoryDesignRuntime(task.runtimeId, run.observedSettings))
     ) {
       invalidPersistedRelationship('Design Run execution policy');
     }
@@ -6924,29 +6925,18 @@ function validatePersistedDesignRelationships(state: StoreState): void {
   }
 }
 
-function hasRestrictedDesignRequestedSettings(
+function hasDesignRuntimeSettings(
+  runtimeId: string,
   settings: AgentExecutionSettings
 ): boolean {
-  return (
-    settings.runtimeId === CODEX_RUNTIME_ID &&
-    settings.sandbox === 'WORKSPACE_WRITE' &&
-    settings.networkAccess === false &&
-    settings.approvalPolicy === 'never' &&
-    settings.approvalsReviewer === 'user'
-  );
+  return settings.runtimeId === runtimeId;
 }
 
-function hasContradictoryDesignObservedSettings(
+function hasContradictoryDesignRuntime(
+  runtimeId: string,
   settings: AgentExecutionSettings | undefined
 ): boolean {
-  if (!settings) return false;
-  return (
-    (settings.runtimeId !== undefined && settings.runtimeId !== CODEX_RUNTIME_ID) ||
-    (settings.sandbox !== undefined && settings.sandbox !== 'WORKSPACE_WRITE') ||
-    (settings.networkAccess !== undefined && settings.networkAccess !== false) ||
-    (settings.approvalPolicy !== undefined && settings.approvalPolicy !== 'never') ||
-    (settings.approvalsReviewer !== undefined && settings.approvalsReviewer !== 'user')
-  );
+  return settings?.runtimeId !== undefined && settings.runtimeId !== runtimeId;
 }
 
 function validatePersistedDesignCheckpoint(
@@ -6993,8 +6983,10 @@ function validatePersistedDesignCheckpoint(
       generation.source.designRevisionId !== undefined ||
       !(
         (generation.state === 'READY' && generation.routingState === 'CANDIDATE') ||
+        generation.state === 'STOPPING' ||
         generation.state === 'STOPPED' ||
-        generation.state === 'FAILED'
+        generation.state === 'FAILED' ||
+        generation.state === 'CLEANUP_INCOMPLETE'
       )
     ) {
       invalidPersistedRelationship('opened Design candidate ownership');
@@ -7484,7 +7476,7 @@ function projectDesignCanvas(
     return {
       state: 'PREVIEWING',
       target: progressTarget,
-      detail: 'Codex is checking this working preview. It is not Ready yet.'
+      detail: 'The Design agent is checking this working preview. It is not Ready yet.'
     };
   }
   if (currentPreview && route) {

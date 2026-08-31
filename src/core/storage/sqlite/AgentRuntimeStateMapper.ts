@@ -61,6 +61,7 @@ function ownerValues(owner: AgentOwnerScope | undefined): RowValues {
     return {
       owner_kind: null,
       task_id: null,
+      generation_id: null,
       request_id: null,
       conversation_id: null,
       stable_participant_id: null
@@ -68,7 +69,12 @@ function ownerValues(owner: AgentOwnerScope | undefined): RowValues {
   }
   return {
     owner_kind: owner.kind,
-    task_id: owner.kind === 'TASK' ? owner.taskId : null,
+    task_id:
+      owner.kind === 'TASK' || owner.kind === 'PREVIEW_RECIPE_GENERATION'
+        ? owner.taskId
+        : null,
+    generation_id:
+      owner.kind === 'PREVIEW_RECIPE_GENERATION' ? owner.generationId : null,
     request_id: owner.kind === 'PROMPT_REFINEMENT' ? owner.requestId : null,
     conversation_id: owner.kind === 'DISCOURSE' ? owner.conversationId : null,
     stable_participant_id: owner.kind === 'DISCOURSE' ? owner.stableParticipantId : null
@@ -665,6 +671,9 @@ function runtimeArtifactManagedFileId(artifactId: string): string {
 function ownerKey(owner: AgentOwnerScope): string {
   if (owner.kind === 'TASK') return `task:${owner.taskId}`;
   if (owner.kind === 'PROMPT_REFINEMENT') return `prompt-refinement:${owner.requestId}`;
+  if (owner.kind === 'PREVIEW_RECIPE_GENERATION') {
+    return `preview-recipe-generation:${owner.taskId}:${owner.generationId}`;
+  }
   return `discourse:${owner.conversationId}:${owner.stableParticipantId}`;
 }
 

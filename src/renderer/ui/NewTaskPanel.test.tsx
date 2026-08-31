@@ -82,7 +82,9 @@ describe('NewTaskPanel', () => {
   });
 
   it('blocks images until an explicitly image-capable model is selected', () => {
-    expect(imageAttachmentModelError(true, undefined)).toContain('not reported');
+    expect(imageAttachmentModelError(true, undefined)).toContain(
+      'No image-capable model is available'
+    );
     expect(
       imageAttachmentModelError(true, {
         id: 'text-model',
@@ -96,7 +98,7 @@ describe('NewTaskPanel', () => {
         serviceTiers: [],
         inputModalities: ['text']
       })
-    ).toContain('not qualified');
+    ).toContain('does not support image input');
     expect(
       imageAttachmentModelError(true, {
         id: 'vision-model',
@@ -398,8 +400,9 @@ describe('NewTaskPanel', () => {
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
     expect(html).toContain('aria-labelledby="task-network-access-label"');
     expect(html).toContain('<details');
-    expect(html).toContain('>Agent<');
-    expect(html).toContain('aria-label="Run configuration agent and model"');
+    expect(html).toContain('>Model<');
+    expect(html).toContain('aria-label="Search models and providers"');
+    expect(html).toContain('aria-label="Models by provider"');
     expect(html).toContain('OpenCode');
     expect(html).toContain('OpenCode-only model');
     expect(html).toContain('role="separator"');

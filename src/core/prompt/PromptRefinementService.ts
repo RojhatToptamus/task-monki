@@ -75,10 +75,13 @@ class PromptRefinementResponseValidationError extends Error {
 export class PromptRefinementService {
   private terminationFence?: PromptRefinementTerminationUnconfirmedError;
   private readonly active = new Map<string, ActiveRefinement>();
+  private accepting = true;
+  private shutdownWork?: Promise<void>;
 
   constructor(private readonly runModel: PromptRefinementRunner) {}
 
   async refine(input: PromptRefinementInput): Promise<RefinePromptResponse> {
+    if (!this.accepting) throw new Error('Prompt refinement is shutting down.');
     const requestId = requireRequestId(input.requestId);
     const userRequest = input.input.trim();
     if (!userRequest) throw new Error('Prompt text is required.');
@@ -173,6 +176,25 @@ export class PromptRefinementService {
     }
   }
 
+  beginShutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    this.accepting = false;
+    const work = Promise.allSettled(
+      [...this.active.keys()].map((requestId) => this.cancel(requestId))
+    ).then((results) => {
+      const failures = results.flatMap((result) =>
+        result.status === 'rejected'
+          ? [result.reason instanceof Error ? result.reason : new Error(String(result.reason))]
+          : []
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Prompt refinement shutdown cleanup is incomplete.');
+      }
+    });
+    this.shutdownWork = work;
+    return work;
+  }
+
   private cancelActive(active: ActiveRefinement): Promise<void> {
     if (active.cancellation) return active.cancellation;
     active.cancellation = (async () => {
@@ -202,11 +224,7 @@ async function parseModelRefinement(input: {
   attachmentSubmissions: readonly AttachmentSubmissionRecord[];
   forbiddenManagedPaths: readonly string[];
 }): Promise<Pick<RefinePromptResponse, 'prompt' | 'titleSuggestion' | 'evidence'>> {
-  const normalized = input.output
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '');
-  const parsed = JSON.parse(normalized) as Record<string, unknown>;
+  const parsed = parseRefinementObject(input.output);
   if (typeof parsed.prompt !== 'string' || typeof parsed.titleSuggestion !== 'string') {
     throw new Error('Prompt refinement response has an invalid shape.');
   }
@@ -282,6 +300,69 @@ async function parseModelRefinement(input: {
     titleSuggestion: titleSuggestion.slice(0, 72),
     evidence
   };
+}
+
+function parseRefinementObject(output: string): Record<string, unknown> {
+  const normalized = output.trim();
+  try {
+    return JSON.parse(stripOuterJsonFence(normalized)) as Record<string, unknown>;
+  } catch (directError) {
+    const fenced = extractSingleJsonFence(normalized);
+    if (fenced !== undefined) {
+      return JSON.parse(fenced) as Record<string, unknown>;
+    }
+    const start = normalized.indexOf('{');
+    if (start > 0) {
+      const prefix = normalized.slice(0, start);
+      if (prefix.length <= 4_096 && !/[{}[\]]/u.test(prefix)) {
+        try {
+          return JSON.parse(normalized.slice(start).trim()) as Record<string, unknown>;
+        } catch {
+          // The complete suffix must be the only JSON result.
+        }
+      }
+    }
+    throw directError;
+  }
+}
+
+function stripOuterJsonFence(value: string): string {
+  return value
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '');
+}
+
+function extractSingleJsonFence(value: string): string | undefined {
+  const lines = value.split(/\r?\n/u);
+  let block: { content: string; opening: number; closing: number } | undefined;
+  let start: number | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (start === undefined) {
+      if (/^\s*```json\s*$/iu.test(line)) {
+        if (block) return undefined;
+        start = index + 1;
+      }
+      continue;
+    }
+    if (/^\s*```\s*$/u.test(line)) {
+      block = {
+        content: lines.slice(start, index).join('\n').trim(),
+        opening: start - 1,
+        closing: index
+      };
+      start = undefined;
+    }
+  }
+  if (start !== undefined || !block?.content) return undefined;
+  const surrounding = [
+    ...lines.slice(0, block.opening),
+    ...lines.slice(block.closing + 1)
+  ].join('\n');
+  if (surrounding.length > 4_096 || /[{}[\]]|```/u.test(surrounding)) {
+    return undefined;
+  }
+  return block.content;
 }
 
 async function validateRepositoryFiles(

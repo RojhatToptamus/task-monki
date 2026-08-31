@@ -3,6 +3,7 @@ import { CODEX_ATTACHMENT_PROMPT_MARKER } from './CodexAttachmentDelivery';
 
 const ATTACHMENT_INPUT_OMITTED = '[Task Monki attachment input omitted]';
 const ATTACHMENT_PATH_OMITTED = '[Task Monki managed attachment path omitted]';
+const MCP_TRANSPORT_OMITTED = '[Task Monki MCP transport omitted]';
 const MANAGED_ATTACHMENT_PATH =
   /[\\/]attachments[\\/](?:tasks|staging|drafts)[\\/]/u;
 
@@ -40,11 +41,35 @@ function sanitizeAttachmentValue(value: unknown): unknown {
     const sanitizedKey = MANAGED_ATTACHMENT_PATH.test(key) ? ATTACHMENT_PATH_OMITTED : key;
     if (record.type === 'localImage' && key === 'path') {
       result[sanitizedKey] = ATTACHMENT_PATH_OMITTED;
+    } else if (key === 'mcp_servers' && entry && typeof entry === 'object') {
+      result[sanitizedKey] = Object.fromEntries(
+        Object.entries(entry as Record<string, unknown>).map(([name, config]) => [
+          name,
+          sanitizeMcpTransport(config)
+        ])
+      );
+    } else if (key.startsWith('mcp_servers.')) {
+      result[sanitizedKey] = sanitizeMcpTransport(entry);
     } else {
       result[sanitizedKey] = sanitizeAttachmentValue(entry);
     }
   }
   return result;
+}
+
+function sanitizeMcpTransport(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return sanitizeAttachmentValue(value);
+  }
+  const config = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(config).map(([key, entry]) => [
+      key,
+      ['url', 'command', 'args', 'cwd'].includes(key)
+        ? MCP_TRANSPORT_OMITTED
+        : sanitizeAttachmentValue(entry)
+    ])
+  );
 }
 
 function sanitizeString(value: string): string {

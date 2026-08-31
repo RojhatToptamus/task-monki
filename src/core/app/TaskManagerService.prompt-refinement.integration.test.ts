@@ -38,9 +38,9 @@ describe('TaskManagerService prompt refinement', () => {
     const capabilities: AgentRuntimeCapabilities = {
       ...acpCapabilities({ ...TEST_ACP_PROFILE, descriptor }),
       runtimeId,
-      promptRefinement: {
+      readOnlyTurns: {
         maturity: 'stable',
-        detail: 'Test-only prompt refinement.'
+        detail: 'Test-only shared read-only turns.'
       },
       attachmentDelivery: {
         maturity: 'stable',
@@ -141,6 +141,7 @@ describe('TaskManagerService prompt refinement', () => {
       settings: expect.objectContaining({ model: targetModel.model }),
       attachments: []
     });
+    expect(resolveExecution.mock.calls[0]?.[0].settings.reasoningEffort).toBeUndefined();
     expect(adapter.startedRuntimeTurns).toHaveLength(1);
     expect(adapter.startedRuntimeTurns[0]).toMatchObject({
       run: { purpose: 'PROMPT_REFINEMENT' },
@@ -149,7 +150,6 @@ describe('TaskManagerService prompt refinement', () => {
         modelSettings: {
           runtimeId,
           model: refinementModel.model,
-          reasoningEffort: 'low',
           sandbox: 'READ_ONLY',
           approvalPolicy: 'NEVER',
           networkAccess: false

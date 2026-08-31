@@ -7,10 +7,6 @@ import {
 import { BROWSER_DEV_ISOLATION_CAPABILITY } from '../BrowserDevAgentBoundary';
 
 const stable = (detail?: string): AgentCapability => ({ maturity: 'stable', detail });
-const experimental = (detail?: string): AgentCapability => ({
-  maturity: 'experimental',
-  detail
-});
 const unsupported = (detail?: string): AgentCapability => ({
   maturity: 'unsupported',
   detail
@@ -83,30 +79,13 @@ export function codexCapabilities(input: {
         }
       ]
     },
-    promptRefinement: stable('Uses the shared read-only turn path in a short-lived Codex session.'),
+    readOnlyTurns: stable(
+      'Uses the shared read-only turn path with an attested Codex permission profile.'
+    ),
     modelCatalog: stable('Discovered through model/list.'),
-    reasoningEffort: stable('Supported efforts are supplied by each model catalog entry.'),
-    persistentSessions: stable('Backed by App Server threads.'),
-    sessionResume: stable('Resumes persisted threads; active work is not recreated after process loss.'),
-    sessionFork: stable('Forks stored thread history into a new thread.'),
     activeTurnSteering: stable('Adds input to the currently active regular turn.'),
     turnInterruption: stable('Interrupts the active turn while preserving its thread.'),
-    truePause: unsupported('Codex has no resumable model-generation pause primitive.'),
-    interactiveApprovals: stable('Command, file, permission, and MCP requests use server requests.'),
-    userInputRequests: experimental('The current request-user-input schema is marked experimental.'),
-    goals: stable('One persisted goal is available per materialized thread.'),
-    plans: stable('turn/plan/updated provides provider-reported plan state.'),
-    detachedReview: stable(
-      'Codex can run the provider-neutral review contract in an attested read-only session.'
-    ),
-    review: stable('Task Monki supplies the review contract through the shared read-only turn path.'),
-    subagents: unsupported(
-      'Task Monki permission profiles disable Codex multi-agent execution; unsolicited child activity remains telemetry only.'
-    ),
-    backgroundTerminals: experimental('List, terminate, and cleanup methods require experimental API access.'),
-    dynamicTools: experimental('Client-registered dynamic tools require experimental API access.'),
     attachmentDelivery: stable('Verified local images and text-like managed files use an attested permission profile.'),
-    runtimeRecovery: stable('Persisted threads are reconciled after App Server process loss.'),
     extensions: {
       [BROWSER_DEV_ISOLATION_CAPABILITY]: stable(
         'Codex attests the active permission profile, exact workspace roots, and disabled network/tool boundary.'
@@ -126,12 +105,7 @@ export function codexCapabilities(input: {
         : unsupported(
             designBrowserVerification.detail ??
               'The packaged Design browser runtime is unavailable.'
-          ),
-      'codex.thread.goal': stable('Native persisted thread goal operations.'),
-      'codex.permission.attestation': stable('Active permission profiles and workspace roots are attested by the runtime.'),
-      'codex.collaboration': unsupported(
-        'Task Monki disables Codex multi-agent execution in every managed permission profile.'
-      )
+          )
     }
   };
 }

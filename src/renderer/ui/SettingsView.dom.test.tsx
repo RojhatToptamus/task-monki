@@ -1,9 +1,16 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  type AgentModel,
+  type AgentRuntimeState,
   type TaskManagerAppSettings
 } from '../../shared/agent';
+import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../../core/agent/codex/codexCapabilities';
 import { SettingsView, type SettingsViewProps } from './SettingsView';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
@@ -24,7 +31,9 @@ function renderSettings({
   updateState = softwareUpdateState,
   onCheckForSoftwareUpdates = vi.fn(async () => undefined),
   onDownloadSoftwareUpdate = vi.fn(async () => undefined),
-  onInstallSoftwareUpdate = vi.fn(async () => undefined)
+  onInstallSoftwareUpdate = vi.fn(async () => undefined),
+  models = [],
+  runtimes = []
 }: {
   appSettings?: TaskManagerAppSettings;
   onSetTheme?: SettingsViewProps['onSetTheme'];
@@ -34,10 +43,12 @@ function renderSettings({
   onCheckForSoftwareUpdates?: SettingsViewProps['onCheckForSoftwareUpdates'];
   onDownloadSoftwareUpdate?: SettingsViewProps['onDownloadSoftwareUpdate'];
   onInstallSoftwareUpdate?: SettingsViewProps['onInstallSoftwareUpdate'];
+  models?: AgentModel[];
+  runtimes?: AgentRuntimeState[];
 } = {}) {
   render(
     <SettingsView
-      theme="device"
+      theme={appSettings.theme}
       onSetTheme={onSetTheme}
       onPreviewThemePreset={onPreviewThemePreset}
       appSettings={appSettings}
@@ -53,8 +64,8 @@ function renderSettings({
       onTestExternalTool={async () => {
         throw new Error('not called');
       }}
-      models={[]}
-      runtimes={[]}
+      models={models}
+      runtimes={runtimes}
     />
   );
   return {
@@ -66,6 +77,146 @@ function renderSettings({
     onInstallSoftwareUpdate
   };
 }
+
+const previewModel: AgentModel = {
+  id: 'codex:preview-model',
+  runtimeId: 'codex',
+  modelProvider: 'openai',
+  model: 'preview-model',
+  displayName: 'Preview model',
+  hidden: false,
+  isDefault: true,
+  supportedReasoningEfforts: [],
+  serviceTiers: [],
+  inputModalities: ['text']
+};
+
+const readyCodexRuntime: AgentRuntimeState = {
+  preflight: {
+    runtime: CODEX_RUNTIME_DESCRIPTOR,
+    readiness: createRuntimeReadiness('READY', 'Ready'),
+    capabilities: codexCapabilities()
+  },
+  models: [previewModel],
+  refreshedAt: '2026-08-31T00:00:00.000Z'
+};
+
+describe('Model settings', () => {
+  it('stores the Preview generation runtime and model together', () => {
+    const onSetAppSettings = vi.fn();
+    renderSettings({
+      onSetAppSettings,
+      models: [previewModel],
+      runtimes: [readyCodexRuntime]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Preview generation: Codex · Preview model'
+      })
+    );
+    fireEvent.click(
+      screen.getByRole('option', { name: 'Preview model via Codex' })
+    );
+
+    expect(onSetAppSettings).toHaveBeenCalledWith({
+      previewRecipeGenerationRuntimeId: 'codex',
+      previewRecipeGenerationModel: 'preview-model',
+      previewRecipeGenerationModelProvider: 'openai'
+    });
+  });
+
+  it('shows a missing saved Preview model instead of displaying a fallback', () => {
+    renderSettings({
+      appSettings: {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'codex',
+        previewRecipeGenerationModel: 'removed-model',
+        previewRecipeGenerationModelProvider: 'openai'
+      },
+      models: [previewModel],
+      runtimes: [readyCodexRuntime]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+
+    const trigger = screen.getByRole('button', {
+      name: 'Preview generation: Codex · removed-model'
+    });
+    expect(trigger.getAttribute('aria-invalid')).toBe('true');
+    expect(
+      screen.getByText(
+        'The selected Preview agent or model is no longer available. Choose another selection.'
+      )
+    ).not.toBeNull();
+  });
+
+  it('shows the configured Preview agent readiness error before a missing model error', () => {
+    const authenticationDetail = 'Sign in to the configured agent, then try again.';
+    renderSettings({
+      appSettings: {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'codex',
+        previewRecipeGenerationModel: 'saved-model',
+        previewRecipeGenerationModelProvider: 'openai'
+      },
+      models: [],
+      runtimes: [
+        {
+          ...readyCodexRuntime,
+          preflight: {
+            ...readyCodexRuntime.preflight,
+            readiness: createRuntimeReadiness(
+              'AUTHENTICATION_REQUIRED',
+              authenticationDetail
+            )
+          },
+          models: []
+        }
+      ]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+
+    const previewSelector = screen.getByRole('button', {
+      name: 'Preview generation: Codex · saved-model'
+    });
+    const previewSetting = previewSelector.closest<HTMLElement>('.tm-model-default');
+    expect(previewSetting).not.toBeNull();
+    expect(within(previewSetting!).getByRole('status').textContent).toBe(authenticationDetail);
+    expect(
+      screen.queryByText(
+        'The selected Preview agent or model is no longer available. Choose another selection.'
+      )
+    ).toBeNull();
+  });
+
+  it('keeps a missing saved Preview agent visible instead of showing another agent', () => {
+    renderSettings({
+      appSettings: {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'removed-agent',
+        previewRecipeGenerationModel: 'removed-model',
+        previewRecipeGenerationModelProvider: 'removed-provider'
+      },
+      models: [previewModel],
+      runtimes: [readyCodexRuntime]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+
+    const trigger = screen.getByRole('button', {
+      name: 'Preview generation: removed-agent · removed-model'
+    });
+    expect(trigger.getAttribute('aria-invalid')).toBe('true');
+    expect(
+      screen.getByText(
+        'The selected Preview agent or model is no longer available. Choose another selection.'
+      )
+    ).not.toBeNull();
+  });
+});
 
 describe('Update settings', () => {
   it('checks for updates when no update is active', () => {
@@ -113,11 +264,11 @@ describe('Appearance settings', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
     expect(screen.getByText('Palette only — typeface and density are set separately.')).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Theme preview' })).toBeTruthy();
-    expect(screen.getByText(/Umber · (?:light|dark)/u)).toBeTruthy();
+    expect(screen.getByText('Graphite · dark')).toBeTruthy();
     expect(screen.getByText('[seed:completion-manual-merged] Manual completion with merged PR')).toBeTruthy();
     expect(screen.getByText('Write a message… Type @ for agents, tasks, or repositories')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /Umber/u }));
+    fireEvent.click(screen.getByRole('button', { name: /Graphite/u }));
     expect(screen.getAllByRole('option')).toHaveLength(16);
     expect(screen.getByRole('group', { name: 'Authored' })).toBeTruthy();
     expect(screen.getByRole('group', { name: 'Catalog' })).toBeTruthy();
@@ -135,21 +286,21 @@ describe('Appearance settings', () => {
     const { onPreviewThemePreset, onSetAppSettings } = renderSettings();
     fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
 
-    const trigger = screen.getByRole('button', { name: /Umber/u });
+    const trigger = screen.getByRole('button', { name: /Graphite/u });
     fireEvent.click(trigger);
+    const graphite = screen.getByRole('option', { name: 'Graphite' });
+    await waitFor(() => expect(document.activeElement).toBe(graphite));
+
+    fireEvent.keyDown(graphite, { key: 'ArrowDown' });
     const umber = screen.getByRole('option', { name: 'Umber' });
     await waitFor(() => expect(document.activeElement).toBe(umber));
+    expect(onPreviewThemePreset).toHaveBeenLastCalledWith('umber');
+    expect(screen.getByText('Umber · dark')).toBeTruthy();
 
-    fireEvent.keyDown(umber, { key: 'ArrowDown' });
-    const nocturne = screen.getByRole('option', { name: 'Nocturne' });
-    await waitFor(() => expect(document.activeElement).toBe(nocturne));
-    expect(onPreviewThemePreset).toHaveBeenLastCalledWith('nocturne');
-    expect(screen.getByText(/Nocturne · (?:light|dark)/u)).toBeTruthy();
-
-    fireEvent.keyDown(nocturne, { key: 'Escape' });
+    fireEvent.keyDown(umber, { key: 'Escape' });
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(onPreviewThemePreset).toHaveBeenLastCalledWith(null);
-    expect(screen.getByText(/Umber · (?:light|dark)/u)).toBeTruthy();
+    expect(screen.getByText('Graphite · dark')).toBeTruthy();
     expect(onSetAppSettings).not.toHaveBeenCalled();
   });
 
@@ -157,18 +308,18 @@ describe('Appearance settings', () => {
     const { onPreviewThemePreset, onSetAppSettings } = renderSettings();
     fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
 
-    const trigger = screen.getByRole('button', { name: /Umber/u });
+    const trigger = screen.getByRole('button', { name: /Graphite/u });
     fireEvent.click(trigger);
+    const graphite = screen.getByRole('option', { name: 'Graphite' });
+    await waitFor(() => expect(document.activeElement).toBe(graphite));
+    fireEvent.keyDown(graphite, { key: 'ArrowDown' });
     const umber = screen.getByRole('option', { name: 'Umber' });
     await waitFor(() => expect(document.activeElement).toBe(umber));
-    fireEvent.keyDown(umber, { key: 'ArrowDown' });
-    const nocturne = screen.getByRole('option', { name: 'Nocturne' });
-    await waitFor(() => expect(document.activeElement).toBe(nocturne));
-    fireEvent.keyDown(nocturne, { key: 'Enter' });
+    fireEvent.keyDown(umber, { key: 'Enter' });
 
     await waitFor(() => {
       expect(onSetAppSettings).toHaveBeenCalledWith(
-        { themePreset: 'nocturne' },
+        { themePreset: 'umber' },
         'Theme preset updated.'
       );
     });

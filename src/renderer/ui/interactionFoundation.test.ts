@@ -32,8 +32,13 @@ describe('renderer style policies', () => {
     const css = await readRendererStyles();
 
     expect(css).toMatch(
-      /\.app-shell\[data-input-modality='keyboard'\][\s\S]*:focus \{[\s\S]*var\(--field-focus-ring\)/
+      /\.app-shell\s+:where\([\s\S]*textarea[\s\S]*\):focus[\s\S]*var\(--field-edge-focus\)/
     );
+    expect(css).toMatch(
+      /\.app-shell\[data-input-modality='keyboard'\][\s\S]*:focus[\s\S]*var\(--focus-ring\)/
+    );
+    expect(css).not.toContain('var(--field-focus-line)');
+    expect(css).not.toContain('var(--field-focus-ring)');
     expect(css).toMatch(
       /\.app-shell\[data-input-modality='pointer'\][\s\S]*:focus \{\s*outline: none/
     );
@@ -44,6 +49,20 @@ describe('renderer style policies', () => {
     );
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*\*,\s*\*::before,\s*\*::after[\s\S]*animation-iteration-count: 1 !important/
+    );
+  });
+
+  it('keeps the Design canvas device presets at their safe maximum widths', async () => {
+    const css = await readRendererStyles();
+
+    expect(css).toMatch(
+      /\.tm-design-canvas__viewport\s*\{[^}]*width: min\(1280px, 100%\)/u
+    );
+    expect(css).toMatch(
+      /\.tm-design-canvas__viewport\[data-device='tablet'\]\s*\{[^}]*width: min\(768px, 100%\)/u
+    );
+    expect(css).toMatch(
+      /\.tm-design-canvas__viewport\[data-device='phone'\]\s*\{[^}]*width: min\(390px, 100%\)/u
     );
   });
 });

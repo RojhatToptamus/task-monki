@@ -44,12 +44,62 @@ import {
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
-  it('runs a scoped Discourse turn without fabricating task-owned state', async () => {
+  it.each([
+    {
+      workflow: 'Discourse',
+      owner: {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-1',
+        stableParticipantId: 'participant-1'
+      },
+      scope: {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-1',
+        waveId: 'wave-1',
+        jobId: 'job-1',
+        contextSnapshotId: 'context-1',
+        attemptId: 'attempt-1'
+      },
+      purpose: 'DISCOURSE_ANSWER' as const
+    },
+    {
+      workflow: 'Preview recipe generation',
+      owner: {
+        kind: 'PREVIEW_RECIPE_GENERATION' as const,
+        taskId: 'task-1',
+        generationId: 'generation-1'
+      },
+      scope: {
+        kind: 'PREVIEW_RECIPE_GENERATION' as const,
+        taskId: 'task-1',
+        generationId: 'generation-1'
+      },
+      purpose: 'PREVIEW_RECIPE_GENERATION' as const
+    }
+  ])('runs a scoped $workflow turn without fabricating task-owned state', async ({
+    owner,
+    scope,
+    purpose
+  }) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
     const executable = await writeFakeCodexExecutable(dir, 'scoped');
     const workspacePath = path.join(dir, 'read-only-workspace');
     await fs.mkdir(workspacePath, { mode: 0o700 });
     const workspace = await fs.realpath(workspacePath);
+    const attachmentBytes = Buffer.from('immutable scoped reference\n');
+    const attachmentFilePath = path.join(dir, 'scoped-reference.txt');
+    await fs.writeFile(attachmentFilePath, attachmentBytes, { mode: 0o400 });
+    const attachment = {
+      attachmentId: 'scoped-reference',
+      ordinal: 0,
+      displayName: 'scoped-reference.txt',
+      kind: 'text' as const,
+      mediaType: 'text/plain',
+      byteCount: attachmentBytes.byteLength,
+      sha256: createHash('sha256').update(attachmentBytes).digest('hex'),
+      path: await fs.realpath(attachmentFilePath),
+      verifiedAt: new Date().toISOString()
+    };
     const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
     const store = persistence.tasks;
     const runtime = persistence.agentRuntime;
@@ -71,11 +121,6 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     try {
       await adapter.initialize();
-      const owner = {
-        kind: 'DISCOURSE' as const,
-        conversationId: 'conversation-1',
-        stableParticipantId: 'participant-1'
-      };
       const sessionId = 'scoped-session-1';
       const executionContext = await adapter.buildExecutionContext({
         sessionId,
@@ -91,7 +136,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
           approvalPolicy: 'NEVER',
           approvalsReviewer: 'user'
         },
-        clientOperationId: 'scoped-context-1'
+        clientOperationId: 'scoped-context-1',
+        attachments: [attachment]
       });
       const session = await runtime.createSession({
         id: sessionId,
@@ -117,23 +163,17 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       const run = await runtime.createRun({
         id: 'scoped-run-1',
         owner,
-        scope: {
-          kind: 'DISCOURSE',
-          conversationId: owner.conversationId,
-          waveId: 'wave-1',
-          jobId: 'job-1',
-          contextSnapshotId: 'context-1',
-          attemptId: 'attempt-1'
-        },
+        scope,
         sessionId: session.id,
         sessionAccessEpoch: session.accessEpoch.epoch,
-        purpose: 'DISCOURSE_ANSWER',
+        purpose,
         generationKey: 'generation-1',
         clientOperationId: 'create-scoped-run',
         requestedSettings: executionContext.modelSettings,
         promptArtifactId: 'scoped-prompt-1',
         outputArtifactId: 'scoped-output-1',
-        diagnosticArtifactId: 'scoped-diagnostic-1'
+        diagnosticArtifactId: 'scoped-diagnostic-1',
+        attachmentSelection: [attachment]
       });
       await Promise.all([
         runtime.createArtifact({
@@ -172,7 +212,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         run: starting,
         executionContext,
         prompt: 'Question the proposed architecture.',
-        attachments: []
+        attachments: [attachment]
       });
       const afterResponse = await runtime.getRun(run.id);
       if (afterResponse?.status === 'STARTING') {
@@ -208,9 +248,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         'utf8'
       );
       const outbound = readOutboundMessages(journal);
-      expect(
-        outbound.find((message) => message.method === 'thread/start')?.params
-      ).toMatchObject({
+      const threadStart = outbound.find((message) => message.method === 'thread/start');
+      expect(threadStart?.params).toMatchObject({
         model: 'fake-model',
         modelProvider: 'openai',
         cwd: workspace,
@@ -219,6 +258,30 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         ephemeral: false,
         dynamicTools: []
       });
+      expect(threadStart?.params).toMatchObject({
+        config: {
+          'mcp_servers.docs': {
+            enabled: false,
+            command: '[Task Monki MCP transport omitted]',
+            args: '[Task Monki MCP transport omitted]',
+            cwd: '[Task Monki MCP transport omitted]'
+          },
+          'mcp_servers.remote': {
+            enabled: false,
+            url: '[Task Monki MCP transport omitted]'
+          }
+        }
+      });
+      for (const secret of [
+        'docs-secret-command',
+        'docs-secret-argument',
+        '/private/docs-secret-cwd',
+        'remote-secret',
+        'query-secret'
+      ]) {
+        expect(journal).not.toContain(secret);
+        expect(journal).not.toContain(JSON.stringify(secret).slice(1, -1));
+      }
       expect(
         outbound.find((message) => message.method === 'turn/start')?.params
       ).toMatchObject({
@@ -238,6 +301,514 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       unsubscribe();
       await adapter.shutdown();
       await closeCodexPersistenceForTaskStore(store);
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('fails before provider delivery when enabled MCP servers cannot be disabled', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-mcp-failure-'));
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'scoped-mcp-discovery-failure'
+    );
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
+    const store = persistence.tasks;
+    const runtime = persistence.agentRuntime;
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      runtimeStore: runtime
+    });
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
+    try {
+      await orchestrator.initialize();
+      const owner = {
+        kind: 'PREVIEW_RECIPE_GENERATION' as const,
+        taskId: 'task-mcp-failure',
+        generationId: 'generation-mcp-failure'
+      };
+      const executionContext = await orchestrator.buildExecutionContext('codex', {
+        sessionId: 'session-mcp-failure',
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'openai',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: 'mcp-failure-context'
+      });
+      const prepared = await orchestrator.prepareTurn({
+        sessionId: 'session-mcp-failure',
+        runId: 'run-mcp-failure',
+        owner,
+        scope: {
+          kind: 'PREVIEW_RECIPE_GENERATION',
+          taskId: owner.taskId,
+          generationId: owner.generationId
+        },
+        runtimeId: 'codex',
+        model: 'fake-model',
+        purpose: 'PREVIEW_RECIPE_GENERATION',
+        generationKey: owner.generationId,
+        executionContext,
+        prompt: 'Generate Preview YAML.',
+        priority: 'TASK_FOREGROUND',
+        clientOperationId: 'mcp-failure-run',
+        createdAt: new Date().toISOString()
+      });
+
+      await expect(
+        orchestrator.startPreparedTurnNow(
+          prepared.queueEntry.id,
+          'mcp-failure-start'
+        )
+      ).rejects.toThrow(
+        'Codex MCP configuration could not be inspected for this read-only turn.'
+      );
+      await expect(runtime.getRun(prepared.run.id)).resolves.toMatchObject({
+        status: 'FAILED',
+        delivery: 'NOT_DELIVERED'
+      });
+      const snapshot = await runtime.snapshot();
+      const journal = await fs.readFile(
+        snapshot.servers[0]!.protocolJournalPath,
+        'utf8'
+      );
+      expect(
+        readOutboundMessages(journal).filter(
+          (message) => message.method === 'turn/start'
+        )
+      ).toEqual([]);
+    } finally {
+      await orchestrator.shutdown();
+      await persistence.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it.each([
+    'scoped-model-reroute',
+    'scoped-model-reroute-before-ack'
+  ] as const)('fails a read-only turn when Codex reroutes the selected model (%s)', async (mode) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-reroute-'));
+    const executable = await writeFakeCodexExecutable(dir, mode);
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
+    const store = persistence.tasks;
+    const runtime = persistence.agentRuntime;
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      runtimeStore: runtime
+    });
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
+    try {
+      await orchestrator.initialize();
+      const owner = {
+        kind: 'PREVIEW_RECIPE_GENERATION' as const,
+        taskId: 'task-reroute',
+        generationId: 'generation-reroute'
+      };
+      const executionContext = await orchestrator.buildExecutionContext('codex', {
+        sessionId: 'session-reroute',
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'openai',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: 'reroute-context'
+      });
+      const prepared = await orchestrator.prepareTurn({
+        sessionId: 'session-reroute',
+        runId: 'run-reroute',
+        owner,
+        scope: {
+          kind: 'PREVIEW_RECIPE_GENERATION',
+          taskId: owner.taskId,
+          generationId: owner.generationId
+        },
+        runtimeId: 'codex',
+        model: 'fake-model',
+        purpose: 'PREVIEW_RECIPE_GENERATION',
+        generationKey: 'generation-reroute',
+        executionContext,
+        prompt: 'Generate Preview YAML.',
+        priority: 'TASK_FOREGROUND',
+        clientOperationId: 'reroute-run',
+        createdAt: new Date().toISOString()
+      });
+
+      await orchestrator.startPreparedTurnNow(
+        prepared.queueEntry.id,
+        'reroute-start'
+      );
+      const failed = await waitForRuntimeRunStatus(
+        runtime,
+        prepared.run.id,
+        'FAILED'
+      );
+
+      expect(failed).toMatchObject({
+        providerTerminalSource:
+          'TURN_COMPLETED_NOTIFICATION_AFTER_MODEL_SELECTION_CHANGE',
+        terminalReason: 'Codex changed the selected model for a read-only turn.'
+      });
+    } finally {
+      await orchestrator.shutdown();
+      await persistence.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('ignores a stale reroute and fences the matching Task-owned review reroute', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-reroute-'));
+    const workspacePath = path.join(dir, 'review-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
+    const store = persistence.tasks;
+    const runtime = persistence.agentRuntime;
+    await runtime.init();
+    const adapter = createCodexAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable: process.execPath,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      runtimeStore: runtime
+    });
+    try {
+      const owner = { kind: 'TASK' as const, taskId: 'task-review-reroute' };
+      const settings = {
+        runtimeId: 'codex' as const,
+        model: 'fake-model',
+        modelProvider: 'openai',
+        sandbox: 'READ_ONLY' as const,
+        networkAccess: false,
+        approvalPolicy: 'NEVER' as const,
+        approvalsReviewer: 'user' as const
+      };
+      const executionContext = {
+        attestation: { status: 'ATTESTED' as const },
+        primaryCwd: workspace,
+        repositoryAccess: 'READ_ONLY' as const,
+        readRoots: [{ canonicalPath: workspace, kind: 'WORKTREE' as const }],
+        managedAttachments: [],
+        permissionProfileHash: '0'.repeat(64),
+        modelSettings: settings,
+        externalTools: {
+          network: false,
+          webSearch: 'disabled' as const,
+          mcpServers: false,
+          apps: false,
+          dynamicTools: false
+        },
+        clientOperationId: 'review-reroute-context'
+      };
+      const server = await runtime.createAgentServer({
+        runtimeId: 'codex',
+        runtimeKind: 'APP_SERVER',
+        transport: 'STDIO',
+        executable: process.execPath,
+        argv: ['app-server', '--stdio']
+      });
+      const session = await runtime.createSession({
+        id: 'session-review-reroute',
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId: 'session-review-reroute',
+          epoch: 1,
+          runtimeId: 'codex',
+          model: 'fake-model',
+          executionContext,
+          createdAt: '2026-07-18T00:00:00.000Z'
+        }),
+        executionContext,
+        taskContext: {
+          iterationId: 'iteration-review-reroute',
+          worktreeId: 'worktree-review-reroute',
+          worktreePath: workspace
+        },
+        clientOperationId: 'create-review-reroute-session',
+        runtimeId: 'codex',
+        role: 'REVIEW',
+        relationshipState: 'ROOT',
+        status: 'ACTIVE',
+        materialized: true,
+        providerSessionId: 'thread-review-reroute',
+        requestedSettings: settings
+      });
+      const earlierRun = await runtime.createRun({
+        id: 'run-earlier-review-reroute',
+        owner,
+        scope: {
+          kind: 'TASK',
+          taskId: owner.taskId,
+          iterationId: 'iteration-review-reroute',
+          worktreeId: 'worktree-review-reroute'
+        },
+        sessionId: session.id,
+        sessionAccessEpoch: session.accessEpoch.epoch,
+        purpose: 'TASK_REVIEW',
+        taskReviewTarget: { type: 'UNCOMMITTED_CHANGES' },
+        generationKey: 'earlier-review-reroute',
+        clientOperationId: 'create-earlier-review-reroute-run',
+        requestedSettings: settings,
+        promptArtifactId: 'prompt-earlier-review-reroute',
+        outputArtifactId: 'output-earlier-review-reroute',
+        diagnosticArtifactId: 'diagnostic-earlier-review-reroute',
+        attachmentSelection: []
+      });
+      const earlierStarting = await runtime.updateRun(
+        earlierRun.id,
+        earlierRun.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: '2026-07-17T23:59:57.000Z'
+        },
+        'start-earlier-review-reroute'
+      );
+      const earlierRunning = await runtime.updateRun(
+        earlierRun.id,
+        earlierStarting.recordRevision,
+        {
+          status: 'RUNNING',
+          delivery: 'ACKNOWLEDGED',
+          serverInstanceId: server.id,
+          providerTurnId: 'turn-from-earlier-review'
+        },
+        'ack-earlier-review-reroute'
+      );
+      await runtime.updateRun(
+        earlierRun.id,
+        earlierRunning.recordRevision,
+        {
+          status: 'COMPLETED',
+          delivery: 'TERMINAL',
+          endedAt: '2026-07-17T23:59:59.000Z'
+        },
+        'complete-earlier-review-reroute'
+      );
+      const run = await runtime.createRun({
+        id: 'run-review-reroute',
+        owner,
+        scope: {
+          kind: 'TASK',
+          taskId: owner.taskId,
+          iterationId: 'iteration-review-reroute',
+          worktreeId: 'worktree-review-reroute'
+        },
+        sessionId: session.id,
+        sessionAccessEpoch: session.accessEpoch.epoch,
+        purpose: 'TASK_REVIEW',
+        taskReviewTarget: { type: 'UNCOMMITTED_CHANGES' },
+        generationKey: 'review-reroute',
+        clientOperationId: 'create-review-reroute-run',
+        requestedSettings: settings,
+        promptArtifactId: 'prompt-review-reroute',
+        outputArtifactId: 'output-review-reroute',
+        diagnosticArtifactId: 'diagnostic-review-reroute',
+        attachmentSelection: []
+      });
+      await Promise.all([
+        runtime.createArtifact({
+          id: run.promptArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'PROMPT',
+          clientOperationId: 'create-review-reroute-prompt',
+          content: 'Review the current changes.'
+        }),
+        runtime.createArtifact({
+          id: run.outputArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'OUTPUT',
+          clientOperationId: 'create-review-reroute-output',
+          content: ''
+        }),
+        runtime.createArtifact({
+          id: run.diagnosticArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'DIAGNOSTIC',
+          clientOperationId: 'create-review-reroute-diagnostic',
+          content: ''
+        })
+      ]);
+      const starting = await runtime.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: '2026-07-18T00:00:01.000Z'
+        },
+        'start-review-reroute'
+      );
+      await runtime.updateRun(
+        run.id,
+        starting.recordRevision,
+        {
+          status: 'RUNNING',
+          delivery: 'ACKNOWLEDGED',
+          serverInstanceId: server.id,
+          providerTurnId: 'turn-review-reroute'
+        },
+        'ack-review-reroute'
+      );
+      const adapterInternals = adapter as unknown as {
+        pendingRunByProviderThread: Map<string, string>;
+        handleTurnCompleted(
+          threadId: string,
+          turn: { id: string; status: 'completed' },
+          raw: {
+            serverInstanceId: string;
+            sequence: number;
+            direction: 'INBOUND';
+            recordedAt: string;
+            byteOffset: number;
+            byteLength: number;
+            sha256: string;
+          }
+        ): Promise<void>;
+        handleModelReroute(
+          threadId: string,
+          turnId: string,
+          fromModel: string,
+          model: string,
+          reason: unknown,
+          raw: {
+            serverInstanceId: string;
+            sequence: number;
+            direction: 'INBOUND';
+            recordedAt: string;
+            byteOffset: number;
+            byteLength: number;
+            sha256: string;
+          }
+        ): Promise<void>;
+      };
+      adapterInternals.pendingRunByProviderThread.set(
+        'thread-review-reroute',
+        run.id
+      );
+      await adapterInternals.handleTurnCompleted(
+        'thread-review-reroute',
+        { id: 'turn-from-earlier-review', status: 'completed' },
+        {
+          serverInstanceId: server.id,
+          sequence: 1,
+          direction: 'INBOUND',
+          recordedAt: '2026-07-18T00:00:01.250Z',
+          byteOffset: 0,
+          byteLength: 1,
+          sha256: '0'.repeat(64)
+        }
+      );
+      expect(
+        adapterInternals.pendingRunByProviderThread.get('thread-review-reroute')
+      ).toBe(run.id);
+      await adapterInternals.handleModelReroute(
+        'thread-review-reroute',
+        'turn-from-earlier-review',
+        'fake-model',
+        'fallback-model',
+        'late provider notification',
+        {
+          serverInstanceId: server.id,
+          sequence: 2,
+          direction: 'INBOUND',
+          recordedAt: '2026-07-18T00:00:01.500Z',
+          byteOffset: 0,
+          byteLength: 1,
+          sha256: '0'.repeat(64)
+        }
+      );
+      const afterStaleReroute = await runtime.getRun(run.id);
+      expect(afterStaleReroute).toMatchObject({
+        status: 'RUNNING',
+        providerTurnId: 'turn-review-reroute'
+      });
+      expect(afterStaleReroute?.terminalReason).toBeUndefined();
+      await adapterInternals.handleModelReroute(
+        'thread-review-reroute',
+        'unknown-turn-from-earlier-review',
+        'fake-model',
+        'fallback-model',
+        'uncorrelated late provider notification',
+        {
+          serverInstanceId: server.id,
+          sequence: 3,
+          direction: 'INBOUND',
+          recordedAt: '2026-07-18T00:00:01.750Z',
+          byteOffset: 1,
+          byteLength: 1,
+          sha256: '1'.repeat(64)
+        }
+      );
+      expect(await runtime.getRun(run.id)).toMatchObject({
+        status: 'RUNNING',
+        providerTurnId: 'turn-review-reroute'
+      });
+      await runtime.updateRun(
+        run.id,
+        afterStaleReroute!.recordRevision,
+        {
+          status: 'INTERRUPTING',
+          interruptDelivery: 'SENDING',
+          stopRequestedAt: '2026-07-18T00:00:02.000Z'
+        },
+        'stop-review-reroute'
+      );
+
+      await adapterInternals.handleModelReroute(
+        'thread-review-reroute',
+        'turn-review-reroute',
+        'fake-model',
+        'fallback-model',
+        'provider fallback',
+        {
+          serverInstanceId: server.id,
+          sequence: 4,
+          direction: 'INBOUND',
+          recordedAt: '2026-07-18T00:00:02.000Z',
+          byteOffset: 0,
+          byteLength: 1,
+          sha256: '0'.repeat(64)
+        }
+      );
+
+      await expect(runtime.getRun(run.id)).resolves.toMatchObject({
+        status: 'INTERRUPTING',
+        terminalReason: 'Codex changed the selected model for a read-only turn.',
+        providerTerminalSource: 'CODEX_MODEL_SELECTION'
+      });
+    } finally {
+      await adapter.shutdown();
+      await persistence.close();
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
@@ -394,6 +965,12 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       terminalStatus: 'INTERRUPTED'
     },
     {
+      name: 'does not resend an interrupt when a model reroute races with cancellation',
+      mode: 'scoped-interrupt-model-reroute',
+      action: 'interrupt',
+      terminalStatus: 'FAILED'
+    },
+    {
       name: 'settles a scoped owner through the canonical server-loss sweep',
       mode: 'scoped-interrupt-no-terminal',
       action: 'process-loss',
@@ -418,6 +995,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     try {
       await adapter.initialize();
+      const interruptRuntimeTurn = vi.spyOn(adapter, 'interruptRuntimeTurn');
       const owner = {
         kind: 'DISCOURSE' as const,
         conversationId: 'conversation-interrupt',
@@ -556,7 +1134,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         );
         await adapter.interruptRuntimeTurn({ session, run });
         run = (await runtime.getRun(run.id))!;
-        if (run.interruptDelivery === 'SENDING') {
+        if (
+          run.interruptDelivery === 'SENDING' &&
+          mode !== 'scoped-interrupt-model-reroute'
+        ) {
           await runtime.updateRun(
             run.id,
             run.recordRevision,
@@ -596,16 +1177,24 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
               providerTerminalSource: 'PROVIDER_PROCESS_LOSS'
             }
           : {
-              status: 'INTERRUPTED',
+              status:
+                mode === 'scoped-interrupt-model-reroute'
+                  ? 'FAILED'
+                  : 'INTERRUPTED',
               delivery: 'TERMINAL',
               interruptDelivery: 'TERMINAL',
               recoveryState: 'NONE',
               providerTerminalSource:
-                mode === 'scoped-interrupt-no-terminal'
+                mode === 'scoped-interrupt-model-reroute'
+                  ? 'TURN_COMPLETED_NOTIFICATION_AFTER_MODEL_SELECTION_CHANGE'
+                  : mode === 'scoped-interrupt-no-terminal'
                   ? 'CONFIRMED_STOP_AFTER_RUNTIME_INTERRUPT'
                   : 'TURN_COMPLETED_NOTIFICATION'
             }
       );
+      if (action === 'interrupt') {
+        expect(interruptRuntimeTurn).toHaveBeenCalledTimes(1);
+      }
     } finally {
       await adapter.shutdown();
       await closeCodexPersistenceForTaskStore(store);
@@ -946,6 +1535,149 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
+  it('ignores late output and items after a normal Task turn is terminal', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-late-task-item-'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, {
+      cwd: dir,
+      executable: process.execPath,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const session = await createTestAgentSession(store, {
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex'
+    });
+    const server = await createTestAgentServer(store, {
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: process.execPath,
+      argv: ['app-server', '--stdio']
+    });
+    await updateTestAgentSession(store, session.id, {
+      providerSessionId: 'thread-late-task-item',
+      status: 'IDLE',
+      materialized: true
+    });
+    const run = await createTestRun(store, {
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      serverInstanceId: server.id
+    });
+    const running = await updateTestRun(store, run.id, {
+      status: 'RUNNING',
+      providerTurnId: 'turn-late-task-item',
+      startedAt: '2026-07-18T00:00:00.000Z'
+    });
+    const terminal = await updateTestRun(store, running.id, {
+      status: 'COMPLETED',
+      finalMessage: 'Stable terminal answer.',
+      endedAt: '2026-07-18T00:00:01.000Z'
+    });
+    const taskRuntime = taskRuntimeForTaskStore(store);
+    const before = await store.snapshot();
+    const outputBefore = await runtimeForTaskStore(store).readArtifact(
+      terminal.outputArtifactId
+    );
+    const emitted: unknown[] = [];
+    const unsubscribe = events.on((event) => emitted.push(event));
+    const adapterInternals = adapter as unknown as {
+      appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
+      flushBufferedOutput(runId: string, releaseCredentialCarry?: boolean): Promise<void>;
+      handleItem(
+        threadId: string,
+        turnId: string,
+        item: {
+          type: 'agentMessage';
+          id: string;
+          text: string;
+          phase: null;
+          memoryCitation: null;
+        },
+        status: 'COMPLETED',
+        raw: {
+          serverInstanceId: string;
+          sequence: number;
+          direction: 'INBOUND';
+          recordedAt: string;
+          byteOffset: number;
+          byteLength: number;
+          sha256: string;
+        },
+        startedAtMs?: number,
+        completedAtMs?: number
+      ): Promise<void>;
+      recordTurnActivity(
+        turnId: string,
+        eventType: string,
+        payload: Record<string, unknown>
+      ): Promise<void>;
+    };
+    const raw = {
+      serverInstanceId: server.id,
+      sequence: 1,
+      direction: 'INBOUND' as const,
+      recordedAt: '2026-07-18T00:00:02.000Z',
+      byteOffset: 0,
+      byteLength: 1,
+      sha256: '0'.repeat(64)
+    };
+
+    try {
+      await adapterInternals.appendTurnOutput(
+        'turn-late-task-item',
+        'agentMessage',
+        'Late output must not be stored.'
+      );
+      await adapterInternals.flushBufferedOutput(run.id, true);
+      await adapterInternals.handleItem(
+        'thread-late-task-item',
+        'turn-late-task-item',
+        {
+          type: 'agentMessage',
+          id: 'late-task-item',
+          text: 'Late answer must not replace the terminal result.',
+          phase: null,
+          memoryCitation: null
+        },
+        'COMPLETED',
+        raw,
+        undefined,
+        Date.parse(raw.recordedAt)
+      );
+      await adapterInternals.recordTurnActivity(
+        'turn-late-task-item',
+        'late/provider/activity',
+        { ignored: true }
+      );
+
+      const after = await store.snapshot();
+      const storedRun = await taskRuntime.getRun(run.id);
+      expect(storedRun).toMatchObject({
+        status: 'COMPLETED',
+        finalMessage: 'Stable terminal answer.'
+      });
+      expect(
+        await runtimeForTaskStore(store).readArtifact(terminal.outputArtifactId)
+      ).toBe(outputBefore);
+      expect(after.agentItems).toEqual(before.agentItems);
+      expect(after.events).toEqual(before.events);
+      expect(emitted).toEqual([]);
+    } finally {
+      unsubscribe();
+      await adapter.shutdown();
+      await closeCodexPersistenceForTaskStore(store);
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('replaces a one-way supervisor for an explicit safe runtime restart', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-restart-'));
     const executable = await writeFakeCodexExecutable(dir);
@@ -1066,6 +1798,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       designSkillRoot
     });
     adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree, turnId } = await createDesignTaskContext(
@@ -1158,6 +1891,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       }
     }));
     adapter.setDesignBrowserToolHandler(inspect);
+    qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree, turnId } = await createDesignTaskContext(
@@ -1232,6 +1966,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       designSkillRoot
     });
     adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree, turnId } = await createDesignTaskContext(
@@ -1337,6 +2072,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       designSkillRoot
     });
     adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
     const { task, iteration, worktree, turnId } = await createDesignTaskContext(
@@ -1770,6 +2506,12 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(finalJournal).not.toContain(textBytes.toString('utf8').trim());
     expect(finalJournal).not.toContain(canonicalImagePath);
     expect(finalJournal).not.toContain(canonicalTextPath);
+    expect(finalJournal).not.toContain(
+      JSON.stringify(canonicalImagePath).slice(1, -1)
+    );
+    expect(finalJournal).not.toContain(
+      JSON.stringify(canonicalTextPath).slice(1, -1)
+    );
     const firstThreadStart = outbound.find((message) => message.method === 'thread/start');
     expect(firstThreadStart?.params).toMatchObject({
       approvalPolicy: 'on-request',
@@ -3003,7 +3745,11 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(firstOutbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
     expect(firstOutbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
     expect(firstOutbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
-    expect(journal).not.toContain(`${path.sep}attachments${path.sep}tasks${path.sep}`);
+    const attachmentPathSegment = `${path.sep}attachments${path.sep}tasks${path.sep}`;
+    expect(journal).not.toContain(attachmentPathSegment);
+    expect(journal).not.toContain(
+      JSON.stringify(attachmentPathSegment).slice(1, -1)
+    );
     const retained = await store.verifyRunAttachments(run!.id, task.id);
     expect(retained).toHaveLength(1);
     await expect(fs.access(retained[0]!.absolutePath)).resolves.toBeUndefined();
@@ -5013,6 +5759,25 @@ function createAgentOrchestrator(
   );
 }
 
+function qualifyFakeDesignModel(adapter: CodexAppServerAdapter): void {
+  const resolveExecution = adapter.resolveExecution.bind(adapter);
+  adapter.resolveExecution = async (input) => {
+    const resolved = await resolveExecution(input);
+    return resolved.model.model === 'fake-model'
+      ? {
+          ...resolved,
+          model: {
+            ...resolved.model,
+            designSupport: {
+              maturity: 'stable',
+              detail: 'Synthetic model for Codex Design adapter coverage.'
+            }
+          }
+        }
+      : resolved;
+  };
+}
+
 function taskRuntimeForTaskStore(store: SqliteTaskStore) {
   const taskRuntime = persistenceByTaskStore.get(store)?.taskRuntime;
   if (!taskRuntime) {
@@ -5267,9 +6032,19 @@ async function createDesignTaskContext(
     request: {
       brief: 'Create a focused launch page with an interactive signup form.',
       creationToken: `design-skill-test-${randomUUID()}`,
+      runtimeId: 'codex',
       model: 'fake-model',
       reasoningEffort: 'high',
       ...(attachmentDraftId ? { attachmentDraftId } : {})
+    },
+    agentSettings: {
+      runtimeId: 'codex',
+      model: 'fake-model',
+      reasoningEffort: 'high',
+      sandbox: 'WORKSPACE_WRITE',
+      networkAccess: false,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
     },
     repository: {
       id: randomUUID(),
@@ -5383,6 +6158,19 @@ async function waitForRunStatus(
   throw new Error(`Timed out waiting for run ${runId} to reach ${status}.`);
 }
 
+async function waitForRuntimeRunStatus(
+  store: SqliteAgentRuntimeStore,
+  runId: string,
+  status: 'COMPLETED' | 'FAILED' | 'INTERRUPTED' | 'RECOVERY_REQUIRED'
+) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const run = await store.getRun(runId);
+    if (run?.status === status) return run;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for runtime run ${runId} to reach ${status}.`);
+}
+
 async function waitForSnapshot(
   store: SqliteTaskStore,
   predicate: (snapshot: Awaited<ReturnType<SqliteTaskStore['snapshot']>>) => boolean,
@@ -5484,6 +6272,10 @@ function fakeCodexScript(
     | 'scoped'
     | 'scoped-interrupt-no-terminal'
     | 'scoped-interrupt-terminal-race'
+    | 'scoped-interrupt-model-reroute'
+    | 'scoped-mcp-discovery-failure'
+    | 'scoped-model-reroute'
+    | 'scoped-model-reroute-before-ack'
     | 'scoped-unexpected-request-before-ack'
     | 'scoped-unexpected-request-after-ack'
     | 'scoped-unexpected-request-ambiguous-stop'
@@ -5511,20 +6303,44 @@ function fakeCodexScript(
     | 'unsafe-live-settings'
     | 'design-browser'
     | 'profile-rebind'
-    | 'design-delete'
     | 'profile-mismatch-create'
     | 'profile-drift'
     | 'unsafe-recovery-resume'
     | 'interrupt-ambiguous-then-terminal'
-    | 'interrupt-ambiguous-no-terminal' = 'normal'
+    | 'interrupt-ambiguous-no-terminal'
+    | 'design-delete' = 'normal'
 ): string {
+  const mcpList = mode === 'scoped'
+    ? [
+        {
+          name: 'docs',
+          enabled: true,
+          transport: {
+            type: 'stdio',
+            command: 'docs-secret-command',
+            args: ['docs-secret-argument'],
+            cwd: '/private/docs-secret-cwd'
+          }
+        },
+        {
+          name: 'remote',
+          enabled: true,
+          transport: {
+            type: 'streamable_http',
+            url: 'https://user:remote-secret@example.test/rpc?token=query-secret'
+          }
+        }
+      ]
+    : mode === 'scoped-mcp-discovery-failure'
+      ? [{ name: 'unknown', enabled: true, transport: { type: 'unknown' } }]
+      : [];
   return `#!/usr/bin/env node
 if (process.argv.includes('--version')) {
   process.stdout.write('codex-cli 0.141.0\\n');
   process.exit(0);
 }
 if (process.argv[2] === 'mcp' && process.argv[3] === 'list') {
-  process.stdout.write('[]\\n');
+  process.stdout.write(${JSON.stringify(`${JSON.stringify(mcpList)}\n`)});
   process.exit(0);
 }
 if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
@@ -5537,10 +6353,11 @@ const rl = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
 const mode = ${JSON.stringify(mode)};
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
-const scopedMode = mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode.startsWith('scoped-unexpected-request-');
+const scopedMode = mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode === 'scoped-interrupt-model-reroute' || mode === 'scoped-model-reroute' || mode === 'scoped-model-reroute-before-ack' || mode.startsWith('scoped-unexpected-request-');
 const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent' || mode === 'stale-generation';
 const userInputMode = mode === 'user-input' || mode === 'user-input-answer-exit' || mode === 'user-input-clear' || mode === 'user-input-exit';
 let goalContinuationStarted = false;
+const deletedThreadIds = new Set();
 const turn = (status, error = null) => ({
   id: 'turn-1',
   items: [],
@@ -5604,7 +6421,6 @@ let currentProfileId = ':workspace';
 let currentProfileNetworkAccess = false;
 let turnStartAttempts = 0;
 let designBrowserToolRegistered = false;
-const deletedThreadIds = new Set();
 const threadResponse = (request = {}) => {
   currentProfileId = request.config?.default_permissions ?? currentProfileId;
   currentProfileNetworkAccess =
@@ -5892,6 +6708,25 @@ rl.on('line', (line) => {
       } });
       break;
     case 'thread/start':
+      if (
+        mode === 'scoped' &&
+        message.params.config?.default_permissions !==
+          'task_monki_capability_probe'
+      ) {
+        const docs = message.params.config?.['mcp_servers.docs'];
+        const remote = message.params.config?.['mcp_servers.remote'];
+        if (
+          docs?.enabled !== false ||
+          docs.command !== 'docs-secret-command' ||
+          docs.args?.[0] !== 'docs-secret-argument' ||
+          docs.cwd !== '/private/docs-secret-cwd' ||
+          remote?.enabled !== false ||
+          !remote.url?.includes('remote-secret')
+        ) {
+          process.exit(19);
+          return;
+        }
+      }
       designBrowserToolRegistered =
         message.params.dynamicTools?.length === 1 &&
         message.params.dynamicTools[0]?.name === 'inspect_design';
@@ -6169,6 +7004,22 @@ rl.on('line', (line) => {
         } }), 10);
         return;
       }
+      if (
+        mode === 'scoped-model-reroute-before-ack' &&
+        currentProfileId !== 'task_monki_capability_probe'
+      ) {
+        send({ method: 'model/rerouted', params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          fromModel: 'fake-model',
+          toModel: 'fallback-model',
+          reason: 'provider fallback'
+        } });
+        setTimeout(() => send({ id: message.id, result: {
+          turn: turn('inProgress')
+        } }), 10);
+        return;
+      }
       send({ id: message.id, result: {
         turn: mode === 'profile-rebind'
           ? { ...turn('inProgress'), id: 'turn-' + turnStartAttempts }
@@ -6186,6 +7037,20 @@ rl.on('line', (line) => {
       if (mode === 'ack-only') return;
       setTimeout(() => {
         send({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('inProgress') } });
+        if (mode === 'scoped-model-reroute') {
+          send({ method: 'model/rerouted', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            fromModel: 'fake-model',
+            toModel: 'fallback-model',
+            reason: 'provider fallback'
+          } });
+          send({ method: 'turn/completed', params: {
+            threadId: 'thread-1',
+            turn: turn('completed')
+          } });
+          return;
+        }
         send({ method: 'thread/settings/updated', params: {
           threadId: 'thread-1',
           threadSettings: {
@@ -6249,7 +7114,7 @@ rl.on('line', (line) => {
           } });
           return;
         }
-        if (interruptMode || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race') {
+        if (interruptMode || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode === 'scoped-interrupt-model-reroute') {
           return;
         }
         if (mode === 'design-browser') {
@@ -6648,6 +7513,21 @@ rl.on('line', (line) => {
       }, 10);
       break;
     case 'turn/interrupt':
+      if (mode === 'scoped-interrupt-model-reroute') {
+        send({ method: 'model/rerouted', params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          fromModel: 'fake-model',
+          toModel: 'fallback-model',
+          reason: 'provider fallback during cancellation'
+        } });
+        send({ id: message.id, result: {} });
+        send({ method: 'turn/completed', params: {
+          threadId: 'thread-1',
+          turn: turn('interrupted')
+        } });
+        break;
+      }
       if (mode === 'user-input-clear' && message.params.threadId === 'thread-1') {
         send({ id: message.id, result: {} });
         send({ method: 'serverRequest/resolved', params: {
@@ -6696,6 +7576,14 @@ rl.on('line', (line) => {
           mode === 'scoped-unexpected-request-no-terminal' &&
           currentProfileId !== 'task_monki_capability_probe'
         ) break;
+        send({ method: 'turn/completed', params: {
+          threadId: 'thread-1',
+          turn: turn('interrupted')
+        } });
+        break;
+      }
+      if (mode.startsWith('scoped-model-reroute')) {
+        send({ id: message.id, result: {} });
         send({ method: 'turn/completed', params: {
           threadId: 'thread-1',
           turn: turn('interrupted')

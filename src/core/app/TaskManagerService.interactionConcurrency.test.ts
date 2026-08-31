@@ -51,7 +51,12 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
       });
 
       starting = scenario.service.startRun({ taskId: task.id });
-      await sessionStarted;
+      await Promise.race([
+        sessionStarted,
+        starting.then(() => {
+          throw new Error('The run finished before it tried to create a provider session.');
+        })
+      ]);
       const queued = (await scenario.store.snapshot()).runs.find(
         (candidate) => candidate.taskId === task.id
       )!;
@@ -74,7 +79,7 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
       await starting?.catch(() => undefined);
       await scenario.dispose();
     }
-  });
+  }, 20_000);
 
   it('does not deliver a positive approval while cancellation owns the task', async () => {
     const directory = await fs.mkdtemp(

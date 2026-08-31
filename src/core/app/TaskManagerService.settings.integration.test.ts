@@ -623,13 +623,37 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const settingsStore = new MemoryAppSettingsStore();
     const persistence = await openTestPersistence(path.join(dir, 'store'));
     const store = persistence.tasks;
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
+    const opencode = createLifecycleRuntime(
+      scriptedRuntime.taskRuntime,
+      'opencode',
+      'OpenCode'
+    );
+    const opencodeCapabilities = await opencode.capabilities();
+    vi.mocked(opencode.capabilities).mockResolvedValue({
+      ...opencodeCapabilities,
+      readOnlyTurns: {
+        maturity: 'stable',
+        detail: 'This lifecycle fixture supports read-only turns.'
+      }
+    });
     const service = new TaskManagerService(store, dir, undefined, {
-      ...taskManagerPersistenceOptions(persistence),
+      ...scriptedRuntime.serviceOptions,
+      agentRuntimeAdapters: [scriptedRuntime.adapter, opencode],
       appSettingsStore: settingsStore,
       worktreeRoot: path.join(dir, 'worktrees')
     });
     await store.init();
 
+    await expect(
+      service.updateAppSettings({ previewRecipeGenerationRuntimeId: 'opencode' })
+    ).resolves.toMatchObject({ previewRecipeGenerationRuntimeId: 'opencode' });
+    await expect(
+      service.updateAppSettings({ disabledRuntimeIds: ['opencode'] })
+    ).rejects.toThrow(
+      'cannot be disabled while it is the preview recipe generation runtime'
+    );
+    await service.updateAppSettings({ previewRecipeGenerationRuntimeId: null });
     await expect(
       service.updateAppSettings({ disabledRuntimeIds: ['opencode'] })
     ).resolves.toMatchObject({ disabledRuntimeIds: ['opencode'] });

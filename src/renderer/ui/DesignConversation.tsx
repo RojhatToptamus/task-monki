@@ -33,6 +33,7 @@ export interface DesignConversationProps {
   project: DesignProjectDetail;
   draft: DesignDraftRecord | null;
   model?: AgentModel;
+  refineUnavailableReason?: string;
   selectedReferenceIds: string[];
   onSelectionChange(referenceIds: string[]): void;
   onSubmit(
@@ -66,6 +67,7 @@ export function DesignConversation({
   project,
   draft,
   model,
+  refineUnavailableReason,
   selectedReferenceIds,
   onSelectionChange,
   onSubmit,
@@ -107,9 +109,10 @@ export function DesignConversation({
   const suppressDraftSaveRef = useRef(false);
   const saveDraftRef = useRef(onSaveDraft);
   saveDraftRef.current = onSaveDraft;
+  const canRefine = project.actions.canRefine && !refineUnavailableReason;
   const attachments = useTaskAttachments({
     enabled: true,
-    blocked: submitting || submissionOutcomeUnknown || !project.actions.canRefine,
+    blocked: submitting || submissionOutcomeUnknown || !canRefine,
     model,
     onStageBatch: onStageAttachmentBatch,
     onDiscard: onDiscardAttachmentDraft,
@@ -123,15 +126,14 @@ export function DesignConversation({
   const activityRows = designActivityRows(project);
   const detailedActivityRows = designDetailedActivityRows(project);
   const canSubmit =
-    project.actions.canRefine &&
+    canRefine &&
     message.trim().length > 0 &&
     !submitting &&
     !attachments.busy &&
     !attachments.hasErrors &&
     !attachments.modelError;
-  const disabledReason = project.actions.canRefine
-    ? undefined
-    : project.actions.refineDisabledReason;
+  const disabledReason = refineUnavailableReason ??
+    (project.actions.canRefine ? undefined : project.actions.refineDisabledReason);
   const activeWork = Boolean(
     project.currentRun &&
       ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING', 'RECOVERY_REQUIRED'].includes(
@@ -220,7 +222,7 @@ export function DesignConversation({
 
   const submit = async () => {
     const nextMessage = message.trim();
-    if (!nextMessage || !project.actions.canRefine || submittingRef.current) return;
+    if (!nextMessage || !canRefine || submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(undefined);
@@ -326,7 +328,7 @@ export function DesignConversation({
                 ? 'Delete this copy and duplicate the earlier Ready state again.'
                 : project.origin
                   ? 'Describe the next change. This Design has its own conversation and files.'
-                  : 'Describe what you want to see. Codex will build the first preview.'}
+                  : 'Describe what you want to see. The Design agent will build the first preview.'}
             </span>
           </div>
         ) : (
@@ -416,7 +418,7 @@ export function DesignConversation({
             rows={3}
             placeholder="Describe the next change…"
             disabled={
-              !project.actions.canRefine ||
+              !canRefine ||
               submitting ||
               submissionOutcomeUnknown ||
               attachments.isRestoringDraft
@@ -538,7 +540,7 @@ function DesignTurnMessages({
 
       <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
         <header>
-          <strong>Codex</strong>
+          <strong>Design agent</strong>
           <div className="tm-design-message__ready-actions">
             <span className="tm-design-message__turn-status" data-tone={view.tone}>
               {entry.readyRevision

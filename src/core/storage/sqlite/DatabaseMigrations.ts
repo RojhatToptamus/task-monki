@@ -456,8 +456,9 @@ CREATE INDEX runtime_servers_runtime_status_idx
 CREATE TABLE runtime_sessions (
   id TEXT PRIMARY KEY,
   runtime_id TEXT NOT NULL,
-  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('TASK', 'PROMPT_REFINEMENT', 'DISCOURSE')),
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('TASK', 'PROMPT_REFINEMENT', 'PREVIEW_RECIPE_GENERATION', 'DISCOURSE')),
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -472,19 +473,21 @@ CREATE TABLE runtime_sessions (
   payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
   UNIQUE (runtime_id, provider_session_id),
   CHECK (
-    (owner_kind = 'TASK' AND task_id IS NOT NULL AND request_id IS NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
-    (owner_kind = 'PROMPT_REFINEMENT' AND task_id IS NULL AND request_id IS NOT NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
-    (owner_kind = 'DISCOURSE' AND task_id IS NULL AND request_id IS NULL AND conversation_id IS NOT NULL AND stable_participant_id IS NOT NULL)
+    (owner_kind = 'TASK' AND task_id IS NOT NULL AND generation_id IS NULL AND request_id IS NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
+    (owner_kind = 'PROMPT_REFINEMENT' AND task_id IS NULL AND generation_id IS NULL AND request_id IS NOT NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
+    (owner_kind = 'PREVIEW_RECIPE_GENERATION' AND task_id IS NOT NULL AND generation_id IS NOT NULL AND request_id IS NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
+    (owner_kind = 'DISCOURSE' AND task_id IS NULL AND generation_id IS NULL AND request_id IS NULL AND conversation_id IS NOT NULL AND stable_participant_id IS NOT NULL)
   )
 ) STRICT;
 
 CREATE INDEX runtime_sessions_owner_idx
-  ON runtime_sessions(owner_kind, task_id, request_id, conversation_id, stable_participant_id, status, updated_at DESC);
+  ON runtime_sessions(owner_kind, task_id, generation_id, request_id, conversation_id, stable_participant_id, status, updated_at DESC);
 CREATE INDEX runtime_sessions_runtime_status_idx
   ON runtime_sessions(runtime_id, status, updated_at DESC, id);
 CREATE UNIQUE INDEX runtime_sessions_owner_operation_idx ON runtime_sessions(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -494,8 +497,9 @@ CREATE UNIQUE INDEX runtime_sessions_owner_operation_idx ON runtime_sessions(
 CREATE TABLE runtime_runs (
   id TEXT PRIMARY KEY,
   runtime_id TEXT NOT NULL,
-  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('TASK', 'PROMPT_REFINEMENT', 'DISCOURSE')),
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('TASK', 'PROMPT_REFINEMENT', 'PREVIEW_RECIPE_GENERATION', 'DISCOURSE')),
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -519,9 +523,10 @@ CREATE TABLE runtime_runs (
   ended_at TEXT,
   payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
   CHECK (
-    (owner_kind = 'TASK' AND task_id IS NOT NULL AND request_id IS NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
-    (owner_kind = 'PROMPT_REFINEMENT' AND task_id IS NULL AND request_id IS NOT NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
-    (owner_kind = 'DISCOURSE' AND task_id IS NULL AND request_id IS NULL AND conversation_id IS NOT NULL AND stable_participant_id IS NOT NULL)
+    (owner_kind = 'TASK' AND task_id IS NOT NULL AND generation_id IS NULL AND request_id IS NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
+    (owner_kind = 'PROMPT_REFINEMENT' AND task_id IS NULL AND generation_id IS NULL AND request_id IS NOT NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
+    (owner_kind = 'PREVIEW_RECIPE_GENERATION' AND task_id IS NOT NULL AND generation_id IS NOT NULL AND request_id IS NULL AND conversation_id IS NULL AND stable_participant_id IS NULL) OR
+    (owner_kind = 'DISCOURSE' AND task_id IS NULL AND generation_id IS NULL AND request_id IS NULL AND conversation_id IS NOT NULL AND stable_participant_id IS NOT NULL)
   )
 ) STRICT;
 
@@ -529,6 +534,7 @@ CREATE INDEX runtime_runs_owner_status_idx
   ON runtime_runs(
     owner_kind,
     task_id,
+    generation_id,
     request_id,
     conversation_id,
     stable_participant_id,
@@ -545,6 +551,7 @@ CREATE INDEX runtime_runs_provider_turn_idx
 CREATE UNIQUE INDEX runtime_runs_owner_operation_idx ON runtime_runs(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -555,6 +562,7 @@ CREATE TABLE runtime_artifacts (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -574,6 +582,7 @@ CREATE INDEX runtime_artifacts_run_kind_idx
 CREATE UNIQUE INDEX runtime_artifacts_owner_operation_idx ON runtime_artifacts(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -586,6 +595,7 @@ CREATE TABLE runtime_queue_entries (
   session_id TEXT NOT NULL REFERENCES runtime_sessions(id) ON DELETE CASCADE,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -605,10 +615,11 @@ CREATE TABLE runtime_queue_entries (
 CREATE INDEX runtime_queue_status_priority_idx
   ON runtime_queue_entries(status, priority, not_before, enqueue_ordinal);
 CREATE INDEX runtime_queue_owner_idx
-  ON runtime_queue_entries(owner_kind, task_id, request_id, conversation_id, stable_participant_id, status);
+  ON runtime_queue_entries(owner_kind, task_id, generation_id, request_id, conversation_id, stable_participant_id, status);
 CREATE UNIQUE INDEX runtime_queue_owner_operation_idx ON runtime_queue_entries(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -619,6 +630,7 @@ CREATE TABLE runtime_items (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -640,6 +652,7 @@ CREATE INDEX runtime_items_run_status_idx ON runtime_items(run_id, status, updat
 CREATE UNIQUE INDEX runtime_items_owner_operation_idx ON runtime_items(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -650,6 +663,7 @@ CREATE TABLE runtime_interactions (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -674,6 +688,7 @@ CREATE INDEX runtime_interactions_run_status_idx
 CREATE UNIQUE INDEX runtime_interactions_owner_operation_idx ON runtime_interactions(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -684,6 +699,7 @@ CREATE TABLE runtime_goal_snapshots (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -701,6 +717,7 @@ CREATE INDEX runtime_goals_session_time_idx
 CREATE UNIQUE INDEX runtime_goals_owner_operation_idx ON runtime_goal_snapshots(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -711,6 +728,7 @@ CREATE TABLE runtime_plan_revisions (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -730,6 +748,7 @@ CREATE INDEX runtime_plans_session_time_idx
 CREATE UNIQUE INDEX runtime_plans_owner_operation_idx ON runtime_plan_revisions(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -740,6 +759,7 @@ CREATE TABLE runtime_usage_snapshots (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -757,6 +777,7 @@ CREATE INDEX runtime_usage_session_time_idx
 CREATE UNIQUE INDEX runtime_usage_owner_operation_idx ON runtime_usage_snapshots(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -767,6 +788,7 @@ CREATE TABLE runtime_settings_observations (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -784,6 +806,7 @@ CREATE INDEX runtime_settings_session_time_idx
 CREATE UNIQUE INDEX runtime_settings_owner_operation_idx ON runtime_settings_observations(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -794,6 +817,7 @@ CREATE TABLE runtime_subagent_observations (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -814,6 +838,7 @@ CREATE INDEX runtime_subagents_parent_time_idx
 CREATE UNIQUE INDEX runtime_subagents_owner_operation_idx ON runtime_subagent_observations(
   owner_kind,
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),
@@ -825,6 +850,7 @@ CREATE TABLE runtime_telemetry (
   kind TEXT NOT NULL,
   owner_kind TEXT,
   task_id TEXT,
+  generation_id TEXT,
   request_id TEXT,
   conversation_id TEXT,
   stable_participant_id TEXT,
@@ -845,6 +871,7 @@ CREATE INDEX runtime_telemetry_session_time_idx
 CREATE UNIQUE INDEX runtime_telemetry_owner_operation_idx ON runtime_telemetry(
   coalesce(owner_kind, 'APP'),
   coalesce(task_id, ''),
+  coalesce(generation_id, ''),
   coalesce(request_id, ''),
   coalesce(conversation_id, ''),
   coalesce(stable_participant_id, ''),

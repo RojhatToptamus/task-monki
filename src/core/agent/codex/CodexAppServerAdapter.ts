@@ -98,6 +98,7 @@ import {
   codexPermissionProfileHash,
   codexPermissionProfileId,
   codexReadOnlyScopeProfile,
+  codexReadOnlyScopeProfileId,
   type CodexPermissionProfileEvidence
 } from './CodexPermissionProfile';
 import {
@@ -117,9 +118,10 @@ import type {
 } from '../../../shared/agent';
 import { isImplementationRunMode } from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
-import type { ThreadSourceKind } from './protocol/generated/v2/ThreadSourceKind';
-import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
-import { normalizeCodexExternalToolSettings } from './CodexToolConfig';
+import {
+  listDisabledCodexMcpServerThreadConfig,
+  normalizeCodexExternalToolSettings
+} from './CodexToolConfig';
 import {
   resolveAgentGitExecutablePath,
   resolveAgentGitMetadata
@@ -131,6 +133,8 @@ import type { ApprovalsReviewer } from './protocol/generated/v2/ApprovalsReviewe
 import type { CollaborationMode } from './protocol/generated/CollaborationMode';
 import type { ThreadItem } from './protocol/generated/v2/ThreadItem';
 import type { Thread } from './protocol/generated/v2/Thread';
+import type { ThreadListResponse } from './protocol/generated/v2/ThreadListResponse';
+import type { ThreadSourceKind } from './protocol/generated/v2/ThreadSourceKind';
 import type { ThreadGoal } from './protocol/generated/v2/ThreadGoal';
 import type { ThreadSettings } from './protocol/generated/v2/ThreadSettings';
 import type { ThreadStatus } from './protocol/generated/v2/ThreadStatus';
@@ -187,6 +191,11 @@ import {
   type DesignBrowserToolResult,
   type InspectDesignOperation
 } from '../../design/AgentBrowserRuntime';
+import {
+  INSPECT_DESIGN_TOOL_DEFINITION,
+  INSPECT_DESIGN_TOOL_NAME,
+  safeDesignClientToolFailure
+} from '../../design/DesignClientToolContract';
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -214,13 +223,11 @@ function isTerminalRunStatus(status: RunRecord['status']): boolean {
 
 const RUNTIME_CONFIG_PENDING_RESTART_WARNING =
   'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.';
-const STREAM_OUTPUT_FLUSH_MS = 75;
+const STREAM_OUTPUT_FLUSH_MS = 1_000;
 const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
 const RECOVERY_CONTINUATION_WAIT_MS = 1_000;
-const DESIGN_BROWSER_TOOL_NAME = 'inspect_design';
-
 export type CodexDesignBrowserToolHandler = (input: {
   runId: string;
   operation: InspectDesignOperation;
@@ -509,21 +516,22 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         run.status === 'INTERRUPTING' &&
         run.providerTurnId
       ) {
-        const unexpectedRequest =
-          run.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST';
+        const forcedFailure = isReadOnlyViolationSource(
+          run.providerTerminalSource
+        );
         const terminal = await this.runtimeStore.updateRun(
           run.id,
           run.recordRevision,
           {
-            status: unexpectedRequest ? 'FAILED' : 'INTERRUPTED',
+            status: forcedFailure ? 'FAILED' : 'INTERRUPTED',
             delivery: 'TERMINAL',
             ...(run.interruptDelivery
               ? { interruptDelivery: 'TERMINAL' as const }
               : {}),
             recoveryState: 'NONE',
-            providerTerminalSource: unexpectedRequest
-              ? 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST'
-              : 'CONFIRMED_STOP_AFTER_RUNTIME_INTERRUPT',
+            providerTerminalSource: confirmedStopSource(
+              run.providerTerminalSource
+            ),
             lastEventAt: observedAt,
             endedAt: observedAt
           },
@@ -542,8 +550,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           type: 'TERMINAL',
           runId: terminal.id,
           providerTurnId: run.providerTurnId,
-          status: unexpectedRequest ? 'failed' : 'interrupted',
-          ...(unexpectedRequest && terminal.terminalReason
+          status: forcedFailure ? 'failed' : 'interrupted',
+          ...(forcedFailure && terminal.terminalReason
             ? { error: terminal.terminalReason }
             : {}),
           completedAt: observedAt
@@ -819,7 +827,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         ? 'AMBIGUOUS'
         : 'NOT_DELIVERED';
       if (delivery === 'NOT_DELIVERED') {
-        this.pendingRunByProviderThread.delete(input.threadId);
+        this.clearPendingRunForThread(input.threadId, input.localRunId);
       }
       throw new CodexProviderMutationDeliveryError(
         'turn/start',
@@ -884,6 +892,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       }
     })();
     const settings = input.executionContext.modelSettings;
+    const readOnlyMcpConfig = await this.readOnlyMcpConfig(
+      input.executionContext.primaryCwd
+    );
     let opened: CodexThreadTransportResult;
     try {
       opened = await this.openCodexThread({
@@ -893,9 +904,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         settings,
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
-        config: profile.config,
+        config: { ...profile.config, ...readOnlyMcpConfig },
         dynamicTools: [],
         validateResponse: (response) => {
+          assertCodexReadOnlyModel(settings, settingsFromThreadResponse(response));
           assertCodexReadOnlyScopeEvidence({
             profileId: profile.profileId,
             primaryCwd: input.executionContext.primaryCwd,
@@ -950,20 +962,22 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       });
-      // A server request can arrive in the same stdout batch as turn/start's
-      // response. Materialize it before the shared orchestrator persists its
-      // acknowledgement so a denied request cannot be overwritten as RUNNING.
+      // A protocol violation can arrive in the same stdout batch as
+      // turn/start's response. Materialize it before the shared orchestrator
+      // persists its acknowledgement so the stop cannot be overwritten as
+      // RUNNING.
       await this.drainInbound();
       const latest = await this.runtimeStore.getRun(input.run.id);
       if (
-        latest?.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST' &&
+        latest &&
+        isReadOnlyViolationSource(latest.providerTerminalSource) &&
         latest.status === 'INTERRUPTING'
       ) {
         let terminationFailure: unknown;
         try {
           await this.supervisor.terminateUnresponsive(
             latest.terminalReason ??
-              'Codex requested an unsupported action before the turn acknowledgement was persisted.'
+              'Codex violated the requested read-only turn before its acknowledgement was persisted.'
           );
         } catch (error) {
           terminationFailure = error;
@@ -976,11 +990,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         );
       }
       const settled = await this.runtimeStore.getRun(input.run.id);
-      if (settled?.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST') {
+      if (
+        settled &&
+        isReadOnlyViolationTerminalSource(settled.providerTerminalSource)
+      ) {
         throw new AgentRuntimeDeliveryError(
           'AMBIGUOUS',
           settled.terminalReason ??
-            'Codex requested an unsupported action during the read-only turn.'
+            'Codex violated the requested read-only turn.'
         );
       }
       return {
@@ -1301,6 +1318,28 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     };
   }
 
+  private async readOnlyMcpConfig(
+    cwd: string
+  ): Promise<Record<string, JsonValue>> {
+    const executable = this.supervisor.currentServer?.executable;
+    if (!executable) {
+      throw runtimeDeliveryError(
+        new Error('Codex MCP configuration could not be inspected for this read-only turn.')
+      );
+    }
+    try {
+      return await listDisabledCodexMcpServerThreadConfig(
+        executable,
+        cwd,
+        this.supervisorOptions.environment
+      );
+    } catch {
+      throw runtimeDeliveryError(
+        new Error('Codex MCP configuration could not be inspected for this read-only turn.')
+      );
+    }
+  }
+
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
     const attachments = input.attachments ?? [];
     let session = await this.requireSession(input.session.localSessionId);
@@ -1541,7 +1580,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         lastAttachedAt: new Date().toISOString()
       });
       this.pendingRunByProviderTurn.delete(response.turn.id);
-      this.pendingRunByProviderThread.delete(providerThreadId);
+      this.clearPendingRunForThread(providerThreadId, input.localRunId);
       this.unmaterializedThreadAttestations.delete(session.id);
     } catch (persistenceError) {
       const fenceReason =
@@ -1896,9 +1935,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       return;
     }
     const ownedWorktreePaths = new Set(
-      await Promise.all(
-        sessions.map((session) => canonicalPath(session.worktreePath))
-      )
+      await Promise.all(sessions.map((session) => canonicalPath(session.worktreePath)))
     );
     const client = await this.ensureClient();
     const listOwned = async (): Promise<Thread[]> => {
@@ -2932,7 +2969,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       models.push(...response.data);
       cursor = response.nextCursor;
     } while (cursor);
-    this.models = models.map(mapModel);
+    this.models = models.map((model) =>
+      mapModel(model, this.supervisor.currentServer?.runtimeVersion)
+    );
   }
 
   private async handleNotification(
@@ -3046,6 +3085,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         return;
       case 'model/rerouted':
         await this.handleModelReroute(
+          notification.params.threadId,
           notification.params.turnId,
           notification.params.fromModel,
           notification.params.toModel,
@@ -3347,7 +3387,17 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     if (!runtimeRun && providerThreadId) {
       const pendingRunId = this.pendingRunByProviderThread.get(providerThreadId);
-      if (pendingRunId) runtimeRun = await this.runtimeStore.getRun(pendingRunId);
+      if (pendingRunId) {
+        const pendingRun = await this.runtimeStore.getRun(pendingRunId);
+        if (
+          pendingRun &&
+          (!providerTurnId ||
+            !pendingRun.providerTurnId ||
+            pendingRun.providerTurnId === providerTurnId)
+        ) {
+          runtimeRun = pendingRun;
+        }
+      }
     }
 
     let runtimeSession = runtimeRun
@@ -3580,7 +3630,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     if (
       request.method !== 'item/tool/call' ||
       request.params.namespace !== null ||
-      request.params.tool !== DESIGN_BROWSER_TOOL_NAME
+      request.params.tool !== INSPECT_DESIGN_TOOL_NAME
     ) {
       return false;
     }
@@ -3711,7 +3761,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       });
       response = successfulDesignToolResponse(result);
     } catch (error) {
-      response = failedDesignToolResponse(safeDesignToolFailure(error));
+      response = failedDesignToolResponse(safeDesignClientToolFailure(error));
     }
     try {
       if (!this.isCurrentClientEvent(input.client, input.raw)) return;
@@ -3728,7 +3778,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           {
             callId: input.callId,
             namespace: null,
-            tool: DESIGN_BROWSER_TOOL_NAME,
+            tool: INSPECT_DESIGN_TOOL_NAME,
             arguments: input.operation
           },
           input.operation,
@@ -3823,43 +3873,64 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     const providerTurnId = latest.providerTurnId ?? turnId;
     if (!providerTurnId) {
-      await this.stopAfterUnexpectedRuntimeRequest(
+      await this.stopAfterReadOnlyRuntimeViolation(
         latest,
         reason,
         'AMBIGUOUS',
-        raw
+        raw,
+        'UNEXPECTED_SERVER_REQUEST'
       );
       return true;
     }
     if (latest.providerTurnId && latest.providerTurnId !== providerTurnId) {
-      await this.stopAfterUnexpectedRuntimeRequest(
+      await this.stopAfterReadOnlyRuntimeViolation(
         latest,
         `${reason} The request identified a different provider turn.`,
         'AMBIGUOUS',
-        raw
+        raw,
+        'UNEXPECTED_SERVER_REQUEST'
       );
       return true;
     }
+    await this.requestReadOnlyRuntimeStop({
+      session,
+      run: latest,
+      providerTurnId,
+      reason,
+      source: 'UNEXPECTED_SERVER_REQUEST',
+      raw
+    });
+    return true;
+  }
+
+  private async requestReadOnlyRuntimeStop(input: {
+    session: AgentRuntimeSessionRecord;
+    run: AgentRuntimeRunRecord;
+    providerTurnId: string;
+    reason: string;
+    source: string;
+    raw: AgentProtocolMessageReference;
+  }): Promise<void> {
     const requestedAt = new Date().toISOString();
-    latest = await this.runtimeStore.updateRun(
-      latest.id,
-      latest.recordRevision,
+    const stopping = await this.runtimeStore.updateRun(
+      input.run.id,
+      input.run.recordRevision,
       {
-        providerTurnId,
-        serverInstanceId: latest.serverInstanceId ?? raw.serverInstanceId,
+        providerTurnId: input.providerTurnId,
+        serverInstanceId: input.run.serverInstanceId ?? input.raw.serverInstanceId,
         status: 'INTERRUPTING',
         delivery: 'ACKNOWLEDGED',
         interruptDelivery: 'SENDING',
         stopRequestedAt: requestedAt,
-        terminalReason: reason,
-        providerTerminalSource: 'UNEXPECTED_SERVER_REQUEST',
+        terminalReason: input.reason,
+        providerTerminalSource: input.source,
         lastEventAt: requestedAt
       },
-      `codex-runtime-request-stop:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+      `codex-runtime-stop:${input.source}:${input.run.id}:${input.raw.serverInstanceId}:${input.raw.sequence}`
     );
     try {
-      await this.interruptRuntimeTurn({ session, run: latest });
-      const current = (await this.runtimeStore.getRun(latest.id)) ?? latest;
+      await this.interruptRuntimeTurn({ session: input.session, run: stopping });
+      const current = (await this.runtimeStore.getRun(stopping.id)) ?? stopping;
       if (
         current.status === 'INTERRUPTING' &&
         current.interruptDelivery === 'SENDING'
@@ -3871,37 +3942,37 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
             interruptDelivery: 'ACKNOWLEDGED',
             lastEventAt: new Date().toISOString()
           },
-          `codex-runtime-request-stop-ack:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+          `codex-runtime-stop-ack:${input.source}:${input.run.id}:${input.raw.serverInstanceId}:${input.raw.sequence}`
         );
       }
     } catch (error) {
-      const interruptDelivery =
-        error instanceof AgentRuntimeDeliveryError ? error.delivery : 'AMBIGUOUS';
-      await this.stopAfterUnexpectedRuntimeRequest(
-        latest,
-        reason,
-        interruptDelivery,
-        raw
+      await this.stopAfterReadOnlyRuntimeViolation(
+        stopping,
+        input.reason,
+        error instanceof AgentRuntimeDeliveryError ? error.delivery : 'AMBIGUOUS',
+        input.raw,
+        input.source
       );
     }
-    return true;
   }
 
-  private async stopAfterUnexpectedRuntimeRequest(
+  private async stopAfterReadOnlyRuntimeViolation(
     run: AgentRuntimeRunRecord,
     reason: string,
     interruptDelivery: 'ACKNOWLEDGED' | 'NOT_DELIVERED' | 'AMBIGUOUS',
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    source: string
   ): Promise<void> {
     try {
       await this.supervisor.terminateUnresponsive(reason);
       const current = (await this.runtimeStore.getRun(run.id)) ?? run;
       if (current.serverInstanceId !== raw.serverInstanceId) {
-        await this.markUnexpectedRuntimeRequestRecovery(
+        await this.markReadOnlyRuntimeViolationRecovery(
           current,
           reason,
           interruptDelivery,
-          raw
+          raw,
+          source
         );
         return;
       }
@@ -3912,14 +3983,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       });
     } catch (terminationError) {
       const current = (await this.runtimeStore.getRun(run.id)) ?? run;
-      await this.markUnexpectedRuntimeRequestRecovery(
+      await this.markReadOnlyRuntimeViolationRecovery(
         current,
         `${reason} Task Monki could not confirm that Codex stopped: ${redactCredentialText(
           errorMessage(terminationError),
           this.sensitiveValues
         )}`,
         interruptDelivery,
-        raw
+        raw,
+        source
       );
     }
   }
@@ -3944,11 +4016,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     );
   }
 
-  private async markUnexpectedRuntimeRequestRecovery(
+  private async markReadOnlyRuntimeViolationRecovery(
     run: AgentRuntimeRunRecord,
     reason: string,
     interruptDelivery: 'ACKNOWLEDGED' | 'NOT_DELIVERED' | 'AMBIGUOUS',
-    raw: AgentProtocolMessageReference | undefined
+    raw: AgentProtocolMessageReference | undefined,
+    source: string
   ): Promise<void> {
     const observedAt = new Date().toISOString();
     const current = (await this.runtimeStore.getRun(run.id)) ?? run;
@@ -3962,7 +4035,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         ...(current.interruptDelivery ? { interruptDelivery } : {}),
         recoveryState: 'REQUIRES_USER_ACTION',
         terminalReason: reason,
-        providerTerminalSource: 'UNEXPECTED_SERVER_REQUEST',
+        providerTerminalSource: source,
         lastEventAt: observedAt
       },
       raw
@@ -4190,7 +4263,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           : session.subagentStatus
     });
     this.pendingRunByProviderTurn.delete(turn.id);
-    this.pendingRunByProviderThread.delete(threadId);
+    this.clearPendingRunForThread(threadId, run.id);
     this.clearInterruptDeadline(turn.id);
   }
 
@@ -4292,7 +4365,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     if (isTerminalRunStatus(target.run.status)) {
       this.pendingRunByProviderTurn.delete(turn.id);
-      this.pendingRunByProviderThread.delete(threadId);
+      this.clearPendingRunForThread(threadId, target.run.id);
       return;
     }
     if (turn.status === 'inProgress') return;
@@ -4321,11 +4394,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const completedAt = turn.completedAt
       ? new Date(turn.completedAt * 1_000).toISOString()
       : new Date().toISOString();
-    const unexpectedRequestReason =
-      run.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST'
-        ? run.terminalReason ??
-          'Codex requested an unsupported action during the read-only turn.'
-        : undefined;
+    const forcedFailureReason = readOnlyViolationReason(run);
     if (session.status !== 'IDLE' || !session.materialized) {
       session = await this.runtimeStore.updateSession(
         session.id,
@@ -4333,7 +4402,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         {
           providerSessionId: session.providerSessionId ?? threadId,
           status:
-            unexpectedRequestReason || turn.status === 'failed'
+            forcedFailureReason || turn.status === 'failed'
               ? 'SYSTEM_ERROR'
               : 'IDLE',
           materialized: true,
@@ -4359,7 +4428,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const artifactBody = await this.runtimeStore.readArtifact(run.outputArtifactId);
     const hasOutput = Boolean(finalMessage.trim() || artifactBody.trim());
     const status =
-      unexpectedRequestReason
+      forcedFailureReason
         ? 'FAILED'
         : turn.status === 'completed' && hasOutput
           ? 'COMPLETED'
@@ -4378,18 +4447,18 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
             delivery: 'TERMINAL',
             ...(run.interruptDelivery ? { interruptDelivery: 'TERMINAL' as const } : {}),
             recoveryState: 'NONE',
-            ...(status === 'COMPLETED'
+            ...(status === 'COMPLETED' && run.scope.kind === 'DISCOURSE'
               ? { contextFreshnessAtCompletion: 'UNKNOWN' as const }
               : {}),
             terminalReason:
-              unexpectedRequestReason ??
+              forcedFailureReason ??
               turn.error?.message ??
               (turn.status === 'completed' && !hasOutput
                 ? 'Codex completed the runtime turn without a response.'
                 : undefined),
-            providerTerminalSource: unexpectedRequestReason
-              ? 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST'
-              : 'TURN_COMPLETED_NOTIFICATION',
+            providerTerminalSource: turnCompletedSource(
+              run.providerTerminalSource
+            ),
             lastEventAt: completedAt,
             endedAt: completedAt
           },
@@ -4413,15 +4482,21 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       type: 'TERMINAL',
       runId: run.id,
       providerTurnId: turn.id,
-      status: unexpectedRequestReason ? 'failed' : turn.status,
-      ...(unexpectedRequestReason || turn.error?.message
-        ? { error: unexpectedRequestReason ?? turn.error!.message }
+      status: forcedFailureReason ? 'failed' : turn.status,
+      ...(forcedFailureReason || turn.error?.message
+        ? { error: forcedFailureReason ?? turn.error!.message }
         : {}),
       completedAt
     });
     this.pendingRunByProviderTurn.delete(turn.id);
-    this.pendingRunByProviderThread.delete(threadId);
+    this.clearPendingRunForThread(threadId, run.id);
     void session;
+  }
+
+  private clearPendingRunForThread(threadId: string, runId: string): void {
+    if (this.pendingRunByProviderThread.get(threadId) === runId) {
+      this.pendingRunByProviderThread.delete(threadId);
+    }
   }
 
   private async findRuntimeRun(
@@ -4483,6 +4558,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       if (!rebound || rebound.serverInstanceId !== raw.serverInstanceId) return;
       run = rebound;
     }
+    if (isTerminalRunStatus(run.status)) return;
     const safeItem = this.redactProviderValue(item);
     await this.persistAgentItem({
       taskId: run.taskId,
@@ -4695,21 +4771,25 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const runtimeSession = await this.findRuntimeSessionByProviderId(threadId);
     if (runtimeSession) {
       try {
-        const profile = await codexReadOnlyScopeProfile({
-          sessionId: runtimeSession.id,
-          scope: {
-            primaryCwd: runtimeSession.executionContext.primaryCwd,
-            readOnlyRoots: runtimeSession.executionContext.readRoots.map(
-              (root) => root.canonicalPath
-            )
-          },
-          reasoningEffort: runtimeSession.executionContext.modelSettings.reasoningEffort
-        });
-        if (profile.scopeHash !== runtimeSession.executionContext.permissionProfileHash) {
-          throw new Error('Codex read-only permission scope no longer matches its access epoch.');
-        }
+        assertCodexReadOnlyModel(
+          runtimeSession.executionContext.modelSettings,
+          observed
+        );
+      } catch (error) {
+        await this.failReadOnlyRuntimeTurn(
+          runtimeSession,
+          error instanceof Error ? error.message : String(error),
+          raw,
+          'CODEX_MODEL_SELECTION'
+        );
+        return;
+      }
+      try {
         assertCodexActivePermissionProfileId(
-          profile.profileId,
+          codexReadOnlyScopeProfileId(
+            runtimeSession.id,
+            runtimeSession.executionContext.permissionProfileHash
+          ),
           settings.activePermissionProfile
         );
         if (
@@ -4724,37 +4804,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         this.latchSecurityBoundary(reason);
-        await this.supervisor.terminateAndFence(reason);
-        const run = (await this.runtimeStore.listRunsByOwner(runtimeSession.owner))
-          .find((candidate) => candidate.sessionId === runtimeSession.id &&
-            !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(candidate.status));
-        if (run) {
-          const completedAt = new Date().toISOString();
-          const failed = await this.runtimeStore.updateRun(
-            run.id,
-            run.recordRevision,
-            {
-              status: 'FAILED',
-              delivery: run.providerTurnId ? 'TERMINAL' : 'AMBIGUOUS',
-              recoveryState: run.providerTurnId ? 'NONE' : 'REQUIRES_USER_ACTION',
-              terminalReason: reason,
-              providerTerminalSource: 'CODEX_PERMISSION_PROFILE',
-              lastEventAt: completedAt,
-              ...(run.providerTurnId ? { endedAt: completedAt } : {})
-            },
-            `codex-runtime-settings-violation:${raw.serverInstanceId}:${raw.sequence}`
-          );
-          if (failed.providerTurnId) {
-            this.emitRuntimeTurnEvent({
-              type: 'TERMINAL',
-              runId: failed.id,
-              providerTurnId: failed.providerTurnId,
-              status: 'failed',
-              error: reason,
-              completedAt
-            });
-          }
-        }
+        await this.failReadOnlyRuntimeTurn(
+          runtimeSession,
+          reason,
+          raw,
+          'CODEX_PERMISSION_PROFILE'
+        );
         return;
       }
       await this.runtimeStore.updateSession(
@@ -4954,16 +5009,28 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   }
 
   private async handleModelReroute(
+    threadId: string,
     turnId: string,
     fromModel: string,
     model: string,
     reason: unknown,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, turnId);
-    if (!run) {
+    const target = await this.resolveProviderTurnTarget(turnId, threadId);
+    if (!target) return;
+    if (target.kind === 'RUNTIME') {
+      if (target.session.executionContext.modelSettings.model === model) return;
+      await this.failReadOnlyRuntimeTurn(
+        target.session,
+        'Codex changed the selected model for a read-only turn.',
+        raw,
+        'CODEX_MODEL_SELECTION',
+        turnId,
+        target.run
+      );
       return;
     }
+    const run = target.run;
     const observedSettings = this.sanitizeProviderSettings({
       ...run.observedSettings,
       model
@@ -4992,13 +5059,128 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     });
   }
 
+  private async failReadOnlyRuntimeTurn(
+    session: AgentRuntimeSessionRecord,
+    reason: string,
+    raw: AgentProtocolMessageReference,
+    source: 'CODEX_MODEL_SELECTION' | 'CODEX_PERMISSION_PROFILE',
+    providerTurnId?: string,
+    resolvedRun?: AgentRuntimeRunRecord
+  ): Promise<void> {
+    const run =
+      resolvedRun ??
+      (await this.runtimeStore.listRunsByOwner(session.owner)).find(
+        (candidate) =>
+          candidate.sessionId === session.id &&
+          !isTerminalRunStatus(candidate.status)
+      );
+    if (source === 'CODEX_PERMISSION_PROFILE') {
+      await this.supervisor.terminateAndFence(reason);
+    }
+    if (
+      !run ||
+      run.sessionId !== session.id ||
+      agentOwnerScopeKey(run.owner) !== agentOwnerScopeKey(session.owner) ||
+      isTerminalRunStatus(run.status)
+    ) {
+      return;
+    }
+    if (source === 'CODEX_MODEL_SELECTION') {
+      if (
+        run.status === 'RECOVERY_REQUIRED'
+      ) {
+        return;
+      }
+      if (run.status === 'INTERRUPTING') {
+        let current: AgentRuntimeRunRecord = run;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (
+            current.status !== 'INTERRUPTING' ||
+            current.providerTerminalSource === source
+          ) {
+            return;
+          }
+          try {
+            await this.runtimeStore.updateRun(
+              current.id,
+              current.recordRevision,
+              {
+                terminalReason: reason,
+                providerTerminalSource: source,
+                lastEventAt: new Date().toISOString()
+              },
+              `codex-runtime-existing-stop:${source}:${run.id}:${raw.serverInstanceId}:${raw.sequence}`
+            );
+            return;
+          } catch (error) {
+            const latest = await this.runtimeStore.getRun(current.id);
+            if (
+              !latest ||
+              latest.recordRevision === current.recordRevision ||
+              attempt === 2
+            ) {
+              throw error;
+            }
+            current = latest;
+          }
+        }
+        return;
+      }
+      const turnId = run.providerTurnId ?? providerTurnId;
+      if (turnId) {
+        await this.requestReadOnlyRuntimeStop({
+          session,
+          run,
+          providerTurnId: turnId,
+          reason,
+          source,
+          raw
+        });
+        return;
+      }
+      await this.stopAfterReadOnlyRuntimeViolation(
+        run,
+        reason,
+        'AMBIGUOUS',
+        raw,
+        source
+      );
+      return;
+    }
+    const completedAt = new Date().toISOString();
+    const failed = await this.runtimeStore.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'FAILED',
+        delivery: run.providerTurnId ? 'TERMINAL' : 'AMBIGUOUS',
+        recoveryState: run.providerTurnId ? 'NONE' : 'REQUIRES_USER_ACTION',
+        terminalReason: reason,
+        providerTerminalSource: source,
+        lastEventAt: completedAt,
+        ...(run.providerTurnId ? { endedAt: completedAt } : {})
+      },
+      `codex-runtime-boundary:${source}:${raw.serverInstanceId}:${raw.sequence}`
+    );
+    if (failed.providerTurnId) {
+      this.emitRuntimeTurnEvent({
+        type: 'TERMINAL',
+        runId: failed.id,
+        providerTurnId: failed.providerTurnId,
+        status: 'failed',
+        error: reason,
+        completedAt
+      });
+    }
+  }
+
   private async appendTurnOutput(
     turnId: string,
     source: string,
     text: string
   ): Promise<void> {
     const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, turnId);
-    if (!run) {
+    if (!run || isTerminalRunStatus(run.status)) {
       return;
     }
     if (!text) return;
@@ -5230,7 +5412,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     payload: Record<string, unknown>
   ): Promise<void> {
     const run = await this.taskRuntime.getRunByProviderTurnId(this.descriptor.id, turnId);
-    if (run) {
+    if (run && !isTerminalRunStatus(run.status)) {
       await this.recordRunActivity(run, eventType, payload);
     }
   }
@@ -6780,164 +6962,8 @@ function codexRuntimeOperationId(action: string, ...identity: unknown[]): string
 
 const INSPECT_DESIGN_TOOL_SPEC: DynamicToolSpec = {
   type: 'function',
-  name: DESIGN_BROWSER_TOOL_NAME,
-  description:
-    'Open and inspect the exact current Design candidate. Use only the operations needed for this change.',
-  inputSchema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['operation'],
-    properties: {
-      operation: {
-        type: 'string',
-        description:
-          'Choose one bridge operation. Browser actions use operation "act" plus an action.',
-        enum: [
-          'open_candidate',
-          'observe',
-          'act',
-          'set_viewport',
-          'set_media',
-          'screenshot',
-          'accessibility'
-        ]
-      },
-      action: {
-        type: 'string',
-        description: 'Required only when operation is "act".',
-        enum: [
-          'click',
-          'double_click',
-          'hover',
-          'focus',
-          'fill',
-          'type',
-          'key',
-          'select',
-          'check',
-          'uncheck',
-          'scroll',
-          'scroll_into_view',
-          'drag',
-          'wait'
-        ]
-      },
-      ref: {
-        type: 'string',
-        description: 'A current snapshot reference including its @ prefix, for example @e4.',
-        pattern: '^@e[1-9][0-9]{0,4}$'
-      },
-      targetRef: {
-        type: 'string',
-        description: 'A second current snapshot reference including its @ prefix.',
-        pattern: '^@e[1-9][0-9]{0,4}$'
-      },
-      value: { type: 'string', maxLength: 4096 },
-      values: {
-        type: 'array',
-        minItems: 1,
-        maxItems: 20,
-        items: { type: 'string', maxLength: 4096 }
-      },
-      direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
-      amount: { type: 'integer', minimum: 1, maximum: 2000 },
-      milliseconds: { type: 'integer', minimum: 0, maximum: 2000 },
-      width: {
-        type: 'integer',
-        description: 'Required only for set_viewport.',
-        minimum: 320,
-        maximum: 2560
-      },
-      height: {
-        type: 'integer',
-        description: 'Required only for set_viewport.',
-        minimum: 320,
-        maximum: 2000
-      },
-      colorScheme: {
-        type: 'string',
-        enum: ['light', 'dark']
-      },
-      reducedMotion: { type: 'boolean' },
-      fullPage: { type: 'boolean' }
-    },
-    oneOf: [
-      {
-        title: 'Open the exact current candidate',
-        properties: { operation: { const: 'open_candidate' } },
-        required: ['operation']
-      },
-      {
-        title: 'Refresh the snapshot, console, and runtime errors',
-        properties: { operation: { const: 'observe' } },
-        required: ['operation']
-      },
-      {
-        title: 'Perform one browser action, then observe',
-        properties: {
-          operation: { const: 'act' },
-          action: {
-            enum: [
-              'click',
-              'double_click',
-              'hover',
-              'focus',
-              'fill',
-              'type',
-              'key',
-              'select',
-              'check',
-              'uncheck',
-              'scroll',
-              'scroll_into_view',
-              'drag',
-              'wait'
-            ]
-          },
-          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          targetRef: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          value: { type: 'string' },
-          values: { type: 'array' },
-          direction: { enum: ['up', 'down', 'left', 'right'] },
-          amount: { type: 'integer' },
-          milliseconds: { type: 'integer' }
-        },
-        required: ['operation', 'action']
-      },
-      {
-        title: 'Set the viewport, then observe',
-        properties: {
-          operation: { const: 'set_viewport' },
-          width: { type: 'integer' },
-          height: { type: 'integer' }
-        },
-        required: ['operation', 'width', 'height']
-      },
-      {
-        title: 'Set color and motion media, then observe',
-        properties: {
-          operation: { const: 'set_media' },
-          colorScheme: { enum: ['light', 'dark'] },
-          reducedMotion: { type: 'boolean' }
-        },
-        required: ['operation', 'colorScheme', 'reducedMotion']
-      },
-      {
-        title: 'Capture a transient screenshot',
-        properties: {
-          operation: { const: 'screenshot' },
-          ref: { pattern: '^@e[1-9][0-9]{0,4}$' },
-          fullPage: { type: 'boolean' }
-        },
-        required: ['operation']
-      },
-      {
-        title: 'Run the bounded accessibility audit',
-        properties: { operation: { const: 'accessibility' } },
-        required: ['operation']
-      }
-    ]
-  } as JsonValue
+  ...INSPECT_DESIGN_TOOL_DEFINITION,
+  inputSchema: INSPECT_DESIGN_TOOL_DEFINITION.inputSchema as JsonValue
 };
 
 function withDynamicTools<T extends object>(
@@ -6971,19 +6997,6 @@ function failedDesignToolResponse(message: string): DynamicToolCallResponse {
     success: false,
     contentItems: [{ type: 'inputText', text: message.slice(0, 1_000) }]
   };
-}
-
-function safeDesignToolFailure(error: unknown): string {
-  const message = errorMessage(error).trim();
-  if (
-    message.length > 0 &&
-    message.length <= 1_000 &&
-    !message.includes('/') &&
-    !message.includes('\\')
-  ) {
-    return message;
-  }
-  return 'The Design browser operation failed. Correct the source or open a fresh candidate.';
 }
 
 function designToolItemPayload(
@@ -7092,8 +7105,81 @@ function isSharedReadOnlyRuntimePurpose(
   return (
     purpose === 'TASK_REVIEW' ||
     purpose === 'PROMPT_REFINEMENT' ||
+    purpose === 'PREVIEW_RECIPE_GENERATION' ||
     purpose.startsWith('DISCOURSE_')
   );
+}
+
+function isReadOnlyViolationSource(source: string | undefined): boolean {
+  return (
+    source === 'UNEXPECTED_SERVER_REQUEST' ||
+    source === 'CODEX_MODEL_SELECTION'
+  );
+}
+
+function isReadOnlyViolationTerminalSource(
+  source: string | undefined
+): boolean {
+  return (
+    isReadOnlyViolationSource(source) ||
+    source === 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST' ||
+    source === 'CONFIRMED_STOP_AFTER_MODEL_SELECTION_CHANGE' ||
+    source === 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST' ||
+    source === 'TURN_COMPLETED_NOTIFICATION_AFTER_MODEL_SELECTION_CHANGE'
+  );
+}
+
+function readOnlyViolationReason(
+  run: AgentRuntimeRunRecord
+): string | undefined {
+  if (run.providerTerminalSource === 'UNEXPECTED_SERVER_REQUEST') {
+    return (
+      run.terminalReason ??
+      'Codex requested an unsupported action during the read-only turn.'
+    );
+  }
+  if (run.providerTerminalSource === 'CODEX_MODEL_SELECTION') {
+    return (
+      run.terminalReason ??
+      'Codex changed the selected model for a read-only turn.'
+    );
+  }
+  return undefined;
+}
+
+function confirmedStopSource(source: string | undefined): string {
+  if (source === 'UNEXPECTED_SERVER_REQUEST') {
+    return 'CONFIRMED_STOP_AFTER_UNEXPECTED_SERVER_REQUEST';
+  }
+  if (source === 'CODEX_MODEL_SELECTION') {
+    return 'CONFIRMED_STOP_AFTER_MODEL_SELECTION_CHANGE';
+  }
+  return 'CONFIRMED_STOP_AFTER_RUNTIME_INTERRUPT';
+}
+
+function turnCompletedSource(source: string | undefined): string {
+  if (source === 'UNEXPECTED_SERVER_REQUEST') {
+    return 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST';
+  }
+  if (source === 'CODEX_MODEL_SELECTION') {
+    return 'TURN_COMPLETED_NOTIFICATION_AFTER_MODEL_SELECTION_CHANGE';
+  }
+  return 'TURN_COMPLETED_NOTIFICATION';
+}
+
+function assertCodexReadOnlyModel(
+  expected: AgentExecutionSettings,
+  observed: AgentExecutionSettings
+): void {
+  if (expected.model && observed.model !== expected.model) {
+    throw new Error('Codex changed the selected model for a read-only turn.');
+  }
+  if (
+    expected.modelProvider &&
+    observed.modelProvider !== expected.modelProvider
+  ) {
+    throw new Error('Codex changed the selected model provider for a read-only turn.');
+  }
 }
 
 function codexAttachmentSandbox(

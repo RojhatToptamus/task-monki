@@ -76,6 +76,7 @@ import {
   eligibleDesignRuntimeCatalog,
   mergeDesignConversationPage,
   mergeDesignDetailHistory,
+  qualifiedDesignModels,
   type DesignCanvasExternalLinkRequest
 } from '../model/designs';
 import {
@@ -770,7 +771,13 @@ export function App() {
     async (
       input: Pick<
         CreateBlankDesignRequest,
-        'brief' | 'creationToken' | 'model' | 'reasoningEffort' | 'attachmentDraftId'
+        | 'brief'
+        | 'creationToken'
+        | 'runtimeId'
+        | 'model'
+        | 'modelProvider'
+        | 'reasoningEffort'
+        | 'attachmentDraftId'
       >
     ) => {
       const brief = input.brief.trim();
@@ -778,7 +785,9 @@ export function App() {
         const detail = await taskManagerApi.createBlankDesign({
           brief,
           creationToken: input.creationToken,
+          runtimeId: input.runtimeId,
           model: input.model,
+          modelProvider: input.modelProvider,
           reasoningEffort: input.reasoningEffort,
           ...(input.attachmentDraftId
             ? { attachmentDraftId: input.attachmentDraftId }
@@ -1741,7 +1750,10 @@ export function App() {
     () =>
       designRuntimeCatalog
         ? resolveModelExecutionSettings(
-            designRuntimeCatalog.models,
+            qualifiedDesignModels(
+              designRuntimeCatalog.runtimes,
+              designRuntimeCatalog.models
+            ),
             appSettings.defaultModel,
             appSettings.defaultReasoningEffort,
             designRuntimeCatalog.defaultRuntimeId,
@@ -1763,6 +1775,39 @@ export function App() {
     'PROMPT_REFINEMENT'
   );
   const promptRefinementRuntime = promptRefinementSelection.runtime;
+  const configuredPreviewRecipeGenerationRuntimeId =
+    appSettings.previewRecipeGenerationRuntimeId ?? appSettings.defaultRuntimeId;
+  const configuredPreviewRecipeGenerationModel = appSettings.previewRecipeGenerationModel
+    ? enabledRuntimeModels.find(
+        (model) =>
+          model.runtimeId === configuredPreviewRecipeGenerationRuntimeId &&
+          (model.id === appSettings.previewRecipeGenerationModel ||
+            model.model === appSettings.previewRecipeGenerationModel) &&
+          (!appSettings.previewRecipeGenerationModelProvider ||
+            model.modelProvider === appSettings.previewRecipeGenerationModelProvider)
+      )
+    : selectModel(
+        enabledRuntimeModels,
+        undefined,
+        configuredPreviewRecipeGenerationRuntimeId,
+        appSettings.previewRecipeGenerationModelProvider
+      );
+  const previewRuntimeSelection = selectConfiguredRuntimeForOperation(
+    enabledRuntimes,
+    configuredPreviewRecipeGenerationRuntimeId,
+    'PREVIEW_RECIPE_GENERATION',
+    { model: configuredPreviewRecipeGenerationModel }
+  );
+  const previewRecipeGenerationSelection =
+    (appSettings.previewRecipeGenerationModel ||
+      appSettings.previewRecipeGenerationModelProvider) &&
+    !configuredPreviewRecipeGenerationModel &&
+    previewRuntimeSelection.runtime
+      ? {
+          unavailableReason:
+            'The selected Preview agent or model is no longer available. Choose another selection.'
+        }
+      : previewRuntimeSelection;
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
   const reviewSelection = selectConfiguredRuntimeForOperation(
@@ -2008,11 +2053,7 @@ export function App() {
 
   const generatePreviewRecipe = async (taskId: string) => {
     try {
-      const refinementModel = selectModel(enabledRuntimeModels, appSettings.promptRefinementModel);
-      const state = await taskManagerApi.generatePreviewRecipe({
-        taskId,
-        model: refinementModel?.model
-      });
+      const state = await taskManagerApi.generatePreviewRecipe({ taskId });
       setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
       return state;
     } catch (caught) {
@@ -2981,6 +3022,9 @@ export function App() {
             subagentObservations={selectedSubagentObservations}
             runtimeState={selectedTaskRuntimeState}
             reviewDisabledReason={reviewDisabledReason}
+            previewRecipeGenerationDisabledReason={
+              previewRecipeGenerationSelection.unavailableReason
+            }
             server={taskDetail.agentServers.find(
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}

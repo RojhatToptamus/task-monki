@@ -78,8 +78,15 @@ Task Monki attempts the turn only for a profile that advertises a native
 read-only policy. The probe qualifies that policy. The report gives the reason
 for each unsupported profile.
 Normal Tasks remain available for an unsupported read-only profile.
-Grok ACP and Claude Agent ACP are unsupported in this release. The command
-does not send a read-only qualification turn to these profiles.
+Grok Build 1.0.13 on macOS uses a separate ACP process for read-only work.
+Normal Task and Design sessions keep the normal writable process. The
+read-only process uses Grok's native sandbox and denies edit, write, and MCP
+tools. It also refuses shared-leader routing.
+
+Do not use a temporary-directory repository for the Grok probe. Grok permits
+writes to temporary directories and `~/.grok` in this sandbox. Task Monki also
+rejects linked worktrees when their Git control directory is in one of these
+writable locations. A sandbox warning fails startup.
 
 A qualification passes only when all these conditions are true:
 
@@ -89,9 +96,11 @@ A qualification passes only when all these conditions are true:
 - The source repository remains clean.
 - The checked-out ref and `HEAD` remain unchanged.
 
-The native policy is a provider control. It is not an operating-system
-sandbox. The independent file and Git checks detect a provider that changes
-the source repository despite that policy.
+Codex, OpenCode, and Cursor use provider controls. These controls are not
+operating-system sandboxes. Grok uses a separate process with its native
+operating-system sandbox. Claude Agent ACP 0.70.0 plan mode failed this probe,
+so its read-only workflows are disabled. The independent file and Git checks
+still detect a provider that changes the source repository.
 
 If a write occurs, the harness does not erase it. It keeps the changed
 repository, runtime records, Discourse records, and `report.json` as evidence.
@@ -118,11 +127,12 @@ selection and one matching submission for each selected file. Each submission
 must use the expected provider transport and correlation kind.
 
 If the selected model supports image input, the command also attaches
-`build/provider-smoke-image.png`. The provider must report an unrevealed visual
-code, the ordered shapes, and the background color. The report includes the
-payload size and the model's effective input modes. Effective support normally
-follows ACP negotiation and exact model qualification. It can also include one
-exact provider-local exception for a proven false capability flag.
+`src/testSupport/fixtures/provider-smoke-image.png`. The provider must report
+an unrevealed visual code, the ordered shapes, and the background color. The
+report includes the payload size and the model's effective input modes.
+Effective support normally follows ACP negotiation and exact model
+qualification. It can also include one exact provider-local exception for a
+proven false capability flag.
 
 The report stores only path-free selection and submission evidence. It does not
 store attachment paths or bytes. A supported qualification fails if the

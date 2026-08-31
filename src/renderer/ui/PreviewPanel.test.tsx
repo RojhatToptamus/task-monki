@@ -170,9 +170,29 @@ routes:
     expect(html).toContain('Agent is drafting the recipe');
     expect(html).toContain('Reading only the bounded evidence bundle');
     expect(html).toContain('Close');
+    expect(html).toContain('Stop');
     expect(html).not.toContain('Discard');
     expect(html).not.toContain('Regenerate');
     expect(html).not.toContain('Accept &amp; save recipe');
+  });
+
+  it('shows why the configured Preview provider cannot generate a recipe', () => {
+    const reason = 'This provider has no qualified read-only turn policy.';
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace
+        {...previewProps({ includePlan: false })}
+        recipeGenerationDisabledReason={reason}
+        resolution={{
+          status: 'UNAVAILABLE',
+          reasonCode: 'RECIPE_MISSING',
+          reason: 'No .taskmonki/preview.yaml exists in the task worktree.'
+        }}
+      />
+    );
+
+    expect(html).toContain(reason);
+    expect(html).toContain('disabled');
+    expect(html).toContain('Write manually');
   });
 
   it('keeps a failed generation compact and offers only the relevant retry', () => {

@@ -42,6 +42,7 @@ describe('Codex protocol attachment redaction', () => {
     expect(safe).toContain('attachment input omitted');
     expect(safe).not.toContain('secret attachment bytes');
     expect(safe).not.toContain(managedPath);
+    expect(safe).not.toContain(JSON.stringify(managedPath).slice(1, -1));
     expect(safe).not.toContain('secret.txt');
   });
 
@@ -58,5 +59,42 @@ describe('Codex protocol attachment redaction', () => {
         'INBOUND'
       )
     ).not.toContain(managedPath);
+  });
+
+  it('keeps MCP denial evidence without journaling transport details', () => {
+    const sanitizer = new CodexProtocolSanitizer();
+    const raw = JSON.stringify({
+      method: 'thread/start',
+      params: {
+        config: {
+          'mcp_servers.local': {
+            enabled: false,
+            command: '/private/tools/secret-mcp',
+            args: ['--token', 'secret-argument'],
+            cwd: '/private/project'
+          },
+          'mcp_servers.remote': {
+            enabled: false,
+            url: 'https://user:secret@example.test/rpc?token=query-secret'
+          }
+        }
+      }
+    });
+
+    const safe = sanitizer.sanitizeRaw(raw, 'OUTBOUND');
+
+    expect(safe).toContain('mcp_servers.local');
+    expect(safe).toContain('MCP transport omitted');
+    expect(safe).toContain('"enabled":false');
+    for (const secret of [
+      '/private/tools/secret-mcp',
+      'secret-argument',
+      '/private/project',
+      'user:secret',
+      'query-secret'
+    ]) {
+      expect(safe).not.toContain(secret);
+      expect(safe).not.toContain(JSON.stringify(secret).slice(1, -1));
+    }
   });
 });

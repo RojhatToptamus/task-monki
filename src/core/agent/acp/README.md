@@ -257,20 +257,29 @@ allow/deny rules still apply before ACP requests reach Task Monki. The current
 Grok ACP may offer only `allow_once` and `reject_once`; Task Monki displays those
 exact choices and does not manufacture `allow_always` or a rule scope.
 
-Restricted workspace, read-only, network-disabled, and automated-reviewer
-settings are rejected instead of being silently downgraded.
+Grok Build 1.0.13 on macOS uses a second, adapter-owned ACP process for review,
+prompt refinement, and Discourse. That process starts with Grok's native
+read-only sandbox. It denies edit, write, and MCP tools and refuses shared
+leader routing. Normal Task and Design sessions stay on the writable process.
+Both processes use the same adapter, registry, runtime store, cancellation,
+recovery, and cleanup paths.
 
-For the same reason, Task Monki attachment delivery is currently unsupported
-for ACP. Agents may negotiate native ACP image/resource blocks, and that state
-is preserved as a native capability, but managed attachment copies are not sent
-until a concrete profile can attest the required confidentiality boundary.
-Browser-development mode is also unsupported because ACP capability negotiation
-does not attest process, filesystem, and network isolation.
+Grok's read-only sandbox still permits writes to temporary directories and
+`~/.grok`. Task Monki rejects repository roots, read roots, and linked Git
+control directories that overlap these locations. It also fails startup when
+Grok reports that the sandbox was not applied. The real mutation test runs
+outside these writable locations and still requires Task Monki's independent
+repository comparison.
 
-Both execution resolution and turn start reject every nonempty managed
-attachment list before executable discovery, provider process startup, session
-creation, or prompt submission. The adapter contains no dormant ACP attachment
-serialization path.
+Normal Task settings that request a restricted workspace, read-only access,
+network-disabled access, or an automated reviewer are rejected. Task Monki
+does not silently downgrade these settings.
+
+Task Monki sends managed attachments only through qualified profile mappings.
+Cursor receives bounded text blocks. Grok and Claude receive embedded text
+resources. Exact qualified model pairs receive native ACP image blocks. An
+unsupported media type, version, or model fails before prompt submission.
+Task Monki keeps attachment bytes and paths out of durable protocol records.
 
 ## Recovery semantics
 
@@ -289,17 +298,16 @@ loss. Once an interrupt deadline or runtime loss makes a prompt ambiguous, late
 prompt responses, stream updates, and permission requests cannot silently
 reverse the recovery decision.
 
-All current ACP profiles use one application-scoped child process per runtime
-identity. Sessions are never shared across Grok, Cursor, and Claude,
-but several sessions belonging to one profile can be loaded in that profile's
-process. Stable ACP session updates do not identify a Task Monki prompt/run.
-Consequently, an ambiguous prompt, cancellation, permission response, or
-session-control update quarantines the entire profile process: Task Monki
-invalidates its client generation before shutdown, unloads every attached
-session, marks affected active work for explicit recovery, and never resends
-the uncertain mutation. Idle sessions may attach again through a newly started
-process. This application-wide blast radius is a documented ACP compatibility
-limitation, not native per-session lifecycle parity.
+Cursor and Claude use one application-scoped child process per runtime
+identity. Grok uses one process for normal work and one process for shared
+read-only work. Sessions are never shared across providers or Grok process
+lanes. Several sessions can use one process lane. Stable ACP session updates
+do not identify a Task Monki prompt or run. Consequently, an ambiguous prompt,
+cancellation, permission response, or session-control update quarantines its
+process lane. Task Monki invalidates that client generation before shutdown.
+It unloads attached sessions, marks affected work for explicit recovery, and
+never resends the uncertain mutation. Idle sessions can attach through a new
+process. This lane-wide recovery scope is an ACP compatibility limitation.
 
 Every inbound notification and permission request is tagged with the bound
 client generation and server instance. Once quarantine or replacement
@@ -326,11 +334,12 @@ session, or submitting any prompt.
   remain gated on an attested read-only execution policy.
 - Full token input/output/cache breakdown: stable ACP reports current context
   `used`/`size` and optional cost, not the richer common breakdown.
-- Automatic authentication flows, session list/delete/close UI, and MCP servers
-  supplied by Task Monki. Their native/negotiated metadata is retained for a
-  future dedicated surface. Runtime cleanup does use stable `session/close`
-  when the connected agent advertises it; release never starts a process merely
-  to close a session and never closes a session with active or ambiguous work.
+- Automatic authentication flows and session list/delete/close UI. Task Monki
+  supplies no general ACP MCP management surface. Qualified Design sessions
+  receive only the narrow app-owned `inspect_design` bridge. Runtime cleanup
+  uses stable `session/close` when the connected agent advertises it. Release
+  never starts a process only to close a session. It never closes a session
+  with active or ambiguous work.
 
 Focused tests include strict framing and bounds, stable-schema parsing, profile
 launch-contract identity, Grok extension gating and `session/set_model`, config

@@ -28,8 +28,8 @@ describe('AppSettingsStore', () => {
 
     await expect(store.get()).resolves.toMatchObject({
       schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      theme: 'device',
-      themePreset: 'umber',
+      theme: 'dark',
+      themePreset: 'graphite',
       sidebarCollapsed: false,
       showMascot: true,
       autoInstallUpdatesOnQuit: true,
@@ -74,19 +74,19 @@ describe('AppSettingsStore', () => {
 
     await expect(
       database.write(async () => {
-        await store.update({ theme: 'dark' });
-        expect((await store.get()).theme).toBe('dark');
+        await store.update({ theme: 'light' });
+        expect((await store.get()).theme).toBe('light');
         throw new Error('abort transaction');
       })
     ).rejects.toThrow('abort transaction');
 
-    expect((await store.get()).theme).toBe('device');
+    expect((await store.get()).theme).toBe('dark');
     const stored = await database.read((reader) =>
       reader.get<{ settings_json: string }>(
         'SELECT settings_json FROM app_settings WHERE singleton_id = 1'
       )
     );
-    expect(JSON.parse(stored!.settings_json)).toMatchObject({ theme: 'device' });
+    expect(JSON.parse(stored!.settings_json)).toMatchObject({ theme: 'dark' });
   });
 
   it('rejects first initialization inside an outer transaction', async () => {
@@ -94,10 +94,10 @@ describe('AppSettingsStore', () => {
     const store = new AppSettingsStore(database);
 
     await expect(
-      database.write(() => store.update({ theme: 'dark' }))
+      database.write(() => store.update({ theme: 'light' }))
     ).rejects.toThrow('must be initialized before joining an outer database transaction');
 
-    await expect(store.get()).resolves.toMatchObject({ theme: 'device' });
+    await expect(store.get()).resolves.toMatchObject({ theme: 'dark' });
   });
 
   it('fails closed on invalid current settings without rewriting them', async () => {
@@ -163,6 +163,22 @@ describe('AppSettingsStore', () => {
 
     await expect(store.update({ showMascot: false })).resolves.toMatchObject({
       showMascot: false
+    });
+  });
+
+  it('stores the dedicated Preview recipe generation selection', async () => {
+    const store = new MemoryAppSettingsStore();
+
+    await expect(
+      store.update({
+        previewRecipeGenerationRuntimeId: 'opencode',
+        previewRecipeGenerationModel: 'openai/gpt-5',
+        previewRecipeGenerationModelProvider: 'openai'
+      })
+    ).resolves.toMatchObject({
+      previewRecipeGenerationRuntimeId: 'opencode',
+      previewRecipeGenerationModel: 'openai/gpt-5',
+      previewRecipeGenerationModelProvider: 'openai'
     });
   });
 

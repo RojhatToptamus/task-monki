@@ -274,6 +274,56 @@ describe('runProviderSmoke', () => {
     expect(report.authoritative).toBe(true);
   });
 
+  it('expects Claude ACP text and image submissions through its native transports', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'claude-agent-acp:anthropic/sonnet',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [
+        catalogWith([
+          runtime(
+            'claude-agent-acp',
+            'READY',
+            true,
+            [candidate],
+            false,
+            { maturity: 'stable' },
+            {
+              kind: 'ACP_AGENT',
+              runtimeVersion: '0.70.0',
+              advertisedImageInput: true
+            }
+          )
+        ])
+      ]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        submissions: [
+          expect.objectContaining({
+            transport: 'embedded-resource',
+            correlation: { kind: 'client-request', id: expect.any(String) }
+          }),
+          expect.objectContaining({
+            transport: 'native-image',
+            correlation: { kind: 'client-request', id: expect.any(String) }
+          })
+        ]
+      }
+    });
+  });
+
   it('reports a verified ACP image path that contradicts the advertised capability', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model(
@@ -313,6 +363,90 @@ describe('runProviderSmoke', () => {
       }
     });
     expect(report.authoritative).toBe(true);
+  });
+
+  it('accepts an equivalent positional image observation', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])],
+      imageObservation:
+        'The image shows Q7 on a yellow triangle, with a cyan circle on the left and a pink square on the right, on a dark navy background.'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        imageContentUsed: true,
+        capabilityDrift: 'ADVERTISED_FALSE_VERIFIED_TRUE'
+      }
+    });
+  });
+
+  it('rejects a positional image observation with the wrong shape order', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
+            advertisedImageInput: false
+          }
+        )
+      ])],
+      imageObservation:
+        'The image shows Q7. The triangle is far left, the circle is left of the square, and the square is on the right, on a navy background.'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]?.attachmentQualification).toMatchObject({
+      status: 'FAILED',
+      textContentUsed: true,
+      imageContentUsed: false
+    });
+    expect(
+      report.results[0]?.attachmentQualification?.capabilityDrift
+    ).toBeUndefined();
   });
 
   it('does not accept an image guess as false-advertisement qualification', async () => {
@@ -861,6 +995,23 @@ describe('runProviderSmoke', () => {
     });
   });
 
+  it('accepts the exact smoke file when the provider stages it', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('opencode:opencode/staged-change');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('opencode', 'READY', true, [candidate])])],
+      stageTaskChange: true
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      gitStatus: 'DIRTY',
+      worktreeChangeVerified: true
+    });
+  });
+
   it('uses the exact explicit post-run Git snapshot', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model('codex:openai/git-evidence');
@@ -1156,6 +1307,9 @@ function runtime(
     advertisedImageInput?: boolean;
   } = {}
 ) {
+  const readOnlyTurns: AgentCapability = runtimeId === 'codex'
+    ? { maturity: 'stable' }
+    : { maturity: 'unsupported' };
   return {
     preflight: {
       runtime: {
@@ -1176,7 +1330,7 @@ function runtime(
             executionPolicy:
               runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
             extensions: {},
-            detachedReview: { maturity: 'unsupported' }
+            readOnlyTurns
           }
         : {
             modelCatalog: {},
@@ -1184,7 +1338,7 @@ function runtime(
             executionPolicy:
               runtimeId === 'codex' ? smokeExecutionPolicy() : unsupportedExecutionPolicy(),
             extensions: {},
-            detachedReview: { maturity: 'unsupported' }
+            readOnlyTurns
           },
       ...(
         options.runtimeVersion || runtimeId === 'codex'
@@ -1262,6 +1416,7 @@ interface FakeProviderBehavior {
   interactionStatus?: 'RESOLVED';
   gitStatus?: 'CLEAN' | 'DIRTY';
   committedTaskChange?: boolean;
+  stageTaskChange?: boolean;
   wrongWorktreeChange?: boolean;
   omitTrailingNewline?: boolean;
   retainDifferentStoredGitSnapshot?: boolean;
@@ -1276,6 +1431,7 @@ interface FakeProviderBehavior {
   mismatchAttachmentEvidence?: boolean;
   mismatchAttachmentTransport?: boolean;
   omitImageObservation?: boolean;
+  imageObservation?: string;
 }
 
 class FakeProviderSmokeService implements ProviderSmokeService {
@@ -1513,7 +1669,8 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     );
     const defaultFinalMessage = attachmentSmokeFinalMessage(
       selectedAttachments,
-      !this.behavior.omitImageObservation
+      !this.behavior.omitImageObservation,
+      this.behavior.imageObservation
     );
     const run = {
       id: `run-${++this.runSequence}`,
@@ -1681,7 +1838,9 @@ class FakeProviderSmokeService implements ProviderSmokeService {
             commitsAheadOfBase: 1,
             committedDiffFileCount: 1
           }
-        : undefined
+        : this.behavior.stageTaskChange
+          ? { stagedCount: 1, workingDiffFileCount: 0 }
+          : undefined
     );
     if (this.behavior.retainDifferentStoredGitSnapshot) {
       this.snapshot.gitSnapshots.push(
@@ -1754,6 +1913,8 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     if (committed) {
       await git(worktreePath, ['add', 'task-monki-provider-smoke.txt']);
       await git(worktreePath, ['commit', '-m', 'Provider committed smoke change']);
+    } else if (this.behavior.stageTaskChange) {
+      await git(worktreePath, ['add', 'task-monki-provider-smoke.txt']);
     }
     return worktreePath;
   }
@@ -1763,7 +1924,8 @@ function attachmentSmokeFinalMessage(
   attachments:
     | { records: readonly StagedAttachmentRecord[]; bytes: ReadonlyMap<string, Uint8Array> }
     | undefined,
-  includeImageObservation = true
+  includeImageObservation = true,
+  imageObservation?: string
 ): string {
   if (!attachments || attachments.records.length === 0) {
     return 'TASK_MONKI_PROVIDER_SMOKE_OK';
@@ -1773,12 +1935,12 @@ function attachmentSmokeFinalMessage(
     ? Buffer.from(attachments.bytes.get(text.id) ?? []).toString('utf8')
       .match(/TM_ATTACHMENT_FACT_[A-F0-9]+/u)?.[0]
     : undefined;
-  const imageObservation = includeImageObservation && attachments.records.some(
+  const imageDetail = includeImageObservation && attachments.records.some(
     (attachment) => attachment.kind === 'image'
   )
-    ? '\nThe code is Q7, with a circle, triangle, and square from left to right on a navy background.'
+    ? `\n${imageObservation ?? 'The code is Q7, with a circle, triangle, and square from left to right on a navy background.'}`
     : '';
-  return `TASK_MONKI_PROVIDER_SMOKE_OK${token ? `\n${token}` : ''}${imageObservation}`;
+  return `TASK_MONKI_PROVIDER_SMOKE_OK${token ? `\n${token}` : ''}${imageDetail}`;
 }
 
 function fakeAttachmentTransport(
@@ -1787,7 +1949,9 @@ function fakeAttachmentTransport(
 ): AttachmentSubmissionRecord['transport'] {
   if (kind === 'image') return runtimeId === 'opencode' ? 'native-file' : 'native-image';
   if (runtimeId === 'opencode') return 'native-file';
-  if (runtimeId === 'grok-acp') return 'embedded-resource';
+  if (runtimeId === 'grok-acp' || runtimeId === 'claude-agent-acp') {
+    return 'embedded-resource';
+  }
   if (runtimeId === 'cursor-agent-acp') return 'text-block';
   return 'managed-path';
 }

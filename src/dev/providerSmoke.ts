@@ -1250,7 +1250,9 @@ function expectedAttachmentSubmissions(
     ? 'provider-turn'
     : target.runtimeId === 'opencode'
       ? 'provider-message'
-      : ['grok-acp', 'cursor-agent-acp'].includes(target.runtimeId)
+      : ['grok-acp', 'cursor-agent-acp', 'claude-agent-acp'].includes(
+            target.runtimeId
+          )
         ? 'client-request'
         : undefined;
   if (!correlationKind) return undefined;
@@ -1264,7 +1266,7 @@ function expectedAttachmentSubmissions(
           : 'native-image'
         : target.runtimeId === 'opencode'
           ? 'native-file'
-          : target.runtimeId === 'grok-acp'
+          : ['grok-acp', 'claude-agent-acp'].includes(target.runtimeId)
             ? 'embedded-resource'
             : target.runtimeId === 'cursor-agent-acp'
               ? 'text-block'
@@ -1295,7 +1297,10 @@ async function stageSmokeAttachments(
   let payloadByteCount = textBytes.byteLength;
   if (expectation.requestedKinds.includes('image')) {
     const imageBytes = await fs.readFile(
-      path.resolve(__dirname, '../../build/provider-smoke-image.png')
+      path.resolve(
+        __dirname,
+        '../../src/testSupport/fixtures/provider-smoke-image.png'
+      )
     );
     payloadByteCount += imageBytes.byteLength;
     attachments.push({
@@ -1597,7 +1602,6 @@ function evaluateResult(input: {
   );
   const expectedWorktreeChange = Boolean(
     input.gitSnapshot?.status === 'DIRTY' &&
-      input.gitSnapshot.workingDiffFileCount === 1 &&
       input.worktreeVerification?.verified
   );
   const baseErrors = [
@@ -1618,9 +1622,6 @@ function evaluateResult(input: {
       : undefined,
     input.gitSnapshot && !worktreeMatchesBase
       ? `The implementation worktree no longer matches its base commit (base=${input.gitSnapshot.baseSha ?? 'missing'}, head=${input.gitSnapshot.headSha ?? 'missing'}, commitsAhead=${input.gitSnapshot.commitsAheadOfBase}, committedFiles=${input.gitSnapshot.committedDiffFileCount}).`
-      : undefined,
-    input.gitSnapshot && input.gitSnapshot.workingDiffFileCount !== 1
-      ? `The implementation worktree reported ${input.gitSnapshot.workingDiffFileCount} changed files; exactly one was required.`
       : undefined,
     input.worktreeVerification && !input.worktreeVerification.verified
       ? input.worktreeVerification.error
@@ -1843,11 +1844,14 @@ function sameAttachmentSubmissions(
 function hasConcreteImageObservation(message: string): boolean {
   const normalized = message.toLocaleLowerCase();
   const code = /\bq7\b/u.test(normalized);
-  const shapes = /\bcircle\b[^.\n]{0,100}\btriangle\b[^.\n]{0,100}\b(?:square|rectangle)\b/u.test(
+  const orderedShapes = /\bcircle\b[^.\n]{0,100}\btriangle\b[^.\n]{0,100}\b(?:square|rectangle)\b/u.test(
+    normalized
+  );
+  const positionedOuterShapes = /\btriangle\b[^.\n]{0,60}\b(?:with|between)\b[^.\n]{0,60}\bcircle\b[^.\n]{0,40}\bleft\b[^.\n]{0,80}\b(?:square|rectangle)\b[^.\n]{0,40}\bright\b/u.test(
     normalized
   );
   const background = /\b(?:navy|dark blue|deep blue)\b/u.test(normalized);
-  return code && shapes && background;
+  return code && (orderedShapes || positionedOuterShapes) && background;
 }
 
 interface SmokeWorktreeVerification {

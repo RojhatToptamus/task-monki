@@ -139,6 +139,7 @@ describe('CodexRpcClient', () => {
     });
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     expect(journal).not.toContain(managedPath);
+    expect(journal).not.toContain(JSON.stringify(managedPath).slice(1, -1));
     expect(journal).not.toContain('private attachment bytes');
     client.close();
   });
@@ -176,12 +177,18 @@ describe('CodexRpcClient', () => {
     });
 
     const wire = await outbound;
-    expect(wire).toContain('private attachment bytes');
-    expect(wire).toContain(managedPath);
+    expect(JSON.parse(wire)).toMatchObject({
+      id: 41,
+      result: {
+        prompt: expect.stringContaining('private attachment bytes'),
+        image: { type: 'localImage', path: managedPath }
+      }
+    });
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     expect(journal).toContain('attachment input omitted');
     expect(journal).not.toContain('private attachment bytes');
     expect(journal).not.toContain(managedPath);
+    expect(journal).not.toContain(JSON.stringify(managedPath).slice(1, -1));
     client.close();
   });
 

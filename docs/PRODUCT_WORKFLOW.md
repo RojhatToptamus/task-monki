@@ -83,7 +83,9 @@ copy their generic rules into every task prompt.
 First-launch defaults, New Task, and Settings use the same runtime/model
 selector. Implementation defaults can use every enabled runtime.
 Prompt refinement, review, and Discourse use one shared read-only support projection.
-The projection requires qualified native mutation denial.
+The projection requires qualified native mutation denial. Preview recipe generation
+normally uses that path. An adapter can instead qualify an exact runtime and model for
+the app-owned disposable evidence copy, which contains no source repository path.
 Unsupported providers remain visible with the reason that blocks the operation.
 Reasoning choices come from the selected model's native catalog.
 

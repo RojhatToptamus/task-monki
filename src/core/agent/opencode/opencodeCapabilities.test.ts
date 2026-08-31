@@ -22,13 +22,6 @@ describe('opencodeCapabilities', () => {
       maturity: 'stable',
       detail: expect.stringContaining('not an OS confinement boundary')
     });
-    expect(capabilities.promptRefinement.maturity).toBe('stable');
-    expect(capabilities.sessionFork).toEqual({
-      maturity: 'stable',
-      detail: expect.stringContaining('target worktree runtime')
-    });
-    expect(capabilities.extensions.nativeFileParts?.maturity).toBe('stable');
-    expect(capabilities.detachedReview.maturity).toBe('stable');
-    expect(capabilities.review.maturity).toBe('stable');
+    expect(capabilities.readOnlyTurns.maturity).toBe('stable');
   });
 });

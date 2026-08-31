@@ -7,10 +7,14 @@ import type {
   AgentTokenUsageBreakdown
 } from '../../../shared/agent';
 import { redactCredentialText } from '../AgentCredentialRedaction';
+import { INSPECT_DESIGN_TOOL_NAME } from '../../design/DesignClientToolContract';
 import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
 
 const MAX_ERROR_DIAGNOSTIC_BYTES = 4 * 1024;
 const ERROR_DIAGNOSTIC_TRUNCATION_SUFFIX = '… [OpenCode diagnostic truncated]';
+export const OPENCODE_DESIGN_MCP_SERVER_NAME = 'task_monki_design';
+export const OPENCODE_DESIGN_TOOL_NAME =
+  `${OPENCODE_DESIGN_MCP_SERVER_NAME}_${INSPECT_DESIGN_TOOL_NAME}`;
 
 export interface OpenCodeHealth {
   healthy: true;
@@ -343,7 +347,7 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
       Object.values(provider.models).map((model): AgentModel => {
         const modelId = model.id;
         const modalities = Object.entries(model.capabilities?.input ?? { text: true })
-          .filter(([, supported]) => supported)
+          .filter(([, supported]) => supported === true)
           .map(([modality]) => modality);
         const variants = Object.keys(model.variants ?? {});
         return {
@@ -401,6 +405,7 @@ export function mapOpenCodePartType(part: OpenCodePart): AgentItemType {
       return 'FILE_CHANGE';
     case 'tool': {
       const tool = part.tool?.toLowerCase() ?? '';
+      if (tool === OPENCODE_DESIGN_TOOL_NAME) return 'MCP_TOOL_CALL';
       if (['bash', 'shell', 'terminal'].some((name) => tool.includes(name))) return 'COMMAND_EXECUTION';
       if (['edit', 'write', 'patch', 'apply'].some((name) => tool.includes(name))) return 'FILE_CHANGE';
       if (tool.includes('web')) return 'WEB_SEARCH';

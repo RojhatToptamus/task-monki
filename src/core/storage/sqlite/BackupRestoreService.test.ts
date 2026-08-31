@@ -19,6 +19,17 @@ import {
 } from './BackupRestoreService';
 import { ManagedFileStore, type ManagedFileReference } from './ManagedFileStore';
 
+function designAgentSettings() {
+  return {
+    runtimeId: 'codex',
+    model: 'gpt-test',
+    sandbox: 'WORKSPACE_WRITE' as const,
+    networkAccess: false,
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user' as const
+  };
+}
+
 describe('BackupRestoreService', () => {
   let temporaryRoot: string;
   let storageRoot: string;
@@ -226,7 +237,8 @@ describe('BackupRestoreService', () => {
     const creationToken = 'pre-upgrade-token-0001';
     const repository = await source.prepareBlankRepository({ creationToken });
     await taskStore.createDesignBundle({
-      request: { brief: 'Back up before migrating.', creationToken },
+      request: { brief: 'Back up before migrating.', creationToken, runtimeId: 'codex' },
+      agentSettings: designAgentSettings(),
       repository
     });
     const serverId = 'pre-upgrade-server';
@@ -274,7 +286,12 @@ describe('BackupRestoreService', () => {
       const creationToken = 'backup-head-drift-token';
       const repository = await source.prepareBlankRepository({ creationToken });
       await taskStore.createDesignBundle({
-        request: { brief: 'Keep the snapshot and Git bundle consistent.', creationToken },
+        request: {
+          brief: 'Keep the snapshot and Git bundle consistent.',
+          creationToken,
+          runtimeId: 'codex'
+        },
+        agentSettings: designAgentSettings(),
         repository
       });
 

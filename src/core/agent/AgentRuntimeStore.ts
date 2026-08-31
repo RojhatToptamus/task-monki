@@ -273,6 +273,7 @@ export interface CreateTaskRuntimeRunInput {
   continuedFromRunId?: string;
   reviewTarget?: import('../../shared/agent').AgentReviewTarget;
   instructionProfile?: import('../../shared/agent').AgentInstructionProfile;
+  clientToolGrants?: string[];
   attachmentSelection?: AgentAttachmentSelection[];
   operationId: string;
 }
@@ -608,6 +609,15 @@ export interface AgentRuntimeStore extends AgentProviderRuntimeStore {
     queueEntryCount: number;
   }>;
   purgePromptRefinement(requestId: string): Promise<{
+    sessionCount: number;
+    runCount: number;
+    artifactCount: number;
+    queueEntryCount: number;
+  }>;
+  purgePreviewRecipeGeneration(
+    taskId: string,
+    generationId: string
+  ): Promise<{
     sessionCount: number;
     runCount: number;
     artifactCount: number;

@@ -141,7 +141,7 @@ describe('runtimeReadinessView', () => {
           }
         ]
       },
-      promptRefinement: {
+      readOnlyTurns: {
         maturity: 'unsupported',
         detail: 'Configured cannot deny repository changes.'
       }
@@ -181,6 +181,32 @@ describe('runtimeReadinessView', () => {
       'Sign in before starting this workflow.'
     );
   });
+
+  it('projects an exact model qualification failure for Preview generation', () => {
+    const runtime = state(createRuntimeReadiness('READY', 'Ready'));
+    runtime.preflight.capabilities.extensions['task-monki.preview-recipe-generation'] = {
+      maturity: 'stable'
+    };
+
+    expect(
+      selectConfiguredRuntimeForOperation(
+        [runtime],
+        'test',
+        'PREVIEW_RECIPE_GENERATION',
+        {
+          model: {
+            inputModalities: ['text'],
+            previewRecipeGenerationSupport: {
+              maturity: 'unsupported',
+              detail: 'Preview generation requires the qualified model.'
+            }
+          }
+        }
+      )
+    ).toEqual({
+      unavailableReason: 'Preview generation requires the qualified model.'
+    });
+  });
 });
 
 function state(
@@ -214,26 +240,11 @@ function state(
           ],
           detail: 'Test'
         },
-        promptRefinement: { maturity: 'unsupported' },
+        readOnlyTurns: { maturity: 'unsupported' },
         modelCatalog: { maturity: 'unsupported' },
-        reasoningEffort: { maturity: 'unsupported' },
-        persistentSessions: { maturity: 'unsupported' },
-        sessionResume: { maturity: 'unsupported' },
-        sessionFork: { maturity: 'unsupported' },
         activeTurnSteering: { maturity: 'unsupported' },
         turnInterruption: { maturity: 'unsupported' },
-        truePause: { maturity: 'unsupported' },
-        interactiveApprovals: { maturity: 'unsupported' },
-        userInputRequests: { maturity: 'unsupported' },
-        goals: { maturity: 'unsupported' },
-        plans: { maturity: 'unsupported' },
-        detachedReview: { maturity: 'unsupported' },
-        review: { maturity: 'unsupported' },
-        subagents: { maturity: 'unsupported' },
-        backgroundTerminals: { maturity: 'unsupported' },
-        dynamicTools: { maturity: 'unsupported' },
         attachmentDelivery: { maturity: 'unsupported' },
-        runtimeRecovery: { maturity: 'unsupported' },
         extensions: {}
       }
     },

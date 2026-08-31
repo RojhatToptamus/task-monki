@@ -22,10 +22,13 @@ import {
   type StageTaskAttachmentBatchRequest
 } from '../../shared/attachments';
 import {
+  designModelUnavailableReason,
   designProjectStatus,
+  designRuntimeUnavailableReason,
   designStatusView,
   designWorkspaceLayout,
   formatDesignUpdatedAt,
+  qualifiedDesignModels,
   visibleDesignProjects,
   type DesignHistoryFilter,
   type DesignProjectDetail,
@@ -71,7 +74,13 @@ import {
 
 export type CreateBlankDesignInput = Pick<
   CreateBlankDesignRequest,
-  'brief' | 'creationToken' | 'model' | 'reasoningEffort' | 'attachmentDraftId'
+  | 'brief'
+  | 'creationToken'
+  | 'runtimeId'
+  | 'model'
+  | 'modelProvider'
+  | 'reasoningEffort'
+  | 'attachmentDraftId'
 >;
 
 export interface DesignsWorkspaceProps {
@@ -200,6 +209,7 @@ export function DesignsWorkspace({
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
   const referenceDesignId = useRef<string | undefined>(undefined);
   const restoredDraftRevision = useRef<number | undefined>(undefined);
+  const projectModelDiscoveryRef = useRef<string | undefined>(undefined);
   const visibleDesigns = visibleDesignProjects(designs, historyQuery, historyFilter);
   const activeDesignId = project?.design.id ?? selectedDesignId;
   const layoutView = designWorkspaceLayout(workspaceWidth, historyCollapsed, historyWidth);
@@ -208,6 +218,64 @@ export function DesignsWorkspace({
   const maxConversationWidth = Math.max(320, layoutView.mainWidth - 485);
   const renderedConversationWidth = Math.min(conversationWidth, maxConversationWidth);
   const historyModalOpen = compact && !historyCollapsed;
+  const projectRuntime = project
+    ? runtimes.find(
+        (runtime) => runtime.preflight.runtime.id === project.task.runtimeId
+      )
+    : undefined;
+  const projectModel = project
+    ? models.find(
+        (model) =>
+          model.runtimeId === project.task.runtimeId &&
+          model.model === project.task.agentSettings.model &&
+          (project.task.agentSettings.modelProvider === undefined ||
+            model.modelProvider === project.task.agentSettings.modelProvider)
+      )
+    : undefined;
+  const refineUnavailableReason = project
+    ? !projectRuntime
+      ? 'The agent for this Design is not available.'
+      : !projectRuntime.preflight.readiness.canStart
+        ? projectRuntime.preflight.readiness.detail ||
+          projectRuntime.preflight.readiness.summary
+        : !projectModel
+          ? 'The selected Design model is not available from this provider.'
+          : designModelUnavailableReason(projectRuntime, projectModel)
+    : undefined;
+
+  useEffect(() => {
+    if (!project || !projectRuntime) return;
+
+    const discoveryKey = `${project.design.id}:${projectRuntime.preflight.runtime.id}`;
+    if (projectModel) {
+      if (projectModelDiscoveryRef.current === discoveryKey) {
+        projectModelDiscoveryRef.current = undefined;
+      }
+      return;
+    }
+
+    if (
+      !projectRuntime.preflight.readiness.canStart ||
+      projectRuntime.preflight.capabilities.modelCatalog.activation !== 'EXPLICIT' ||
+      !onDiscoverAgentRuntimeModels
+    ) {
+      return;
+    }
+    if (projectModelDiscoveryRef.current === discoveryKey) return;
+    projectModelDiscoveryRef.current = discoveryKey;
+    void onDiscoverAgentRuntimeModels(projectRuntime.preflight.runtime.id).catch(
+      () => {
+        if (projectModelDiscoveryRef.current === discoveryKey) {
+          projectModelDiscoveryRef.current = undefined;
+        }
+      }
+    );
+  }, [
+    onDiscoverAgentRuntimeModels,
+    project?.design.id,
+    projectModel?.id,
+    projectRuntime
+  ]);
 
   useDialogFocusBoundary({
     dialogRef: historyRailRef,
@@ -486,11 +554,8 @@ export function DesignsWorkspace({
                     key={project.design.id}
                     project={project}
                     draft={draft}
-                    model={models.find(
-                      (model) =>
-                        model.runtimeId === project.task.runtimeId &&
-                        model.model === project.task.agentSettings.model
-                    )}
+                    model={projectModel}
+                    refineUnavailableReason={refineUnavailableReason}
                     selectedReferenceIds={selectedReferenceIds}
                     onSelectionChange={setSelectedReferenceIds}
                     onSubmit={(message, referenceIds, attachmentDraftId) =>
@@ -745,17 +810,31 @@ function BlankDesignForm({
 }) {
   const [brief, setBrief] = useState('');
   const [creationToken] = useState(() => crypto.randomUUID());
+  const selectableModels = qualifiedDesignModels(runtimes, models);
+  const preferredRuntimeId = defaultAgentSettings?.runtimeId;
   const initialRuntimeId =
-    defaultAgentSettings?.runtimeId ?? runtimes[0]?.preflight.runtime.id ?? '';
+    (selectableModels.some((model) => model.runtimeId === preferredRuntimeId)
+      ? preferredRuntimeId
+      : undefined) ??
+    selectableModels[0]?.runtimeId ??
+    runtimes[0]?.preflight.runtime.id ??
+    '';
   const initialModel = selectModel(
-    models,
+    selectableModels,
     defaultAgentSettings?.model,
-    initialRuntimeId
+    initialRuntimeId,
+    defaultAgentSettings?.modelProvider
   );
   const [runtimeId, setRuntimeId] = useState(initialRuntimeId);
   const [modelId, setModelId] = useState(initialModel?.id ?? '');
-  const [reasoningEffort, setReasoningEffort] = useState(
-    resolveReasoningEffort(initialModel, defaultAgentSettings?.reasoningEffort) ?? ''
+  const [reasoningEffort, setReasoningEffort] = useState<string | undefined>(() =>
+    initialModel
+      ? resolveReasoningEffort(
+          initialModel,
+          initialModel.designSupport?.defaultReasoningEffort ??
+            defaultAgentSettings?.reasoningEffort
+        )
+      : undefined
   );
   const [submitting, setSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
@@ -771,18 +850,28 @@ function BlankDesignForm({
       ? defaultAgentSettings.runtimeId
       : runtimes[0]?.preflight.runtime.id ?? '';
   const selectedModel =
-    models.find(
+    selectableModels.find(
       (model) => model.id === modelId && model.runtimeId === selectedRuntimeId
-    ) ?? selectModel(models, defaultAgentSettings?.model, selectedRuntimeId);
+    ) ?? selectModel(
+      selectableModels,
+      defaultAgentSettings?.model,
+      selectedRuntimeId,
+      defaultAgentSettings?.modelProvider
+    );
   const selectedModelId = selectedModel?.id ?? '';
   const selectedReasoningEffort =
     resolveReasoningEffort(
       selectedModel,
-      reasoningEffort || defaultAgentSettings?.reasoningEffort
+      reasoningEffort ??
+        selectedModel?.designSupport?.defaultReasoningEffort ??
+        defaultAgentSettings?.reasoningEffort
     ) ?? '';
   const selectedRuntime = runtimes.find(
     (runtime) => runtime.preflight.runtime.id === selectedRuntimeId
   );
+  const selectedRuntimeUnavailableReason = selectedRuntime
+    ? designRuntimeUnavailableReason(selectedRuntime, models)
+    : undefined;
   const attachmentsEnabled = Boolean(
     selectedRuntime &&
       selectedRuntime.preflight.capabilities.attachmentDelivery.maturity !== 'unsupported'
@@ -800,7 +889,13 @@ function BlankDesignForm({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const nextBrief = brief.trim();
-    if (!nextBrief || !selectedRuntimeId || !selectedModel || submittingRef.current) return;
+    if (
+      !nextBrief ||
+      !selectedRuntimeId ||
+      !selectedModel ||
+      selectedRuntimeUnavailableReason ||
+      submittingRef.current
+    ) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(undefined);
@@ -811,7 +906,11 @@ function BlankDesignForm({
         await onCreate({
           brief: nextBrief,
           creationToken,
+          runtimeId: selectedRuntimeId,
           model: selectedModel.model,
+          ...(selectedModel.modelProvider
+            ? { modelProvider: selectedModel.modelProvider }
+            : {}),
           reasoningEffort: selectedReasoningEffort || undefined,
           ...(attachmentDraftId ? { attachmentDraftId } : {})
         });
@@ -923,17 +1022,34 @@ function BlankDesignForm({
                 runtimes={runtimes}
                 disabled={composerLocked}
                 presentation="compact"
-                selectionUnavailable={!selectedRuntimeId || !selectedModelId}
-                selectionUnavailableMessage="No ready agent supports Design Mode."
+                selectionUnavailable={
+                  !selectedRuntimeId ||
+                  !selectedModelId ||
+                  Boolean(selectedRuntimeUnavailableReason)
+                }
+                selectionUnavailableMessage={
+                  selectedRuntimeUnavailableReason ??
+                  'No ready agent supports Design Mode.'
+                }
+                runtimeUnavailableReason={(runtime) =>
+                  designRuntimeUnavailableReason(runtime, models)
+                }
+                modelUnavailableReason={(model, runtime) =>
+                  designModelUnavailableReason(runtime, model)
+                }
                 onDiscoverModels={onDiscoverAgentRuntimeModels}
                 onSelectionChange={(nextRuntimeId, nextModelId) => {
                   setRuntimeId(nextRuntimeId);
                   setModelId(nextModelId);
-                  const nextModel = models.find(
+                  const nextModel = selectableModels.find(
                     (model) =>
                       model.runtimeId === nextRuntimeId && model.id === nextModelId
                   );
-                  setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+                  setReasoningEffort(
+                    nextModel?.designSupport?.defaultReasoningEffort ??
+                      nextModel?.defaultReasoningEffort ??
+                      ''
+                  );
                 }}
                 onReasoningEffortChange={setReasoningEffort}
               />
@@ -956,6 +1072,7 @@ function BlankDesignForm({
               brief.trim().length === 0 ||
               !selectedRuntimeId ||
               !selectedModelId ||
+              Boolean(selectedRuntimeUnavailableReason) ||
               attachments.busy ||
               attachments.hasErrors ||
               Boolean(attachments.modelError)

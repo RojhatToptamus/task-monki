@@ -17,6 +17,11 @@ export interface AgentCapability {
   detail?: string;
 }
 
+export interface AgentDesignCapability extends AgentCapability {
+  /** Design-only default. It does not change the model default for normal Tasks. */
+  defaultReasoningEffort?: string;
+}
+
 export interface AgentModelCatalogCapability extends AgentCapability {
   /** Catalog activation is allowed only in direct response to a user selection. */
   activation?: 'EXPLICIT';
@@ -45,31 +50,13 @@ export interface AgentRuntimeCapabilities {
   runtimeId: AgentRuntimeId;
   /** Truthful Task Monki execution presets supplied by this runtime adapter. */
   executionPolicy: AgentExecutionPolicyCapability;
-  promptRefinement: AgentCapability;
+  /** Shared provider-neutral read-only turns used by refinement, review, and Discourse. */
+  readOnlyTurns: AgentCapability;
   modelCatalog: AgentModelCatalogCapability;
-  reasoningEffort: AgentCapability;
-  persistentSessions: AgentCapability;
-  sessionResume: AgentCapability;
-  sessionFork: AgentCapability;
   activeTurnSteering: AgentCapability;
   turnInterruption: AgentCapability;
-  truePause: AgentCapability;
-  interactiveApprovals: AgentCapability;
-  userInputRequests: AgentCapability;
-  goals: AgentCapability;
-  plans: AgentCapability;
-  /** Provider-neutral review prompt in a separately attested read-only session. */
-  detachedReview: AgentCapability;
-  /** Runtime-native review operation, when the provider exposes one. */
-  review: AgentCapability;
-  subagents: AgentCapability;
-  backgroundTerminals: AgentCapability;
-  dynamicTools: AgentCapability;
   attachmentDelivery: AgentCapability;
-  runtimeRecovery: AgentCapability;
-  /** Safe provider-owned boolean/select controls for an existing session. */
-  sessionControls?: AgentCapability;
-  /** Runtime-native features that Task Monki preserves without pretending they are universal. */
+  /** Current Task Monki product and security capabilities that do not fit the common fields. */
   extensions: Record<string, AgentCapability>;
 }
 
@@ -246,7 +233,7 @@ export interface PreviewGatewaySettings {
   port: number | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 11 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 12 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -264,6 +251,9 @@ export interface TaskManagerAppSettings {
   promptRefinementModel?: string;
   promptRefinementRuntimeId?: AgentRuntimeId;
   promptRefinementModelProvider?: AgentModelProviderId;
+  previewRecipeGenerationModel?: string;
+  previewRecipeGenerationRuntimeId?: AgentRuntimeId;
+  previewRecipeGenerationModelProvider?: AgentModelProviderId;
   reviewModel?: string;
   reviewRuntimeId?: AgentRuntimeId;
   reviewModelProvider?: AgentModelProviderId;
@@ -288,12 +278,10 @@ export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSe
   ghExecutablePath: null
 };
 
-export const DEFAULT_PROMPT_REFINEMENT_MODEL = 'gpt-5.3-codex-spark';
-
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-  theme: 'device',
-  themePreset: 'umber',
+  theme: 'dark',
+  themePreset: 'graphite',
   sidebarCollapsed: false,
   showMascot: true,
   autoInstallUpdatesOnQuit: true,
@@ -859,6 +847,10 @@ export interface AgentModel {
   serviceTiers: string[];
   defaultServiceTier?: string;
   inputModalities: string[];
+  /** Model-specific support for generating Preview YAML, when a runtime requires qualification. */
+  previewRecipeGenerationSupport?: AgentCapability;
+  /** Provider-owned model support for the full Design workflow. */
+  designSupport?: AgentDesignCapability;
   isDefault: boolean;
   /** Lossless runtime-native model metadata that does not fit common selectors. */
   native?: AgentJsonValue;

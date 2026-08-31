@@ -71,6 +71,7 @@ import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
 } from '../review/AgentReviewContract';
+import { INSPECT_DESIGN_TOOL_NAME } from '../design/DesignClientToolContract';
 
 const MAX_CONCURRENT_TURNS = 2;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
@@ -98,6 +99,7 @@ function isReadOnlyRuntimePurpose(
   return (
     purpose === 'TASK_REVIEW' ||
     purpose === 'PROMPT_REFINEMENT' ||
+    purpose === 'PREVIEW_RECIPE_GENERATION' ||
     purpose.startsWith('DISCOURSE_')
   );
 }
@@ -251,6 +253,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     private readonly options: {
       allowNetworkAccess?: boolean;
       providerStartupDisabledReason?: string;
+      allowCandidateDesignModels?: boolean;
     } = {}
   ) {
     this.runtimes =
@@ -715,21 +718,37 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     );
     try {
       await adapter.interruptRuntimeTurn({ session, run });
-      const latest = (await this.runtimeStore.getRun(run.id)) ?? run;
-      if (isTerminalRuntimeRun(latest.status)) return latest;
-      if (
-        latest.status === 'INTERRUPTING' &&
-        latest.interruptDelivery === 'SENDING'
-      ) {
-        return this.runtimeStore.updateRun(
-          latest.id,
-          latest.recordRevision,
-          {
-            interruptDelivery: 'ACKNOWLEDGED',
-            lastEventAt: new Date().toISOString()
-          },
-          `${clientOperationId}:runtime-stop-ack`
-        );
+      let latest = (await this.runtimeStore.getRun(run.id)) ?? run;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (
+          isTerminalRuntimeRun(latest.status) ||
+          latest.status === 'RECOVERY_REQUIRED' ||
+          latest.status !== 'INTERRUPTING' ||
+          latest.interruptDelivery !== 'SENDING'
+        ) {
+          return latest;
+        }
+        try {
+          return await this.runtimeStore.updateRun(
+            latest.id,
+            latest.recordRevision,
+            {
+              interruptDelivery: 'ACKNOWLEDGED',
+              lastEventAt: new Date().toISOString()
+            },
+            `${clientOperationId}:runtime-stop-ack`
+          );
+        } catch (error) {
+          const current = await this.runtimeStore.getRun(latest.id);
+          if (
+            !current ||
+            current.recordRevision === latest.recordRevision ||
+            attempt === 2
+          ) {
+            throw error;
+          }
+          latest = current;
+        }
       }
       return latest;
     } catch (error) {
@@ -800,6 +819,16 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           this.appendRuntimeDiagnostic(
             run,
             `Task Monki could not clean up prompt-refinement records: ${errorMessage(error)}`
+          )
+        );
+    }
+    if (released && run.owner.kind === 'PREVIEW_RECIPE_GENERATION') {
+      await this.runtimeStore
+        .purgePreviewRecipeGeneration(run.owner.taskId, run.owner.generationId)
+        .catch((error) =>
+          this.appendRuntimeDiagnostic(
+            run,
+            `Task Monki could not clean up Preview recipe generation records: ${errorMessage(error)}`
           )
         );
     }
@@ -1355,6 +1384,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       runtimeIdsToInitialize
     );
     await this.runtimeTurnEventQueue;
+    await this.stopAbandonedPreviewRecipeGenerations();
+    await this.runtimeTurnEventQueue;
     await this.reconcileSettledReadOnlyTurns();
     if (this.options.allowNetworkAccess === false) {
       const requiredFailure = initializationFailures.find((failure) =>
@@ -1428,8 +1459,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         run.owner.kind === 'TASK' &&
         run.purpose === 'TASK_REVIEW' &&
         !publishedTaskRuntimeOperations.has(taskProjectionOperationId);
-      const promptRefinementNeedsCleanup =
-        run.owner.kind === 'PROMPT_REFINEMENT' && terminal;
+      const transientTurnNeedsCleanup =
+        terminal &&
+        (run.owner.kind === 'PROMPT_REFINEMENT' ||
+          run.owner.kind === 'PREVIEW_RECIPE_GENERATION');
       const queueEntry = snapshot.queueEntries.find(
         (candidate) => candidate.runId === run.id
       );
@@ -1446,7 +1479,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         !(
           run.repositoryIntegrity?.status === 'PENDING' ||
           taskProjectionNeedsReconciliation ||
-          promptRefinementNeedsCleanup ||
+          transientTurnNeedsCleanup ||
           terminalQueueNeedsSettlement
         )
       ) {
@@ -1487,7 +1520,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         }
       }
       if (event.type === 'TERMINAL') {
-        if (run.owner.kind === 'PROMPT_REFINEMENT') {
+        if (
+          run.owner.kind === 'PROMPT_REFINEMENT' ||
+          run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
+        ) {
           await this.finishRuntimeTurn(run.id);
         } else if (run.owner.kind === 'TASK' && run.purpose === 'TASK_REVIEW') {
           if (!needsEventProcessing && terminalQueueNeedsSettlement) {
@@ -1501,6 +1537,49 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         }
       }
     }
+  }
+
+  private async stopAbandonedPreviewRecipeGenerations(): Promise<void> {
+    const snapshot = await this.runtimeStore.snapshot();
+    const abandoned = snapshot.runs.filter(
+      (run) =>
+        run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
+        !isTerminalRuntimeRun(run.status)
+    );
+    await Promise.allSettled(
+      abandoned.map(async (run) => {
+        try {
+          const stopped = await this.interruptTurn(
+            run.id,
+            'Task Monki restarted before Preview recipe generation finished.',
+            `startup-preview-recipe-stop:${run.id}`
+          );
+          if (isTerminalRuntimeRun(stopped.status)) {
+            await this.finishRuntimeTurn(stopped.id);
+            return;
+          }
+          if (
+            stopped.status === 'RECOVERY_REQUIRED' ||
+            (stopped.status === 'INTERRUPTING' &&
+              stopped.interruptDelivery === 'AMBIGUOUS')
+          ) {
+            return;
+          }
+          const terminal = await this.waitForRuntimeTurn(run.id, 15_000);
+          if (isTerminalRuntimeRun(terminal.run.status)) {
+            await this.finishRuntimeTurn(run.id);
+          }
+        } catch (error) {
+          const current = await this.runtimeStore.getRun(run.id).catch(() => undefined);
+          if (current) {
+            await this.appendRuntimeDiagnostic(
+              current,
+              `Task Monki could not stop abandoned Preview recipe generation: ${errorMessage(error)}`
+            ).catch(() => undefined);
+          }
+        }
+      })
+    );
   }
 
   async getRuntimeCatalog(
@@ -1586,12 +1665,11 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
 
   async deleteTaskProviderHistory(task: Task): Promise<void> {
     const adapter = this.runtimes.require(task.runtimeId);
-    if (!adapter.deleteTaskProviderHistory) {
-      throw new Error(
-        `${adapter.descriptor.displayName} cannot delete provider history safely.`
-      );
+    if (adapter.deleteTaskProviderHistory) {
+      await adapter.deleteTaskProviderHistory(task.id);
+      return;
     }
-    await adapter.deleteTaskProviderHistory(task.id);
+    await adapter.releaseTask?.(task.id);
   }
 
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {
@@ -1652,7 +1730,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const settings = await this.validateSettings(
       adapter,
       { ...input.settings, runtimeId },
-      taskAttachments
+      taskAttachments,
+      input.mode
     );
     await this.assertCapacity();
 
@@ -1724,6 +1803,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: input.retryOfRunId,
       continuedFromRunId: input.continuedFromRunId,
       instructionProfile: input.instructionProfile,
+      clientToolGrants:
+        input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
       attachmentSelection: toAgentAttachmentSelectionFromRecords(taskAttachments),
       operationId: `task-run:${runId}`
     });
@@ -1743,6 +1824,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           iterationId: input.iteration.id,
           worktreeId: input.worktree.id,
           worktreePath: input.worktree.worktreePath,
+          mode: input.mode,
+          instructionProfile: input.instructionProfile,
           settings,
           attachments
         });
@@ -2162,7 +2245,6 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
     if (
       !session.providerSessionId ||
-      capabilities.goals.maturity === 'unsupported' ||
       !adapter.syncGoal
     ) {
       throw new Error('This provider session cannot synchronize goals.');
@@ -2180,6 +2262,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   async shutdown(): Promise<void> {
     for (const dispose of this.disposeRuntimeTurnListeners.splice(0)) dispose();
     this.runtimeTurnListeners.clear();
+    await this.runtimeTurnEventQueue;
     await this.runtimes.shutdownAll();
   }
 
@@ -2310,6 +2393,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: current.id,
       continuedFromRunId: input.input.continuedFromRunId,
       instructionProfile: input.input.instructionProfile,
+      clientToolGrants:
+        input.input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
       attachmentSelection: toAgentAttachmentSelectionFromRecords(
         input.attachmentRecords
       ),
@@ -2348,6 +2433,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
             iterationId: replacementSession.iterationId,
             worktreeId: replacementSession.worktreeId,
             worktreePath: replacementSession.worktreePath,
+            mode: input.input.mode,
+            instructionProfile: input.input.instructionProfile,
             settings: input.settings,
             attachments: replacementAttachments
           });
@@ -2360,6 +2447,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           iterationId: replacementSession.iterationId,
           worktreeId: replacementSession.worktreeId,
           worktreePath: replacementSession.worktreePath,
+          mode: input.input.mode,
+          instructionProfile: input.input.instructionProfile,
           settings: input.settings,
           attachments: replacementAttachments
         });
@@ -2401,7 +2490,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     attachments: readonly Pick<
       AgentAttachmentSelection,
       'kind' | 'mediaType' | 'byteCount' | 'sha256'
-    >[] = []
+    >[] = [],
+    mode?: AgentRunMode
   ): Promise<AgentExecutionSettings> {
     if (this.options.allowNetworkAccess === false) {
       assertBrowserDevRuntimeIsolation(
@@ -2409,7 +2499,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         await adapter.capabilities()
       );
     }
-    const resolvedSettings = (await adapter.resolveExecution({ settings, attachments })).settings;
+    const resolved = await adapter.resolveExecution({ settings, attachments });
+    const resolvedSettings = resolved.settings;
     if (resolvedSettings.runtimeId !== adapter.descriptor.id) {
       throw new Error(
         `Runtime ${adapter.descriptor.id} returned execution settings for ${String(resolvedSettings.runtimeId)}.`
@@ -2417,6 +2508,17 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
     if (this.options.allowNetworkAccess === false) {
       this.assertBrowserDevSettings(resolvedSettings, 'Requested run');
+    }
+    if (mode === 'DESIGN') {
+      const support = projectAgentExecutionSupport(
+        await adapter.capabilities(),
+        'DESIGN',
+        {
+          model: resolved.model,
+          allowCandidateDesignModel: this.options.allowCandidateDesignModels
+        }
+      );
+      if (!support.supported) throw new Error(support.reason);
     }
     return resolvedSettings;
   }

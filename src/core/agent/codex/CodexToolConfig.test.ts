@@ -8,6 +8,7 @@ import type {
 import {
   codexExternalToolConfigOverrides,
   parseDisabledCodexMcpServerConfigOverrides,
+  parseDisabledCodexMcpServerThreadConfig,
   resolveCodexExternalToolConfigOverrides
 } from './CodexToolConfig';
 
@@ -124,5 +125,44 @@ describe('Codex external tool config', () => {
         requireCompleteDiscovery: true
       })
     ).toThrow('could not be disabled safely');
+  });
+
+  it('builds complete per-thread denial config for enabled MCP servers', () => {
+    expect(
+      parseDisabledCodexMcpServerThreadConfig(
+        JSON.stringify([
+          {
+            name: 'docs',
+            enabled: true,
+            transport: {
+              type: 'stdio',
+              command: 'docs-mcp',
+              args: ['--stdio'],
+              cwd: '/tmp/docs'
+            }
+          },
+          {
+            name: 'remote',
+            enabled: true,
+            transport: {
+              type: 'streamable_http',
+              url: 'https://example.test/mcp'
+            }
+          },
+          { name: 'off', enabled: false }
+        ])
+      )
+    ).toEqual({
+      'mcp_servers.docs': {
+        enabled: false,
+        command: 'docs-mcp',
+        args: ['--stdio'],
+        cwd: '/tmp/docs'
+      },
+      'mcp_servers.remote': {
+        enabled: false,
+        url: 'https://example.test/mcp'
+      }
+    });
   });
 });

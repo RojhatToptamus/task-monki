@@ -7,6 +7,7 @@ import type { AgentModel } from '../../../shared/agent';
 import type { AgentTurnAttachment } from '../AgentAttachmentDelivery';
 import type { AcpInitializeResponse } from './AcpProtocol';
 import {
+  journalSafeAcpMessage,
   prepareAcpAttachmentDelivery,
   sanitizeAcpAttachmentContent
 } from './AcpAttachmentDelivery';
@@ -27,6 +28,36 @@ afterEach(async () => {
 });
 
 describe('ACP attachment delivery', () => {
+  it('removes Design MCP credentials and managed paths from protocol journals', () => {
+    const safe = journalSafeAcpMessage({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'session/new',
+      params: {
+        cwd: '/worktree',
+        mcpServers: [{
+          name: 'task-monki-design-tools',
+          command: '/packaged/Task Monki',
+          args: ['/packaged/design-tool-mcp-server.mjs'],
+          env: [
+            {
+              name: 'TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL',
+              value: 'session-secret'
+            },
+            {
+              name: 'TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE',
+              value: '/managed/design-tool-credentials/grant/turn-grant'
+            }
+          ]
+        }]
+      }
+    });
+
+    expect(JSON.stringify(safe)).not.toContain('session-secret');
+    expect(JSON.stringify(safe)).not.toContain('/managed/design-tool-credentials');
+    expect(JSON.stringify(safe)).toContain('[REDACTED TASK MONKI DESIGN TOOL VALUE]');
+  });
+
   it('maps verified Grok text to an opaque embedded resource without a path', async () => {
     const attachment = await managedAttachment('notes.txt', 'private reference');
     const result = await prepareAcpAttachmentDelivery({
@@ -49,6 +80,9 @@ describe('ACP attachment delivery', () => {
       }
     ]);
     expect(JSON.stringify(result.prompt)).not.toContain(attachment.path);
+    expect(JSON.stringify(result.prompt)).not.toContain(
+      JSON.stringify(attachment.path).slice(1, -1)
+    );
     expect(result.submissionCandidates).toEqual([
       expect.objectContaining({
         attachmentId: attachment.attachmentId,
@@ -129,6 +163,27 @@ describe('ACP attachment delivery', () => {
     ).rejects.toThrow('not image/webp');
   });
 
+  it('removes inspect_design image bytes from nested ACP tool results', () => {
+    const sanitized = sanitizeAcpAttachmentContent({
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          title: 'inspect_design',
+          content: [{
+            type: 'content',
+            content: { type: 'image', data: 'transient-screenshot', mimeType: 'image/png' }
+          }]
+        }
+      }
+    });
+
+    expect(JSON.stringify(sanitized)).not.toContain('transient-screenshot');
+    expect(JSON.stringify(sanitized)).toContain(
+      '[REDACTED TASK MONKI ATTACHMENT CONTENT]'
+    );
+  });
+
   it('rejects embedded text before reading bytes when the agent did not negotiate it', async () => {
     const attachment = await managedAttachment('notes.txt', 'content');
     await expect(
@@ -198,17 +253,26 @@ describe('ACP attachment delivery', () => {
     ).rejects.toThrow('no verified compatibility exception');
   });
 
-  it('keeps Claude attachments disabled without packaged qualification', async () => {
+  it('maps Claude text through its advertised embedded-resource transport', async () => {
     const text = await managedAttachment('notes.txt', 'content');
-    await expect(
-      prepareAcpAttachmentDelivery({
-        profile: CLAUDE_AGENT_ACP_PROFILE,
-        initialize: initialize({ embeddedContext: true }),
-        model: model(['text']),
-        prompt: 'Read it.',
-        attachments: [text]
+    const delivery = await prepareAcpAttachmentDelivery({
+      profile: CLAUDE_AGENT_ACP_PROFILE,
+      initialize: initialize({ embeddedContext: true }),
+      model: model(['text']),
+      prompt: 'Read it.',
+      attachments: [text]
+    });
+    expect(delivery.prompt).toEqual([
+      { type: 'text', text: 'Read it.' },
+      expect.objectContaining({
+        type: 'resource',
+        resource: expect.objectContaining({
+          uri: expect.stringMatching(/^task-monki-attachment:/u),
+          mimeType: 'text/plain',
+          text: expect.stringContaining('content')
+        })
       })
-    ).rejects.toThrow('content-use qualification');
+    ]);
   });
 });
 
