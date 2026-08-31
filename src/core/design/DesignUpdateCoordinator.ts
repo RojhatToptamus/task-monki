@@ -19,7 +19,7 @@ import type { PreviewTaskContext } from '../preview/PreviewManager';
 import { PreviewManager } from '../preview/PreviewManager';
 import type { DesignCanvasCutoverFence } from '../preview/DesignCanvasCutoverFence';
 import { AppEventBus } from '../runner/AppEventBus';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import {
   type DesignBrowserOwner,
   type DesignBrowserToolResult,
@@ -54,7 +54,7 @@ class RecoverableCheckpointWriteError extends Error {
 }
 
 export interface DesignUpdateCoordinatorOptions {
-  store: FileTaskStore;
+  store: SqliteTaskStore;
   agents: AgentOrchestrator;
   previews: PreviewManager;
   source: DesignSourceService;

@@ -12,7 +12,7 @@ import type {
   PreviewOciObjectIdentity,
   PreviewOciPublishedPort
 } from '../../../shared/contracts';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { PreviewReadinessService } from '../PreviewReadinessService';
 import { boundedPreviewFailure as safeFailure } from '../PreviewFailure';
 import { OciEngineAdapter } from '../runtime/OciEngineAdapter';
@@ -54,7 +54,7 @@ export class PreviewComposeRuntime {
   private readonly watchWork = new Set<Promise<void>>();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly cli: PreviewComposeCliAdapter,
     private readonly inspector: PreviewComposeInspector,
     private readonly engine: OciEngineAdapter,

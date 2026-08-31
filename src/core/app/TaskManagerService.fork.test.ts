@@ -4,8 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { FileTaskStore } from '../storage/FileTaskStore';
-import { createScriptedAgentRuntimeFixture } from '../../testSupport/taskMonkiScenario';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
@@ -18,8 +17,7 @@ describe('TaskManagerService fork alternatives', () => {
     await fs.mkdir(repositoryPath, { recursive: true });
     const baseSha = await initRepository(repositoryPath);
 
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const agent = scriptedRuntime.adapter;
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
@@ -114,8 +112,7 @@ describe('TaskManagerService fork alternatives', () => {
     await fs.writeFile(worktreeRoot, 'not a directory');
     const baseSha = await initRepository(repositoryPath);
 
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
       ...scriptedRuntime.serviceOptions

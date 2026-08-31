@@ -4,12 +4,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { git } from '../git/gitCli';
 import { parsePrView } from '../github/GitHubService';
 import { WorktreeService } from '../worktree/WorktreeService';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import {
   createScriptedAgentRuntimeFixture,
   TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { TaskManagerService } from './TaskManagerService';
 
@@ -55,7 +56,7 @@ describe('TaskManagerService crash recovery', () => {
         ).length
       );
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -100,7 +101,7 @@ describe('TaskManagerService crash recovery', () => {
         status: 'COMMITTED_UNPUSHED'
       });
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -132,7 +133,7 @@ describe('TaskManagerService crash recovery', () => {
       });
       expect((await restarted.store.snapshot()).iterations).toHaveLength(1);
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -160,7 +161,7 @@ describe('TaskManagerService crash recovery', () => {
         error: expect.stringContaining('could not verify this worktree after restart')
       });
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -205,7 +206,7 @@ describe('TaskManagerService crash recovery', () => {
       expect(publications.filter((publication) => publication.status === 'PUSHING')).toHaveLength(1);
       expect(publications.filter((publication) => publication.status === 'PUSHED')).toHaveLength(1);
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -237,7 +238,7 @@ describe('TaskManagerService crash recovery', () => {
       expect(latest).toMatchObject({ status: 'FAILED', headSha });
       expect(latest.error).toMatch(/retry is safe/iu);
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -355,7 +356,7 @@ describe('TaskManagerService crash recovery', () => {
       .filter((publication) => publication.iterationId === worktree.iterationId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
     expect(ambiguous).toMatchObject({ status: 'AMBIGUOUS', headSha });
-    await firstRestart.service.shutdown();
+    await firstRestart.close();
 
     const unchangedRestart = await openRestartedScenario(scenario);
     const unchangedPublications = (await unchangedRestart.store.snapshot()).branchPublications
@@ -372,7 +373,7 @@ describe('TaskManagerService crash recovery', () => {
       'origin',
       `HEAD:refs/heads/${worktree.branchName}`
     ]);
-    await unchangedRestart.service.shutdown();
+    await unchangedRestart.close();
 
     const completedRestart = await openRestartedScenario(scenario);
     try {
@@ -387,7 +388,7 @@ describe('TaskManagerService crash recovery', () => {
         publications.filter((publication) => publication.status === 'PUSHING')
       ).toHaveLength(1);
     } finally {
-      await completedRestart.service.shutdown();
+      await completedRestart.close();
     }
   }, 30_000);
 
@@ -419,7 +420,7 @@ describe('TaskManagerService crash recovery', () => {
         workflowPhase: 'IN_REVIEW'
       });
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -453,7 +454,7 @@ describe('TaskManagerService crash recovery', () => {
       expect(invocations).toContain('pr list');
       expect(invocations).not.toContain('pr create');
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 
@@ -501,7 +502,7 @@ describe('TaskManagerService crash recovery', () => {
       expect(invocations).toContain('pr view 43');
       expect(invocations).toContain('pr checks 43');
     } finally {
-      await restarted.service.shutdown();
+      await restarted.close();
     }
   }, 20_000);
 });
@@ -509,24 +510,39 @@ describe('TaskManagerService crash recovery', () => {
 async function restartScenario(
   scenario: TaskMonkiScenario,
   ghPath?: string
-): Promise<{ store: FileTaskStore; service: TaskManagerService }> {
-  await scenario.store.close();
+): Promise<RestartedScenario> {
+  await scenario.service.shutdown();
+  await scenario.persistence.close();
   return openRestartedScenario(scenario, ghPath);
 }
 
 async function openRestartedScenario(
   scenario: TaskMonkiScenario,
   ghPath?: string
-): Promise<{ store: FileTaskStore; service: TaskManagerService }> {
-  const store = new FileTaskStore(path.join(scenario.rootDir, 'store'));
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+): Promise<RestartedScenario> {
+  const persistence = await openTestPersistence(scenario.persistence.paths.profileRoot);
+  const store = persistence.tasks;
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
   const service = new TaskManagerService(store, scenario.repositoryPath, undefined, {
     worktreeRoot: scenario.worktreeRoot,
     ghPath,
     ...scriptedRuntime.serviceOptions
   });
   await service.init();
-  return { store, service };
+  return {
+    store,
+    service,
+    async close() {
+      await service.shutdown();
+      await persistence.close();
+    }
+  };
+}
+
+interface RestartedScenario {
+  store: SqliteTaskStore;
+  service: TaskManagerService;
+  close(): Promise<void>;
 }
 
 async function writeRecoveryGh(

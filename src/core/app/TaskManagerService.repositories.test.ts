@@ -4,8 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { FileTaskStore } from '../storage/FileTaskStore';
-import { createScriptedAgentRuntimeFixture } from '../../testSupport/taskMonkiScenario';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
@@ -119,8 +118,7 @@ async function createHarness(name: string) {
   await fs.writeFile(path.join(repositoryPath, 'README.md'), '# Repository\n');
   await git(repositoryPath, ['add', 'README.md']);
   await git(repositoryPath, ['commit', '-m', 'Initial commit']);
-  const store = new FileTaskStore(path.join(rootDir, 'store'));
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+  const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(rootDir, 'store'));
   const service = new TaskManagerService(store, repositoryPath, undefined, {
     ...scriptedRuntime.serviceOptions,
     worktreeRoot: path.join(rootDir, 'worktrees'),

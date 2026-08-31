@@ -6,11 +6,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord, PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import { previewRouteHostname } from '../preview/PreviewRouteHostname';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import {
   TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 
 const scenarioRegistry = new TaskMonkiScenarioRegistry();
 const createTaskMonkiScenario = scenarioRegistry.create.bind(scenarioRegistry);
@@ -790,8 +791,8 @@ routes:
     await scenario.service.approvePreviewPlan({
       taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
     });
-    const mutableStore = scenario.store as FileTaskStore & {
-      cutoverPreviewGenerations: FileTaskStore['cutoverPreviewGenerations'];
+    const mutableStore = scenario.store as SqliteTaskStore & {
+      cutoverPreviewGenerations: SqliteTaskStore['cutoverPreviewGenerations'];
     };
     const cutover = mutableStore.cutoverPreviewGenerations.bind(scenario.store);
     mutableStore.cutoverPreviewGenerations = async () => {
@@ -1069,9 +1070,12 @@ routes:
     );
     expect(new Set(resources.map((resource) => resource.native?.launcher.pid)).size).toBe(3);
     await scenario.service.shutdown();
-    const reopenedStore = new FileTaskStore(path.join(scenario.rootDir, 'store'));
-    const stopped = await reopenedStore.getPreviewGenerations();
-    await reopenedStore.close();
+    await scenario.persistence.close();
+    const reopenedPersistence = await openTestPersistence(
+      scenario.persistence.paths.profileRoot
+    );
+    const stopped = await reopenedPersistence.tasks.getPreviewGenerations();
+    await reopenedPersistence.close();
     expect(stopped.every((generation) => generation.state === 'STOPPED')).toBe(true);
     for (const generation of generations) {
       await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });

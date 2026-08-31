@@ -62,8 +62,8 @@ It must not claim that a provider forgets bytes after delivery.
 1. Keep `AgentRuntimeRegistry` as the only runtime registry.
 2. Keep one adapter implementation for each native protocol family.
 3. Use one registered ACP adapter instance for each ACP agent product.
-4. Keep all provider sessions and runs in `FileAgentRuntimeStore`.
-5. Keep domain state in `FileTaskStore` and `FileDiscourseStore`.
+4. Keep all provider sessions and runs in `SqliteAgentRuntimeStore`.
+5. Keep domain state in `SqliteTaskStore` and `SqliteDiscourseStore`.
 6. Use `AgentOrchestrator` as the shared runtime coordinator.
 7. Do not add another scoped-turn runtime lifecycle.
 8. Keep one provider-neutral turn model across the current workflow entry points.
@@ -72,7 +72,8 @@ It must not claim that a provider forgets bytes after delivery.
 11. Do not expose workflow-specific review or prompt-refinement methods on adapters.
 12. Use a new session with bounded Task Monki context when native fork is absent.
 13. Queue a later message when live steering is absent.
-14. Keep `AttachmentFileStore` as the only Task Monki attachment byte owner.
+14. Keep SQLite as attachment reachability authority and `ManagedFileStore` as
+    the only publisher and verifier of Task Monki-managed attachment bytes.
 15. Store the exact workflow-selected attachment set on each runtime run before delivery.
 16. Keep attachment transport inside each provider adapter.
 17. Do not add a generic path fallback for OpenCode or ACP attachments.
@@ -81,7 +82,7 @@ It must not claim that a provider forgets bytes after delivery.
 20. Add one packaged stdio MCP bridge for OpenCode and ACP Design sessions.
 21. Select workflow support by operations, effective model input types, and applied policy.
 22. Never select a workflow by provider name.
-23. Do not keep old development-store formats during this change.
+23. Do not keep readers for the former JSON development stores.
 
 ## Evidence method
 
@@ -114,9 +115,9 @@ Milestone 3 changed transport and run evidence without changing attachment byte 
 | --- | --- |
 | Composition | `src/core/app/AgentRuntimeComposition.ts`, `src/core/app/TaskManagerService.ts` |
 | Registry and adapter contract | `src/core/agent/AgentRuntimeRegistry.ts`, `src/core/agent/AgentRuntimeAdapter.ts` |
-| Shared runtime | `src/core/agent/AgentOrchestrator.ts`, `src/core/agent/AgentRuntimeCoordinator.ts`, `src/core/storage/FileAgentRuntimeStore.ts` |
-| Task and Design domain | `src/core/storage/FileTaskStore.ts`, `src/core/design/DesignUpdateCoordinator.ts` |
-| Discourse domain | `src/core/discourse/DiscourseRuntimeHost.ts`, `src/core/discourse/DiscourseRuntimeCoordinator.ts`, `src/core/storage/FileDiscourseStore.ts` |
+| Shared runtime | `src/core/agent/AgentOrchestrator.ts`, `src/core/agent/AgentRuntimeCoordinator.ts`, `src/core/storage/SqliteAgentRuntimeStore.ts` |
+| Task and Design domain | `src/core/storage/SqliteTaskStore.ts`, `src/core/design/DesignUpdateCoordinator.ts` |
+| Discourse domain | `src/core/discourse/DiscourseRuntimeHost.ts`, `src/core/discourse/DiscourseRuntimeCoordinator.ts`, `src/core/storage/sqlite/SqliteDiscourseStore.ts` |
 | Codex | `src/core/agent/codex/CodexAppServerAdapter.ts`, `CodexPermissionProfile.ts`, `CodexRpcClient.ts` |
 | OpenCode | `src/core/agent/opencode/OpenCodeAdapter.ts`, `OpenCodeHttpClient.ts`, `OpenCodeServerSupervisor.ts` |
 | ACP | `src/core/agent/acp/AcpRuntimeAdapter.ts`, `AcpProtocol.ts`, `AcpRuntimeProfiles.ts`, `AcpPermissionPolicy.ts` |
@@ -125,7 +126,7 @@ Milestone 3 changed transport and run evidence without changing attachment byte 
 | Design | `src/core/design/DesignUpdateCoordinator.ts`, `DesignSourceService.ts`, `DesignSkillPack.ts` |
 | Design browser | `src/core/design/AgentBrowserRuntime.ts`, `src/core/agent/journal/AgentProtocolRedaction.ts` |
 | Preview | `src/core/preview/PreviewManager.ts`, `PreviewSourcePreparer.ts`, `ManagedDesignStaticPreview.ts` |
-| Attachments | `src/core/storage/AttachmentFileStore.ts`, `src/core/design/FileDesignDraftStore.ts`, `src/core/agent/AgentAttachmentDelivery.ts`, `src/shared/attachments.ts` |
+| Attachments | `src/core/storage/sqlite/SqliteTaskAttachmentStore.ts`, `src/core/storage/sqlite/ManagedFileStore.ts`, `src/core/design/DesignDraftStore.ts`, `src/core/agent/AgentAttachmentDelivery.ts`, `src/shared/attachments.ts` |
 | Durable contracts | `src/shared/contracts.ts`, `src/shared/agentRuntime.ts`, `src/shared/design.ts`, `src/shared/agent.ts` |
 | Execution support | `src/shared/agentExecutionSupport.ts` and its core and renderer callers |
 | Renderer support | `src/renderer/model/designs.ts`, `src/renderer/model/discourse.ts`, `src/renderer/ui/useTaskAttachments.ts`, `src/renderer/ui/AgentControlPanel.tsx`, `src/renderer/ui/SettingsView.tsx` |
@@ -168,8 +169,9 @@ Shutdown stops admission, drains owned work, revokes tool grants, and closes pro
 
 Task Monki creates every adapter in `AgentRuntimeComposition`.
 It registers all adapters in `AgentRuntimeRegistry`.
-`TaskManagerService` creates one `FileAgentRuntimeStore` and one `AgentOrchestrator`.
-The Discourse host receives that same orchestrator and runtime store.
+`ApplicationPersistence` creates one `SqliteAgentRuntimeStore` and passes it to
+`TaskManagerService`, which creates one `AgentOrchestrator`. The Discourse host
+receives that same orchestrator and runtime store.
 
 ```mermaid
 flowchart LR
@@ -183,19 +185,19 @@ flowchart LR
   Registry --> Codex[Codex adapter]
   Registry --> OpenCode[OpenCode adapter]
   Registry --> ACP[ACP adapter profiles]
-  Orchestrator --> RuntimeStore[FileAgentRuntimeStore]
+  Orchestrator --> RuntimeStore[SqliteAgentRuntimeStore]
   Codex --> RuntimeStore
   OpenCode --> RuntimeStore
   ACP --> RuntimeStore
-  TaskFlow --> TaskStore[FileTaskStore domain state]
-  DiscourseCoordinator --> DiscourseStore[FileDiscourseStore domain state]
+  TaskFlow --> TaskStore[SqliteTaskStore domain state]
+  DiscourseCoordinator --> DiscourseStore[SqliteDiscourseStore domain state]
 ```
 
-`FileAgentRuntimeStore` owns provider sessions, runs, queue entries, artifacts, telemetry, and recovery state.
+`SqliteAgentRuntimeStore` owns provider sessions, runs, queue entries, artifacts, telemetry, and recovery state.
 Its owner scope separates Task records from Discourse records.
 
-`FileTaskStore` and `FileDiscourseStore` own product state and links to runtime records.
-`FileTaskStore` can expose a joined runtime projection to existing callers.
+`SqliteTaskStore` and `SqliteDiscourseStore` own product state and links to runtime records.
+`SqliteTaskStore` can expose a joined runtime projection to existing callers.
 It does not persist provider records in the Task snapshot.
 
 The old scoped router and its separate runtime owner no longer exist.
@@ -216,7 +218,7 @@ Grok ACP and Claude Agent ACP remain available for normal Tasks only.
 1. Task creation stores `runtimeId` and execution settings as Task domain state.
 2. `AgentOrchestrator` resolves the adapter from the registry.
 3. It verifies the Task, session, run, worktree, and selected attachments.
-4. The orchestrator creates the local session and run in `FileAgentRuntimeStore`.
+4. The orchestrator creates the local session and run in `SqliteAgentRuntimeStore`.
 5. The adapter creates or resumes its provider session and starts the turn.
 6. The adapter maps provider events into runtime items and interactions.
 7. Task Monki observes Git and tests independently.
@@ -230,7 +232,7 @@ Grok ACP and Claude Agent ACP remain available for normal Tasks only.
 3. The shared support projection selects a compatible runtime.
 4. The adapter builds its provider-native read-only execution context.
 5. `AgentOrchestrator` records the repository fingerprint.
-6. `AgentOrchestrator` prepares and starts the turn in `FileAgentRuntimeStore`.
+6. `AgentOrchestrator` prepares and starts the turn in `SqliteAgentRuntimeStore`.
 7. The shared runtime event path reports progress and terminal state.
 8. The orchestrator compares repository state before it accepts completion.
 9. The coordinator turns valid terminal output into a Discourse message.
@@ -563,10 +565,10 @@ The renderer result never becomes security authority.
 
 ### One runtime store
 
-`FileAgentRuntimeStore` is the only owner of provider sessions, runs, interactions, items, plans, usage, and recovery state.
+`SqliteAgentRuntimeStore` is the only owner of provider sessions, runs, interactions, items, plans, usage, and recovery state.
 
-`FileTaskStore` keeps Task and Design domain state.
-`FileDiscourseStore` keeps Discourse domain state.
+`SqliteTaskStore` keeps Task and Design domain state.
+`SqliteDiscourseStore` keeps Discourse domain state.
 Each domain record stores only local runtime session or run links when needed.
 
 Do not dual-write provider state.
@@ -687,8 +689,9 @@ String injection tests are not enough.
 
 ## Attachment contract
 
-`AttachmentFileStore` remains the only byte owner.
-The current staging, adoption, hash, retry, draft, delete, and quota rules remain.
+SQLite remains the attachment reachability owner and `ManagedFileStore` remains
+the only byte publisher and verifier. The current staging, adoption, hash,
+retry, draft, delete, and quota rules remain.
 
 Task Monki keeps one immutable managed copy for each owning Task.
 A duplicated Task or Design gets an independent copy and lifetime.
@@ -1101,7 +1104,7 @@ This model is simpler and more accurate than claiming universal OS isolation.
 
 Provider milestone 1 removed these parts:
 
-- persisted Task and Design provider records from `FileTaskStore`.
+- persisted Task and Design provider records from `SqliteTaskStore`.
 - `AgentScopedTurnRouter` and `AgentScopedRuntimeAdapter`.
 - the separate Codex scoped run owner and transport.
 - duplicated renderer workflow support rules.
@@ -1135,7 +1138,7 @@ Status: implemented on 2026-08-28.
 
 This milestone changed ownership without adding provider features.
 
-1. `FileAgentRuntimeStore` now owns every provider session and run.
+1. `SqliteAgentRuntimeStore` now owns every provider session and run.
 2. `AgentOrchestrator` now uses that store for all runtimes.
 3. Adapters emit normalized events without storing provider state in domain stores.
 4. Discourse uses the same orchestrator.
@@ -1153,7 +1156,7 @@ Acceptance:
 - Codex Design and `inspect_design` still work without behavior changes.
 - Codex Discourse, review, and refinement still work.
 - Task and Discourse use the same runtime session and run owner.
-- No adapter writes `FileTaskStore` or `FileDiscourseStore` provider records.
+- No adapter writes `SqliteTaskStore` or `SqliteDiscourseStore` provider records.
 - No provider state is dual-written.
 - Uncertain delivery is never resent automatically.
 - Process release and shutdown leave no active subscriptions or child processes.
@@ -1182,7 +1185,7 @@ Their native policies are not operating-system sandboxes.
 
 Acceptance:
 
-- Review, prompt refinement, and Discourse use `AgentOrchestrator` and `FileAgentRuntimeStore`.
+- Review, prompt refinement, and Discourse use `AgentOrchestrator` and `SqliteAgentRuntimeStore`.
 - Workflow prompts, parsing, budgets, and domain state remain with their existing owners.
 - The repository fingerprint is stored before provider delivery and compared after terminal output.
 - A changed or unverifiable repository fails the turn and keeps detected changes as evidence.
@@ -1279,7 +1282,7 @@ Keep one Task Monki byte owner and one runtime lifecycle.
 
 | Owner | Existing modules to change |
 | --- | --- |
-| Durable selection and evidence | `src/shared/agentRuntime.ts`, `src/shared/attachments.ts`, `AgentRuntimeAdapter.ts`, `FileAgentRuntimeStore.ts`, `AgentRuntimeCoordinator.ts` |
+| Durable selection and evidence | `src/shared/agentRuntime.ts`, `src/shared/attachments.ts`, `AgentRuntimeAdapter.ts`, `SqliteAgentRuntimeStore.ts`, `AgentRuntimeCoordinator.ts` |
 | Shared verification and access identity | `AgentAttachmentDelivery.ts`, `AgentRuntimeOwnership.ts`, `AgentOrchestrator.ts` |
 | Refinement selection and evidence | `PromptRefinementService.ts`, `TaskManagerService.ts` |
 | Codex mapping | `CodexAppServerAdapter.ts`, `CodexPermissionProfile.ts`, `CodexRpcClient.ts` |
@@ -1289,7 +1292,7 @@ Keep one Task Monki byte owner and one runtime lifecycle.
 | Packaged qualification | `providerSmoke.ts`, its tests, and `PROVIDER_SMOKE_TESTING.md` |
 
 Do not add a store, transport registry, attachment service, or workflow adapter.
-Do not change the shared composer or `AttachmentFileStore` ownership model.
+Do not change the shared composer or SQLite/`ManagedFileStore` ownership model.
 
 #### Milestone 3 acceptance criteria
 
@@ -1639,5 +1642,5 @@ Implement the shared Design tool transport next.
 
 This is the smallest clean path to broad provider support.
 It keeps lifecycle code in one place.
-It keeps file ownership in `AttachmentFileStore`.
+It keeps file reachability in SQLite and byte ownership in `ManagedFileStore`.
 It keeps each wire transport inside its provider adapter.

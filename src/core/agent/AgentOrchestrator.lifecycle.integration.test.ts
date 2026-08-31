@@ -13,8 +13,8 @@ import type {
 import type { Task, TaskIteration, WorktreeRecord } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
-import { FileTaskStore } from '../storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
+import { SqliteAgentRuntimeStore } from '../storage/SqliteAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from './AgentRuntimeStore';
 import {
   AgentMutationAmbiguousError,
@@ -47,15 +47,17 @@ import {
   opencodeCapabilities
 } from './opencode/opencodeCapabilities';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { git } from '../git/gitCli';
+import type { ApplicationPersistence } from '../storage/sqlite/ApplicationPersistence';
 
 describe('AgentOrchestrator lifecycle and recovery', () => {
   it('keeps a prepared turn provably unsent when its local prompt cannot be read', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-runtime-prompt-read-failure-')
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(
       store,
@@ -139,8 +141,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-disabled-runtime-loss-')
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const server = await runtime.store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -170,8 +172,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
 
   it('marks an idle on-demand runtime server lost without launching that runtime', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-idle-runtime-loss-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const staleServer = await runtime.store.createAgentServer({
       runtimeId: 'grok-acp',
       runtimeKind: 'ACP_AGENT',
@@ -213,8 +215,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     );
     const workspace = path.join(dir, 'workspace');
     await fs.mkdir(workspace);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const codex = new Phase4Adapter(runtime.task);
     const discourseRuntime = new Phase4Adapter(runtime.task, {
       ...CODEX_RUNTIME_DESCRIPTOR,
@@ -349,8 +351,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-text-model-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter, {
     });
@@ -394,8 +396,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-provider-normalize-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
     const task = await store.createTask({
@@ -431,8 +433,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-cancel-unsent-turn-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(
       store,
@@ -499,8 +501,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-stop-sending-turn-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(
       store,
@@ -566,8 +568,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
     await initializeRepository(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
     const task = await store.createTask({
@@ -633,8 +635,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-session-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
     const task = await store.createTask({
@@ -716,8 +718,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-ambiguous-start-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     adapter.ambiguousStart = true;
     const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
@@ -766,8 +768,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     );
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     adapter.recoveryThenRejectStart = true;
     const appEvents = new AppEventBus();
@@ -866,8 +868,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
     await initializeRepository(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
     const task = await store.createTask({
@@ -956,8 +958,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
     await initializeRepository(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const server = await runtime.store.createAgentServer({
       runtimeId: 'codex',
@@ -1081,8 +1083,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
     await initializeRepository(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const server = await runtime.store.createAgentServer({
       runtimeId: 'codex',
@@ -1159,8 +1161,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
     await initializeRepository(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const server = await runtime.store.createAgentServer({
       runtimeId: 'codex',
@@ -1274,8 +1276,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     );
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     adapter.startFailure = 'provider startup failed';
     const appEvents = new AppEventBus();
@@ -1338,8 +1340,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-network-boundary-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter, {
       allowNetworkAccess: false
@@ -1535,8 +1537,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-boundary-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
@@ -1582,8 +1584,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
 
   it('rechecks provider-observed settings after creating a session and before turn/start', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-created-boundary-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const safeSettings: AgentExecutionSettings = {
       model: 'test-model',
@@ -1624,8 +1626,8 @@ const { task, iteration, worktree } = await createTaskContext(
 
   it('rechecks recreated session observations before retrying turn/start', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-recreated-boundary-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const adapter = new Phase4Adapter(runtime.task);
     const safeSettings: AgentExecutionSettings = {
       model: 'test-model',
@@ -1694,8 +1696,8 @@ const { task, iteration, worktree } = await createTaskContext(
 
   it('stops the provider when recovery first observes unsafe browser-dev settings', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-recovery-boundary-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const safeSettings: AgentExecutionSettings = {
       model: 'test-model',
       sandbox: 'WORKSPACE_WRITE',
@@ -1745,8 +1747,8 @@ const { task, iteration, worktree } = await createTaskContext(
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-cold-boundary-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     const server = await runtime.store.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -2010,8 +2012,8 @@ const { task, iteration, worktree } = await createTaskContext(
       runtimeId: 'codex',
       type: 'COMMAND_APPROVAL'
     });
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = bindTaskRuntime(store, path.join(dir, 'runtime'));
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
     vi.spyOn(runtime.store, 'taskAgentRuntimeAccess').mockReturnValue({
       ...runtime.task,
       getInteractionRequest
@@ -2336,7 +2338,7 @@ async function initializeRepository(repositoryPath: string): Promise<void> {
 }
 
 async function createTaskContext(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   dir: string,
   settings: AgentExecutionSettings
 ) {
@@ -2507,16 +2509,30 @@ async function terminal(
   );
 }
 
-function bindTaskRuntime(store: FileTaskStore, root: string): {
-  store: FileAgentRuntimeStore;
+const persistenceByTaskStore = new WeakMap<
+  SqliteTaskStore,
+  ApplicationPersistence
+>();
+
+async function openOrchestratorTaskStore(
+  profileRoot: string
+): Promise<SqliteTaskStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  persistenceByTaskStore.set(persistence.tasks, persistence);
+  return persistence.tasks;
+}
+
+function bindTaskRuntime(store: SqliteTaskStore): {
+  store: SqliteAgentRuntimeStore;
   task: TaskAgentRuntimeAccess;
 } {
-  const runtimeStore = new FileAgentRuntimeStore(root);
-  const task = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-    store.recordAgentRuntimeEvent(event, operationId)
-  );
+  const persistence = persistenceByTaskStore.get(store);
+  if (!persistence) {
+    throw new Error('AgentOrchestrator test store has no persistence owner.');
+  }
+  const runtimeStore = persistence.agentRuntime;
+  const task = persistence.taskRuntime;
   vi.spyOn(runtimeStore, 'taskAgentRuntimeAccess').mockReturnValue(task);
-  store.bindAgentRuntime(task);
   return { store: runtimeStore, task };
 }
 

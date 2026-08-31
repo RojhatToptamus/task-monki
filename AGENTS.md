@@ -23,6 +23,9 @@ state, and local acceptance.
 - `docs/architecture/CRASH_RECOVERY.md`
   - Required reading before changing startup, shutdown, external reconciliation,
     delivery recovery, or owned-process behavior.
+- `docs/architecture/PERSISTENCE_ARCHITECTURE.md`
+  - Required reading before changing SQLite storage, managed files, schema
+    migrations, backup, restore, quarantine, or persistence startup.
 - `DESIGN.md`
   - Frontend and design guidance for coherent Task Monki UI changes.
 - `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`
@@ -213,7 +216,7 @@ projection, or provider state inconsistent.
 ## Storage And Schema Rules
 
 - Treat stored contracts as durable. Changes to `src/shared` contracts,
-  `FileTaskStore`, domain events, run/session records, artifacts, or projections
+  `SqliteTaskStore`, domain events, run/session records, artifacts, or projections
   need explicit compatibility thinking.
 - If stored shape changes, update schema/version intentionally and add tests for
   initialization, loading, repair, or rejection behavior.

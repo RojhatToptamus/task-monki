@@ -26,11 +26,11 @@ import type {
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import { buildDiffEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotService';
 import { git } from '../core/git/gitCli';
-import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type { TaskAgentRuntimeAccess } from '../core/agent/AgentRuntimeStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import { SqliteAgentRuntimeStore } from '../core/storage/SqliteAgentRuntimeStore';
+import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
+import { SqliteDiscourseStore } from '../core/storage/sqlite/SqliteDiscourseStore';
 import { DesignSourceService } from '../core/design/DesignSourceService';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
@@ -54,7 +54,7 @@ import {
   type DevSeedScenarioGroup
 } from './seedScenarios';
 
-export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v6';
+export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v7';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
 
 function seedSha256(value: string): string {
@@ -76,32 +76,22 @@ export interface DevSeedManifest {
   deterministicContract: string;
   scenarioSet: DevSeedScenarioSet;
   rootDir: string;
-  storeDir: string;
+  profileRoot: string;
+  databasePath: string;
   repositoryPath: string;
   secondaryRepositoryPath: string;
   worktreeRoot: string;
   previewRoot: string;
-  discourseDir: string;
-  agentRuntimeDir: string;
   discourseWorkspaceRoot: string;
   designRepositoryRoot: string;
-  designWorktreeRoot: string;
-  designDraftRoot: string;
-  appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
   env: {
-    TASK_MANAGER_STORE_DIR: string;
-    TASK_MANAGER_APP_SETTINGS_PATH: string;
+    TASK_MANAGER_PROFILE_ROOT: string;
     TASK_MANAGER_REPO_PATH: string;
     TASK_MANAGER_WORKTREE_ROOT: string;
     TASK_MANAGER_PREVIEW_ROOT: string;
-    TASK_MANAGER_DISCOURSE_DIR: string;
-    TASK_MANAGER_AGENT_RUNTIME_DIR: string;
     TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: string;
-    TASK_MANAGER_DESIGN_REPOSITORY_ROOT: string;
-    TASK_MANAGER_DESIGN_WORKTREE_ROOT: string;
-    TASK_MANAGER_DESIGN_DRAFT_ROOT: string;
     TASK_MANAGER_PREVIEW_RECONCILE: '0';
     TASK_MANAGER_DETERMINISTIC_SEED: '1';
     TASK_MANAGER_DEV_SEED_MODE: '1';
@@ -120,18 +110,12 @@ export interface DevSeedManifest {
 
 export interface SeedTaskMonkiDevelopmentDataOptions {
   rootDir?: string;
-  storeDir?: string;
+  profileRoot?: string;
   repositoryPath?: string;
   secondaryRepositoryPath?: string;
   worktreeRoot?: string;
   previewRoot?: string;
-  discourseDir?: string;
-  agentRuntimeDir?: string;
   discourseWorkspaceRoot?: string;
-  designRepositoryRoot?: string;
-  designWorktreeRoot?: string;
-  designDraftRoot?: string;
-  appSettingsPath?: string;
   scenarioSet?: DevSeedScenarioSet;
   reset?: boolean;
 }
@@ -147,26 +131,22 @@ const DEFAULT_AGENT_SETTINGS: AgentExecutionSettings = {
 
 interface SeedPaths {
   rootDir: string;
-  storeDir: string;
+  profileRoot: string;
   repositoryPath: string;
   secondaryRepositoryPath: string;
   worktreeRoot: string;
   previewRoot: string;
-  discourseDir: string;
-  agentRuntimeDir: string;
   discourseWorkspaceRoot: string;
-  designRepositoryRoot: string;
-  designWorktreeRoot: string;
-  designDraftRoot: string;
-  appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
 }
 
 interface SeedContext extends SeedPaths {
   scenarioSet: DevSeedScenarioSet;
-  store: FileTaskStore;
-  runtimeStore: FileAgentRuntimeStore;
+  store: SqliteTaskStore;
+  runtimeStore: SqliteAgentRuntimeStore;
+  designRepositoryRoot: string;
+  designWorktreeRoot: string;
   taskRuntime: TaskAgentRuntimeAccess;
   repositoryId: string;
   secondaryRepositoryId: string;
@@ -223,156 +203,155 @@ export async function seedTaskMonkiDevelopmentData(
   await initSeedRepository(paths.rootDir, paths.secondaryRepositoryPath, 'remote-secondary.git');
   await initSeedRepository(paths.rootDir, paths.repositoryPath, 'remote.git');
 
-  const store = new FileTaskStore(paths.storeDir);
-  const runtimeStore = new FileAgentRuntimeStore(paths.agentRuntimeDir);
-  const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-    store.recordAgentRuntimeEvent(event, operationId)
-  );
-  store.bindAgentRuntime(taskRuntime);
-  await runtimeStore.init();
-  await store.init();
-  const secondaryRepository = await store.addRepository(
-    await validateRepositoryPath(paths.secondaryRepositoryPath)
-  );
-  const repository = await store.addRepository(
-    await validateRepositoryPath(paths.repositoryPath)
-  );
-  const appSettingsStore = new AppSettingsStore(paths.appSettingsPath);
-  await appSettingsStore.update({
-    firstLaunchSetupCompleted: true,
-    defaultModel: DEFAULT_AGENT_SETTINGS.model ?? null,
-    defaultReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
-    reviewModel: DEFAULT_AGENT_SETTINGS.model ?? null,
-    reviewReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
-    selectedRepositoryId: repository.id
+  const persistence = await ApplicationPersistence.open({
+    profileRoot: paths.profileRoot,
+    appVersion: TASK_MONKI_DEV_SEED_VERSION
   });
-
-  const server = await runtimeStore.createAgentServer({
-    runtimeId: 'codex',
-    runtimeKind: 'APP_SERVER',
-    transport: 'STDIO',
-    executable: 'codex-seed-runtime',
-    argv: ['codex-seed-runtime', '--deterministic-scenarios'],
-    runtimeVersion: TASK_MONKI_DEV_SEED_VERSION,
-    schemaVersion: 'seed'
-  });
-  await runtimeStore.updateAgentServer(server.id, {
-    status: 'READY',
-    initializedAt: new Date().toISOString(),
-    lastHealthAt: new Date().toISOString()
-  });
-
-  const ctx: SeedContext = {
-    ...paths,
-    scenarioSet,
-    store,
-    runtimeStore,
-    taskRuntime,
-    repositoryId: repository.id,
-    secondaryRepositoryId: secondaryRepository.id,
-    worktrees: new WorktreeService(paths.worktreeRoot),
-    serverInstanceId: server.id,
-    baseSha: (await git(paths.repositoryPath, ['rev-parse', 'HEAD'])).trim(),
-    scenarios: [],
-    turnCounter: 0,
-    protocolCounter: 0,
-    prCounter: 100
-  };
-  const discourseStore = new FileDiscourseStore(paths.discourseDir);
-  await discourseStore.init();
-
-  for (const definition of scenariosForSet(scenarioSet)) {
-    if (definition.group === 'discourse') {
-      const conversationId = await seedDiscourseScenario({
-        definition,
-        discourseStore,
-        taskStore: store,
-        repositoryId: repository.id
-      });
-      ctx.scenarios.push({ ...definition, conversationId });
-      continue;
-    }
-    const result = await seedScenario(ctx, definition);
-    ctx.scenarios.push({
-      ...definition,
-      taskId: result.task.id,
-      relatedTaskIds: result.relatedTaskIds
+  const store = persistence.tasks;
+  const runtimeStore = persistence.agentRuntime;
+  const discourseStore = persistence.discourse;
+  try {
+    const taskRuntime = persistence.taskRuntime;
+    await runtimeStore.init();
+    await store.init();
+    const secondaryRepository = await store.addRepository(
+      await validateRepositoryPath(paths.secondaryRepositoryPath)
+    );
+    const repository = await store.addRepository(
+      await validateRepositoryPath(paths.repositoryPath)
+    );
+    await persistence.settings.update({
+      firstLaunchSetupCompleted: true,
+      defaultModel: DEFAULT_AGENT_SETTINGS.model ?? null,
+      defaultReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
+      reviewModel: DEFAULT_AGENT_SETTINGS.model ?? null,
+      reviewReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
+      selectedRepositoryId: repository.id
     });
-  }
-  if (scenarioSet === 'all') {
-    await seedDesignScenarios(ctx);
-  }
-  await store.createBoard({
-    name: 'Secondary repository',
-    color: 'VIOLET',
-    repositoryIds: [secondaryRepository.id],
-    workflowPhases: []
-  });
-  await store.createBoard({
-    name: 'Review across repositories',
-    color: 'BLUE',
-    repositoryIds: [],
-    workflowPhases: ['REVIEW', 'IN_REVIEW']
-  });
-  await runtimeStore.updateAgentServer(server.id, {
-    status: 'EXITED',
-    exitedAt: new Date().toISOString(),
-    exitReason: 'Seeded App Server record; no live provider process is attached.'
-  });
 
-  const snapshot = await store.snapshot();
-  const manifest: DevSeedManifest = {
-    catalogVersion: TASK_MONKI_DEV_SEED_VERSION,
-    storeSchemaVersion: TASK_STORE_SCHEMA_VERSION,
-    generatedAt: new Date().toISOString(),
-    deterministicContract:
-      'Scenario slugs, titles, and manifest entries are stable. Store IDs and timestamps are generated by FileTaskStore and must be read from this manifest.',
-    scenarioSet,
-    ...paths,
-    env: {
-      TASK_MANAGER_STORE_DIR: paths.storeDir,
-      TASK_MANAGER_APP_SETTINGS_PATH: paths.appSettingsPath,
-      TASK_MANAGER_REPO_PATH: paths.repositoryPath,
-      TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
+    const server = await runtimeStore.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex-seed-runtime',
+      argv: ['codex-seed-runtime', '--deterministic-scenarios'],
+      runtimeVersion: TASK_MONKI_DEV_SEED_VERSION,
+      schemaVersion: 'seed'
+    });
+    await runtimeStore.updateAgentServer(server.id, {
+      status: 'READY',
+      initializedAt: new Date().toISOString(),
+      lastHealthAt: new Date().toISOString()
+    });
+
+    const ctx: SeedContext = {
+      ...paths,
+      scenarioSet,
+      store,
+      runtimeStore,
+      designRepositoryRoot: persistence.paths.designRepositoryRoot,
+      designWorktreeRoot: persistence.paths.designWorktreeRoot,
+      taskRuntime,
+      repositoryId: repository.id,
+      secondaryRepositoryId: secondaryRepository.id,
+      worktrees: new WorktreeService(paths.worktreeRoot),
+      serverInstanceId: server.id,
+      baseSha: (await git(paths.repositoryPath, ['rev-parse', 'HEAD'])).trim(),
+      scenarios: [],
+      turnCounter: 0,
+      protocolCounter: 0,
+      prCounter: 100
+    };
+    await discourseStore.init();
+
+    for (const definition of scenariosForSet(scenarioSet)) {
+      if (definition.group === 'discourse') {
+        const conversationId = await seedDiscourseScenario({
+          definition,
+          discourseStore,
+          taskStore: store,
+          repositoryId: repository.id
+        });
+        ctx.scenarios.push({ ...definition, conversationId });
+        continue;
+      }
+      const result = await seedScenario(ctx, definition);
+      ctx.scenarios.push({
+        ...definition,
+        taskId: result.task.id,
+        relatedTaskIds: result.relatedTaskIds
+      });
+    }
+    if (scenarioSet === 'all') {
+      await seedDesignScenarios(ctx);
+    }
+    await store.createBoard({
+      name: 'Secondary repository',
+      color: 'VIOLET',
+      repositoryIds: [secondaryRepository.id],
+      workflowPhases: []
+    });
+    await store.createBoard({
+      name: 'Review across repositories',
+      color: 'BLUE',
+      repositoryIds: [],
+      workflowPhases: ['REVIEW', 'IN_REVIEW']
+    });
+    await runtimeStore.updateAgentServer(server.id, {
+      status: 'EXITED',
+      exitedAt: new Date().toISOString(),
+      exitReason: 'Seeded App Server record; no live provider process is attached.'
+    });
+
+    const snapshot = await store.snapshot();
+    const manifest: DevSeedManifest = {
+      catalogVersion: TASK_MONKI_DEV_SEED_VERSION,
+      storeSchemaVersion: TASK_STORE_SCHEMA_VERSION,
+      generatedAt: new Date().toISOString(),
+      deterministicContract:
+        'Scenario slugs, titles, and manifest entries are stable. Store IDs and timestamps are generated by SqliteTaskStore and must be read from this manifest.',
+      scenarioSet,
+      ...paths,
+      databasePath: persistence.paths.databasePath,
+      designRepositoryRoot: persistence.paths.designRepositoryRoot,
+      env: {
+        TASK_MANAGER_PROFILE_ROOT: paths.profileRoot,
+        TASK_MANAGER_REPO_PATH: paths.repositoryPath,
+        TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
       TASK_MANAGER_PREVIEW_ROOT: paths.previewRoot,
-      TASK_MANAGER_DISCOURSE_DIR: paths.discourseDir,
-      TASK_MANAGER_AGENT_RUNTIME_DIR: paths.agentRuntimeDir,
       TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: paths.discourseWorkspaceRoot,
-      TASK_MANAGER_DESIGN_REPOSITORY_ROOT: paths.designRepositoryRoot,
-      TASK_MANAGER_DESIGN_WORKTREE_ROOT: paths.designWorktreeRoot,
-      TASK_MANAGER_DESIGN_DRAFT_ROOT: paths.designDraftRoot,
-      TASK_MANAGER_PREVIEW_RECONCILE: '0',
-      [DETERMINISTIC_DEV_SEED_ENV_VAR]: '1',
-      TASK_MANAGER_DEV_SEED_MODE: '1'
-    },
-    counts: {
-      tasks: snapshot.tasks.length,
-      scenarios: ctx.scenarios.length,
-      runs: snapshot.runs.length,
-      worktrees: snapshot.worktrees.length,
-      events: snapshot.events.length,
-      conversations: ctx.scenarios.filter((scenario) => scenario.conversationId).length,
-      designs: (await store.listDesigns()).length
-    },
-    scenarios: ctx.scenarios
-  };
+        TASK_MANAGER_PREVIEW_RECONCILE: '0',
+        [DETERMINISTIC_DEV_SEED_ENV_VAR]: '1',
+        TASK_MANAGER_DEV_SEED_MODE: '1'
+      },
+      counts: {
+        tasks: snapshot.tasks.length,
+        scenarios: ctx.scenarios.length,
+        runs: snapshot.runs.length,
+        worktrees: snapshot.worktrees.length,
+        events: snapshot.events.length,
+        conversations: ctx.scenarios.filter((scenario) => scenario.conversationId).length,
+        designs: (await store.listDesigns()).length
+      },
+      scenarios: ctx.scenarios
+    };
 
-  await fs.writeFile(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600
-  });
-  await fs.writeFile(paths.envFilePath, formatEnvFile(manifest.env), {
-    encoding: 'utf8',
-    mode: 0o600
-  });
-  await Promise.all([
-    fs.chmod(paths.manifestPath, 0o600),
-    fs.chmod(paths.envFilePath, 0o600)
-  ]);
-  await discourseStore.close();
-  await store.close();
-  await runtimeStore.close();
-  return manifest;
+    await fs.writeFile(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+    await fs.writeFile(paths.envFilePath, formatEnvFile(manifest.env), {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+    await Promise.all([
+      fs.chmod(paths.manifestPath, 0o600),
+      fs.chmod(paths.envFilePath, 0o600)
+    ]);
+    return manifest;
+  } finally {
+    await persistence.close();
+  }
 }
 
 async function seedDesignScenarios(ctx: SeedContext): Promise<void> {
@@ -495,8 +474,8 @@ async function seedDesignScenarios(ctx: SeedContext): Promise<void> {
 
 async function seedDiscourseScenario(input: {
   definition: DevSeedScenarioDefinition;
-  discourseStore: FileDiscourseStore;
-  taskStore: FileTaskStore;
+  discourseStore: SqliteDiscourseStore;
+  taskStore: SqliteTaskStore;
   repositoryId: string;
 }): Promise<string> {
   const { definition, discourseStore } = input;
@@ -748,7 +727,7 @@ function discourseSeedBindings(
 
 async function seedDiscourseAgentWaveState(input: {
   slug: string;
-  store: FileDiscourseStore;
+  store: SqliteDiscourseStore;
   conversationId: string;
   triggerMessageId: string;
   triggerOrdinal: number;
@@ -1019,7 +998,7 @@ async function seedDiscourseAgentWaveState(input: {
 async function seedWavePlan(input: {
   slug: string;
   suffix: string;
-  store: FileDiscourseStore;
+  store: SqliteDiscourseStore;
   conversationId: string;
   triggerMessageId: string;
   triggerOrdinal: number;
@@ -1131,7 +1110,7 @@ function seedJobRecord(input: {
 }
 
 async function seedWaveRunning(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   waveId: string
 ) {
@@ -1152,7 +1131,7 @@ async function seedWaveRunning(
 }
 
 async function seedJobStarting(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   jobId: string
 ) {
@@ -1178,7 +1157,7 @@ async function seedJobStarting(
 }
 
 async function seedJobRunning(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   jobId: string
 ) {
@@ -1197,7 +1176,7 @@ async function seedJobRunning(
 }
 
 async function seedCompleteContribution(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   jobId: string,
   body: string
@@ -1234,7 +1213,7 @@ async function seedCompleteContribution(
 }
 
 async function seedFailJob(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   jobId: string
 ) {
@@ -1260,7 +1239,7 @@ async function seedFailJob(
 }
 
 async function seedCompleteReview(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   jobId: string,
   targetMessageId: string,
@@ -1319,7 +1298,7 @@ function seedConcern(
 }
 
 async function seedWavePhase(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   waveId: string,
   phase: 'REVIEW' | 'CORRECT'
@@ -1334,7 +1313,7 @@ async function seedWavePhase(
 }
 
 async function seedSettleWave(
-  store: FileDiscourseStore,
+  store: SqliteDiscourseStore,
   conversationId: string,
   waveId: string,
   outcome: 'COMPLETE' | 'PARTIAL',
@@ -1358,7 +1337,7 @@ async function seedSettleWave(
 }
 
 function requireSeedWave(
-  aggregate: Awaited<ReturnType<FileDiscourseStore['getConversation']>>,
+  aggregate: Awaited<ReturnType<SqliteDiscourseStore['getConversation']>>,
   waveId: string
 ) {
   const wave = aggregate.waves.find((candidate) => candidate.id === waveId);
@@ -1367,7 +1346,7 @@ function requireSeedWave(
 }
 
 function requireSeedJob(
-  aggregate: Awaited<ReturnType<FileDiscourseStore['getConversation']>>,
+  aggregate: Awaited<ReturnType<SqliteDiscourseStore['getConversation']>>,
   jobId: string
 ) {
   const job = aggregate.jobs.find((candidate) => candidate.id === jobId);
@@ -1401,28 +1380,16 @@ function resolveSeedPaths(options: SeedTaskMonkiDevelopmentDataOptions): SeedPat
   const rootDir = path.resolve(options.rootDir ?? defaultDevSeedRoot());
   return {
     rootDir,
-    storeDir: path.resolve(options.storeDir ?? path.join(rootDir, 'store')),
+    profileRoot: path.resolve(options.profileRoot ?? path.join(rootDir, 'profile')),
     repositoryPath: path.resolve(options.repositoryPath ?? path.join(rootDir, 'repo')),
     secondaryRepositoryPath: path.resolve(
       options.secondaryRepositoryPath ?? path.join(rootDir, 'repo-secondary')
     ),
     worktreeRoot: path.resolve(options.worktreeRoot ?? path.join(rootDir, 'worktrees')),
     previewRoot: path.resolve(options.previewRoot ?? path.join(rootDir, 'preview-runtime')),
-    discourseDir: path.resolve(options.discourseDir ?? path.join(rootDir, 'discourse')),
-    agentRuntimeDir: path.resolve(options.agentRuntimeDir ?? path.join(rootDir, 'agent-runtime')),
     discourseWorkspaceRoot: path.resolve(
       options.discourseWorkspaceRoot ?? path.join(rootDir, 'discourse-workspaces')
     ),
-    designRepositoryRoot: path.resolve(
-      options.designRepositoryRoot ?? path.join(rootDir, 'design-repositories')
-    ),
-    designWorktreeRoot: path.resolve(
-      options.designWorktreeRoot ?? path.join(rootDir, 'design-worktrees')
-    ),
-    designDraftRoot: path.resolve(
-      options.designDraftRoot ?? path.join(rootDir, 'design-drafts')
-    ),
-    appSettingsPath: path.resolve(options.appSettingsPath ?? path.join(rootDir, 'app-settings.json')),
     manifestPath: path.join(rootDir, 'manifest.json'),
     envFilePath: path.join(rootDir, 'dev-api.env')
   };

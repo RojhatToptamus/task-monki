@@ -1,26 +1,32 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
 } from '../../shared/agent';
+import { AppDatabase } from '../storage/sqlite/AppDatabase';
 import {
   AppSettingsStore,
   MemoryAppSettingsStore,
   normalizeAppSettings
 } from './AppSettingsStore';
 
+const databases: AppDatabase[] = [];
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(databases.splice(0).map((database) => database.close()));
+  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
 describe('AppSettingsStore', () => {
-  it('initializes a missing settings file with normalized defaults', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    const store = new AppSettingsStore(settingsPath);
+  it('initializes normalized defaults in the application database', async () => {
+    const { database } = await createDatabase();
+    const store = new AppSettingsStore(database);
 
-    const settings = await store.get();
-
-    expect(settings).toMatchObject({
+    await expect(store.get()).resolves.toMatchObject({
       schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
       theme: 'device',
       themePreset: 'umber',
@@ -34,11 +40,88 @@ describe('AppSettingsStore', () => {
         ghExecutablePath: null
       }
     });
-    await expect(fs.stat(settingsPath)).resolves.toBeTruthy();
-    if (process.platform !== 'win32') {
-      expect((await fs.stat(settingsPath)).mode & 0o777).toBe(0o600);
-      expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
-    }
+    await expect(
+      database.read((reader) =>
+        reader.get<{ record_revision: number; settings_json: string }>(
+          'SELECT record_revision, settings_json FROM app_settings WHERE singleton_id = 1'
+        )
+      )
+    ).resolves.toEqual({
+      record_revision: 0,
+      settings_json: JSON.stringify(DEFAULT_TASK_MANAGER_APP_SETTINGS)
+    });
+  });
+
+  it('persists settings across database reopen', async () => {
+    const { database, databasePath } = await createDatabase();
+    const store = new AppSettingsStore(database);
+    await store.update({ theme: 'dark', selectedRepositoryId: 'repository-1' });
+    await closeDatabase(database);
+
+    const reopened = await AppDatabase.open(databasePath);
+    databases.push(reopened);
+
+    await expect(new AppSettingsStore(reopened).get()).resolves.toMatchObject({
+      theme: 'dark',
+      selectedRepositoryId: 'repository-1'
+    });
+  });
+
+  it('does not publish settings from a rolled-back outer transaction', async () => {
+    const { database } = await createDatabase();
+    const store = new AppSettingsStore(database);
+    await store.get();
+
+    await expect(
+      database.write(async () => {
+        await store.update({ theme: 'dark' });
+        expect((await store.get()).theme).toBe('dark');
+        throw new Error('abort transaction');
+      })
+    ).rejects.toThrow('abort transaction');
+
+    expect((await store.get()).theme).toBe('device');
+    const stored = await database.read((reader) =>
+      reader.get<{ settings_json: string }>(
+        'SELECT settings_json FROM app_settings WHERE singleton_id = 1'
+      )
+    );
+    expect(JSON.parse(stored!.settings_json)).toMatchObject({ theme: 'device' });
+  });
+
+  it('rejects first initialization inside an outer transaction', async () => {
+    const { database } = await createDatabase();
+    const store = new AppSettingsStore(database);
+
+    await expect(
+      database.write(() => store.update({ theme: 'dark' }))
+    ).rejects.toThrow('must be initialized before joining an outer database transaction');
+
+    await expect(store.get()).resolves.toMatchObject({ theme: 'device' });
+  });
+
+  it('fails closed on invalid current settings without rewriting them', async () => {
+    const { database } = await createDatabase();
+    const invalidSettings = JSON.stringify({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
+    });
+    await database.write((transaction) => {
+      transaction.run(
+        `INSERT INTO app_settings (
+           singleton_id, record_revision, settings_json, updated_at
+         ) VALUES (1, 4, ?, ?)`,
+        [invalidSettings, '2026-08-29T10:00:00.000Z']
+      );
+    });
+
+    await expect(new AppSettingsStore(database).get()).rejects.toThrow('is invalid');
+    await expect(
+      database.read((reader) =>
+        reader.get<{ settings_json: string }>(
+          'SELECT settings_json FROM app_settings WHERE singleton_id = 1'
+        )
+      )
+    ).resolves.toEqual({ settings_json: invalidSettings });
   });
 
   it('merges nested patches without resetting sibling settings', async () => {
@@ -83,35 +166,16 @@ describe('AppSettingsStore', () => {
     });
   });
 
-  it('migrates schema 10 settings and enables install-on-quit by default', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-v10-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    const legacy = currentSettings() as Record<string, unknown>;
-    legacy.schemaVersion = 10;
-    delete legacy.autoInstallUpdatesOnQuit;
-    await fs.writeFile(settingsPath, `${JSON.stringify(legacy)}\n`, 'utf8');
-
-    await expect(new AppSettingsStore(settingsPath).get()).resolves.toMatchObject({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      autoInstallUpdatesOnQuit: true
-    });
-    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toContain(
-      '"autoInstallUpdatesOnQuit": true'
-    );
-  });
-
   it('stores repository selection as an ID-only UI preference', async () => {
     const store = new MemoryAppSettingsStore();
 
-    const settings = await store.update({
-      selectedRepositoryId: 'repository-1'
-    });
+    const settings = await store.update({ selectedRepositoryId: 'repository-1' });
 
     expect(settings.firstLaunchSetupCompleted).toBe(false);
     expect(settings.selectedRepositoryId).toBe('repository-1');
   });
 
-  it.each([3, 9])('rejects unsupported settings schema %s', (schemaVersion) => {
+  it.each([3, 9, 10])('rejects unsupported settings schema %s', (schemaVersion) => {
     expect(() => normalizeAppSettings({ schemaVersion })).toThrow(
       `Unsupported Task Monki app settings schema ${schemaVersion}`
     );
@@ -123,9 +187,9 @@ describe('AppSettingsStore', () => {
     await expect(store.update({ themePreset: 'nocturne' })).resolves.toMatchObject({
       themePreset: 'nocturne'
     });
-    await expect(
-      store.update({ themePreset: 'unknown' as 'graphite' })
-    ).rejects.toThrow('Theme preset is not supported.');
+    await expect(store.update({ themePreset: 'unknown' as 'graphite' })).rejects.toThrow(
+      'Theme preset is not supported.'
+    );
   });
 
   it('rejects incomplete current-schema settings instead of filling defaults', () => {
@@ -169,48 +233,21 @@ describe('AppSettingsStore', () => {
       'Preview gateway port must be null or an integer from 10000 to 65535.'
     );
   });
-
-  it('fails closed on invalid JSON without replacing user data', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-invalid-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    await fs.writeFile(settingsPath, '{not valid json', 'utf8');
-    const store = new AppSettingsStore(settingsPath);
-
-    await expect(store.get()).rejects.toThrow();
-    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe('{not valid json');
-  });
-
-  it('does not reuse or remove an untrusted legacy settings temporary path', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-temp-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    const legacyTemporaryPath = `${settingsPath}.tmp`;
-    await fs.mkdir(legacyTemporaryPath);
-    await fs.writeFile(path.join(legacyTemporaryPath, 'marker'), 'keep');
-
-    await new AppSettingsStore(settingsPath).get();
-
-    await expect(fs.stat(settingsPath)).resolves.toMatchObject({ size: expect.any(Number) });
-    await expect(
-      fs.readFile(path.join(legacyTemporaryPath, 'marker'), 'utf8')
-    ).resolves.toBe('keep');
-  });
-
-  it.runIf(process.platform !== 'win32')(
-    'rejects a symlinked settings file without reading or replacing its target',
-    async () => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-link-'));
-      const settingsPath = path.join(dir, 'app-settings.json');
-      const outsidePath = path.join(dir, 'outside.json');
-      const outsideContents = JSON.stringify({ theme: 'dark' });
-      await fs.writeFile(outsidePath, outsideContents, { mode: 0o600 });
-      await fs.symlink(outsidePath, settingsPath);
-
-      await expect(new AppSettingsStore(settingsPath).get()).rejects.toBeTruthy();
-      await expect(fs.readFile(outsidePath, 'utf8')).resolves.toBe(outsideContents);
-      expect((await fs.lstat(settingsPath)).isSymbolicLink()).toBe(true);
-    }
-  );
 });
+
+async function createDatabase(): Promise<{ database: AppDatabase; databasePath: string }> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-'));
+  roots.push(root);
+  const databasePath = path.join(root, 'task-monki.sqlite3');
+  const database = await AppDatabase.open(databasePath);
+  databases.push(database);
+  return { database, databasePath };
+}
+
+async function closeDatabase(database: AppDatabase): Promise<void> {
+  await database.close();
+  databases.splice(databases.indexOf(database), 1);
+}
 
 function currentSettings(
   overrides: Partial<typeof DEFAULT_TASK_MANAGER_APP_SETTINGS> = {}

@@ -12,10 +12,12 @@ import type {
   BuildAgentRuntimeExecutionContextInput
 } from '../agent/AgentRuntimeCoordinator';
 import { AppEventBus } from '../runner/AppEventBus';
-import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../storage/FileDiscourseStore';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteAgentRuntimeStore } from '../storage/SqliteAgentRuntimeStore';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import {
+  openTestPersistence,
+  taskManagerPersistenceOptions
+} from '../../testSupport/persistenceFixture';
 import type {
   BuiltInAgentProfileId,
   DiscourseAgentSelectionInput
@@ -35,7 +37,7 @@ class DiscourseCapableRuntimeAdapter extends ScriptedAgentRuntimeAdapter {
     (event: AgentRuntimeTurnEvent) => void
   >();
 
-  constructor(private readonly runtimeStore: FileAgentRuntimeStore) {
+  constructor(private readonly runtimeStore: SqliteAgentRuntimeStore) {
     super(runtimeStore.taskAgentRuntimeAccess());
   }
 
@@ -173,15 +175,16 @@ class DiscourseCapableRuntimeAdapter extends ScriptedAgentRuntimeAdapter {
 describe('TaskManagerService discourse runtime composition', () => {
   it('recovers a clean shutdown latch on startup and latches before closing', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-lifecycle-'));
-    const taskStore = new FileTaskStore(path.join(root, 'tasks'));
-    const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime'));
-    const discourseStore = new FileDiscourseStore(path.join(root, 'discourse'));
+    const persistence = await openTestPersistence(path.join(root, 'profile'));
+    const taskStore = persistence.tasks;
+    const runtimeStore = persistence.agentRuntime;
+    const discourseStore = persistence.discourse;
     await runtimeStore.init();
     await runtimeStore.setShutdownLatched(true, 'previous-process-shutdown');
     const runtimeAdapter = new DiscourseCapableRuntimeAdapter(runtimeStore);
     const service = new TaskManagerService(taskStore, root, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       agentRuntimeAdapters: [runtimeAdapter],
-      agentRuntimeStore: runtimeStore,
       discourseStore
     });
 
@@ -189,9 +192,10 @@ describe('TaskManagerService discourse runtime composition', () => {
     expect((await runtimeStore.snapshot()).shutdownLatched).toBe(false);
 
     await service.shutdown();
-    const reopenedRuntime = new FileAgentRuntimeStore(path.join(root, 'runtime'));
-    expect((await reopenedRuntime.snapshot()).shutdownLatched).toBe(true);
-    await reopenedRuntime.close();
+    await persistence.close();
+    const reopened = await openTestPersistence(path.join(root, 'profile'));
+    expect((await reopened.agentRuntime.snapshot()).shutdownLatched).toBe(true);
+    await reopened.close();
   });
 
   it('dispatches every Panel job through the shared runtime without racing the wave', async () => {
@@ -364,14 +368,15 @@ describe('TaskManagerService discourse runtime composition', () => {
     releaseDelete();
     await expect(deletion).resolves.toBeUndefined();
     await shutdown;
-    expect(await fixture.discourseStore.getConversationTombstone(conversation.id)).toMatchObject({
+    await fixture.persistence.close();
+    const reopened = await openTestPersistence(
+      fixture.persistence.paths.profileRoot
+    );
+    expect(await reopened.discourse.getConversationTombstone(conversation.id)).toMatchObject({
       conversationId: conversation.id
     });
-    const reopenedRuntime = new FileAgentRuntimeStore(
-      path.join(fixture.root, 'runtime')
-    );
-    expect((await reopenedRuntime.snapshot()).shutdownLatched).toBe(true);
-    await reopenedRuntime.close();
+    expect((await reopened.agentRuntime.snapshot()).shutdownLatched).toBe(true);
+    await reopened.close();
     delayedDelete.mockRestore();
   });
 
@@ -481,6 +486,19 @@ describe('TaskManagerService discourse runtime composition', () => {
     const readConversation = fixture.discourseStore.getConversation.bind(
       fixture.discourseStore
     );
+    const leaseQueueEntry = fixture.runtimeStore.leaseQueueEntry.bind(
+      fixture.runtimeStore
+    );
+    let releaseLease!: () => void;
+    const leaseGate = new Promise<void>((resolve) => {
+      releaseLease = resolve;
+    });
+    const lease = vi
+      .spyOn(fixture.runtimeStore, 'leaseQueueEntry')
+      .mockImplementation(async (...args) => {
+        await leaseGate;
+        return leaseQueueEntry(...args);
+      });
     let failNextLeasedRead = true;
     const storeRead = vi.spyOn(fixture.discourseStore, 'getConversation').mockImplementation(
       async (conversationId) => {
@@ -497,6 +515,7 @@ describe('TaskManagerService discourse runtime composition', () => {
     );
     try {
       await sendDirectMessage(fixture, 'Retry this after the transient failure.');
+      releaseLease();
 
       await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 1);
       const run = fixture.runtimeAdapter.runtimeStarts[0]!.run;
@@ -511,7 +530,9 @@ describe('TaskManagerService discourse runtime composition', () => {
         expect.objectContaining({ status: 'RUNNING' })
       ]);
     } finally {
+      releaseLease();
       await fixture.service.shutdown();
+      lease.mockRestore();
       storeRead.mockRestore();
       error.mockRestore();
     }
@@ -520,20 +541,22 @@ describe('TaskManagerService discourse runtime composition', () => {
 
 async function createFixture(name: string) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-discourse-${name}-`));
-  const taskStore = new FileTaskStore(path.join(root, 'tasks'));
-  const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime'));
-  const discourseStore = new FileDiscourseStore(path.join(root, 'discourse'));
+  const persistence = await openTestPersistence(path.join(root, 'profile'));
+  const taskStore = persistence.tasks;
+  const runtimeStore = persistence.agentRuntime;
+  const discourseStore = persistence.discourse;
   const runtimeAdapter = new DiscourseCapableRuntimeAdapter(runtimeStore);
   const events = new AppEventBus();
   const service = new TaskManagerService(taskStore, root, events, {
+    ...taskManagerPersistenceOptions(persistence),
     agentRuntimeAdapters: [runtimeAdapter],
-    agentRuntimeStore: runtimeStore,
     discourseStore,
     discourseWorkspaceRoot: path.join(root, 'discourse-workspaces')
   });
   await service.init();
   return {
     root,
+    persistence,
     taskStore,
     runtimeStore,
     discourseStore,

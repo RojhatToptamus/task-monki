@@ -10,7 +10,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { isTaskCreationToken } from '../../shared/contracts';
-import type { ManagedDesignRepositoryInput } from '../storage/FileTaskStore';
+import type { ManagedDesignRepositoryInput } from '../storage/SqliteTaskStore';
 import {
   enforcePosixMode,
   hasNoGroupOrOtherPosixAccess,

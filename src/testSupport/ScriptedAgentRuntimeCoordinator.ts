@@ -9,7 +9,7 @@ import type {
 } from '../core/agent/AgentRuntimeCoordinator';
 import { AgentMutationAmbiguousError } from '../core/agent/AgentRuntimeAdapter';
 import { createAgentSessionAccessEpoch } from '../core/agent/AgentRuntimeOwnership';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
+import { SqliteAgentRuntimeStore } from '../core/storage/SqliteAgentRuntimeStore';
 
 export interface ScriptedRuntimeStartCall {
   session: AgentRuntimeSessionRecord;
@@ -40,7 +40,7 @@ export class ScriptedAgentRuntimeCoordinator implements AgentRuntimeCoordinator 
   private readonly listeners = new Set<(event: AgentRuntimeTurnEvent) => void>();
   private startSequence = 0;
 
-  constructor(private readonly runtime: FileAgentRuntimeStore) {}
+  constructor(private readonly runtime: SqliteAgentRuntimeStore) {}
 
   hasRuntime(runtimeId: string): boolean {
     return runtimeId === 'codex';

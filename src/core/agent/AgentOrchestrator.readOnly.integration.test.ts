@@ -2,11 +2,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { git } from '../git/gitCli';
 import { AppEventBus } from '../runner/AppEventBus';
-import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteAgentRuntimeStore } from '../storage/SqliteAgentRuntimeStore';
 import { AgentOrchestrator } from './AgentOrchestrator';
 
 describe('AgentOrchestrator read-only repository boundary', () => {
@@ -317,7 +317,7 @@ interface ReadOnlyFixture {
   adapter: ScriptedAgentRuntimeAdapter;
   orchestrator: AgentOrchestrator;
   repositoryPath: string;
-  runtimeStore: FileAgentRuntimeStore;
+  runtimeStore: SqliteAgentRuntimeStore;
 }
 
 async function createFixture(name: string): Promise<ReadOnlyFixture> {
@@ -331,12 +331,10 @@ async function createFixture(name: string): Promise<ReadOnlyFixture> {
   await git(repositoryPath, ['add', 'README.md']);
   await git(repositoryPath, ['commit', '-m', 'Initial commit']);
 
-  const taskStore = new FileTaskStore(path.join(root, 'task-store'));
-  const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime-store'));
-  const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-    taskStore.recordAgentRuntimeEvent(event, operationId)
-  );
-  taskStore.bindAgentRuntime(taskRuntime);
+  const persistence = await openTestPersistence(path.join(root, 'profile'));
+  const taskStore = persistence.tasks;
+  const runtimeStore = persistence.agentRuntime;
+  const taskRuntime = persistence.taskRuntime;
   const adapter = new ScriptedAgentRuntimeAdapter(taskRuntime, runtimeStore);
   return {
     adapter,
@@ -414,7 +412,7 @@ async function startReadOnlyTurn(
 }
 
 async function markRecoveryRequired(
-  runtimeStore: FileAgentRuntimeStore,
+  runtimeStore: SqliteAgentRuntimeStore,
   runId: string,
   terminalReason: string
 ): Promise<void> {

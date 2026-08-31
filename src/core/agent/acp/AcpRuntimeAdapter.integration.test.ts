@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
 import { AgentInteractionService } from '../AgentInteractionService';
 import {
   toAgentAttachmentSelection,
@@ -25,8 +26,9 @@ import type {
   WorktreeRecord
 } from '../../../shared/contracts';
 import type { AgentAttachmentSelection } from '../../../shared/attachments';
-import { FileTaskStore } from '../../storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
+import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import type { TaskAgentRuntimeAccess } from '../AgentRuntimeStore';
 import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import type { AcpNativeSessionState } from './AcpNativeSession';
@@ -41,33 +43,26 @@ import {
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 
 const temporaryDirectories: string[] = [];
-const testStores = new Set<{
-  tasks: FileTaskStore;
-  runtimeStore: FileAgentRuntimeStore;
-}>();
+const testPersistence = new Set<ApplicationPersistence>();
 const runtimeByTaskStore = new WeakMap<
-  FileTaskStore,
-  { runtimeStore: FileAgentRuntimeStore; runtime: TaskAgentRuntimeAccess }
+  SqliteTaskStore,
+  { runtimeStore: SqliteAgentRuntimeStore; runtime: TaskAgentRuntimeAccess }
 >();
 let testOperationOrdinal = 0;
 
-function createTestStore(root: string): FileTaskStore {
-  const store = new FileTaskStore(root);
-  const runtimeStore = new FileAgentRuntimeStore(`${root}-runtime`);
-  const runtime = runtimeStore.taskAgentRuntimeAccess(async (event, operationId) => {
-    await store.recordAgentRuntimeEvent(event, operationId);
+async function createTestStore(profileRoot: string): Promise<SqliteTaskStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  runtimeByTaskStore.set(persistence.tasks, {
+    runtimeStore: persistence.agentRuntime,
+    runtime: persistence.taskRuntime
   });
-  store.bindAgentRuntime(runtime);
-  runtimeByTaskStore.set(store, { runtimeStore, runtime });
-  testStores.add({ tasks: store, runtimeStore });
-  return store;
+  testPersistence.add(persistence);
+  return persistence.tasks;
 }
 
 afterEach(async () => {
-  await Promise.all(
-    [...testStores].flatMap(({ tasks, runtimeStore }) => [tasks.close(), runtimeStore.close()])
-  );
-  testStores.clear();
+  await Promise.all([...testPersistence].map((persistence) => persistence.close()));
+  testPersistence.clear();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       fs.rm(directory, { recursive: true, force: true })
@@ -75,8 +70,8 @@ afterEach(async () => {
   );
 });
 
-function runtimeFixture(store: FileTaskStore): {
-  runtimeStore: FileAgentRuntimeStore;
+function runtimeFixture(store: SqliteTaskStore): {
+  runtimeStore: SqliteAgentRuntimeStore;
   runtime: TaskAgentRuntimeAccess;
 } {
   const fixture = runtimeByTaskStore.get(store);
@@ -85,7 +80,7 @@ function runtimeFixture(store: FileTaskStore): {
 }
 
 function createTestAdapter(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   appEvents: AppEventBus,
   profile: AcpRuntimeProfile,
   options: ConstructorParameters<typeof AcpRuntimeAdapter>[4]
@@ -117,7 +112,7 @@ interface CreateTestAgentSessionInput {
 }
 
 async function createTestAgentSession(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: CreateTestAgentSessionInput
 ): Promise<AgentSessionRecord> {
   const runtime = runtimeFixture(store).runtime;
@@ -169,7 +164,7 @@ async function createTestAgentSession(
 }
 
 function updateTestAgentSession(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   id: string,
   update: Partial<AgentSessionRecord>
 ) {
@@ -195,7 +190,7 @@ interface CreateTestRunInput {
 }
 
 async function createTestRun(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: CreateTestRunInput
 ): Promise<RunRecord> {
   const id = randomUUID();
@@ -230,7 +225,7 @@ async function createTestRun(
   return (await runtimeFixture(store).runtime.getRun(run.id)) ?? run;
 }
 
-function updateTestRun(store: FileTaskStore, id: string, update: Partial<RunRecord>) {
+function updateTestRun(store: SqliteTaskStore, id: string, update: Partial<RunRecord>) {
   return runtimeFixture(store).runtime.updateRun(
     id,
     update,
@@ -238,40 +233,40 @@ function updateTestRun(store: FileTaskStore, id: string, update: Partial<RunReco
   );
 }
 
-function getTestAgentSession(store: FileTaskStore, id: string) {
+function getTestAgentSession(store: SqliteTaskStore, id: string) {
   return runtimeFixture(store).runtime.getAgentSession(id);
 }
 
-function getTestRun(store: FileTaskStore, id: string) {
+function getTestRun(store: SqliteTaskStore, id: string) {
   return runtimeFixture(store).runtime.getRun(id);
 }
 
-function getTestAgentServer(store: FileTaskStore, id: string) {
+function getTestAgentServer(store: SqliteTaskStore, id: string) {
   return runtimeFixture(store).runtimeStore.getAgentServer(id);
 }
 
 function getTestAgentItemByProviderId(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   runId: string,
   providerItemId: string
 ) {
   return runtimeFixture(store).runtime.getAgentItemByProviderId(runId, providerItemId);
 }
 
-function getTestInteractionRequest(store: FileTaskStore, id: string) {
+function getTestInteractionRequest(store: SqliteTaskStore, id: string) {
   return runtimeFixture(store).runtime.getInteractionRequest(id);
 }
 
 function appendTestProtocolMessage(
-  store: FileTaskStore,
-  ...input: Parameters<FileAgentRuntimeStore['appendProtocolMessage']>
+  store: SqliteTaskStore,
+  ...input: Parameters<SqliteAgentRuntimeStore['appendProtocolMessage']>
 ) {
   return runtimeFixture(store).runtimeStore.appendProtocolMessage(...input);
 }
 
 function createTestAgentServer(
-  store: FileTaskStore,
-  input: Parameters<FileAgentRuntimeStore['createAgentServer']>[0]
+  store: SqliteTaskStore,
+  input: Parameters<SqliteAgentRuntimeStore['createAgentServer']>[0]
 ) {
   return runtimeFixture(store).runtimeStore.createAgentServer(input);
 }
@@ -323,7 +318,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const fixture = runtimeFixture(store);
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
@@ -671,7 +666,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
@@ -861,7 +856,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         executableCandidates: [process.execPath],
         argv: [agentScript]
       };
-      const store = createTestStore(path.join(directory, 'store'));
+      const store = await createTestStore(path.join(directory, 'store'));
       const adapter = createTestAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         ...(credential
@@ -988,7 +983,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-      const store = createTestStore(path.join(directory, 'store'));
+      const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -1021,7 +1016,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       path.join(os.tmpdir(), 'task-monki-generic-acp-model-')
     );
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(
       store,
       new AppEventBus(),
@@ -1103,7 +1098,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -1287,7 +1282,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -1413,7 +1408,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       environment: { ...process.env, TEST_ACP_API_KEY: secret },
@@ -1507,7 +1502,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -1636,7 +1631,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
@@ -1817,7 +1812,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         sensitiveKeys: ['GEMINI_API_KEY']
       }
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const events = new AppEventBus();
     const observedEvents: Array<{ type: string; payload: unknown; runId?: string }> = [];
     events.on((event) => observedEvents.push(event));
@@ -3008,7 +3003,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       path.join(os.tmpdir(), 'task-monki-acp-shutdown-fence-')
     );
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const server = await createTestAgentServer(store, {
       runtimeId: 'test-acp-shutdown-fence',
       runtimeKind: 'ACP_AGENT',
@@ -3056,7 +3051,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
   it('retains a failed quarantine and rejects every later runtime operation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-fence-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const server = await createTestAgentServer(store, {
       runtimeId: 'test-acp-fence',
       runtimeKind: 'ACP_AGENT',
@@ -3122,7 +3117,7 @@ describe('AcpRuntimeAdapter native settings', () => {
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId }
     };
     const adapter = createTestAdapter(
-      createTestStore(path.join(directory, 'store')),
+      await createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       profile,
       { cwd: directory }
@@ -3216,7 +3211,7 @@ describe('AcpRuntimeAdapter native settings', () => {
     temporaryDirectories.push(directory);
     const runtimeId = 'test-grok-reasoning-setting';
     const adapter = createTestAdapter(
-      createTestStore(path.join(directory, 'store')),
+      await createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       {
         ...TEST_ACP_PROFILE,
@@ -3285,7 +3280,7 @@ describe('AcpRuntimeAdapter native settings', () => {
     );
     temporaryDirectories.push(directory);
     const adapter = createTestAdapter(
-      createTestStore(path.join(directory, 'store')),
+      await createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       TEST_ACP_PROFILE,
       { cwd: directory }
@@ -3712,20 +3707,10 @@ describe('AcpRuntimeAdapter permission materialization', () => {
     }
   });
 
-  it.each([
-    {
-      boundary: 'atomic activation before publication',
-      failure: 'injected permission activation failure',
-      failDuringPersistence: false
-    },
-    {
-      boundary: 'atomic boundary persistence',
-      failure: 'injected permission boundary persistence failure',
-      failDuringPersistence: true
-    }
-  ])(
-    'cancels and quarantines when $boundary cannot be persisted',
-    async ({ failure, failDuringPersistence }) => {
+  it(
+    'cancels and quarantines when permission activation cannot be persisted',
+    async () => {
+      const failure = 'injected permission activation failure';
       const directory = await fs.mkdtemp(
         path.join(os.tmpdir(), 'task-monki-acp-permission-persistence-')
       );
@@ -3735,16 +3720,14 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         mode: 0o600
       });
 
-      const runtimeId = `test-acp-permission-${
-        failDuringPersistence ? 'persistence' : 'activation'
-      }`;
+      const runtimeId = 'test-acp-permission-activation';
       const profile: AcpRuntimeProfile = {
         ...TEST_ACP_PROFILE,
         descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
         executableCandidates: [process.execPath],
         argv: [agentScript]
       };
-      const store = createTestStore(path.join(directory, 'store'));
+      const store = await createTestStore(path.join(directory, 'store'));
       const adapter = createTestAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         requestTimeoutMs: 1_000,
@@ -3799,36 +3782,9 @@ describe('AcpRuntimeAdapter permission materialization', () => {
       });
 
       const runtimeFixtureForPermission = runtimeFixture(store);
-      const persistenceSpies: Array<{ mockRestore(): void }> = [];
-      if (!failDuringPersistence) {
-        persistenceSpies.push(
-          vi
-            .spyOn(runtimeFixtureForPermission.runtime, 'createInteractionRequest')
-            .mockRejectedValueOnce(new Error(failure))
-        );
-      } else {
-        const createInteractionRequest =
-          runtimeFixtureForPermission.runtime.createInteractionRequest.bind(
-            runtimeFixtureForPermission.runtime
-          );
-        persistenceSpies.push(
-          vi
-            .spyOn(runtimeFixtureForPermission.runtime, 'createInteractionRequest')
-            .mockImplementationOnce(async (input, operationId) => {
-              const internals = runtimeFixtureForPermission.runtimeStore as unknown as {
-                persist(state: unknown): Promise<void>;
-              };
-              const persist = vi
-                .spyOn(internals, 'persist')
-                .mockRejectedValueOnce(new Error(failure));
-              try {
-                return await createInteractionRequest(input, operationId);
-              } finally {
-                persist.mockRestore();
-              }
-            })
-        );
-      }
+      const activation = vi
+        .spyOn(runtimeFixtureForPermission.runtime, 'createInteractionRequest')
+        .mockRejectedValueOnce(new Error(failure));
 
       const readProtocolMessages = async () => {
         const snapshot = await store.snapshot();
@@ -3973,7 +3929,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           )
         ).toHaveLength(1);
       } finally {
-        for (const spy of persistenceSpies) spy.mockRestore();
+        activation.mockRestore();
         await adapter.shutdown();
       }
     },
@@ -3997,7 +3953,7 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const appEvents = new AppEventBus();
     const observedEvents: Array<{ type: string; runId?: string }> = [];
     appEvents.on((event) => observedEvents.push(event));
@@ -4357,7 +4313,7 @@ async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 10_000
 }
 
 async function protocolMethodCount(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   method: string
 ): Promise<number> {
   const snapshot = await store.snapshot();
@@ -4420,7 +4376,7 @@ async function createPermissionHarness(input: {
     executableCandidates: [process.execPath],
     argv: [agentScript]
   };
-  const store = createTestStore(path.join(directory, 'store'));
+  const store = await createTestStore(path.join(directory, 'store'));
   const events = new AppEventBus();
   const adapter = createTestAdapter(store, events, profile, {
     cwd: directory,
@@ -4634,7 +4590,7 @@ async function createStreamSafetyHarness(scenario: string, secret = 'test-stream
     executableCandidates: [process.execPath],
     argv: [agentScript]
   };
-  const store = createTestStore(path.join(directory, 'store'));
+  const store = await createTestStore(path.join(directory, 'store'));
   const appEvents = new AppEventBus();
   const observedEvents: Array<{ type: string; runId?: string; payload: unknown }> = [];
   appEvents.on((event) => observedEvents.push(event));

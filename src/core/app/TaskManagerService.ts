@@ -158,8 +158,7 @@ import { validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
-import { FileTaskStore } from '../storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
@@ -170,7 +169,6 @@ import type {
 import type { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 import {
   mergeAppSettings,
-  MemoryAppSettingsStore,
   type AppSettingsStorage
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
@@ -188,7 +186,7 @@ import {
   toAgentTurnAttachments,
   type AgentTurnAttachment
 } from '../agent/AgentAttachmentDelivery';
-import { AttachmentStoreError } from '../storage/AttachmentFileStore';
+import { AttachmentStoreError } from '../storage/AttachmentErrors';
 import type { DiscourseStore } from '../discourse/DiscourseStore';
 import { DiscourseService } from '../discourse/DiscourseService';
 import {
@@ -219,7 +217,7 @@ import {
 } from './AgentRuntimeComposition';
 import { DesignSourceService } from '../design/DesignSourceService';
 import { DesignUpdateCoordinator } from '../design/DesignUpdateCoordinator';
-import { FileDesignDraftStore } from '../design/FileDesignDraftStore';
+import type { DesignDraftStore } from '../design/DesignDraftStore';
 import {
   AgentBrowserRuntime,
   type DesignBrowserOwner
@@ -251,7 +249,7 @@ export class TaskManagerService {
   private readonly designSource?: DesignSourceService;
   private readonly designUpdates?: DesignUpdateCoordinator;
   private readonly designBrowser?: DesignBrowserOwner;
-  private readonly designDrafts?: FileDesignDraftStore;
+  private readonly designDrafts?: DesignDraftStore;
   private readonly github: GitHubService;
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
@@ -277,7 +275,7 @@ export class TaskManagerService {
   private codexExecutable?: string;
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     agentCwd: string,
     events = new AppEventBus(),
     options: {
@@ -288,10 +286,10 @@ export class TaskManagerService {
       openCodePath?: string;
       acpExecutablePaths?: Partial<Record<string, string>>;
       agentCwd?: string;
-      appSettingsStore?: AppSettingsStorage;
+      appSettingsStore: AppSettingsStorage;
       agentRuntimeAdapters?: readonly AgentRuntimeAdapter[];
-      agentRuntimeStore?: AgentRuntimeStore;
-      taskRuntimeAccess?: TaskAgentRuntimeAccess;
+      agentRuntimeStore: AgentRuntimeStore;
+      taskRuntimeAccess: TaskAgentRuntimeAccess;
       discourseStore?: DiscourseStore;
       discourseWorkspaceRoot?: string;
       defaultAgentRuntimeId?: string;
@@ -307,7 +305,7 @@ export class TaskManagerService {
       previewOciContextName?: string;
       previewOciEnv?: NodeJS.ProcessEnv;
       previewOpenHost?: PreviewUrlHost;
-      previewSecretProtector?: import('../preview/private/PreviewPrivateVault').PreviewSecretProtector;
+      previewPrivateVault?: import('../preview/private/PreviewPrivateVault').PreviewPrivateVault;
       previewEnabled?: boolean;
       previewReconcile?: boolean;
       allowAgentNetworkAccess?: boolean;
@@ -316,14 +314,14 @@ export class TaskManagerService {
       designWorktreeRoot?: string;
       designCanvasFence?: DesignCanvasCutoverFence;
       designSkillRoot?: string;
-      designDraftRoot?: string;
+      designDraftStore?: DesignDraftStore;
       designBrowserRuntime?: DesignBrowserOwner;
       designBrowserExecutablePath?: string;
       designBrowserChromeExecutablePath?: string;
       designBrowserScratchRoot?: string;
       designBrowserSocketRoot?: string;
       designBrowserRequireCodeSignature?: boolean;
-    } = {}
+    }
   ) {
     agentCwd = options.agentCwd ?? (agentCwd || process.cwd());
     this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
@@ -334,7 +332,7 @@ export class TaskManagerService {
       options.acpExecutablePaths
     );
     this.events = events;
-    this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
+    this.appSettingsStore = options.appSettingsStore;
     this.externalToolResolver = new ExternalToolResolver({
       cwd: agentCwd,
       overrides: {
@@ -367,19 +365,10 @@ export class TaskManagerService {
           options.previewOciContextName ?? process.env.TASK_MANAGER_OCI_CONTEXT,
         ociEnv: options.previewOciEnv,
         openHost: options.previewOpenHost,
-        secretProtector: options.previewSecretProtector
+        privateVault: options.previewPrivateVault
       });
-    this.agentRuntimeStore =
-      options.agentRuntimeStore ??
-      new FileAgentRuntimeStore(path.join(store.getStorageRoot(), 'agent-runtime'));
-    if (options.taskRuntimeAccess && !options.agentRuntimeStore) {
-      throw new Error('A Task runtime access override requires its runtime store.');
-    }
-    const taskRuntime =
-      options.taskRuntimeAccess ??
-      this.agentRuntimeStore.taskAgentRuntimeAccess((event, operationId) =>
-        store.recordAgentRuntimeEvent(event, operationId)
-      );
+    this.agentRuntimeStore = options.agentRuntimeStore;
+    const taskRuntime = options.taskRuntimeAccess;
     this.taskRuntime = taskRuntime;
     store.bindAgentRuntime(taskRuntime);
     const runtimeAdapters = options.agentRuntimeAdapters ??
@@ -444,10 +433,10 @@ export class TaskManagerService {
         repositoryRoot: options.designRepositoryRoot,
         worktreeRoot: options.designWorktreeRoot
       });
-      this.designDrafts = new FileDesignDraftStore(
-        options.designDraftRoot ??
-          path.join(path.dirname(options.designRepositoryRoot), 'design-drafts')
-      );
+      if (!options.designDraftStore) {
+        throw new Error('Design Mode requires a Design draft store.');
+      }
+      this.designDrafts = options.designDraftStore;
       this.designBrowser =
         options.designBrowserRuntime ??
         createDesignBrowserRuntime({
@@ -3505,9 +3494,12 @@ export class TaskManagerService {
           }
         }
 
-        await this.store.deleteTask(task.id);
+        await this.store.serializePersistenceMutation(() =>
+          this.previews.retireDeletedTaskPrivateInputs(task.id, () =>
+            this.store.deleteTask(task.id)
+          )
+        );
         await this.agentRuntimeStore.purgeTask(task.id).catch(() => undefined);
-        await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
         const result = { taskId: task.id, removedWorktree };
         this.events.emit({
           type: 'task.deleted',
@@ -3566,7 +3558,11 @@ export class TaskManagerService {
     }
 
     const designDraft = await this.designDrafts?.get(task.id).catch(() => null);
-    const released = await this.store.deleteTaskAndReleaseManagedRepository(task.id);
+    const released = await this.store.serializePersistenceMutation(() =>
+      this.previews.retireDeletedTaskPrivateInputs(task.id, () =>
+        this.store.deleteTaskAndReleaseManagedRepository(task.id)
+      )
+    );
     await this.agentRuntimeStore.purgeTask(task.id).catch(() => undefined);
     await this.designDrafts?.deleteForDesign(task.id).catch(() => undefined);
     if (designDraft?.attachmentDraftId) {
@@ -3574,7 +3570,6 @@ export class TaskManagerService {
         .discardAttachmentDraft(designDraft.attachmentDraftId)
         .catch(() => undefined);
     }
-    await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
     if (released.removedManagedRepository) {
       await source.removeManagedRepository(released.removedManagedRepository);
     }
@@ -4013,7 +4008,7 @@ export class TaskManagerService {
     return this.designSource;
   }
 
-  private requireDesignDrafts(): FileDesignDraftStore {
+  private requireDesignDrafts(): DesignDraftStore {
     if (!this.designDrafts) {
       throw new Error('Design drafts are not configured in this Task Monki host.');
     }

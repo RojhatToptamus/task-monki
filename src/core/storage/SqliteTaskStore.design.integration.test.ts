@@ -2,11 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type {
   AgentExecutionSettings,
   AgentRunMode,
   AgentSessionRecord,
+  DesignTurn,
   GitSnapshotRecord,
   PreviewGenerationRecord,
   PreviewPlanRecord,
@@ -15,29 +16,38 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
-import { FileTaskStore, type ManagedDesignRepositoryInput } from './FileTaskStore';
-import { FileAgentRuntimeStore } from './FileAgentRuntimeStore';
+import { SqliteTaskStore, type ManagedDesignRepositoryInput } from './SqliteTaskStore';
+import { SqliteAgentRuntimeStore } from './SqliteAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
 import { toAgentAttachmentSelectionFromRecords } from '../agent/AgentAttachmentDelivery';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
+import type { ApplicationPersistence } from './sqlite/ApplicationPersistence';
 
 const COMMIT = 'a'.repeat(40);
 const EXECUTION_DIGEST = 'b'.repeat(64);
 
-const runtimeFixtures = new Set<FileAgentRuntimeStore>();
-const runtimeByTaskStore = new WeakMap<
-  FileTaskStore,
-  { store: FileAgentRuntimeStore; task: TaskAgentRuntimeAccess }
->();
+const persistenceByTaskStore = new WeakMap<SqliteTaskStore, ApplicationPersistence>();
 
-afterEach(async () => {
-  await Promise.all([...runtimeFixtures].map((runtime) => runtime.close()));
-  runtimeFixtures.clear();
-});
+async function createStore(profileRoot: string): Promise<SqliteTaskStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  persistenceByTaskStore.set(persistence.tasks, persistence);
+  return persistence.tasks;
+}
 
-describe('FileTaskStore Design ownership', () => {
+function persistenceFixture(store: SqliteTaskStore): ApplicationPersistence {
+  const persistence = persistenceByTaskStore.get(store);
+  if (!persistence) throw new Error('Task store does not belong to this test fixture.');
+  return persistence;
+}
+
+function closeStore(store: SqliteTaskStore): Promise<void> {
+  return persistenceFixture(store).close();
+}
+
+describe('SqliteTaskStore Design ownership', () => {
   it('creates an idempotent Codex-owned Design bundle and excludes it from boards', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-store-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const draft = await store.createAttachmentDraft();
     await store.stageTaskAttachment({
       draftId: draft.id,
@@ -144,12 +154,12 @@ describe('FileTaskStore Design ownership', () => {
         repository
       })
     ).rejects.toThrow('already used for a different request');
-    await store.close();
+    await closeStore(store);
   });
 
   it('stores inline turns as an idempotent FIFO message queue', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-message-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: { brief: 'Create the initial page.', creationToken: 'design-request-0002' },
       repository: managedRepository(dir)
@@ -216,12 +226,12 @@ describe('FileTaskStore Design ownership', () => {
     await expect(store.getDesignDetail(created.task.id)).resolves.toMatchObject({
       actions: { canRefine: false, queuedTurnCount: 20 }
     });
-    await store.close();
+    await closeStore(store);
   });
 
   it('adopts post-create references, records exact turn selection, and keeps inactive history', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-references-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
@@ -387,12 +397,12 @@ describe('FileTaskStore Design ownership', () => {
     expect(detail.turns.find((candidate) => candidate.id === turn.id)?.referenceIds).toEqual([
       selected.id
     ]);
-    await store.close();
+    await closeStore(store);
   });
 
   it('adopts message files once and records exact references for consecutive queued turns', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-turn-files-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
@@ -472,12 +482,12 @@ describe('FileTaskStore Design ownership', () => {
       })
     ).resolves.toEqual([]);
     expect((await store.getDesignDetail(created.task.id)).actions.queuedTurnCount).toBe(4);
-    await store.close();
+    await closeStore(store);
   });
 
   it('pages older conversation entries while retaining an old unsettled turn', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-paging-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: { brief: 'Create the initial page.', creationToken: 'design-paging-create' },
       repository: managedRepository(dir)
@@ -513,12 +523,12 @@ describe('FileTaskStore Design ownership', () => {
     await expect(
       store.listDesignConversation({ designId: created.task.id, beforeCursor: 'invalid' })
     ).rejects.toThrow('cursor is invalid');
-    await store.close();
+    await closeStore(store);
   }, 10_000);
 
-  it('rolls back the complete Design bundle when snapshot publication fails', async () => {
+  it('rolls back the complete Design bundle with its enclosing transaction', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-create-rollback-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const draft = await store.createAttachmentDraft();
     const attachment = await store.stageTaskAttachment({
       draftId: draft.id,
@@ -526,25 +536,19 @@ describe('FileTaskStore Design ownership', () => {
       bytes: Buffer.from('Reference bytes')
     });
     const repository = managedRepository(dir);
-    const restoreFailure = injectNextSnapshotSyncFailure(
-      dir,
-      'injected Design creation persistence failure'
-    );
-
-    try {
-      await expect(
-        store.createDesignBundle({
+    await expect(
+      persistenceFixture(store).database.write(async () => {
+        await store.createDesignBundle({
           request: {
             brief: 'Create a page from the supplied reference.',
             creationToken: 'design-request-create-rollback',
             attachmentDraftId: draft.id
           },
           repository
-        })
-      ).rejects.toThrow('Design creation persistence failure');
-    } finally {
-      restoreFailure();
-    }
+        });
+        throw new Error('injected Design creation transaction failure');
+      })
+    ).rejects.toThrow('Design creation transaction failure');
 
     const snapshot = await store.snapshot();
     expect(snapshot.tasks).toEqual([]);
@@ -555,12 +559,12 @@ describe('FileTaskStore Design ownership', () => {
     await expect(store.listAttachmentDraft(draft.id)).resolves.toMatchObject({
       attachments: [expect.objectContaining({ id: attachment.id })]
     });
-    await store.close();
+    await closeStore(store);
   });
 
-  it('publishes a post-create attachment and reference together or publishes neither', async () => {
+  it('publishes a post-create attachment and reference in one transaction', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-reference-rollback-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create a page.',
@@ -575,21 +579,15 @@ describe('FileTaskStore Design ownership', () => {
       displayName: 'reference.txt',
       bytes: Buffer.from('Reference bytes')
     });
-    const restoreFailure = injectNextSnapshotSyncFailure(
-      dir,
-      'injected Design reference persistence failure'
-    );
-
-    try {
-      await expect(
-        store.addDesignReferences({
+    await expect(
+      persistenceFixture(store).database.write(async () => {
+        await store.addDesignReferences({
           designId: created.task.id,
           attachmentDraftId: draft.id
-        })
-      ).rejects.toThrow('Design reference persistence failure');
-    } finally {
-      restoreFailure();
-    }
+        });
+        throw new Error('injected Design reference transaction failure');
+      })
+    ).rejects.toThrow('Design reference transaction failure');
 
     const detail = await store.getDesignDetail(created.task.id);
     expect(detail.references).toEqual([]);
@@ -597,15 +595,21 @@ describe('FileTaskStore Design ownership', () => {
     await expect(store.listAttachmentDraft(draft.id)).resolves.toMatchObject({
       attachments: [expect.objectContaining({ id: staged.id })]
     });
-    await expect(
-      fs.access(path.join(dir, 'attachments', 'tasks', created.task.id))
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-    await store.close();
+    expect(
+      await persistenceFixture(store).database.read((reader) =>
+        reader.get<{ count: number }>(
+          `SELECT count(*) AS count FROM managed_files
+           WHERE domain = 'TASK' AND owner_id = ? AND role = 'ATTACHMENT'`,
+          [created.task.id]
+        )
+      )
+    ).toMatchObject({ count: 0 });
+    await closeStore(store);
   });
 
-  it('rolls back an inline turn and its artifact when snapshot publication fails', async () => {
+  it('rolls back an inline turn, attachment, and artifact in one transaction', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-turn-rollback-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create the initial page.',
@@ -625,24 +629,18 @@ describe('FileTaskStore Design ownership', () => {
       displayName: 'rollback-reference.txt',
       bytes: Buffer.from('Keep this staged after failure.')
     });
-    const restoreFailure = injectNextSnapshotSyncFailure(
-      dir,
-      'injected Design turn persistence failure'
-    );
-
-    try {
-      await expect(
-        store.createInlineDesignTurn({
+    await expect(
+      persistenceFixture(store).database.write(async () => {
+        await store.createInlineDesignTurn({
           designId: created.task.id,
           clientMessageId: 'design-message-turn-rollback',
           message: 'Add a more prominent primary action.',
           referenceIds: [],
           attachmentDraftId: draft.id
-        })
-      ).rejects.toThrow('Design turn persistence failure');
-    } finally {
-      restoreFailure();
-    }
+        });
+        throw new Error('injected Design turn transaction failure');
+      })
+    ).rejects.toThrow('Design turn transaction failure');
 
     const snapshot = await store.snapshot();
     expect(snapshot.designTurns).toEqual([
@@ -656,72 +654,89 @@ describe('FileTaskStore Design ownership', () => {
     await expect(store.listAttachmentDraft(draft.id)).resolves.toMatchObject({
       attachments: [expect.objectContaining({ id: staged.id })]
     });
-    await store.close();
+    await closeStore(store);
   });
 
   it('rejects a persisted Design that weakens its restricted execution settings', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-policy-'));
-    const storePath = path.join(dir, 'store.json');
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: { brief: 'Create a safe page.', creationToken: 'design-request-0004' },
       repository: managedRepository(dir)
     });
-    await store.close();
+    await persistenceFixture(store).database.write((transaction) => {
+      const row = transaction.get<{ payload_json: string }>(
+        'SELECT payload_json FROM tasks WHERE id = ?',
+        [created.task.id]
+      );
+      const task = JSON.parse(row!.payload_json) as {
+        agentSettings: { approvalPolicy?: string };
+      };
+      task.agentSettings.approvalPolicy = 'on-request';
+      transaction.run('UPDATE tasks SET payload_json = ? WHERE id = ?', [
+        JSON.stringify(task),
+        created.task.id
+      ]);
+    });
+    await closeStore(store);
 
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      tasks: Array<{ id: string; agentSettings: { approvalPolicy?: string } }>;
-    };
-    persisted.tasks.find((task) => task.id === created.task.id)!.agentSettings.approvalPolicy =
-      'on-request';
-    await fs.writeFile(storePath, `${JSON.stringify(persisted)}\n`, 'utf8');
-
-    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
-      'Design task ownership is inconsistent'
+    const restarted = await createStore(dir);
+    await expect(restarted.snapshot()).rejects.toThrow(
+      'column agent_settings_json does not match its record'
     );
   });
 
   it('rejects a persisted Design with a broken seeded-turn lineage', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-lineage-'));
-    const storePath = path.join(dir, 'store.json');
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const created = await store.createDesignBundle({
       request: { brief: 'Create a safe page.', creationToken: 'design-request-lineage' },
       repository: managedRepository(dir)
     });
-    await store.close();
-
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      designTurns: Array<{
-        id: string;
-        clientMessageId: string;
-        order: number;
-        messageSource: 'TASK_PROMPT' | 'INLINE_MESSAGE';
-        outcome?: string;
-        settledAt?: string;
-        checkpoint?: unknown;
-      }>;
-    };
-    const initial = persisted.designTurns.find((turn) => turn.id === created.turn.id)!;
-    persisted.designTurns.push({
-      ...initial,
-      id: randomUUID(),
-      clientMessageId: 'design-request-extra-task-prompt',
-      order: 2,
-      outcome: 'CANCELED',
-      settledAt: new Date().toISOString(),
-      checkpoint: undefined
+    await persistenceFixture(store).database.write((transaction) => {
+      const initial = transaction.get<{
+        payload_json: string;
+        created_at: string;
+      }>('SELECT payload_json, created_at FROM design_turns WHERE id = ?', [created.turn.id]);
+      const duplicate = {
+        ...(JSON.parse(initial!.payload_json) as DesignTurn),
+        id: randomUUID(),
+        clientMessageId: 'design-request-extra-task-prompt',
+        order: 2,
+        outcome: 'CANCELED' as const,
+        settledAt: new Date().toISOString(),
+        checkpoint: undefined
+      };
+      transaction.run(
+        `INSERT INTO design_turns (
+           id, design_id, client_message_id, turn_ordinal, run_id, outcome,
+           record_revision, created_at, settled_at, payload_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          duplicate.id,
+          created.task.id,
+          duplicate.clientMessageId,
+          duplicate.order,
+          duplicate.runId ?? null,
+          duplicate.outcome,
+          0,
+          initial!.created_at,
+          duplicate.settledAt,
+          JSON.stringify(duplicate)
+        ]
+      );
     });
-    await fs.writeFile(storePath, `${JSON.stringify(persisted)}\n`, 'utf8');
+    await closeStore(store);
 
-    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+    const restarted = await createStore(dir);
+    await expect(restarted.snapshot()).rejects.toThrow(
       'Design turn lineage is inconsistent'
     );
   });
 
   it('keeps DESIGN runs out of task phases and atomically settles Preview plus revision', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-cutover-'));
-    let store = new FileTaskStore(dir);
+    let store = await createStore(dir);
     const attachmentDraft = await store.createAttachmentDraft();
     await store.stageTaskAttachment({
       draftId: attachmentDraft.id,
@@ -841,9 +856,8 @@ describe('FileTaskStore Design ownership', () => {
       })
     ).rejects.toThrow('Invalid Design turn checkpoint transition');
     await store.savePreviewGeneration({ ...firstCandidate, state: 'STOPPED' });
-    await runtimeFixture(store).store.close();
-    await store.close();
-    store = new FileTaskStore(dir);
+    await closeStore(store);
+    store = await createStore(dir);
     runtimeFixture(store);
     await expect(
       store.updateDesignTurnCheckpoint({
@@ -874,30 +888,15 @@ describe('FileTaskStore Design ownership', () => {
         runId: run.id
       }
     };
-    const originalOpen = fs.open.bind(fs);
-    const temporaryPathPrefix = `${path.join(dir, 'store.json')}.`;
-    let injected = false;
-    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
-      const handle = await originalOpen(...args);
-      if (
-        !injected &&
-        String(args[0]).startsWith(temporaryPathPrefix) &&
-        String(args[0]).endsWith('.tmp')
-      ) {
-        injected = true;
-        vi.spyOn(handle, 'sync').mockRejectedValueOnce(
-          new Error('injected Design settlement persistence failure')
-        );
-      }
-      return handle;
-    });
-    try {
-      await expect(
-        store.cutoverPreviewGenerations({ candidate: ready, designSettlement: settlement })
-      ).rejects.toThrow('settlement persistence failure');
-    } finally {
-      open.mockRestore();
-    }
+    await expect(
+      persistenceFixture(store).database.write(async () => {
+        await store.cutoverPreviewGenerations({
+          candidate: ready,
+          designSettlement: settlement
+        });
+        throw new Error('injected Design settlement transaction failure');
+      })
+    ).rejects.toThrow('Design settlement transaction failure');
     const rolledBack = await store.getDesignDetail(created.task.id);
     expect(rolledBack.revisions).toEqual([]);
     expect(rolledBack.turns[0]).toMatchObject({
@@ -1059,9 +1058,8 @@ describe('FileTaskStore Design ownership', () => {
     await store.failDesignSourceAction(archivedCopy.action!.id, 'Stop the archived copy test.');
     await store.deleteTaskAndReleaseManagedRepository(archivedCopy.task.id);
 
-    await runtimeFixture(store).store.close();
-    await store.close();
-    const restarted = new FileTaskStore(dir);
+    await closeStore(store);
+    const restarted = await createStore(dir);
     const restartedRuntime = runtimeFixture(restarted);
     await expect(restarted.getDesignDetail(created.task.id)).resolves.toMatchObject({
       revisions: [expect.objectContaining({ id: settled.revision!.id })]
@@ -1077,7 +1075,7 @@ describe('FileTaskStore Design ownership', () => {
     ).resolves.toEqual({ removedManagedRepository: created.repository });
     expect((await restarted.snapshot()).tasks).toEqual([]);
     expect((await restarted.snapshot()).repositories).toEqual([]);
-    await restarted.close();
+    await closeStore(restarted);
   }, 30_000);
 });
 
@@ -1165,7 +1163,7 @@ function managedCandidate(input: {
 }
 
 async function recordDesignGitSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: {
     taskId: string;
     iterationId: string;
@@ -1203,27 +1201,16 @@ async function recordDesignGitSnapshot(
   );
 }
 
-function runtimeFixture(store: FileTaskStore): {
-  store: FileAgentRuntimeStore;
+function runtimeFixture(store: SqliteTaskStore): {
+  store: SqliteAgentRuntimeStore;
   task: TaskAgentRuntimeAccess;
 } {
-  const current = runtimeByTaskStore.get(store);
-  if (current) return current;
-  const runtimeStore = new FileAgentRuntimeStore(
-    path.join(store.getStorageRoot(), '.test-agent-runtime')
-  );
-  const task = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-    store.recordAgentRuntimeEvent(event, operationId)
-  );
-  store.bindAgentRuntime(task);
-  const fixture = { store: runtimeStore, task };
-  runtimeByTaskStore.set(store, fixture);
-  runtimeFixtures.add(runtimeStore);
-  return fixture;
+  const persistence = persistenceFixture(store);
+  return { store: persistence.agentRuntime, task: persistence.taskRuntime };
 }
 
 async function createTestAgentSession(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: {
     task: Task;
     iteration: TaskIteration;
@@ -1278,7 +1265,7 @@ async function createTestAgentSession(
 }
 
 async function createTestRun(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: {
     task: Task;
     session: AgentSessionRecord;
@@ -1314,7 +1301,7 @@ async function createTestRun(
 }
 
 function updateTestRun(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   runId: string,
   update: Partial<RunRecord>
 ): Promise<RunRecord> {
@@ -1326,30 +1313,11 @@ function updateTestRun(
 }
 
 function upsertTestAgentItem(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   item: Parameters<TaskAgentRuntimeAccess['upsertAgentItem']>[0]
 ) {
   return runtimeFixture(store).task.upsertAgentItem(
     item,
     `test:item:${randomUUID()}`
   );
-}
-
-function injectNextSnapshotSyncFailure(dir: string, message: string): () => void {
-  const originalOpen = fs.open.bind(fs);
-  const temporaryPathPrefix = `${path.join(dir, 'store.json')}.`;
-  let injected = false;
-  const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
-    const handle = await originalOpen(...args);
-    if (
-      !injected &&
-      String(args[0]).startsWith(temporaryPathPrefix) &&
-      String(args[0]).endsWith('.tmp')
-    ) {
-      injected = true;
-      vi.spyOn(handle, 'sync').mockRejectedValueOnce(new Error(message));
-    }
-    return handle;
-  });
-  return () => open.mockRestore();
 }

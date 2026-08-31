@@ -224,7 +224,7 @@ Backend flow:
     opens a new draft PR with the normalized title.
 14. `gh pr view` and `gh pr checks` normalize PR, CI, review, and merge
     evidence.
-15. `FileTaskStore.recordPullRequestSync(...)` stores all evidence records.
+15. `SqliteTaskStore.recordPullRequestSync(...)` stores all evidence records.
 16. If GitHub reports an open PR, Task Monki transitions the task to
     `IN_REVIEW`.
 
@@ -952,7 +952,7 @@ neutral:
 
 ## Evidence Updates And Projection
 
-`FileTaskStore.recordPullRequestSync(...)` writes four records and four events:
+`SqliteTaskStore.recordPullRequestSync(...)` writes four records and four events:
 
 ```text
 PR_SNAPSHOT_CAPTURED
@@ -973,7 +973,7 @@ Core and renderer coverage lives in:
 
 - `src/renderer/model/prStatus.test.ts`
 - `src/renderer/model/taskView.test.ts`
-- `src/core/storage/FileTaskStore.integration.test.ts`
+- `src/core/storage/SqliteTaskStore.integration.test.ts`
 - `src/core/projection/reducer.test.ts`
 - `src/core/app/TaskManagerService.workflowPolicies.test.ts`
 - `src/core/app/TaskManagerService.reviewPrActions.integration.test.ts`

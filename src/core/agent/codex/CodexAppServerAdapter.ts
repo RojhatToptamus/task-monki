@@ -30,7 +30,7 @@ import {
 } from '../../../shared/agentRuntime';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { AgentRuntimeDeliveryError } from '../AgentRuntimeAdapter';
 import type {
   AgentInteractionResponse,
@@ -253,7 +253,7 @@ export interface CodexAppServerAdapterOptions
 }
 
 type CodexTaskDomainStore = Pick<
-  FileTaskStore,
+  SqliteTaskStore,
   | 'getTask'
   | 'getWorktree'
   | 'getRepository'

@@ -5,19 +5,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentExecutionSettings } from '../../shared/agent';
 import {
-  createScriptedAgentRuntimeFixture,
+  openScriptedTaskManagerPersistence,
   createTaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
-import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
-const temporaryDirectories: string[] = [];
+const temporaryProfiles: Array<{
+  directory: string;
+  close(): Promise<void>;
+}> = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      fs.rm(directory, { recursive: true, force: true })
-    )
+    temporaryProfiles.splice(0).map(async ({ directory, close }) => {
+      await close();
+      await fs.rm(directory, { recursive: true, force: true });
+    })
   );
 });
 
@@ -77,9 +80,11 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-interaction-cancel-')
     );
-    temporaryDirectories.push(directory);
-    const store = new FileTaskStore(path.join(directory, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const opened = await openScriptedTaskManagerPersistence(
+      path.join(directory, 'store')
+    );
+    temporaryProfiles.push({ directory, close: () => opened.persistence.close() });
+    const { store, ...scriptedRuntime } = opened;
     const adapter = scriptedRuntime.adapter;
     const service = new TaskManagerService(store, directory, undefined, {
       ...scriptedRuntime.serviceOptions

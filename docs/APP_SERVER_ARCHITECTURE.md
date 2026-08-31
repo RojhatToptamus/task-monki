@@ -40,10 +40,10 @@ flowchart LR
   Codex --> RPC["CodexRpcClient"]
   RPC --> Server["resolved codex app-server stdio transport"]
   RPC --> Journal["Protocol journal"]
-  Orchestrator --> RuntimeStore["FileAgentRuntimeStore"]
+  Orchestrator --> RuntimeStore["SqliteAgentRuntimeStore"]
   Codex --> RuntimeStore
   Journal --> RuntimeStore
-  Service --> TaskStore["FileTaskStore domain state"]
+  Service --> TaskStore["SqliteTaskStore domain state"]
   Service --> Git["GitSnapshotService"]
   Service --> GitHub["GitHubService"]
 ```
@@ -65,9 +65,9 @@ WebSocket transport is not used.
 
 ## Important records
 
-`FileAgentRuntimeStore` owns provider sessions, runs, items, interactions,
+`SqliteAgentRuntimeStore` owns provider sessions, runs, items, interactions,
 observations, artifacts, and journal metadata.
-`FileTaskStore` owns Task and workflow domain records.
+`SqliteTaskStore` owns Task and workflow domain records.
 
 - `Task`
   - User intent, workflow phase, current implementation-side run, worktree,
@@ -154,7 +154,7 @@ The adapter must not:
 - treat provider debug state as local evidence;
 - let detached review runs replace the implementation run;
 - expose experimental protocol features without explicit capability gates;
-- accept renderer-supplied or canonical task-store file paths, or claim generic
+- accept renderer-supplied or canonical managed-attachment paths, or claim generic
   App Server file or PDF support that the live protocol does not provide.
 
 The complete attachment storage, delivery, cleanup, and security contract is in
@@ -384,10 +384,9 @@ refresh; only an omitted or `default` selection may use the provider default.
 Renderer settings should update both implementation defaults and review defaults
 so the app uses the configured reasoning level consistently.
 
-App-level user preferences are separate from `FileTaskStore`. The Electron app
-stores them in `app-settings.json` directly under `app.getPath('userData')`.
-The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
-`app-settings.json` file beside the dev store. These settings include:
+App-level user preferences are separate from `SqliteTaskStore`. The Electron
+and development hosts receive the same SQLite-backed `AppSettingsStore` from
+`ApplicationPersistence`. These settings include:
 
 - theme, sidebar, and mascot preferences;
 - first-launch setup completion;
@@ -406,11 +405,11 @@ The executable environment variables
 `TASK_MANAGER_GIT_PATH`, `TASK_MONKI_CODEX_BIN`, and `TASK_MANAGER_GH_PATH`
 act as debug overrides ahead of saved settings.
 
-Repository records and boards belong to `FileTaskStore`, not app settings.
-The task store, agent-runtime store, Discourse store, and app settings each load
-one complete current schema version. Startup validates the stored shape before
-performing current-state reconciliation such as resolving an interrupted
-provider turn; schema conversion is not part of reconciliation.
+Repository records and boards belong to `SqliteTaskStore`, not app settings.
+All structured stores share one versioned application database. Startup applies
+forward SQLite migrations, then validates stored records before current-state
+reconciliation such as resolving an interrupted provider turn. See
+`docs/architecture/PERSISTENCE_ARCHITECTURE.md` for the storage boundary.
 
 Codex Auto-detect status may display the resolved `codex` path, but that
 auto-discovered path is not passed as an explicit App Server runtime. In Auto

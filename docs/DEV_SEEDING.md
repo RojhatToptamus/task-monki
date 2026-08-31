@@ -14,7 +14,7 @@ provider process, worktree lifecycle, or post-run Git observation worked.
 ## Contract
 
 The deterministic identifiers are scenario slugs and the generated manifest,
-not store IDs. `FileTaskStore` owns UUIDs and timestamps, so agents must read
+not store IDs. `SqliteTaskStore` owns UUIDs and timestamps, so agents must read
 `.local/task-monki-dev-seed/manifest.json` to map a stable slug to the task ID
 created for that run.
 
@@ -43,15 +43,16 @@ terminals.
 `npm run dev:seed` resets only the seed-owned root and then prints the same
 environment variables written to `dev-api.env`:
 
-- `TASK_MANAGER_STORE_DIR`
-- `TASK_MANAGER_APP_SETTINGS_PATH`
+- `TASK_MANAGER_PROFILE_ROOT`
 - `TASK_MANAGER_REPO_PATH`
 - `TASK_MANAGER_WORKTREE_ROOT`
 - `TASK_MANAGER_PREVIEW_ROOT`
+- `TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT`
 - `TASK_MANAGER_PREVIEW_RECONCILE=0` (keeps synthetic preview UI states intact;
   normal product/dev runs reconcile by default)
 - `TASK_MANAGER_DETERMINISTIC_SEED=1` (keeps the live Codex provider inert so
   synthetic provider records cannot start or recover real agent work)
+- `TASK_MANAGER_DEV_SEED_MODE=1` (enables deterministic Design composition)
 
 The seed manifest and environment file are forced to mode `0600`.
 
@@ -99,7 +100,7 @@ When a UI change needs a state that is not represented, extend the seed catalog
 instead of manually constructing state in the app:
 
 1. Add a scenario definition in `src/dev/seedScenarios.ts`.
-2. Add a builder path that uses `FileTaskStore` APIs and domain events.
+2. Add a builder path that uses `SqliteTaskStore` APIs and domain events.
 3. Add or update `src/dev/seedData.integration.test.ts` to assert the resulting selector or
    view-model output.
 4. Regenerate with `npm run dev:seed` and test the UI against the new slug.

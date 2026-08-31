@@ -1,5 +1,5 @@
 import type { PreviewGenerationRecord } from '../../shared/contracts';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { PreviewGateway } from './PreviewGateway';
 import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewSourcePreparer } from './PreviewSourcePreparer';
@@ -9,7 +9,7 @@ import { PreviewComposeRuntime } from './compose/PreviewComposeRuntime';
 
 export class PreviewReconciler {
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly gateway: PreviewGateway,
     private readonly nativeRuntime: NativeServiceRuntime,
     private readonly sourcePreparer: PreviewSourcePreparer,

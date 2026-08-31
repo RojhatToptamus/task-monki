@@ -4,16 +4,14 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentModel } from '../../shared/agent';
 import { ATTACHMENT_MAX_IMAGE_BYTES } from '../../shared/attachments';
-import { createScriptedAgentRuntimeFixture } from '../../testSupport/taskMonkiScenario';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('TaskManagerService attachments', () => {
   it('stages one bounded batch atomically through the public boundary', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
       ...scriptedRuntime.serviceOptions
     });
@@ -30,8 +28,7 @@ describe('TaskManagerService attachments', () => {
 
   it('keeps the draft when an image is incompatible with the selected model', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const adapter = scriptedRuntime.adapter;
     vi.spyOn(adapter, 'listModels').mockResolvedValue([textModel()]);
     const service = new TaskManagerService(store, dir, undefined, {
@@ -61,8 +58,7 @@ describe('TaskManagerService attachments', () => {
 
   it('adopts an image only after the provider reports image input support', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const adapter = scriptedRuntime.adapter;
     vi.spyOn(adapter, 'listModels').mockResolvedValue([imageModel()]);
     const service = new TaskManagerService(store, dir, undefined, {
@@ -93,8 +89,7 @@ describe('TaskManagerService attachments', () => {
 
   it('returns the acknowledged task when a lost response is retried after draft commit', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
       ...scriptedRuntime.serviceOptions
     });
@@ -126,8 +121,7 @@ describe('TaskManagerService attachments', () => {
 
   it('rejects malformed task creation retry tokens at the service boundary', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
       ...scriptedRuntime.serviceOptions
     });
@@ -148,8 +142,7 @@ describe('TaskManagerService attachments', () => {
 
   it('allows attachments with network access and full access', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
       ...scriptedRuntime.serviceOptions
     });
@@ -188,8 +181,7 @@ describe('TaskManagerService attachments', () => {
 
   it('rejects malformed and over-limit batch payloads before storage', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
       ...scriptedRuntime.serviceOptions
     });

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import {
   DISCOURSE_LIMITS,
   type ContextGenerationFingerprint,
@@ -38,7 +38,7 @@ interface ResolvedRepository {
  */
 export class DiscourseContextResolver {
   constructor(
-    private readonly taskStore: FileTaskStore,
+    private readonly taskStore: SqliteTaskStore,
     private readonly now: () => Date = () => new Date()
   ) {}
 

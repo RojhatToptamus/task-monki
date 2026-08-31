@@ -12,11 +12,10 @@ import {
 } from '../../shared/agent';
 import type { UpdateAppSettingsRequest } from '../../shared/contracts';
 import {
-  readPrivateFile,
-  writePrivateFileAtomically
-} from '../filesystem/secureFilesystem';
-
-const MAX_APP_SETTINGS_FILE_BYTES = 1024 * 1024;
+  AppDatabase,
+  AppDatabaseTransaction,
+  type SqlRowValue
+} from '../storage/sqlite/AppDatabase';
 
 export interface AppSettingsStorage {
   get(): Promise<TaskManagerAppSettings>;
@@ -25,68 +24,132 @@ export interface AppSettingsStorage {
 
 export class AppSettingsStore implements AppSettingsStorage {
   private settings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
+  private recordRevision = 0;
   private loaded = false;
-  private writeQueue: Promise<unknown> = Promise.resolve();
+  private initialization?: Promise<void>;
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly database: AppDatabase,
+    private readonly now: () => string = () => new Date().toISOString()
+  ) {}
 
   async get(): Promise<TaskManagerAppSettings> {
     await this.init();
-    return cloneSettings(this.settings);
+    return this.database.read((reader) => {
+      const local =
+        reader instanceof AppDatabaseTransaction
+          ? reader.getLocal<SettingsTransactionState>(this)
+          : undefined;
+      return cloneSettings(local?.settings ?? this.settings);
+    });
   }
 
   async update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
     await this.init();
-    const operation = this.writeQueue
-      .catch(() => undefined)
-      .then(async () => {
-        const candidate = mergeAppSettings(this.settings, input);
-        await this.persist(candidate);
-        this.settings = candidate;
-        return cloneSettings(candidate);
+    return this.database.write((transaction) => {
+      const local = transaction.getOrCreateLocal<SettingsTransactionState>(this, () => {
+        const state: SettingsTransactionState = {
+          settings: cloneSettings(this.settings),
+          recordRevision: this.recordRevision,
+          publishRegistered: false
+        };
+        return state;
       });
-    this.writeQueue = operation.then(
-      () => undefined,
-      () => undefined
-    );
-    return operation;
+      if (!local.publishRegistered) {
+        local.publishRegistered = true;
+        transaction.afterCommit(() => {
+          this.settings = cloneSettings(local.settings);
+          this.recordRevision = local.recordRevision;
+        });
+      }
+      const candidate = mergeAppSettings(local.settings, input);
+      const nextRevision = local.recordRevision + 1;
+      const result = transaction.run(
+        `UPDATE app_settings
+         SET record_revision = ?, settings_json = ?, updated_at = ?
+         WHERE singleton_id = 1 AND record_revision = ?`,
+        [nextRevision, JSON.stringify(candidate), this.now(), local.recordRevision]
+      );
+      if (Number(result.changes) !== 1) {
+        throw new Error('Application settings changed before they could be updated.');
+      }
+      local.settings = candidate;
+      local.recordRevision = nextRevision;
+      return cloneSettings(candidate);
+    });
   }
 
   private async init(): Promise<void> {
-    if (this.loaded) {
-      return;
+    if (this.loaded) return;
+    if (this.database.hasCurrentWriteTransaction()) {
+      throw new Error(
+        'Application settings must be initialized before joining an outer database transaction.'
+      );
     }
+    this.initialization ??= this.initialize().finally(() => {
+      this.initialization = undefined;
+    });
+    await this.initialization;
+  }
 
-    let raw: Buffer;
-    try {
-      raw = await readPrivateFile(this.filePath, MAX_APP_SETTINGS_FILE_BYTES);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-      this.settings = normalizeAppSettings(DEFAULT_TASK_MANAGER_APP_SETTINGS);
-      await this.persist();
-      this.loaded = true;
-      return;
+  private async initialize(): Promise<void> {
+    const stored = await this.database.read((reader) =>
+      reader.get<{
+        record_revision: SqlRowValue;
+        settings_json: SqlRowValue;
+      }>(
+        `SELECT record_revision, settings_json
+         FROM app_settings
+         WHERE singleton_id = 1`
+      )
+    );
+    if (!stored) {
+      const defaults = normalizeAppSettings(DEFAULT_TASK_MANAGER_APP_SETTINGS);
+      await this.database.write((transaction) => {
+        transaction.run(
+          `INSERT INTO app_settings (
+             singleton_id, record_revision, settings_json, updated_at
+           ) VALUES (1, 0, ?, ?)
+           ON CONFLICT(singleton_id) DO NOTHING`,
+          [JSON.stringify(defaults), this.now()]
+        );
+      });
+      const created = await this.database.read((reader) =>
+        reader.get<{ record_revision: SqlRowValue; settings_json: SqlRowValue }>(
+          `SELECT record_revision, settings_json
+           FROM app_settings
+           WHERE singleton_id = 1`
+        )
+      );
+      if (!created) throw new Error('Application settings could not be initialized.');
+      this.loadStoredSettings(created);
+    } else {
+      this.loadStoredSettings(stored);
     }
-
-    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw);
-    const parsed = JSON.parse(decoded) as unknown;
-    const migrated = migrateAppSettings(parsed);
-    this.settings = normalizeAppSettings(migrated);
-    if (migrated !== parsed) {
-      await this.persist();
-    }
-
     this.loaded = true;
   }
 
-  private async persist(settings = this.settings): Promise<void> {
-    await writePrivateFileAtomically(
-      this.filePath,
-      `${JSON.stringify(settings, null, 2)}\n`
-    );
+  private loadStoredSettings(stored: {
+    record_revision: SqlRowValue;
+    settings_json: SqlRowValue;
+  }): void {
+    if (
+      typeof stored.record_revision !== 'number' ||
+      !Number.isSafeInteger(stored.record_revision) ||
+      stored.record_revision < 0 ||
+      typeof stored.settings_json !== 'string'
+    ) {
+      throw new Error('Stored application settings metadata is invalid.');
+    }
+    this.settings = normalizeAppSettings(JSON.parse(stored.settings_json) as unknown);
+    this.recordRevision = stored.record_revision;
   }
+}
+
+interface SettingsTransactionState {
+  settings: TaskManagerAppSettings;
+  recordRevision: number;
+  publishRegistered: boolean;
 }
 
 export class MemoryAppSettingsStore implements AppSettingsStorage {
@@ -115,14 +178,14 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     const schemaVersion = isRecord(value) ? value.schemaVersion : undefined;
     throw new Error(
       `Unsupported Task Monki app settings schema ${String(schemaVersion)}. ` +
-        'Delete the local app settings and restart.'
+        'Reset the local application settings or restore a compatible backup.'
     );
   }
   const record = value;
   if (!isCurrentAppSettingsRecord(record)) {
     throw new Error(
       `Task Monki app settings schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION} is invalid. ` +
-        'Delete the local app settings and restart; fallback values are intentionally not applied.'
+        'Reset the local application settings or restore a backup; fallback values are intentionally not applied.'
     );
   }
   return {
@@ -444,17 +507,6 @@ function isCurrentAppSettingsRecord(
         Number(previewGateway.port) >= 10_000 &&
         Number(previewGateway.port) <= 65_535))
   );
-}
-
-function migrateAppSettings(value: unknown): unknown {
-  if (!isRecord(value) || value.schemaVersion !== 10) {
-    return value;
-  }
-  return {
-    ...value,
-    schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-    autoInstallUpdatesOnQuit: true
-  };
 }
 
 function isCanonicalRequiredString(value: unknown): boolean {

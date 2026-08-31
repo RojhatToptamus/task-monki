@@ -87,38 +87,38 @@ import {
 } from '../../shared/contracts';
 import {
   enforcePosixMode,
-  hasNoGroupOrOtherPosixAccess,
   isOwnedByCurrentUser,
-  posixModeMatches,
-  syncDirectoryIfSupported
+  posixModeMatches
 } from '../filesystem/secureFilesystem';
 import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
 import { createDomainEvent } from './domainEvent';
 import {
   AttachmentAdoptionAmbiguousError,
-  AttachmentFileStore,
-  AttachmentStoreError,
   validateTaskAttachmentRecords,
-  type PreparedAttachmentDraft,
-  type PreparedAttachmentAppend,
   type StoredAttachmentContent,
   type VerifiedDraftAttachment,
   type VerifiedTaskAttachment
-} from './AttachmentFileStore';
+} from './TaskAttachmentStorage';
+import { AttachmentStoreError } from './AttachmentErrors';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
 import {
-  normalizeLoadedState
-} from './currentStoreNormalization';
+  AppDatabase
+} from './sqlite/AppDatabase';
+import type { ManagedFileStore } from './sqlite/ManagedFileStore';
 import {
-  STORE_OWNERSHIP_LEASE_FILE,
-  acquireStoreOwnershipLease,
-  assertStoreOwnershipLease,
-  releaseStoreOwnershipLease,
-  type StoreOwnershipLease
-} from './StoreOwnershipLease';
+  TaskStateMapper,
+  type PersistedTaskState
+} from './sqlite/TaskStateMapper';
+import {
+  SqliteTaskAttachmentStore,
+  type PreparedSqliteAttachmentAppend,
+  type PreparedSqliteAttachmentDraft
+} from './sqlite/SqliteTaskAttachmentStore';
+import { SqliteTaskArtifactStore } from './sqlite/SqliteTaskArtifactStore';
 import type {
   TaskAgentRuntimeAccess,
-  TaskAgentRuntimeSnapshot
+  TaskAgentRuntimeSnapshot,
+  TaskRuntimeEventSink
 } from '../agent/AgentRuntimeStore';
 
 export interface CreateTaskStoreInput extends CreateTaskRequest {
@@ -277,7 +277,6 @@ const CREATE_TASK_COMPLETION_POLICIES: Task['completionPolicy'][] = [
   'MERGED_AND_VERIFIED',
   'MANUAL'
 ];
-const MAX_STORE_FILE_BYTES = 256 * 1024 * 1024;
 const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'agent-prompt': 8 * 1024 * 1024,
   'agent-output': 32 * 1024 * 1024,
@@ -294,10 +293,6 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_FILE_SEGMENT_PATTERN = new RegExp(`^${UUID_FILE_SEGMENT}$`, 'u');
-const MANAGED_ARTIFACT_FILE_PATTERN = new RegExp(
-  `^${UUID_FILE_SEGMENT}-(?:task|${UUID_FILE_SEGMENT})-(?:${ARTIFACT_KINDS.join('|')})-${UUID_FILE_SEGMENT}\\.log$`,
-  'u'
-);
 const WORKFLOW_PHASES = new Set<WorkflowPhase>([
   'BACKLOG',
   'READY',
@@ -560,22 +555,6 @@ function isCanonicalStoreTimestamp(value: unknown): value is string {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
-const TASK_RUNTIME_PROJECTION_KEYS = [
-  'runs',
-  'agentServers',
-  'agentSessions',
-  'agentItems',
-  'agentGoalSnapshots',
-  'agentPlanRevisions',
-  'agentUsageSnapshots',
-  'agentSettingsObservations',
-  'agentSubagentObservations',
-  'interactionRequests'
-] as const satisfies readonly (keyof StoreState)[];
-
-type TaskRuntimeProjectionKey = (typeof TASK_RUNTIME_PROJECTION_KEYS)[number];
-type PersistedTaskState = Omit<StoreState, TaskRuntimeProjectionKey>;
-
 export type TaskCreationRequestErrorCode =
   | 'TASK_CREATION_INVALID_REQUEST'
   | 'TASK_CREATION_CONFLICT';
@@ -592,65 +571,69 @@ export class TaskCreationRequestError extends Error {
   }
 }
 
-/**
- * The artifact bytes may have been appended even though their metadata could
- * not be published or rolled back. Callers must not retry the same chunk.
- */
-export class ArtifactAppendAmbiguousError extends AggregateError {
-  readonly name = 'ArtifactAppendAmbiguousError';
-
-  constructor(
-    readonly artifactId: string,
-    persistenceError: unknown,
-    rollbackError: unknown
-  ) {
-    super(
-      [persistenceError, rollbackError],
-      'Artifact append failed and its durable file state could not be proven.'
-    );
-  }
-}
-
 type StoreLifecycle = 'NEW' | 'OPENING' | 'OPEN' | 'CLOSING' | 'CLOSED';
 
-export class FileTaskStore {
-  private readonly storePath: string;
-  private readonly leasePath: string;
-  private readonly artifactsDir: string;
-  private readonly attachmentFiles: AttachmentFileStore;
-  private state: StoreState = createEmptyState();
-  private publishedState: StoreState = this.state;
-  private publishedSnapshotJson = JSON.stringify(this.state);
+interface TaskTransactionState {
+  state: StoreState;
+}
+
+export class SqliteTaskStore {
+  private readonly baseDir: string;
+  private readonly artifactFiles: SqliteTaskArtifactStore;
+  private readonly attachmentFiles: SqliteTaskAttachmentStore;
+  private readonly stateMapper: TaskStateMapper;
+  private readonly transactionStateKey = {};
+  private committedState: StoreState = createEmptyState();
+  private publishedState: StoreState = this.committedState;
   private loaded = false;
   private lifecycle: StoreLifecycle = 'NEW';
   private initialization?: Promise<void>;
   private closePromise?: Promise<void>;
   private retainedAttachmentDraftIds = new Set<string>();
-  private lease?: StoreOwnershipLease;
   private mutationQueue: Promise<unknown> = Promise.resolve();
-  private readonly mutationContext = new AsyncLocalStorage<boolean>();
+  private readonly mutationContext = new AsyncLocalStorage<TaskTransactionState>();
   private readonly ownedIoContext = new AsyncLocalStorage<boolean>();
   private readonly activeOwnedIo = new Set<Promise<unknown>>();
   private taskRuntime?: TaskAgentRuntimeAccess;
 
-  constructor(private readonly baseDir: string) {
-    this.storePath = path.join(baseDir, 'store.json');
-    this.leasePath = path.join(baseDir, STORE_OWNERSHIP_LEASE_FILE);
-    this.artifactsDir = path.join(baseDir, 'artifacts');
-    this.attachmentFiles = new AttachmentFileStore(baseDir);
+  constructor(
+    private readonly database: AppDatabase,
+    private readonly managedFiles: ManagedFileStore
+  ) {
+    this.baseDir = path.join(managedFiles.rootPath, 'task');
+    this.artifactFiles = new SqliteTaskArtifactStore(managedFiles);
+    this.attachmentFiles = new SqliteTaskAttachmentStore(database, managedFiles);
+    this.stateMapper = new TaskStateMapper(database, managedFiles);
+  }
+
+  private get state(): StoreState {
+    return (
+      this.mutationContext.getStore()?.state ??
+      this.database.getTransactionLocal<TaskTransactionState>(this.transactionStateKey)?.state ??
+      this.committedState
+    );
+  }
+
+  private set state(state: StoreState) {
+    const mutation = this.mutationContext.getStore();
+    if (mutation) {
+      mutation.state = state;
+      return;
+    }
+    this.committedState = state;
   }
 
   getStoreIdentity(): string {
-    return createHash('sha256').update(path.resolve(this.baseDir)).digest('hex');
+    return createHash('sha256').update(this.managedFiles.rootPath).digest('hex');
   }
 
   getStorageRoot(): string {
-    return this.baseDir;
+    return this.managedFiles.rootPath;
   }
 
   /**
    * Binds the canonical runtime owner. Runtime records remain a derived view
-   * and are never written to the Task store file.
+   * and are never written to Task-owned database tables.
    */
   bindAgentRuntime(runtime: TaskAgentRuntimeAccess): void {
     if (this.taskRuntime && this.taskRuntime !== runtime) {
@@ -659,9 +642,31 @@ export class FileTaskStore {
     this.taskRuntime = runtime;
   }
 
+  /**
+   * Creates the runtime-to-Task event boundary with the only safe lock order:
+   * Task mutation serialization first, then the shared SQLite transaction.
+   */
+  createAgentRuntimeEventSink(): TaskRuntimeEventSink {
+    const sink: TaskRuntimeEventSink = (event, operationId) =>
+      this.recordAgentRuntimeEvent(event, operationId);
+    sink.serializeMutation = (operation) => this.serializePersistenceMutation(operation);
+    return sink;
+  }
+
+  /**
+   * Coordinates a mutation that spans this store and another facade on the
+   * same AppDatabase. The callback must not perform external I/O.
+   */
+  serializePersistenceMutation<T>(operation: () => Promise<T>): Promise<T> {
+    return this.serializeMutation(operation);
+  }
+
   refreshAgentRuntimeProjection(): Promise<void> {
     if (!this.taskRuntime) return Promise.resolve();
-    return this.serializeMutation(() => this.refreshAgentRuntimeProjectionInternal());
+    return this.serializeMutation(async () => {
+      await this.refreshAgentRuntimeProjectionInternal();
+      if (!this.database.hasCurrentWriteTransaction()) this.publishCurrentState();
+    });
   }
 
   private async refreshAgentRuntimeProjectionInternal(): Promise<void> {
@@ -672,12 +677,11 @@ export class FileTaskStore {
     validatePersistedDesignRelationships(projected);
     validatePersistedRuntimeIdentity(projected);
     this.state = projected;
-    this.publishCurrentState();
   }
 
   private publishCurrentState(): void {
+    this.committedState = this.state;
     this.publishedState = this.state;
-    this.publishedSnapshotJson = JSON.stringify(this.state);
   }
 
   /** Registers durable composer drafts before the first store initialization. */
@@ -735,48 +739,19 @@ export class FileTaskStore {
       throw new Error('Task store root failed its directory integrity check.');
     }
     await enforcePosixMode(this.baseDir, 0o700);
-    this.lease = await acquireStoreOwnershipLease(this.baseDir, this.leasePath);
-    try {
-      await cleanupStoreTemporaryFiles(this.baseDir, this.storePath);
-      await this.attachmentFiles.init();
-      await initializeArtifactDirectory(this.baseDir, this.artifactsDir);
-      let raw: string | undefined;
-      try {
-        raw = await readPrivateStoreFile(this.storePath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
-      }
-      if (raw === undefined) {
-        this.state = createEmptyState();
-        await this.attachmentFiles.reconcile(
-          this.state.attachments,
-          this.retainedAttachmentDraftIds
-        );
-        await this.reconcileArtifacts();
-        await this.persist();
-      } else {
-        const normalized = normalizeLoadedState(requireCurrentState(JSON.parse(raw)));
-        this.state = normalized.state;
-        await this.attachmentFiles.reconcile(
-          this.state.attachments,
-          this.retainedAttachmentDraftIds
-        );
-        await this.reconcileArtifacts();
-        if (normalized.changed) {
-          await this.persist();
-        }
-      }
-      if (this.publishedState !== this.state) {
-        this.publishedState = this.state;
-        this.publishedSnapshotJson = JSON.stringify(this.state);
-      }
-      this.loaded = true;
-    } catch (error) {
-      await this.releaseLease().catch(() => undefined);
-      throw error;
-    }
+    await this.attachmentFiles.init();
+    await this.artifactFiles.init();
+    this.state = withEmptyTaskRuntimeProjection(await this.stateMapper.load());
+    validateLoadedTaskState(this.state);
+    await this.attachmentFiles.reconcile(
+      this.state.attachments,
+      this.retainedAttachmentDraftIds
+    );
+    await this.stateMapper.retryPendingArtifactGarbageCollection();
+    await this.reconcileArtifacts();
+    await this.stateMapper.verifyArtifactIntegrity();
+    this.publishCurrentState();
+    this.loaded = true;
   }
 
   close(): Promise<void> {
@@ -795,23 +770,10 @@ export class FileTaskStore {
       result.status === 'rejected' ? [result.reason] : []
     );
     this.loaded = false;
-    try {
-      await this.releaseLease();
-    } catch (error) {
-      failures.push(error);
-    } finally {
-      this.lifecycle = 'CLOSED';
-    }
+    this.lifecycle = 'CLOSED';
     if (failures.length > 0) {
       throw new AggregateError(failures, 'Task store shutdown did not complete cleanly.');
     }
-  }
-
-  private async releaseLease(): Promise<void> {
-    if (!this.lease) return;
-    const lease = this.lease;
-    this.lease = undefined;
-    await releaseStoreOwnershipLease(this.baseDir, this.leasePath, lease);
   }
 
   private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -820,17 +782,15 @@ export class FileTaskStore {
       return Promise.reject(new Error('Task store is closed.'));
     }
     const initialization = this.ensureInitialized();
-    const queued = this.mutationQueue.catch(() => undefined).then(() =>
-      this.mutationContext.run(true, async () => {
-        await initialization;
-        try {
-          return await operation();
-        } catch (error) {
-          this.state = this.publishedState;
-          throw error;
-        }
-      })
-    );
+    const queued = this.mutationQueue.catch(() => undefined).then(async () => {
+      await initialization;
+      const transactionState =
+        this.database.getTransactionLocal<TaskTransactionState>(this.transactionStateKey);
+      const mutation = {
+        state: transactionState?.state ?? this.publishedState
+      };
+      return this.mutationContext.run(mutation, operation);
+    });
     this.mutationQueue = queued.catch(() => undefined);
     return queued;
   }
@@ -857,69 +817,28 @@ export class FileTaskStore {
     return running;
   }
   private async reconcileArtifacts(): Promise<void> {
-    await assertArtifactDirectory(this.baseDir, this.artifactsDir);
     const taskIds = new Set(this.state.tasks.map((task) => task.id));
-    const runsById = new Map(this.state.runs.map((run) => [run.id, run]));
     const artifactIds = new Set<string>();
-    const expectedByName = new Map<string, ArtifactRecord>();
     for (const artifact of this.state.artifacts) {
-      const fileName = validateArtifactRecord(
-        artifact,
-        this.artifactsDir,
-        taskIds,
-        runsById
-      );
-      if (artifactIds.has(artifact.id) || expectedByName.has(fileName)) {
+      validateArtifactRecord(artifact, taskIds);
+      if (artifactIds.has(artifact.id)) {
         throw new Error('Task artifact records contain duplicate managed identifiers.');
       }
       artifactIds.add(artifact.id);
-      expectedByName.set(fileName, artifact);
     }
-
-    let removedOrphans = 0;
-    for (const entry of await fs.readdir(this.artifactsDir, { withFileTypes: true })) {
-      const entryPath = path.join(this.artifactsDir, entry.name);
-      const stat = await fs.lstat(entryPath);
-      if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) {
-        throw new Error('Task artifact directory contains an unsafe entry.');
-      }
-      const expected = expectedByName.get(entry.name);
-      if (expected) {
-        if (!stat.isFile()) {
-          throw new Error('Stored task artifact path is not a regular file.');
-        }
-        await reconcileArtifactFile(entryPath, expected.byteCount);
-        expectedByName.delete(entry.name);
-        continue;
-      }
-      if (!MANAGED_ARTIFACT_FILE_PATTERN.test(entry.name)) {
-        // Unknown regular files and directories are not Task Monki records and
-        // are intentionally left untouched.
-        continue;
-      }
-      if (!stat.isFile()) {
-        throw new Error('Orphan task artifact path is not a regular file.');
-      }
-      assertArtifactOwnedByCurrentUser(stat);
-      await fs.unlink(entryPath);
-      removedOrphans += 1;
-    }
-    if (expectedByName.size > 0) {
-      throw new Error('A referenced task artifact file is missing.');
-    }
-    if (removedOrphans > 0) await syncDirectoryIfSupported(this.artifactsDir);
+    await this.artifactFiles.reconcile(this.state.artifacts);
   }
 
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
     await this.refreshAgentRuntimeProjection();
-    return JSON.parse(this.publishedSnapshotJson) as TaskSnapshot;
+    return clone(this.state);
   }
 
   async getBoardSnapshot(): Promise<BoardSnapshot> {
     await this.init();
     await this.refreshAgentRuntimeProjection();
-    const state = this.publishedState;
+    const state = this.state;
     return clone({
       schemaVersion: state.schemaVersion,
       repositories: state.repositories.filter(
@@ -942,7 +861,7 @@ export class FileTaskStore {
   async listDesigns(): Promise<DesignListItem[]> {
     await this.init();
     await this.refreshAgentRuntimeProjection();
-    const state = this.publishedState;
+    const state = this.state;
     return clone(
       state.tasks
         .filter((task) => task.kind === 'DESIGN')
@@ -958,7 +877,7 @@ export class FileTaskStore {
   async getDesignDetail(designId: string): Promise<DesignDetailSnapshot> {
     await this.init();
     await this.refreshAgentRuntimeProjection();
-    const state = this.publishedState;
+    const state = this.state;
     const task = state.tasks.find(
       (candidate) => candidate.id === designId && candidate.kind === 'DESIGN'
     );
@@ -1068,7 +987,7 @@ export class FileTaskStore {
   ): Promise<DesignConversationPage> {
     await this.init();
     await this.refreshAgentRuntimeProjection();
-    const state = this.publishedState;
+    const state = this.state;
     const task = state.tasks.find(
       (candidate) => candidate.id === input.designId && candidate.kind === 'DESIGN'
     );
@@ -1079,7 +998,7 @@ export class FileTaskStore {
   async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
     await this.init();
     await this.refreshAgentRuntimeProjection();
-    const state = this.publishedState;
+    const state = this.state;
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) {
       throw new Error('Task not found.');
@@ -2176,7 +2095,6 @@ export class FileTaskStore {
         ...removedAttempts.flatMap((attempt) => [attempt.stdoutArtifactId, attempt.stderrArtifactId]),
         ...removedGenerations.flatMap((generation) => generation.sourceManifestArtifactId ? [generation.sourceManifestArtifactId] : [])
       ]);
-      const artifacts = this.state.artifacts.filter((artifact) => artifactIds.has(artifact.id));
       this.state = {
         ...this.state,
         previewGenerations: this.state.previewGenerations.filter((generation) => !removedIds.has(generation.id)),
@@ -2189,7 +2107,6 @@ export class FileTaskStore {
         artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
       };
       await this.persistSnapshot();
-      await Promise.all(artifacts.map((artifact) => unlinkIfExists(artifact.path)));
       return removedIds.size;
     });
   }
@@ -2230,7 +2147,6 @@ export class FileTaskStore {
       const removedResourceIds = new Set(
         terminalResources.slice(maxAttempts).map((resource) => resource.id)
       );
-      const artifacts = this.state.artifacts.filter((artifact) => artifactIds.has(artifact.id));
       this.state = {
         ...this.state,
         previewNodeAttempts: this.state.previewNodeAttempts.filter(
@@ -2250,7 +2166,6 @@ export class FileTaskStore {
         artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
       };
       await this.persistSnapshot();
-      await Promise.all(artifacts.map((artifact) => unlinkIfExists(artifact.path)));
       return removedAttempts.length;
     });
   }
@@ -2606,9 +2521,8 @@ export class FileTaskStore {
       };
 
       const previousState = this.state;
-      let preparedDraft: PreparedAttachmentDraft | undefined;
+      let preparedDraft: PreparedSqliteAttachmentDraft | undefined;
       let attachmentRecords: TaskAttachmentRecord[] = [];
-      let publishedWithoutDirectorySync = false;
       try {
         if (input.request.attachmentDraftId) {
           preparedDraft = await this.attachmentFiles.prepareDraftForTask(
@@ -2660,8 +2574,8 @@ export class FileTaskStore {
             }
           })
         );
-        publishedWithoutDirectorySync = !(await this.persistSnapshot());
-        if (!publishedWithoutDirectorySync && preparedDraft) {
+        await this.persistSnapshot();
+        if (preparedDraft) {
           await this.attachmentFiles.finalizeDraftForTask(preparedDraft).catch(
             () => undefined
           );
@@ -2920,7 +2834,9 @@ export class FileTaskStore {
       } catch (error) {
         this.state = previousState;
         if (attachments.length > 0) {
-          await this.attachmentFiles.discardTaskFiles(targetId).catch(() => undefined);
+          await this.attachmentFiles
+            .discardTaskFiles(targetId, attachments)
+            .catch(() => undefined);
         }
         throw error;
       }
@@ -3081,7 +2997,7 @@ export class FileTaskStore {
       }
       const referenceIds = [...input.referenceIds];
       const previousState = this.state;
-      let prepared: PreparedAttachmentAppend | undefined;
+      let prepared: PreparedSqliteAttachmentAppend | undefined;
       let artifact: ArtifactRecord | undefined;
       try {
         if (input.attachmentDraftId) {
@@ -3105,10 +3021,12 @@ export class FileTaskStore {
             createdAt: now
           })
         );
-        artifact = await this.createArtifactRecord(design.id, 'design-message');
-        await writeNewArtifactFiles(this.artifactsDir, [
-          { artifact, content: input.message }
-        ]);
+        artifact = await this.createArtifactRecord(
+          design.id,
+          'design-message',
+          {},
+          input.message
+        );
         const order =
           Math.max(
             0,
@@ -3138,8 +3056,8 @@ export class FileTaskStore {
           designTurns: [turn, ...this.state.designTurns],
           artifacts: [artifact, ...this.state.artifacts]
         };
-        const directorySynced = await this.persistSnapshot();
-        if (directorySynced && prepared) {
+        await this.persistSnapshot();
+        if (prepared) {
           await this.attachmentFiles
             .finalizeDraftForExistingTask(prepared)
             .catch(() => undefined);
@@ -3201,7 +3119,7 @@ export class FileTaskStore {
         .filter((attachment) => attachment.taskId === design.id)
         .sort((left, right) => left.ordinal - right.ordinal);
       const previousState = this.state;
-      let prepared: PreparedAttachmentAppend | undefined;
+      let prepared: PreparedSqliteAttachmentAppend | undefined;
       try {
         prepared = await this.attachmentFiles.prepareDraftForExistingTask(
           input.attachmentDraftId,
@@ -3226,12 +3144,10 @@ export class FileTaskStore {
           attachments: [...this.state.attachments, ...prepared.records],
           designReferences: [...this.state.designReferences, ...references]
         };
-        const directorySynced = await this.persistSnapshot();
-        if (directorySynced) {
-          await this.attachmentFiles
-            .finalizeDraftForExistingTask(prepared)
-            .catch(() => undefined);
-        }
+        await this.persistSnapshot();
+        await this.attachmentFiles
+          .finalizeDraftForExistingTask(prepared)
+          .catch(() => undefined);
         return clone(references);
       } catch (error) {
         this.state = previousState;
@@ -3376,13 +3292,13 @@ export class FileTaskStore {
     generationKey: string
   ): Promise<RunRecord | undefined> {
     await this.init();
-    const candidates = this.publishedState.runs.filter(
+    const candidates = this.state.runs.filter(
       (run) =>
         run.taskId === taskId &&
         run.mode === 'DESIGN' &&
         run.generationKey === generationKey
     );
-    const linkedRunId = this.publishedState.designTurns.find(
+    const linkedRunId = this.state.designTurns.find(
       (turn) => turn.designId === taskId && turn.id === generationKey
     )?.runId;
     const retriedRunIds = new Set(
@@ -3736,6 +3652,9 @@ export class FileTaskStore {
         (artifact.taskId === taskId ||
           (artifact.runId ? runIds.has(artifact.runId) : false))
     );
+    const attachmentsToDelete = this.state.attachments.filter(
+      (attachment) => attachment.taskId === taskId
+    );
     const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
     const now = new Date().toISOString();
     const removedManagedRepository = this.state.repositories.find(
@@ -3748,8 +3667,6 @@ export class FileTaskStore {
         )
     );
     const previousState = this.state;
-    let publishedWithoutDirectorySync = false;
-
     try {
       this.state = {
         ...this.state,
@@ -3875,19 +3792,16 @@ export class FileTaskStore {
           (attachment) => attachment.taskId !== taskId
         )
       };
-      publishedWithoutDirectorySync = !(await this.persistSnapshot());
+      await this.persistSnapshot();
     } catch (error) {
       this.state = previousState;
       throw error;
     }
-    if (!publishedWithoutDirectorySync) {
-      // Files are removed only after the parent-directory sync proves the
-      // record deletion durable. Startup retries cleanup after later failures.
-      await this.attachmentFiles.discardTaskFiles(taskId).catch(() => undefined);
-      await Promise.allSettled(
-        artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path))
-      );
-    }
+    await this.scheduleBestEffortAfterCommit(async () => {
+      await this.attachmentFiles
+        .discardTaskFiles(taskId, attachmentsToDelete)
+        .catch(() => undefined);
+    });
     return clone({ removedManagedRepository });
   }
 
@@ -3970,9 +3884,8 @@ export class FileTaskStore {
     }
 
     const previousState = this.state;
-    let preparedDraft: PreparedAttachmentDraft | undefined;
+    let preparedDraft: PreparedSqliteAttachmentDraft | undefined;
     let attachmentRecords: TaskAttachmentRecord[] = [];
-    let publishedWithoutDirectorySync = false;
     try {
       if (fork) {
         attachmentRecords = await this.attachmentFiles.copyTaskAttachments(
@@ -4040,7 +3953,7 @@ export class FileTaskStore {
         );
       }
 
-      publishedWithoutDirectorySync = !(await this.persistSnapshot());
+      await this.persistSnapshot();
     } catch (error) {
       this.state = previousState;
       if (preparedDraft) {
@@ -4054,11 +3967,13 @@ export class FileTaskStore {
           );
         }
       } else if (fork && attachmentRecords.length > 0) {
-        await this.attachmentFiles.discardTaskFiles(task.id).catch(() => undefined);
+        await this.attachmentFiles
+          .discardTaskFiles(task.id, attachmentRecords)
+          .catch(() => undefined);
       }
       throw error;
     }
-    if (!publishedWithoutDirectorySync && preparedDraft) {
+    if (preparedDraft) {
       await this.attachmentFiles.finalizeDraftForTask(preparedDraft).catch(
         () => undefined
       );
@@ -4460,7 +4375,7 @@ export class FileTaskStore {
   /**
    * Publishes the Task-owned link to a session that already exists in the
    * canonical agent runtime store. Provider session state is never persisted
-   * by FileTaskStore.
+   * by the SQLite Task store.
    */
   async recordAgentSessionCreated(
     session: AgentSessionRecord
@@ -5272,33 +5187,22 @@ export class FileTaskStore {
       throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
     }
 
-    const byteCount = await appendBoundedArtifactFile(artifact, chunk);
-    const updatedAt = new Date().toISOString();
+    const current = await this.artifactFiles.read(
+      artifact,
+      ARTIFACT_BYTE_LIMITS[artifact.kind]
+    );
+    const contents = appendBoundedArtifactBytes(artifact, current, Buffer.from(chunk, 'utf8'));
+    const updated = await this.publishArtifactRevision(artifact, contents);
     this.state = {
       ...this.state,
       artifacts: this.state.artifacts.map((candidate) =>
-        candidate.id === artifactId
-          ? { ...candidate, byteCount, updatedAt }
-          : candidate
+        candidate.id === artifactId ? updated : candidate
       )
     };
     try {
       await this.persistSnapshot();
     } catch (error) {
-      const published = this.publishedState.artifacts.find(
-        (candidate) => candidate.id === artifactId
-      );
-      if (published) {
-        try {
-          await reconcileArtifactFile(published.path, published.byteCount);
-        } catch (rollbackError) {
-          throw new ArtifactAppendAmbiguousError(
-            artifactId,
-            error,
-            rollbackError
-          );
-        }
-      }
+      await this.cleanupUnpublishedArtifacts([updated]);
       throw error;
     }
   }
@@ -5310,7 +5214,7 @@ export class FileTaskStore {
     return this.serializeMutation(async () => {
       await this.init();
       const artifact = await this.createArtifactRecord(taskId, kind);
-      await writeNewArtifactFiles(this.artifactsDir, [{ artifact, content: '' }]);
+      const capturePath = await this.artifactFiles.createCapture(artifact.id);
       this.state = {
         ...this.state,
         artifacts: [artifact, ...this.state.artifacts]
@@ -5319,9 +5223,10 @@ export class FileTaskStore {
         await this.persistSnapshot();
       } catch (error) {
         await this.cleanupUnpublishedArtifacts([artifact]);
+        await this.artifactFiles.deleteCapture(artifact.id).catch(() => undefined);
         throw error;
       }
-      return clone(artifact);
+      return clone({ ...artifact, path: capturePath });
     });
   }
 
@@ -5357,29 +5262,22 @@ export class FileTaskStore {
             marker.subarray(0, Math.min(marker.byteLength, remaining))
           ])
         : input;
-      if (output.byteLength > 0) {
-        await appendManagedArtifactFile(artifact.path, output);
-      }
-
-      const byteCount = artifact.byteCount + output.byteLength;
-      const updatedAt = new Date().toISOString();
+      const current = await this.artifactFiles.read(artifact, limit);
+      const contents = output.byteLength > 0 ? Buffer.concat([current, output]) : current;
+      const updated = await this.publishArtifactRevision(artifact, contents);
       this.state = {
         ...this.state,
         artifacts: this.state.artifacts.map((candidate) =>
-          candidate.id === artifactId ? { ...candidate, byteCount, updatedAt } : candidate
+          candidate.id === artifactId ? updated : candidate
         )
       };
       try {
         await this.persistSnapshot();
       } catch (error) {
-        try {
-          await reconcileArtifactFile(artifact.path, artifact.byteCount);
-        } catch (rollbackError) {
-          throw new ArtifactAppendAmbiguousError(artifactId, error, rollbackError);
-        }
+        await this.cleanupUnpublishedArtifacts([updated]);
         throw error;
       }
-      return { byteCount, truncated };
+      return { byteCount: updated.byteCount, truncated };
     });
   }
 
@@ -5391,27 +5289,27 @@ export class FileTaskStore {
       if (TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)) {
         throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
       }
-      const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-        throw error;
-      });
-      const stat = handle ? await handle.stat().finally(() => handle.close()) : undefined;
-      const byteCount = stat?.size ?? 0;
-      if (byteCount > ARTIFACT_BYTE_LIMITS[artifact.kind]) {
-        throw new Error('Stored task artifact exceeds its byte limit.');
-      }
-      const updated: ArtifactRecord = {
-        ...artifact,
-        byteCount,
-        updatedAt: new Date().toISOString()
-      };
+      const captured = await this.artifactFiles.readCapture(
+        artifact.id,
+        ARTIFACT_BYTE_LIMITS[artifact.kind]
+      );
+      const contents = captured ?? await this.artifactFiles.read(
+        artifact,
+        ARTIFACT_BYTE_LIMITS[artifact.kind]
+      );
+      const updated = await this.publishArtifactRevision(artifact, contents);
       this.state = {
         ...this.state,
         artifacts: this.state.artifacts.map((candidate) =>
           candidate.id === artifactId ? updated : candidate
         )
       };
-      await this.persistSnapshot();
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        await this.cleanupUnpublishedArtifacts([updated]);
+        throw error;
+      }
       return clone(updated);
     });
   }
@@ -5448,13 +5346,7 @@ export class FileTaskStore {
     content: string
   ): Promise<ArtifactRecord> {
 
-    const artifact = await this.createArtifactRecord(taskId, kind);
-    await writeNewArtifactFiles(this.artifactsDir, [{ artifact, content }]);
-
-    const stored: ArtifactRecord = {
-      ...artifact,
-      updatedAt: new Date().toISOString()
-    };
+    const stored = await this.createArtifactRecord(taskId, kind, {}, content);
 
     this.state = {
       ...this.state,
@@ -5466,23 +5358,32 @@ export class FileTaskStore {
   readArtifact(artifactId: string): Promise<string> {
     // The file bytes and recorded byte count are one durable unit. Use the
     // store's exclusive queue so an append cannot change either during a read.
-    return this.serializeMutation(() => {
+    return this.serializeMutation(async () => {
       const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
       if (!artifact) {
         throw new Error(`Artifact not found: ${artifactId}`);
       }
-      return readPrivateArtifactFile(artifact.path, artifact.byteCount);
+      const bytes = await this.artifactFiles.read(
+        artifact,
+        ARTIFACT_BYTE_LIMITS[artifact.kind]
+      );
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     });
   }
 
   private async cleanupUnpublishedArtifacts(
     artifacts: readonly ArtifactRecord[]
   ): Promise<void> {
-    const publishedIds = new Set(this.publishedState.artifacts.map((artifact) => artifact.id));
-    const unpublished = artifacts.filter((artifact) => !publishedIds.has(artifact.id));
+    const publishedPaths = new Set(
+      this.publishedState.artifacts.map((artifact) => `${artifact.id}:${artifact.path}`)
+    );
+    const unpublished = artifacts.filter(
+      (artifact) => !publishedPaths.has(`${artifact.id}:${artifact.path}`)
+    );
     if (unpublished.length === 0) return;
-    await Promise.allSettled(unpublished.map((artifact) => fs.unlink(artifact.path)));
-    await syncDirectoryIfSupported(this.artifactsDir).catch(() => undefined);
+    await Promise.allSettled(
+      unpublished.map((artifact) => this.artifactFiles.deleteRevision(artifact))
+    );
   }
 
   readArtifactRange(
@@ -5499,28 +5400,23 @@ export class FileTaskStore {
       }
       const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
       if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
-      const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-        throw error;
-      });
-      if (!handle) return { chunk: '', nextOffset: offset, endOfFile: true };
-      try {
-        const stat = await handle.stat();
-        if (offset >= stat.size) return { chunk: '', nextOffset: stat.size, endOfFile: true };
-        const buffer = Buffer.alloc(Math.min(maxBytes, stat.size - offset));
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
-        const safeBytes = utf8SafePrefixLength(
-          buffer.subarray(0, bytesRead),
-          offset + bytesRead >= stat.size
-        );
-        return {
-          chunk: buffer.subarray(0, safeBytes).toString('utf8'),
-          nextOffset: offset + safeBytes,
-          endOfFile: offset + safeBytes >= stat.size
-        };
-      } finally {
-        await handle.close();
+      const contents = await this.artifactFiles.read(
+        artifact,
+        ARTIFACT_BYTE_LIMITS[artifact.kind]
+      );
+      if (offset >= contents.byteLength) {
+        return { chunk: '', nextOffset: contents.byteLength, endOfFile: true };
       }
+      const buffer = contents.subarray(offset, Math.min(contents.byteLength, offset + maxBytes));
+      const safeBytes = utf8SafePrefixLength(
+        buffer,
+        offset + buffer.byteLength >= contents.byteLength
+      );
+      return {
+        chunk: buffer.subarray(0, safeBytes).toString('utf8'),
+        nextOffset: offset + safeBytes,
+        endOfFile: offset + safeBytes >= contents.byteLength
+      };
     });
   }
 
@@ -5536,7 +5432,8 @@ export class FileTaskStore {
   private async createArtifactRecord(
     taskId: string,
     kind: ArtifactKind,
-    ids: { runId?: string } = {}
+    ids: { runId?: string } = {},
+    content = ''
   ): Promise<ArtifactRecord> {
     if (!UUID_FILE_SEGMENT_PATTERN.test(taskId)) {
       throw new Error('Task artifact owner id is invalid.');
@@ -5550,74 +5447,61 @@ export class FileTaskStore {
     }
     const now = new Date().toISOString();
     const id = randomUUID();
-    const ownerId = ids.runId ?? 'task';
-    const fileName = `${taskId}-${ownerId}-${kind}-${id}.log`;
-    const artifactPath = path.resolve(this.artifactsDir, fileName);
-    if (
-      !MANAGED_ARTIFACT_FILE_PATTERN.test(fileName) ||
-      !sameAbsolutePath(path.dirname(artifactPath), path.resolve(this.artifactsDir))
-    ) {
-      throw new Error('Task artifact path escaped its managed directory.');
-    }
+    const published = await this.artifactFiles.publish(id, boundedArtifactBytes(kind, content));
     return {
       id,
       taskId,
       runId: ids.runId,
       kind,
-      path: artifactPath,
-      byteCount: 0,
+      path: published.path,
+      byteCount: published.byteCount,
       createdAt: now,
       updatedAt: now
     };
   }
 
-  private async persistSnapshot(): Promise<boolean> {
+  private async publishArtifactRevision(
+    artifact: ArtifactRecord,
+    contents: Uint8Array
+  ): Promise<ArtifactRecord> {
+    const published = await this.artifactFiles.publish(artifact.id, contents);
+    return {
+      ...artifact,
+      path: published.path,
+      byteCount: published.byteCount,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  private persistSnapshot(): Promise<void> {
     return this.persist();
   }
 
-  private async persist(): Promise<boolean> {
-    const lease = this.lease;
-    if (!lease) {
-      throw new Error('Task store persistence requires an active ownership lease.');
-    }
-    await assertStoreOwnershipLease(this.leasePath, lease);
-    await fs.mkdir(this.baseDir, { recursive: true });
-    const publishedSnapshotJson = JSON.stringify(this.state);
-    const serialized = `${JSON.stringify(withoutTaskRuntimeProjection(this.state))}\n`;
-    if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_FILE_BYTES) {
-      throw new Error('Task store snapshot exceeds its durable size limit.');
-    }
-    const tmpPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
-    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-    let published = false;
-    try {
-      handle = await fs.open(
-        tmpPath,
-        fsConstants.O_WRONLY |
-          fsConstants.O_CREAT |
-          fsConstants.O_EXCL |
-          (fsConstants.O_NOFOLLOW ?? 0),
-        0o600
+  private async persist(): Promise<void> {
+    const next = this.state;
+    await this.database.write(async (transaction) => {
+      const staged = transaction.getLocal<TaskTransactionState>(this.transactionStateKey);
+      const previous = staged?.state ?? this.publishedState;
+      this.stateMapper.persist(
+        transaction,
+        withoutTaskRuntimeProjection(previous),
+        withoutTaskRuntimeProjection(next)
       );
-      await handle.writeFile(serialized, 'utf8');
-      await handle.sync();
-      await enforcePosixMode(handle, 0o600);
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      await assertStoreOwnershipLease(this.leasePath, lease);
-      await fs.rename(tmpPath, this.storePath);
-      published = true;
-      this.publishedState = this.state;
-      this.publishedSnapshotJson = publishedSnapshotJson;
-      await syncDirectoryIfSupported(this.baseDir);
-      return true;
-    } catch (error) {
-      await handle?.close().catch(() => undefined);
-      await fs.unlink(tmpPath).catch(() => undefined);
-      if (published) return false;
-      throw error;
-    }
+      transaction.setLocal(this.transactionStateKey, { state: next });
+      transaction.afterCommit(() => {
+        this.committedState = next;
+        this.publishedState = next;
+      });
+      transaction.afterRollback(() => {
+        this.committedState = this.publishedState;
+      });
+    });
+  }
+
+  private scheduleBestEffortAfterCommit(operation: () => Promise<void>): Promise<void> {
+    return this.database.write((transaction) => {
+      transaction.afterCommitDeferred(() => operation().catch(() => undefined));
+    });
   }
 }
 
@@ -5751,128 +5635,10 @@ function withoutTaskRuntimeProjection(state: StoreState): PersistedTaskState {
   };
 }
 
-async function readPrivateStoreFile(storePath: string): Promise<string> {
-  const handle = await fs.open(
-    storePath,
-    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
-  );
-  try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.size <= 0 ||
-      stat.size > MAX_STORE_FILE_BYTES ||
-      !hasNoGroupOrOtherPosixAccess(stat) ||
-      !isOwnedByCurrentUser(stat)
-    ) {
-      throw new Error('Task store file failed its integrity check.');
-    }
-    const bytes = await handle.readFile();
-    if (bytes.byteLength !== stat.size) {
-      throw new Error('Task store file changed while it was being read.');
-    }
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function cleanupStoreTemporaryFiles(
-  baseDir: string,
-  storePath: string
-): Promise<void> {
-  const storeName = path.basename(storePath);
-  for (const entry of await fs.readdir(baseDir, { withFileTypes: true })) {
-    if (
-      entry.name !== `${storeName}.tmp` &&
-      !(entry.name.startsWith(`${storeName}.`) && entry.name.endsWith('.tmp'))
-    ) {
-      continue;
-    }
-    const temporaryPath = path.join(baseDir, entry.name);
-    const stat = await fs.lstat(temporaryPath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return undefined;
-      throw error;
-    });
-    if (!stat) continue;
-    if (stat.isDirectory() && !stat.isSymbolicLink()) {
-      throw new Error('Task store temporary path failed its integrity check.');
-    }
-    await fs.unlink(temporaryPath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') throw error;
-    });
-  }
-}
-
-async function initializeArtifactDirectory(
-  baseDir: string,
-  artifactsDir: string
-): Promise<void> {
-  try {
-    await fs.mkdir(artifactsDir, { mode: 0o700 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-  }
-  const before = await inspectArtifactDirectory(baseDir, artifactsDir);
-  let handle: Awaited<ReturnType<typeof fs.open>>;
-  try {
-    handle = await fs.open(
-      artifactsDir,
-      fsConstants.O_RDONLY |
-        (fsConstants.O_DIRECTORY ?? 0) |
-        (fsConstants.O_NOFOLLOW ?? 0)
-    );
-  } catch {
-    throw new Error('Task artifact directory failed its integrity check.');
-  }
-  try {
-    const stat = await handle.stat();
-    if (!stat.isDirectory() || !sameFileIdentity(stat, before)) {
-      throw new Error('Task artifact directory changed during initialization.');
-    }
-    assertArtifactOwnedByCurrentUser(stat);
-    await enforcePosixMode(handle, 0o700);
-  } finally {
-    await handle.close();
-  }
-  await assertArtifactDirectory(baseDir, artifactsDir);
-}
-
-async function assertArtifactDirectory(
-  baseDir: string,
-  artifactsDir: string
-): Promise<void> {
-  const stat = await inspectArtifactDirectory(baseDir, artifactsDir);
-  assertArtifactPrivateMode(stat, 0o700);
-}
-
-async function inspectArtifactDirectory(
-  baseDir: string,
-  artifactsDir: string
-): Promise<Awaited<ReturnType<typeof fs.lstat>>> {
-  const stat = await fs.lstat(artifactsDir);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error('Task artifact directory failed its integrity check.');
-  }
-  assertArtifactOwnedByCurrentUser(stat);
-  const [baseRealPath, artifactRealPath] = await Promise.all([
-    fs.realpath(baseDir),
-    fs.realpath(artifactsDir)
-  ]);
-  const expectedArtifactPath = path.join(baseRealPath, path.basename(artifactsDir));
-  if (!sameAbsolutePath(artifactRealPath, expectedArtifactPath)) {
-    throw new Error('Task artifact directory escaped its managed root.');
-  }
-  return stat;
-}
-
 function validateArtifactRecord(
   artifact: ArtifactRecord,
-  artifactsDir: string,
-  taskIds: ReadonlySet<string>,
-  runsById: ReadonlyMap<string, RunRecord>
-): string {
-  const run = artifact.runId === undefined ? undefined : runsById.get(artifact.runId);
+  taskIds: ReadonlySet<string>
+): void {
   if (
     !artifact ||
     typeof artifact !== 'object' ||
@@ -5886,210 +5652,10 @@ function validateArtifactRecord(
     !isCanonicalStoreTimestamp(artifact.createdAt) ||
     !isCanonicalStoreTimestamp(artifact.updatedAt) ||
     artifact.updatedAt < artifact.createdAt ||
-    !taskIds.has(artifact.taskId) ||
-    (artifact.runId !== undefined && (!run || run.taskId !== artifact.taskId))
+    !taskIds.has(artifact.taskId)
   ) {
     throw new Error('Task artifact record failed its integrity check.');
   }
-  const ownerId = artifact.runId ?? 'task';
-  const fileName = `${artifact.taskId}-${ownerId}-${artifact.kind}-${artifact.id}.log`;
-  if (
-    !MANAGED_ARTIFACT_FILE_PATTERN.test(fileName) ||
-    !sameAbsolutePath(artifact.path, path.join(artifactsDir, fileName))
-  ) {
-    throw new Error('Task artifact path failed its managed-path integrity check.');
-  }
-  return fileName;
-}
-
-async function reconcileArtifactFile(
-  filePath: string,
-  expectedByteCount: number
-): Promise<void> {
-  const before = await fs.lstat(filePath);
-  if (!before.isFile() || before.isSymbolicLink()) {
-    throw new Error('Stored task artifact is not a regular file.');
-  }
-  assertArtifactOwnedByCurrentUser(before);
-  let handle: Awaited<ReturnType<typeof fs.open>>;
-  try {
-    handle = await fs.open(
-      filePath,
-      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
-    );
-  } catch {
-    throw new Error('Stored task artifact could not be opened safely.');
-  }
-  try {
-    const stat = await handle.stat();
-    if (!sameFileIdentity(stat, before)) {
-      throw new Error('Stored task artifact changed during validation.');
-    }
-    assertArtifactOwnedByCurrentUser(stat);
-    if (stat.size < expectedByteCount) {
-      throw new Error('Stored task artifact is missing referenced bytes.');
-    }
-    if (stat.size > expectedByteCount) {
-      await handle.truncate(expectedByteCount);
-      await handle.sync();
-    }
-    if (!posixModeMatches(stat, 0o600)) {
-      await enforcePosixMode(handle, 0o600);
-      await handle.sync();
-    }
-    assertArtifactPrivateMode(await handle.stat(), 0o600);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function writeNewArtifactFiles(
-  artifactsDir: string,
-  entries: Array<{ artifact: ArtifactRecord; content: string }>
-): Promise<void> {
-  const createdPaths: string[] = [];
-  try {
-    for (const entry of entries) {
-      const bytes = boundedArtifactBytes(entry.artifact.kind, entry.content);
-      let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-      try {
-        handle = await fs.open(
-          entry.artifact.path,
-          fsConstants.O_WRONLY |
-            fsConstants.O_CREAT |
-            fsConstants.O_EXCL |
-            (fsConstants.O_NOFOLLOW ?? 0),
-          0o600
-        );
-        createdPaths.push(entry.artifact.path);
-        await handle.writeFile(bytes);
-        await handle.sync();
-        await enforcePosixMode(handle, 0o600);
-        await handle.sync();
-      } finally {
-        await handle?.close().catch(() => undefined);
-      }
-      entry.artifact.byteCount = bytes.byteLength;
-    }
-    await syncDirectoryIfSupported(artifactsDir);
-  } catch (error) {
-    await Promise.allSettled(createdPaths.map((filePath) => fs.unlink(filePath)));
-    await syncDirectoryIfSupported(artifactsDir).catch(() => undefined);
-    throw error;
-  }
-}
-
-async function appendBoundedArtifactFile(
-  artifact: ArtifactRecord,
-  chunk: string
-): Promise<number> {
-  if (!chunk) return artifact.byteCount;
-  const before = await fs.lstat(artifact.path);
-  if (!before.isFile() || before.isSymbolicLink()) {
-    throw new Error('Stored task artifact is not a regular file.');
-  }
-  assertArtifactOwnedByCurrentUser(before);
-
-  let handle: Awaited<ReturnType<typeof fs.open>>;
-  try {
-    handle = await fs.open(
-      artifact.path,
-      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
-    );
-  } catch {
-    throw new Error('Stored task artifact could not be opened safely.');
-  }
-  let appendAttempted = false;
-  let operationFailed = false;
-  let operationError: unknown;
-  let byteCount: number | undefined;
-  try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.dev !== before.dev ||
-      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino) ||
-      stat.size !== artifact.byteCount
-    ) {
-      throw new Error('Stored task artifact changed during append.');
-    }
-    assertArtifactOwnedByCurrentUser(stat);
-    assertArtifactPrivateMode(stat, 0o600);
-
-    const incoming = Buffer.from(chunk, 'utf8');
-    const limit = ARTIFACT_BYTE_LIMITS[artifact.kind];
-    const marker = artifactTruncationMarker(artifact.kind, limit);
-    if (artifact.byteCount >= marker.byteLength) {
-      const tail = Buffer.alloc(marker.byteLength);
-      await readAllAt(handle, tail, artifact.byteCount - marker.byteLength);
-      if (tail.equals(marker)) byteCount = artifact.byteCount;
-    }
-    if (byteCount === undefined) {
-      const contentLimit = limit - marker.byteLength;
-      if (artifact.byteCount > contentLimit) {
-        throw new Error('Stored task artifact exceeds its appendable content budget.');
-      }
-
-      const available = contentLimit - artifact.byteCount;
-      const append = incoming.byteLength <= available
-        ? incoming
-        : Buffer.concat([truncateUtf8Buffer(incoming, available), marker]);
-      appendAttempted = true;
-      try {
-        await writeAllAt(handle, append, artifact.byteCount);
-        await handle.sync();
-        byteCount = artifact.byteCount + append.byteLength;
-      } catch (error) {
-        try {
-          await handle.truncate(artifact.byteCount);
-          await handle.sync();
-        } catch (rollbackError) {
-          throw new ArtifactAppendAmbiguousError(
-            artifact.id,
-            error,
-            rollbackError
-          );
-        }
-        throw error;
-      }
-    }
-  } catch (error) {
-    operationFailed = true;
-    operationError = error;
-  }
-
-  let closeError: unknown;
-  try {
-    await handle.close();
-  } catch (error) {
-    closeError = error;
-  }
-  if (closeError !== undefined) {
-    if (operationError instanceof ArtifactAppendAmbiguousError) {
-      throw operationError;
-    }
-    if (appendAttempted) {
-      try {
-        await reconcileArtifactFile(artifact.path, artifact.byteCount);
-      } catch (rollbackError) {
-        const appendError = operationFailed
-          ? new AggregateError(
-              [operationError, closeError],
-              'Artifact append and close both failed.'
-            )
-          : closeError;
-        throw new ArtifactAppendAmbiguousError(
-          artifact.id,
-          appendError,
-          rollbackError
-        );
-      }
-    }
-    if (operationFailed) throw operationError;
-    throw closeError;
-  }
-  if (operationFailed) throw operationError;
-  return byteCount!;
 }
 
 function boundedArtifactBytes(kind: ArtifactKind, content: string): Buffer {
@@ -6102,6 +5668,34 @@ function boundedArtifactBytes(kind: ArtifactKind, content: string): Buffer {
     truncateUtf8Buffer(bytes, contentLimit),
     marker
   ]);
+}
+
+function appendBoundedArtifactBytes(
+  artifact: ArtifactRecord,
+  current: Buffer,
+  incoming: Buffer
+): Buffer {
+  if (current.byteLength !== artifact.byteCount) {
+    throw new Error('Stored task artifact changed before append.');
+  }
+  if (incoming.byteLength === 0) return current;
+  const limit = ARTIFACT_BYTE_LIMITS[artifact.kind];
+  const marker = artifactTruncationMarker(artifact.kind, limit);
+  if (
+    current.byteLength >= marker.byteLength &&
+    current.subarray(current.byteLength - marker.byteLength).equals(marker)
+  ) {
+    return current;
+  }
+  const contentLimit = limit - marker.byteLength;
+  if (current.byteLength > contentLimit) {
+    throw new Error('Stored task artifact exceeds its appendable content budget.');
+  }
+  const available = contentLimit - current.byteLength;
+  const appended = incoming.byteLength <= available
+    ? incoming
+    : Buffer.concat([truncateUtf8Buffer(incoming, available), marker]);
+  return Buffer.concat([current, appended]);
 }
 
 function artifactTruncationMarker(kind: ArtifactKind, limit: number): Buffer {
@@ -6128,46 +5722,6 @@ function truncateUtf8Buffer(bytes: Buffer, maxBytes: number): Buffer {
   throw new Error('Task artifact content is not valid UTF-8.');
 }
 
-async function writeAllAt(
-  handle: Awaited<ReturnType<typeof fs.open>>,
-  bytes: Buffer,
-  position: number
-): Promise<void> {
-  let written = 0;
-  while (written < bytes.byteLength) {
-    const result = await handle.write(
-      bytes,
-      written,
-      bytes.byteLength - written,
-      position + written
-    );
-    if (result.bytesWritten <= 0) {
-      throw new Error('Task artifact write made no progress.');
-    }
-    written += result.bytesWritten;
-  }
-}
-
-async function readAllAt(
-  handle: Awaited<ReturnType<typeof fs.open>>,
-  bytes: Buffer,
-  position: number
-): Promise<void> {
-  let read = 0;
-  while (read < bytes.byteLength) {
-    const result = await handle.read(
-      bytes,
-      read,
-      bytes.byteLength - read,
-      position + read
-    );
-    if (result.bytesRead <= 0) {
-      throw new Error('Task artifact changed while it was being read.');
-    }
-    read += result.bytesRead;
-  }
-}
-
 async function readPrivateArtifactFile(
   filePath: string,
   expectedByteCount: number
@@ -6182,7 +5736,7 @@ async function readPrivateArtifactFile(
     throw new Error('Stored task artifact is not a regular file.');
   }
   assertArtifactOwnedByCurrentUser(before);
-  assertArtifactPrivateMode(before, 0o600);
+  assertArtifactPrivateMode(before, 0o400);
   let handle: Awaited<ReturnType<typeof fs.open>>;
   try {
     handle = await fs.open(
@@ -6203,7 +5757,7 @@ async function readPrivateArtifactFile(
       throw new Error('Stored task artifact changed during read.');
     }
     assertArtifactOwnedByCurrentUser(stat);
-    assertArtifactPrivateMode(stat, 0o600);
+    assertArtifactPrivateMode(stat, 0o400);
     const bytes = await handle.readFile();
     if (bytes.byteLength !== stat.size) {
       throw new Error('Stored task artifact changed while it was being read.');
@@ -6211,55 +5765,6 @@ async function readPrivateArtifactFile(
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } finally {
     await handle.close();
-  }
-}
-
-async function appendManagedArtifactFile(
-  filePath: string,
-  content: string | Buffer
-): Promise<void> {
-  const handle = await openManagedArtifactFile(
-    filePath,
-    fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT,
-    0o600
-  );
-  try {
-    await handle.writeFile(content);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function openManagedArtifactFile(
-  filePath: string,
-  flags: number,
-  mode?: number
-): Promise<Awaited<ReturnType<typeof fs.open>>> {
-  let handle: Awaited<ReturnType<typeof fs.open>>;
-  try {
-    handle = await fs.open(
-      filePath,
-      flags | (fsConstants.O_NOFOLLOW ?? 0),
-      mode
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
-    throw new Error('Stored task artifact could not be opened safely.', { cause: error });
-  }
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) {
-      throw new Error('Stored task artifact is not a regular file.');
-    }
-    assertArtifactOwnedByCurrentUser(stat);
-    if (!posixModeMatches(stat, 0o600)) {
-      await enforcePosixMode(handle, 0o600);
-    }
-    assertArtifactPrivateMode(await handle.stat(), 0o600);
-    return handle;
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    throw error;
   }
 }
 
@@ -6280,14 +5785,6 @@ function assertArtifactPrivateMode(
   }
 }
 
-function sameFileIdentity(
-  left: { dev: number | bigint; ino: number | bigint },
-  right: { dev: number | bigint; ino: number | bigint }
-): boolean {
-  if (left.dev !== right.dev) return false;
-  return left.ino === 0 || right.ino === 0 || left.ino === right.ino;
-}
-
 function sameAbsolutePath(left: string, right: string): boolean {
   return path.isAbsolute(left) && path.isAbsolute(right) && path.relative(left, right) === '';
 }
@@ -6305,81 +5802,9 @@ function isSafeDesignProjectPath(value: string): boolean {
   );
 }
 
-function requireCurrentState(value: unknown): StoreState {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(
-      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid.`
-    );
-  }
-  const state = value as Record<string, unknown>;
-  if (state.schemaVersion !== TASK_STORE_SCHEMA_VERSION) {
-    throw new Error(
-      `Unsupported Task Monki store schema ${String(state.schemaVersion)}. ` +
-        `This build accepts only schema ${TASK_STORE_SCHEMA_VERSION}.`
-    );
-  }
-  for (const key of TASK_RUNTIME_PROJECTION_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(state, key)) {
-      throw new Error(
-        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} belongs to the agent runtime store.`
-      );
-    }
-  }
-  if (
-    Array.isArray(state.artifacts) &&
-    state.artifacts.some((artifact) => {
-      if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
-        return false;
-      }
-      const kind = (artifact as Record<string, unknown>).kind;
-      return (
-        typeof kind === 'string' &&
-        TASK_RUNTIME_ARTIFACT_KINDS.has(kind as ArtifactKind)
-      );
-    })
-  ) {
-    throw new Error(
-      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: agent artifacts belong to the agent runtime store.`
-    );
-  }
-  const requiredCollections: Array<Exclude<keyof PersistedTaskState, 'schemaVersion'>> = [
-    'repositories',
-    'boards',
-    'tasks',
-    'designTurns',
-    'designReferences',
-    'designRevisions',
-    'designSourceActions',
-    'iterations',
-    'worktrees',
-    'gitSnapshots',
-    'githubRepositories',
-    'branchPublications',
-    'pullRequests',
-    'ciRollups',
-    'reviewRollups',
-    'mergeSnapshots',
-    'previewPlans',
-    'previewApprovals',
-    'previewComposeProjects',
-    'previewGenerations',
-    'previewManagedEnvironments',
-    'previewManagedResources',
-    'previewGenerationAttachments',
-    'previewLocalBindings',
-    'previewNodeAttempts',
-    'previewResources',
-    'events',
-    'artifacts',
-    'attachments'
-  ];
-  for (const key of requiredCollections) {
-    if (!Array.isArray(state[key])) {
-      throw new Error(`Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} is missing.`);
-    }
-  }
-  const current: StoreState = {
-    ...(state as PersistedTaskState),
+function withEmptyTaskRuntimeProjection(state: PersistedTaskState): StoreState {
+  return {
+    ...state,
     runs: [],
     agentServers: [],
     agentSessions: [],
@@ -6391,6 +5816,9 @@ function requireCurrentState(value: unknown): StoreState {
     agentSubagentObservations: [],
     interactionRequests: []
   };
+}
+
+function validateLoadedTaskState(current: StoreState): void {
   validateCurrentStoreRecords(current);
   validatePersistedRelationships(current);
   validatePersistedDesignRelationships(current);
@@ -6399,7 +5827,6 @@ function requireCurrentState(value: unknown): StoreState {
   validatePersistedBoards(current);
   validatePersistedTaskCreationMetadata(current);
   validatePersistedAttachments(current);
-  return current;
 }
 
 function validatePersistedRelationships(state: StoreState): void {
@@ -7758,16 +7185,6 @@ function eventBelongsToDeletedTask(
     return true;
   }
   return false;
-}
-
-async function unlinkIfExists(filePath: string): Promise<void> {
-  try {
-    await fs.unlink(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
 }
 
 function clone<T>(value: T): T {

@@ -1,9 +1,6 @@
 import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
-import { AppSettingsStore } from '../core/settings/AppSettingsStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import {
   createDevApiTokenLease,
   DEFAULT_DEV_API_PORT,
@@ -30,85 +27,16 @@ const rendererPort = parseDevPort(
 );
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
 const defaultDevDataDir = path.join(process.cwd(), '.local', 'task-monki-dev');
-const storeDir =
-  process.env.TASK_MANAGER_STORE_DIR ?? path.join(defaultDevDataDir, 'dev-store');
-const appSettingsPath =
-  process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
+const profileRoot =
+  process.env.TASK_MANAGER_PROFILE_ROOT ?? path.join(defaultDevDataDir, 'profile');
 const previewRoot =
-  process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(storeDir, 'preview-runtime');
-const agentRuntimeDir =
-  process.env.TASK_MANAGER_AGENT_RUNTIME_DIR ?? path.join(storeDir, 'agent-runtime');
-const discourseDir =
-  process.env.TASK_MANAGER_DISCOURSE_DIR ?? path.join(storeDir, 'discourse');
+  process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(defaultDevDataDir, 'preview-runtime');
 const discourseWorkspaceRoot =
   process.env.TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT ??
-  path.join(storeDir, 'discourse-workspaces');
-const designRepositoryRoot = process.env.TASK_MANAGER_DESIGN_REPOSITORY_ROOT;
-const designWorktreeRoot = process.env.TASK_MANAGER_DESIGN_WORKTREE_ROOT;
-const designDraftRoot = process.env.TASK_MANAGER_DESIGN_DRAFT_ROOT;
+  path.join(defaultDevDataDir, 'discourse-workspaces');
+const deterministicSeedMode = process.env.TASK_MANAGER_DEV_SEED_MODE === '1';
 const agentProviderStartupDisabledReason =
   deterministicDevSeedProviderDisabledReason(process.env);
-const taskStore = new FileTaskStore(storeDir);
-
-const service = new TaskManagerService(
-  taskStore,
-  defaultRepositoryPath,
-  undefined,
-  {
-    appSettingsStore: new AppSettingsStore(appSettingsPath),
-    previewEnabled: true,
-    previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
-    // A same-user provider process can read ordinary filesystem secrets. Keep
-    // the browser-only HTTP development surface unreachable from agent commands
-    // by requiring non-escalatable, network-disabled turns. Startup also makes
-    // unsafe persisted runs terminal before Codex initialization/recovery;
-    // external tools are forced off with fail-closed MCP discovery. Packaged
-    // Electron uses guarded IPC and does not enable this restriction.
-    allowAgentNetworkAccess: false,
-    agentProviderStartupDisabledReason,
-    agentRuntimeStore: new FileAgentRuntimeStore(
-      agentRuntimeDir
-    ),
-    discourseStore: new FileDiscourseStore(
-      discourseDir
-    ),
-    discourseWorkspaceRoot,
-    designSkillRoot: path.join(process.cwd(), 'resources', 'design-skills'),
-    ...(designRepositoryRoot && designWorktreeRoot && designDraftRoot
-      ? {
-          designRepositoryRoot,
-          designWorktreeRoot,
-          designDraftRoot,
-          designBrowserRuntime: {
-            async attest() {},
-            async recover() {},
-            async openCandidate() {
-              throw new Error('The deterministic Design seed does not start browser automation.');
-            },
-            async inspect() {
-              throw new Error('The deterministic Design seed does not start browser automation.');
-            },
-            abortRun() {},
-            async closeRun() {},
-            async shutdown() {}
-          },
-          designCanvasFence: {
-            async begin() {
-              return {
-                async commit() {},
-                async rollback() {}
-              };
-            }
-          }
-        }
-      : {}),
-    previewRoot,
-    previewLauncherPath: path.join(
-      process.cwd(),
-      'src/core/preview/runtime/native-preview-launcher.mjs'
-    )
-  }
-);
 const security = {
   token: '',
   expectedHost: devApiExpectedHost(port),
@@ -117,9 +45,71 @@ const security = {
 
 let devServer: DevHttpServer | undefined;
 let tokenLease: DevApiTokenLease | undefined;
+let persistence: ApplicationPersistence | undefined;
+let service: TaskManagerService | undefined;
 const lifecycle = new DevProcessLifecycle();
 
 async function start(): Promise<void> {
+  persistence = await ApplicationPersistence.open({
+    profileRoot,
+    appVersion: process.env.npm_package_version ?? 'development'
+  });
+  service = new TaskManagerService(
+    persistence.tasks,
+    defaultRepositoryPath,
+    undefined,
+    {
+      appSettingsStore: persistence.settings,
+      previewEnabled: true,
+      previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
+      // A same-user provider process can read ordinary filesystem secrets. Keep
+      // the browser-only HTTP development surface unreachable from agent commands
+      // by requiring non-escalatable, network-disabled turns. Startup also makes
+      // unsafe persisted runs terminal before provider initialization/recovery;
+      // external tools are forced off with fail-closed discovery. Packaged
+      // Electron uses guarded IPC and does not enable this restriction.
+      allowAgentNetworkAccess: false,
+      agentProviderStartupDisabledReason,
+      agentRuntimeStore: persistence.agentRuntime,
+      taskRuntimeAccess: persistence.taskRuntime,
+      discourseStore: persistence.discourse,
+      discourseWorkspaceRoot,
+      designSkillRoot: path.join(process.cwd(), 'resources', 'design-skills'),
+      ...(deterministicSeedMode
+        ? {
+            designRepositoryRoot: persistence.paths.designRepositoryRoot,
+            designWorktreeRoot: persistence.paths.designWorktreeRoot,
+            designDraftStore: persistence.designDrafts,
+            designBrowserRuntime: {
+              async attest() {},
+              async recover() {},
+              async openCandidate() {
+                throw new Error('The deterministic Design seed does not start browser automation.');
+              },
+              async inspect() {
+                throw new Error('The deterministic Design seed does not start browser automation.');
+              },
+              abortRun() {},
+              async closeRun() {},
+              async shutdown() {}
+            },
+            designCanvasFence: {
+              async begin() {
+                return {
+                  async commit() {},
+                  async rollback() {}
+                };
+              }
+            }
+          }
+        : {}),
+      previewRoot,
+      previewLauncherPath: path.join(
+        process.cwd(),
+        'src/core/preview/runtime/native-preview-launcher.mjs'
+      )
+    }
+  );
   await service.init();
   if (lifecycle.isStopping) {
     return;
@@ -141,7 +131,7 @@ async function start(): Promise<void> {
 
   console.log(`Task Monki dev API listening on http://${security.expectedHost}`);
   console.log(`Renderer origin: ${security.expectedOrigin}`);
-  console.log(`Store: ${storeDir}`);
+  console.log(`Profile: ${profileRoot}`);
   console.log(`Default repository: ${defaultRepositoryPath}`);
   if (agentProviderStartupDisabledReason) {
     console.log(`Agent provider: ${agentProviderStartupDisabledReason}`);
@@ -160,7 +150,14 @@ async function cleanupResources(): Promise<void> {
   devServer = undefined;
   tokenLease = undefined;
   const cleanupErrors: unknown[] = [];
-  const serviceCleanup = attemptCleanup(() => service.shutdown(), cleanupErrors);
+  const activeService = service;
+  const activePersistence = persistence;
+  service = undefined;
+  persistence = undefined;
+  const serviceCleanup = attemptCleanup(
+    () => activeService?.shutdown(),
+    cleanupErrors
+  );
 
   await attemptCleanup(() => activeTokenLease?.dispose(), cleanupErrors);
   if (activeServer) {
@@ -169,6 +166,7 @@ async function cleanupResources(): Promise<void> {
     await attemptCleanup(() => activeServer.dispose(), cleanupErrors);
   }
   await serviceCleanup;
+  await attemptCleanup(() => activePersistence?.close(), cleanupErrors);
 
   if (cleanupErrors.length > 0) {
     throw cleanupErrors[0];

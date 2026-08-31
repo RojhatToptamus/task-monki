@@ -23,9 +23,11 @@ import {
 import { AgentRuntimeArtifactMutationAmbiguousError } from '../AgentRuntimeStore';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AppEventBus } from '../../runner/AppEventBus';
-import { FileTaskStore } from '../../storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
+import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
 import {
   CodexAppServerAdapter,
   type CodexAppServerAdapterOptions
@@ -48,9 +50,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const workspacePath = path.join(dir, 'read-only-workspace');
     await fs.mkdir(workspacePath, { mode: 0o700 });
     const workspace = await fs.realpath(workspacePath);
-    const store = new FileTaskStore(path.join(dir, 'task-store'));
-    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    await runtime.init();
+    const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
+    const store = persistence.tasks;
+    const runtime = persistence.agentRuntime;
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -235,7 +237,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     } finally {
       unsubscribe();
       await adapter.shutdown();
-      await runtime.close();
+      await closeCodexPersistenceForTaskStore(store);
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
@@ -262,9 +264,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path: attachmentPath,
       verifiedAt: new Date().toISOString()
     };
-    const store = new FileTaskStore(path.join(dir, 'task-store'));
-    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    await runtime.init();
+    const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
+    const store = persistence.tasks;
+    const runtime = persistence.agentRuntime;
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -374,7 +376,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       expect(outbound.map((message) => message.method)).not.toContain('turn/start');
     } finally {
       await adapter.shutdown();
-      await runtime.close();
+      await closeCodexPersistenceForTaskStore(store);
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
@@ -403,9 +405,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const workspacePath = path.join(dir, 'read-only-workspace');
     await fs.mkdir(workspacePath, { mode: 0o700 });
     const workspace = await fs.realpath(workspacePath);
-    const store = new FileTaskStore(path.join(dir, 'task-store'));
-    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    await runtime.init();
+    const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
+    const store = persistence.tasks;
+    const runtime = persistence.agentRuntime;
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -606,7 +608,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       );
     } finally {
       await adapter.shutdown();
-      await runtime.close();
+      await closeCodexPersistenceForTaskStore(store);
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
@@ -659,9 +661,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const workspacePath = path.join(dir, 'read-only-workspace');
     await fs.mkdir(workspacePath, { mode: 0o700 });
     const workspace = await fs.realpath(workspacePath);
-    const store = new FileTaskStore(path.join(dir, 'task-store'));
-    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    await runtime.init();
+    const persistence = await openCodexPersistence(path.join(dir, 'persistence'));
+    const store = persistence.tasks;
+    const runtime = persistence.agentRuntime;
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -782,14 +784,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     } finally {
       terminate?.mockRestore();
       await orchestrator.shutdown();
-      await runtime.close();
+      await closeCodexPersistenceForTaskStore(store);
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('can initialize again after a confirmed idle shutdown', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-reenable-'));
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -821,7 +823,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('does not report ready when the live Codex model catalog is empty', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-empty-models-'));
     const executable = await writeFakeCodexExecutable(dir, 'empty-models');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -854,7 +856,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-app-server-model-provider-')
     );
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -914,7 +916,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     const executable = await writeFakeCodexExecutable(dir);
     const adapter = createCodexAdapter(
-      new FileTaskStore(path.join(dir, 'store')),
+      await openCodexTaskStore(path.join(dir, 'store')),
       new AppEventBus(),
       {
         cwd: dir,
@@ -947,7 +949,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('replaces a one-way supervisor for an explicit safe runtime restart', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-restart-'));
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -985,7 +987,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const worktreePath = path.join(dir, 'worktree');
     await fs.mkdir(worktreePath);
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -1054,7 +1056,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-skills-app-server-'));
     const executable = await writeFakeCodexExecutable(dir);
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -1137,7 +1139,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-browser-tool-'));
     const executable = await writeFakeCodexExecutable(dir, 'design-browser');
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -1220,7 +1222,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-reference-scope-'));
     const executable = await writeFakeCodexExecutable(dir, 'profile-rebind');
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -1325,7 +1327,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-image-turns-'));
     const executable = await writeFakeCodexExecutable(dir, 'profile-rebind');
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -1394,7 +1396,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('releases task-owned permission profile state without deleting provider history', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-release-task-'));
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
@@ -1452,7 +1454,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       );
     } finally {
       await adapter.shutdown();
-      await store.close();
+      await closeCodexPersistenceForTaskStore(store);
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
@@ -1460,7 +1462,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('deletes the complete stored Design thread tree from children to root', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-delete-design-'));
     const executable = await writeFakeCodexExecutable(dir, 'design-delete');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createDesignTaskContext(store, dir);
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: worktree.worktreePath,
@@ -1505,7 +1507,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       );
     } finally {
       await adapter.shutdown();
-      await store.close();
+      await closeCodexPersistenceForTaskStore(store);
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
@@ -1513,7 +1515,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('keeps normal Codex work available when the Design skill pack is missing', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-design-skills-'));
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -1550,7 +1552,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-'));
     const executable = await writeFakeCodexExecutable(dir);
 
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const appendArtifact = vi.spyOn(runtimeForTaskStore(store), 'appendArtifact');
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
@@ -1842,7 +1844,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('redacts Codex telemetry before normalized records and output artifacts are persisted', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-redaction-'));
     const executable = await writeFakeCodexExecutable(dir, 'credential-telemetry');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -1928,7 +1930,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
   it('restores a failed output batch ahead of deltas appended during persistence', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-output-buffer-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const adapter = createCodexAdapter(store, new AppEventBus(), {
       cwd: dir,
       environment: {
@@ -2000,7 +2002,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(output).toContain('[REDACTED] after');
     expect(output).not.toContain('opaque-provider-credential-1742');
     expect(appendAttempts).toBe(2);
-    await store.close();
+    await closeCodexPersistenceForTaskStore(store);
   });
 
   it('redacts unresolved credential prefixes at source and terminal boundaries', async () => {
@@ -2027,7 +2029,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const output = await runtimeForTaskStore(store).readArtifact(run.outputArtifactId);
     expect(output.match(/\[REDACTED\]/gu)).toHaveLength(2);
     expect(output).not.toContain('opaque-provider-');
-    await store.close();
+    await closeCodexPersistenceForTaskStore(store);
   });
 
   it('redacts a complete self-overlapping credential before selecting carry', async () => {
@@ -2046,7 +2048,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const output = await runtimeForTaskStore(store).readArtifact(run.outputArtifactId);
     expect(output).toContain('\n[output]\n[REDACTED]');
     expect(output).not.toContain('\n[output]\na[REDACTED]');
-    await store.close();
+    await closeCodexPersistenceForTaskStore(store);
   });
 
   it('does not retry an output append whose durable file state is ambiguous', async () => {
@@ -2079,7 +2081,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await expect(adapter.preflight()).resolves.toMatchObject({
       readiness: { status: 'FAILED', canStart: false }
     });
-    await store.close();
+    await closeCodexPersistenceForTaskStore(store);
   });
 
   it('bounds output append retries and fences repeated persistence failure', async () => {
@@ -2109,7 +2111,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await expect(adapter.preflight()).resolves.toMatchObject({
       readiness: { status: 'FAILED', canStart: false }
     });
-    await store.close();
+    await closeCodexPersistenceForTaskStore(store);
   });
 
   it('publishes exactly one terminal outcome when local and provider settlement race', async () => {
@@ -2173,7 +2175,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       )
     ).toHaveLength(1);
     expect(terminalEvents).toHaveLength(1);
-    await store.close();
+    await closeCodexPersistenceForTaskStore(store);
   });
 
   it('does not let stale reconciliation overwrite a terminal settlement', async () => {
@@ -2240,115 +2242,15 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       )
     ).toHaveLength(0);
     expect(terminalEvents).toHaveLength(1);
-    await store.close();
+    await closeCodexPersistenceForTaskStore(store);
   });
-
-  it('reconciles a terminal notification after one materialization failure without replaying the prompt', async () => {
-    const dir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-terminal-materialization-recovery-')
-    );
-    const executable = await writeFakeCodexExecutable(
-      dir,
-      'recovery-notification-echo'
-    );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const events = new AppEventBus();
-    const adapter = createCodexAdapter(store, events, {
-      cwd: dir,
-      executable,
-      requestTimeoutMs: 2_000,
-      restartDelaysMs: []
-    });
-    const orchestrator = createAgentOrchestrator(store, events, adapter);
-    await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir);
-    const recordAgentRuntimeEvent = store.recordAgentRuntimeEvent.bind(store);
-    const runtime = runtimeForTaskStore(store);
-    const updateAgentSession = runtime.updateSession.bind(runtime);
-    let rejectedTerminalEvent = false;
-    let rejectedRecoveryEcho = false;
-    vi.spyOn(store, 'recordAgentRuntimeEvent').mockImplementation(async (
-      event,
-      operationId
-    ) => {
-      if (!rejectedTerminalEvent && event.type === 'AGENT_RUN_COMPLETED') {
-        rejectedTerminalEvent = true;
-        throw new Error('injected terminal event persistence failure');
-      }
-      return recordAgentRuntimeEvent(event, operationId);
-    });
-    vi.spyOn(runtime, 'updateSession').mockImplementation(async (
-      sessionId,
-      expectedRevision,
-      update,
-      operationId
-    ) => {
-      if (
-        rejectedTerminalEvent &&
-        !rejectedRecoveryEcho &&
-        update.status === 'IDLE' &&
-        update.materialized === true &&
-        update.observedSettings === undefined
-      ) {
-        rejectedRecoveryEcho = true;
-        throw new Error('injected recovery notification echo persistence failure');
-      }
-      return updateAgentSession(sessionId, expectedRevision, update, operationId);
-    });
-
-    const terminal = waitForAppEvent(events, 'run.terminal');
-    const run = await orchestrator.startTurn({
-      task,
-      iteration,
-      worktree,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt,
-      settings: task.agentSettings
-    });
-    await terminal;
-    const completed = await waitForRunStatus(store, run.id, 'COMPLETED');
-    await waitForSnapshot(
-      store,
-      () => rejectedRecoveryEcho,
-      'recovery notification echo failure'
-    );
-    const snapshot = await store.snapshot();
-    const server = snapshot.agentServers.find(
-      (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
-    )!;
-    const outbound = readOutboundMessages(
-      await fs.readFile(server.protocolJournalPath, 'utf8')
-    );
-
-    expect(rejectedTerminalEvent).toBe(true);
-    expect(rejectedRecoveryEcho).toBe(true);
-    expect(completed.providerTerminalSource).toBe('RECOVERY_RESUME_RESPONSE');
-    expect(
-      snapshot.artifacts.filter(
-        (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
-      )
-    ).toHaveLength(1);
-    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
-    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(1);
-    expect(adapter.getProviderState().preflight).toMatchObject({
-      readiness: {
-        status: 'DEGRADED',
-        canStart: true,
-        diagnostics: expect.arrayContaining([
-          expect.objectContaining({ code: 'EVENT_MATERIALIZATION_FAILED' })
-        ])
-      }
-    });
-
-    await orchestrator.shutdown();
-  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('fences the App Server when terminal materialization cannot be reconciled durably', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-terminal-materialization-fence-')
     );
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -2436,7 +2338,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-empty-thread-restart-')
     );
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const firstAdapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -2519,7 +2421,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-first-turn-pre-submit-failure-')
     );
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -2620,7 +2522,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'turn-start-rejected-once'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -2691,7 +2593,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'turn-start-rejected-with-evidence'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -2745,7 +2647,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'turn-start-rejected-with-evidence'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -2830,7 +2732,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'turn-start-ambiguous-late'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -2927,7 +2829,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-first-turn-profile-drift-')
     );
     const executable = await writeFakeCodexExecutable(dir);
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3041,7 +2943,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-post-ack-persistence-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'ack-only');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3153,7 +3055,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-thread-start-post-ack-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'ack-only');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3221,7 +3123,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-thread-start-profile-mismatch-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'profile-mismatch-create');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3263,7 +3165,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('submits one typed approval response and waits for server resolution', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-'));
     const executable = await writeFakeCodexExecutable(dir, 'approval');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3347,7 +3249,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('answers a typed mid-turn question once and resumes the same Codex run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-user-input-'));
     const executable = await writeFakeCodexExecutable(dir, 'user-input');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3460,7 +3362,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('clears a canceled typed question without accepting a late answer', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-user-input-clear-'));
     const executable = await writeFakeCodexExecutable(dir, 'user-input-clear');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3530,7 +3432,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-user-input-ambiguous-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'user-input');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3600,7 +3502,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-user-input-answer-exit-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'user-input-answer-exit');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3666,7 +3568,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('aborts a pending typed question when the Codex runtime disconnects', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-user-input-exit-'));
     const executable = await writeFakeCodexExecutable(dir, 'user-input-exit');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3718,7 +3620,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('does not offer a retry after approval-response delivery becomes ambiguous', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-ambiguous-'));
     const executable = await writeFakeCodexExecutable(dir, 'approval');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3776,7 +3678,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('settles active ownership when shutdown reports a failure after process exit', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-shutdown-'));
     const executable = await writeFakeCodexExecutable(dir, 'approval');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -3831,7 +3733,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-recovered-approval-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'recovery-approval');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const priorServer = await createTestAgentServer(store, {
       runtimeId: 'codex',
@@ -3935,13 +3837,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect((await store.getInteractionRequest(interaction.id))?.status).toBe('RESOLVED');
 
     await orchestrator.shutdown();
-    await store.close();
-    const reloaded = new FileTaskStore(path.join(dir, 'store'));
-    reloaded.bindAgentRuntime(
-      runtimeForTaskStore(store).taskAgentRuntimeAccess((event, operationId) =>
-        reloaded.recordAgentRuntimeEvent(event, operationId)
-      )
-    );
+    await closeCodexPersistenceForTaskStore(store);
+    const reloaded = await openCodexTaskStore(path.join(dir, 'store'));
     await expect(reloaded.getRun(run.id)).resolves.toMatchObject({
       status: 'COMPLETED',
       serverInstanceId: interaction.serverInstanceId
@@ -3952,7 +3849,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       status: 'ABORTED_SERVER_LOST',
       serverInstanceId: priorServer.id
     });
-    await reloaded.close();
+    await closeCodexPersistenceForTaskStore(reloaded);
   });
 
   it('adopts and interrupts a goal continuation started by recovery resume', async () => {
@@ -3963,7 +3860,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'recovery-goal-continuation'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const priorServer = await createTestAgentServer(store, {
       runtimeId: 'codex',
@@ -4052,7 +3949,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-recovered-user-input-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'recovery-user-input');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const priorServer = await createTestAgentServer(store, {
       runtimeId: 'codex',
@@ -4188,7 +4085,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-stale-codex-generation-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'stale-generation');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4325,7 +4222,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-codex-generation-drain-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'exit');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4438,7 +4335,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('redacts and declines redundant attachment path permission requests', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-permission-ref-'));
     const executable = await writeFakeCodexExecutable(dir, 'permission');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4503,7 +4400,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('aborts pending approvals when the owning App Server exits', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-loss-'));
     const executable = await writeFakeCodexExecutable(dir, 'exit');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4546,7 +4443,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('marks a request stale when App Server clears it before a response', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-stale-'));
     const executable = await writeFakeCodexExecutable(dir, 'clear');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4586,7 +4483,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   it('discovers child sessions and correlates child-origin approvals', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-'));
     const executable = await writeFakeCodexExecutable(dir, 'subagent');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4677,7 +4574,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-live-settings-boundary-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'unsafe-live-settings');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const runtime = runtimeForTaskStore(store);
     const updateAgentSession = runtime.updateSession.bind(runtime);
     const updateAgentServer = runtime.updateAgentServer.bind(runtime);
@@ -4785,7 +4682,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-live-profile-boundary-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'profile-drift');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4828,7 +4725,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       path.join(os.tmpdir(), 'task-monki-recovery-response-boundary-')
     );
     const executable = await writeFakeCodexExecutable(dir, 'unsafe-recovery-resume');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const safeSettings = {
       ...task.agentSettings,
@@ -4891,7 +4788,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'interrupt-ambiguous-then-terminal'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4934,7 +4831,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'interrupt-ambiguous-no-terminal'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -4989,7 +4886,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       dir,
       'interrupt-ambiguous-no-terminal'
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
@@ -5047,41 +4944,54 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
   });
 });
 
-const runtimeByTaskStore = new WeakMap<FileTaskStore, FileAgentRuntimeStore>();
+const persistenceByTaskStore = new WeakMap<SqliteTaskStore, ApplicationPersistence>();
+
+async function openCodexPersistence(
+  profileRoot: string
+): Promise<ApplicationPersistence> {
+  const persistence = await openTestPersistence(profileRoot);
+  persistenceByTaskStore.set(persistence.tasks, persistence);
+  return persistence;
+}
+
+async function openCodexTaskStore(profileRoot: string): Promise<SqliteTaskStore> {
+  return (await openCodexPersistence(profileRoot)).tasks;
+}
+
+async function closeCodexPersistenceForTaskStore(
+  store: SqliteTaskStore
+): Promise<void> {
+  const persistence = persistenceByTaskStore.get(store);
+  if (!persistence) {
+    throw new Error('Codex test task store has no persistence owner.');
+  }
+  await persistence.close();
+}
 
 function runtimeForTaskStore(
-  store: FileTaskStore,
-  explicit?: FileAgentRuntimeStore
-): FileAgentRuntimeStore {
-  const current = runtimeByTaskStore.get(store);
-  if (current && explicit && current !== explicit) {
+  store: SqliteTaskStore,
+  explicit?: SqliteAgentRuntimeStore
+): SqliteAgentRuntimeStore {
+  const current = persistenceByTaskStore.get(store)?.agentRuntime;
+  if (!current) {
+    throw new Error('Codex test task store has no shared persistence runtime.');
+  }
+  if (explicit && current !== explicit) {
     throw new Error('Codex test task store is already bound to another runtime store.');
   }
-  const runtime = explicit ?? current ?? new FileAgentRuntimeStore(
-    path.join(os.tmpdir(), `task-monki-codex-runtime-${randomUUID()}`)
-  );
-  if (!current) {
-    const taskRuntime = runtime.taskAgentRuntimeAccess((event, operationId) =>
-      store.recordAgentRuntimeEvent(event, operationId)
-    );
-    store.bindAgentRuntime(taskRuntime);
-    runtimeByTaskStore.set(store, runtime);
-  }
-  return runtime;
+  return current;
 }
 
 function createCodexAdapter(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   events: AppEventBus,
-  options: CodexAppServerAdapterOptions & { runtimeStore?: FileAgentRuntimeStore }
+  options: CodexAppServerAdapterOptions & { runtimeStore?: SqliteAgentRuntimeStore }
 ): CodexAppServerAdapter {
   const { runtimeStore: explicitRuntime, ...adapterOptions } = options;
   const runtime = runtimeForTaskStore(store, explicitRuntime);
   return new CodexAppServerAdapter(
     store,
-    runtime.taskAgentRuntimeAccess((event, operationId) =>
-      store.recordAgentRuntimeEvent(event, operationId)
-    ),
+    taskRuntimeForTaskStore(store),
     runtime,
     events,
     adapterOptions
@@ -5089,7 +4999,7 @@ function createCodexAdapter(
 }
 
 function createAgentOrchestrator(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   events: AppEventBus,
   adapter: CodexAppServerAdapter,
   options?: ConstructorParameters<typeof AgentOrchestrator>[4]
@@ -5103,14 +5013,16 @@ function createAgentOrchestrator(
   );
 }
 
-function taskRuntimeForTaskStore(store: FileTaskStore) {
-  return runtimeForTaskStore(store).taskAgentRuntimeAccess((event, operationId) =>
-    store.recordAgentRuntimeEvent(event, operationId)
-  );
+function taskRuntimeForTaskStore(store: SqliteTaskStore) {
+  const taskRuntime = persistenceByTaskStore.get(store)?.taskRuntime;
+  if (!taskRuntime) {
+    throw new Error('Codex test task store has no shared Task runtime facade.');
+  }
+  return taskRuntime;
 }
 
 async function createTestAgentSession(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: {
     task: Task;
     iteration: TaskIteration;
@@ -5172,7 +5084,7 @@ async function createTestAgentSession(
 }
 
 async function updateTestAgentSession(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   sessionId: string,
   update: Partial<AgentSessionRecord>
 ): Promise<AgentSessionRecord> {
@@ -5184,7 +5096,7 @@ async function updateTestAgentSession(
 }
 
 async function createTestRun(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: {
     task: Task;
     session: AgentSessionRecord;
@@ -5224,7 +5136,7 @@ async function createTestRun(
 }
 
 async function updateTestRun(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   runId: string,
   update: Partial<RunRecord>
 ): Promise<RunRecord> {
@@ -5245,29 +5157,29 @@ async function updateTestRun(
 }
 
 function createTestAgentServer(
-  store: FileTaskStore,
-  input: Parameters<FileAgentRuntimeStore['createAgentServer']>[0]
+  store: SqliteTaskStore,
+  input: Parameters<SqliteAgentRuntimeStore['createAgentServer']>[0]
 ) {
   return runtimeForTaskStore(store).createAgentServer(input);
 }
 
 function updateTestAgentServer(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   serverId: string,
-  update: Parameters<FileAgentRuntimeStore['updateAgentServer']>[1]
+  update: Parameters<SqliteAgentRuntimeStore['updateAgentServer']>[1]
 ) {
   return runtimeForTaskStore(store).updateAgentServer(serverId, update);
 }
 
 function appendTestProtocolMessage(
-  store: FileTaskStore,
-  ...input: Parameters<FileAgentRuntimeStore['appendProtocolMessage']>
+  store: SqliteTaskStore,
+  ...input: Parameters<SqliteAgentRuntimeStore['appendProtocolMessage']>
 ) {
   return runtimeForTaskStore(store).appendProtocolMessage(...input);
 }
 
 async function createTaskContext(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   dir: string,
   options: { withTextAttachment?: boolean } = {}
 ) {
@@ -5321,7 +5233,7 @@ async function createTaskContext(
 }
 
 async function createDesignTaskContext(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   dir: string,
   options: {
     initialAttachment?: { displayName: string; body: string | Uint8Array };
@@ -5387,7 +5299,7 @@ async function createBufferedCodexRun(
   credential = 'opaque-provider-credential-1742'
 ) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), directoryPrefix));
-  const store = new FileTaskStore(path.join(dir, 'store'));
+  const store = await openCodexTaskStore(path.join(dir, 'store'));
   const events = new AppEventBus();
   const adapter = createCodexAdapter(store, events, {
     cwd: dir,
@@ -5420,7 +5332,7 @@ async function createBufferedCodexRun(
 }
 
 async function waitForInteraction(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   status: 'PENDING' | 'RESPONDING' | 'RESOLVED' | 'ABORTED_SERVER_LOST' | 'STALE',
   ownership: {
     runId?: string;
@@ -5457,7 +5369,7 @@ async function waitForInteraction(
 }
 
 async function waitForRunStatus(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   runId: string,
   status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'INTERRUPTED'
 ) {
@@ -5472,8 +5384,8 @@ async function waitForRunStatus(
 }
 
 async function waitForSnapshot(
-  store: FileTaskStore,
-  predicate: (snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>) => boolean,
+  store: SqliteTaskStore,
+  predicate: (snapshot: Awaited<ReturnType<SqliteTaskStore['snapshot']>>) => boolean,
   description: string
 ) {
   for (let attempt = 0; attempt < 1_000; attempt += 1) {
@@ -5487,7 +5399,7 @@ async function waitForSnapshot(
 }
 
 async function waitForAgentItem(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   runId: string,
   providerItemId: string
 ) {

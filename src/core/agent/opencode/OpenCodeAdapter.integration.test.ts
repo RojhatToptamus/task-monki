@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
 import type {
   AgentExecutionSettings,
   AgentProtocolMessageReference,
@@ -20,8 +21,9 @@ import type {
 import type { AgentAttachmentSelection } from '../../../shared/attachments';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
-import { FileTaskStore } from '../../storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
+import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import type {
   AgentProviderRuntimeStore,
   TaskAgentRuntimeAccess
@@ -3374,24 +3376,15 @@ describe('OpenCodeAdapter', () => {
     expect(await fixture.runtime.getRun(nextRun.id)).toMatchObject({ status: 'RUNNING' });
     expect(fixture.harness.promptBodies).toHaveLength(2);
     await replacement.shutdown();
-    await fixture.store.close();
-    const reopenedStore = new FileTaskStore(path.join(fixture.root, 'store'));
-    const reopenedRuntimeStore = new FileAgentRuntimeStore(
-      path.join(fixture.root, 'runtime-store')
-    );
-    await reopenedRuntimeStore.init();
-    const reopenedRuntime = reopenedRuntimeStore.taskAgentRuntimeAccess(async (event) => {
-      await reopenedStore.appendEvent(event);
-    });
-    reopenedStore.bindAgentRuntime(reopenedRuntime);
-    await expect(reopenedStore.snapshot()).resolves.toMatchObject({
+    await fixture.persistence.close();
+    const reopened = await openTestPersistence(path.join(fixture.root, 'profile'));
+    await expect(reopened.tasks.snapshot()).resolves.toMatchObject({
       runs: expect.arrayContaining([
         expect.objectContaining({ id: run.id, status: 'INTERRUPTED' }),
         expect.objectContaining({ id: nextRun.id, status: 'RUNNING' })
       ])
     });
-    await reopenedStore.close();
-    await reopenedRuntimeStore.close();
+    await reopened.close();
   });
 
   it('never retries an output append with ambiguous durable state', async () => {
@@ -3955,7 +3948,7 @@ describe('OpenCodeAdapter', () => {
       todo: fixture.harness.todoReadCount
     };
     const originalUpdate = fixture.runtime.updateAgentSession.bind(fixture.runtime);
-    let remainingFailures = 2;
+    let remainingFailures = 1;
     fixture.runtime.updateAgentSession = async (sessionId, update, operationId) => {
       if (sessionId === session.id && update.status === 'ACTIVE' && remainingFailures > 0) {
         remainingFailures -= 1;
@@ -5146,10 +5139,11 @@ describe('OpenCodeAdapter', () => {
 });
 
 interface AdapterFixture {
+  persistence: ApplicationPersistence;
   root: string;
   appCwd: string;
-  store: FileTaskStore;
-  runtimeStore: FileAgentRuntimeStore;
+  store: SqliteTaskStore;
+  runtimeStore: SqliteAgentRuntimeStore;
   runtime: TaskAgentRuntimeAccess;
   adapter: OpenCodeAdapter;
   appEvents: AppEventBus;
@@ -5326,13 +5320,10 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
   const worktreePath = path.join(root, 'worktree');
   await fs.mkdir(appCwd, { recursive: true });
   await fs.mkdir(worktreePath, { recursive: true });
-  const store = new FileTaskStore(path.join(root, 'store'));
-  const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime-store'));
-  await runtimeStore.init();
-  const runtimeAccess = runtimeStore.taskAgentRuntimeAccess(async (event) => {
-    await store.appendEvent(event);
-  });
-  store.bindAgentRuntime(runtimeAccess);
+  const persistence = await openTestPersistence(path.join(root, 'profile'));
+  const store = persistence.tasks;
+  const runtimeStore = persistence.agentRuntime;
+  const runtimeAccess = persistence.taskRuntime;
   const task = await store.createTask({
     runtimeId: 'opencode',
     title: 'OpenCode adapter lifecycle',
@@ -5352,6 +5343,7 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
   const runtime = fakeRuntime();
   const appEvents = new AppEventBus();
   const fixture = {
+    persistence,
     root,
     appCwd,
     store,

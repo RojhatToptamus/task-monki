@@ -1,5 +1,5 @@
 import type { AppEventBus } from '../runner/AppEventBus';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import type { TaskManagerAppSettings } from '../../shared/contracts';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import type {
@@ -22,7 +22,7 @@ export interface BuiltInAgentRuntimeOptions {
 }
 
 export function createBuiltInAgentRuntimes(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   taskRuntime: TaskAgentRuntimeAccess,
   runtimeStore: AgentRuntimeStore,
   events: AppEventBus,

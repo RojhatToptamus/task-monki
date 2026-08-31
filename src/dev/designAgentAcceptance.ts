@@ -16,7 +16,8 @@ import {
   resolveDesignBrowserRuntimePaths,
   resolveDesignBrowserSocketRoot
 } from '../core/design/AgentBrowserRuntimePath';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const POLL_MS = 250;
@@ -69,13 +70,18 @@ async function main(): Promise<void> {
     path.join(os.tmpdir(), 'task-monki-design-agent-acceptance-')
   );
   let service: TaskManagerService | undefined;
-  let store: FileTaskStore | undefined;
+  let store: SqliteTaskStore | undefined;
+  let persistence: ApplicationPersistence | undefined;
   const scenarios: ScenarioResult[] = [];
   let failure: unknown;
 
   try {
-    store = new FileTaskStore(path.join(root, 'store'));
-    service = createService(root, store);
+    persistence = await ApplicationPersistence.open({
+      profileRoot: path.join(root, 'profile'),
+      appVersion: 'design-agent-acceptance'
+    });
+    store = persistence.tasks;
+    service = createService(root, persistence);
     await service.init();
     const capabilities = await service.getAgentRuntimeCatalog();
     const codex = capabilities.runtimes.find(
@@ -287,6 +293,15 @@ async function main(): Promise<void> {
           : error;
       }
     }
+    if (persistence) {
+      try {
+        await persistence.close();
+      } catch (error) {
+        failure = failure
+          ? new AggregateError([failure, error], 'Acceptance run and persistence shutdown both failed.')
+          : error;
+      }
+    }
     if (failure && keepFailedRoot) {
       console.error(`[design-agent] Retained failed run at ${root}`);
     } else {
@@ -311,7 +326,10 @@ async function main(): Promise<void> {
   console.log(`[design-agent] ${JSON.stringify(report, null, 2)}`);
 }
 
-function createService(root: string, store: FileTaskStore): TaskManagerService {
+function createService(
+  root: string,
+  persistence: ApplicationPersistence
+): TaskManagerService {
   const packagedBrowserRoot = optionalText(
     process.env.TASK_MONKI_DESIGN_BROWSER_RUNTIME_ROOT
   );
@@ -333,11 +351,16 @@ function createService(root: string, store: FileTaskStore): TaskManagerService {
         appPath: process.cwd()
       });
   return new TaskManagerService(
-    store,
+    persistence.tasks,
     root,
     undefined,
     {
       agentCwd: root,
+      appSettingsStore: persistence.settings,
+      agentRuntimeStore: persistence.agentRuntime,
+      taskRuntimeAccess: persistence.taskRuntime,
+      discourseStore: persistence.discourse,
+      discourseWorkspaceRoot: path.join(root, 'discourse-workspaces'),
       worktreeRoot: path.join(root, 'normal-worktrees'),
       previewEnabled: true,
       previewReconcile: false,
@@ -348,9 +371,9 @@ function createService(root: string, store: FileTaskStore): TaskManagerService {
       managedDesignStaticServerPath: path.resolve(
         'src/core/preview/runtime/managed-design-static-server.mjs'
       ),
-      designRepositoryRoot: path.join(root, 'design-repositories'),
-      designWorktreeRoot: path.join(root, 'design-worktrees'),
-      designDraftRoot: path.join(root, 'design-drafts'),
+      designRepositoryRoot: persistence.paths.designRepositoryRoot,
+      designWorktreeRoot: persistence.paths.designWorktreeRoot,
+      designDraftStore: persistence.designDrafts,
       designSkillRoot: path.resolve('resources/design-skills'),
       designBrowserExecutablePath: browser.executablePath,
       designBrowserChromeExecutablePath: browser.browserExecutablePath,
@@ -371,7 +394,7 @@ function createService(root: string, store: FileTaskStore): TaskManagerService {
 
 async function createAndWait(
   service: TaskManagerService,
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: {
     name: string;
     brief: string;
@@ -401,7 +424,7 @@ async function createAndWait(
 
 async function submitAndWait(
   service: TaskManagerService,
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   designId: string,
   input: {
     name: string;
@@ -429,7 +452,7 @@ async function submitAndWait(
 
 async function waitAndInspect(
   service: TaskManagerService,
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   designId: string,
   input: {
     name: string;

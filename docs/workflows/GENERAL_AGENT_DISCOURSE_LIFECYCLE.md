@@ -23,9 +23,9 @@ turn, item, model, settings, tool, and usage events. Provider output is
 untrusted telemetry until Task Monki validates and persists it. Discourse does
 not create a hidden task, worktree, iteration, or task workflow transition.
 
-Curated conversation state lives in `FileDiscourseStore`. Owner-neutral
+Curated conversation state lives in `SqliteDiscourseStore`. Owner-neutral
 provider sessions, runs, queue entries, artifacts, diagnostics, and protocol
-journals live in `FileAgentRuntimeStore`. Their records link by opaque IDs.
+journals live in `SqliteAgentRuntimeStore`. Their records link by opaque IDs.
 Terminal provider output is durable in the runtime store before a curated agent
 message or structured review result is committed.
 

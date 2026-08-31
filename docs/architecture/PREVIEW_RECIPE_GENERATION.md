@@ -134,7 +134,7 @@ private input and typed recipient instead.
 ## Transient state and lifecycle
 
 Generation snapshots and drafts are main-process memory only. They are not
-stored in `FileTaskStore`, task snapshots, artifacts, logs, approval records,
+stored in `SqliteTaskStore`, task snapshots, artifacts, logs, approval records,
 or general provider history. Purpose-specific IPC sends only the current safe
 snapshot and reviewed YAML.
 

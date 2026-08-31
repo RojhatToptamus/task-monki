@@ -16,13 +16,14 @@ import type {
 } from '../agent/AgentOrchestrator';
 import type { PreviewManager } from '../preview/PreviewManager';
 import { AppEventBus } from '../runner/AppEventBus';
-import { FileTaskStore, type ManagedDesignRepositoryInput } from '../storage/FileTaskStore';
+import { SqliteTaskStore, type ManagedDesignRepositoryInput } from '../storage/SqliteTaskStore';
 import {
-  createScriptedAgentRuntimeFixture,
+  openScriptedTaskManagerPersistence,
   type ScriptedAgentRuntimeFixture
 } from '../../testSupport/taskMonkiScenario';
 import type { DesignSourceService } from './DesignSourceService';
 import { DesignUpdateCoordinator } from './DesignUpdateCoordinator';
+import type { ApplicationPersistence } from '../storage/sqlite/ApplicationPersistence';
 
 const COMMIT = 'a'.repeat(40);
 const harnesses: CoordinatorHarness[] = [];
@@ -30,8 +31,7 @@ const harnesses: CoordinatorHarness[] = [];
 afterEach(async () => {
   await Promise.allSettled(
     harnesses.splice(0).map(async (harness) => {
-      await harness.scriptedRuntime.runtimeStore.close();
-      await harness.store.close();
+      await harness.persistence.close();
       await fs.rm(harness.dir, { recursive: true, force: true });
     })
   );
@@ -467,7 +467,8 @@ describe('DesignUpdateCoordinator', () => {
 
 interface CoordinatorHarness {
   dir: string;
-  store: FileTaskStore;
+  persistence: ApplicationPersistence;
+  store: SqliteTaskStore;
   scriptedRuntime: ScriptedAgentRuntimeFixture;
   designId: string;
   coordinator: DesignUpdateCoordinator;
@@ -500,8 +501,11 @@ async function createHarness(
   } = {}
 ): Promise<CoordinatorHarness> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-coordinator-'));
-  const store = new FileTaskStore(dir);
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+  const opened = await openScriptedTaskManagerPersistence(
+    path.join(dir, 'profile')
+  );
+  const { persistence, store } = opened;
+  const scriptedRuntime = opened;
   const created = await store.createDesignBundle({
     request: {
       brief: 'Create a compact launch page.',
@@ -678,6 +682,7 @@ async function createHarness(
   });
   const harness = {
     dir,
+    persistence,
     store,
     scriptedRuntime,
     designId: task.id,
@@ -785,7 +790,7 @@ async function settleCurrentTurnReady(
 }
 
 async function cutoverCandidate(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: Parameters<PreviewManager['cutoverManagedDesignCandidate']>[0]
 ): Promise<PreviewGenerationRecord> {
   const stored = await store.getPreviewGeneration(input.generationId);
@@ -910,7 +915,7 @@ function managedRepository(dir: string): ManagedDesignRepositoryInput {
 }
 
 function recordGitSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   input: {
     taskId: string;
     iterationId: string;
@@ -949,7 +954,7 @@ function recordGitSnapshot(
 }
 
 function requireCurrentRun(
-  detail: Awaited<ReturnType<FileTaskStore['getDesignDetail']>>
+  detail: Awaited<ReturnType<SqliteTaskStore['getDesignDetail']>>
 ): RunRecord {
   if (!detail.currentRun) throw new Error('Expected a current Design Run.');
   return detail.currentRun;

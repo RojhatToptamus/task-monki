@@ -14,9 +14,9 @@ import {
   TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
-import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
 const scenarios = new TaskMonkiScenarioRegistry();
@@ -250,9 +250,13 @@ describe('TaskManagerService evidence flow', () => {
     await scenario.completeRun(run.id, 'The command was denied.');
     await failedCapture;
     await scenario.service.shutdown();
+    await scenario.persistence.close();
 
-    const reopenedStore = new FileTaskStore(path.join(scenario.rootDir, 'store'));
-    const recoveredRuntime = createScriptedAgentRuntimeFixture(reopenedStore);
+    const reopenedPersistence = await openTestPersistence(
+      scenario.persistence.paths.profileRoot
+    );
+    const reopenedStore = reopenedPersistence.tasks;
+    const recoveredRuntime = createScriptedAgentRuntimeFixture(reopenedPersistence);
     const recoveredService = new TaskManagerService(
       reopenedStore,
       scenario.repositoryPath,
@@ -262,18 +266,26 @@ describe('TaskManagerService evidence flow', () => {
         ...recoveredRuntime.serviceOptions
       }
     );
-    await recoveredService.init();
-    const recovered = await reopenedStore.snapshot();
-    const recoveredTask = recovered.tasks.find((candidate) => candidate.id === task.id);
-    const recoveredRun = recovered.runs.find((candidate) => candidate.id === run.id);
+    try {
+      await recoveredService.init();
+      const recovered = await reopenedStore.snapshot();
+      const recoveredTask = recovered.tasks.find(
+        (candidate) => candidate.id === task.id
+      );
+      const recoveredRun = recovered.runs.find(
+        (candidate) => candidate.id === run.id
+      );
 
-    expect(recoveredRun?.afterGitSnapshotId).toBeTruthy();
-    expect(recoveredTask?.workflowPhase).toBe('IN_PROGRESS');
-    expect(recoveredTask?.projection.implementationRetry).toMatchObject({
-      runId: run.id,
-      reason: expect.stringMatching(/declined.*no Git change/i)
-    });
-    await recoveredService.shutdown();
+      expect(recoveredRun?.afterGitSnapshotId).toBeTruthy();
+      expect(recoveredTask?.workflowPhase).toBe('IN_PROGRESS');
+      expect(recoveredTask?.projection.implementationRetry).toMatchObject({
+        runId: run.id,
+        reason: expect.stringMatching(/declined.*no Git change/i)
+      });
+    } finally {
+      await recoveredService.shutdown();
+      await reopenedPersistence.close();
+    }
   }, 15_000);
 
   it('reconciles missing post-run evidence before recording a merged GitHub refresh', async () => {

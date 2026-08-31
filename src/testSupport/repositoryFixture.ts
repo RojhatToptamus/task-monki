@@ -1,10 +1,10 @@
 import path from 'node:path';
 import type { Repository } from '../shared/contracts';
-import type { FileTaskStore } from '../core/storage/FileTaskStore';
+import type { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
 
 /** Registers repository identity for tests that do not exercise Git validation itself. */
 export async function addTestRepository(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   repositoryPath: string
 ): Promise<Repository> {
   const root = path.resolve(repositoryPath);
