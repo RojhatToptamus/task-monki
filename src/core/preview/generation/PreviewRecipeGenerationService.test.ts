@@ -130,6 +130,147 @@ describe('PreviewRecipeGenerationService', () => {
     await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
   });
 
+  it('keeps the last valid draft when regeneration is stopped', async () => {
+    const root = await previewWorktree();
+    let secondStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    let rejectSecond!: (error: Error) => void;
+    let callCount = 0;
+    const service = new PreviewRecipeGenerationService(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
+      }
+      const result = new Promise<string>((_resolve, reject) => {
+        rejectSecond = reject;
+      });
+      secondStarted();
+      return {
+        result,
+        cancel: async () => {
+          rejectSecond(new PreviewRecipeGenerationRunError('CANCELED', 'canceled'));
+        }
+      };
+    });
+
+    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
+    const regeneration = service.generate({ taskId: 'task-1', worktreePath: root });
+    await started;
+    const stopped = await service.discard('task-1');
+
+    expect(await regeneration).toEqual(stopped);
+    expect(stopped).toMatchObject({ status: 'READY', draft: { id: first.draft!.id } });
+    expect(service.validate('task-1', first.draft!.id, first.draft!.yaml)).toEqual({
+      status: 'VALID'
+    });
+  });
+
+  it('keeps the displayed draft and report from the same valid generation', async () => {
+    const root = await previewWorktree();
+    let callCount = 0;
+    const service = new PreviewRecipeGenerationService(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
+      }
+      const rejected = JSON.parse(agentDraft()) as {
+        yaml: string;
+        summary: string;
+      };
+      rejected.yaml = 'version: 1\nservices: {}\nroutes: {}\n';
+      rejected.summary = 'This report describes the rejected attempt.';
+      return {
+        result: Promise.resolve(JSON.stringify(rejected)),
+        cancel: async () => {}
+      };
+    });
+
+    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
+    const failed = await service.generate({ taskId: 'task-1', worktreePath: root });
+
+    expect(failed).toMatchObject({
+      status: 'FAILED',
+      draft: { id: first.draft!.id },
+      report: { summary: first.draft!.report.summary }
+    });
+    expect(failed.report?.summary).not.toBe(
+      'This report describes the rejected attempt.'
+    );
+  });
+
+  it('joins regeneration and removes the previous draft when its task is deleted', async () => {
+    const root = await previewWorktree();
+    let secondStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    let rejectSecond!: (error: Error) => void;
+    let callCount = 0;
+    const service = new PreviewRecipeGenerationService(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
+      }
+      const result = new Promise<string>((_resolve, reject) => {
+        rejectSecond = reject;
+      });
+      secondStarted();
+      return {
+        result,
+        cancel: async () => {
+          rejectSecond(new PreviewRecipeGenerationRunError('CANCELED', 'canceled'));
+        }
+      };
+    });
+
+    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
+    const regeneration = service.generate({ taskId: 'task-1', worktreePath: root });
+    await started;
+    await service.clearTask('task-1');
+
+    await expect(regeneration).resolves.toMatchObject({
+      status: 'READY',
+      draft: { id: first.draft!.id }
+    });
+    expect(service.get('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
+    expect(() => service.validate('task-1', first.draft!.id, first.draft!.yaml)).toThrow(
+      'no longer current'
+    );
+  });
+
+  it('does not remove an active evidence bundle during recovery cleanup', async () => {
+    const root = await previewWorktree();
+    const evidenceRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'preview-active-evidence-test-')
+    );
+    roots.push(evidenceRoot);
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const service = new PreviewRecipeGenerationService(async () => {
+      signalStarted();
+      await released;
+      return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
+    }, evidenceRoot);
+
+    const generation = service.generate({ taskId: 'task-1', worktreePath: root });
+    await started;
+    const [activeDirectory] = await fs.readdir(evidenceRoot);
+    await service.recoverEvidence();
+    expect(await fs.readdir(evidenceRoot)).toEqual([activeDirectory]);
+
+    release();
+    await expect(generation).resolves.toMatchObject({ status: 'READY' });
+    expect(await fs.readdir(evidenceRoot)).toEqual([]);
+  });
+
   it('returns a reviewable evidence report when the agent refuses to invent authority', async () => {
     const root = await previewWorktree();
     const service = new PreviewRecipeGenerationService(async () => ({

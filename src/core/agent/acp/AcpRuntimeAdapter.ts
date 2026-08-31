@@ -126,6 +126,7 @@ import {
   acpDesignSupport,
   acpImageInputSupport,
   acpModelInputModalities,
+  acpPreviewRecipeGenerationSupport,
   defaultAcpModel,
   type AcpRuntimeProfile
 } from './AcpRuntimeProfiles';
@@ -186,7 +187,7 @@ const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
   'RECOVERY_REQUIRED'
 ];
 const INTERRUPT_COMPLETION_TIMEOUT_MS = 15_000;
-const STREAM_OUTPUT_FLUSH_INTERVAL_MS = 75;
+const STREAM_OUTPUT_FLUSH_INTERVAL_MS = 1_000;
 const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_TEXT_SEGMENT_BYTES = 8 * 1024;
 const MAX_BUFFERED_OUTPUT_GROUPS = 256;
@@ -984,6 +985,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         model: requestedModel,
         displayName: requestedModel,
         inputModalities: this.modelInputModalities(requestedModel),
+        ...this.previewRecipeGenerationModelSupport(requestedModel),
         designSupport: acpDesignSupport({
           profile: this.profile,
           runtimeVersion: this.resolvedRuntime?.version,
@@ -1561,6 +1563,34 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<StartedAgentRuntimeTurn> {
     if (this.readOnlyLane) return this.readOnlyLane.startRuntimeTurn(input);
     await this.waitForRuntimeQuarantine();
+    const previewQualification =
+      this.profile.previewRecipeGenerationQualification;
+    const isolatedPreviewQualification =
+      input.run.purpose === 'PREVIEW_RECIPE_GENERATION' &&
+      previewQualification !== undefined &&
+      previewQualification.runtimeVersion === this.resolvedRuntime?.version &&
+      previewQualification.modelId ===
+        input.executionContext.modelSettings.model &&
+      input.executionContext.readRoots.length === 1 &&
+      input.executionContext.readRoots[0]?.kind === 'EMPTY_MANAGED' &&
+      input.executionContext.readRoots[0].entityId === undefined &&
+      input.executionContext.readRoots[0].canonicalPath ===
+        input.executionContext.primaryCwd;
+    if (
+      input.run.purpose === 'PREVIEW_RECIPE_GENERATION' &&
+      previewQualification &&
+      !isolatedPreviewQualification
+    ) {
+      throw new Error(
+        `${this.descriptor.displayName} Preview generation requires ${previewQualification.runtimeVersion} with ${previewQualification.modelId} and one app-owned isolated evidence directory.`
+      );
+    }
+    if (
+      this.profile.readOnlyTurnUnavailableReason &&
+      !isolatedPreviewQualification
+    ) {
+      throw new Error(this.profile.readOnlyTurnUnavailableReason);
+    }
     const policy = requireAcpReadOnlyTurnPolicy(this.profile);
     if (
       input.run.sessionId !== input.session.id ||
@@ -6439,6 +6469,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           defaultReasoningEffort: providerDefaultReasoningEffort,
           serviceTiers: [],
           inputModalities: this.modelInputModalities(model.modelId),
+          ...this.previewRecipeGenerationModelSupport(model.modelId),
           designSupport: acpDesignSupport({
             profile: this.profile,
             runtimeVersion: this.resolvedRuntime?.version,
@@ -6490,6 +6521,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           defaultReasoningEffort,
           serviceTiers: [],
           inputModalities: this.modelInputModalities(model.value),
+          ...this.previewRecipeGenerationModelSupport(model.value),
           designSupport: acpDesignSupport({
             profile: this.profile,
             runtimeVersion: this.resolvedRuntime?.version,
@@ -6516,6 +6548,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           this.profile,
           this.modelInputModalities(this.profile.defaultModel)
         ),
+        ...this.previewRecipeGenerationModelSupport(this.profile.defaultModel),
         designSupport: acpDesignSupport({
           profile: this.profile,
           runtimeVersion: this.resolvedRuntime?.version,
@@ -6535,7 +6568,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const modelIds = new Set(
       [
         ...(this.profile.imageInputQualifications ?? []),
-        ...(this.profile.designQualifications ?? [])
+        ...(this.profile.designQualifications ?? []),
+        ...(this.profile.previewRecipeGenerationQualification
+          ? [this.profile.previewRecipeGenerationQualification]
+          : [])
       ]
         .filter((qualification) => qualification.runtimeVersion === runtimeVersion)
         .map((qualification) => qualification.modelId)
@@ -6553,6 +6589,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       supportedReasoningEfforts: [],
       serviceTiers: [],
       inputModalities: this.modelInputModalities(modelId),
+      ...this.previewRecipeGenerationModelSupport(modelId),
       designSupport: acpDesignSupport({
         profile: this.profile,
         runtimeVersion,
@@ -6574,6 +6611,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       runtimeVersion: this.resolvedRuntime?.version,
       modelId
     });
+  }
+
+  private previewRecipeGenerationModelSupport(
+    modelId: string
+  ): Pick<AgentModel, 'previewRecipeGenerationSupport'> {
+    const support = acpPreviewRecipeGenerationSupport({
+      profile: this.profile,
+      runtimeVersion: this.resolvedRuntime?.version,
+      modelId
+    });
+    return support ? { previewRecipeGenerationSupport: support } : {};
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {

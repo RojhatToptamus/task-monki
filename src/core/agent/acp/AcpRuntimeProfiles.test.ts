@@ -10,6 +10,7 @@ import {
   acpDesignSupport,
   acpImageInputSupport,
   acpModelInputModalities,
+  acpPreviewRecipeGenerationSupport,
   defaultAcpModel
 } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
@@ -226,12 +227,7 @@ describe('ACP runtime profiles', () => {
     );
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' }),
-      expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' }),
-      expect.objectContaining({
-        id: 'native-read-only',
-        approvalPolicy: 'NEVER',
-        repositoryMutation: 'DENY'
-      })
+      expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' })
     ]);
     expect(acpCapabilities(TEST_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
@@ -248,10 +244,41 @@ describe('ACP runtime profiles', () => {
     });
     expect(CLAUDE_AGENT_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
       modeId: 'plan',
-      policyId: 'claude-agent-acp/plan-read-only@v1'
+      policyId: 'claude-agent-acp/plan-preview-generation@v1'
     });
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE)).toMatchObject({
-      readOnlyTurns: { maturity: 'stable' }
+      readOnlyTurns: {
+        maturity: 'unsupported',
+        detail: expect.stringContaining('executed a file write')
+      },
+      extensions: {
+        'task-monki.preview-recipe-generation': { maturity: 'unsupported' }
+      }
+    });
+    expect(
+      acpCapabilities(CLAUDE_AGENT_ACP_PROFILE, { runtimeVersion: '0.70.0' })
+    ).toMatchObject({
+      readOnlyTurns: { maturity: 'unsupported' },
+      extensions: {
+        'task-monki.preview-recipe-generation': { maturity: 'stable' }
+      }
+    });
+    expect(
+      acpPreviewRecipeGenerationSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'sonnet'
+      })
+    ).toMatchObject({ maturity: 'stable' });
+    expect(
+      acpPreviewRecipeGenerationSupport({
+        profile: CLAUDE_AGENT_ACP_PROFILE,
+        runtimeVersion: '0.70.0',
+        modelId: 'default'
+      })
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('0.70.0 with sonnet')
     });
     expect(GROK_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
       kind: 'DEDICATED_PROCESS',

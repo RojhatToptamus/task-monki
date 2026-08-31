@@ -19,8 +19,9 @@ Discourse used another lifecycle and another runtime store.
 Provider milestone 1 removed this split.
 Task, Design, Discourse, and review now use one runtime coordinator and one runtime store.
 Provider milestone 2 moved review, prompt refinement, and Discourse to one shared read-only turn path.
-Preview recipe generation now uses the same transient read-only turn path with
-the provider and model selected in Settings.
+Preview recipe generation normally uses the same transient read-only turn path
+with the provider and model selected in Settings. An adapter can qualify an exact
+runtime and model for the app-owned disposable evidence copy instead.
 Each workflow still owns its product state and rules.
 Provider milestone 3 added provider-neutral selection and evidence.
 Each adapter still owns its native attachment transport.
@@ -202,6 +203,11 @@ flowchart LR
 
 `FileAgentRuntimeStore` owns provider sessions, runs, queue entries, artifacts, telemetry, and recovery state.
 Its owner scope separates Task records from Discourse records.
+Streamed output and diagnostic artifacts append only their new bounded bytes. A failed
+state publication restores the last durable length. Startup removes an uncommitted
+suffix after it verifies the durable prefix. Full artifact replacements remain immutable.
+Adapters flush a stream at 64 KiB or after one second. This keeps live output responsive
+without rewriting durable runtime state for every provider token.
 
 `FileTaskStore` and `FileDiscourseStore` own product state and links to runtime records.
 `FileTaskStore` can expose a joined runtime projection to existing callers.
@@ -217,8 +223,9 @@ Review, refinement, and Discourse availability use `projectAgentExecutionSupport
 The projection requires a qualified native mutation-denial policy with no approval exceptions.
 The provider process can still use its model transport and normal user permissions.
 `DiscourseRuntimeHost` also requires the common runtime operations.
-Codex, OpenCode, Cursor ACP, Claude Agent ACP 0.70.0, and Grok Build 1.0.13 on macOS meet these requirements.
-The Claude read-only policy was qualified with Sonnet.
+Codex, OpenCode, Cursor ACP, and Grok Build 1.0.13 on macOS meet these requirements.
+Claude Agent ACP 0.70.0 does not. Its plan mode completed a native Write tool
+call during the packaged mutation probe.
 Grok uses a separate adapter-owned ACP process with its native read-only sandbox.
 Task Monki also denies edit, write, and MCP tools on that process.
 Other Grok versions and platforms remain disabled for read-only workflows.
@@ -296,9 +303,9 @@ This table describes current code, not provider protocol potential.
 | Queue next message | Yes | Yes | Yes | Yes | Yes |
 | Live steering | Yes | No | No | No | No |
 | Managed attachments | Text and image | Text and model-gated image | Text and exact-qualified Grok 4.6 PNG image | Text and exact-qualified Composer 2.5 PNG image | Text and exact-qualified Sonnet PNG image |
-| Prompt refinement | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | Yes; profile-wide |
-| Review provider | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | Yes; profile-wide |
-| Discourse participant | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | Yes; profile-wide |
+| Prompt refinement | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | No; plan mode allowed a write |
+| Review provider | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | No; plan mode allowed a write |
+| Discourse participant | Yes | Yes | Yes; Grok Build 1.0.13 on macOS | Yes | No; plan mode allowed a write |
 | Design | Codex 0.151.0-alpha.7.2 with GPT-5.6-Luna | Every connected catalog model that reports image input | Grok Build 1.0.13 with Grok 4.6 at low reasoning | Composer 2.5 on Cursor 2026.08.25-3e8eec8 | Claude Agent ACP 0.70.0 with Sonnet |
 | Provider resume | Yes | Yes | Negotiated | Negotiated | Yes for Claude Agent ACP 0.70.0 |
 | Native provider fork | Yes | Yes | No | No | No |
@@ -321,6 +328,7 @@ The Design row requires technical product qualification, not only a working tool
 | OpenCode image attachment with a text-only model | The adapter rejects it before submission. | Model input limit |
 | ACP image attachment without an exact qualification entry | The adapter rejects it before submission. | Profile and model limit |
 | Grok read-only work from temporary paths, `~/.grok`, another Grok version, or another platform | Grok's qualified sandbox permits writes to temporary paths and `~/.grok`. Task Monki has only qualified Grok Build 1.0.13 on macOS. | Exact process-policy limit |
+| Claude review, refinement, or Discourse | Claude Agent ACP 0.70.0 plan mode completed a native Write tool call during the packaged mutation probe. Task Monki detected and preserved the change. | Provider policy limit |
 | Claude ACP default, Haiku, or Opus image and Design use | Only exact model `sonnet` passed image and Design qualification. Opus was not tested. | Unqualified exact model |
 
 ## Codex-specific dependency classification
@@ -379,10 +387,10 @@ Every enabled cell still requires a compatible packaged runtime and selected mod
 | Active conversation | Live steer | Queue fallback | Queue fallback | Queue fallback | Queue fallback |
 | Text attachment | Exact managed path after qualification; bounded inline fallback | `data:` file part | Embedded text resource | Bounded text block | Embedded text resource |
 | Image attachment | `localImage`, model-gated | `data:` file part, model-gated | Native PNG block for the exact Grok 1.0.13 and Grok 4.6 pair | Native PNG block for the exact Cursor 2026.08.25-3e8eec8 and Composer 2.5 pair | Native image block for Claude Agent ACP 0.70.0 with Sonnet |
-| Prompt refinement | Shared short turn | Shared short turn | Shared short turn; Grok Build 1.0.13 on macOS | Shared short turn | Shared short turn; profile-wide |
-| Review | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Shared read-only turn; profile-wide |
-| Discourse | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Shared read-only turn; profile-wide |
-| Preview recipe generation | Shared transient read-only turn | Shared transient read-only turn | Shared transient read-only turn | Shared transient read-only turn | Shared transient read-only turn |
+| Prompt refinement | Shared short turn | Shared short turn | Shared short turn; Grok Build 1.0.13 on macOS | Shared short turn | Disabled; no qualified mutation denial |
+| Review | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Disabled; no qualified mutation denial |
+| Discourse | Shared read-only turn | Shared read-only turn | Shared read-only turn; Grok Build 1.0.13 on macOS | Shared read-only turn | Disabled; no qualified mutation denial |
+| Preview recipe generation | Shared transient read-only turn | Shared transient read-only turn | Shared transient read-only turn; Grok Build 1.0.13 on macOS | Shared transient read-only turn | Exact 0.70.0 and Sonnet isolated turn with a disposable evidence copy |
 | Design | Native tool transport; exact Codex 0.151.0-alpha.7.2 and GPT-5.6-Luna | Packaged MCP bridge; connected catalog models that report image input | Packaged MCP bridge; exact Grok Build 1.0.13 and Grok 4.6 pair | Packaged MCP bridge; exact Cursor and Composer pair | Packaged MCP bridge; exact Claude Agent ACP 0.70.0 and Sonnet |
 | Resume | Native | Native | Negotiated or new session | Negotiated or new session | Negotiated or new session |
 | Fork product state | New Task session | New Task session | New Task session | New Task session | New Task session |
@@ -1282,11 +1290,11 @@ Current profile results:
   and MCP tools, and does not use the shared Grok leader. Task Monki rejects
   repositories and linked Git control paths in Grok's writable temp and state
   locations.
-- Claude Agent ACP 0.70.0 uses native plan mode.
-  The packaged mutation test selected Sonnet.
-  Task Monki rejected permission requests, and the repository remained unchanged after the mutation attempt.
+- Claude Agent ACP 0.70.0 plan mode completed a native Write tool call during
+  the packaged mutation probe. Task Monki detected the repository change and
+  retained it as evidence. This profile no longer advertises read-only turns.
 
-OpenCode, Cursor ACP, and Claude ACP still run with normal user permissions.
+OpenCode and Cursor ACP still run with normal user permissions.
 Their native policies are not operating-system sandboxes. Grok's separate
 read-only process uses a provider-owned operating-system sandbox.
 
@@ -1545,7 +1553,7 @@ The final real-provider results are:
 | OpenCode 1.18.25 with MiMo V2.5 | Normal Task, read-only mutation denial, text, image, and Design transport checks passed. | Its earlier weak Design behavior remains quality evidence, not an availability override. |
 | Grok Build 1.0.13 with Grok 4.6 on macOS | Normal Task, text, PNG, Design, and shared read-only checks passed on 2026-08-30. The read-only mutation probe completed with an unchanged repository. A direct sandbox probe reached the write tool and macOS denied the write. The report records Grok's false image capability advertisement. Design defaults to low reasoning. | Other Grok versions and platforms stay read-only-unqualified. Other Grok versions and models stay Design-unqualified. |
 | Cursor 2026.08.25-3e8eec8 with Composer 2.5 | Normal Task, read-only mutation denial, text, PNG, and all nine Design regression scenarios passed. | No enabled workflow failed qualification. |
-| Claude Agent ACP 0.70.0 with Sonnet | Normal Task, read-only mutation denial, text, PNG, Design qualification, and cleanup passed. | Default and Haiku stay image- and Design-unqualified. Opus was not tested. |
+| Claude Agent ACP 0.70.0 with Sonnet | Normal Task, text, PNG, Preview generation, and Design qualification passed. A later packaged plan-mode probe completed a native Write tool call; Task Monki detected and preserved the change. | Review, refinement, and Discourse are disabled. Preview generation receives only a disposable evidence copy. Default and Haiku stay image- and Design-unqualified. Opus was not tested. |
 
 ## Required tests
 

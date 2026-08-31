@@ -117,15 +117,28 @@ routes:
     );
     const task = await scenario.createTask({ title: 'Generate Preview recipe' });
     await scenario.service.prepareWorktree({ taskId: task.id });
-    const internals = scenario.service as unknown as {
-      appSettings: Record<string, unknown>;
-    };
-    internals.appSettings = {
-      ...internals.appSettings,
+    const [baseModel] = await scenario.agent.listModels();
+    const resolveExecution = vi
+      .spyOn(scenario.agent, 'resolveExecution')
+      .mockImplementation(async ({ settings }) => ({
+        model: {
+          ...baseModel!,
+          id: `${scenario.agent.descriptor.id}:chosen-provider/chosen-preview-model`,
+          model: 'chosen-preview-model',
+          modelProvider: 'chosen-provider'
+        },
+        settings: {
+          ...settings,
+          runtimeId: scenario.agent.descriptor.id,
+          model: 'chosen-preview-model',
+          modelProvider: 'chosen-provider'
+        }
+      }));
+    await scenario.service.updateAppSettings({
       previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
       previewRecipeGenerationModel: 'chosen-preview-model',
       previewRecipeGenerationModelProvider: 'chosen-provider'
-    };
+    });
     scenario.agent.nextRuntimeTurnResult = {
       status: 'completed',
       output: JSON.stringify({
@@ -140,7 +153,6 @@ routes:
         publicEnvironmentDecisions: []
       })
     };
-    const resolveExecution = vi.spyOn(scenario.agent, 'resolveExecution');
 
     await expect(
       scenario.service.generatePreviewRecipe({ taskId: task.id })
@@ -158,6 +170,64 @@ routes:
       'PREVIEW_RECIPE_GENERATION'
     );
     expect(scenario.agent.startedRuntimeTurns[0]?.attachments).toEqual([]);
+  });
+
+  it('resolves a cold runtime before checking version-derived Preview support', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-cold-runtime',
+      previewEnabled: true
+    });
+    const originalCapabilities = scenario.agent.capabilities.bind(scenario.agent);
+    const originalResolveExecution = scenario.agent.resolveExecution.bind(scenario.agent);
+    let runtimeResolved = false;
+    vi.spyOn(scenario.agent, 'capabilities').mockImplementation(async () => {
+      const capabilities = await originalCapabilities();
+      return runtimeResolved
+        ? capabilities
+        : {
+            ...capabilities,
+            readOnlyTurns: {
+              maturity: 'unsupported',
+              detail: 'The runtime version has not been resolved yet.'
+            }
+          };
+    });
+    const resolveExecution = vi
+      .spyOn(scenario.agent, 'resolveExecution')
+      .mockImplementation(async (input) => {
+        runtimeResolved = true;
+        return originalResolveExecution(input);
+      });
+
+    await expect(
+      scenario.service.updateAppSettings({
+        previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+        previewRecipeGenerationModel: 'scenario-model',
+        previewRecipeGenerationModelProvider: 'openai'
+      })
+    ).resolves.toMatchObject({
+      previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+      previewRecipeGenerationModel: 'scenario-model',
+      previewRecipeGenerationModelProvider: 'openai'
+    });
+    expect(resolveExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not save or start Preview generation when the provider resolves another model', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-model-fallback',
+      previewEnabled: true
+    });
+    const task = await scenario.createTask({ title: 'Reject Preview fallback' });
+    await scenario.service.prepareWorktree({ taskId: task.id });
+    await expect(
+      scenario.service.updateAppSettings({
+        previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+        previewRecipeGenerationModel: 'selected-model',
+        previewRecipeGenerationModelProvider: 'selected-provider'
+      })
+    ).rejects.toThrow('did not resolve the selected Preview model');
+    expect(scenario.agent.startedRuntimeTurns).toHaveLength(0);
   });
 
   it('shows the configured runtime error without starting another provider', async () => {

@@ -163,7 +163,7 @@ const TERMINAL_RUN_STATES: RunRecord['status'][] = [
   'LOST'
 ];
 const RECOVERY_DELAYS_MS = [500, 1_000, 2_000, 5_000];
-const STREAM_OUTPUT_FLUSH_MS = 75;
+const STREAM_OUTPUT_FLUSH_MS = 1_000;
 const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 512 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
@@ -6002,8 +6002,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async materializeRunStreamBuffer(runId: string): Promise<void> {
-    await this.flushBufferedStreamOutput(runId, true);
-    await this.materializeBufferedStreamParts(runId);
+    let outputFailure: unknown;
+    try {
+      await this.flushBufferedStreamOutput(runId, true);
+    } catch (cause) {
+      outputFailure = cause;
+    }
+    try {
+      await this.materializeBufferedStreamParts(runId);
+    } catch (cause) {
+      if (outputFailure) {
+        throw new AggregateError(
+          [outputFailure, cause],
+          'OpenCode could not persist buffered output or item evidence.'
+        );
+      }
+      throw cause;
+    }
+    if (outputFailure) throw outputFailure;
   }
 
   private discardStreamBuffer(runId: string): void {

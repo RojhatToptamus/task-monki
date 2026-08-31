@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   AgentExecutionContext,
   AgentOwnerScope,
@@ -14,10 +14,12 @@ import type {
   CreateRuntimeRunInput,
   CreateRuntimeSessionInput
 } from '../agent/AgentRuntimeStore';
+import { AgentRuntimeArtifactMutationAmbiguousError } from '../agent/AgentRuntimeStore';
 import {
   AgentRuntimeStorePublishedError,
   FileAgentRuntimeStore
 } from './FileAgentRuntimeStore';
+import type { FileAgentRuntimeStoreOptions } from './FileAgentRuntimeStore';
 
 describe('FileAgentRuntimeStore', () => {
   it('creates and restarts one canonical Task runtime projection with atomic artifacts', async () => {
@@ -1063,6 +1065,318 @@ describe('FileAgentRuntimeStore', () => {
     );
   });
 
+  it('writes streamed artifact bytes once instead of copying every prior chunk', async () => {
+    const fixture = await appendArtifactFixture();
+    const artifactPath = path.join(
+      fixture.root,
+      'artifacts',
+      fixture.artifact.storageKey
+    );
+    const initialStorageKey = fixture.artifact.storageKey;
+    const openFile = fs.open.bind(fs);
+    const artifactWrites: Array<{ mock: { calls: unknown[][] } }> = [];
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (String(args[0]) === artifactPath) {
+        artifactWrites.push(
+          vi.spyOn(handle, 'write') as unknown as {
+            mock: { calls: unknown[][] };
+          }
+        );
+      }
+      return handle;
+    });
+    const chunk = 'x'.repeat(1_024);
+    try {
+      for (let index = 0; index < 32; index += 1) {
+        const artifact = await fixture.store.appendArtifact(
+          fixture.artifact.id,
+          chunk,
+          `linear-append-${index}`
+        );
+        expect(artifact.storageKey).toBe(initialStorageKey);
+      }
+    } finally {
+      open.mockRestore();
+    }
+
+    const writtenBytes = artifactWrites.reduce(
+      (total, write) =>
+        total +
+        write.mock.calls.reduce((written, call) => {
+          const buffer = call[0];
+          const length = call[2];
+          return (
+            written +
+            (typeof length === 'number'
+              ? length
+              : Buffer.isBuffer(buffer)
+                ? buffer.byteLength
+                : 0)
+          );
+        }, 0),
+      0
+    );
+    expect(writtenBytes).toBe(32 * 1_024);
+    await expect(fixture.store.readArtifact(fixture.artifact.id)).resolves.toHaveLength(
+      32 * 1_024
+    );
+    await fixture.store.close();
+  });
+
+  it('rolls back a pre-publish append and lets the same operation retry once', async () => {
+    let failBeforePublish = false;
+    const fixture = await appendArtifactFixture(undefined, {
+      afterFileSync: async () => {
+        if (failBeforePublish) {
+          failBeforePublish = false;
+          throw new Error('injected pre-publish failure');
+        }
+      }
+    });
+    await fixture.store.appendArtifact(fixture.artifact.id, 'base', 'append-base');
+    failBeforePublish = true;
+
+    await expect(
+      fixture.store.appendArtifact(fixture.artifact.id, '-next', 'append-next')
+    ).rejects.toThrow('injected pre-publish failure');
+    await expect(fixture.store.readArtifact(fixture.artifact.id)).resolves.toBe('base');
+
+    await fixture.store.appendArtifact(fixture.artifact.id, '-next', 'append-next');
+    await expect(fixture.store.readArtifact(fixture.artifact.id)).resolves.toBe(
+      'base-next'
+    );
+    await fixture.store.close();
+    const restarted = new FileAgentRuntimeStore(fixture.root);
+    await expect(restarted.readArtifact(fixture.artifact.id)).resolves.toBe('base-next');
+    await restarted.close();
+  });
+
+  it('restores streamed bytes when the artifact sync fails', async () => {
+    const fixture = await appendArtifactFixture();
+    await fixture.store.appendArtifact(fixture.artifact.id, 'base', 'append-base');
+    const artifactPath = path.join(
+      fixture.root,
+      'artifacts',
+      fixture.artifact.storageKey
+    );
+    const openFile = fs.open.bind(fs);
+    let failSync = true;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (String(args[0]) === artifactPath && failSync) {
+        failSync = false;
+        vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+          new Error('injected artifact sync failure')
+        );
+      }
+      return handle;
+    });
+    try {
+      await expect(
+        fixture.store.appendArtifact(fixture.artifact.id, '-next', 'append-next')
+      ).rejects.toThrow('injected artifact sync failure');
+    } finally {
+      open.mockRestore();
+    }
+
+    await expect(fixture.store.readArtifact(fixture.artifact.id)).resolves.toBe('base');
+    await fixture.store.appendArtifact(
+      fixture.artifact.id,
+      '-next',
+      'append-next'
+    );
+    await expect(fixture.store.readArtifact(fixture.artifact.id)).resolves.toBe(
+      'base-next'
+    );
+    await fixture.store.close();
+  });
+
+  it('fences the store when an artifact append and its rollback both fail', async () => {
+    const fixture = await appendArtifactFixture();
+    await fixture.store.appendArtifact(fixture.artifact.id, 'base', 'append-base');
+    const artifactPath = path.join(
+      fixture.root,
+      'artifacts',
+      fixture.artifact.storageKey
+    );
+    const openFile = fs.open.bind(fs);
+    let artifactOpenCount = 0;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (String(args[0]) === artifactPath) {
+        artifactOpenCount += 1;
+        if (artifactOpenCount === 1) {
+          vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+            new Error('injected artifact sync failure')
+          );
+        } else if (artifactOpenCount === 2) {
+          vi.spyOn(handle, 'truncate').mockRejectedValueOnce(
+            new Error('injected artifact rollback failure')
+          );
+        }
+      }
+      return handle;
+    });
+    try {
+      await expect(
+        fixture.store.appendArtifact(fixture.artifact.id, '-next', 'append-next')
+      ).rejects.toBeInstanceOf(AgentRuntimeArtifactMutationAmbiguousError);
+    } finally {
+      open.mockRestore();
+    }
+
+    await expect(fixture.store.readArtifact(fixture.artifact.id)).rejects.toThrow(
+      'restart before continuing'
+    );
+    await fixture.store.close();
+  });
+
+  it('keeps orphan cleanup serialized with artifact replacement', async () => {
+    const fixture = await appendArtifactFixture();
+    const artifactsDirectory = path.join(fixture.root, 'artifacts');
+    let releaseCleanup!: () => void;
+    let cleanupReached!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      cleanupReached = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const readDirectory = fs.readdir.bind(fs);
+    let pauseCleanup = true;
+    const readdir = vi.spyOn(fs, 'readdir').mockImplementation(async (...args) => {
+      if (String(args[0]) === artifactsDirectory && pauseCleanup) {
+        pauseCleanup = false;
+        cleanupReached();
+        await release;
+      }
+      return readDirectory(...args);
+    });
+    try {
+      const first = fixture.store.updateArtifact({
+        artifactId: fixture.artifact.id,
+        expectedRevision: fixture.artifact.recordRevision,
+        clientOperationId: 'replace-artifact-first',
+        content: 'first'
+      });
+      await reached;
+      const second = fixture.store.updateArtifact({
+        artifactId: fixture.artifact.id,
+        expectedRevision: fixture.artifact.recordRevision + 1,
+        clientOperationId: 'replace-artifact-second',
+        content: 'second'
+      });
+      const secondStoragePath = path.join(
+        artifactsDirectory,
+        `${fixture.artifact.id}-r${fixture.artifact.recordRevision + 2}.txt`
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await expect(fs.access(secondStoragePath)).rejects.toThrow();
+
+      releaseCleanup();
+      await first;
+      await second;
+      await expect(fixture.store.readArtifact(fixture.artifact.id)).resolves.toBe(
+        'second'
+      );
+    } finally {
+      releaseCleanup();
+      readdir.mockRestore();
+      await fixture.store.close();
+    }
+  });
+
+  it('repairs an uncommitted streamed suffix on restart', async () => {
+    const fixture = await appendArtifactFixture();
+    const committed = await fixture.store.appendArtifact(
+      fixture.artifact.id,
+      'committed',
+      'append-committed'
+    );
+    await fixture.store.close();
+    const artifactPath = path.join(fixture.root, 'artifacts', committed.storageKey);
+    const handle = await fs.open(artifactPath, 'r+');
+    try {
+      await handle.write(Buffer.from('-uncommitted'), 0, 12, committed.byteCount);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    const restarted = new FileAgentRuntimeStore(fixture.root);
+    await expect(restarted.readArtifact(committed.id)).resolves.toBe('committed');
+    await expect(fs.stat(artifactPath)).resolves.toMatchObject({
+      size: committed.byteCount
+    });
+    await restarted.close();
+  });
+
+  it('fences a post-publish append and replays it without duplicate bytes after restart', async () => {
+    let failAfterPublish = false;
+    const fixture = await appendArtifactFixture(undefined, {
+      afterRename: async () => {
+        if (failAfterPublish) {
+          failAfterPublish = false;
+          throw new Error('injected post-publish failure');
+        }
+      }
+    });
+    await fixture.store.appendArtifact(fixture.artifact.id, 'base', 'append-base');
+    failAfterPublish = true;
+
+    await expect(
+      fixture.store.appendArtifact(fixture.artifact.id, '-next', 'append-next')
+    ).rejects.toBeInstanceOf(AgentRuntimeArtifactMutationAmbiguousError);
+    await expect(fixture.store.readArtifact(fixture.artifact.id)).rejects.toThrow(
+      'restart before continuing'
+    );
+    await fixture.store.close();
+
+    const restarted = new FileAgentRuntimeStore(fixture.root);
+    await expect(restarted.readArtifact(fixture.artifact.id)).resolves.toBe('base-next');
+    await restarted.appendArtifact(fixture.artifact.id, '-next', 'append-next');
+    await expect(restarted.readArtifact(fixture.artifact.id)).resolves.toBe('base-next');
+    await restarted.close();
+  });
+
+  it('keeps reads behind an append until its bytes and metadata are both published', async () => {
+    let releasePublish!: () => void;
+    let publishReached!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      publishReached = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releasePublish = resolve;
+    });
+    let pausePublish = false;
+    const fixture = await appendArtifactFixture(undefined, {
+      afterFileSync: async () => {
+        if (!pausePublish) return;
+        publishReached();
+        await release;
+      }
+    });
+    pausePublish = true;
+    const append = fixture.store.appendArtifact(
+      fixture.artifact.id,
+      'complete',
+      'append-complete'
+    );
+    await reached;
+    let readSettled = false;
+    const read = fixture.store.readArtifact(fixture.artifact.id).finally(() => {
+      readSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(readSettled).toBe(false);
+
+    releasePublish();
+    await append;
+    await expect(read).resolves.toBe('complete');
+    await fixture.store.close();
+  });
+
   it('purges only settled discourse runtime records and their artifact files', async () => {
     const fixture = await storeFixture();
     const session = await fixture.store.createSession(
@@ -1453,6 +1767,38 @@ async function storeFixture(root?: string) {
   });
   await store.snapshot();
   return { root: directory, store };
+}
+
+async function appendArtifactFixture(
+  root?: string,
+  options: FileAgentRuntimeStoreOptions = {}
+) {
+  const directory =
+    root ?? (await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-append-')));
+  let ordinal = 0;
+  const store = new FileAgentRuntimeStore(directory, {
+    now: () =>
+      new Date(Date.UTC(2026, 6, 13) + ordinal++ * 1_000).toISOString(),
+    createId: () =>
+      `10000000-0000-4000-8000-${String(++ordinal).padStart(12, '0')}`,
+    ...options
+  });
+  await store.snapshot();
+  const session = await store.createSession(
+    sessionInput('append-session', discourseOwner, 'create-append-session')
+  );
+  const run = await store.createRun(
+    runInput('append-run', session, discourseScope, 'create-append-run')
+  );
+  const artifact = await store.createArtifact({
+    id: run.outputArtifactId,
+    owner: run.owner,
+    runId: run.id,
+    kind: 'OUTPUT',
+    clientOperationId: 'create-append-output',
+    content: ''
+  });
+  return { root: directory, store, artifact };
 }
 
 function sessionInput(

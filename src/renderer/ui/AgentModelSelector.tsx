@@ -527,10 +527,14 @@ export function AgentModelSetting({
   hint,
   runtimeId,
   modelId,
+  fallbackSummary,
+  selectionUnavailable,
+  selectionUnavailableMessage,
   reasoningEffort,
   models,
   runtimes,
   runtimeUnavailableReason,
+  modelUnavailableReason,
   onDiscoverModels,
   onSelectionChange,
   onReasoningEffortChange
@@ -539,10 +543,17 @@ export function AgentModelSetting({
   hint?: string;
   runtimeId: string;
   modelId: string;
+  fallbackSummary?: string;
+  selectionUnavailable?: boolean;
+  selectionUnavailableMessage?: string;
   reasoningEffort?: string;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
   runtimeUnavailableReason?(runtime: AgentRuntimeState): string | undefined;
+  modelUnavailableReason?(
+    model: AgentModel,
+    runtime: AgentRuntimeState
+  ): string | undefined;
   onDiscoverModels?(runtimeId: string): Promise<void>;
   onSelectionChange(runtimeId: string, modelId: string): void;
   onReasoningEffortChange?(value: string): void;
@@ -558,10 +569,14 @@ export function AgentModelSetting({
         showRuntimeLabel={false}
         runtimeId={runtimeId}
         modelId={modelId}
+        fallbackSummary={fallbackSummary}
+        selectionUnavailable={selectionUnavailable}
+        selectionUnavailableMessage={selectionUnavailableMessage}
         reasoningEffort={reasoningEffort}
         models={models}
         runtimes={runtimes}
         runtimeUnavailableReason={runtimeUnavailableReason}
+        modelUnavailableReason={modelUnavailableReason}
         onDiscoverModels={onDiscoverModels}
         onSelectionChange={onSelectionChange}
         onReasoningEffortChange={onReasoningEffortChange}

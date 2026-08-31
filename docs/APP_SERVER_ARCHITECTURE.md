@@ -197,7 +197,8 @@ Multi-agent V1/V2 and memories are disabled in both configurations. Runtime
 discovery proves the custom-profile surface with a disposable ephemeral thread
 before selecting a Codex binary.
 
-Review, prompt-refinement, and Discourse settings use Task Monki's read-only policy.
+Review, prompt refinement, Preview recipe generation, and Discourse use Task Monki's
+read-only policy.
 A Full access implementation selection does not make a review unrestricted.
 The review uses the isolated read-only profile plus the validated Git common directory.
 
@@ -205,12 +206,19 @@ Thread create, resume, fork, each ordinary turn, and recovery require the return
 They also require the sole runtime workspace root before provider input.
 Live settings drift terminates the provider and fails active runs.
 Attachment reads need no separate permission escalation or path expansion flow.
+Before each read-only thread starts or resumes, the adapter finds each enabled
+MCP server and disables it in that thread. If discovery fails, the turn does not start.
 
-Codex review, prompt refinement, and Discourse use ordinary `turn/start` requests.
+Codex review, prompt refinement, Preview recipe generation, and Discourse use ordinary
+`turn/start` requests.
 The adapter does not expose separate review or refinement workflow methods.
-`AgentOrchestrator` records repository state before delivery.
-It compares that state after terminal output and fails a changed or unreadable turn.
-Task Monki leaves detected repository changes in place as evidence.
+For review, prompt refinement, and Discourse, `AgentOrchestrator` records
+repository state before delivery. It compares that state after terminal output
+and fails a changed or unreadable turn. Task Monki leaves detected repository
+changes in place as evidence. Preview recipe generation receives only an
+app-owned disposable evidence directory. It does not receive a repository
+root. `PreviewRecipeGenerationService` hashes the exact evidence file before
+and after the turn and rejects changed evidence.
 
 An empty local Codex session can bind its first exact attachment scope before
 the first provider prompt. The store permits this only before materialization
@@ -384,8 +392,9 @@ Task and review execution settings stored on task/run records include:
 Settings are validated against the live model catalog before a turn starts. An
 explicit model must match that catalog exactly, including after one forced
 refresh; only an omitted or `default` selection may use the provider default.
-Renderer settings should update both implementation defaults and review defaults
-so the app uses the configured reasoning level consistently.
+Renderer settings update the exact runtime and model for implementation, prompt
+refinement, Preview recipe generation, and review. They do not replace a missing
+explicit Preview model with another model.
 
 App-level user preferences are separate from `FileTaskStore`. The Electron app
 stores them in `app-settings.json` directly under `app.getPath('userData')`.
@@ -394,7 +403,7 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 
 - theme, sidebar, and mascot preferences;
 - first-launch setup completion;
-- default implementation, review, and prompt-refinement models;
+- default implementation, prompt-refinement, Preview-generation, and review models;
 - selected repository ID for the new-task default;
 - automatic installation of a downloaded desktop update on normal quit;
 - Codex external tool modes for web search, MCP servers, and apps;

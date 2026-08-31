@@ -1777,11 +1777,37 @@ export function App() {
   const promptRefinementRuntime = promptRefinementSelection.runtime;
   const configuredPreviewRecipeGenerationRuntimeId =
     appSettings.previewRecipeGenerationRuntimeId ?? appSettings.defaultRuntimeId;
-  const previewRecipeGenerationSelection = selectConfiguredRuntimeForOperation(
+  const configuredPreviewRecipeGenerationModel = appSettings.previewRecipeGenerationModel
+    ? enabledRuntimeModels.find(
+        (model) =>
+          model.runtimeId === configuredPreviewRecipeGenerationRuntimeId &&
+          (model.id === appSettings.previewRecipeGenerationModel ||
+            model.model === appSettings.previewRecipeGenerationModel) &&
+          (!appSettings.previewRecipeGenerationModelProvider ||
+            model.modelProvider === appSettings.previewRecipeGenerationModelProvider)
+      )
+    : selectModel(
+        enabledRuntimeModels,
+        undefined,
+        configuredPreviewRecipeGenerationRuntimeId,
+        appSettings.previewRecipeGenerationModelProvider
+      );
+  const previewRuntimeSelection = selectConfiguredRuntimeForOperation(
     enabledRuntimes,
     configuredPreviewRecipeGenerationRuntimeId,
-    'PREVIEW_RECIPE_GENERATION'
+    'PREVIEW_RECIPE_GENERATION',
+    { model: configuredPreviewRecipeGenerationModel }
   );
+  const previewRecipeGenerationSelection =
+    (appSettings.previewRecipeGenerationModel ||
+      appSettings.previewRecipeGenerationModelProvider) &&
+    !configuredPreviewRecipeGenerationModel &&
+    previewRuntimeSelection.runtime
+      ? {
+          unavailableReason:
+            'The selected Preview agent or model is no longer available. Choose another selection.'
+        }
+      : previewRuntimeSelection;
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
   const reviewSelection = selectConfiguredRuntimeForOperation(

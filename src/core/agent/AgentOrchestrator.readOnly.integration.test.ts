@@ -192,6 +192,50 @@ describe('AgentOrchestrator read-only repository boundary', () => {
     expect(stopped.repositoryIntegrity?.afterFingerprint).toBeUndefined();
   });
 
+  it('acknowledges a stop after concurrent provider evidence changes its revision', async () => {
+    const fixture = await createFixture('stop-ack-revision-race');
+    const runId = await startReadOnlyTurn(fixture, 'stop-ack-revision-race');
+    vi.spyOn(fixture.adapter, 'interruptRuntimeTurn').mockResolvedValue();
+    const getRun = fixture.runtimeStore.getRun.bind(fixture.runtimeStore);
+    let injected = false;
+    vi.spyOn(fixture.runtimeStore, 'getRun').mockImplementation(async (id) => {
+      const run = await getRun(id);
+      if (
+        id === runId &&
+        run?.status === 'INTERRUPTING' &&
+        run.interruptDelivery === 'SENDING' &&
+        !injected
+      ) {
+        injected = true;
+        await fixture.runtimeStore.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            terminalReason: 'Provider reported a model change during cancellation.',
+            providerTerminalSource: 'CODEX_MODEL_SELECTION',
+            lastEventAt: new Date().toISOString()
+          },
+          'stop-ack-revision-race:provider-evidence'
+        );
+      }
+      return run;
+    });
+
+    const stopped = await fixture.orchestrator.interruptTurn(
+      runId,
+      'Stop the read-only turn.',
+      'stop-ack-revision-race:interrupt'
+    );
+
+    expect(injected).toBe(true);
+    expect(stopped).toMatchObject({
+      status: 'INTERRUPTING',
+      interruptDelivery: 'ACKNOWLEDGED',
+      providerTerminalSource: 'CODEX_MODEL_SELECTION',
+      terminalReason: 'Provider reported a model change during cancellation.'
+    });
+  });
+
   it('recovers a completed read-only turn when no repository root applies', async () => {
     const fixture = await createFixture('empty-managed');
     const runId = await startReadOnlyTurn(

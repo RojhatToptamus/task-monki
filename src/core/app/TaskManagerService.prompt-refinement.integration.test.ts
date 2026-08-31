@@ -142,6 +142,7 @@ describe('TaskManagerService prompt refinement', () => {
       settings: expect.objectContaining({ model: targetModel.model }),
       attachments: []
     });
+    expect(resolveExecution.mock.calls[0]?.[0].settings.reasoningEffort).toBeUndefined();
     expect(adapter.startedRuntimeTurns).toHaveLength(1);
     expect(adapter.startedRuntimeTurns[0]).toMatchObject({
       run: { purpose: 'PROMPT_REFINEMENT' },
@@ -150,7 +151,6 @@ describe('TaskManagerService prompt refinement', () => {
         modelSettings: {
           runtimeId,
           model: refinementModel.model,
-          reasoningEffort: 'low',
           sandbox: 'READ_ONLY',
           approvalPolicy: 'NEVER',
           networkAccess: false

@@ -370,9 +370,10 @@ The renderer is not the security boundary.
 Codex uses an attested App Server read-only profile.
 OpenCode uses a dedicated `--pure` session and native deny rules.
 Cursor ACP uses native Ask mode and rejects every permission request.
-Claude Agent ACP uses native plan mode and rejects every permission request.
+Claude Agent ACP 0.70.0 is unavailable for Discourse because its plan mode
+completed a native Write tool call during the packaged mutation probe.
 Grok Build 1.0.13 on macOS uses a separate process with its native read-only
-sandbox. These five profiles can participate in Discourse.
+sandbox. These four profiles can participate in Discourse.
 
 OpenCode and Cursor still run with normal user permissions. Their policies are
 not operating-system sandboxes. Grok uses a separate sandboxed ACP process for

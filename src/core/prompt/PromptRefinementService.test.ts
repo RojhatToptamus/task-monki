@@ -44,6 +44,90 @@ describe('PromptRefinementService', () => {
     expect(capturedInstruction).toContain('Preserve every explicit requirement');
   });
 
+  it('accepts one fenced JSON result when a provider adds surrounding progress text', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to:\n```\nready\n```',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`I will return the refined request.\n\`\`\`json\n${payload}\n\`\`\`\nThe request is ready.`)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined).toMatchObject({
+      source: 'model',
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to:\n```\nready\n```'
+    });
+  });
+
+  it('accepts one final JSON result after a bounded progress message', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`I will return the refined request.\n${payload}`)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined).toMatchObject({
+      source: 'model',
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.'
+    });
+  });
+
+  it('rejects more than one fenced JSON result', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`\`\`\`json\n${payload}\n\`\`\`\n\`\`\`json\n${payload}\n\`\`\``)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined.source).toBe('unchanged-fallback');
+  });
+
+  it('rejects a fenced result followed by another raw JSON result', async () => {
+    const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
+    const payload = refinementJson({
+      titleSuggestion: 'Clarify the status change',
+      prompt: 'Set the status to ready.',
+      repositoryInspection: 'none'
+    });
+    const service = new PromptRefinementService(async () =>
+      completedRun(`\`\`\`json\n${payload}\n\`\`\`\n${payload}`)
+    );
+
+    const refined = await service.refine(refinementInput({
+      repositoryPath,
+      input: 'Update the status.'
+    }));
+
+    expect(refined.source).toBe('unchanged-fallback');
+  });
+
   it('accepts only repository facts backed by inspected files', async () => {
     const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-refine-'));
     await fs.mkdir(path.join(repositoryPath, 'src'));

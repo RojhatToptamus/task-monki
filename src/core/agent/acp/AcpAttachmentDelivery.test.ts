@@ -80,6 +80,9 @@ describe('ACP attachment delivery', () => {
       }
     ]);
     expect(JSON.stringify(result.prompt)).not.toContain(attachment.path);
+    expect(JSON.stringify(result.prompt)).not.toContain(
+      JSON.stringify(attachment.path).slice(1, -1)
+    );
     expect(result.submissionCandidates).toEqual([
       expect.objectContaining({
         attachmentId: attachment.attachmentId,

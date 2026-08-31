@@ -38,7 +38,6 @@ describe('projectAgentExecutionSupport', () => {
 
     for (const operation of [
       'PROMPT_REFINEMENT',
-      'PREVIEW_RECIPE_GENERATION',
       'REVIEW',
       'DISCOURSE'
     ] as const) {
@@ -48,6 +47,42 @@ describe('projectAgentExecutionSupport', () => {
           'This profile can still mutate through child agents. Normal Tasks remain available.'
       });
     }
+  });
+
+  it('allows isolated Preview generation without enabling repository read-only workflows', () => {
+    const capabilities = supportedCapabilities({
+      readOnlyTurns: {
+        maturity: 'unsupported',
+        detail: 'This profile can still mutate a repository.'
+      },
+      extensions: {
+        ...supportedCapabilities().extensions,
+        'task-monki.preview-recipe-generation': { maturity: 'stable' }
+      }
+    });
+
+    expect(
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+    ).toEqual({ supported: true });
+    expect(
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION', {
+        model: {
+          inputModalities: ['text'],
+          previewRecipeGenerationSupport: {
+            maturity: 'unsupported',
+            detail: 'This exact model was not qualified.'
+          }
+        }
+      })
+    ).toEqual({
+      supported: false,
+      reason: 'This exact model was not qualified.'
+    });
+    expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
+      supported: false,
+      reason:
+        'This profile can still mutate a repository. Normal Tasks remain available.'
+    });
   });
 
   it('explains the exact unqualified read-only profile without disabling normal Tasks', () => {

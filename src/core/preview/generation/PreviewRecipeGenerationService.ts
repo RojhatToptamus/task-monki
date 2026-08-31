@@ -114,7 +114,10 @@ export class PreviewRecipeGenerationService {
   recoverEvidence(retainedGenerationIds: ReadonlySet<string> = new Set()): Promise<void> {
     return recoverPreviewRecipeEvidenceRoot(
       this.evidenceRoot,
-      retainedGenerationIds
+      new Set([
+        ...retainedGenerationIds,
+        ...[...this.operations.values()].map((operation) => operation.id)
+      ])
     );
   }
 
@@ -232,6 +235,21 @@ export class PreviewRecipeGenerationService {
     return settled;
   }
 
+  async clearTask(taskId: string): Promise<void> {
+    const operation = this.operations.get(taskId);
+    if (operation) {
+      try {
+        await this.requestCancellation(operation);
+      } catch (cause) {
+        operation.cancellationError = cause;
+      }
+      if (operation.settled) await operation.settled;
+      if (operation.cancellationError) throw operation.cancellationError;
+    }
+    this.states.delete(taskId);
+    this.clearDraftAuthority(taskId);
+  }
+
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
@@ -292,7 +310,8 @@ export class PreviewRecipeGenerationService {
         input.onUpdate
       );
       const evidenceHash = await hashFile(
-        path.join(evidence.directoryPath, evidence.fileName)
+        path.join(evidence.directoryPath, evidence.fileName),
+        evidence.fileByteCount
       );
       const run = await this.runAgent({
         taskId: input.taskId,
@@ -316,7 +335,8 @@ export class PreviewRecipeGenerationService {
       let currentEvidenceHash: string;
       try {
         currentEvidenceHash = await hashFile(
-          path.join(evidence.directoryPath, evidence.fileName)
+          path.join(evidence.directoryPath, evidence.fileName),
+          evidence.fileByteCount
         );
       } catch {
         throw new PreviewRecipeEvidenceChangedError();
@@ -379,7 +399,7 @@ export class PreviewRecipeGenerationService {
           {
             taskId: input.taskId,
             status: 'FAILED',
-            report: parsed.report,
+            report: previousDraft?.report ?? parsed.report,
             draft: previousDraft,
             failureCode: 'INVALID_AGENT_OUTPUT',
             message: validation.issues[0]?.message ?? 'The generated recipe was invalid.'
@@ -413,11 +433,12 @@ export class PreviewRecipeGenerationService {
       if (operation.canceled && !operation.cancellationError) {
         const current = this.operations.get(input.taskId);
         if (current !== operation) return this.get(input.taskId);
-        this.clearDraftAuthority(input.taskId);
         return this.finish(
           input.taskId,
           operation,
-          { taskId: input.taskId, status: 'EMPTY' },
+          previousDraft
+            ? { taskId: input.taskId, status: 'READY', draft: previousDraft }
+            : { taskId: input.taskId, status: 'EMPTY' },
           input.onUpdate
         );
       }
@@ -1077,8 +1098,41 @@ function classifyGenerationFailure(error: unknown): {
   };
 }
 
-async function hashFile(filePath: string): Promise<string> {
-  return createHash('sha256').update(await fs.readFile(filePath)).digest('hex');
+async function hashFile(filePath: string, expectedBytes: number): Promise<string> {
+  const handle = await fs.open(
+    filePath,
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0)
+  );
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.size !== expectedBytes) {
+      throw new PreviewRecipeEvidenceChangedError();
+    }
+    const hash = createHash('sha256');
+    const buffer = Buffer.alloc(Math.min(64 * 1024, Math.max(1, expectedBytes)));
+    let offset = 0;
+    while (offset < expectedBytes) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        Math.min(buffer.length, expectedBytes - offset),
+        offset
+      );
+      if (bytesRead === 0) throw new PreviewRecipeEvidenceChangedError();
+      hash.update(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    const trailing = await handle.read(Buffer.alloc(1), 0, 1, offset);
+    const after = await handle.stat();
+    if (trailing.bytesRead !== 0 || !after.isFile() || after.size !== expectedBytes) {
+      throw new PreviewRecipeEvidenceChangedError();
+    }
+    return hash.digest('hex');
+  } finally {
+    await handle.close();
+  }
 }
 
 async function writeNewPreviewRecipe(worktreePath: string, yaml: string): Promise<void> {

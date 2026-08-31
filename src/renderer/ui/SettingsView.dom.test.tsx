@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
@@ -123,6 +123,96 @@ describe('Model settings', () => {
       previewRecipeGenerationModel: 'preview-model',
       previewRecipeGenerationModelProvider: 'openai'
     });
+  });
+
+  it('shows a missing saved Preview model instead of displaying a fallback', () => {
+    renderSettings({
+      appSettings: {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'codex',
+        previewRecipeGenerationModel: 'removed-model',
+        previewRecipeGenerationModelProvider: 'openai'
+      },
+      models: [previewModel],
+      runtimes: [readyCodexRuntime]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+
+    const trigger = screen.getByRole('button', {
+      name: 'Preview generation: Codex · removed-model'
+    });
+    expect(trigger.getAttribute('aria-invalid')).toBe('true');
+    expect(
+      screen.getByText(
+        'The selected Preview agent or model is no longer available. Choose another selection.'
+      )
+    ).not.toBeNull();
+  });
+
+  it('shows the configured Preview agent readiness error before a missing model error', () => {
+    const authenticationDetail = 'Sign in to the configured agent, then try again.';
+    renderSettings({
+      appSettings: {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'codex',
+        previewRecipeGenerationModel: 'saved-model',
+        previewRecipeGenerationModelProvider: 'openai'
+      },
+      models: [],
+      runtimes: [
+        {
+          ...readyCodexRuntime,
+          preflight: {
+            ...readyCodexRuntime.preflight,
+            readiness: createRuntimeReadiness(
+              'AUTHENTICATION_REQUIRED',
+              authenticationDetail
+            )
+          },
+          models: []
+        }
+      ]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+
+    const previewSelector = screen.getByRole('button', {
+      name: 'Preview generation: Codex · saved-model'
+    });
+    const previewSetting = previewSelector.closest<HTMLElement>('.tm-model-default');
+    expect(previewSetting).not.toBeNull();
+    expect(within(previewSetting!).getByRole('status').textContent).toBe(authenticationDetail);
+    expect(
+      screen.queryByText(
+        'The selected Preview agent or model is no longer available. Choose another selection.'
+      )
+    ).toBeNull();
+  });
+
+  it('keeps a missing saved Preview agent visible instead of showing another agent', () => {
+    renderSettings({
+      appSettings: {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'removed-agent',
+        previewRecipeGenerationModel: 'removed-model',
+        previewRecipeGenerationModelProvider: 'removed-provider'
+      },
+      models: [previewModel],
+      runtimes: [readyCodexRuntime]
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+
+    const trigger = screen.getByRole('button', {
+      name: 'Preview generation: removed-agent · removed-model'
+    });
+    expect(trigger.getAttribute('aria-invalid')).toBe('true');
+    expect(
+      screen.getByText(
+        'The selected Preview agent or model is no longer available. Choose another selection.'
+      )
+    ).not.toBeNull();
   });
 });
 

@@ -408,7 +408,7 @@ export function designRuntimeUnavailableReason(
     );
     if (!support.supported) return support.reason;
   }
-  return 'This agent has no model that passed the required Design Mode technical qualification.';
+  return 'This agent has no model that supports Design Mode.';
 }
 
 export function mergeDesignConversationPage(

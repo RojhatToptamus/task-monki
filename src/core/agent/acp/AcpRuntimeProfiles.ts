@@ -1,4 +1,5 @@
 import type {
+  AgentCapability,
   AgentDesignCapability,
   AgentModel,
   AgentRuntimeCapabilities,
@@ -77,6 +78,12 @@ export interface AcpRuntimeProfile {
       };
   /** Why this profile cannot currently run shared read-only workflows. */
   readOnlyTurnUnavailableReason?: string;
+  /** Exact runtime that can generate Preview YAML from a disposable evidence copy. */
+  previewRecipeGenerationQualification?: {
+    runtimeVersion: string;
+    modelId: string;
+    detail: string;
+  };
   /**
    * Exact provider text that represents a failed turn despite an ACP
    * `end_turn` response. This is profile-owned because ACP has no structured
@@ -359,9 +366,17 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   readOnlyTurnPolicy: {
     kind: 'SESSION_MODE',
     modeId: 'plan',
-    policyId: 'claude-agent-acp/plan-read-only@v1',
+    policyId: 'claude-agent-acp/plan-preview-generation@v1',
     detail:
-      'Claude Agent ACP plan mode denies tool execution. Task Monki also rejects every permission request and compares repository state after the turn.'
+      'Claude Agent ACP plan mode is used only with the app-owned disposable Preview evidence copy.'
+  },
+  readOnlyTurnUnavailableReason:
+    'Claude Agent ACP 0.70.0 plan mode executed a file write during the packaged mutation test. Repository read-only workflows stay unavailable until a native mutation-denial mode passes qualification.',
+  previewRecipeGenerationQualification: {
+    runtimeVersion: '0.70.0',
+    modelId: 'sonnet',
+    detail:
+      'Claude Agent ACP 0.70.0 with Sonnet passed Preview YAML generation from an app-owned disposable evidence copy. It receives no source repository path.'
   },
   attachmentTextTransport: 'embedded-resource',
   imageInputQualifications: [
@@ -439,7 +454,9 @@ export function acpCapabilities(
   const hasQualifiedModelSelections = Boolean(
     !profile.sessionModelExtension &&
       !profile.parameterizedModelCatalog &&
-      (profile.imageInputQualifications?.length || profile.designQualifications?.length)
+      (profile.imageInputQualifications?.length ||
+        profile.designQualifications?.length ||
+        profile.previewRecipeGenerationQualification)
   );
   const normalExecutionPresets = approvalPolicies.map((approvalPolicy) => {
     switch (approvalPolicy) {
@@ -486,7 +503,8 @@ export function acpCapabilities(
     configuredReadOnlyPolicy?.kind !== 'DEDICATED_PROCESS' ||
     (negotiated?.runtimeVersion === configuredReadOnlyPolicy.runtimeVersion &&
       negotiated.platform === configuredReadOnlyPolicy.platform);
-  const readOnlyPolicy = dedicatedProcessQualified
+  const readOnlyPolicy = dedicatedProcessQualified &&
+    !profile.readOnlyTurnUnavailableReason
     ? configuredReadOnlyPolicy
     : undefined;
   const executionPresets = [
@@ -557,7 +575,21 @@ export function acpCapabilities(
       'task-monki.design-skill-access': {
         maturity: 'unsupported',
         detail: 'ACP cannot attest a restricted app-owned read root for Design skills.'
-      }
+      },
+      'task-monki.preview-recipe-generation':
+        profile.previewRecipeGenerationQualification &&
+        profile.previewRecipeGenerationQualification.runtimeVersion ===
+          negotiated?.runtimeVersion
+          ? {
+              maturity: 'stable',
+              detail: profile.previewRecipeGenerationQualification.detail
+            }
+          : {
+              maturity: 'unsupported',
+              detail: profile.previewRecipeGenerationQualification
+                ? `${profile.descriptor.displayName} Preview generation requires ${profile.previewRecipeGenerationQualification.runtimeVersion}. Found ${negotiated?.runtimeVersion ?? 'an unknown runtime version'}.`
+                : `${profile.descriptor.displayName} uses its qualified shared read-only turn path for Preview generation.`
+            }
     }
   };
 }
@@ -678,10 +710,33 @@ export function acpDesignSupport(input: {
       };
 }
 
+export function acpPreviewRecipeGenerationSupport(input: {
+  profile: AcpRuntimeProfile;
+  runtimeVersion?: string;
+  modelId: string;
+}): AgentCapability | undefined {
+  const qualification = input.profile.previewRecipeGenerationQualification;
+  if (!qualification) return undefined;
+  if (
+    qualification.runtimeVersion === input.runtimeVersion &&
+    qualification.modelId === input.modelId
+  ) {
+    return { maturity: 'stable', detail: qualification.detail };
+  }
+  return {
+    maturity: 'unsupported',
+    detail: `${input.profile.descriptor.displayName} Preview generation requires ${qualification.runtimeVersion} with ${qualification.modelId}. Found ${input.runtimeVersion ?? 'an unknown runtime version'} with ${input.modelId}.`
+  };
+}
+
 export function defaultAcpModel(
   profile: AcpRuntimeProfile,
   inputModalities: string[] = ['text']
 ): AgentModel {
+  const previewRecipeGenerationSupport = acpPreviewRecipeGenerationSupport({
+    profile,
+    modelId: profile.defaultModel
+  });
   return {
     id: `${profile.descriptor.id}:${profile.defaultModelProvider}/${profile.defaultModel}`,
     runtimeId: profile.descriptor.id,
@@ -697,6 +752,7 @@ export function defaultAcpModel(
     supportedReasoningEfforts: [],
     serviceTiers: [],
     inputModalities,
+    ...(previewRecipeGenerationSupport ? { previewRecipeGenerationSupport } : {}),
     isDefault: true,
     native: {
       source: profile.parameterizedModelCatalog?.contractId ?? 'profile-default'

@@ -96,10 +96,11 @@ A qualification passes only when all these conditions are true:
 - The source repository remains clean.
 - The checked-out ref and `HEAD` remain unchanged.
 
-Codex, OpenCode, Cursor, and Claude use provider controls. These controls are
-not operating-system sandboxes. Grok uses a separate process with its native
-operating-system sandbox. The independent file and Git checks still detect a
-provider that changes the source repository.
+Codex, OpenCode, and Cursor use provider controls. These controls are not
+operating-system sandboxes. Grok uses a separate process with its native
+operating-system sandbox. Claude Agent ACP 0.70.0 plan mode failed this probe,
+so its read-only workflows are disabled. The independent file and Git checks
+still detect a provider that changes the source repository.
 
 If a write occurs, the harness does not erase it. It keeps the changed
 repository, runtime records, Discourse records, and `report.json` as evidence.

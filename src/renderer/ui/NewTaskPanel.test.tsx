@@ -82,7 +82,9 @@ describe('NewTaskPanel', () => {
   });
 
   it('blocks images until an explicitly image-capable model is selected', () => {
-    expect(imageAttachmentModelError(true, undefined)).toContain('not reported');
+    expect(imageAttachmentModelError(true, undefined)).toContain(
+      'No image-capable model is available'
+    );
     expect(
       imageAttachmentModelError(true, {
         id: 'text-model',
@@ -96,7 +98,7 @@ describe('NewTaskPanel', () => {
         serviceTiers: [],
         inputModalities: ['text']
       })
-    ).toContain('not qualified');
+    ).toContain('does not support image input');
     expect(
       imageAttachmentModelError(true, {
         id: 'vision-model',

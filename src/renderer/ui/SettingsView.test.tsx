@@ -307,6 +307,42 @@ describe('SettingsView', () => {
     expect(selected.selectedReviewModel?.id).toBe(providerModel.id);
   });
 
+  it('uses the configured Preview model provider when that provider uses its default model', () => {
+    const alternateProviderModel: AgentModel = {
+      ...codexModel,
+      id: 'codex:alternate/default-model',
+      modelProvider: 'alternate',
+      model: 'default-model',
+      displayName: 'Alternate default',
+      isDefault: false
+    };
+    const selected = selectSettingsModels(
+      [codexModel, alternateProviderModel],
+      runtimes,
+      {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        previewRecipeGenerationRuntimeId: 'codex',
+        previewRecipeGenerationModel: undefined,
+        previewRecipeGenerationModelProvider: 'alternate'
+      }
+    );
+
+    expect(selected.selectedPreviewRecipeGenerationModel?.id).toBe(
+      alternateProviderModel.id
+    );
+  });
+
+  it('does not replace a missing provider-only Preview selection', () => {
+    const selected = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      previewRecipeGenerationRuntimeId: 'codex',
+      previewRecipeGenerationModel: undefined,
+      previewRecipeGenerationModelProvider: 'removed-provider'
+    });
+
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
+  });
+
   it('preserves an unavailable configured workflow provider until the user changes it', () => {
     const selected = selectSettingsModels([codexModel], runtimes, {
       ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
@@ -323,8 +359,32 @@ describe('SettingsView', () => {
     expect(selected.selectedReviewModel).toBeUndefined();
   });
 
-  it('shows the actual default Preview provider instead of silently selecting another provider', () => {
-    const writeOnlyCodex: AgentRuntimeState = {
+  it('does not replace a missing configured Preview model with another model', () => {
+    const selected = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      previewRecipeGenerationRuntimeId: 'codex',
+      previewRecipeGenerationModel: 'removed-model',
+      previewRecipeGenerationModelProvider: 'openai'
+    });
+
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('codex');
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
+  });
+
+  it('does not replace a missing configured Preview agent with the default agent', () => {
+    const selected = selectSettingsModels([codexModel], [runtimes[0]!], {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      previewRecipeGenerationRuntimeId: 'removed-agent',
+      previewRecipeGenerationModel: 'removed-model',
+      previewRecipeGenerationModelProvider: 'removed-provider'
+    });
+
+    expect(selected.previewRecipeGenerationRuntimeId).toBe('removed-agent');
+    expect(selected.selectedPreviewRecipeGenerationModel).toBeUndefined();
+  });
+
+  it('keeps an unsupported default Preview provider instead of silently selecting another provider', () => {
+    const unsupportedCodex: AgentRuntimeState = {
       ...runtimes[0]!,
       preflight: {
         ...runtimes[0]!.preflight,
@@ -345,6 +405,10 @@ describe('SettingsView', () => {
                 repositoryMutation: 'ALLOW'
               }
             ]
+          },
+          readOnlyTurns: {
+            maturity: 'unsupported',
+            detail: 'This profile cannot deny repository changes.'
           }
         }
       }
@@ -378,7 +442,7 @@ describe('SettingsView', () => {
 
     const selected = selectSettingsModels(
       [codexModel, alternateModel],
-      [writeOnlyCodex, alternateRuntime],
+      [unsupportedCodex, alternateRuntime],
       DEFAULT_TASK_MANAGER_APP_SETTINGS
     );
 

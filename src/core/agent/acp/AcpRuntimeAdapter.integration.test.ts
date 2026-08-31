@@ -948,6 +948,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       );
       expect(JSON.stringify(submittedPrompt)).toContain('read-only attachment content');
       expect(JSON.stringify(submittedPrompt)).not.toContain(attachment.path);
+      expect(JSON.stringify(submittedPrompt)).not.toContain(
+        JSON.stringify(attachment.path).slice(1, -1)
+      );
 
       const cancellationSessionId = randomUUID();
       const cancellationRunId = randomUUID();
@@ -1179,6 +1182,135 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       await expect(build(linkedWorktree)).rejects.toThrow(
         'because its native sandbox permits writes there'
       );
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('limits a qualified Preview exception to one app-owned evidence root', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-preview-root-')
+    );
+    temporaryDirectories.push(directory);
+    const runtimeId = 'test-acp-preview-root';
+    const unavailableReason =
+      'Repository read-only workflows are unavailable for this test provider.';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      readOnlyTurnPolicy: {
+        kind: 'SESSION_MODE',
+        modeId: 'plan',
+        policyId: 'test-acp/isolated-preview@v1',
+        detail: 'Plan mode is qualified only for disposable Preview evidence.'
+      },
+      readOnlyTurnUnavailableReason: unavailableReason,
+      previewRecipeGenerationQualification: {
+        runtimeVersion: process.version,
+        modelId: 'default',
+        detail: 'The exact test runtime and model passed isolated Preview generation.'
+      }
+    };
+    const store = createTestStore(path.join(directory, 'store'));
+    const fixture = runtimeFixture(store);
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const owner = {
+      kind: 'PREVIEW_RECIPE_GENERATION' as const,
+      taskId: 'task-preview-root',
+      generationId: 'generation-preview-root'
+    };
+    const context = await adapter.buildExecutionContext({
+      sessionId,
+      primaryCwd: directory,
+      readRoots: [{ canonicalPath: directory, kind: 'WORKTREE', entityId: 'worktree-1' }],
+      modelSettings: {
+        runtimeId,
+        model: 'default',
+        modelProvider: 'test-provider'
+      },
+      clientOperationId: `preview-root-context:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await fixture.runtimeStore.prepareRuntimeTurn({
+      session: {
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId,
+          model: 'default',
+          executionContext: context
+        }),
+        executionContext: context,
+        clientOperationId: `preview-root-session:${sessionId}`,
+        runtimeId,
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: context.modelSettings
+      },
+      run: {
+        id: runId,
+        owner,
+        scope: owner,
+        sessionId,
+        sessionAccessEpoch: 1,
+        purpose: 'PREVIEW_RECIPE_GENERATION',
+        generationKey: owner.generationId,
+        clientOperationId: `preview-root-run:${runId}`,
+        requestedSettings: context.modelSettings,
+        promptArtifactId: `prompt-${runId}`,
+        outputArtifactId: `output-${runId}`,
+        diagnosticArtifactId: `diagnostic-${runId}`
+      },
+      prompt: 'Generate Preview YAML from this evidence.',
+      priority: 'TASK_FOREGROUND',
+      queueOperationId: `preview-root-queue:${runId}`
+    });
+    const starting = await fixture.runtimeStore.updateRun(
+      runId,
+      prepared.run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: new Date().toISOString()
+      },
+      `preview-root-starting:${runId}`
+    );
+
+    try {
+      await adapter.initialize();
+      await expect(
+        adapter.startRuntimeTurn({
+          session: prepared.session,
+          run: starting,
+          executionContext: context,
+          prompt: 'Generate Preview YAML from this evidence.',
+          attachments: []
+        })
+      ).rejects.toThrow('one app-owned isolated evidence directory');
+      const storedSession = await fixture.runtimeStore.getSession(sessionId);
+      expect(storedSession?.materialized).toBe(false);
+      expect(storedSession?.providerSessionId).toBeUndefined();
     } finally {
       await adapter.shutdown();
     }
@@ -1521,6 +1653,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(prompts).toHaveLength(2);
       expect(JSON.stringify(prompts[0])).toContain('normal turn attachment content');
       expect(JSON.stringify(prompts[0])).not.toContain(attachment.path);
+      expect(JSON.stringify(prompts[0])).not.toContain(
+        JSON.stringify(attachment.path).slice(1, -1)
+      );
       expect(JSON.stringify(prompts[1])).not.toContain('normal turn attachment content');
 
       const journals = await Promise.all(
@@ -1530,6 +1665,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       );
       expect(journals.join('\n')).not.toContain('normal turn attachment content');
       expect(journals.join('\n')).not.toContain(attachment.path);
+      expect(journals.join('\n')).not.toContain(
+        JSON.stringify(attachment.path).slice(1, -1)
+      );
     } finally {
       await adapter.shutdown();
     }
@@ -3627,9 +3765,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           event.payload.text !== undefined &&
           highVolumeRun.id === event.runId
       );
-      // The 75 ms flush boundary is scheduler-dependent under parallel I/O,
-      // but it must still collapse at least eight wire deltas per UI event on
-      // average for this burst.
+      // The timed flush is scheduler-dependent under parallel I/O, but it must
+      // still collapse at least eight wire deltas per UI event on average for
+      // this burst.
       expect(highVolumeOutputEvents.length).toBeLessThanOrEqual(64);
       expect(
         highVolumeOutputEvents

@@ -115,8 +115,9 @@ Codex uses an attested read-only permission profile.
 OpenCode uses native deny rules in a dedicated `--pure` session.
 Grok Build 1.0.13 on macOS uses its native read-only sandbox in a dedicated process.
 Cursor ACP uses native Ask mode and rejects every permission request.
-Claude Agent ACP uses native plan mode and rejects every permission request.
-The OpenCode, Cursor, and Claude processes are not operating-system sandboxes.
+Claude Agent ACP 0.70.0 is unavailable for review because its plan mode
+completed a native Write tool call during the packaged mutation probe.
+The OpenCode and Cursor processes are not operating-system sandboxes.
 Task Monki uses repository comparison as an independent backstop.
 Managed attachments use the shared provider delivery path.
 Each selected runtime and model must support the attachment type.

@@ -206,14 +206,22 @@ export class DesignUpdateCoordinator {
         throw new Error('The active Design turn lost its agent run.');
       }
       if (ACTIVE_RUN_STATUSES.has(run.status)) {
-        await this.closeBrowserRun(run.id);
-        await this.stopOpenedCandidate(turn).catch(() => undefined);
-        await this.options.agents.interruptRun(run.id);
+        const results = await Promise.allSettled([
+          this.closeBrowserAndStopOpenedCandidate(run.id, turn),
+          this.options.agents.interruptRun(run.id)
+        ]);
         this.emitUpdated(designId, {
           reason: 'turn-cancel-requested',
           turnId,
           runId: run.id
         });
+        const failures = rejectedReasons(results);
+        if (failures.length > 0) {
+          throw new AggregateError(
+            failures,
+            'The Design cancel request did not complete cleanly.'
+          );
+        }
         return;
       }
       await this.settleRunUnlocked(run.id);
@@ -246,26 +254,42 @@ export class DesignUpdateCoordinator {
     if (this.shuttingDown) return;
     this.accepting = false;
     this.shuttingDown = true;
-    await this.options.browser.shutdown();
-    const snapshot = await this.options.store.snapshot();
-    await Promise.allSettled(
-      snapshot.designTurns
-        .filter((turn) => turn.outcome === undefined && turn.finalOpenedCandidate)
-        .map((turn) =>
-          this.options.previews.stopManagedDesignCandidate(
-            turn.finalOpenedCandidate!.previewGenerationId
+    const failures: unknown[] = [];
+    const [browserResult, snapshotResult] = await Promise.allSettled([
+      this.options.browser.shutdown(),
+      this.options.store.snapshot()
+    ]);
+    if (browserResult.status === 'rejected') failures.push(browserResult.reason);
+    if (snapshotResult.status === 'rejected') {
+      failures.push(snapshotResult.reason);
+    } else {
+      const candidateResults = await Promise.allSettled(
+        snapshotResult.value.designTurns
+          .filter((turn) => turn.outcome === undefined && turn.finalOpenedCandidate)
+          .map((turn) =>
+            this.options.previews.stopManagedDesignCandidate(
+              turn.finalOpenedCandidate!.previewGenerationId
+            )
           )
-        )
-    );
-    await Promise.allSettled(
-      snapshot.runs
-        .filter(
-          (run) => run.mode === 'DESIGN' && ACTIVE_RUN_STATUSES.has(run.status)
-        )
-        .map((run) => this.options.agents.interruptRun(run.id))
-    );
+      );
+      const interruptResults = await Promise.allSettled(
+        snapshotResult.value.runs
+          .filter(
+            (run) => run.mode === 'DESIGN' && ACTIVE_RUN_STATUSES.has(run.status)
+          )
+          .map((run) => this.options.agents.interruptRun(run.id))
+      );
+      failures.push(...rejectedReasons(candidateResults), ...rejectedReasons(interruptResults));
+    }
     this.terminalAdmissionClosed = true;
-    await this.drain();
+    try {
+      await this.drain();
+    } catch (cause) {
+      failures.push(cause);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'Design shutdown did not complete cleanly.');
+    }
   }
 
   async drain(): Promise<void> {
@@ -856,10 +880,29 @@ export class DesignUpdateCoordinator {
       });
       return { text: formatBrowserObservation(observation) };
     } catch (error) {
-      await lease.close().catch(() => undefined);
-      await this.closeBrowserRun(run.id);
+      const failures: unknown[] = [];
+      try {
+        await lease.close();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+      try {
+        await this.closeBrowserRun(run.id);
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
       if (generation.id !== turn.finalOpenedCandidate?.previewGenerationId) {
-        await this.options.previews.stopManagedDesignCandidate(generation.id).catch(() => undefined);
+        try {
+          await this.options.previews.stopManagedDesignCandidate(generation.id);
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          [error, ...failures],
+          'The failed Design candidate did not clean up completely.'
+        );
       }
       throw error;
     }
@@ -940,6 +983,29 @@ export class DesignUpdateCoordinator {
     );
     if (generation?.routingState === 'CANDIDATE') {
       await this.options.previews.stopManagedDesignCandidate(generation.id);
+    }
+  }
+
+  private async closeBrowserAndStopOpenedCandidate(
+    runId: string,
+    turn: DesignTurn
+  ): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      await this.closeBrowserRun(runId);
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await this.stopOpenedCandidate(turn);
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        'The Design browser and candidate did not clean up completely.'
+      );
     }
   }
 
@@ -1039,7 +1105,7 @@ export class DesignUpdateCoordinator {
     } catch {
       // The browser owner keeps failed cleanup state so one bounded retry can
       // finish a transient daemon or filesystem failure in this process.
-      await this.options.browser.closeRun(runId).catch(() => undefined);
+      await this.options.browser.closeRun(runId);
     }
   }
 
@@ -1051,6 +1117,12 @@ export class DesignUpdateCoordinator {
       if (this.locks.get(designId) === operation) this.locks.delete(designId);
     });
   }
+}
+
+function rejectedReasons(results: readonly PromiseSettledResult<unknown>[]): unknown[] {
+  return results
+    .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    .map((result) => result.reason);
 }
 
 function requireReadyContext(detail: DesignDetailSnapshot): PreviewTaskContext {

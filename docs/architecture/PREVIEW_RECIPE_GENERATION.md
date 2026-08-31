@@ -18,8 +18,10 @@ offers:
 
 The generated draft can be edited, regenerated, discarded, or closed. Close
 leaves the repository unchanged and keeps the last generated draft in
-main-process memory for the current app session. Discard cancels active
-generation and removes the transient draft.
+main-process memory for the current app session. Stop cancels active generation
+and keeps the last valid draft, when one exists. Discard removes an idle draft.
+Task deletion cancels and joins active generation before it removes all draft
+state.
 
 Only **Accept & save recipe** writes to the repository. Acceptance validates
 the exact reviewed YAML, exclusively creates `.taskmonki/preview.yaml`, and
@@ -124,9 +126,13 @@ The agent does not receive the live worktree as its working directory. Task
 Monki creates a bounded JSON evidence bundle in app-owned scratch storage. It contains safe text
 from the task worktree. It runs a transient turn through the configured
 provider and model only when that combination supports Preview recipe
-generation. The turn uses:
+generation. The normal path uses the adapter's native read-only permission
+mapping. An adapter can make one exact runtime-and-model exception only after
+real qualification against the disposable evidence directory. Such an
+exception does not enable repository read-only workflows. The turn uses:
 
-- the provider adapter's native read-only permission mapping;
+- a native read-only policy or the exact adapter-local disposable-evidence
+  qualification;
 - the packaged provider runtime and its normal cancellation and cleanup path;
 - no additional live repository path;
 - sanitized process environment;

@@ -29,6 +29,21 @@ export interface CodexReadOnlyScopeProfile {
   config: Record<string, JsonValue>;
 }
 
+export function codexReadOnlyScopeProfileId(
+  sessionId: string,
+  scopeHash: string
+): string {
+  if (!SAFE_SESSION_ID.test(sessionId) || !/^[a-f0-9]{64}$/u.test(scopeHash)) {
+    throw new Error('Cannot create a Codex read-only permission profile id.');
+  }
+  const sessionHash = crypto
+    .createHash('sha256')
+    .update(sessionId)
+    .digest('hex')
+    .slice(0, 12);
+  return `${PROFILE_PREFIX}${sessionHash}_${scopeHash.slice(0, 24)}`;
+}
+
 export function codexPermissionProfileId(
   sessionId: string,
   sandbox: AgentExecutionSettings['sandbox'],
@@ -113,8 +128,7 @@ export async function codexReadOnlyScopeProfile(input: {
     .createHash('sha256')
     .update(JSON.stringify(scopeDescriptor))
     .digest('hex');
-  const sessionHash = crypto.createHash('sha256').update(input.sessionId).digest('hex').slice(0, 12);
-  const profileId = `${PROFILE_PREFIX}${sessionHash}_${scopeHash.slice(0, 24)}`;
+  const profileId = codexReadOnlyScopeProfileId(input.sessionId, scopeHash);
   const filesystem: Record<string, 'read'> = { ':minimal': 'read' };
   for (const candidate of roots) filesystem[candidate] = 'read';
   for (const candidate of attachmentPaths) filesystem[candidate] = 'read';

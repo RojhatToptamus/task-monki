@@ -78,6 +78,7 @@ import {
   enforcePosixMode,
   hasNoGroupOrOtherPosixAccess,
   isOwnedByCurrentUser,
+  posixModeMatches,
   syncDirectoryIfSupported
 } from '../filesystem/secureFilesystem';
 
@@ -826,7 +827,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     clientOperationId: string;
     content: string;
   }): Promise<AgentRuntimeArtifactRecord> {
-    const artifact = await this.mutate(async (draft) => {
+    return this.mutate(async (draft) => {
       requireOperationId(input.clientOperationId);
       const content = encodeArtifactContent(input.content);
       const fingerprint = requestFingerprint({
@@ -883,9 +884,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         }
       });
       return stored;
-    });
-    await this.cleanupUnreferencedArtifactFiles();
-    return artifact;
+    }, false, true);
   }
 
   async appendArtifact(
@@ -893,68 +892,91 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     chunk: string,
     operationId: string
   ): Promise<AgentRuntimeArtifactRecord> {
-    const artifact = await this.mutate(async (draft) => {
-      requireOperationId(operationId);
-      const bytes = Buffer.from(chunk, 'utf8');
-      const fingerprint = requestFingerprint({
-        artifactId,
-        chunkSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
-        byteCount: bytes.byteLength
-      });
-      if (
-        replayedOperation(draft, {
-          operationId,
-          type: 'ARTIFACT_UPDATED',
+    let rollback: (() => Promise<void>) | undefined;
+    let artifact: AgentRuntimeArtifactRecord;
+    try {
+      artifact = await this.mutate(async (draft) => {
+        requireOperationId(operationId);
+        const bytes = Buffer.from(chunk, 'utf8');
+        const fingerprint = requestFingerprint({
           artifactId,
-          requestFingerprint: fingerprint
-        })
-      ) {
-        return requireArtifact(draft, artifactId);
-      }
-      const index = draft.artifacts.findIndex((candidate) => candidate.id === artifactId);
-      if (index < 0) throw new Error(`Agent runtime artifact not found: ${artifactId}`);
-      const existing = draft.artifacts[index]!;
-      const current = Buffer.from(await readVerifiedArtifact(this.artifactsDir, existing));
-      const combined = Buffer.concat([current, bytes]);
-      if (combined.byteLength > AGENT_RUNTIME_LIMITS.maxArtifactBytes) {
-        throw new Error('Agent runtime artifact exceeds its safety limit.');
-      }
-      const revision = existing.recordRevision + 1;
-      const storageKey = artifactStorageKey(existing.id, revision);
-      await writeImmutableArtifact(
-        this.artifactsDir,
-        storageKey,
-        combined,
-        this.syncDirectoryHook
-      );
-      const stored: AgentRuntimeArtifactRecord = {
-        ...existing,
-        clientOperationId: operationId,
-        requestFingerprint: fingerprint,
-        storageKey,
-        contentSha256: crypto.createHash('sha256').update(combined).digest('hex'),
-        byteCount: combined.byteLength,
-        recordRevision: revision,
-        updatedAt: this.now()
-      };
-      draft.artifacts[index] = stored;
-      appendEvent(draft, this.createId, stored.updatedAt, {
-        type: 'ARTIFACT_UPDATED',
-        owner: stored.owner,
-        runId: stored.runId,
-        artifactId: stored.id,
-        operationId,
-        payload: {
-          kind: stored.kind,
-          appendedByteCount: bytes.byteLength,
-          contentSha256: stored.contentSha256,
-          byteCount: stored.byteCount,
-          requestFingerprint: fingerprint
+          chunkSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+          byteCount: bytes.byteLength
+        });
+        if (
+          replayedOperation(draft, {
+            operationId,
+            type: 'ARTIFACT_UPDATED',
+            artifactId,
+            requestFingerprint: fingerprint
+          })
+        ) {
+          return requireArtifact(draft, artifactId);
         }
+        const index = draft.artifacts.findIndex((candidate) => candidate.id === artifactId);
+        if (index < 0) throw new Error(`Agent runtime artifact not found: ${artifactId}`);
+        const existing = draft.artifacts[index]!;
+        if (existing.kind !== 'OUTPUT' && existing.kind !== 'DIAGNOSTIC') {
+          throw new Error('Only streamed Agent runtime artifacts can be appended.');
+        }
+        const appended = await appendVerifiedArtifact(
+          this.artifactsDir,
+          existing,
+          bytes
+        );
+        rollback = appended.rollback;
+        const stored: AgentRuntimeArtifactRecord = {
+          ...existing,
+          clientOperationId: operationId,
+          requestFingerprint: fingerprint,
+          contentSha256: appended.contentSha256,
+          byteCount: appended.byteCount,
+          recordRevision: existing.recordRevision + 1,
+          updatedAt: this.now()
+        };
+        draft.artifacts[index] = stored;
+        appendEvent(draft, this.createId, stored.updatedAt, {
+          type: 'ARTIFACT_UPDATED',
+          owner: stored.owner,
+          runId: stored.runId,
+          artifactId: stored.id,
+          operationId,
+          payload: {
+            kind: stored.kind,
+            appendedByteCount: bytes.byteLength,
+            contentSha256: stored.contentSha256,
+            byteCount: stored.byteCount,
+            requestFingerprint: fingerprint
+          }
+        });
+        return stored;
       });
-      return stored;
-    });
-    await this.cleanupUnreferencedArtifactFiles();
+    } catch (cause) {
+      if (cause instanceof AgentRuntimeStorePublishedError) {
+        throw translateArtifactMutationError(cause);
+      }
+      if (cause instanceof AgentRuntimeArtifactMutationAmbiguousError) {
+        this.publishedFailure = true;
+        throw cause;
+      }
+      if (rollback) {
+        try {
+          await rollback();
+        } catch (rollbackCause) {
+          this.publishedFailure = true;
+          throw new AgentRuntimeArtifactMutationAmbiguousError(
+            'Agent runtime artifact append failed and its prior bytes could not be restored.',
+            {
+              cause: new AggregateError(
+                [cause, rollbackCause],
+                'Agent runtime artifact append and rollback both failed.'
+              )
+            }
+          );
+        }
+      }
+      throw cause;
+    }
     return artifact;
   }
 
@@ -965,7 +987,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     clientOperationId: string;
     content: string;
   }): Promise<AgentRuntimeArtifactRecord> {
-    const artifact = await this.mutate(async (draft) => {
+    return this.mutate(async (draft) => {
       requireSafeId(input.artifactId, 'artifact id');
       requireOperationId(input.clientOperationId);
       const run = requireRun(draft, input.runId);
@@ -1047,8 +1069,6 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       });
       return stored;
     });
-    await this.cleanupUnreferencedArtifactFiles();
-    return artifact;
   }
 
   async getArtifact(artifactId: string): Promise<AgentRuntimeArtifactRecord | undefined> {
@@ -1057,10 +1077,23 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   }
 
   async readArtifact(artifactId: string): Promise<string> {
-    await this.init();
-    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
-    if (!artifact) throw new Error(`Agent runtime artifact not found: ${artifactId}`);
-    return readVerifiedArtifact(this.artifactsDir, artifact);
+    if (this.closePromise) {
+      throw new Error('Agent runtime store is closed.');
+    }
+    const initialization = this.ensureInitialized();
+    const queued = this.operationQueue.catch(() => undefined).then(async () => {
+      await initialization;
+      if (this.publishedFailure) {
+        throw new Error(
+          'Agent runtime state was published without confirmed directory sync; restart before continuing.'
+        );
+      }
+      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+      if (!artifact) throw new Error(`Agent runtime artifact not found: ${artifactId}`);
+      return readVerifiedArtifact(this.artifactsDir, artifact);
+    });
+    this.operationQueue = queued.catch(() => undefined);
+    return queued;
   }
 
   async recordTelemetry(input: {
@@ -2642,7 +2675,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     artifactCount: number;
     queueEntryCount: number;
   }> {
-    const result = await this.mutate((draft) => {
+    return this.mutate((draft) => {
       const sessions = draft.sessions.filter((session) => owns(session.owner));
       const sessionIds = new Set(sessions.map((session) => session.id));
       const runs = draft.runs.filter(
@@ -2696,9 +2729,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         artifactCount: artifacts.length,
         queueEntryCount: queueEntries.length
       };
-    }, true);
-    await this.cleanupUnreferencedArtifactFiles();
-    return result;
+    }, true, true);
   }
 
   async setShutdownLatched(latched: boolean, operationId: string): Promise<void> {
@@ -2832,7 +2863,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   private async reconcileArtifacts(): Promise<void> {
     const expected = new Set(this.state.artifacts.map((artifact) => artifact.storageKey));
     for (const artifact of this.state.artifacts) {
-      await readVerifiedArtifact(this.artifactsDir, artifact);
+      await reconcileArtifactFile(this.artifactsDir, artifact);
     }
     for (const entry of await fs.readdir(this.artifactsDir, { withFileTypes: true })) {
       if (!entry.isFile() || entry.isSymbolicLink() || !ARTIFACT_FILE.test(entry.name)) {
@@ -2887,7 +2918,8 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
 
   private mutate<T>(
     operation: (draft: AgentRuntimeStoreState) => T | Promise<T>,
-    collectTerminalServers = false
+    collectTerminalServers = false,
+    cleanupUnreferencedArtifacts = false
   ): Promise<T> {
     if (this.closePromise) {
       return Promise.reject(new Error('Agent runtime store is closed.'));
@@ -2906,7 +2938,12 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       const prunedServerIds = collectTerminalServers
         ? pruneUnreferencedTerminalAgentServers(draft)
         : [];
-      if (stableStringify(draft) === before) return clone(result);
+      if (stableStringify(draft) === before) {
+        if (cleanupUnreferencedArtifacts) {
+          await this.cleanupUnreferencedArtifactFiles();
+        }
+        return clone(result);
+      }
       draft.revision += 1;
       validateState(draft);
       try {
@@ -2917,6 +2954,9 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       }
       this.state = draft;
       await cleanupPrunedServerJournals(this.protocolJournal, prunedServerIds);
+      if (cleanupUnreferencedArtifacts) {
+        await this.cleanupUnreferencedArtifactFiles();
+      }
       return clone(result);
     });
     this.operationQueue = queued.catch(() => undefined);
@@ -3681,7 +3721,7 @@ function validateState(state: AgentRuntimeStoreState): void {
       !run ||
       agentOwnerScopeKey(run.owner) !== agentOwnerScopeKey(artifact.owner) ||
       !artifactMatchesRunReference(artifact, run) ||
-      artifact.storageKey !== artifactStorageKey(artifact.id, artifact.recordRevision) ||
+      !artifactStorageKeyMatchesRecord(artifact) ||
       !HASH.test(artifact.contentSha256) ||
       !HASH.test(artifact.requestFingerprint) ||
       !Number.isSafeInteger(artifact.byteCount) ||
@@ -5251,6 +5291,24 @@ function artifactStorageKey(artifactId: string, revision: number): string {
   return `${artifactId}-r${revision}.txt`;
 }
 
+function artifactStorageKeyMatchesRecord(
+  artifact: Pick<
+    AgentRuntimeArtifactRecord,
+    'id' | 'kind' | 'recordRevision' | 'storageKey'
+  >
+): boolean {
+  const match = ARTIFACT_FILE.exec(artifact.storageKey);
+  if (!match || match[1] !== artifact.id) return false;
+  const storageRevision = Number(match[2]);
+  return (
+    Number.isSafeInteger(storageRevision) &&
+    storageRevision >= 1 &&
+    (storageRevision === artifact.recordRevision ||
+      ((artifact.kind === 'OUTPUT' || artifact.kind === 'DIAGNOSTIC') &&
+        storageRevision < artifact.recordRevision))
+  );
+}
+
 function encodeArtifactContent(content: string): { bytes: Buffer; sha256: string } {
   const bytes = Buffer.from(content, 'utf8');
   if (bytes.byteLength > AGENT_RUNTIME_LIMITS.maxArtifactBytes) {
@@ -5299,11 +5357,134 @@ async function writeImmutableArtifact(
   }
 }
 
+async function appendVerifiedArtifact(
+  directory: string,
+  artifact: AgentRuntimeArtifactRecord,
+  bytes: Buffer
+): Promise<{
+  byteCount: number;
+  contentSha256: string;
+  rollback: () => Promise<void>;
+}> {
+  if (!artifactStorageKeyMatchesRecord(artifact)) {
+    throw new Error('Agent runtime artifact storage key is invalid.');
+  }
+  if (artifact.byteCount + bytes.byteLength > AGENT_RUNTIME_LIMITS.maxArtifactBytes) {
+    throw new Error('Agent runtime artifact exceeds its safety limit.');
+  }
+  const filePath = path.join(directory, artifact.storageKey);
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let writeAttempted = false;
+  let contentSha256: string | undefined;
+  try {
+    handle = await fs.open(
+      filePath,
+      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
+    );
+    const stat = await handle.stat();
+    assertMutableArtifactStat(stat);
+    if (stat.size !== artifact.byteCount) {
+      throw new Error('Agent runtime artifact changed during append.');
+    }
+    const current = Buffer.alloc(artifact.byteCount);
+    await readAllAt(handle, current, 0);
+    if (
+      crypto.createHash('sha256').update(current).digest('hex') !== artifact.contentSha256
+    ) {
+      throw new Error('Agent runtime artifact content failed its integrity check.');
+    }
+    new TextDecoder('utf-8', { fatal: true }).decode(current);
+    contentSha256 = crypto
+      .createHash('sha256')
+      .update(current)
+      .update(bytes)
+      .digest('hex');
+    writeAttempted = bytes.byteLength > 0;
+    await writeAllAt(handle, bytes, artifact.byteCount);
+    await handle.sync();
+    const updated = await handle.stat();
+    assertMutableArtifactStat(updated);
+    if (updated.size !== artifact.byteCount + bytes.byteLength) {
+      throw new Error('Agent runtime artifact changed during append.');
+    }
+    await handle.close();
+    handle = undefined;
+  } catch (cause) {
+    await handle?.close().catch(() => undefined);
+    if (writeAttempted) {
+      try {
+        await restoreArtifactPrefix(filePath, artifact);
+      } catch (rollbackCause) {
+        throw new AgentRuntimeArtifactMutationAmbiguousError(
+          'Agent runtime artifact append failed and its prior bytes could not be restored.',
+          {
+            cause: new AggregateError(
+              [cause, rollbackCause],
+              'Agent runtime artifact append and rollback both failed.'
+            )
+          }
+        );
+      }
+    }
+    throw cause;
+  }
+
+  return {
+    byteCount: artifact.byteCount + bytes.byteLength,
+    contentSha256: contentSha256!,
+    rollback: () => restoreArtifactPrefix(filePath, artifact)
+  };
+}
+
+async function reconcileArtifactFile(
+  directory: string,
+  artifact: AgentRuntimeArtifactRecord
+): Promise<void> {
+  if (artifact.kind === 'OUTPUT' || artifact.kind === 'DIAGNOSTIC') {
+    await restoreArtifactPrefix(path.join(directory, artifact.storageKey), artifact);
+    return;
+  }
+  await readVerifiedArtifact(directory, artifact);
+}
+
+async function restoreArtifactPrefix(
+  filePath: string,
+  artifact: AgentRuntimeArtifactRecord
+): Promise<void> {
+  if (!artifactStorageKeyMatchesRecord(artifact)) {
+    throw new Error('Agent runtime artifact storage key is invalid.');
+  }
+  const handle = await fs.open(
+    filePath,
+    fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
+  );
+  try {
+    const stat = await handle.stat();
+    assertMutableArtifactStat(stat);
+    if (stat.size < artifact.byteCount) {
+      throw new Error('Agent runtime artifact rollback could not verify its prior bytes.');
+    }
+    const prefix = Buffer.alloc(artifact.byteCount);
+    await readAllAt(handle, prefix, 0);
+    if (
+      crypto.createHash('sha256').update(prefix).digest('hex') !== artifact.contentSha256
+    ) {
+      throw new Error('Agent runtime artifact rollback found changed prior bytes.');
+    }
+    if (stat.size > artifact.byteCount) {
+      await handle.truncate(artifact.byteCount);
+      await handle.sync();
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readVerifiedArtifact(
   directory: string,
   artifact: AgentRuntimeArtifactRecord
 ): Promise<string> {
-  if (artifact.storageKey !== artifactStorageKey(artifact.id, artifact.recordRevision)) {
+  if (!artifactStorageKeyMatchesRecord(artifact)) {
     throw new Error('Agent runtime artifact storage key is invalid.');
   }
   const filePath = path.join(directory, artifact.storageKey);
@@ -5331,6 +5512,60 @@ async function readVerifiedArtifact(
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } finally {
     await handle.close();
+  }
+}
+
+async function writeAllAt(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  bytes: Buffer,
+  position: number
+): Promise<void> {
+  let written = 0;
+  while (written < bytes.byteLength) {
+    const result = await handle.write(
+      bytes,
+      written,
+      bytes.byteLength - written,
+      position + written
+    );
+    if (result.bytesWritten <= 0) {
+      throw new Error('Agent runtime artifact write made no progress.');
+    }
+    written += result.bytesWritten;
+  }
+}
+
+async function readAllAt(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  bytes: Buffer,
+  position: number
+): Promise<void> {
+  let read = 0;
+  while (read < bytes.byteLength) {
+    const result = await handle.read(
+      bytes,
+      read,
+      bytes.byteLength - read,
+      position + read
+    );
+    if (result.bytesRead <= 0) {
+      throw new Error('Agent runtime artifact changed while it was being read.');
+    }
+    read += result.bytesRead;
+  }
+}
+
+function assertMutableArtifactStat(stat: {
+  isFile(): boolean;
+  mode: number | bigint;
+  uid: number | bigint;
+}): void {
+  if (
+    !stat.isFile() ||
+    !isOwnedByCurrentUser(stat) ||
+    !posixModeMatches(stat, 0o600)
+  ) {
+    throw new Error('Agent runtime artifact file failed its integrity check.');
   }
 }
 

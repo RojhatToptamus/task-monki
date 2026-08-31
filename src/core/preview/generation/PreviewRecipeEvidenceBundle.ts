@@ -71,6 +71,7 @@ const DERIVED_ONLY_BASENAMES = new Set([
 export interface PreparedPreviewRecipeEvidenceBundle {
   directoryPath: string;
   fileName: typeof EVIDENCE_FILE_NAME;
+  fileByteCount: number;
   includedPaths: ReadonlySet<string>;
   safeOmissions: string[];
   frameworkCapabilities: PreviewFrameworkCapabilities;
@@ -205,25 +206,27 @@ export async function preparePreviewRecipeEvidenceBundle(
       }
     }
     for (const template of publicEnvironment.templates) includedPaths.add(template.path);
+    const evidenceBody = JSON.stringify(
+      {
+        schemaVersion: 'task-monki-preview-repository-evidence/v2',
+        source: 'sanitized task worktree snapshot',
+        files,
+        frameworkCapabilities,
+        publicEnvironment,
+        omissions: safeOmissions
+      },
+      null,
+      2
+    );
     await fs.writeFile(
       path.join(directoryPath, EVIDENCE_FILE_NAME),
-      JSON.stringify(
-        {
-          schemaVersion: 'task-monki-preview-repository-evidence/v2',
-          source: 'sanitized task worktree snapshot',
-          files,
-          frameworkCapabilities,
-          publicEnvironment,
-          omissions: safeOmissions
-        },
-        null,
-        2
-      ),
+      evidenceBody,
       { encoding: 'utf8', mode: 0o600, flag: 'wx' }
     );
     return {
       directoryPath,
       fileName: EVIDENCE_FILE_NAME,
+      fileByteCount: Buffer.byteLength(evidenceBody, 'utf8'),
       includedPaths,
       safeOmissions,
       frameworkCapabilities,

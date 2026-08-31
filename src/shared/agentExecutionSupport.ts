@@ -12,7 +12,10 @@ export type AgentExecutionOperation =
   | 'DISCOURSE';
 
 export interface AgentExecutionSupportContext {
-  model?: Pick<AgentModel, 'inputModalities' | 'designSupport'>;
+  model?: Pick<
+    AgentModel,
+    'inputModalities' | 'previewRecipeGenerationSupport' | 'designSupport'
+  >;
   /** Lets the explicit Design qualification harness test an unqualified candidate model and its image-result path. */
   allowCandidateDesignModel?: boolean;
 }
@@ -41,6 +44,18 @@ export function projectAgentExecutionSupport(
       return readOnlyTurnSupport(capabilities);
 
     case 'PREVIEW_RECIPE_GENERATION':
+      if (
+        capabilities.extensions['task-monki.preview-recipe-generation']
+          ?.maturity === 'stable'
+      ) {
+        const modelSupport = context.model?.previewRecipeGenerationSupport;
+        return modelSupport?.maturity === 'unsupported'
+          ? unsupported(
+              modelSupport.detail?.trim() ||
+                'This model has not passed Preview generation qualification.'
+            )
+          : supported();
+      }
       return readOnlyTurnSupport(capabilities);
 
     case 'REVIEW':

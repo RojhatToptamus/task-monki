@@ -15,7 +15,7 @@ describe('Preview recipe generation support', () => {
     }
   });
 
-  it('publishes a versioned machine-readable contract and a strict output instruction', () => {
+  it('publishes the structured read-only and output boundaries', () => {
     const instruction = buildPreviewRecipeGenerationInstruction({
       evidenceFileName: 'repository-evidence.json'
     });
@@ -28,30 +28,13 @@ describe('Preview recipe generation support', () => {
     expect(instruction).toContain('Do not modify files');
     expect(instruction).toContain('Never reproduce or infer secret values');
     expect(instruction).toContain(PREVIEW_FRAMEWORK_CAPABILITIES_VERSION);
-    expect(instruction).toContain('compatiblePreviewCommand');
-    expect(instruction).toContain('dependencyPreparation');
-    expect(instruction).toContain('npm ci may run repository and dependency lifecycle scripts');
-    expect(instruction).toContain('Never use npm exec, npx, pnpm dlx, or yarn dlx');
-    expect(instruction).toContain('copy those lines exactly');
-    expect(instruction).toContain('Do not report the listed port, protocol, or hostname conflicts as unresolved');
-    expect(instruction).toContain('exactly one publicEnvironmentDecision');
-    expect(instruction).toContain('target: local rather than silently choosing either endpoint');
-    expect(instruction).toContain('Do not model NEXT_PUBLIC values as private inputs');
-    expect(instruction).toContain('insufficient-evidence');
-    expect(instruction).toContain('A ports entry only injects the allocated value');
-    expect(instruction).toContain('exact command binds its listener from that exact environment key');
-    expect(instruction).toContain('Use the npmNext example only when compatiblePreviewCommand is exactly');
-    expect(instruction).toContain('frameworkCapabilities.analyses[].dependencyPreparation.lockfilePath');
-    expect(instruction).toContain('publicEnvironment.templates[].path');
-    expect(instruction).toContain('Do not cite repository-evidence.json');
     expect(instruction).toContain('Do not include markdown, commentary, planning, progress');
-    expect(instruction).toContain('Every report string must be nonempty, single-line');
-    expect(instruction).toContain('at most 1200 UTF-8 bytes');
-    expect(instruction).toContain('can each contain at most 40 items');
-    expect(instruction).toContain('Use an empty array when a report list has no items');
-    expect(instruction).toContain('A draft requires a complete YAML string and at least one evidence item');
-    expect(instruction).toContain(
-      'Include attachmentId only for HTTP_ATTACHMENT. Omit the field for SOURCE_DEFAULT and OMIT.'
+    expect(PREVIEW_RECIPE_GENERATION_CONTRACT.output.requiredFields).toContain('yaml');
+    expect(PREVIEW_RECIPE_GENERATION_CONTRACT.output.format).toContain(
+      'Exactly one JSON object'
+    );
+    expect(PREVIEW_RECIPE_GENERATION_CONTRACT.safety).toContain(
+      'Never emit credentials, tokens, passwords, private keys, connection strings containing credentials, or values from secret-bearing files.'
     );
     expect(PREVIEW_RECIPE_GENERATION_CONTRACT.evidencePaths.allowed).toEqual([
       'files[].path',

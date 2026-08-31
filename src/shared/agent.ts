@@ -847,6 +847,8 @@ export interface AgentModel {
   serviceTiers: string[];
   defaultServiceTier?: string;
   inputModalities: string[];
+  /** Model-specific support for generating Preview YAML, when a runtime requires qualification. */
+  previewRecipeGenerationSupport?: AgentCapability;
   /** Provider-owned model support for the full Design workflow. */
   designSupport?: AgentDesignCapability;
   isDefault: boolean;

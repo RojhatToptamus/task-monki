@@ -181,6 +181,32 @@ describe('runtimeReadinessView', () => {
       'Sign in before starting this workflow.'
     );
   });
+
+  it('projects an exact model qualification failure for Preview generation', () => {
+    const runtime = state(createRuntimeReadiness('READY', 'Ready'));
+    runtime.preflight.capabilities.extensions['task-monki.preview-recipe-generation'] = {
+      maturity: 'stable'
+    };
+
+    expect(
+      selectConfiguredRuntimeForOperation(
+        [runtime],
+        'test',
+        'PREVIEW_RECIPE_GENERATION',
+        {
+          model: {
+            inputModalities: ['text'],
+            previewRecipeGenerationSupport: {
+              maturity: 'unsupported',
+              detail: 'Preview generation requires the qualified model.'
+            }
+          }
+        }
+      )
+    ).toEqual({
+      unavailableReason: 'Preview generation requires the qualified model.'
+    });
+  });
 });
 
 function state(

@@ -718,21 +718,37 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     );
     try {
       await adapter.interruptRuntimeTurn({ session, run });
-      const latest = (await this.runtimeStore.getRun(run.id)) ?? run;
-      if (isTerminalRuntimeRun(latest.status)) return latest;
-      if (
-        latest.status === 'INTERRUPTING' &&
-        latest.interruptDelivery === 'SENDING'
-      ) {
-        return this.runtimeStore.updateRun(
-          latest.id,
-          latest.recordRevision,
-          {
-            interruptDelivery: 'ACKNOWLEDGED',
-            lastEventAt: new Date().toISOString()
-          },
-          `${clientOperationId}:runtime-stop-ack`
-        );
+      let latest = (await this.runtimeStore.getRun(run.id)) ?? run;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (
+          isTerminalRuntimeRun(latest.status) ||
+          latest.status === 'RECOVERY_REQUIRED' ||
+          latest.status !== 'INTERRUPTING' ||
+          latest.interruptDelivery !== 'SENDING'
+        ) {
+          return latest;
+        }
+        try {
+          return await this.runtimeStore.updateRun(
+            latest.id,
+            latest.recordRevision,
+            {
+              interruptDelivery: 'ACKNOWLEDGED',
+              lastEventAt: new Date().toISOString()
+            },
+            `${clientOperationId}:runtime-stop-ack`
+          );
+        } catch (error) {
+          const current = await this.runtimeStore.getRun(latest.id);
+          if (
+            !current ||
+            current.recordRevision === latest.recordRevision ||
+            attempt === 2
+          ) {
+            throw error;
+          }
+          latest = current;
+        }
       }
       return latest;
     } catch (error) {

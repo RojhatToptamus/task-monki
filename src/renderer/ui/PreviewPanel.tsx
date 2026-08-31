@@ -835,8 +835,8 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
         </div>
         <div className="tm-preview-setup__rules">
           <p>
-            The agent inspects a bounded read-only evidence bundle and cannot write the
-            repository. You review the complete YAML before accepting it.
+            The agent inspects a bounded evidence bundle. You review the complete YAML
+            before accepting it.
           </p>
           <p>
             Acceptance creates only the Preview recipe, then checks it through the normal

@@ -115,7 +115,7 @@ import {
   isImplementationRunMode,
   normalizePullRequestTitle,
 } from '../../shared/contracts';
-import { CODEX_RUNTIME_ID, type AgentRuntimeId } from '../../shared/agent';
+import type { AgentRuntimeId } from '../../shared/agent';
 import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import type {
   AgentOwnerScope,
@@ -967,17 +967,6 @@ export class TaskManagerService {
       );
       if (!support.supported) throw new Error(support.reason);
     }
-    if (input.previewRecipeGenerationRuntimeId) {
-      const adapter = this.runtimeRegistry.require(
-        input.previewRecipeGenerationRuntimeId
-      );
-      const capabilities = await adapter.capabilities();
-      const support = projectAgentExecutionSupport(
-        capabilities,
-        'PREVIEW_RECIPE_GENERATION'
-      );
-      if (!support.supported) throw new Error(support.reason);
-    }
     if (input.reviewRuntimeId) {
       const adapter = this.runtimeRegistry.require(input.reviewRuntimeId);
       const capabilities = await adapter.capabilities();
@@ -1004,6 +993,24 @@ export class TaskManagerService {
       : input;
     const prospective = mergeAppSettings(current, safeInput);
     await this.assertRuntimeEnablementValid(prospective, current);
+    if (
+      input.previewRecipeGenerationRuntimeId !== undefined ||
+      input.previewRecipeGenerationModel !== undefined ||
+      input.previewRecipeGenerationModelProvider !== undefined
+    ) {
+      const runtimeId =
+        prospective.previewRecipeGenerationRuntimeId ?? prospective.defaultRuntimeId;
+      const adapter = this.runtimeRegistry.require(runtimeId);
+      await preparePreviewRecipeGenerationExecution(adapter, {
+        runtimeId,
+        model: prospective.previewRecipeGenerationModel,
+        modelProvider: prospective.previewRecipeGenerationModelProvider,
+        sandbox: 'READ_ONLY',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      });
+    }
     const newlyDisabledRuntimeIds = prospective.disabledRuntimeIds.filter(
       (runtimeId) => !current.disabledRuntimeIds.includes(runtimeId)
     );
@@ -1968,7 +1975,6 @@ export class TaskManagerService {
           (useConfiguredModel
             ? this.appSettings.promptRefinementModelProvider
             : undefined),
-        reasoningEffort: 'low',
         sandbox: 'READ_ONLY',
         networkAccess: false,
         approvalPolicy: 'never',
@@ -2037,29 +2043,17 @@ export class TaskManagerService {
     this.assertRuntimeEnabled(runtimeId);
     const adapter = this.runtimeRegistry.require(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
-    const support = projectAgentExecutionSupport(
-      await adapter.capabilities(),
-      'PREVIEW_RECIPE_GENERATION'
-    );
-    if (!support.supported) throw new PreviewRecipeGenerationRunError(
-      'UNAVAILABLE',
-      support.reason
-    );
     let execution;
     try {
-      execution = await adapter.resolveExecution({
-        settings: {
-          runtimeId,
-          model: this.appSettings.previewRecipeGenerationModel,
-          modelProvider: this.appSettings.previewRecipeGenerationModelProvider,
-          sandbox: 'READ_ONLY',
-          networkAccess: false,
-          approvalPolicy: 'never',
-          approvalsReviewer: 'user'
-        },
-        attachments: []
+      execution = await preparePreviewRecipeGenerationExecution(adapter, {
+        runtimeId,
+        model: this.appSettings.previewRecipeGenerationModel,
+        modelProvider: this.appSettings.previewRecipeGenerationModelProvider,
+        sandbox: 'READ_ONLY',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
       });
-      assertResolvedExecutionRuntime(adapter, execution);
     } catch (cause) {
       throw new PreviewRecipeGenerationRunError(
         'UNAVAILABLE',
@@ -3009,12 +3003,11 @@ export class TaskManagerService {
       promptRefinementShutdown,
       previewRecipeGenerationShutdown
     ]);
+    const promptRefinementDrain = drainResults.at(-2);
     const previewGenerationDrain = drainResults.at(-1);
-    const drainFailure =
-      previewGenerationDrain?.status === 'rejected'
-        ? previewGenerationDrain
-        : undefined;
-    await this.discourseHost?.beginShutdown();
+    const [discourseResult] = await Promise.allSettled([
+      this.discourseHost?.beginShutdown()
+    ]);
     const [designResult] = await Promise.allSettled([
       this.designUpdates?.beginShutdown()
     ]);
@@ -3043,6 +3036,9 @@ export class TaskManagerService {
         if (failed) throw failed.reason;
       })
     ]);
+    if (discourseResult.status === 'rejected') {
+      throw discourseResult.reason;
+    }
     if (designResult.status === 'rejected') {
       throw designResult.reason;
     }
@@ -3061,8 +3057,11 @@ export class TaskManagerService {
     if (storeCloseResult.status === 'rejected') {
       throw storeCloseResult.reason;
     }
-    if (drainFailure) {
-      throw drainFailure.reason;
+    if (promptRefinementDrain?.status === 'rejected') {
+      throw promptRefinementDrain.reason;
+    }
+    if (previewGenerationDrain?.status === 'rejected') {
+      throw previewGenerationDrain.reason;
     }
   }
 
@@ -3219,7 +3218,8 @@ export class TaskManagerService {
         await this.agents.finishRuntimeTurn(run.id);
       }
     }
-    const remaining = (await this.agentRuntimeStore.snapshot()).runs.some(
+    const current = await this.agentRuntimeStore.snapshot();
+    const remaining = current.runs.some(
       (run) =>
         run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
         run.owner.taskId === taskId
@@ -3229,6 +3229,15 @@ export class TaskManagerService {
         'Preview recipe generation is still recovering. Restart Task Monki before you try again or delete this task.'
       );
     }
+    await this.previewRecipeGenerator.recoverEvidence(
+      new Set(
+        current.runs.flatMap((run) =>
+          run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
+            ? [run.owner.generationId]
+            : []
+        )
+      )
+    );
   }
 
   approvePreviewPlan(
@@ -3767,7 +3776,7 @@ export class TaskManagerService {
         // Preview cleanup is part of deletion authority. The store keeps its
         // resource ledger intact if any process or workspace identity is ambiguous.
         await this.previews.stopTask(task.id);
-        await this.previewRecipeGenerator.discard(task.id);
+        await this.previewRecipeGenerator.clearTask(task.id);
         await this.assertNoUnsettledPreviewRecipeGeneration(task.id);
         await this.agents.releaseTask(task.id);
 
@@ -3833,7 +3842,7 @@ export class TaskManagerService {
     const source = this.requireDesignSource();
 
     await this.previews.stopTask(task.id);
-    await this.previewRecipeGenerator.discard(task.id);
+    await this.previewRecipeGenerator.clearTask(task.id);
     await this.agents.releaseTask(task.id);
 
     let removedWorktree = false;
@@ -4682,6 +4691,50 @@ async function prepareTaskCreationSettings(
   const resolved = await adapter.resolveExecution({ settings, attachments });
   assertResolvedExecutionRuntime(adapter, resolved);
   return resolved.settings;
+}
+
+async function preparePreviewRecipeGenerationExecution(
+  adapter: AgentRuntimeAdapter,
+  requestedSettings: AgentExecutionSettings
+) {
+  const resolved = await adapter.resolveExecution({
+    settings: requestedSettings,
+    attachments: []
+  });
+  assertResolvedExecutionRuntime(adapter, resolved);
+  const capabilities = await adapter.capabilities();
+  const runtimeSupport = projectAgentExecutionSupport(
+    capabilities,
+    'PREVIEW_RECIPE_GENERATION'
+  );
+  if (!runtimeSupport.supported) throw new Error(runtimeSupport.reason);
+  const selectedModel = requestedSettings.model?.trim();
+  if (
+    selectedModel &&
+    (resolved.model.model !== selectedModel ||
+      resolved.settings.model !== selectedModel)
+  ) {
+    throw new Error(
+      `${adapter.descriptor.displayName} did not resolve the selected Preview model.`
+    );
+  }
+  const selectedModelProvider = requestedSettings.modelProvider?.trim();
+  if (
+    selectedModelProvider &&
+    (resolved.model.modelProvider !== selectedModelProvider ||
+      resolved.settings.modelProvider !== selectedModelProvider)
+  ) {
+    throw new Error(
+      `${adapter.descriptor.displayName} did not resolve the selected Preview model provider.`
+    );
+  }
+  const modelSupport = projectAgentExecutionSupport(
+    capabilities,
+    'PREVIEW_RECIPE_GENERATION',
+    { model: resolved.model }
+  );
+  if (!modelSupport.supported) throw new Error(modelSupport.reason);
+  return resolved;
 }
 
 async function prepareDesignCreationExecution(

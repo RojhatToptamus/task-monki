@@ -311,6 +311,17 @@ function ModelSettings({
   );
   const enabledModels = models.filter((model) => enabledRuntimeIds.has(model.runtimeId));
   const selected = selectSettingsModels(enabledModels, enabledRuntimes, appSettings);
+  const selectedPreviewRuntime = enabledRuntimes.find(
+    (runtime) =>
+      runtime.preflight.runtime.id === selected.previewRecipeGenerationRuntimeId
+  );
+  const previewUnavailableReason = selectedPreviewRuntime
+      ? runtimeExecutionUnavailableReason(
+          selectedPreviewRuntime,
+          'PREVIEW_RECIPE_GENERATION',
+          { model: selected.selectedPreviewRecipeGenerationModel }
+        )
+      : undefined;
   return (
     <SettingsPane
       id="models"
@@ -368,10 +379,48 @@ function ModelSettings({
           label="Preview generation"
           runtimeId={selected.previewRecipeGenerationRuntimeId}
           modelId={selected.selectedPreviewRecipeGenerationModel?.id ?? ''}
+          fallbackSummary={
+            selected.selectedPreviewRecipeGenerationModel
+              ? undefined
+              : enabledRuntimes.some(
+                    (runtime) =>
+                      runtime.preflight.runtime.id ===
+                      selected.previewRecipeGenerationRuntimeId
+                  )
+                ? (appSettings.previewRecipeGenerationModel ?? undefined)
+                : [
+                    appSettings.previewRecipeGenerationRuntimeId,
+                    appSettings.previewRecipeGenerationModel
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
+          }
+          selectionUnavailable={Boolean(
+            !enabledRuntimes.some(
+              (runtime) =>
+                runtime.preflight.runtime.id ===
+                selected.previewRecipeGenerationRuntimeId
+            ) ||
+              ((appSettings.previewRecipeGenerationModel ||
+                appSettings.previewRecipeGenerationModelProvider) &&
+                !selected.selectedPreviewRecipeGenerationModel) ||
+              previewUnavailableReason
+          )}
+          selectionUnavailableMessage={
+            previewUnavailableReason ??
+            'The selected Preview agent or model is no longer available. Choose another selection.'
+          }
           models={enabledModels}
           runtimes={enabledRuntimes}
           runtimeUnavailableReason={(runtime) =>
             runtimeExecutionUnavailableReason(runtime, 'PREVIEW_RECIPE_GENERATION')
+          }
+          modelUnavailableReason={(model, runtime) =>
+            runtimeExecutionUnavailableReason(
+              runtime,
+              'PREVIEW_RECIPE_GENERATION',
+              { model }
+            )
           }
           onDiscoverModels={onDiscoverAgentRuntimeModels}
           onSelectionChange={(runtimeId, modelId) => {
@@ -471,10 +520,7 @@ export function selectSettingsModels(
         ? defaultRuntimeId
         : ([...promptRefinementRuntimeIds][0] ?? defaultRuntimeId);
   const previewRecipeGenerationRuntimeId =
-    appSettings.previewRecipeGenerationRuntimeId &&
-    availableRuntimeIds.has(appSettings.previewRecipeGenerationRuntimeId)
-      ? appSettings.previewRecipeGenerationRuntimeId
-      : defaultRuntimeId;
+    appSettings.previewRecipeGenerationRuntimeId ?? defaultRuntimeId;
   const reviewRuntimeId =
     appSettings.reviewRuntimeId && availableRuntimeIds.has(appSettings.reviewRuntimeId)
       ? appSettings.reviewRuntimeId
@@ -493,12 +539,21 @@ export function selectSettingsModels(
     promptRefinementRuntimeId,
     appSettings.promptRefinementModelProvider
   );
-  const selectedPreviewRecipeGenerationModel = selectModel(
-    models,
-    appSettings.previewRecipeGenerationModel,
-    previewRecipeGenerationRuntimeId,
-    appSettings.previewRecipeGenerationModelProvider
-  );
+  const selectedPreviewRecipeGenerationModel = appSettings.previewRecipeGenerationModel
+    ? models.find(
+        (model) =>
+          model.runtimeId === previewRecipeGenerationRuntimeId &&
+          (model.id === appSettings.previewRecipeGenerationModel ||
+            model.model === appSettings.previewRecipeGenerationModel) &&
+          (!appSettings.previewRecipeGenerationModelProvider ||
+            model.modelProvider === appSettings.previewRecipeGenerationModelProvider)
+      )
+    : selectModel(
+        models,
+        undefined,
+        previewRecipeGenerationRuntimeId,
+        appSettings.previewRecipeGenerationModelProvider
+      );
   const selectedReviewModel = selectModel(
     models,
     appSettings.reviewModel,

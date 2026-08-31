@@ -324,6 +324,103 @@ describe('TaskManagerService shutdown coordination', () => {
       'Task Manager is shutting down.'
     );
   });
+
+  it.each([
+    {
+      owner: 'Discourse',
+      discourseFailure: 'Discourse scheduler state could not be saved.',
+      promptRefinementFailure: undefined
+    },
+    {
+      owner: 'prompt refinement',
+      discourseFailure: undefined,
+      promptRefinementFailure: 'Prompt refinement termination was not confirmed.'
+    }
+  ])('continues owned-resource cleanup when $owner shutdown fails', async ({
+    discourseFailure,
+    promptRefinementFailure
+  }) => {
+    const events: string[] = [];
+    const service = Object.create(TaskManagerService.prototype) as TaskManagerService;
+    initializeRuntimeLifecycle(service);
+    const internals = service as unknown as {
+      lifecycleState: string;
+      taskActionLocks: Map<string, unknown>;
+      activeControlActions: Set<Promise<unknown>>;
+      previewEnabled: boolean;
+      promptRefiner: { beginShutdown(): Promise<void> };
+      discourseHost: {
+        beginShutdown(): Promise<void>;
+        closeStores(): Promise<void>;
+      };
+      store: { close(): Promise<void> };
+      agentRuntimeStore: { close(): Promise<void> };
+      agents: { shutdown(): Promise<void> };
+      designToolBridge: { shutdown(): Promise<void> };
+      previews: { shutdown(): Promise<void> };
+      previewRecipeGenerator: { shutdown(): Promise<void> };
+    };
+    internals.lifecycleState = 'READY';
+    internals.taskActionLocks = new Map();
+    internals.activeControlActions = new Set();
+    internals.previewEnabled = true;
+    internals.promptRefiner = {
+      async beginShutdown() {
+        events.push('prompt-refinement-shutdown');
+        if (promptRefinementFailure) throw new Error(promptRefinementFailure);
+      }
+    };
+    internals.discourseHost = {
+      async beginShutdown() {
+        events.push('discourse-shutdown');
+        if (discourseFailure) throw new Error(discourseFailure);
+      },
+      async closeStores() {
+        events.push('discourse-store-close');
+      }
+    };
+    internals.store = {
+      async close() {
+        events.push('task-store-close');
+      }
+    };
+    internals.agentRuntimeStore = {
+      async close() {
+        events.push('agent-runtime-store-close');
+      }
+    };
+    internals.agents = {
+      async shutdown() {
+        events.push('agent-shutdown');
+      }
+    };
+    internals.designToolBridge = {
+      async shutdown() {
+        events.push('design-tool-shutdown');
+      }
+    };
+    internals.previews = {
+      async shutdown() {
+        events.push('preview-shutdown');
+      }
+    };
+    internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
+
+    const expectedFailure = discourseFailure ?? promptRefinementFailure;
+    if (!expectedFailure) throw new Error('The shutdown failure fixture is invalid.');
+    await expect(service.shutdown()).rejects.toThrow(expectedFailure);
+    expect(new Set(events)).toEqual(new Set([
+      'prompt-refinement-shutdown',
+      'discourse-shutdown',
+      'agent-shutdown',
+      'design-tool-shutdown',
+      'preview-shutdown',
+      'discourse-store-close',
+      'agent-runtime-store-close',
+      'task-store-close'
+    ]));
+    expect(internals.lifecycleState).toBe('STOPPED');
+  });
 });
 
 function initializeRuntimeLifecycle(service: TaskManagerService): void {

@@ -3644,9 +3644,11 @@ describe('OpenCodeAdapter', () => {
       }
     });
 
-    await waitForCondition(async () =>
-      appendArtifact.mock.calls.length === 2 &&
-      (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED'
+    await waitForCondition(
+      async () =>
+        appendArtifact.mock.calls.length === 2 &&
+        (await fixture.runtime.getRun(run.id))?.status === 'RECOVERY_REQUIRED',
+      4_000
     );
     await wait(250);
     expect(appendArtifact).toHaveBeenCalledTimes(2);
@@ -5550,6 +5552,12 @@ describe('OpenCodeAdapter', () => {
     expect(decodeDataUrl(body.parts[2]!.url!)).toEqual(imageBytes);
     expect(JSON.stringify(body)).not.toContain(textPath);
     expect(JSON.stringify(body)).not.toContain(imagePath);
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(textPath).slice(1, -1)
+    );
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(imagePath).slice(1, -1)
+    );
     await expect(fixture.runtime.getRun(run.id)).resolves.toMatchObject({
       attachmentSubmissions: attachments.map((attachment) =>
         expect.objectContaining({
@@ -5615,6 +5623,9 @@ describe('OpenCodeAdapter', () => {
     });
     expect(decodeDataUrl(body.parts[1]!.url!)).toEqual(fixture.attachmentBytes);
     expect(JSON.stringify(body)).not.toContain(fixture.attachmentPath);
+    expect(JSON.stringify(body)).not.toContain(
+      JSON.stringify(fixture.attachmentPath).slice(1, -1)
+    );
     expect(fixture.started.attachmentSubmissions).toEqual([
       expect.objectContaining({
         attachmentId: fixture.attachments[0]!.attachmentId,
