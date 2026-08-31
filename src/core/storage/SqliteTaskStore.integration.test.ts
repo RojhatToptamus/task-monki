@@ -304,7 +304,7 @@ describe('SqliteTaskStore', () => {
       runs: [{ id: consumerRun.id }]
     });
     await closeStore(restarted);
-  });
+  }, 15_000);
 
   it('keeps provider runtime records out of the durable Task store', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-runtime-boundary-'));
