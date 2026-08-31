@@ -5792,6 +5792,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         candidate.serverInstanceId === serverInstanceId &&
         ACTIVE_RUN_STATUSES.includes(candidate.status)
     ) : [];
+    const unloadedTaskSessionIds = new Set<string>();
     for (const run of affectedRuns) {
       await this.flushRunContent(run.id, true);
       const lossPublished = await this.taskRuntime.applyTaskRuntimeEventIfRunStatus(
@@ -5817,6 +5818,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         { status: 'NOT_LOADED' },
         acpRuntimeOperationId('session/runtime-lost', run.sessionId, serverInstanceId, run.id)
       );
+      unloadedTaskSessionIds.add(run.sessionId);
       this.appEvents.emit({
         type: 'run.state.updated',
         taskId: run.taskId,
@@ -5839,6 +5841,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       (candidate) =>
         candidate.runtimeId === this.descriptor.id &&
         !runtimeSessionIds.has(candidate.id) &&
+        !unloadedTaskSessionIds.has(candidate.id) &&
         (provisionalLocalSessionIds.has(candidate.id) ||
           (candidate.providerSessionId !== undefined &&
             loadedProviderSessionIds.has(candidate.providerSessionId)))

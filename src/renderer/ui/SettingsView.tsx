@@ -388,12 +388,7 @@ function ModelSettings({
                       selected.previewRecipeGenerationRuntimeId
                   )
                 ? (appSettings.previewRecipeGenerationModel ?? undefined)
-                : [
-                    appSettings.previewRecipeGenerationRuntimeId,
-                    appSettings.previewRecipeGenerationModel
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')
+                : (appSettings.previewRecipeGenerationModel ?? 'Choose a model')
           }
           selectionUnavailable={Boolean(
             !enabledRuntimes.some(

@@ -23,7 +23,7 @@ import {
   LADDER
 } from './theme-derivation.mjs';
 
-export const DEFAULT_THEME = 'Umber';
+export const DEFAULT_THEME = 'Graphite';
 
 export const GROUPS = {
   Authored: ['Graphite', 'Umber', 'Nocturne'],
@@ -104,9 +104,9 @@ export const SEEDS = {
 /* Emission order, with the section comments that make a diff readable. */
 export const SECTIONS = [
   ['surfaces — the elevation ladder', ['--ground', '--panel', '--surface', '--well', '--card', '--card-hover', '--overlay']],
-  ['controls', ['--field', '--field-hover', '--field-focus', '--field-disabled', '--field-focus-line', '--focus-ring', '--field-focus-ring', '--control-edge']],
+  ['controls', ['--field', '--field-hover', '--field-focus', '--field-disabled', '--focus-ring', '--field-focus-ring', '--control-edge']],
   ['row and control states', ['--hover', '--sel', '--press']],
-  ['lines — interior divider, control edge, object edge, structural seam', ['--hair', '--field-edge', '--edge-raised', '--edge']],
+  ['lines — interior divider, control edge, focused control edge, object edge, structural seam', ['--hair', '--field-edge', '--field-edge-focus', '--edge-raised', '--edge']],
   ['ink', ['--text', '--text-soft', '--muted', '--faint', '--placeholder', '--text-disabled']],
   ['primary action', ['--primary', '--primary-hover', '--primary-press', '--primary-disabled', '--on-primary']],
   ['accent — the interactive and "working" hue', ['--accent', '--accent-ink', '--accent-soft']],
@@ -143,7 +143,7 @@ export function buildCss(variants) {
     '   16 themes × 2 modes × ' + count + ' tokens, all derived from seven seeds',
     '   per theme. See DESIGN.md §2.2–§2.10; Appendix A binds each token to elements.',
     '',
-    '   Usage:  <html data-theme="umber" data-mode="dark">',
+    '   Usage:  <html data-theme="graphite" data-mode="dark">',
     '   data-mode: "light" | "dark" | omitted (follows prefers-color-scheme). */',
     '',
     INVARIANTS,
@@ -232,6 +232,9 @@ export function buildAll() {
       }
       if (!measured.monotonic) problems.push(name + ' ' + mode + ': surface ladder is not monotonic');
       if (!measured.separated) problems.push(name + ' ' + mode + ': --field is not separated from its host planes');
+      if (!measured.edgeFocusSeparated) {
+        problems.push(name + ' ' + mode + ': --field-edge-focus is too close to --field-edge');
+      }
     }
   }
   return { variants: variants, problems: problems, notes: notes };

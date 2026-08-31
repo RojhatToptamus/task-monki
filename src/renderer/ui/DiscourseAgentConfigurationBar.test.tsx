@@ -97,7 +97,7 @@ describe('DiscourseAgentConfigurationBar', () => {
     const html = renderToStaticMarkup(
       <DiscourseAgentConfigurationBar
         catalog={catalog}
-        compact={false}
+        compact
         disabled={false}
         expanded
         policy="DIRECT"
@@ -119,8 +119,10 @@ describe('DiscourseAgentConfigurationBar', () => {
     expect(html).toContain(
       'This provider can still mutate through child agents. Normal Tasks remain available.'
     );
+    expect(html).toContain('tm-agent-console--compact');
+    expect(html).toContain('>Codex model</span>');
     expect(html).toMatch(
-      /<button[^>]*disabled=""[^>]*><span>Blocked model<\/span>/u
+      /<button[^>]*disabled=""[^>]*aria-label="Blocked model via Blocked provider/u
     );
   });
 });

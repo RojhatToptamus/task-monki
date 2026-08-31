@@ -196,7 +196,7 @@ export function DiscourseAgentConfigurationBar({
                   <small>{capitalize(entry.profile.roleTemplate)}</small>
                 </div>
                 <AgentModelSelector
-                  presentation={compact ? 'icon' : 'compact'}
+                  presentation="compact"
                   label={`${entry.profile.displayName} provider and model`}
                   runtimeId={selection.runtimeId ?? ''}
                   modelId={selection.modelId ?? ''}

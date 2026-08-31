@@ -157,8 +157,8 @@ describe('SettingsView', () => {
 
     expect(withoutEffort).not.toContain('>Reasoning<');
     expect(withEffort).toContain('>Reasoning<');
-    expect(withEffort).toContain('>High</small>');
-    expect(withEffort).toContain('>X-high</small>');
+    expect(withEffort).toContain('aria-label="High reasoning"');
+    expect(withEffort).toContain('aria-label="X-high reasoning"');
 
     const providerDefault = renderToStaticMarkup(
       <AgentModelSetting
@@ -179,7 +179,7 @@ describe('SettingsView', () => {
         onReasoningEffortChange={() => undefined}
       />
     );
-    expect(providerDefault).toContain('>Default</small>');
+    expect(providerDefault).toContain('aria-label="Default reasoning"');
   });
 
   it('offers explicit model loading without starting discovery during render', () => {
@@ -516,7 +516,7 @@ describe('SettingsView', () => {
       'This profile cannot deny shell changes. Normal Tasks remain available.'
     );
     expect(html).toMatch(
-      /<button[^>]*disabled=""[^>]*><span>Provider model<\/span>/u
+      /<button[^>]*disabled=""[^>]*aria-label="Provider model via Provider runtime/u
     );
   });
 

@@ -155,10 +155,10 @@ describe('mounted Design workspace', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: /Design: Codex · Luna/ }));
-    const unavailableOption = screen.getByRole('menuitemradio', {
-      name: `Unqualified Unavailable ${reason}`
+    const unavailableOption = screen.getByRole('option', {
+      name: `Unqualified via Codex, unavailable. ${reason}`
     });
-    expect(unavailableOption).toHaveProperty('disabled', true);
+    expect(unavailableOption.getAttribute('aria-disabled')).toBe('true');
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: 'Build with the qualified model.' }

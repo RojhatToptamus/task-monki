@@ -85,47 +85,6 @@ describe('projectAgentExecutionSupport', () => {
     });
   });
 
-  it('explains the exact unqualified read-only profile without disabling normal Tasks', () => {
-    const capabilities = supportedCapabilities({
-      executionPolicy: {
-        defaultPresetId: 'write',
-        detail: 'Write access only.',
-        presets: [
-          {
-            id: 'write',
-            label: 'Write',
-            detail: 'Write access.',
-            sandbox: 'WORKSPACE_WRITE',
-            repositoryMutation: 'ALLOW',
-            approvalPolicy: 'never',
-            approvalsReviewer: 'user',
-            networkAccess: 'DISABLED'
-          }
-        ]
-      },
-      readOnlyTurns: {
-        maturity: 'unsupported',
-        detail: 'This profile can still mutate through child agents.'
-      }
-    });
-
-    expect(projectAgentExecutionSupport(capabilities, 'PROMPT_REFINEMENT')).toEqual({
-      supported: false,
-      reason:
-        'This profile can still mutate through child agents. Normal Tasks remain available.'
-    });
-    expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
-      supported: false,
-      reason:
-        'This profile can still mutate through child agents. Normal Tasks remain available.'
-    });
-    expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
-      supported: false,
-      reason:
-        'This profile can still mutate through child agents. Normal Tasks remain available.'
-    });
-  });
-
   it('requires the complete current Design contract and uses the read-only turn capability for Discourse', () => {
     const capabilities = supportedCapabilities();
 

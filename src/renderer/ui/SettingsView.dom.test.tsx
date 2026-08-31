@@ -48,7 +48,7 @@ function renderSettings({
 } = {}) {
   render(
     <SettingsView
-      theme="device"
+      theme={appSettings.theme}
       onSetTheme={onSetTheme}
       onPreviewThemePreset={onPreviewThemePreset}
       appSettings={appSettings}
@@ -116,7 +116,9 @@ describe('Model settings', () => {
         name: 'Preview generation: Codex · Preview model'
       })
     );
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Preview model/u }));
+    fireEvent.click(
+      screen.getByRole('option', { name: 'Preview model via Codex' })
+    );
 
     expect(onSetAppSettings).toHaveBeenCalledWith({
       previewRecipeGenerationRuntimeId: 'codex',
@@ -262,11 +264,11 @@ describe('Appearance settings', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
     expect(screen.getByText('Palette only — typeface and density are set separately.')).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Theme preview' })).toBeTruthy();
-    expect(screen.getByText(/Umber · (?:light|dark)/u)).toBeTruthy();
+    expect(screen.getByText('Graphite · dark')).toBeTruthy();
     expect(screen.getByText('[seed:completion-manual-merged] Manual completion with merged PR')).toBeTruthy();
     expect(screen.getByText('Write a message… Type @ for agents, tasks, or repositories')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /Umber/u }));
+    fireEvent.click(screen.getByRole('button', { name: /Graphite/u }));
     expect(screen.getAllByRole('option')).toHaveLength(16);
     expect(screen.getByRole('group', { name: 'Authored' })).toBeTruthy();
     expect(screen.getByRole('group', { name: 'Catalog' })).toBeTruthy();
@@ -284,21 +286,21 @@ describe('Appearance settings', () => {
     const { onPreviewThemePreset, onSetAppSettings } = renderSettings();
     fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
 
-    const trigger = screen.getByRole('button', { name: /Umber/u });
+    const trigger = screen.getByRole('button', { name: /Graphite/u });
     fireEvent.click(trigger);
+    const graphite = screen.getByRole('option', { name: 'Graphite' });
+    await waitFor(() => expect(document.activeElement).toBe(graphite));
+
+    fireEvent.keyDown(graphite, { key: 'ArrowDown' });
     const umber = screen.getByRole('option', { name: 'Umber' });
     await waitFor(() => expect(document.activeElement).toBe(umber));
+    expect(onPreviewThemePreset).toHaveBeenLastCalledWith('umber');
+    expect(screen.getByText('Umber · dark')).toBeTruthy();
 
-    fireEvent.keyDown(umber, { key: 'ArrowDown' });
-    const nocturne = screen.getByRole('option', { name: 'Nocturne' });
-    await waitFor(() => expect(document.activeElement).toBe(nocturne));
-    expect(onPreviewThemePreset).toHaveBeenLastCalledWith('nocturne');
-    expect(screen.getByText(/Nocturne · (?:light|dark)/u)).toBeTruthy();
-
-    fireEvent.keyDown(nocturne, { key: 'Escape' });
+    fireEvent.keyDown(umber, { key: 'Escape' });
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(onPreviewThemePreset).toHaveBeenLastCalledWith(null);
-    expect(screen.getByText(/Umber · (?:light|dark)/u)).toBeTruthy();
+    expect(screen.getByText('Graphite · dark')).toBeTruthy();
     expect(onSetAppSettings).not.toHaveBeenCalled();
   });
 
@@ -306,18 +308,18 @@ describe('Appearance settings', () => {
     const { onPreviewThemePreset, onSetAppSettings } = renderSettings();
     fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
 
-    const trigger = screen.getByRole('button', { name: /Umber/u });
+    const trigger = screen.getByRole('button', { name: /Graphite/u });
     fireEvent.click(trigger);
+    const graphite = screen.getByRole('option', { name: 'Graphite' });
+    await waitFor(() => expect(document.activeElement).toBe(graphite));
+    fireEvent.keyDown(graphite, { key: 'ArrowDown' });
     const umber = screen.getByRole('option', { name: 'Umber' });
     await waitFor(() => expect(document.activeElement).toBe(umber));
-    fireEvent.keyDown(umber, { key: 'ArrowDown' });
-    const nocturne = screen.getByRole('option', { name: 'Nocturne' });
-    await waitFor(() => expect(document.activeElement).toBe(nocturne));
-    fireEvent.keyDown(nocturne, { key: 'Enter' });
+    fireEvent.keyDown(umber, { key: 'Enter' });
 
     await waitFor(() => {
       expect(onSetAppSettings).toHaveBeenCalledWith(
-        { themePreset: 'nocturne' },
+        { themePreset: 'umber' },
         'Theme preset updated.'
       );
     });

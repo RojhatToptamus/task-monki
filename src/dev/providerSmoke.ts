@@ -1279,7 +1279,10 @@ async function stageSmokeAttachments(
   let payloadByteCount = textBytes.byteLength;
   if (expectation.requestedKinds.includes('image')) {
     const imageBytes = await fs.readFile(
-      path.resolve(__dirname, '../../build/provider-smoke-image.png')
+      path.resolve(
+        __dirname,
+        '../../src/testSupport/fixtures/provider-smoke-image.png'
+      )
     );
     payloadByteCount += imageBytes.byteLength;
     attachments.push({

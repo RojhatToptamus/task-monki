@@ -400,8 +400,9 @@ describe('NewTaskPanel', () => {
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
     expect(html).toContain('aria-labelledby="task-network-access-label"');
     expect(html).toContain('<details');
-    expect(html).toContain('>Agent<');
-    expect(html).toContain('aria-label="Run configuration agent and model"');
+    expect(html).toContain('>Model<');
+    expect(html).toContain('aria-label="Search models and providers"');
+    expect(html).toContain('aria-label="Models by provider"');
     expect(html).toContain('OpenCode');
     expect(html).toContain('OpenCode-only model');
     expect(html).toContain('role="separator"');

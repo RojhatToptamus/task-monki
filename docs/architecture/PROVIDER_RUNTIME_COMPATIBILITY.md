@@ -61,16 +61,14 @@ Codex, OpenCode, and Cursor use provider policies, not operating-system
 sandboxes. Grok uses a separate provider process with an operating-system
 sandbox. Every model transport still needs provider network access.
 
-The complete current and target matrices are in
+The shared ownership and lifecycle rules are in
 `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`.
-That document separates protocol limits from adapter gaps and old Codex coupling.
 
 This file records implemented protocol behavior.
 It does not make a runtime unavailable only because it lacks a Codex sandbox.
 Each workflow asks the adapter to qualify one concrete execution request.
 An unsupported read-only profile remains available for normal Tasks.
-Provider-neutral managed attachments are implemented in provider milestone 3.
-Provider-neutral Design transport is implemented in provider milestone 4.
+Managed attachments and Design transport use the shared provider runtime.
 
 The Design row records technical product qualification.
 A transport probe alone does not change this row.

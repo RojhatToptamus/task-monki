@@ -32,8 +32,13 @@ describe('renderer style policies', () => {
     const css = await readRendererStyles();
 
     expect(css).toMatch(
-      /\.app-shell\[data-input-modality='keyboard'\][\s\S]*:focus \{[\s\S]*var\(--field-focus-ring\)/
+      /\.app-shell\s+:where\([\s\S]*textarea[\s\S]*\):focus[\s\S]*var\(--field-edge-focus\)/
     );
+    expect(css).toMatch(
+      /\.app-shell\[data-input-modality='keyboard'\][\s\S]*:focus[\s\S]*var\(--focus-ring\)/
+    );
+    expect(css).not.toContain('var(--field-focus-line)');
+    expect(css).not.toContain('var(--field-focus-ring)');
     expect(css).toMatch(
       /\.app-shell\[data-input-modality='pointer'\][\s\S]*:focus \{\s*outline: none/
     );

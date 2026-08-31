@@ -247,6 +247,17 @@ interface TaskActionWork {
   work: Promise<unknown>;
 }
 
+async function settleOwnedWork(
+  work: PromiseLike<unknown> | undefined
+): Promise<PromiseSettledResult<void>> {
+  try {
+    await work;
+    return { status: 'fulfilled', value: undefined };
+  } catch (reason) {
+    return { status: 'rejected', reason };
+  }
+}
+
 export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
@@ -2701,8 +2712,7 @@ export class TaskManagerService {
         this.runtimeRegistry.list().map(async (adapter) => {
           if (
             !updatedRuntimeIds.has(adapter.descriptor.id) ||
-            !adapter.configureRuntime ||
-            adapter.descriptor.id === 'codex'
+            !adapter.configureRuntime
           ) {
             return;
           }
@@ -2994,82 +3004,46 @@ export class TaskManagerService {
     promptRefinementShutdown: Promise<void>,
     previewRecipeGenerationShutdown: Promise<void>
   ): Promise<void> {
-    const drainResults = await Promise.allSettled([
+    const promptRefinementDrain = settleOwnedWork(promptRefinementShutdown);
+    const previewGenerationDrain = settleOwnedWork(
+      previewRecipeGenerationShutdown
+    );
+    await Promise.allSettled([
       pendingInitialization ?? Promise.resolve(),
       ...pendingTaskActions,
       ...pendingControlActions,
       pendingRuntimeLifecycle,
       ...pendingRuntimeOperations,
-      promptRefinementShutdown,
-      previewRecipeGenerationShutdown
+      promptRefinementDrain,
+      previewGenerationDrain
     ]);
-    const promptRefinementDrain = drainResults.at(-2);
-    const previewGenerationDrain = drainResults.at(-1);
-    const [discourseResult] = await Promise.allSettled([
-      this.discourseHost?.beginShutdown()
-    ]);
-    const [designResult] = await Promise.allSettled([
-      this.designUpdates?.beginShutdown()
-    ]);
-    const [agentResult] = await Promise.allSettled([
-      this.shutdownAgentOwners()
-    ]);
-    const [designToolResult] = await Promise.allSettled([
-      this.designToolBridge?.shutdown()
-    ]);
-    const [postRunEvidenceResult] = await Promise.allSettled([
-      this.drainPostRunEvidence()
-    ]);
-    const [previewResult] = await Promise.allSettled([
-      this.previewEnabled === false ? Promise.resolve() : this.previews.shutdown()
-    ]);
-    this.disposeAgentEventListener();
-    const [storeCloseResult] = await Promise.allSettled([
-      Promise.allSettled([
-        this.discourseHost?.closeStores(),
-        this.agentRuntimeStore.close(),
-        this.store.close()
-      ]).then((results) => {
-        const failed = results.find(
-          (result): result is PromiseRejectedResult => result.status === 'rejected'
-        );
-        if (failed) throw failed.reason;
-      })
-    ]);
-    if (discourseResult.status === 'rejected') {
-      throw discourseResult.reason;
-    }
-    if (designResult.status === 'rejected') {
-      throw designResult.reason;
-    }
-    if (agentResult.status === 'rejected') {
-      throw agentResult.reason;
-    }
-    if (designToolResult.status === 'rejected') {
-      throw designToolResult.reason;
-    }
-    if (postRunEvidenceResult.status === 'rejected') {
-      throw postRunEvidenceResult.reason;
-    }
-    if (previewResult.status === 'rejected') {
-      throw previewResult.reason;
-    }
-    if (storeCloseResult.status === 'rejected') {
-      throw storeCloseResult.reason;
-    }
-    if (promptRefinementDrain?.status === 'rejected') {
-      throw promptRefinementDrain.reason;
-    }
-    if (previewGenerationDrain?.status === 'rejected') {
-      throw previewGenerationDrain.reason;
-    }
-  }
 
-  private async shutdownAgentOwners(): Promise<void> {
-    const [agentResult] = await Promise.allSettled([
-      this.agents.shutdown()
-    ]);
-    if (agentResult.status === 'rejected') throw agentResult.reason;
+    const cleanupResults = [
+      await settleOwnedWork(this.discourseHost?.beginShutdown()),
+      await settleOwnedWork(this.designUpdates?.beginShutdown()),
+      await settleOwnedWork(this.agents.shutdown()),
+      await settleOwnedWork(this.designToolBridge?.shutdown()),
+      await settleOwnedWork(this.drainPostRunEvidence()),
+      await settleOwnedWork(
+        this.previewEnabled === false ? undefined : this.previews.shutdown()
+      )
+    ];
+    this.disposeAgentEventListener();
+    cleanupResults.push(
+      ...(await Promise.all([
+        settleOwnedWork(this.discourseHost?.closeStores()),
+        settleOwnedWork(this.agentRuntimeStore.close()),
+        settleOwnedWork(this.store.close())
+      ]))
+    );
+    cleanupResults.push(
+      await promptRefinementDrain,
+      await previewGenerationDrain
+    );
+    const failed = cleanupResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected'
+    );
+    if (failed) throw failed.reason;
   }
 
   private requireDiscourseService(): DiscourseService {

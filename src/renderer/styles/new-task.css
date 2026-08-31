@@ -142,12 +142,18 @@
   background: var(--field-hover);
 }
 
+.tm-repository-select__trigger:focus {
+  outline: 0;
+  background: var(--field-focus);
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
+}
+
 .app-shell[data-input-modality='keyboard'] .tm-repository-select__trigger:focus {
   outline: 0;
   background: var(--field-focus);
   box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+    inset 0 0 0 1px var(--field-edge-focus),
+    0 0 0 3px var(--focus-ring);
 }
 
 .tm-repository-select__trigger:disabled {
@@ -217,9 +223,7 @@
 
 .app-shell[data-input-modality='keyboard'] .tm-repository-select__option:focus {
   outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .tm-repository-select__option:disabled {
@@ -277,9 +281,7 @@
 
 .app-shell[data-input-modality='keyboard'] .tm-repository-picker__option:focus-within {
   outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .tm-repository-picker__option:has(input:disabled) {
@@ -503,9 +505,7 @@
 .app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus,
 .app-shell[data-input-modality='keyboard'] .newtask-settings > summary:focus {
   outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .task-attachment-add:disabled {
@@ -738,14 +738,22 @@
   resize: vertical;
 }
 
-.app-shell[data-input-modality='keyboard'] .field input:focus,
-.app-shell[data-input-modality='keyboard'] .field textarea:focus,
-.app-shell[data-input-modality='keyboard'] .field select:focus {
+.field:not(.field--prompt) input:focus,
+.field:not(.field--prompt) textarea:focus,
+.field:not(.field--prompt) select:focus {
+  background: var(--field-focus);
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
+}
+
+.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) input:focus,
+.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) textarea:focus,
+.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) select:focus {
   background: var(--field-focus);
   outline: 0;
   box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+    inset 0 0 0 1px var(--field-edge-focus),
+    0 0 0 3px var(--focus-ring);
 }
 
 .newtask-settings {

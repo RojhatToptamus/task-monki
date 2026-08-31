@@ -122,6 +122,11 @@ const ATTACHMENT_CORRELATION_KINDS = new Set([
   'client-request'
 ] as const);
 
+interface MutationOptions {
+  collectTerminalServers?: boolean;
+  cleanupUnreferencedArtifacts?: boolean;
+}
+
 const RUN_STATUS_TRANSITIONS: Record<AgentRuntimeRunRecord['status'], readonly AgentRuntimeRunRecord['status'][]> = {
   QUEUED: ['STARTING', 'INTERRUPTED', 'FAILED', 'RECOVERY_REQUIRED'],
   STARTING: ['RUNNING', 'INTERRUPTING', 'COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'],
@@ -323,7 +328,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       assertAgentServer(stored);
       draft.servers[index] = stored;
       return stored;
-    }, true);
+    }, { collectTerminalServers: true });
   }
 
   async appendProtocolMessage(
@@ -884,7 +889,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         }
       });
       return stored;
-    }, false, true);
+    }, { cleanupUnreferencedArtifacts: true });
   }
 
   async appendArtifact(
@@ -2729,7 +2734,10 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         artifactCount: artifacts.length,
         queueEntryCount: queueEntries.length
       };
-    }, true, true);
+    }, {
+      collectTerminalServers: true,
+      cleanupUnreferencedArtifacts: true
+    });
   }
 
   async setShutdownLatched(latched: boolean, operationId: string): Promise<void> {
@@ -2918,8 +2926,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
 
   private mutate<T>(
     operation: (draft: AgentRuntimeStoreState) => T | Promise<T>,
-    collectTerminalServers = false,
-    cleanupUnreferencedArtifacts = false
+    options: MutationOptions = {}
   ): Promise<T> {
     if (this.closePromise) {
       return Promise.reject(new Error('Agent runtime store is closed.'));
@@ -2935,11 +2942,11 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       const draft = clone(this.state);
       const before = stableStringify(draft);
       const result = await operation(draft);
-      const prunedServerIds = collectTerminalServers
+      const prunedServerIds = options.collectTerminalServers
         ? pruneUnreferencedTerminalAgentServers(draft)
         : [];
       if (stableStringify(draft) === before) {
-        if (cleanupUnreferencedArtifacts) {
+        if (options.cleanupUnreferencedArtifacts) {
           await this.cleanupUnreferencedArtifactFiles();
         }
         return clone(result);
@@ -2954,7 +2961,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       }
       this.state = draft;
       await cleanupPrunedServerJournals(this.protocolJournal, prunedServerIds);
-      if (cleanupUnreferencedArtifacts) {
+      if (options.cleanupUnreferencedArtifacts) {
         await this.cleanupUnreferencedArtifactFiles();
       }
       return clone(result);

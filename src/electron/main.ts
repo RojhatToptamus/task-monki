@@ -401,10 +401,9 @@ function configureMacDockIcon(): void {
 
   const iconPath = getMacDockIconPath({
     appPath: app.getAppPath(),
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath
+    isPackaged: app.isPackaged
   });
-  if (fs.existsSync(iconPath)) {
+  if (iconPath !== undefined && fs.existsSync(iconPath)) {
     app.dock?.setIcon(iconPath);
   }
 }

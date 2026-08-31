@@ -127,11 +127,12 @@ selection and one matching submission for each selected file. Each submission
 must use the expected provider transport and correlation kind.
 
 If the selected model supports image input, the command also attaches
-`build/provider-smoke-image.png`. The provider must report an unrevealed visual
-code, the ordered shapes, and the background color. The report includes the
-payload size and the model's effective input modes. Effective support normally
-follows ACP negotiation and exact model qualification. It can also include one
-exact provider-local exception for a proven false capability flag.
+`src/testSupport/fixtures/provider-smoke-image.png`. The provider must report
+an unrevealed visual code, the ordered shapes, and the background color. The
+report includes the payload size and the model's effective input modes.
+Effective support normally follows ACP negotiation and exact model
+qualification. It can also include one exact provider-local exception for a
+proven false capability flag.
 
 The report stores only path-free selection and submission evidence. It does not
 store attachment paths or bytes. A supported qualification fails if the

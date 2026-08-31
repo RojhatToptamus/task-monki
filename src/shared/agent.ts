@@ -280,8 +280,8 @@ export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSe
 
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-  theme: 'device',
-  themePreset: 'umber',
+  theme: 'dark',
+  themePreset: 'graphite',
   sidebarCollapsed: false,
   showMascot: true,
   autoInstallUpdatesOnQuit: true,
