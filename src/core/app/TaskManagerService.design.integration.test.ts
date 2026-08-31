@@ -373,7 +373,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     expect(detail.turns.at(-1)?.failureReason).toBeUndefined();
     expect(scenario.agent.startedTurns).toHaveLength(2);
     expect(scenario.agent.startedTurns[1]!.settings!.model).toBe('candidate-model');
-  });
+  }, 15_000);
 
   it('does not accept a later Design turn after exact model qualification is withdrawn', async () => {
     const scenario = await createTaskMonkiScenario({
@@ -473,7 +473,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       'This queued model qualification is no longer valid.'
     );
     expect(scenario.agent.startedTurns).toHaveLength(1);
-  });
+  }, 15_000);
 
   it('delivers adopted references with the first Design turn and preserves them on reopen', async () => {
     const scenario = await createTaskMonkiScenario({

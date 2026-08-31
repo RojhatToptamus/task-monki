@@ -591,7 +591,23 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-disable-'));
     const settingsStore = new MemoryAppSettingsStore();
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const opencode = createLifecycleRuntime(
+      scriptedRuntime.taskRuntime,
+      'opencode',
+      'OpenCode'
+    );
+    const opencodeCapabilities = await opencode.capabilities();
+    vi.mocked(opencode.capabilities).mockResolvedValue({
+      ...opencodeCapabilities,
+      readOnlyTurns: {
+        maturity: 'stable',
+        detail: 'This lifecycle fixture supports read-only turns.'
+      }
+    });
     const service = new TaskManagerService(store, dir, undefined, {
+      ...scriptedRuntime.serviceOptions,
+      agentRuntimeAdapters: [scriptedRuntime.adapter, opencode],
       appSettingsStore: settingsStore,
       worktreeRoot: path.join(dir, 'worktrees')
     });
