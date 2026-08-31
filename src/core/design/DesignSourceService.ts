@@ -601,19 +601,23 @@ export class DesignSourceService {
       ':/'
     ]);
     await managedGit(input.worktree.worktreePath, ['clean', '-ffdx']);
-    const [status, indexTree, head] = await Promise.all([
-      managedGit(input.worktree.worktreePath, [
-        'status',
-        '--porcelain=v1',
-        '--untracked-files=all'
-      ]),
-      managedGit(input.worktree.worktreePath, ['write-tree']).then(cleanGitOutput),
-      managedGit(input.worktree.worktreePath, [
+    // `git status` may refresh and lock the worktree index. Complete it before
+    // `write-tree` so two commands never contend for the same index.lock.
+    const status = await managedGit(input.worktree.worktreePath, [
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all'
+    ]);
+    const indexTree = cleanGitOutput(
+      await managedGit(input.worktree.worktreePath, ['write-tree'])
+    );
+    const head = cleanGitOutput(
+      await managedGit(input.worktree.worktreePath, [
         'rev-parse',
         '--verify',
         'HEAD'
-      ]).then(cleanGitOutput)
-    ]);
+      ])
+    );
     const targetTree = cleanGitOutput(
       await managedGit(input.repository.path, [
         'rev-parse',

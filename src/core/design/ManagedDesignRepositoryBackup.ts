@@ -563,8 +563,13 @@ async function syncDirectoryTree(directory: string): Promise<void> {
     if (!entry.isFile()) {
       throw new Error('Restored managed Design repository contains an unsafe filesystem entry.');
     }
+    if (process.platform === 'win32') {
+      // Git marks pack files read-only on Windows. Clear that attribute so the
+      // Task Monki-owned restore can flush every reconstructed object.
+      await fs.chmod(path.toNamespacedPath(entryPath), 0o600);
+    }
     const handle = await fs.open(
-      entryPath,
+      path.toNamespacedPath(entryPath),
       process.platform === 'win32' ? 'r+' : 'r'
     );
     try {

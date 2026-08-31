@@ -1221,18 +1221,20 @@ describe('SqliteAgentRuntimeStore', () => {
   it('bounds application-wide receipts and retains the current shutdown replay', async () => {
     const fixture = await storeFixture();
     const operationCount = AGENT_RUNTIME_LIMITS.maxGlobalOperationReceipts + 1;
-    for (let index = 0; index < operationCount; index += 1) {
-      await fixture.store.setShutdownLatched(index % 2 === 0, `shutdown-cycle-${index}`);
-    }
-    for (let index = 0; index < operationCount; index += 1) {
-      await fixture.store.recordTelemetry({
-        id: `global-telemetry-${index}`,
-        kind: 'SERVER',
-        clientOperationId: `global-telemetry-operation-${index}`,
-        payload: { index },
-        observedAt: '2026-07-13T00:05:00.000Z'
-      });
-    }
+    await fixture.database.write(async () => {
+      for (let index = 0; index < operationCount; index += 1) {
+        await fixture.store.setShutdownLatched(index % 2 === 0, `shutdown-cycle-${index}`);
+      }
+      for (let index = 0; index < operationCount; index += 1) {
+        await fixture.store.recordTelemetry({
+          id: `global-telemetry-${index}`,
+          kind: 'SERVER',
+          clientOperationId: `global-telemetry-operation-${index}`,
+          payload: { index },
+          observedAt: '2026-07-13T00:05:00.000Z'
+        });
+      }
+    });
 
     expect(
       await runtimeReceiptCount(fixture.database, 'app:shutdown')
@@ -1255,7 +1257,7 @@ describe('SqliteAgentRuntimeStore', () => {
       restarted.setShutdownLatched(true, 'shutdown-already-latched')
     ).resolves.toBeUndefined();
     expect((await restarted.snapshot()).shutdownLatched).toBe(false);
-  }, 60_000);
+  });
 
   it('keeps shutdown state and receipts inside an outer transaction rollback', async () => {
     const fixture = await storeFixture();
