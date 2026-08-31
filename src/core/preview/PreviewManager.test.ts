@@ -347,7 +347,7 @@ routes:
       new Set(observedGenerationIds.slice(-20))
     );
     expect(generations.some((generation) => generation.id === observedGenerationIds[0])).toBe(false);
-  }, 15_000);
+  });
 });
 
 describe('PreviewManager Compose adapter', () => {
@@ -571,7 +571,7 @@ routes: { app: { service: web, port: http, primary: true } }
     expect(stopped.state).toBe('STOPPED');
     expect(cleanupCalls).toBeGreaterThanOrEqual(2);
     saveGenerationSpy.mockRestore();
-  }, 15_000);
+  });
 });
 
 describe('PreviewManager managed reset preflight', () => {
@@ -843,7 +843,7 @@ scenarios:
     await healthCallbacks[0]({}, 'Retired resource failed during cutover.');
     expect(await store.getPreviewGeneration(retired.id)).toMatchObject({ state: 'FAILED' });
     expect(await store.getPreviewGeneration(currentActive.id)).toMatchObject({ state: 'READY' });
-  }, 15_000);
+  });
 });
 
 function storedGitSnapshot(

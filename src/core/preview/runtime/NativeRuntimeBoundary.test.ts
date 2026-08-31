@@ -121,8 +121,7 @@ describe('native runtime launcher boundary evidence', () => {
       expect(attempt.state).toBe('FAILED');
       expect(attempt.endedAt).toBeDefined();
       expect(resource.state).toBe('FAILED');
-    },
-    15_000
+    }
   );
 });
 

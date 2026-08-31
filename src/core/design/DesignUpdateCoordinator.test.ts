@@ -649,7 +649,7 @@ describe('DesignUpdateCoordinator', () => {
     expect(harness.source.materializeRestoreCommit).toHaveBeenCalledTimes(1);
     expect(harness.previews.executeManagedDesignCandidate).toHaveBeenCalledTimes(2);
     expect((await harness.store.snapshot()).designSourceActions).toEqual([]);
-  }, 15_000);
+  });
 });
 
 interface CoordinatorHarness {
