@@ -1,149 +1,206 @@
-import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { AppDatabase } from '../../storage/sqlite/AppDatabase';
+import { ManagedFileStore } from '../../storage/sqlite/ManagedFileStore';
 import { PreviewPrivateVault, type PreviewSecretProtector } from './PreviewPrivateVault';
 
 const roots: string[] = [];
-afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
+const databases: AppDatabase[] = [];
 const protector: PreviewSecretProtector = {
   isAvailable: () => true,
   encrypt: async (value) => Buffer.from(value.map((byte) => byte ^ 0xaa)),
   decrypt: async (value) => Buffer.from(value.map((byte) => byte ^ 0xaa))
 };
 
+afterEach(async () => {
+  await Promise.all(databases.splice(0).map((database) => database.close()));
+  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
 describe('PreviewPrivateVault', () => {
-  it('rotates without deleting a leased revision and never stores plaintext', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
+  it('rotates without deleting a leased revision and never persists plaintext', async () => {
+    const fixture = await createFixture(['task']);
+    const vault = fixture.vault;
     expect(await vault.set('task', 'token', 'canary-one')).toBe('STORED');
     const lease = await vault.acquire('task', ['token']);
     if (Array.isArray(lease)) throw new Error('unexpected blocker');
     expect(lease.values.token).toBe('canary-one');
-    await vault.set('task', 'token', 'canary-two');
-    expect((await readdir(root)).filter((name) => name.endsWith('.blob'))).toHaveLength(2);
+
+    expect(await vault.set('task', 'token', 'canary-two')).toBe('STORED');
+    await waitForCleanup(vault);
+    expect(await privateBlobNames(fixture.files.rootPath)).toHaveLength(2);
     await lease.release();
-    expect((await readdir(root)).filter((name) => name.endsWith('.blob'))).toHaveLength(1);
-    for (const name of await readdir(root)) expect(await readFile(path.join(root, name), 'utf8')).not.toContain('canary');
+    await waitForCleanup(vault);
+    expect(await privateBlobNames(fixture.files.rootPath)).toHaveLength(1);
+
+    const databaseBytes = await fs.readFile(fixture.databasePath);
+    expect(databaseBytes.includes(Buffer.from('canary'))).toBe(false);
+    for (const name of await privateBlobNames(fixture.files.rootPath)) {
+      const contents = await fs.readFile(path.join(fixture.files.rootPath, 'preview-private', name));
+      expect(contents.includes(Buffer.from('canary'))).toBe(false);
+    }
   });
+
   it('reports missing values without preventing planning', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
-    expect(await vault.readiness('task', ['token'])).toEqual([{ kind: 'PRIVATE_INPUT_MISSING', inputId: 'token' }]);
-  });
-  it('recovers the last-known-good index when the primary index is missing', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
-    await vault.set('task', 'token', 'recoverable-canary');
-    await unlink(path.join(root, 'index.json'));
+    const { vault } = await createFixture(['task']);
 
-    const recovered = new PreviewPrivateVault(root, protector);
-    const lease = await recovered.acquire('task', ['token']);
+    await expect(vault.readiness('task', ['token'])).resolves.toEqual([
+      { kind: 'PRIVATE_INPUT_MISSING', inputId: 'token' }
+    ]);
+  });
+
+  it('loads encrypted authority after reopening the application database', async () => {
+    const fixture = await createFixture(['task']);
+    expect(await fixture.vault.set('task', 'token', 'persisted-canary')).toBe('STORED');
+    await closeDatabase(fixture.database);
+
+    const reopened = await AppDatabase.open(fixture.databasePath);
+    databases.push(reopened);
+    const vault = new PreviewPrivateVault(reopened, fixture.files, protector);
+    const lease = await vault.acquire('task', ['token']);
     if (Array.isArray(lease)) throw new Error('unexpected blocker');
-    expect(lease.values.token).toBe('recoverable-canary');
-    expect(await readFile(path.join(root, 'index.json'), 'utf8')).toContain(lease.revisions.token);
+
+    expect(lease.values.token).toBe('persisted-canary');
     await lease.release();
   });
-  it('recovers the last-known-good index when the primary index is corrupt', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
-    await vault.set('task', 'token', 'first-canary');
-    const previousLease = await vault.acquire('task', ['token']);
-    if (Array.isArray(previousLease)) throw new Error('unexpected blocker');
-    await vault.set('task', 'token', 'second-canary');
-    await writeFile(path.join(root, 'index.json'), '{broken', { mode: 0o600 });
 
-    const recovered = new PreviewPrivateVault(root, protector);
-    const lease = await recovered.acquire('task', ['token']);
-    if (Array.isArray(lease)) throw new Error('unexpected blocker');
-    expect(lease.values.token).toBe('first-canary');
-    await lease.release();
-  });
-  it('does not reinterpret an established vault with lost indexes as empty', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
-    await vault.set('task', 'token', 'preserved-canary');
-    const blob = (await readdir(root)).find((name) => name.endsWith('.blob'))!;
-    await Promise.all([
-      unlink(path.join(root, 'index.json')),
-      unlink(path.join(root, 'index.backup.json'))
+  it('removes published ciphertext when an outer transaction rolls back', async () => {
+    const fixture = await createFixture(['task']);
+
+    await expect(
+      fixture.database.write(async () => {
+        expect(await fixture.vault.set('task', 'token', 'rolled-back-canary')).toBe('STORED');
+        throw new Error('abort transaction');
+      })
+    ).rejects.toThrow('abort transaction');
+
+    await expect(fixture.vault.readiness('task', ['token'])).resolves.toEqual([
+      { kind: 'PRIVATE_INPUT_MISSING', inputId: 'token' }
     ]);
-
-    const reopened = new PreviewPrivateVault(root, protector);
-    expect(await reopened.sweep({
-      taskIds: new Set(['task']),
-      retainedGenerationIds: new Set()
-    })).toBe('RECOVERY_REQUIRED');
-    expect(await readFile(path.join(root, blob))).toBeDefined();
+    expect(await privateBlobNames(fixture.files.rootPath)).toEqual([]);
   });
-  it('fails closed when the vault root permissions become unsafe', async () => {
-    if (process.platform === 'win32') return;
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    await chmod(root, 0o755);
-    const vault = new PreviewPrivateVault(root, protector);
 
-    expect(await vault.readiness('task', ['token'])).toEqual([
-      { kind: 'PRIVATE_INPUT_CORRUPT', inputId: 'token' }
-    ]);
-    expect((await fsMode(root)) & 0o777).toBe(0o755);
-  });
   it('retains an exact revision until its durable generation reference is released', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
+    const fixture = await createFixture(['task']);
+    const vault = fixture.vault;
     await vault.set('task', 'token', 'r1');
-    const lease = await vault.acquire('task', ['token']); if (Array.isArray(lease)) throw new Error('unexpected blocker');
+    const lease = await vault.acquire('task', ['token']);
+    if (Array.isArray(lease)) throw new Error('unexpected blocker');
     await vault.retainGeneration('generation-1', 'task', lease.revisions);
-    await lease.release(); await vault.set('task', 'token', 'r2');
-    expect((await readdir(root)).filter((name) => name.endsWith('.blob'))).toHaveLength(2);
+    await lease.release();
+    await vault.set('task', 'token', 'r2');
+    await waitForCleanup(vault);
+
+    expect(await privateBlobNames(fixture.files.rootPath)).toHaveLength(2);
     await vault.releaseGeneration('generation-1');
-    expect((await readdir(root)).filter((name) => name.endsWith('.blob'))).toHaveLength(1);
+    await waitForCleanup(vault);
+    expect(await privateBlobNames(fixture.files.rootPath)).toHaveLength(1);
   });
-  it('sweeps deleted-task references and exact unindexed encrypted orphans', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
-    await vault.set('deleted-task', 'token', 'residue');
-    await writeFile(path.join(root, '11111111-1111-4111-8111-111111111111.blob'), 'orphan');
-    expect(await vault.sweep({ taskIds: new Set(), retainedGenerationIds: new Set() })).toBe('CLEAN');
-    expect((await readdir(root)).filter((name) => name.endsWith('.blob'))).toEqual([]);
+
+  it('sweeps deleted-task authority and encrypted files with no database owner', async () => {
+    const fixture = await createFixture(['deleted-task']);
+    await fixture.vault.set('deleted-task', 'token', 'residue');
+    const orphanKey = `preview-private/${randomUUID()}.blob`;
+    await fixture.files.publish(orphanKey, Buffer.from('orphan'));
+
+    await expect(
+      fixture.vault.sweep({ taskIds: new Set(), retainedGenerationIds: new Set() })
+    ).resolves.toBe('CLEAN');
+    expect(await privateBlobNames(fixture.files.rootPath)).toEqual([]);
   });
-  it('fails closed on corrupt blob authority without deleting outside the vault', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const outside = path.join(path.dirname(root), `${path.basename(root)}-outside`);
-    roots.push(outside);
-    await writeFile(outside, 'keep-me', { mode: 0o600 });
-    await writeFile(path.join(root, 'index.json'), JSON.stringify({
-      formatVersion: 1,
-      current: {},
-      revisions: [{
-        id: '11111111-1111-4111-8111-111111111111',
-        taskId: 'task',
-        inputId: 'token',
-        blobName: `../${path.basename(outside)}`,
-        createdAt: new Date().toISOString()
-      }],
-      references: []
-    }), { mode: 0o600 });
-    await chmod(path.join(root, 'index.json'), 0o600);
-    const vault = new PreviewPrivateVault(root, protector);
-    expect(await vault.sweep({ taskIds: new Set(), retainedGenerationIds: new Set() }))
-      .toBe('RECOVERY_REQUIRED');
-    expect(await readFile(outside, 'utf8')).toBe('keep-me');
-  });
-  it('refuses a symlink substituted for an encrypted revision', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
-    const vault = new PreviewPrivateVault(root, protector);
-    await vault.set('task', 'token', 'canary');
-    const blob = (await readdir(root)).find((name) => name.endsWith('.blob'))!;
-    const outside = path.join(root, 'outside');
-    await writeFile(outside, 'not-ciphertext', { mode: 0o600 });
-    await unlink(path.join(root, blob));
-    await symlink(outside, path.join(root, blob));
-    expect(await vault.acquire('task', ['token'])).toEqual([
+
+  it('fails closed when immutable ciphertext no longer matches its database digest', async () => {
+    const fixture = await createFixture(['task']);
+    await fixture.vault.set('task', 'token', 'canary');
+    const blob = (await privateBlobNames(fixture.files.rootPath))[0]!;
+    const blobPath = path.join(fixture.files.rootPath, 'preview-private', blob);
+    if (process.platform !== 'win32') await fs.chmod(blobPath, 0o600);
+    await fs.writeFile(blobPath, 'tampered');
+    if (process.platform !== 'win32') await fs.chmod(blobPath, 0o400);
+
+    await expect(fixture.vault.acquire('task', ['token'])).resolves.toEqual([
       { kind: 'PRIVATE_INPUT_CORRUPT', inputId: 'token' }
     ]);
+    await expect(fixture.vault.retryCleanup()).resolves.toBe('RECOVERY_REQUIRED');
+  });
+
+  it('does not persist a value when platform protection is unavailable', async () => {
+    const fixture = await createFixture(['task']);
+    const unavailable = new PreviewPrivateVault(fixture.database, fixture.files, {
+      ...protector,
+      isAvailable: () => false
+    });
+
+    await expect(unavailable.set('task', 'token', 'canary')).resolves.toBe(
+      'PROTECTION_UNAVAILABLE'
+    );
+    expect(await privateBlobNames(fixture.files.rootPath)).toEqual([]);
   });
 });
 
-async function fsMode(target: string): Promise<number> {
-  return (await stat(target)).mode;
+async function createFixture(taskIds: string[]): Promise<{
+  root: string;
+  databasePath: string;
+  database: AppDatabase;
+  files: ManagedFileStore;
+  vault: PreviewPrivateVault;
+}> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-private-vault-'));
+  roots.push(root);
+  const databasePath = path.join(root, 'storage', 'task-monki.sqlite3');
+  const database = await AppDatabase.open(databasePath);
+  databases.push(database);
+  for (const taskId of taskIds) await insertTask(database, taskId);
+  const files = new ManagedFileStore(path.join(root, 'storage', 'files'));
+  const vault = new PreviewPrivateVault(database, files, protector);
+  return { root, databasePath, database, files, vault };
+}
+
+async function insertTask(database: AppDatabase, taskId: string): Promise<void> {
+  const repositoryId = randomUUID();
+  const now = '2026-08-29T10:00:00.000Z';
+  await database.write((transaction) => {
+    transaction.run(
+      `INSERT INTO repositories (
+         id, kind, name, path, status, head_sha, branch, remotes_json, error,
+         payload_json, record_revision, created_at, updated_at, checked_at
+       ) VALUES (?, 'USER_REGISTERED', 'Repository', ?, 'AVAILABLE', NULL, NULL,
+         '[]', NULL, '{}', 0, ?, ?, ?)`,
+      [repositoryId, `/tmp/repository-${repositoryId}`, now, now, now]
+    );
+    transaction.run(
+      `INSERT INTO tasks (
+         id, kind, runtime_id, title, prompt, repository_id, creation_token,
+         creation_request_fingerprint, workflow_phase, resolution, completion_policy,
+         phase_version, current_run_id, current_session_id, current_iteration_id,
+         current_worktree_id, forked_from_task_id, forked_from_run_id, source_design_id,
+         source_design_revision_id, agent_settings_json, payload_json, record_revision,
+         created_at, updated_at
+       ) VALUES (?, 'NORMAL', 'codex', 'Task', 'Prompt', ?, NULL, NULL,
+         'BACKLOG', 'UNRESOLVED', 'COMMIT', 0, NULL, NULL, NULL, NULL, NULL, NULL,
+         NULL, NULL, '{}', '{}', 0, ?, ?)`,
+      [taskId, repositoryId, now, now]
+    );
+  });
+}
+
+async function privateBlobNames(root: string): Promise<string[]> {
+  try {
+    return (await fs.readdir(path.join(root, 'preview-private'))).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+async function waitForCleanup(vault: PreviewPrivateVault): Promise<void> {
+  await vault.shutdown();
+}
+
+async function closeDatabase(database: AppDatabase): Promise<void> {
+  await database.close();
+  databases.splice(databases.indexOf(database), 1);
 }

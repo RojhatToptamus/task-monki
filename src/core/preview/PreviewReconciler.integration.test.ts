@@ -4,8 +4,12 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
+import {
+  closeTestTaskStore,
+  openTestTaskStore
+} from '../../testSupport/persistenceFixture';
 import { PreviewGateway } from './PreviewGateway';
 import { PreviewReconciler } from './PreviewReconciler';
 import { previewRouteHostname } from './PreviewRouteHostname';
@@ -15,11 +19,17 @@ import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 const launcherPath = path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs');
-const fixtures: Array<{ root: string; host: NativeLauncherHost; owned: NativeOwnedProcess }> = [];
+const fixtures: Array<{
+  root: string;
+  host: NativeLauncherHost;
+  owned: NativeOwnedProcess;
+  store: SqliteTaskStore;
+}> = [];
 afterEach(async () => {
   await Promise.all(
     fixtures.splice(0).map(async (fixture) => {
       await fixture.host.stopVerified(fixture.owned.identity).catch(() => undefined);
+      await closeTestTaskStore(fixture.store);
       await fs.rm(fixture.root, { recursive: true, force: true });
     })
   );
@@ -188,7 +198,7 @@ async function runningGeneration() {
   await git(repo, ['add', '.']);
   await git(repo, ['commit', '-m', 'Initial']);
   const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
-  const store = new FileTaskStore(path.join(root, 'store'));
+  const store = await openTestTaskStore(path.join(root, 'store'));
   const task = await store.createTask({ title: 'Reconcile', prompt: 'Test', repositoryId: (await addTestRepository(store, repo)).id });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task, branchName: 'codex/reconcile', worktreePath: repo, baseSha: head

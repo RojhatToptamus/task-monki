@@ -4,8 +4,12 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GitSnapshotRecord } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
+import {
+  closeTestTaskStore,
+  openTestTaskStore
+} from '../../testSupport/persistenceFixture';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { PreviewManager } from './PreviewManager';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
@@ -17,11 +21,19 @@ import {
 } from './compose/PreviewComposeRuntime';
 
 const fixtureRoots: string[] = [];
+const fixtureStores: SqliteTaskStore[] = [];
 afterEach(async () => {
+  await Promise.all(fixtureStores.splice(0).map(closeTestTaskStore));
   await Promise.all(
     fixtureRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))
   );
 });
+
+async function openStore(root: string): Promise<SqliteTaskStore> {
+  const store = await openTestTaskStore(root);
+  fixtureStores.push(store);
+  return store;
+}
 
 function previewGatewayStub() {
   return {
@@ -42,7 +54,7 @@ describe('PreviewManager lifecycle', () => {
   it('joins an in-flight initialization and closes the gateway when shutdown wins', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-manager-lifecycle-'));
     fixtureRoots.push(root);
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const store = await openStore(path.join(root, 'store'));
     let releaseReconcile!: () => void;
     const reconcileGate = new Promise<void>((resolve) => { releaseReconcile = resolve; });
     let markReconcileStarted!: () => void;
@@ -108,7 +120,7 @@ routes:
   app: { service: web, port: http, primary: true }
 `
     );
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const store = await openStore(path.join(root, 'store'));
     const task = await store.createTask({ title: 'Prepare cleanup', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/prepare-cleanup', worktreePath, baseSha: 'head'
@@ -199,7 +211,7 @@ routes:
   app: { service: web, port: http, primary: true }
 `
     );
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const store = await openStore(path.join(root, 'store'));
     const task = await store.createTask({ title: 'Stop preparation', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/stop-prepare', worktreePath, baseSha: 'head'
@@ -274,7 +286,7 @@ routes:
   app: { service: web, port: http, primary: true }
 `
     );
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const store = await openStore(path.join(root, 'store'));
     const task = await store.createTask({
       title: 'Prepare retention', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id
     });
@@ -359,7 +371,7 @@ compose:
 routes: { app: { service: web, port: http, primary: true } }
 `);
     await fs.writeFile(path.join(worktreePath, 'compose.yaml'), 'services: { web: { image: node:22, expose: [3000] } }\n');
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const store = await openStore(path.join(root, 'store'));
     const task = await store.createTask({ title: 'Compose manager', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/compose-manager', worktreePath, baseSha: 'head'
@@ -591,7 +603,7 @@ scenarios:
   default: { jobs: [migrate], resources: [database] }
 `;
     await fs.writeFile(recipePath, recipe('server-a.mjs'));
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const store = await openStore(path.join(root, 'store'));
     const task = await store.createTask({ title: 'Reset', prompt: 'Reset data', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/reset', worktreePath, baseSha: 'head'
@@ -835,7 +847,7 @@ scenarios:
 });
 
 function storedGitSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   taskId: string,
   iterationId: string,
   worktreeId: string,

@@ -10,6 +10,10 @@ tool survey.
 The audit was performed against `v0.2.0-alpha.1` (`02ee4e87`) on 25 July
 2026. The worktree was clean and detached before the investigation began.
 
+Names such as `FileTaskStore` below describe that audited revision. Current
+persistence ownership is documented in
+`docs/architecture/PERSISTENCE_ARCHITECTURE.md`.
+
 The repository instructions and the required product, runtime, preview,
 workflow, protocol, seeding, provider-smoke, and design documents were read
 before implementation. The audit also covered test configuration, CI,

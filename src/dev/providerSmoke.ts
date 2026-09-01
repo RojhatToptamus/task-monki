@@ -34,9 +34,7 @@ import { toAgentAttachmentSelectionFromRecords } from '../core/agent/AgentAttach
 import { codexAttachmentSupport } from '../core/agent/codex/CodexAttachmentDelivery';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 
 const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v4' as const;
 const SMOKE_SENTINEL = 'TASK_MONKI_PROVIDER_SMOKE_OK';
@@ -453,31 +451,35 @@ export async function runProviderSmoke(
   const repositoryPath = repository.path;
   const stateRoot = await createStateRoot(options.stateRoot, repositoryPath);
   let runtimeStore = dependencies.runtimeStore;
+  let ownedPersistence: ApplicationPersistence | undefined;
   let service: ProviderSmokeService;
   if (dependencies.createService) {
     service = dependencies.createService({ repositoryPath, stateRoot });
   } else {
-    const taskStore = new FileTaskStore(path.join(stateRoot, 'store'));
-    const fileRuntimeStore = options.qualifyReadOnly
-      ? new FileAgentRuntimeStore(path.join(stateRoot, 'store', 'agent-runtime'))
-      : undefined;
-    runtimeStore = fileRuntimeStore;
-    service = new TaskManagerService(
-      taskStore,
-      repositoryPath,
-      undefined,
-      {
-        worktreeRoot: path.join(stateRoot, 'worktrees'),
-        agentCwd: repositoryPath,
-        ...(fileRuntimeStore
-          ? {
-              agentRuntimeStore: fileRuntimeStore,
-              discourseStore: new FileDiscourseStore(path.join(stateRoot, 'discourse')),
-              discourseWorkspaceRoot: path.join(stateRoot, 'discourse-workspaces')
-            }
-          : {})
-      }
-    );
+    ownedPersistence = await ApplicationPersistence.open({
+      profileRoot: path.join(stateRoot, 'profile'),
+      appVersion: REPORT_SCHEMA_VERSION
+    });
+    runtimeStore = ownedPersistence.agentRuntime;
+    try {
+      service = new TaskManagerService(
+        ownedPersistence.tasks,
+        repositoryPath,
+        undefined,
+        {
+          worktreeRoot: path.join(stateRoot, 'worktrees'),
+          agentCwd: repositoryPath,
+          appSettingsStore: ownedPersistence.settings,
+          agentRuntimeStore: ownedPersistence.agentRuntime,
+          taskRuntimeAccess: ownedPersistence.taskRuntime,
+          discourseStore: ownedPersistence.discourse,
+          discourseWorkspaceRoot: path.join(stateRoot, 'discourse-workspaces')
+        }
+      );
+    } catch (error) {
+      await ownedPersistence.close();
+      throw error;
+    }
   }
   const pollIntervalMs = dependencies.pollIntervalMs ?? POLL_INTERVAL_MS;
   const cancelTimeoutMs = dependencies.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS;
@@ -672,6 +674,22 @@ export async function runProviderSmoke(
     } else if (shutdown.error) {
       appendUnique(errors, `Runtime shutdown failed: ${errorMessage(shutdown.error)}`);
       stopRequested = true;
+    }
+    if (ownedPersistence) {
+      const persistenceClose = await within(
+        ownedPersistence.close(),
+        cancelTimeoutMs
+      );
+      if (!persistenceClose.settled) {
+        appendUnique(errors, 'Persistence shutdown did not settle before its safety deadline.');
+        stopRequested = true;
+      } else if (persistenceClose.error) {
+        appendUnique(
+          errors,
+          `Persistence shutdown failed: ${errorMessage(persistenceClose.error)}`
+        );
+        stopRequested = true;
+      }
     }
   }
   const repositoryState = await inspectRepositoryState(repository);

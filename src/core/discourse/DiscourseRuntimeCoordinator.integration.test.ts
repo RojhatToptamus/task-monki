@@ -10,10 +10,10 @@ import type {
   DiscourseResponseWaveRecord
 } from '../../shared/discourse';
 import { DISCOURSE_LIMITS } from '../../shared/discourse';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
 import { createAgentSessionAccessEpoch } from '../agent/AgentRuntimeOwnership';
-import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../storage/FileDiscourseStore';
+import type { SqliteAgentRuntimeStore } from '../storage/SqliteAgentRuntimeStore';
 import { ScriptedAgentRuntimeCoordinator } from '../../testSupport/ScriptedAgentRuntimeCoordinator';
 import { DiscourseRuntimeCoordinator } from './DiscourseRuntimeCoordinator';
 
@@ -1714,8 +1714,9 @@ describe('DiscourseRuntimeCoordinator', () => {
 
 async function coordinatorFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-discourse-runtime-'));
-  const runtime = new FileAgentRuntimeStore(path.join(root, 'runtime'));
-  const discourse = new FileDiscourseStore(path.join(root, 'discourse'));
+  const persistence = await openTestPersistence(path.join(root, 'profile'));
+  const runtime = persistence.agentRuntime;
+  const discourse = persistence.discourse;
   const participant = participantSeed('conversation-1');
   const conversation = await discourse.createConversation({
     id: 'conversation-1',
@@ -1848,7 +1849,7 @@ async function createSiblingRuntimeRun(
 }
 
 async function markRepositoryUnchanged(
-  runtime: FileAgentRuntimeStore,
+  runtime: SqliteAgentRuntimeStore,
   runId: string,
   clientOperationId: string
 ): Promise<void> {

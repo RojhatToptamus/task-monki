@@ -307,7 +307,7 @@ Agent review:
 - May use a different registered runtime from the source implementation.
 - Creates a fresh provider session for one normal read-only review turn.
 - Requires a qualified native mutation-denial policy from the selected runtime.
-- Uses the same `AgentOrchestrator` and `FileAgentRuntimeStore` lifecycle as other turns.
+- Uses the same `AgentOrchestrator` and `SqliteAgentRuntimeStore` lifecycle as other turns.
 - The review run id is tracked through `projection.agentReview.runId`.
 
 The review session must not be confused with the task's active implementation

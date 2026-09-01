@@ -9,10 +9,7 @@ import {
 } from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { posixModeMatches } from '../core/filesystem/secureFilesystem';
-import { AppSettingsStore } from '../core/settings/AppSettingsStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type { Task, TaskSnapshot } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import {
@@ -47,7 +44,7 @@ describe('Task Monki development seed data', () => {
   beforeAll(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
-    snapshot = await readStoreSnapshot(manifest.storeDir, manifest.agentRuntimeDir);
+    snapshot = await readStoreSnapshot(manifest.profileRoot);
   }, 180_000);
 
   afterAll(async () => {
@@ -62,85 +59,86 @@ describe('Task Monki development seed data', () => {
   }, 30_000);
 
   it('creates a current-schema deterministic scenario catalog', async () => {
-    const settings = await new AppSettingsStore(manifest.appSettingsPath).get();
-    expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
-    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(settings.firstLaunchSetupCompleted).toBe(true);
-    expect(snapshot.repositories).toHaveLength(4);
-    expect(
-      snapshot.repositories.filter((repository) => repository.kind === 'DESIGN_MANAGED')
-    ).toHaveLength(2);
-    const primaryRepository = snapshot.repositories.find(
-      (repository) => repository.name === path.basename(manifest.repositoryPath)
-    );
-    const secondaryRepository = snapshot.repositories.find(
-      (repository) => repository.name === path.basename(manifest.secondaryRepositoryPath)
-    );
-    expect(settings.selectedRepositoryId).toBe(primaryRepository?.id);
-    expect(primaryRepository?.path).toBe(await fs.realpath(manifest.repositoryPath));
-    expect(secondaryRepository?.path).toBe(await fs.realpath(manifest.secondaryRepositoryPath));
-    expect(secondaryRepository).toMatchObject({ status: 'AVAILABLE' });
-    expect(await pathExists(manifest.manifestPath)).toBe(true);
-    expect(await pathExists(manifest.envFilePath)).toBe(true);
-    expect(manifest.env).toMatchObject({
-      TASK_MANAGER_STORE_DIR: manifest.storeDir,
-      TASK_MANAGER_APP_SETTINGS_PATH: manifest.appSettingsPath,
-      TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
-      TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
+    const persistence = await openSeedPersistence(manifest.profileRoot);
+    try {
+      const settings = await persistence.settings.get();
+      expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
+      expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+      expect(settings.firstLaunchSetupCompleted).toBe(true);
+      expect(snapshot.repositories).toHaveLength(4);
+      expect(
+        snapshot.repositories.filter((repository) => repository.kind === 'DESIGN_MANAGED')
+      ).toHaveLength(2);
+      const primaryRepository = snapshot.repositories.find(
+        (repository) => repository.name === path.basename(manifest.repositoryPath)
+      );
+      const secondaryRepository = snapshot.repositories.find(
+        (repository) => repository.name === path.basename(manifest.secondaryRepositoryPath)
+      );
+      expect(settings.selectedRepositoryId).toBe(primaryRepository?.id);
+      expect(primaryRepository?.path).toBe(await fs.realpath(manifest.repositoryPath));
+      expect(secondaryRepository?.path).toBe(await fs.realpath(manifest.secondaryRepositoryPath));
+      expect(secondaryRepository).toMatchObject({ status: 'AVAILABLE' });
+      expect(await pathExists(manifest.manifestPath)).toBe(true);
+      expect(await pathExists(manifest.envFilePath)).toBe(true);
+      expect(manifest.env).toMatchObject({
+        TASK_MANAGER_PROFILE_ROOT: manifest.profileRoot,
+        TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
+        TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
       TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
-      TASK_MANAGER_DISCOURSE_DIR: manifest.discourseDir,
-      TASK_MANAGER_AGENT_RUNTIME_DIR: manifest.agentRuntimeDir,
       TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: manifest.discourseWorkspaceRoot,
-      TASK_MANAGER_DESIGN_REPOSITORY_ROOT: manifest.designRepositoryRoot,
-      TASK_MANAGER_DESIGN_WORKTREE_ROOT: manifest.designWorktreeRoot,
-      TASK_MANAGER_DESIGN_DRAFT_ROOT: manifest.designDraftRoot,
-      TASK_MANAGER_PREVIEW_RECONCILE: '0',
-      TASK_MANAGER_DETERMINISTIC_SEED: '1',
-      TASK_MANAGER_DEV_SEED_MODE: '1'
-    });
-    expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
-      DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
-    );
-    expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
+        TASK_MANAGER_PREVIEW_RECONCILE: '0',
+        TASK_MANAGER_DETERMINISTIC_SEED: '1',
+        TASK_MANAGER_DEV_SEED_MODE: '1'
+      });
+      expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
+        DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
+      );
+      expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 
-    expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
-      DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)
-    );
-    expect(new Set(manifest.scenarios.map((scenario) => scenario.slug)).size).toBe(
-      manifest.scenarios.length
-    );
+      expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
+        DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)
+      );
+      expect(new Set(manifest.scenarios.map((scenario) => scenario.slug)).size).toBe(
+        manifest.scenarios.length
+      );
 
-    for (const scenario of manifest.scenarios) {
-      if (scenario.group === 'discourse') {
-        expect(scenario.conversationId).toBeTruthy();
-        const aggregate = await new FileDiscourseStore(manifest.discourseDir)
-          .getConversation(scenario.conversationId!);
-        expect(aggregate.conversation.title).toContain(`[seed:${scenario.slug}]`);
-        continue;
+      for (const scenario of manifest.scenarios) {
+        if (scenario.group === 'discourse') {
+          expect(scenario.conversationId).toBeTruthy();
+          const aggregate = await persistence.discourse.getConversation(
+            scenario.conversationId!
+          );
+          expect(aggregate.conversation.title).toContain(`[seed:${scenario.slug}]`);
+          continue;
+        }
+        const task = taskForScenario(manifest, snapshot, scenario.slug);
+        expect(task.title).toContain(`[seed:${scenario.slug}]`);
       }
-      const task = taskForScenario(manifest, snapshot, scenario.slug);
-      expect(task.title).toContain(`[seed:${scenario.slug}]`);
-    }
 
-    expect(taskForScenario(manifest, snapshot, 'board-backlog').repositoryId).toBe(
-      secondaryRepository?.id
-    );
-    expect(snapshot.boards.map((board) => board.name)).toEqual([
-      'Review across repositories',
-      'Secondary repository'
-    ]);
-    expect(snapshot.boards.map((board) => board.color)).toEqual(['BLUE', 'VIOLET']);
-    const secondaryBoard = snapshot.boards.find(
-      (board) => board.name === 'Secondary repository'
-    );
-    expect(secondaryBoard?.repositoryIds).toEqual([secondaryRepository?.id]);
-    expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
-      taskForScenario(manifest, snapshot, 'board-backlog').id
-    ]);
+      expect(taskForScenario(manifest, snapshot, 'board-backlog').repositoryId).toBe(
+        secondaryRepository?.id
+      );
+      expect(snapshot.boards.map((board) => board.name)).toEqual([
+        'Review across repositories',
+        'Secondary repository'
+      ]);
+      expect(snapshot.boards.map((board) => board.color)).toEqual(['BLUE', 'VIOLET']);
+      const secondaryBoard = snapshot.boards.find(
+        (board) => board.name === 'Secondary repository'
+      );
+      expect(secondaryBoard?.repositoryIds).toEqual([secondaryRepository?.id]);
+      expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
+        taskForScenario(manifest, snapshot, 'board-backlog').id
+      ]);
+    } finally {
+      await persistence.close();
+    }
   });
 
   it('materializes Design starting and recovery states', async () => {
-    const store = new FileTaskStore(manifest.storeDir);
+    const persistence = await openSeedPersistence(manifest.profileRoot);
+    const store = persistence.tasks;
     try {
       const designs = await store.listDesigns();
       expect(manifest.counts.designs).toBe(2);
@@ -173,47 +171,51 @@ describe('Task Monki development seed data', () => {
       await expect(fs.readFile(path.join(startingDetail.currentWorktree!.worktreePath, 'app.js'), 'utf8'))
         .resolves.toContain('dataset.seeded');
     } finally {
-      await store.close();
+      await persistence.close();
     }
   });
 
   it('materializes discourse running, partial, review, correction, queue, stale, and recovery states', async () => {
-    const store = new FileDiscourseStore(manifest.discourseDir);
+    const persistence = await openSeedPersistence(manifest.profileRoot);
+    const store = persistence.discourse;
     const discourse = async (slug: string) => {
       const scenario = manifest.scenarios.find((candidate) => candidate.slug === slug)!;
       return store.getConversation(scenario.conversationId!);
     };
-
-    await expect(discourse('discourse-team-running')).resolves.toMatchObject({
-      waves: [{ policy: 'TEAM', status: 'RUNNING' }],
-      jobs: [{ role: 'ANSWER', status: 'RUNNING' }]
-    });
-    await expect(discourse('discourse-panel-partial')).resolves.toMatchObject({
-      waves: [{ policy: 'PANEL', status: 'SETTLED', outcome: 'PARTIAL' }]
-    });
-    const silent = await discourse('discourse-review-silent');
-    expect(silent.jobs.filter((job) => job.role === 'CRITIQUE')).toMatchObject([
-      { result: { outcome: 'NO_CONCERN_FOUND' } },
-      { result: { outcome: 'NO_CONCERN_FOUND' } }
-    ]);
-    const corrected = await discourse('discourse-author-correction');
-    expect(corrected.concerns).toMatchObject([{
-      resolution: { outcome: 'REVISED', correctionMessageId: expect.any(String) }
-    }]);
-    await expect(discourse('discourse-followup-queued')).resolves.toMatchObject({
-      waves: [{ status: 'RUNNING' }, { status: 'PLANNED' }]
-    });
-    await expect(discourse('discourse-context-stale')).resolves.toMatchObject({
-      waves: [{
-        status: 'PLANNED',
-        dispatchGate: { status: 'RECONFIRMATION_REQUIRED' }
-      }],
-      jobs: [{ status: 'QUEUED', delivery: 'NOT_SENT' }]
-    });
-    await expect(discourse('discourse-recovery-required')).resolves.toMatchObject({
-      waves: [{ status: 'RECOVERY_REQUIRED' }],
-      jobs: [{ status: 'RECOVERY_REQUIRED', delivery: 'AMBIGUOUS' }]
-    });
+    try {
+      await expect(discourse('discourse-team-running')).resolves.toMatchObject({
+        waves: [{ policy: 'TEAM', status: 'RUNNING' }],
+        jobs: [{ role: 'ANSWER', status: 'RUNNING' }]
+      });
+      await expect(discourse('discourse-panel-partial')).resolves.toMatchObject({
+        waves: [{ policy: 'PANEL', status: 'SETTLED', outcome: 'PARTIAL' }]
+      });
+      const silent = await discourse('discourse-review-silent');
+      expect(silent.jobs.filter((job) => job.role === 'CRITIQUE')).toMatchObject([
+        { result: { outcome: 'NO_CONCERN_FOUND' } },
+        { result: { outcome: 'NO_CONCERN_FOUND' } }
+      ]);
+      const corrected = await discourse('discourse-author-correction');
+      expect(corrected.concerns).toMatchObject([{
+        resolution: { outcome: 'REVISED', correctionMessageId: expect.any(String) }
+      }]);
+      await expect(discourse('discourse-followup-queued')).resolves.toMatchObject({
+        waves: [{ status: 'RUNNING' }, { status: 'PLANNED' }]
+      });
+      await expect(discourse('discourse-context-stale')).resolves.toMatchObject({
+        waves: [{
+          status: 'PLANNED',
+          dispatchGate: { status: 'RECONFIRMATION_REQUIRED' }
+        }],
+        jobs: [{ status: 'QUEUED', delivery: 'NOT_SENT' }]
+      });
+      await expect(discourse('discourse-recovery-required')).resolves.toMatchObject({
+        waves: [{ status: 'RECOVERY_REQUIRED' }],
+        jobs: [{ status: 'RECOVERY_REQUIRED', delivery: 'AMBIGUOUS' }]
+      });
+    } finally {
+      await persistence.close();
+    }
   });
 
   it('seeds every native preview UI state without embedding runtime logs in the snapshot', () => {
@@ -516,12 +518,10 @@ describe('Task Monki development seed data', () => {
   });
 
   it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
-    const store = new FileTaskStore(manifest.storeDir);
-    const runtimeStore = new FileAgentRuntimeStore(manifest.agentRuntimeDir);
-    const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-      store.recordAgentRuntimeEvent(event, operationId)
-    );
-    store.bindAgentRuntime(taskRuntime);
+    const persistence = await openSeedPersistence(manifest.profileRoot);
+    const store = persistence.tasks;
+    const runtimeStore = persistence.agentRuntime;
+    const taskRuntime = persistence.taskRuntime;
     const before = await store.snapshot();
     const initialize = vi.fn(async () => undefined);
     const adapter = {
@@ -533,11 +533,11 @@ describe('Task Monki development seed data', () => {
     const disabledReason =
       'Codex is disabled while deterministic development seed scenarios are loaded.';
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
-      appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
+      appSettingsStore: persistence.settings,
       agentRuntimeAdapters: [adapter],
       agentRuntimeStore: runtimeStore,
       taskRuntimeAccess: taskRuntime,
-      discourseStore: new FileDiscourseStore(manifest.discourseDir),
+      discourseStore: persistence.discourse,
       discourseWorkspaceRoot: manifest.discourseWorkspaceRoot,
       allowAgentNetworkAccess: false,
       agentProviderStartupDisabledReason: disabledReason,
@@ -627,6 +627,7 @@ describe('Task Monki development seed data', () => {
       );
     } finally {
       await service.shutdown();
+      await persistence.close();
     }
   });
 
@@ -704,22 +705,20 @@ function prView(snapshot: TaskSnapshot, task: Task) {
   });
 }
 
-async function readStoreSnapshot(
-  storeDir: string,
-  agentRuntimeDir: string
-): Promise<TaskSnapshot> {
-  const store = new FileTaskStore(storeDir);
-  const runtimeStore = new FileAgentRuntimeStore(agentRuntimeDir);
-  const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-    store.recordAgentRuntimeEvent(event, operationId)
-  );
-  store.bindAgentRuntime(taskRuntime);
+async function readStoreSnapshot(profileRoot: string): Promise<TaskSnapshot> {
+  const persistence = await openSeedPersistence(profileRoot);
   try {
-    return await store.snapshot();
+    return await persistence.tasks.snapshot();
   } finally {
-    await store.close();
-    await runtimeStore.close();
+    await persistence.close();
   }
+}
+
+function openSeedPersistence(profileRoot: string): Promise<ApplicationPersistence> {
+  return ApplicationPersistence.open({
+    profileRoot,
+    appVersion: 'seed-data-integration-test'
+  });
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

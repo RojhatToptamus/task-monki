@@ -8,13 +8,12 @@ import type {
   AgentRuntimeDescriptor
 } from '../../shared/agent';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
-import { createScriptedAgentRuntimeFixture } from '../../testSupport/taskMonkiScenario';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
 import { AgentRuntimeDeliveryError } from '../agent/AgentRuntimeAdapter';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
-import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 import { git } from '../git/gitCli';
 import {
@@ -28,7 +27,8 @@ describe('TaskManagerService prompt refinement', () => {
     const repositoryPath = path.join(root, 'repository');
     await fs.mkdir(repositoryPath);
     await initializeRepository(repositoryPath);
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const { store, ...scriptedRuntime } =
+      await openScriptedTaskManagerPersistence(path.join(root, 'store'));
     const runtimeId = 'prompt-refinement-test';
     const descriptor: AgentRuntimeDescriptor = {
       ...TEST_ACP_PROFILE.descriptor,
@@ -65,7 +65,6 @@ describe('TaskManagerService prompt refinement', () => {
     };
     const refinementModel = model(runtimeId, 'refiner-model', ['text', 'image']);
     const targetModel = model(runtimeId, 'target-model', ['text', 'image']);
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
     const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', { value: descriptor });
     vi.spyOn(adapter, 'capabilities').mockResolvedValue(capabilities);
@@ -255,8 +254,7 @@ describe('TaskManagerService prompt refinement', () => {
     const repositoryPath = path.join(root, 'repository');
     await fs.mkdir(repositoryPath);
     await initializeRepository(repositoryPath);
-    const store = new FileTaskStore(path.join(root, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(root, 'store'));
     const service = new TaskManagerService(store, root, undefined, {
       ...scriptedRuntime.serviceOptions,
       appSettingsStore: new MemoryAppSettingsStore({
@@ -338,8 +336,7 @@ async function createPromptRefinementFixture(name: string) {
   const repositoryPath = path.join(root, 'repository');
   await fs.mkdir(repositoryPath);
   await initializeRepository(repositoryPath);
-  const store = new FileTaskStore(path.join(root, 'store'));
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+  const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(root, 'store'));
   const service = new TaskManagerService(store, root, undefined, {
     ...scriptedRuntime.serviceOptions,
     appSettingsStore: new MemoryAppSettingsStore({

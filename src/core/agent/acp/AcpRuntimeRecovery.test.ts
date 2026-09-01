@@ -4,9 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
 import { AppEventBus } from '../../runner/AppEventBus';
-import { FileTaskStore } from '../../storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
+import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import type { TaskAgentRuntimeAccess } from '../AgentRuntimeStore';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
@@ -32,19 +34,21 @@ afterEach(async () => {
 });
 
 interface RecoveryFixture {
-  tasks: FileTaskStore;
-  runtimeStore: FileAgentRuntimeStore;
+  persistence: ApplicationPersistence;
+  tasks: SqliteTaskStore;
+  runtimeStore: SqliteAgentRuntimeStore;
   runtime: TaskAgentRuntimeAccess;
 }
 
-function createRecoveryFixture(taskRoot: string, runtimeRoot: string): RecoveryFixture {
-  const tasks = new FileTaskStore(taskRoot);
-  const runtimeStore = new FileAgentRuntimeStore(runtimeRoot);
-  const runtime = runtimeStore.taskAgentRuntimeAccess(async (event) => {
-    await tasks.appendEvent(event);
-  });
-  tasks.bindAgentRuntime(runtime);
-  return { tasks, runtimeStore, runtime };
+async function createRecoveryFixture(profileRoot: string): Promise<RecoveryFixture> {
+  const persistence = await openTestPersistence(profileRoot);
+  await Promise.all([persistence.tasks.init(), persistence.agentRuntime.init()]);
+  return {
+    persistence,
+    tasks: persistence.tasks,
+    runtimeStore: persistence.agentRuntime,
+    runtime: persistence.taskRuntime
+  };
 }
 
 function operationId(action: string): string {
@@ -184,9 +188,8 @@ describe('ACP cold recovery', () => {
   it('passively reconciles a persisted active run without starting or replaying ACP', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-recovery-'));
     temporaryDirectories.push(directory);
-    const storeDirectory = path.join(directory, 'store');
-    const runtimeDirectory = path.join(directory, 'runtime-store');
-    const seed = createRecoveryFixture(storeDirectory, runtimeDirectory);
+    const profileRoot = path.join(directory, 'profile');
+    const seed = await createRecoveryFixture(profileRoot);
     const seedStore = seed.tasks;
     const settings = {
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
@@ -251,10 +254,9 @@ describe('ACP cold recovery', () => {
     );
     const beforeEventCount = (await seedStore.snapshot()).events.length;
     const journalPath = server.protocolJournalPath;
-    await seedStore.close();
-    await seed.runtimeStore.close();
+    await seed.persistence.close();
 
-    const recovered = createRecoveryFixture(storeDirectory, runtimeDirectory);
+    const recovered = await createRecoveryFixture(profileRoot);
     const recoveredStore = recovered.tasks;
     const appEvents = new AppEventBus();
     const observedAppEvents: string[] = [];
@@ -312,18 +314,14 @@ describe('ACP cold recovery', () => {
       await expect(fs.access(journalPath)).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
       await adapter.shutdown();
-      await recoveredStore.close();
-      await recovered.runtimeStore.close();
+      await recovered.persistence.close();
     }
   });
 
   it('does not downgrade a run when terminalization wins the reconciliation race', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-reconcile-race-'));
     temporaryDirectories.push(directory);
-    const fixture = createRecoveryFixture(
-      path.join(directory, 'store'),
-      path.join(directory, 'runtime-store')
-    );
+    const fixture = await createRecoveryFixture(path.join(directory, 'profile'));
     const store = fixture.tasks;
     const settings = {
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
@@ -405,17 +403,13 @@ describe('ACP cold recovery', () => {
     expect(snapshot.events.map((event) => event.type)).not.toContain(
       'AGENT_RUNTIME_RECONCILED'
     );
-    await store.close();
-    await fixture.runtimeStore.close();
+    await fixture.persistence.close();
   });
 
   it('does not publish runtime loss when terminalization wins after the loss snapshot', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-loss-race-'));
     temporaryDirectories.push(directory);
-    const fixture = createRecoveryFixture(
-      path.join(directory, 'store'),
-      path.join(directory, 'runtime-store')
-    );
+    const fixture = await createRecoveryFixture(path.join(directory, 'profile'));
     const store = fixture.tasks;
     const settings = {
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
@@ -510,7 +504,6 @@ describe('ACP cold recovery', () => {
     expect(snapshot.events.map((event) => event.type)).not.toContain('AGENT_RUNTIME_LOST');
     expect((await fixture.runtime.getAgentSession(session.id))?.status).toBe('ACTIVE');
     expect(observedEvents).not.toContain('run.activity');
-    await store.close();
-    await fixture.runtimeStore.close();
+    await fixture.persistence.close();
   });
 });

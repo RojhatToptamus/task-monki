@@ -24,7 +24,7 @@ The architecture has three main owners:
 - `AgentOrchestrator` owns the shared runtime lifecycle.
 - Each provider adapter owns its protocol and local provider resources.
 
-`FileAgentRuntimeStore` is the durable runtime store.
+`SqliteAgentRuntimeStore` is the durable runtime store in the shared application database.
 Domain stores remain authoritative for product state.
 
 ## Core rules
@@ -33,9 +33,9 @@ Domain stores remain authoritative for product state.
 2. Use one adapter for each native protocol family.
 3. Register one ACP adapter instance for each ACP agent product.
 4. Use `AgentOrchestrator` for shared session and turn behavior.
-5. Store all provider sessions and runs in `FileAgentRuntimeStore`.
+5. Store all provider sessions and runs through `SqliteAgentRuntimeStore`.
 6. Keep Task, Design, and Discourse state in their domain owners.
-7. Keep attachment bytes in `AttachmentFileStore`.
+7. Keep attachment bytes in the managed-file store and attachment records in SQLite.
 8. Keep provider protocol mapping inside provider adapters.
 9. Select workflows by effective capabilities, not provider names.
 10. Never select another provider or model as a silent fallback.
@@ -50,12 +50,12 @@ Domain stores remain authoritative for product state.
 | Runtime and model selection | App settings or the owning Task or Design |
 | Provider qualification | The selected adapter and its model projection |
 | Shared session and turn lifecycle | `AgentOrchestrator` |
-| Runtime sessions, runs, items, and interactions | `FileAgentRuntimeStore` |
+| Runtime sessions, runs, items, and interactions | `SqliteAgentRuntimeStore` |
 | Provider process, stream, and protocol state | The selected adapter |
-| Task workflow and Git evidence | `FileTaskStore` and Task services |
-| Design conversation and Ready state | Design services and `FileTaskStore` |
-| Discourse conversation and wave state | Discourse services and `FileDiscourseStore` |
-| Attachment bytes and managed paths | `AttachmentFileStore` |
+| Task workflow and Git evidence | `SqliteTaskStore` and Task services |
+| Design conversation and Ready state | Design services and `SqliteTaskStore` |
+| Discourse conversation and wave state | Discourse services and `SqliteDiscourseStore` |
+| Attachment bytes and managed paths | `ManagedFileStore` and the owning attachment store |
 | Per-turn attachment selection | The runtime run record |
 | Preview processes and routes | `PreviewManager` and Preview runtime owners |
 | Design source and candidate identity | `DesignSourceService` and `DesignUpdateCoordinator` |
@@ -83,7 +83,8 @@ A detached review can use another explicit runtime and session.
 
 `src/core/app/AgentRuntimeComposition.ts` creates the built-in adapters.
 `TaskManagerService` registers them in `AgentRuntimeRegistry`.
-It then creates one `AgentOrchestrator` and one `FileAgentRuntimeStore`.
+`ApplicationPersistence` supplies the shared SQLite-backed runtime and domain stores,
+and the service creates one `AgentOrchestrator` over those stores.
 
 The registry owns initialization, shutdown, lookup, catalogs, and readiness.
 It does not own workflow prompts or domain state.
@@ -197,7 +198,7 @@ Do not duplicate optional adapter methods as descriptive flags.
 
 ## Runtime persistence
 
-`FileAgentRuntimeStore` stores the provider-neutral runtime record.
+`SqliteAgentRuntimeStore` stores the provider-neutral runtime record.
 It stores:
 
 - provider server instances.
@@ -270,8 +271,8 @@ An uncertain cancellation uses reconciliation, not resend.
 
 ## Attachment contract
 
-`AttachmentFileStore` is the only owner of attachment bytes.
-It owns staging, adoption, immutable storage, integrity checks, and cleanup.
+`SqliteTaskAttachmentStore` owns attachment records and their lifecycle.
+`ManagedFileStore` owns the immutable bytes, integrity checks, and cleanup.
 
 Each runtime run stores the exact ordered attachment selection before delivery.
 The selection includes IDs, media types, sizes, and hashes.

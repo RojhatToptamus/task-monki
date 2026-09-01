@@ -45,7 +45,8 @@ kept independent: Codex, ACP, and OpenCode adapters cannot import one another.
 | --- | --- | --- |
 | Durable task, run, evidence, and workflow truth | `src/core` | Provider output is telemetry until independently verified. |
 | Provider process/session/turn protocol | `src/core/agent/<provider>` | Keep provider-specific rules local; do not introduce a common adapter base merely to align file shapes. |
-| Discourse conversation/runtime state | `src/core/discourse`, `src/core/storage/FileDiscourseStore.ts` | Runtime state and curated conversation state remain separately attributable. |
+| Discourse conversation/runtime state | `src/core/discourse`, `src/core/storage/sqlite/SqliteDiscourseStore.ts` | Runtime state and curated conversation state remain separately attributable. |
+| Application persistence composition | `src/core/storage/sqlite/ApplicationPersistence.ts` | One profile lease, SQLite connection, managed-file owner, and backup/recovery boundary. |
 | Discourse runtime composition | `src/core/app/DiscourseRuntimeHost.ts` | Owns scheduler, recovery, scoped routing, and shutdown without moving durable conversation truth out of its store. |
 | Provider composition | `src/core/app/AgentRuntimeComposition.ts` | Wires built-in adapters and scoped routers; provider protocol behavior stays in each adapter. |
 | Preview validation and execution | `src/core/preview` | YAML normalization remains separate from `PreviewExecutionAuthority`; preserve bounded lifecycle ownership and explicit private-input handling. |

@@ -12,7 +12,7 @@ import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
 import { getGitExecutablePath, configureGitExecutablePath, git } from '../git/gitCli';
 import { AppEventBus } from '../runner/AppEventBus';
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import {
@@ -21,9 +21,15 @@ import {
 } from '../../testSupport/fakeExecutable';
 import {
   createScriptedAgentRuntimeFixture,
+  openScriptedTaskManagerPersistence,
   ScriptedAgentRuntimeAdapter
 } from '../../testSupport/taskMonkiScenario';
+import type { ApplicationPersistence } from '../storage/sqlite/ApplicationPersistence';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
+import {
+  openTestPersistence,
+  taskManagerPersistenceOptions
+} from '../../testSupport/persistenceFixture';
 
 const SERVICE_INTEGRATION_TIMEOUT_MS = 20_000;
 
@@ -45,11 +51,13 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version service-test');
     const fakeCodex = await writeOutputExecutable(dir, 'fake-codex', 'codex-cli test');
     const fakeGh = await writeOutputExecutable(dir, 'fake-gh', 'gh version test');
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(
-      new FileTaskStore(path.join(dir, 'store')),
+      persistence.tasks,
       dir,
       undefined,
       {
+        ...taskManagerPersistenceOptions(persistence),
         appSettingsStore: new MemoryAppSettingsStore(),
         codexPath: fakeCodex,
         ghPath: fakeGh
@@ -77,11 +85,13 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     process.env.TASK_MANAGER_GIT_PATH = '   ';
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-service-git-env-'));
     const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version normalized-env');
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(
-      new FileTaskStore(path.join(dir, 'store')),
+      persistence.tasks,
       dir,
       undefined,
       {
+        ...taskManagerPersistenceOptions(persistence),
         appSettingsStore: new MemoryAppSettingsStore(),
         codexPath: 'codex-not-used'
       }
@@ -102,8 +112,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
       version: '9.9.9'
     });
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const service = new TaskManagerService(store, dir, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       codexPath: executable,
       appSettingsStore: new MemoryAppSettingsStore({
         codexExternalTools: {
@@ -144,8 +156,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
         apps: 'enabled'
       }
     });
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const service = new TaskManagerService(store, dir, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       codexPath: executable,
       appSettingsStore: settingsStore,
       worktreeRoot: path.join(dir, 'worktrees'),
@@ -192,8 +206,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       version: '9.9.9',
       mcpList: 'fail'
     });
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const service = new TaskManagerService(store, dir, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       codexPath: executable,
       appSettingsStore: new MemoryAppSettingsStore(),
       worktreeRoot: path.join(dir, 'worktrees'),
@@ -209,10 +225,12 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
 
   it('keeps deterministic seed hosts inert without starting Codex', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-inert-seed-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const repository = await addTestRepository(store, dir);
     const reason = 'Codex is disabled while deterministic seed scenarios are loaded.';
     const service = new TaskManagerService(store, dir, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       codexPath: 'codex-not-used',
       appSettingsStore: new MemoryAppSettingsStore(),
       agentProviderStartupDisabledReason: reason
@@ -240,10 +258,11 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
       version: '9.9.9'
     });
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const events = new AppEventBus();
     const { service, scriptedRuntime } = createCodexSettingsTestService({
-      store,
+      persistence,
       repositoryPath: dir,
       executable,
       events
@@ -331,10 +350,11 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
       version: '9.9.9'
     });
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     let opencode!: ScriptedAgentRuntimeAdapter;
     const { service, scriptedRuntime } = createCodexSettingsTestService({
-      store,
+      persistence,
       repositoryPath: dir,
       executable,
       createAdditionalAdapters(taskRuntime) {
@@ -398,9 +418,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       version: '9.9.9'
     });
     const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version git-only');
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const { service } = createCodexSettingsTestService({
-      store,
+      persistence,
       repositoryPath: dir,
       executable
     });
@@ -435,11 +456,13 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     });
     process.env.PATH = withPath(path.dirname(codex));
     const settingsStore = new MemoryAppSettingsStore();
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(
-      new FileTaskStore(path.join(dir, 'store')),
+      persistence.tasks,
       dir,
       undefined,
       {
+        ...taskManagerPersistenceOptions(persistence),
         appSettingsStore: settingsStore
       }
     );
@@ -468,8 +491,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       version: '9.9.9'
     });
     process.env.PATH = withPath(path.dirname(staleCodex), path.dirname(compatibleCodex));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const service = new TaskManagerService(store, dir, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       appSettingsStore: new MemoryAppSettingsStore(),
       worktreeRoot: path.join(dir, 'worktrees')
     });
@@ -500,8 +525,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       version: '9.9.9'
     });
     process.env.PATH = withPath(path.dirname(customCodex));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const service = new TaskManagerService(store, dir, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       appSettingsStore: new MemoryAppSettingsStore({
         externalExecutables: {
           gitExecutablePath: null,
@@ -533,8 +560,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     });
     process.env[TASK_MONKI_CODEX_BIN_ENV] = envCodex;
     process.env.PATH = withPath(path.dirname(pathCodex));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const service = new TaskManagerService(store, dir, undefined, {
+      ...taskManagerPersistenceOptions(persistence),
       appSettingsStore: new MemoryAppSettingsStore(),
       worktreeRoot: path.join(dir, 'worktrees')
     });
@@ -564,11 +593,13 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const pathCodex = await writeOutputExecutable(dir, 'codex', 'codex-cli path-test');
     process.env[TASK_MONKI_CODEX_BIN_ENV] = envCodex;
     process.env.PATH = withPath(path.dirname(pathCodex));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(
-      new FileTaskStore(path.join(dir, 'store')),
+      persistence.tasks,
       dir,
       undefined,
       {
+        ...taskManagerPersistenceOptions(persistence),
         appSettingsStore: new MemoryAppSettingsStore()
       }
     );
@@ -590,8 +621,9 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
   it('persists provider disablement and rejects disabled defaults and task creation', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-disable-'));
     const settingsStore = new MemoryAppSettingsStore();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
     const opencode = createLifecycleRuntime(
       scriptedRuntime.taskRuntime,
       'opencode',
@@ -643,8 +675,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
 
   it('does not disable a runtime that owns active or recovery-required work', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-active-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const cursor = createLifecycleRuntime(
       scriptedRuntime.taskRuntime,
       'cursor-agent-acp',
@@ -699,8 +730,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
 
   it('keeps disabled runtimes stopped and initializes them when re-enabled', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-toggle-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const codex = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'codex', 'Codex');
     const opencode = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'opencode', 'OpenCode');
     const configureRuntime = vi.fn().mockResolvedValue(undefined);
@@ -741,8 +771,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const repositoryPath = path.join(root, 'repo');
     await fs.mkdir(repositoryPath);
     await initializeRepository(repositoryPath);
-    const store = new FileTaskStore(path.join(root, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(root, 'store'));
     const codex = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'codex', 'Codex');
     const opencode = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'opencode', 'OpenCode');
     const service = new TaskManagerService(store, repositoryPath, undefined, {
@@ -806,8 +835,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
 
   it('serializes live catalog discovery before runtime disablement', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-catalog-disable-race-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const codex = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'codex', 'Codex');
     const opencode = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'opencode', 'OpenCode');
     const models = await opencode.listModels();
@@ -865,8 +893,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const repositoryPath = path.join(root, 'repo');
     await fs.mkdir(repositoryPath);
     await initializeRepository(repositoryPath);
-    const store = new FileTaskStore(path.join(root, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(root, 'store'));
     const runtime = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'codex', 'Codex');
     const capabilities = await runtime.capabilities();
     vi.mocked(runtime.capabilities).mockResolvedValue({
@@ -925,9 +952,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
 
   it('settles interrupted initialization before provider shutdown and store closure', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-init-shutdown-race-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const closeStore = vi.spyOn(store, 'close');
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
     const runtime = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'codex', 'Codex');
     let releaseInitialization!: () => void;
     const initializationGate = new Promise<void>((resolve) => {
@@ -963,9 +991,10 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
 
   it('queues shutdown behind provider lifecycle work and rejects later starts', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-shutdown-race-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const persistence = await openTestPersistence(path.join(dir, 'store'));
+    const store = persistence.tasks;
     const closeStore = vi.spyOn(store, 'close');
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
     const runtime = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'codex', 'Codex');
     const models = await runtime.listModels();
     vi.mocked(runtime.listModels).mockClear();
@@ -1005,8 +1034,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
 
   it('serializes task runtime release before provider disablement', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-release-disable-race-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const codex = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'codex', 'Codex');
     const opencode = createLifecycleRuntime(scriptedRuntime.taskRuntime, 'opencode', 'OpenCode');
     let releaseTask!: () => void;
@@ -1136,7 +1164,7 @@ function withPath(...entries: string[]): string {
 }
 
 function createCodexSettingsTestService(input: {
-  store: FileTaskStore;
+  persistence: ApplicationPersistence;
   repositoryPath: string;
   executable: string;
   events?: AppEventBus;
@@ -1144,10 +1172,11 @@ function createCodexSettingsTestService(input: {
     taskRuntime: TaskAgentRuntimeAccess
   ) => readonly AgentRuntimeAdapter[];
 }) {
+  const store = input.persistence.tasks;
   const events = input.events ?? new AppEventBus();
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(input.store);
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(input.persistence);
   const codex = new CodexAppServerAdapter(
-    input.store,
+    store,
     scriptedRuntime.taskRuntime,
     scriptedRuntime.runtimeStore,
     events,
@@ -1158,7 +1187,7 @@ function createCodexSettingsTestService(input: {
       restartDelaysMs: []
     }
   );
-  const service = new TaskManagerService(input.store, input.repositoryPath, events, {
+  const service = new TaskManagerService(store, input.repositoryPath, events, {
     codexPath: input.executable,
     appSettingsStore: new MemoryAppSettingsStore(),
     worktreeRoot: path.join(input.repositoryPath, 'worktrees'),
@@ -1173,10 +1202,10 @@ function createCodexSettingsTestService(input: {
 }
 
 async function waitForAgentServerSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   minimumCodexServers = 1,
   requireReady = false
-): Promise<Awaited<ReturnType<FileTaskStore['snapshot']>>> {
+): Promise<Awaited<ReturnType<SqliteTaskStore['snapshot']>>> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const snapshot = await store.snapshot();
     const servers = codexServers(snapshot);
@@ -1192,7 +1221,7 @@ async function waitForAgentServerSnapshot(
 }
 
 function codexServers(
-  snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>
+  snapshot: Awaited<ReturnType<SqliteTaskStore['snapshot']>>
 ) {
   return snapshot.agentServers.filter((server) => server.runtimeId === 'codex');
 }

@@ -16,12 +16,9 @@ import {
 import { autoUpdater } from 'electron-updater';
 import fs from 'node:fs';
 import path from 'node:path';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
-import { AppSettingsStore } from '../core/settings/AppSettingsStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
@@ -170,6 +167,7 @@ const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
+let persistence: ApplicationPersistence | undefined;
 let designCanvasHost: DesignCanvasHost | undefined;
 let softwareUpdateController: SoftwareUpdateController | undefined;
 let serviceCreated = false;
@@ -1094,6 +1092,10 @@ function beginApplicationShutdown(): Promise<void> {
     .catch((error: unknown) => {
       console.error('Failed to shut down the Design canvas cleanly.', error);
     })
+    .then(() => persistence?.close())
+    .catch((error: unknown) => {
+      console.error('Failed to close application persistence cleanly.', error);
+    })
     .then(() => {
       quitAfterShutdown = true;
       softwareUpdateController?.dispose();
@@ -1154,7 +1156,6 @@ void app.whenReady().then(async () => {
   configureMacDockIcon();
   const defaultRepositoryPath = resolveDefaultRepositoryPath();
   const userDataDir = app.getPath('userData');
-  const taskStoreDir = path.join(userDataDir, 'task-store');
   configureOwnedProcessLauncher({
     launcherPath: resolveOwnedProcessLauncherPath({
       isPackaged: app.isPackaged,
@@ -1178,15 +1179,24 @@ void app.whenReady().then(async () => {
         appPath: app.getAppPath()
       })
     : undefined;
+  persistence = await ApplicationPersistence.open({
+    profileRoot: userDataDir,
+    appVersion: app.getVersion(),
+    previewSecretProtector: {
+      isAvailable: () =>
+        process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
+      encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
+      decrypt: async (value) =>
+        Buffer.from(safeStorage.decryptString(value), 'utf8')
+    }
+  });
   service = new TaskManagerService(
-    new FileTaskStore(taskStoreDir),
+    persistence.tasks,
     defaultRepositoryPath,
     undefined,
     {
       agentCwd: defaultRepositoryPath || app.getPath('home'),
-      appSettingsStore: new AppSettingsStore(
-        path.join(userDataDir, 'app-settings.json')
-      ),
+      appSettingsStore: persistence.settings,
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,
       previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),
@@ -1207,22 +1217,17 @@ void app.whenReady().then(async () => {
         resourcesPath: process.resourcesPath,
         appPath: app.getAppPath()
       }),
-      previewSecretProtector: {
-        isAvailable: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
-        encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
-        decrypt: async (value) => Buffer.from(safeStorage.decryptString(value), 'utf8')
-      },
+      previewPrivateVault: persistence.previewPrivateVault,
       previewOpenHost: createElectronPreviewUrlHost(),
-      agentRuntimeStore: new FileAgentRuntimeStore(
-        path.join(userDataDir, 'agent-runtime-store')
-      ),
-      discourseStore: new FileDiscourseStore(path.join(userDataDir, 'discourse-store')),
+      agentRuntimeStore: persistence.agentRuntime,
+      taskRuntimeAccess: persistence.taskRuntime,
+      discourseStore: persistence.discourse,
       discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces'),
       ...(designCanvasHost
         ? {
-            designRepositoryRoot: path.join(userDataDir, 'design-repositories'),
-            designWorktreeRoot: path.join(userDataDir, 'design-worktrees'),
-            designDraftRoot: path.join(userDataDir, 'design-drafts'),
+            designRepositoryRoot: persistence.paths.designRepositoryRoot,
+            designWorktreeRoot: persistence.paths.designWorktreeRoot,
+            designDraftStore: persistence.designDrafts,
             designBrowserExecutablePath: designBrowserPaths!.executablePath,
             designBrowserChromeExecutablePath:
               designBrowserPaths!.browserExecutablePath,
@@ -1278,8 +1283,20 @@ void app.whenReady().then(async () => {
   installIpcHandlers();
   createWindow();
   softwareUpdateController.start();
-}).catch((error: unknown) => {
+}).catch(async (error: unknown) => {
   console.error('Task Monki failed to initialize its trusted local services.', error);
+  if (serviceCreated) {
+    await service.shutdown().catch((shutdownError: unknown) => {
+      console.error('Failed to shut down after application startup failed.', shutdownError);
+    });
+  }
+  await designCanvasHost?.shutdown().catch((shutdownError: unknown) => {
+    console.error('Failed to close the Design canvas after startup failed.', shutdownError);
+  });
+  await persistence?.close().catch((shutdownError: unknown) => {
+    console.error('Failed to close persistence after startup failed.', shutdownError);
+  });
+  quitAfterShutdown = true;
   app.quit();
 });
 

@@ -6,6 +6,8 @@ import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   type AgentRuntimeCatalog
 } from '../../shared/contracts';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
+import { ScriptedAgentRuntimeCoordinator } from '../../testSupport/ScriptedAgentRuntimeCoordinator';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
 import {
@@ -13,9 +15,8 @@ import {
   codexCapabilities
 } from '../agent/codex/codexCapabilities';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
-import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../storage/FileDiscourseStore';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteAgentRuntimeStore } from '../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../storage/sqlite/ApplicationPersistence';
 import { DiscourseContextResolver } from './DiscourseContextResolver';
 import {
   DiscourseContextSnapshotService,
@@ -32,7 +33,6 @@ import {
   type DiscourseConversationAggregateRecord,
   type SendDiscourseMessageRequest
 } from '../../shared/discourse';
-import { ScriptedAgentRuntimeCoordinator } from '../../testSupport/ScriptedAgentRuntimeCoordinator';
 
 function selections(
   ...agentProfileIds: BuiltInAgentProfileId[]
@@ -54,10 +54,10 @@ function currentParticipantModels(
 describe('DiscourseService', () => {
   it('persists an idempotent Direct send through frozen context and a queued scoped run', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-discourse-service-'));
-    const taskStore = new FileTaskStore(path.join(root, 'tasks'));
-    const discourseStore = new FileDiscourseStore(path.join(root, 'discourse'));
-    const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime'));
-    await Promise.all([taskStore.init(), discourseStore.init(), runtimeStore.init()]);
+    const persistence = await openTestPersistence(path.join(root, 'profile'));
+    const taskStore = persistence.tasks;
+    const discourseStore = persistence.discourse;
+    const runtimeStore = persistence.agentRuntime;
     const resolver = new DiscourseContextResolver(taskStore);
     const snapshots = new DiscourseContextSnapshotService(
       resolver,
@@ -700,8 +700,19 @@ describe('DiscourseService', () => {
     await expect(fixture.service.sendMessage(laterRequest)).rejects.toThrow(
       'Simulated second crash before wave persistence'
     );
-    const restartedStore = new FileDiscourseStore(path.join(fixture.root, 'discourse'));
-    const durable = await restartedStore.getConversation(conversation.id);
+    prepare.mockRestore();
+    await fixture.persistence.close();
+    const restartedPersistence = await openTestPersistence(
+      path.join(fixture.root, 'profile')
+    );
+    const restartedFixture = composeServiceFixture(
+      fixture.root,
+      restartedPersistence,
+      () => catalog
+    );
+    const durable = await restartedFixture.discourseStore.getConversation(
+      conversation.id
+    );
     expect(durable).toMatchObject({
       acceptedSends: [
         {
@@ -722,31 +733,35 @@ describe('DiscourseService', () => {
     expect(currentParticipantModels(durable)).toEqual({
       'builtin.lead': 'gpt-recovery'
     });
-    expect((await restartedStore.listMessages({
+    expect((await restartedFixture.discourseStore.listMessages({
       conversationId: conversation.id,
       limit: 100
     })).messages).toMatchObject([
       { body: request.body, status: 'VISIBLE' },
       { body: laterRequest.body, status: 'VISIBLE' }
     ]);
-    expect((await restartedStore.listConversations()).conversations[0]).toMatchObject({
+    expect((await restartedFixture.discourseStore.listConversations()).conversations[0])
+      .toMatchObject({
       needsAttention: true
     });
 
-    prepare.mockRestore();
-    await fixture.service.resumeAcceptedSend({
+    await restartedFixture.service.resumeAcceptedSend({
       conversationId: conversation.id,
       acceptedSendId: durable.acceptedSends[0]!.id
     });
-    await fixture.service.resumeAcceptedSend({
+    await restartedFixture.service.resumeAcceptedSend({
       conversationId: conversation.id,
       acceptedSendId: durable.acceptedSends[1]!.id
     });
-    await expect(fixture.service.sendMessage(request)).resolves.toMatchObject({
-      wave: { status: 'QUEUED' },
-      jobs: [{ assignment: { model: 'gpt-recovery' } }]
-    });
-    const recovered = await fixture.discourseStore.getConversation(conversation.id);
+    await expect(restartedFixture.service.sendMessage(request)).resolves.toMatchObject(
+      {
+        wave: { status: 'QUEUED' },
+        jobs: [{ assignment: { model: 'gpt-recovery' } }]
+      }
+    );
+    const recovered = await restartedFixture.discourseStore.getConversation(
+      conversation.id
+    );
     expect(recovered.waves).toHaveLength(2);
     const firstJob = recovered.jobs.find(
       (job) => job.waveId === recovered.waves[0]?.id
@@ -761,7 +776,7 @@ describe('DiscourseService', () => {
       durable.acceptedSends[0]!.triggerMessageId,
       durable.acceptedSends[1]!.triggerMessageId
     ]);
-    expect((await fixture.discourseStore.listMessages({
+    expect((await restartedFixture.discourseStore.listMessages({
       conversationId: conversation.id,
       limit: 100
     })).messages).toHaveLength(2);
@@ -834,14 +849,22 @@ describe('DiscourseService', () => {
       clientOperationId: 'archive-canceled-accepted-conversation'
     });
 
-    const restarted = new FileDiscourseStore(path.join(fixture.root, 'discourse'));
-    expect(await restarted.getConversation(conversation.id)).toMatchObject({
+    await fixture.persistence.close();
+    const restartedPersistence = await openTestPersistence(
+      path.join(fixture.root, 'profile')
+    );
+    const archived = await restartedPersistence.discourse.getConversation(
+      conversation.id
+    );
+    expect(archived).toMatchObject({
       conversation: { status: 'ARCHIVED' },
       acceptedSends: [{ status: 'CANCELED' }],
       waves: []
     });
-    expect((await restarted.listConversations({ status: 'ARCHIVED' })).conversations[0])
-      .toMatchObject({ needsAttention: false });
+    const archivedPage = await restartedPersistence.discourse.listConversations({
+      status: 'ARCHIVED'
+    });
+    expect(archivedPage.conversations[0]).toMatchObject({ needsAttention: false });
   });
 
   it('counts unplanned accepted sends against the queued-response safety limit', async () => {
@@ -1628,10 +1651,22 @@ async function serviceFixture(
   getRuntimeCatalog: () => AgentRuntimeCatalog = runtimeCatalog
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-discourse-${label}-`));
-  const taskStore = new FileTaskStore(path.join(root, 'tasks'));
-  const discourseStore = new FileDiscourseStore(path.join(root, 'discourse'));
-  const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime'));
-  await Promise.all([taskStore.init(), discourseStore.init(), runtimeStore.init()]);
+  const persistence = await openTestPersistence(path.join(root, 'profile'));
+  return {
+    root,
+    persistence,
+    ...composeServiceFixture(root, persistence, getRuntimeCatalog)
+  };
+}
+
+function composeServiceFixture(
+  root: string,
+  persistence: ApplicationPersistence,
+  getRuntimeCatalog: () => AgentRuntimeCatalog
+) {
+  const taskStore = persistence.tasks;
+  const discourseStore = persistence.discourse;
+  const runtimeStore = persistence.agentRuntime;
   const resolver = new DiscourseContextResolver(taskStore);
   const executionContextInputs: DiscourseReadOnlyExecutionScopeInput[] = [];
   const snapshots = new DiscourseContextSnapshotService(
@@ -1686,7 +1721,6 @@ async function serviceFixture(
     }
   );
   return {
-    root,
     service,
     discourseStore,
     runtimeStore,
@@ -1699,7 +1733,7 @@ async function serviceFixture(
 }
 
 async function markRepositoryUnchanged(
-  runtime: FileAgentRuntimeStore,
+  runtime: SqliteAgentRuntimeStore,
   runId: string,
   clientOperationId: string
 ): Promise<void> {

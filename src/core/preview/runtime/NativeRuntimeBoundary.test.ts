@@ -3,14 +3,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PreviewNativeProcessIdentity } from '../../../shared/contracts';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import {
+  closeTestTaskStore,
+  openTestTaskStore
+} from '../../../testSupport/persistenceFixture';
 import { NativeJobRunner, PreviewJobCompletionAmbiguousError } from './NativeJobRunner';
 import type { NativeLaunchInput } from './NativeLauncherHost';
 import { NativeServiceRuntime } from './NativeServiceRuntime';
 
 const fixtureRoots: string[] = [];
+const fixtureStores: SqliteTaskStore[] = [];
 afterEach(async () => {
+  await Promise.all(fixtureStores.splice(0).map(closeTestTaskStore));
   await Promise.all(
     fixtureRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))
   );
@@ -124,7 +130,8 @@ async function runtimeFixture() {
   fixtureRoots.push(root);
   const sourcePath = path.join(root, 'preview', 'source');
   await fs.mkdir(sourcePath, { recursive: true });
-  const store = new FileTaskStore(path.join(root, 'store'));
+  const store = await openTestTaskStore(path.join(root, 'store'));
+  fixtureStores.push(store);
   const task = await store.createTask({ title: 'Boundary', prompt: 'Test', repositoryId: (await addTestRepository(store, root)).id });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task, branchName: 'codex/boundary', worktreePath: root, baseSha: 'head'

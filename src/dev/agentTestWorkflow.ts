@@ -1,5 +1,6 @@
 import { execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import http from 'node:http';
 import net, { type AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -15,10 +16,8 @@ import {
   waitForPortableProcessTreeExit
 } from '../core/process/portableChildProcess';
 import { AppEventBus } from '../core/runner/AppEventBus';
-import { MemoryAppSettingsStore } from '../core/settings/AppSettingsStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type {
   AgentItemRecord,
   AgentRunStatus,
@@ -245,7 +244,8 @@ interface AgentTestEnvironment {
   previewRoot: string;
   providerLogPath: string;
   initialHead: string;
-  store: FileTaskStore;
+  store: SqliteTaskStore;
+  persistence: ApplicationPersistence;
   service: TaskManagerService;
   events: AppEventBus;
   repositoryId: string;
@@ -586,38 +586,39 @@ export async function runAgentResourceStressWorkflow(
     );
     const beforeShutdown = await measureResources(environment, measurementStartedAt);
     beforeShutdown.providers.forEach((entry) => observedProcessIds.add(entry.pid));
-    const finalBytes = await storeByteCount(environment.storeDir);
+    const finalBytes = await storeByteCount(environment.persistence.paths.storageRoot);
     const recordCounts = snapshotRecordCounts(beforeShutdownSnapshot);
 
     const shutdownStartedAt = performance.now();
     await environment.service.shutdown();
     serviceStopped = true;
+    await environment.persistence.close();
     const shutdownMs = elapsed(shutdownStartedAt);
 
-    const coldStore = new FileTaskStore(environment.storeDir);
-    const coldRuntimeStore = new FileAgentRuntimeStore(
-      path.join(environment.rootDir, 'agent-runtime')
-    );
-    const coldTaskRuntime = coldRuntimeStore.taskAgentRuntimeAccess(
-      (event, operationId) => coldStore.recordAgentRuntimeEvent(event, operationId)
-    );
-    coldStore.bindAgentRuntime(coldTaskRuntime);
-    const coldStartedAt = performance.now();
-    await coldRuntimeStore.init();
-    await coldStore.init();
-    await coldStore.refreshAgentRuntimeProjection();
-    const coldInitializationMs = elapsed(coldStartedAt);
-    const postRestartStartedAt = performance.now();
-    const postRestartSnapshot = await coldStore.snapshot();
-    const postRestartSnapshotMs = elapsed(postRestartStartedAt);
-    assert(
-      postRestartSnapshot.tasks.length === beforeShutdownSnapshot.tasks.length &&
-        postRestartSnapshot.runs.length === beforeShutdownSnapshot.runs.length,
-      `Cold store restart did not preserve accumulated task and run history: ` +
-        `tasks ${beforeShutdownSnapshot.tasks.length} -> ${postRestartSnapshot.tasks.length}, ` +
-        `runs ${beforeShutdownSnapshot.runs.length} -> ${postRestartSnapshot.runs.length}.`
-    );
-    await Promise.all([coldStore.close(), coldRuntimeStore.close()]);
+    const coldPersistence = await ApplicationPersistence.open({
+      profileRoot: environment.storeDir,
+      appVersion: REPORT_SCHEMA_VERSION
+    });
+    let coldInitializationMs: number;
+    let postRestartSnapshotMs: number;
+    try {
+      const coldStore = coldPersistence.tasks;
+      const coldStartedAt = performance.now();
+      await coldStore.init();
+      coldInitializationMs = elapsed(coldStartedAt);
+      const postRestartStartedAt = performance.now();
+      const postRestartSnapshot = await coldStore.snapshot();
+      postRestartSnapshotMs = elapsed(postRestartStartedAt);
+       assert(
+         postRestartSnapshot.tasks.length === beforeShutdownSnapshot.tasks.length &&
+           postRestartSnapshot.runs.length === beforeShutdownSnapshot.runs.length,
+        `Cold store restart did not preserve accumulated task and run history: ` +
+          `tasks ${beforeShutdownSnapshot.tasks.length} -> ${postRestartSnapshot.tasks.length}, ` +
+          `runs ${beforeShutdownSnapshot.runs.length} -> ${postRestartSnapshot.runs.length}.`
+       );
+    } finally {
+     await coldPersistence.close();
+   }
 
     await waitForProcessesToExit([...observedProcessIds, ...observedPreviewProcessIds], 5_000);
     const providerProcessesJoined = [...observedProcessIds].every(
@@ -716,6 +717,7 @@ export async function runAgentResourceStressWorkflow(
     if (!serviceStopped) {
       await attemptCleanup(() => environment.service.shutdown(), cleanupErrors);
     }
+    await attemptCleanup(() => environment.persistence.close(), cleanupErrors);
     await attemptCleanup(() => removeOwnedRoot(environment.rootDir), cleanupErrors);
     rootRemoved = !(await pathExists(environment.rootDir));
     throw new Error(
@@ -1062,7 +1064,7 @@ async function measureResources(
       updateListeners: appUpdateListenerCount(environment.events)
     },
     providers: await Promise.all(providerPids.map(measureProcessResources)),
-    storeBytes: await storeByteCount(environment.storeDir)
+    storeBytes: await storeByteCount(environment.persistence.paths.storageRoot)
   };
 }
 
@@ -1135,11 +1137,28 @@ function countValues(values: readonly string[]): Record<string, number> {
   }, {});
 }
 
-async function storeByteCount(storeDir: string): Promise<number> {
-  return fs.stat(path.join(storeDir, 'store.json')).then(
-    (stat) => stat.size,
-    () => 0
-  );
+async function storeByteCount(storageRoot: string): Promise<number> {
+  const visit = async (directory: string): Promise<number> => {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+      throw error;
+    }
+    let total = 0;
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        total += await visit(entryPath);
+      } else if (entry.isFile()) {
+        total += (await fs.stat(entryPath)).size;
+      }
+    }
+    return total;
+  };
+  return visit(storageRoot);
 }
 
 function snapshotRecordCounts(snapshot: TaskSnapshot): Record<string, number> {
@@ -1442,6 +1461,7 @@ async function createAgentTestEnvironment(
   const providerScriptPath = path.join(runtimeRoot, 'deterministic-acp.cjs');
   const providerLogPath = path.join(runtimeRoot, 'provider.log');
   let service: TaskManagerService | undefined;
+  let persistence: ApplicationPersistence | undefined;
 
   try {
     await Promise.all([
@@ -1461,8 +1481,12 @@ async function createAgentTestEnvironment(
       { encoding: 'utf8', mode: 0o600 }
     );
 
-    const store = new FileTaskStore(storeDir);
-    const appSettingsStore = new MemoryAppSettingsStore({
+    persistence = await ApplicationPersistence.open({
+      profileRoot: storeDir,
+      appVersion: REPORT_SCHEMA_VERSION
+    });
+    const store = persistence.tasks;
+    await persistence.settings.update({
       firstLaunchSetupCompleted: true,
       defaultRuntimeId: RUNTIME_ID,
       defaultModel: 'deterministic',
@@ -1470,11 +1494,8 @@ async function createAgentTestEnvironment(
     });
     const events = new AppEventBus();
     const profile = deterministicAcpProfile(providerScriptPath);
-    const runtimeStore = new FileAgentRuntimeStore(path.join(rootDir, 'agent-runtime'));
-    const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-      store.recordAgentRuntimeEvent(event, operationId)
-    );
-    store.bindAgentRuntime(taskRuntime);
+    const runtimeStore = persistence.agentRuntime;
+    const taskRuntime = persistence.taskRuntime;
     const adapter = new AcpRuntimeAdapter(taskRuntime, runtimeStore, events, profile, {
       cwd: rootDir,
       environment: {
@@ -1503,11 +1524,11 @@ async function createAgentTestEnvironment(
     });
     service = new TaskManagerService(store, sourceRepositoryPath, events, {
       worktreeRoot,
-      appSettingsStore,
+      appSettingsStore: persistence.settings,
       agentRuntimeAdapters: [adapter],
       agentRuntimeStore: runtimeStore,
       taskRuntimeAccess: taskRuntime,
-      discourseStore: new FileDiscourseStore(path.join(rootDir, 'discourse')),
+      discourseStore: persistence.discourse,
       discourseWorkspaceRoot: path.join(rootDir, 'discourse-workspaces'),
       defaultAgentRuntimeId: RUNTIME_ID,
       previewRoot,
@@ -1526,7 +1547,7 @@ async function createAgentTestEnvironment(
 
     await service.init();
     const repository = await service.addRepository(sourceRepositoryPath);
-    await appSettingsStore.update({ selectedRepositoryId: repository.id });
+    await persistence.settings.update({ selectedRepositoryId: repository.id });
     return {
       rootDir,
       storeDir,
@@ -1537,6 +1558,7 @@ async function createAgentTestEnvironment(
       providerLogPath,
       initialHead: (await git(sourceRepositoryPath, ['rev-parse', 'HEAD'])).trim(),
       store,
+      persistence,
       service,
       events,
       repositoryId: repository.id
@@ -1546,6 +1568,10 @@ async function createAgentTestEnvironment(
     if (service) {
       const initializedService = service;
       await attemptCleanup(() => initializedService.shutdown(), cleanupErrors);
+    }
+    if (persistence) {
+      const openedPersistence = persistence;
+      await attemptCleanup(() => openedPersistence.close(), cleanupErrors);
     }
     await attemptCleanup(() => removeOwnedRoot(rootDir), cleanupErrors);
     const rootRemoved = !(await pathExists(rootDir));
@@ -2400,7 +2426,7 @@ function waitForTerminationSignal(): Promise<void> {
 }
 
 async function waitForSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   predicate: (snapshot: TaskSnapshot) => boolean,
   timeoutMs = TIMEOUT_MS
 ): Promise<TaskSnapshot> {
@@ -2504,6 +2530,7 @@ async function cleanupAgentTestEnvironment(
     await environment.service.shutdown();
     serviceStopped = true;
   }, errors);
+  await attemptCleanup(() => environment.persistence.close(), errors);
   await attemptCleanup(async () => {
     const providerLog = await fs
       .readFile(environment.providerLogPath, 'utf8')

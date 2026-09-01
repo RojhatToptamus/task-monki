@@ -9,7 +9,7 @@ import type {
 import { canonicalProspectivePath, isPathWithin } from '../PreviewPaths';
 import { buildPreviewEnvironment } from '../PreviewEnvironment';
 import { boundedPreviewFailure } from '../PreviewFailure';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import {
   digestCommand,
   NativeLauncherHost,
@@ -25,7 +25,7 @@ export interface NativeJobResult {
 
 export class NativeJobRunner {
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly launcherHost: NativeLauncherHost
   ) {}
 

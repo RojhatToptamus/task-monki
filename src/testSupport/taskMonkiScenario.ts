@@ -44,8 +44,9 @@ import { git } from '../core/git/gitCli';
 import { AppEventBus } from '../core/runner/AppEventBus';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import type { TaskAgentRuntimeAccess } from '../core/agent/AgentRuntimeStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { SqliteAgentRuntimeStore } from '../core/storage/SqliteAgentRuntimeStore';
+import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import {
   assertModelSupportsAttachments,
@@ -54,6 +55,7 @@ import {
 import type { PreviewRecipeGenerationService } from '../core/preview/generation/PreviewRecipeGenerationService';
 import type { AgentRuntimeTurnEvent } from '../core/agent/AgentRuntimeCoordinator';
 import type { AgentExecutionContext } from '../shared/agentRuntime';
+import { openTestPersistence } from './persistenceFixture';
 
 export interface ScenarioOptions {
   name?: string;
@@ -79,8 +81,9 @@ export interface TaskMonkiScenario {
   repositoryId: string;
   worktreeRoot: string;
   previewRoot: string;
-  store: FileTaskStore;
-  runtimeStore: FileAgentRuntimeStore;
+  persistence: ApplicationPersistence;
+  store: SqliteTaskStore;
+  runtimeStore: SqliteAgentRuntimeStore;
   taskRuntime: TaskAgentRuntimeAccess;
   events: AppEventBus;
   agent: ScriptedAgentRuntimeAdapter;
@@ -106,12 +109,13 @@ export interface TaskMonkiScenario {
 
 export interface ScriptedAgentRuntimeFixture {
   adapter: ScriptedAgentRuntimeAdapter;
-  runtimeStore: FileAgentRuntimeStore;
+  runtimeStore: SqliteAgentRuntimeStore;
   taskRuntime: TaskAgentRuntimeAccess;
   serviceOptions: {
     agentRuntimeAdapters: readonly AgentRuntimeAdapter[];
-    agentRuntimeStore: FileAgentRuntimeStore;
+    agentRuntimeStore: SqliteAgentRuntimeStore;
     taskRuntimeAccess: TaskAgentRuntimeAccess;
+    appSettingsStore: ApplicationPersistence['settings'];
   };
   createSession(input: {
     task: Task;
@@ -138,17 +142,31 @@ export interface ScriptedAgentRuntimeFixture {
   ): Promise<RunRecord>;
 }
 
-/** One canonical runtime store and Task view for tests that use the scripted provider. */
+export interface ScriptedTaskManagerPersistence
+  extends ScriptedAgentRuntimeFixture {
+  persistence: ApplicationPersistence;
+  store: SqliteTaskStore;
+}
+
+/** Opens one profile with its shared Task and runtime stores. */
+export async function openScriptedTaskManagerPersistence(
+  profileRoot: string
+): Promise<ScriptedTaskManagerPersistence> {
+  const persistence = await openTestPersistence(profileRoot);
+  return {
+    persistence,
+    store: persistence.tasks,
+    ...createScriptedAgentRuntimeFixture(persistence)
+  };
+}
+
+/** Uses one profile's Task and runtime stores with the scripted provider. */
 export function createScriptedAgentRuntimeFixture(
-  store: FileTaskStore
+  persistence: ApplicationPersistence
 ): ScriptedAgentRuntimeFixture {
-  const runtimeStore = new FileAgentRuntimeStore(
-    path.join(store.getStorageRoot(), 'agent-runtime')
-  );
-  const taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-    store.recordAgentRuntimeEvent(event, operationId)
-  );
-  store.bindAgentRuntime(taskRuntime);
+  const store = persistence.tasks;
+  const runtimeStore = persistence.agentRuntime;
+  const taskRuntime = persistence.taskRuntime;
   const adapter = new ScriptedAgentRuntimeAdapter(taskRuntime, runtimeStore);
   return {
     adapter,
@@ -157,7 +175,8 @@ export function createScriptedAgentRuntimeFixture(
     serviceOptions: {
       agentRuntimeAdapters: [adapter],
       agentRuntimeStore: runtimeStore,
-      taskRuntimeAccess: taskRuntime
+      taskRuntimeAccess: taskRuntime,
+      appSettingsStore: persistence.settings
     },
     async createSession(input) {
       const id = randomUUID();
@@ -283,17 +302,21 @@ export async function createTaskMonkiScenario(
   const repositoryPath = path.join(rootDir, 'repo');
   const worktreeRoot = path.join(rootDir, 'worktrees');
   const previewRoot = path.join(rootDir, 'preview-runtime');
-  const designRepositoryRoot = path.join(rootDir, 'design-repositories');
-  const designWorktreeRoot = path.join(rootDir, 'design-worktrees');
   try {
     await fs.mkdir(repositoryPath, { recursive: true });
     await initRepository(repositoryPath);
   } catch (error) {
-    return cleanupFailedScenarioCreation(undefined, rootDir, error);
+    return cleanupFailedScenarioCreation(undefined, undefined, rootDir, error);
   }
 
-  const store = new FileTaskStore(path.join(rootDir, 'store'));
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+  let persistence: ApplicationPersistence | undefined;
+  try {
+    persistence = await openTestPersistence(path.join(rootDir, 'profile'));
+  } catch (error) {
+    return cleanupFailedScenarioCreation(undefined, undefined, rootDir, error);
+  }
+  const store = persistence.tasks;
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
   const { adapter: agent, taskRuntime } = scriptedRuntime;
   const events = new AppEventBus();
   let service: TaskManagerService | undefined;
@@ -320,8 +343,9 @@ export async function createTaskMonkiScenario(
       allowCandidateDesignModels: options.allowCandidateDesignModels,
       ...(options.designMode
         ? {
-            designRepositoryRoot,
-            designWorktreeRoot,
+            designRepositoryRoot: persistence.paths.designRepositoryRoot,
+            designWorktreeRoot: persistence.paths.designWorktreeRoot,
+            designDraftStore: persistence.designDrafts,
             designBrowserRuntime: {
               async attest() {},
               async recover() {},
@@ -353,11 +377,12 @@ export async function createTaskMonkiScenario(
     await service.init();
     repository = await service.addRepository(repositoryPath);
   } catch (error) {
-    return cleanupFailedScenarioCreation(service, rootDir, error);
+    return cleanupFailedScenarioCreation(service, persistence, rootDir, error);
   }
   if (!service || !repository) {
     return cleanupFailedScenarioCreation(
       service,
+      persistence,
       rootDir,
       new Error('Scenario initialization did not produce a service and repository.')
     );
@@ -370,6 +395,7 @@ export async function createTaskMonkiScenario(
     repositoryId: repository.id,
     worktreeRoot,
     previewRoot,
+    persistence,
     store,
     runtimeStore: scriptedRuntime.runtimeStore,
     taskRuntime,
@@ -377,7 +403,7 @@ export async function createTaskMonkiScenario(
     agent,
     service,
     dispose() {
-      disposeWork ??= disposeScenario(service, rootDir);
+      disposeWork ??= disposeScenario(service, persistence, rootDir);
       return disposeWork;
     },
     createTask(input = {}) {
@@ -448,37 +474,53 @@ export async function createTaskMonkiScenario(
   };
 }
 
-async function disposeScenario(service: TaskManagerService, rootDir: string): Promise<void> {
-  let shutdownError: unknown;
+async function disposeScenario(
+  service: TaskManagerService,
+  persistence: ApplicationPersistence,
+  rootDir: string
+): Promise<void> {
+  const shutdownErrors: unknown[] = [];
   try {
     await service.shutdown();
   } catch (error) {
-    shutdownError = error;
+    shutdownErrors.push(error);
+  }
+  try {
+    await persistence.close();
+  } catch (error) {
+    shutdownErrors.push(error);
   }
 
   try {
     await removeScenarioRoot(rootDir);
   } catch (cleanupError) {
-    if (shutdownError) {
+    if (shutdownErrors.length > 0) {
       throw new AggregateError(
-        [shutdownError, cleanupError],
+        [...shutdownErrors, cleanupError],
         `Scenario shutdown and cleanup failed for ${rootDir}.`
       );
     }
     throw cleanupError;
   }
 
-  if (shutdownError) throw shutdownError;
+  if (shutdownErrors.length === 1) throw shutdownErrors[0];
+  if (shutdownErrors.length > 1) {
+    throw new AggregateError(shutdownErrors, `Scenario shutdown failed for ${rootDir}.`);
+  }
 }
 
 async function cleanupFailedScenarioCreation(
   service: TaskManagerService | undefined,
+  persistence: ApplicationPersistence | undefined,
   rootDir: string,
   creationError: unknown
 ): Promise<never> {
   try {
-    if (service) await disposeScenario(service, rootDir);
-    else await removeScenarioRoot(rootDir);
+    if (service && persistence) await disposeScenario(service, persistence, rootDir);
+    else {
+      await persistence?.close();
+      await removeScenarioRoot(rootDir);
+    }
   } catch (cleanupError) {
     throw new AggregateError(
       [creationError, cleanupError],
@@ -542,7 +584,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   constructor(
     private readonly runtime: TaskAgentRuntimeAccess,
-    private readonly rawRuntime?: FileAgentRuntimeStore
+    private readonly rawRuntime?: SqliteAgentRuntimeStore
   ) {}
 
   initialize(): Promise<void> {
@@ -1079,7 +1121,7 @@ function waitForEvent(
 }
 
 function waitForSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   predicate: (snapshot: TaskSnapshot) => boolean,
   timeoutMs: number
 ): Promise<TaskSnapshot> {

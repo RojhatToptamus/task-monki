@@ -53,7 +53,7 @@ jobs:
         run: npm exec vitest -- run src/core/preview/runtime/NativeLauncherHost.integration.test.ts
       - name: Run Windows storage integration tests
         if: runner.os == 'Windows'
-        run: npm exec vitest -- run src/core/storage/FileTaskStore.integration.test.ts
+        run: npm exec vitest -- run src/core/storage/SqliteTaskStore.integration.test.ts
       - name: Run system tests
         if: runner.os == 'Linux'
         run: npm run test:system

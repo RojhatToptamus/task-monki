@@ -2,8 +2,8 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppEventBus } from '../core/runner/AppEventBus';
-import { AttachmentStoreError } from '../core/storage/AttachmentFileStore';
-import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
+import { AttachmentStoreError } from '../core/storage/AttachmentErrors';
+import { TaskCreationRequestError } from '../core/storage/SqliteTaskStore';
 import {
   DEV_API_TOKEN_HEADER,
   devRendererOrigin,

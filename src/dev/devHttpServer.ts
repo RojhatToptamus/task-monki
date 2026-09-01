@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
-import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
+import { TaskCreationRequestError } from '../core/storage/SqliteTaskStore';
 import type {
   AppUpdateEvent,
   CreateBoardRequest,

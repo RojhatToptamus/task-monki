@@ -62,12 +62,13 @@ fails.
 ```mermaid
 flowchart LR
   Input["Pick, paste, or drop"] --> Local["Renderer-local files"]
-  Local -->|"Refine or Create"| Stage["Private staging directory"]
-  Stage --> Validate["Core admission and hashes"]
-  Validate -->|"Refine"| Inspect["Bounded read-only refinement"]
-  Validate -->|"Create"| Rename["Atomic rename to task directory"]
-  Rename --> Store["Atomic task-store snapshot"]
+  Local -->|"Refine or Create"| Validate["Core admission and hashes"]
+  Validate --> Stage["SQLite draft + immutable managed files"]
+  Stage -->|"Refine"| Inspect["Bounded read-only refinement"]
+  Stage -->|"Create"| Copy["Verified immutable task copies"]
+  Copy --> Store["One SQLite task transaction"]
   Store --> Task["Immutable task-owned inputs"]
+  Store --> Cleanup["Post-commit draft cleanup"]
 ```
 
 The renderer uses one task-creation token for retries. A response lost after a
@@ -117,26 +118,28 @@ the private staging data and does not publish partial message state.
 
 ## Storage
 
-Managed files live under the Task Monki data root:
+SQLite owns attachment drafts, task attachment records, and managed-file
+reachability. Immutable bytes live below the shared Task Monki managed-file
+root:
 
 ```text
-attachments/
-  staging/<draft-id>/
+storage/files/task/attachments/
+  staging/<draft-id>/<attachment-id>.<safe-extension>
   tasks/<task-id>/<attachment-id>.<safe-extension>
 ```
 
-Directories are `0700`, staging manifests and task state are `0600`, and
-immutable attachment files are `0400` on POSIX. Node does not provide equivalent
-owner/group/other mode enforcement on Windows, and Task Monki does not treat
-Windows `chmod` as an ACL boundary. Packaged Windows storage instead lives under
-the app's per-user data directory and inherits that managed root's Windows ACLs.
-This protects the normal per-user installation boundary but does not protect
-against another process running as the same OS user or against a user who has
-weakened the inherited ACLs. Names use opaque ids; original absolute paths are
-never stored. Durable records contain task id, attachment id, ordinal, display
-name, kind, media type, byte count, SHA-256, and creation time. The storage path
-is derived internally and is absent from snapshots, events, API responses, and
-submission evidence.
+Directories are private and immutable attachment files are `0400` on POSIX.
+Attachment metadata is stored only in SQLite. Node does not provide
+equivalent owner/group/other mode enforcement on Windows, and Task Monki does
+not treat Windows `chmod` as an ACL boundary. Packaged Windows storage instead
+lives under the app's per-user data directory and inherits that managed root's
+Windows ACLs. This protects the normal per-user installation boundary but does
+not protect against another process that runs as the same OS user. It also does
+not protect against a user who weakens the inherited ACLs. Names use opaque ids.
+Original absolute paths are never stored. Durable records contain task id,
+attachment id, ordinal, display name, kind, media type, byte count, SHA-256, and
+creation time. The storage key is internal and absent from snapshots, events,
+API responses, and submission evidence.
 
 File data is flushed before publication on every platform. Directory metadata
 is also synchronized on POSIX filesystems that support directory `fsync`.
@@ -146,21 +149,21 @@ claiming the additional POSIX directory-flush guarantee.
 
 Store shutdown stops admitting attachment operations synchronously, drains
 every operation already admitted, closes the attachment store, and only then
-releases the application-wide store lease. A caller cannot begin attachment I/O
-against a closing or closed store.
+releases the application-wide profile lease. A caller cannot begin attachment
+I/O against a closing or closed store.
 
-Task and blank Design creation verify the staging directory. They atomically
-rename it to the task id, then synchronize both parent directories before
-publishing `store.json`. A synchronization or store-publication failure renames
-the directory back. It synchronizes that rollback before reporting a retry-safe
-failure. If rollback cannot be proven, adoption fails explicitly as ambiguous.
-It must not be retried automatically. If final manifest cleanup is interrupted,
-startup verifies the task-owned files and removes the stale manifest. Startup
-also removes an adopted directory that has no durable task record.
+Task and blank Design creation verify each staged database reference and its
+immutable bytes, then publish verified immutable copies under task-owned keys.
+One SQLite transaction publishes the task, attachments, Design references or
+turn, and domain events. A transaction failure removes the unpublished task
+copies and leaves the draft retryable. After commit, draft rows and staged
+managed-file references are removed. Physical byte deletion happens only after
+that reference deletion commits. Startup reconciles interrupted or failed
+physical cleanup.
 
-The attachment store contains only task-owned records and one blob authority.
-Its complete current durable shape is validated before records are published
-to the task store.
+The attachment store validates the complete draft or task selection against
+SQLite size, digest, ownership, order, and storage-key metadata before exposing
+verified paths or bytes.
 
 Fork alternatives receive independent task-owned copies. This intentionally
 avoids shared-reference accounting and garbage collection at the small bounded
@@ -257,11 +260,12 @@ different malicious process already running as the same OS user.
 
 ## Portability and retention
 
-Managed copies make tasks independent of their selected source files. A backup
-or export must keep `store.json` and `attachments/tasks` together while Task
-Monki is closed. It must also keep Design draft files and their owned staging
-together. Other staging is disposable and is removed on restart. Task
-attachments last for the task lifetime.
+Managed copies make tasks independent of their selected source files. Use the
+complete backup service. A copy of only the SQLite file or attachment directory
+is not a valid backup. A verified backup takes one SQLite snapshot and includes
+every live managed attachment that snapshot references. It also preserves
+Design draft rows and their retained staged files. Other staging is disposable
+and is removed on restart. Task attachments last for the task lifetime.
 
 Provider conversation history can retain files, paths, or derived discussion
 after local task deletion. Task Monki cannot erase that provider history.

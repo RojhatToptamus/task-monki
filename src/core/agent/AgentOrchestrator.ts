@@ -22,7 +22,7 @@ import type {
 import type { AgentExecutionContext } from '../../shared/agentRuntime';
 import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { buildAgentReviewPrompt } from '../../shared/promptTemplates';
 import {
   AgentMutationAmbiguousError,
@@ -246,7 +246,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   private runtimeTurnEventQueue: Promise<void> = Promise.resolve();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly runtimeStore: AgentRuntimeStore,
     private readonly events: AppEventBus,
     runtimes: AgentRuntimeRegistry | AgentRuntimeAdapter,
@@ -260,8 +260,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       runtimes instanceof AgentRuntimeRegistry
         ? runtimes
         : new AgentRuntimeRegistry([runtimes], runtimes.descriptor.id);
-    this.taskRuntime = runtimeStore.taskAgentRuntimeAccess((event, operationId) =>
-      store.recordAgentRuntimeEvent(event, operationId)
+    this.taskRuntime = runtimeStore.taskAgentRuntimeAccess(
+      store.createAgentRuntimeEventSink()
     );
     this.interactions = new AgentInteractionService(this.taskRuntime, events, (runtimeId) =>
       this.runtimes.require(runtimeId)
@@ -1661,6 +1661,15 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         'One or more agent runtimes could not release the task.'
       );
     }
+  }
+
+  async deleteTaskProviderHistory(task: Task): Promise<void> {
+    const adapter = this.runtimes.require(task.runtimeId);
+    if (adapter.deleteTaskProviderHistory) {
+      await adapter.deleteTaskProviderHistory(task.id);
+      return;
+    }
+    await adapter.releaseTask?.(task.id);
   }
 
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {

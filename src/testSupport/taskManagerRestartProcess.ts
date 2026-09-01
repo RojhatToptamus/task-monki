@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import { WorktreeService, listGitWorktrees } from '../core/worktree/WorktreeService';
 import { createScriptedAgentRuntimeFixture } from './taskMonkiScenario';
 
@@ -12,7 +12,7 @@ if (!mode || !root) {
 }
 
 const repositoryPath = path.join(root, 'repository');
-const storePath = path.join(root, 'store');
+const profileRoot = path.join(root, 'profile');
 const worktreeRoot = path.join(root, 'worktrees');
 
 if (mode === 'prepare') {
@@ -24,8 +24,12 @@ if (mode === 'prepare') {
   await git(repositoryPath, ['add', 'README.md']);
   await git(repositoryPath, ['commit', '-m', 'Initial fixture commit']);
 
-  const store = new FileTaskStore(storePath);
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+  const persistence = await ApplicationPersistence.open({
+    profileRoot,
+    appVersion: 'restart-fixture-1.0.0'
+  });
+  const store = persistence.tasks;
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
   const service = new TaskManagerService(store, repositoryPath, undefined, {
     worktreeRoot,
     ...scriptedRuntime.serviceOptions
@@ -63,8 +67,12 @@ if (mode === 'prepare') {
   );
   setInterval(() => undefined, 30_000);
 } else if (mode === 'recover') {
-  const store = new FileTaskStore(storePath);
-  const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+  const persistence = await ApplicationPersistence.open({
+    profileRoot,
+    appVersion: 'restart-fixture-1.0.0'
+  });
+  const store = persistence.tasks;
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
   const service = new TaskManagerService(store, repositoryPath, undefined, {
     worktreeRoot,
     ...scriptedRuntime.serviceOptions
@@ -89,6 +97,7 @@ if (mode === 'prepare') {
     })}\n`
   );
   await service.shutdown();
+  await persistence.close();
 } else {
   throw new Error(`Unknown restart fixture mode: ${mode}`);
 }

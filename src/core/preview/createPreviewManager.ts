@@ -1,5 +1,5 @@
 import { AppEventBus } from '../runner/AppEventBus';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { PreviewGateway } from './PreviewGateway';
 import { PreviewGraph } from './PreviewGraph';
@@ -19,7 +19,7 @@ import { OciEngineAdapter } from './runtime/OciEngineAdapter';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 import { PreviewCredentialHost } from './runtime/PreviewCredentialHost';
 import path from 'node:path';
-import { PreviewPrivateVault, type PreviewSecretProtector } from './private/PreviewPrivateVault';
+import type { PreviewPrivateVault } from './private/PreviewPrivateVault';
 import { PreviewComposeCliAdapter } from './compose/PreviewComposeCliAdapter';
 import { PreviewComposeInspector } from './compose/PreviewComposeInspector';
 import { PreviewComposeRuntime } from './compose/PreviewComposeRuntime';
@@ -35,11 +35,11 @@ export interface CreatePreviewManagerOptions {
   ociContextName?: string;
   ociEnv?: NodeJS.ProcessEnv;
   openHost?: PreviewUrlHost;
-  secretProtector?: PreviewSecretProtector;
+  privateVault?: PreviewPrivateVault;
 }
 
 export function createPreviewManager(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   events: AppEventBus,
   options: CreatePreviewManagerOptions
 ): PreviewManager {
@@ -104,9 +104,7 @@ export function createPreviewManager(
     new PreviewReconciler(store, gateway, nativeRuntime, source, ociRuntime, composeRuntime),
     new PreviewOpenService(store, options.openHost),
     ociRuntime,
-    options.secretProtector
-      ? new PreviewPrivateVault(path.join(options.previewRoot, 'private-vault'), options.secretProtector)
-      : undefined,
+    options.privateVault,
     composeRuntime,
     options.managedDesignStaticServerPath
       ? new ManagedDesignStaticPreview({

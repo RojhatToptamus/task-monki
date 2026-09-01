@@ -146,9 +146,9 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
 /**
- * Validates JSON-loaded current-schema primitives before domain code can observe
- * them. Relationship, artifact, attachment, and runtime ownership invariants
- * remain in FileTaskStore where their indexes and filesystem context live.
+ * Validates persisted current-schema records before domain code can observe
+ * them. Cross-record and managed-file checks remain in SqliteTaskStore, which
+ * has the required database and filesystem context.
  */
 export function validateCurrentStoreRecords(state: StoreState): void {
   validateCollection(state.tasks, 'tasks', (task) => {

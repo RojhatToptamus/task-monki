@@ -1,5 +1,5 @@
 import type { OpenPreviewRequest, OpenPreviewResult } from '../../../shared/contracts';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { previewRouteHostname } from '../PreviewRouteHostname';
 
 export interface PreviewUrlHost {
@@ -16,7 +16,7 @@ export interface ResolvedPreviewRoute {
 
 export class PreviewOpenService {
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly host?: PreviewUrlHost
   ) {}
 

@@ -23,11 +23,11 @@ import { DiscourseService } from '../discourse/DiscourseService';
 import type { DiscourseStore } from '../discourse/DiscourseStore';
 import { DiscourseWorkspace } from '../discourse/DiscourseWorkspace';
 import { AppEventBus } from '../runner/AppEventBus';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { RuntimeOperationGate } from './RuntimeOperationGate';
 
 export interface DiscourseRuntimeHostOptions {
-  taskStore: FileTaskStore;
+  taskStore: SqliteTaskStore;
   runtimeStore: AgentRuntimeStore;
   discourseStore: DiscourseStore;
   agents: AgentRuntimeCoordinator;

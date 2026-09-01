@@ -4,12 +4,28 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CreateBoardRequest } from '../../shared/contracts';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
-import { FileTaskStore } from './FileTaskStore';
+import { SqliteTaskStore } from './SqliteTaskStore';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
+import type { ApplicationPersistence } from './sqlite/ApplicationPersistence';
 
-describe('FileTaskStore boards', () => {
+const persistenceByTaskStore = new WeakMap<SqliteTaskStore, ApplicationPersistence>();
+
+async function createStore(profileRoot: string): Promise<SqliteTaskStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  persistenceByTaskStore.set(persistence.tasks, persistence);
+  return persistence.tasks;
+}
+
+function closeStore(store: SqliteTaskStore): Promise<void> {
+  const persistence = persistenceByTaskStore.get(store);
+  if (!persistence) throw new Error('Task store does not belong to this test fixture.');
+  return persistence.close();
+}
+
+describe('SqliteTaskStore boards', () => {
   it('persists saved filters without storing task membership', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-boards-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const repository = await addTestRepository(store, path.join(dir, 'repository'));
     const task = await store.createTask({
       title: 'Authoritative task',
@@ -40,20 +56,20 @@ describe('FileTaskStore boards', () => {
       workflowPhases: ['READY']
     });
     expect(updated).toMatchObject({ name: 'Ready work', color: 'ROSE', repositoryIds: [] });
-    await store.close();
+    await closeStore(store);
 
-    const reloaded = new FileTaskStore(dir);
+    const reloaded = await createStore(dir);
     expect((await reloaded.snapshot()).boards).toEqual([updated]);
     await reloaded.deleteBoard(board.id);
     const snapshot = await reloaded.snapshot();
     expect(snapshot.boards).toEqual([]);
     expect(snapshot.tasks.map((candidate) => candidate.id)).toContain(task.id);
-    await reloaded.close();
+    await closeStore(reloaded);
   });
 
   it('rejects filters that reference an unknown repository', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-board-invalid-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     await expect(
       store.createBoard({
         name: 'Unknown repository',
@@ -66,7 +82,7 @@ describe('FileTaskStore boards', () => {
 
   it('rejects saved-view colors outside the fixed palette', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-board-color-'));
-    const store = new FileTaskStore(dir);
+    const store = await createStore(dir);
     const invalidInput = {
       name: 'Invalid color',
       color: 'ORANGE',

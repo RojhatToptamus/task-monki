@@ -6,26 +6,31 @@ import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
-import { FileTaskStore } from '../storage/FileTaskStore';
-import { createScriptedAgentRuntimeFixture } from '../../testSupport/taskMonkiScenario';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
-const temporaryDirectories: string[] = [];
+const temporaryProfiles: Array<{
+  directory: string;
+  close(): Promise<void>;
+}> = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      fs.rm(directory, { recursive: true, force: true })
-    )
+    temporaryProfiles.splice(0).map(async ({ directory, close }) => {
+      await close();
+      await fs.rm(directory, { recursive: true, force: true });
+    })
   );
 });
 
 describe('TaskManagerService provider-native session configuration', () => {
   it('routes revisioned provider controls only after validating task, runtime, and idle ownership', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-native-session-'));
-    temporaryDirectories.push(directory);
-    const store = new FileTaskStore(path.join(directory, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const opened = await openScriptedTaskManagerPersistence(
+      path.join(directory, 'store')
+    );
+    temporaryProfiles.push({ directory, close: () => opened.persistence.close() });
+    const { store, ...scriptedRuntime } = opened;
     const scripted = scriptedRuntime.adapter;
     Object.defineProperty(scripted, 'descriptor', {
       value: TEST_ACP_PROFILE.descriptor

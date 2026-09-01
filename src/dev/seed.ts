@@ -2,11 +2,10 @@ import { seedTaskMonkiDevelopmentData, type DevSeedScenarioSet } from './seedDat
 
 interface CliOptions {
   rootDir?: string;
-  storeDir?: string;
+  profileRoot?: string;
   repositoryPath?: string;
   worktreeRoot?: string;
   previewRoot?: string;
-  appSettingsPath?: string;
   scenarioSet?: DevSeedScenarioSet;
   reset?: boolean;
   help?: boolean;
@@ -20,11 +19,10 @@ async function main(): Promise<void> {
   }
   const manifest = await seedTaskMonkiDevelopmentData({
     rootDir: options.rootDir,
-    storeDir: options.storeDir,
+    profileRoot: options.profileRoot,
     repositoryPath: options.repositoryPath,
     worktreeRoot: options.worktreeRoot,
     previewRoot: options.previewRoot,
-    appSettingsPath: options.appSettingsPath,
     scenarioSet: options.scenarioSet,
     reset: options.reset
   });
@@ -58,8 +56,8 @@ function parseArgs(args: string[]): CliOptions {
       case '--root':
         options.rootDir = readValue(args, ++index, arg);
         break;
-      case '--store-dir':
-        options.storeDir = readValue(args, ++index, arg);
+      case '--profile-root':
+        options.profileRoot = readValue(args, ++index, arg);
         break;
       case '--repo-path':
         options.repositoryPath = readValue(args, ++index, arg);
@@ -69,9 +67,6 @@ function parseArgs(args: string[]): CliOptions {
         break;
       case '--preview-root':
         options.previewRoot = readValue(args, ++index, arg);
-        break;
-      case '--app-settings-path':
-        options.appSettingsPath = readValue(args, ++index, arg);
         break;
       case '--scenario-set':
         options.scenarioSet = readScenarioSet(readValue(args, ++index, arg));
@@ -104,11 +99,10 @@ function printHelp(): void {
 Options:
   --reset                    Reset the seed-owned root before generating data.
   --root <path>              Seed root. Defaults to .local/task-monki-dev-seed.
-  --store-dir <path>         FileTaskStore directory.
+  --profile-root <path>      Application persistence profile root.
   --repo-path <path>         Generated fixture repository path.
   --worktree-root <path>     Generated worktree root.
   --preview-root <path>      Generated preview runtime root.
-  --app-settings-path <path> App settings JSON path.
   --scenario-set <set>       all, board, agent, review, delivery, completion, workflow, preview, discourse.
 `);
 }

@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
+import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import {
   AcpStdioSupervisor,
   clientCapabilitiesForAcpProfile,
@@ -21,17 +23,17 @@ import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 import { spawnPortable } from '../../process/portableChildProcess';
 
 const temporaryDirectories: string[] = [];
-const testStores = new Set<FileAgentRuntimeStore>();
+const testPersistence = new Set<ApplicationPersistence>();
 
-function createTestStore(root: string): FileAgentRuntimeStore {
-  const store = new FileAgentRuntimeStore(root);
-  testStores.add(store);
-  return store;
+async function createTestStore(profileRoot: string): Promise<SqliteAgentRuntimeStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  testPersistence.add(persistence);
+  return persistence.agentRuntime;
 }
 
 afterEach(async () => {
-  await Promise.all([...testStores].map((store) => store.close()));
-  testStores.clear();
+  await Promise.all([...testPersistence].map((persistence) => persistence.close()));
+  testPersistence.clear();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       fs.rm(directory, { recursive: true, force: true })
@@ -102,7 +104,7 @@ describe('AcpStdioSupervisor', () => {
         sensitiveKeys: ['GEMINI_API_KEY']
       }
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const supervisor = new AcpStdioSupervisor(store, {
       profile,
       runtime: {
@@ -197,7 +199,7 @@ describe('AcpStdioSupervisor', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript, 'writable-lane']
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const supervisor = new AcpStdioSupervisor(store, {
       profile,
       runtime: {
@@ -237,7 +239,7 @@ describe('AcpStdioSupervisor', () => {
       path.join(os.tmpdir(), 'task-monki-acp-supervisor-late-policy-')
     );
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-late-policy'),
@@ -292,7 +294,7 @@ describe('AcpStdioSupervisor', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const supervisor = new AcpStdioSupervisor(store, {
       profile,
       runtime: {
@@ -321,7 +323,7 @@ describe('AcpStdioSupervisor', () => {
   it('drains an accepted terminal response before publishing process loss', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-close-drain-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-close-drain'),
@@ -387,7 +389,7 @@ describe('AcpStdioSupervisor', () => {
   it('safety-fences the runtime when accepted inbound dispatch cannot drain', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-drain-failure-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-drain-failure'),
@@ -525,7 +527,7 @@ describe('AcpStdioSupervisor', () => {
         if (spawnCount === 1) firstChild = child;
         return child;
       };
-      const store = createTestStore(path.join(directory, 'store'));
+      const store = await createTestStore(path.join(directory, 'store'));
       const supervisor = new AcpStdioSupervisor(store, {
         profile: {
           ...testProfile('test-acp-leader-exit'),
@@ -573,7 +575,7 @@ describe('AcpStdioSupervisor', () => {
   it('does not spawn or leave STARTING state when shutdown wins server creation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-supervisor-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const originalCreate = store.createAgentServer.bind(store);
     let releaseCreate!: () => void;
     const createGate = new Promise<void>((resolve) => {
@@ -626,7 +628,7 @@ describe('AcpStdioSupervisor', () => {
   it('fails promptly and permanently fences a child that ignores TERM and KILL', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-stubborn-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: false });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-stubborn'),
@@ -674,7 +676,7 @@ describe('AcpStdioSupervisor', () => {
   it('retains a hard fence when startup cleanup cannot confirm process exit', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-start-fence-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: false, protocolVersion: 2 });
     const spawnProcess = vi.fn(fakeSpawn(child)) as unknown as NonNullable<
       AcpStdioSupervisorOptions['spawnProcess']
@@ -708,7 +710,7 @@ describe('AcpStdioSupervisor', () => {
   it('permanently fences a process after a protocol violation even when termination is unconfirmed', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-protocol-fence-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: false });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-protocol-fence'),
@@ -737,7 +739,7 @@ describe('AcpStdioSupervisor', () => {
   it('keeps the protocol-violation fence after process exit is confirmed', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-protocol-exit-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-protocol-exit'),
@@ -762,7 +764,7 @@ describe('AcpStdioSupervisor', () => {
   it('completes close cleanup and surfaces a terminal persistence failure', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-close-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-close-failure'),

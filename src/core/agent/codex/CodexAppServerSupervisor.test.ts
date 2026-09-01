@@ -21,7 +21,9 @@ import {
   parseDisabledCodexMcpServerConfigOverrides,
   parseEnabledCodexMcpServerNames
 } from './CodexToolConfig';
-import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
+import type { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
 
 const WEB_SEARCH_MODES: CodexWebSearchMode[] = ['disabled', 'cached', 'live'];
 const MCP_SERVER_MODES: CodexMcpServersMode[] = ['disabled', 'all'];
@@ -201,7 +203,7 @@ describe('Codex App Server launch configuration', () => {
 
   it('does not spawn or leave STARTING state when shutdown wins a durable-start race', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-supervisor-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const originalCreate = store.createAgentServer.bind(store);
     let releaseCreate!: () => void;
     const createGate = new Promise<void>((resolve) => {
@@ -239,13 +241,12 @@ describe('Codex App Server launch configuration', () => {
     ]);
     await expect(supervisor.start()).rejects.toThrow('shut down');
     store.createAgentServer = originalCreate;
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('persists and emits only redacted argv and process diagnostics', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-supervisor-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const diagnostics: string[] = [];
     let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
@@ -299,13 +300,12 @@ describe('Codex App Server launch configuration', () => {
       expect(durable).not.toContain(secret);
       expect(diagnostics.join('\n')).not.toContain(secret);
     }
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('delivers journaled notifications before emitting process exit', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-drain-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -360,13 +360,12 @@ describe('Codex App Server launch configuration', () => {
     await exited;
     expect(lifecycleOrder).toEqual(['notification', 'exit']);
 
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('fences replacement startup when inbound delivery cannot be drained', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-drain-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -390,15 +389,14 @@ describe('Codex App Server launch configuration', () => {
     await exited;
 
     await expect(supervisor.start()).rejects.toThrow('lifecycle is fenced');
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('terminates and fences the client even when exit persistence fails', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-codex-termination-store-failure-')
     );
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -437,13 +435,12 @@ describe('Codex App Server launch configuration', () => {
     expect(supervisor.currentClient).toBeUndefined();
     await expect(supervisor.start()).rejects.toThrow('lifecycle is fenced');
 
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('hard-fences an unresponsive process when TERM and KILL cannot confirm exit', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-stubborn-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeOnKill: false });
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -468,13 +465,12 @@ describe('Codex App Server launch configuration', () => {
     await expect(supervisor.start()).rejects.toThrow('lifecycle is fenced');
     expect(supervisor.currentServer).toMatchObject({ status: 'LOST' });
 
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('coalesces safety-fence and close-handler process-tree termination', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-fence-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeBeforeExitConfirmation: true });
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -492,13 +488,12 @@ describe('Codex App Server launch configuration', () => {
 
     expect(child.kill).toHaveBeenCalledTimes(1);
     expect(supervisor.currentServer).toMatchObject({ status: 'EXITED' });
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('confirms process-tree absence after a signal-send race during normal shutdown', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-close-race-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeAfterSignalFailure: true });
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
@@ -536,13 +531,12 @@ describe('Codex App Server launch configuration', () => {
       exitCode: 0,
       signal: null
     });
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('preserves signal failures when process-tree absence cannot be confirmed', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-signal-failure-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeOnKill: false });
     child.kill.mockImplementation((signal: NodeJS.Signals = 'SIGTERM') => {
       throw Object.assign(new Error(`${signal} kill EPERM`), {
@@ -580,13 +574,12 @@ describe('Codex App Server launch configuration', () => {
       'Codex App Server process 7676 did not exit after SIGKILL.'
     ]);
     expect(child.kill).toHaveBeenCalledTimes(2);
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 
   it('refuses a replacement generation when prior exit cleanup cannot confirm termination', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-prior-tree-'));
-    const store = new FileAgentRuntimeStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild({ closeOnKill: false });
     const spawnProcess = vi.fn(() => {
       queueMicrotask(() => child.emit('spawn'));
@@ -611,10 +604,32 @@ describe('Codex App Server launch configuration', () => {
     );
     expect(spawnProcess).toHaveBeenCalledTimes(1);
 
-    await store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await closeRuntimeStore(store, directory);
   });
 });
+
+const persistenceByRuntimeStore = new WeakMap<
+  SqliteAgentRuntimeStore,
+  ApplicationPersistence
+>();
+
+async function openRuntimeStore(profileRoot: string): Promise<SqliteAgentRuntimeStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  persistenceByRuntimeStore.set(persistence.agentRuntime, persistence);
+  return persistence.agentRuntime;
+}
+
+async function closeRuntimeStore(
+  store: SqliteAgentRuntimeStore,
+  fixtureRoot: string
+): Promise<void> {
+  const persistence = persistenceByRuntimeStore.get(store);
+  if (!persistence) {
+    throw new Error('Codex supervisor test runtime has no persistence owner.');
+  }
+  await persistence.close();
+  await fs.rm(fixtureRoot, { recursive: true, force: true });
+}
 
 function resolvedCodexRuntime() {
   return {

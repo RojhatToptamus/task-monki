@@ -2,23 +2,35 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import {
+  closeTestTaskStore,
+  openTestTaskStore
+} from '../../../testSupport/persistenceFixture';
 import { previewRouteHostname } from '../PreviewRouteHostname';
 import { PreviewOpenService } from './PreviewOpenService';
 
 const fixtureRoots: string[] = [];
+const fixtureStores: SqliteTaskStore[] = [];
 afterEach(async () => {
+  await Promise.all(fixtureStores.splice(0).map(closeTestTaskStore));
   await Promise.all(
     fixtureRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))
   );
 });
 
+async function openStore(root: string): Promise<SqliteTaskStore> {
+  const store = await openTestTaskStore(root);
+  fixtureStores.push(store);
+  return store;
+}
+
 describe('PreviewOpenService', () => {
   it('opens only a recorded attached ready .localhost route identity', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-open-preview-'));
     fixtureRoots.push(root);
-    const store = new FileTaskStore(root);
+    const store = await openStore(root);
     const opened: string[] = [];
     const service = new PreviewOpenService(store, {
       async openExternal(url) { opened.push(url); }
@@ -46,7 +58,7 @@ describe('PreviewOpenService', () => {
   it('rejects a stored arbitrary external URL even when the caller knows its route id', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-open-preview-unsafe-'));
     fixtureRoots.push(root);
-    const store = new FileTaskStore(root);
+    const store = await openStore(root);
     const { generation, taskId } = await seedGeneration(store, {
       hostname: 'example.com',
       url: 'https://example.com/',
@@ -61,7 +73,7 @@ describe('PreviewOpenService', () => {
   it('rejects stale, malformed, and foreign stored route identities', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-open-preview-invalid-'));
     fixtureRoots.push(root);
-    const store = new FileTaskStore(root);
+    const store = await openStore(root);
     const service = new PreviewOpenService(store, { async openExternal() {} });
     const { generation, taskId } = await seedGeneration(store);
 
@@ -99,7 +111,7 @@ describe('PreviewOpenService', () => {
 });
 
 async function seedGeneration(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   routeOverride?: { hostname: string; url: string; gatewayPort: number }
 ) {
   const task = await store.createTask({ title: 'Open', prompt: 'Test', repositoryId: (await addTestRepository(store, process.cwd())).id });

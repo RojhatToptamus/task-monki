@@ -10,7 +10,7 @@ import type {
   PreviewOciPublishedPort,
   PreviewOciResourcePlan
 } from '../../../shared/contracts';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { boundedPreviewFailure } from '../PreviewFailure';
 import { PreviewReadinessService } from '../PreviewReadinessService';
 import {
@@ -220,7 +220,7 @@ export class OciResourceRuntime {
   >();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly engine: OciEngineAdapter,
     private readonly readiness: PreviewReadinessService,
     private readonly credentials: PreviewCredentialHost,

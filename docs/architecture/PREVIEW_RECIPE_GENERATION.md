@@ -167,7 +167,7 @@ private input and typed recipient instead.
 ## Transient state and lifecycle
 
 Generation snapshots and drafts are main-process memory only. They are not
-stored in `FileTaskStore`, task snapshots, approval records, or Preview
+stored in `SqliteTaskStore`, task snapshots, approval records, or Preview
 artifacts. The shared runtime keeps the transient provider turn only until
 terminal cleanup succeeds. Purpose-specific IPC sends only the current safe
 snapshot and reviewed YAML.

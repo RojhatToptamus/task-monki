@@ -40,6 +40,7 @@ export const AGENT_RUNTIME_LIMITS = {
   maxTypedRecords: 500_000,
   maxServerInstances: 2_000,
   maxEvents: 200_000,
+  maxGlobalOperationReceipts: 256,
   maxOwnerIdBytes: 512,
   maxClientOperationIdBytes: 512,
   maxGenerationKeyBytes: 1024,
@@ -47,8 +48,7 @@ export const AGENT_RUNTIME_LIMITS = {
   maxExecutionRoots: 3,
   maxManagedAttachments: 10,
   maxArtifactBytes: 4 * 1024 * 1024,
-  maxTelemetryPayloadBytes: 256 * 1024,
-  maxRuntimeStateBytes: 128 * 1024 * 1024
+  maxTelemetryPayloadBytes: 256 * 1024
 } as const;
 
 export const AGENT_SCHEDULER_POLICY = {

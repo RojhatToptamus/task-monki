@@ -5,9 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentModel, AgentRuntimeCapabilities } from '../../shared/contracts';
 import {
-  createScriptedAgentRuntimeFixture,
+  openScriptedTaskManagerPersistence,
   ScriptedAgentRuntimeAdapter
 } from '../../testSupport/taskMonkiScenario';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
@@ -16,7 +17,6 @@ import {
   opencodeCapabilities
 } from '../agent/opencode/opencodeCapabilities';
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
-import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
 describe('TaskManagerService runtime execution defaults', () => {
@@ -49,8 +49,7 @@ describe('TaskManagerService runtime execution defaults', () => {
       const dir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'task-monki-runtime-defaults-')
       );
-      const store = new FileTaskStore(path.join(dir, 'store'));
-      const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+      const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
       const adapter = scriptedRuntime.adapter;
       Object.defineProperty(adapter, 'descriptor', { value: descriptor });
       vi.spyOn(adapter, 'capabilities').mockResolvedValue(
@@ -81,12 +80,16 @@ describe('TaskManagerService runtime execution defaults', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-runtime-composition-')
     );
+    const persistence = await openTestPersistence(path.join(dir, 'profile'));
     const service = new TaskManagerService(
-      new FileTaskStore(path.join(dir, 'store')),
+      persistence.tasks,
       dir,
       undefined,
       {
-        agentProviderStartupDisabledReason: 'inert test'
+        agentProviderStartupDisabledReason: 'inert test',
+        appSettingsStore: persistence.settings,
+        agentRuntimeStore: persistence.agentRuntime,
+        taskRuntimeAccess: persistence.taskRuntime
       }
     );
     await service.init();
@@ -109,8 +112,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-runtime-executable-settings-')
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
@@ -184,8 +186,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-runtime-executable-override-')
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
@@ -216,8 +217,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-browser-runtime-create-')
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
@@ -247,8 +247,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-browser-runtime-settings-')
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const adapter = scriptedRuntime.adapter;
     Object.defineProperty(adapter, 'descriptor', {
       value: OPENCODE_RUNTIME_DESCRIPTOR
@@ -281,8 +280,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-runtime-identity-conflict-')
     );
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const scriptedRuntime = createScriptedAgentRuntimeFixture(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
       ...scriptedRuntime.serviceOptions
     });

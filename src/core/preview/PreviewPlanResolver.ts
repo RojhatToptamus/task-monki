@@ -19,7 +19,7 @@ import {
 } from './PreviewExecutionAuthority';
 import { canonicalProspectivePath, isPathWithin } from './PreviewPaths';
 import { OciEngineAdapter } from './runtime/OciEngineAdapter';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { PreviewComposeInspector } from './compose/PreviewComposeInspector';
 import { previewComposeProjectName } from './compose/PreviewComposeIdentity';
 
@@ -34,7 +34,7 @@ export interface ResolvePreviewPlanInput {
 export class PreviewPlanResolver {
   constructor(
     private readonly ociEngine?: OciEngineAdapter,
-    private readonly store?: FileTaskStore,
+    private readonly store?: SqliteTaskStore,
     private readonly composeInspector?: PreviewComposeInspector
   ) {}
 

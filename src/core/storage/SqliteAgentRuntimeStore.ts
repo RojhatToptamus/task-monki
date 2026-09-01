@@ -1,6 +1,4 @@
 import crypto, { randomUUID } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
   AgentGoalSnapshotRecord,
@@ -71,23 +69,25 @@ import type {
   TaskObserveSubagentInput,
   TaskRuntimeEventSink
 } from '../agent/AgentRuntimeStore';
-import { AgentRuntimeArtifactMutationAmbiguousError } from '../agent/AgentRuntimeStore';
 import type { ArtifactRecord, DomainEvent, RunRecord } from '../../shared/contracts';
 import { reduceRun } from '../projection/reducer';
-import {
-  enforcePosixMode,
-  hasNoGroupOrOtherPosixAccess,
-  isOwnedByCurrentUser,
-  posixModeMatches,
-  syncDirectoryIfSupported
-} from '../filesystem/secureFilesystem';
+import type {
+  AppDatabase,
+  AppDatabaseTransaction,
+  SqlReader
+} from './sqlite/AppDatabase';
+import { AgentRuntimeStateMapper } from './sqlite/AgentRuntimeStateMapper';
+import type {
+  ManagedFileReference,
+  ManagedFileStore
+} from './sqlite/ManagedFileStore';
 
-const RUNTIME_FILE_NAME = 'runtime.json';
-const ARTIFACT_DIRECTORY = 'artifacts';
 const MAX_UNREFERENCED_TERMINAL_AGENT_SERVERS = 8;
+const RUNTIME_RECEIPT_DOMAIN = 'AGENT_RUNTIME';
+const GLOBAL_RUNTIME_SHUTDOWN_RECEIPT_OWNER = 'app:shutdown';
+const GLOBAL_RUNTIME_TELEMETRY_RECEIPT_OWNER = 'app:telemetry';
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/u;
-const ARTIFACT_FILE = /^([A-Za-z0-9_-]{1,128})-r(\d+)\.txt$/u;
 const TELEMETRY_KINDS = new Set<AgentRuntimeTelemetryKind>([
   'SERVER',
   'ITEM',
@@ -98,6 +98,30 @@ const TELEMETRY_KINDS = new Set<AgentRuntimeTelemetryKind>([
   'SETTINGS',
   'SUBAGENT',
   'PROTOCOL_REFERENCE'
+]);
+const RUNTIME_EVENT_TYPES = new Set<AgentRuntimeEventRecord['type']>([
+  'SESSION_CREATED',
+  'SESSION_UPDATED',
+  'RUN_CREATED',
+  'RUN_UPDATED',
+  'ARTIFACT_CREATED',
+  'ARTIFACT_UPDATED',
+  'TELEMETRY_RECORDED',
+  'ITEM_UPSERTED',
+  'INTERACTION_CREATED',
+  'INTERACTION_UPDATED',
+  'GOAL_RECORDED',
+  'PLAN_RECORDED',
+  'USAGE_RECORDED',
+  'SETTINGS_RECORDED',
+  'SUBAGENT_RECORDED',
+  'QUEUE_ENQUEUED',
+  'QUEUE_LEASED',
+  'QUEUE_RELEASED',
+  'QUEUE_CANCELED',
+  'QUEUE_SETTLED',
+  'SHUTDOWN_LATCHED',
+  'SHUTDOWN_CLEARED'
 ]);
 const SERVER_STATUSES = new Set<AgentServerInstance['status']>([
   'STARTING',
@@ -121,11 +145,6 @@ const ATTACHMENT_CORRELATION_KINDS = new Set([
   'provider-message',
   'client-request'
 ] as const);
-
-interface MutationOptions {
-  collectTerminalServers?: boolean;
-  cleanupUnreferencedArtifacts?: boolean;
-}
 
 const RUN_STATUS_TRANSITIONS: Record<AgentRuntimeRunRecord['status'], readonly AgentRuntimeRunRecord['status'][]> = {
   QUEUED: ['STARTING', 'INTERRUPTED', 'FAILED', 'RECOVERY_REQUIRED'],
@@ -172,51 +191,187 @@ const SESSION_STATUS_TRANSITIONS: Record<
   UNKNOWN: ['IDLE', 'ACTIVE', 'NOT_LOADED', 'SYSTEM_ERROR', 'ARCHIVED', 'DELETED']
 };
 
-export interface FileAgentRuntimeStoreOptions {
+export interface SqliteAgentRuntimeStoreOptions {
   now?: () => string;
   createId?: () => string;
-  afterFileSync?: () => Promise<void>;
-  afterRename?: () => Promise<void>;
-  syncDirectory?: (directory: string) => Promise<void>;
 }
 
-export class AgentRuntimeStorePublishedError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
-    this.name = 'AgentRuntimeStorePublishedError';
-  }
+interface RuntimeTransactionState {
+  state: AgentRuntimeStoreState;
 }
 
-export class FileAgentRuntimeStore implements AgentRuntimeStore {
-  private readonly storePath: string;
-  private readonly artifactsDir: string;
+interface RecordRuntimeTelemetryInput {
+  id: string;
+  kind: AgentRuntimeTelemetryKind;
+  owner?: AgentOwnerScope;
+  sessionId?: string;
+  runId?: string;
+  serverInstanceId?: string;
+  providerIdentity?: string;
+  clientOperationId: string;
+  payload: unknown;
+  observedAt: string;
+}
+
+interface RuntimeMetadataRecord {
+  record_revision: number | bigint;
+  next_event_ordinal: number | bigint;
+  next_queue_ordinal: number | bigint;
+  shutdown_latched: number | bigint;
+}
+
+interface RuntimeOwnerRecord {
+  owner_kind: string | null;
+  task_id: string | null;
+  generation_id: string | null;
+  request_id: string | null;
+  conversation_id: string | null;
+  stable_participant_id: string | null;
+}
+
+interface RuntimeOperationReceiptRow {
+  owner_id?: string;
+  client_operation_id?: string;
+  request_fingerprint: string;
+  result_json: string;
+  created_at: string;
+}
+
+interface RuntimeOperationReceiptResult {
+  type: AgentRuntimeEventRecord['type'];
+  sessionId?: string;
+  runId?: string;
+  queueEntryId?: string;
+  artifactId?: string;
+}
+
+interface RuntimeOperationReceiptInput extends RuntimeOperationReceiptResult {
+  owner: AgentOwnerScope | undefined;
+  operationId: string;
+  requestFingerprint: string;
+  createdAt: string;
+}
+
+type RuntimeReceiptOwnerSelector =
+  | { kind: 'EXACT'; ownerId: string }
+  | { kind: 'PREFIX'; ownerIdPrefix: string };
+
+export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
   private readonly protocolJournal: AgentProtocolJournal;
-  private state = emptyState();
+  private readonly stateMapper: AgentRuntimeStateMapper;
+  private readonly transactionStateKey = {};
+  private readonly artifactsDir: string;
+  private committedState = emptyState();
   private initPromise?: Promise<void>;
   private closePromise?: Promise<void>;
-  private operationQueue: Promise<unknown> = Promise.resolve();
   private readonly activeProtocolOperations = new Set<Promise<unknown>>();
-  private publishedFailure = false;
   private readonly now: () => string;
   private readonly createId: () => string;
-  private readonly afterFileSync: () => Promise<void>;
-  private readonly afterRename: () => Promise<void>;
-  private readonly syncDirectoryHook: (directory: string) => Promise<void>;
 
   constructor(
-    private readonly rootDir: string,
-    options: FileAgentRuntimeStoreOptions = {}
+    private readonly database: AppDatabase,
+    private readonly managedFiles: ManagedFileStore,
+    protocolJournalRoot: string,
+    options: SqliteAgentRuntimeStoreOptions = {}
   ) {
-    this.storePath = path.join(rootDir, RUNTIME_FILE_NAME);
-    this.artifactsDir = path.join(rootDir, ARTIFACT_DIRECTORY);
-    this.protocolJournal = new AgentProtocolJournal(
-      path.join(rootDir, 'protocol-journals')
-    );
+    this.protocolJournal = new AgentProtocolJournal(protocolJournalRoot);
+    this.stateMapper = new AgentRuntimeStateMapper(database, managedFiles);
+    this.artifactsDir = managedFiles.rootPath;
     this.now = options.now ?? (() => new Date().toISOString());
     this.createId = options.createId ?? (() => randomUUID());
-    this.afterFileSync = options.afterFileSync ?? (async () => undefined);
-    this.afterRename = options.afterRename ?? (async () => undefined);
-    this.syncDirectoryHook = options.syncDirectory ?? syncDirectoryIfSupported;
+  }
+
+  private get state(): AgentRuntimeStoreState {
+    return (
+      this.database.getTransactionLocal<RuntimeTransactionState>(this.transactionStateKey)
+        ?.state ?? this.committedState
+    );
+  }
+
+  private set state(value: AgentRuntimeStoreState) {
+    this.committedState = value;
+  }
+
+  private currentState(): AgentRuntimeStoreState {
+    return this.state;
+  }
+
+  private assertManagedFilePublicationAllowed(): void {
+    if (this.database.hasCurrentWriteTransaction()) {
+      throw new Error(
+        'Agent runtime artifact bytes must be published before opening a database transaction.'
+      );
+    }
+  }
+
+  private async publishInitialRunArtifacts(input: {
+    run: Pick<
+      AgentRuntimeRunRecord,
+      | 'id'
+      | 'owner'
+      | 'promptArtifactId'
+      | 'outputArtifactId'
+      | 'diagnosticArtifactId'
+    >;
+    operationId: string;
+    prompt: string;
+    now: string;
+  }): Promise<AgentRuntimeArtifactRecord[]> {
+    const prepared: AgentRuntimeArtifactRecord[] = [];
+    try {
+      for (const entry of initialArtifactEntries(input.run, input.prompt)) {
+        const encoded = encodeArtifactContent(entry.content);
+        const reference = await this.managedFiles.publish(
+          artifactStorageKey(entry.id, 1),
+          encoded.bytes
+        );
+        const artifactOperationId = derivedOperationId(input.operationId, entry.kind);
+        prepared.push({
+          id: entry.id,
+          owner: clone(input.run.owner),
+          runId: input.run.id,
+          kind: entry.kind,
+          clientOperationId: artifactOperationId,
+          requestFingerprint: requestFingerprint({
+            id: entry.id,
+            runId: input.run.id,
+            kind: entry.kind,
+            contentSha256: reference.sha256,
+            byteCount: reference.byteCount
+          }),
+          storageKey: reference.storageKey,
+          contentSha256: reference.sha256,
+          byteCount: reference.byteCount,
+          recordRevision: 1,
+          createdAt: input.now,
+          updatedAt: input.now
+        });
+      }
+      return prepared;
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences(prepared);
+      throw error;
+    }
+  }
+
+  private async deletePreparedFilesWithoutReferences(
+    prepared: readonly (AgentRuntimeArtifactRecord | ManagedFileReference)[]
+  ): Promise<void> {
+    if (prepared.length === 0) return;
+    const unreferenced = await this.database.read((reader) =>
+      prepared.filter(
+        (item) =>
+          !reader.get(
+            'SELECT 1 AS present FROM managed_files WHERE storage_key = ? LIMIT 1',
+            [item.storageKey]
+          )
+      )
+    );
+    await Promise.all(
+      unreferenced.map((item) =>
+        this.managedFiles.deleteAfterReferenceCommit(item.storageKey)
+      )
+    );
   }
 
   async init(): Promise<void> {
@@ -245,20 +400,19 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
 
   private async closeOwnedResources(): Promise<void> {
     await this.initPromise?.catch(() => undefined);
-    await this.operationQueue.catch(() => undefined);
-    await Promise.allSettled([...this.activeProtocolOperations]);
+    await this.drainProtocolOperations();
     await this.protocolJournal.close();
   }
 
   async snapshot(): Promise<AgentRuntimeStoreState> {
     await this.init();
-    return clone(this.state);
+    return clone(this.currentState());
   }
 
   async createAgentServer(
     input: CreateAgentRuntimeServerInput
   ): Promise<AgentServerInstance> {
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       if (draft.servers.length >= AGENT_RUNTIME_LIMITS.maxServerInstances) {
         throw new Error('Agent runtime server-instance limit reached.');
       }
@@ -286,13 +440,13 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   ): Promise<AgentServerInstance | undefined> {
     await this.init();
     return clone(
-      this.state.servers.find((server) => server.id === serverInstanceId)
+      this.currentState().servers.find((server) => server.id === serverInstanceId)
     );
   }
 
   async listAgentServers(): Promise<AgentServerInstance[]> {
     await this.init();
-    return clone(this.state.servers);
+    return clone(this.currentState().servers);
   }
 
   async updateAgentServer(
@@ -328,7 +482,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       assertAgentServer(stored);
       draft.servers[index] = stored;
       return stored;
-    }, { collectTerminalServers: true });
+    }, true);
   }
 
   async appendProtocolMessage(
@@ -338,7 +492,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     metadata?: Record<string, unknown>
   ): Promise<AgentProtocolMessageReference> {
     return this.withProtocolJournal(() => {
-      if (!this.state.servers.some((server) => server.id === serverInstanceId)) {
+      if (!this.currentState().servers.some((server) => server.id === serverInstanceId)) {
         throw new Error('Protocol journal server instance is not owned by this runtime.');
       }
       return this.protocolJournal.append(serverInstanceId, direction, raw, metadata);
@@ -348,7 +502,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   async readProtocolMessage(reference: AgentProtocolMessageReference) {
     return this.withProtocolJournal(() => {
       if (
-        !this.state.servers.some(
+        !this.currentState().servers.some(
           (server) => server.id === reference.serverInstanceId
         )
       ) {
@@ -356,6 +510,11 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       }
       return this.protocolJournal.read(reference);
     });
+  }
+
+  /** Flushes every journal append queued before this call for a stable backup copy. */
+  flushProtocolJournals(): Promise<void> {
+    return this.withProtocolJournal(() => this.protocolJournal.flush());
   }
 
   async createSession(input: CreateRuntimeSessionInput): Promise<AgentRuntimeSessionRecord> {
@@ -392,7 +551,21 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   async prepareRuntimeTurn(
     input: PrepareRuntimeTurnStoreInput
   ): Promise<PreparedRuntimeTurnRecords> {
-    return this.mutate(async (draft) => {
+    await this.init();
+    this.assertManagedFilePublicationAllowed();
+    const existingArtifacts = this.state.artifacts.filter(
+      (artifact) => artifact.runId === input.run.id
+    );
+    const prepared = existingArtifacts.length === 0
+      ? await this.publishInitialRunArtifacts({
+          run: input.run,
+          operationId: input.run.clientOperationId,
+          prompt: input.prompt,
+          now: this.now()
+        })
+      : [];
+    try {
+      return await this.mutate((draft, transaction) => {
       const now = this.now();
       const session = insertRuntimeSession(
         draft,
@@ -414,15 +587,11 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       );
       const artifacts = draft.artifacts.filter((artifact) => artifact.runId === run.id);
       if (artifacts.length === 0) {
-        await appendInitialRunArtifacts({
+        appendInitialRunArtifacts({
           draft,
           run,
-          artifactsDir: this.artifactsDir,
-          syncDirectory: this.syncDirectoryHook,
           createId: this.createId,
-          now,
-          operationId: input.run.clientOperationId,
-          prompt: input.prompt
+          artifacts: prepared
         });
       } else {
         assertCompleteInitialRunArtifacts(artifacts, run, input.prompt);
@@ -437,7 +606,11 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         this.createId
       );
       return { session, run, queueEntry };
-    });
+      });
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences(prepared);
+      throw error;
+    }
   }
 
   private createRunWithLifecycle(
@@ -502,19 +675,20 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     >,
     operationId: string
   ): Promise<AgentRuntimeSessionRecord> {
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       requireOperationId(operationId);
+      const index = draft.sessions.findIndex((session) => session.id === sessionId);
+      if (index < 0) throw new Error(`Agent runtime session not found: ${sessionId}`);
+      const existing = draft.sessions[index]!;
       const fingerprint = requestFingerprint({ sessionId, update });
-      const replay = replayedOperation(draft, {
+      const replay = replayedOperation(transaction, {
+        owner: existing.owner,
         operationId,
         type: 'SESSION_UPDATED',
         sessionId,
         requestFingerprint: fingerprint
       });
-      if (replay) return requireSession(draft, sessionId);
-      const index = draft.sessions.findIndex((session) => session.id === sessionId);
-      if (index < 0) throw new Error(`Agent runtime session not found: ${sessionId}`);
-      const existing = draft.sessions[index]!;
+      if (replay) return existing;
       if (existing.recordRevision !== expectedRevision) {
         throw new Error('Agent runtime session changed before the requested update.');
       }
@@ -758,72 +932,92 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     clientOperationId: string;
     content: string;
   }): Promise<AgentRuntimeArtifactRecord> {
-    return this.mutate(async (draft) => {
-      requireSafeId(input.id, 'artifact id');
-      requireOperationId(input.clientOperationId);
-      assertAgentOwnerScope(input.owner);
-      const run = requireRun(draft, input.runId);
-      assertArtifactBelongsToRun(input, run);
-      const content = encodeArtifactContent(input.content);
-      const fingerprint = requestFingerprint({
-        id: input.id,
-        owner: input.owner,
-        runId: input.runId,
-        kind: input.kind,
-        contentSha256: content.sha256,
-        byteCount: content.bytes.byteLength
-      });
-      const replay = replayedOperation(draft, {
-        operationId: input.clientOperationId,
-        type: 'ARTIFACT_CREATED',
-        artifactId: input.id,
-        requestFingerprint: fingerprint
-      });
-      if (replay) return requireArtifact(draft, input.id);
-      if (draft.artifacts.some((artifact) => artifact.id === input.id)) {
-        throw new Error(`Agent runtime artifact already exists: ${input.id}`);
-      }
-      if (draft.artifacts.length >= AGENT_RUNTIME_LIMITS.maxArtifacts) {
-        throw new Error('Agent runtime artifact limit reached.');
-      }
-      const storageKey = artifactStorageKey(input.id, 1);
-      await writeImmutableArtifact(
-        this.artifactsDir,
-        storageKey,
-        content.bytes,
-        this.syncDirectoryHook
-      );
-      const now = this.now();
-      const artifact: AgentRuntimeArtifactRecord = {
-        id: input.id,
-        owner: clone(input.owner),
-        runId: input.runId,
-        kind: input.kind,
-        clientOperationId: input.clientOperationId,
-        requestFingerprint: fingerprint,
-        storageKey,
-        contentSha256: content.sha256,
-        byteCount: content.bytes.byteLength,
-        recordRevision: 1,
-        createdAt: now,
-        updatedAt: now
-      };
-      draft.artifacts.push(artifact);
-      appendEvent(draft, this.createId, now, {
-        type: 'ARTIFACT_CREATED',
-        owner: artifact.owner,
-        runId: artifact.runId,
-        artifactId: artifact.id,
-        operationId: input.clientOperationId,
-        payload: {
-          kind: artifact.kind,
-          contentSha256: artifact.contentSha256,
-          byteCount: artifact.byteCount,
-          requestFingerprint: fingerprint
-        }
-      });
-      return artifact;
+    requireSafeId(input.id, 'artifact id');
+    requireOperationId(input.clientOperationId);
+    assertAgentOwnerScope(input.owner);
+    await this.init();
+    this.assertManagedFilePublicationAllowed();
+    const run = requireRun(this.state, input.runId);
+    assertArtifactBelongsToRun(input, run);
+    const content = encodeArtifactContent(input.content);
+    const fingerprint = requestFingerprint({
+      id: input.id,
+      owner: input.owner,
+      runId: input.runId,
+      kind: input.kind,
+      contentSha256: content.sha256,
+      byteCount: content.bytes.byteLength
     });
+    if (
+      await this.database.read((reader) =>
+        replayedOperation(reader, {
+          owner: input.owner,
+          operationId: input.clientOperationId,
+          type: 'ARTIFACT_CREATED',
+          artifactId: input.id,
+          requestFingerprint: fingerprint
+        })
+      )
+    ) {
+      return clone(requireArtifact(this.state, input.id));
+    }
+    const reference = await this.managedFiles.publish(
+      artifactStorageKey(input.id, 1),
+      content.bytes
+    );
+    try {
+      return await this.mutate((draft, transaction) => {
+        const run = requireRun(draft, input.runId);
+        assertArtifactBelongsToRun(input, run);
+        const replay = replayedOperation(transaction, {
+          owner: input.owner,
+          operationId: input.clientOperationId,
+          type: 'ARTIFACT_CREATED',
+          artifactId: input.id,
+          requestFingerprint: fingerprint
+        });
+        if (replay) return requireArtifact(draft, input.id);
+        if (draft.artifacts.some((artifact) => artifact.id === input.id)) {
+          throw new Error(`Agent runtime artifact already exists: ${input.id}`);
+        }
+        if (draft.artifacts.length >= AGENT_RUNTIME_LIMITS.maxArtifacts) {
+          throw new Error('Agent runtime artifact limit reached.');
+        }
+        const now = this.now();
+        const artifact: AgentRuntimeArtifactRecord = {
+          id: input.id,
+          owner: clone(input.owner),
+          runId: input.runId,
+          kind: input.kind,
+          clientOperationId: input.clientOperationId,
+          requestFingerprint: fingerprint,
+          storageKey: reference.storageKey,
+          contentSha256: reference.sha256,
+          byteCount: reference.byteCount,
+          recordRevision: 1,
+          createdAt: now,
+          updatedAt: now
+        };
+        draft.artifacts.push(artifact);
+        appendEvent(draft, this.createId, now, {
+          type: 'ARTIFACT_CREATED',
+          owner: artifact.owner,
+          runId: artifact.runId,
+          artifactId: artifact.id,
+          operationId: input.clientOperationId,
+          payload: {
+            kind: artifact.kind,
+            contentSha256: artifact.contentSha256,
+            byteCount: artifact.byteCount,
+            requestFingerprint: fingerprint
+          }
+        });
+        return artifact;
+      });
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences([reference]);
+      throw error;
+    }
   }
 
   async updateArtifact(input: {
@@ -832,64 +1026,92 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     clientOperationId: string;
     content: string;
   }): Promise<AgentRuntimeArtifactRecord> {
-    return this.mutate(async (draft) => {
-      requireOperationId(input.clientOperationId);
-      const content = encodeArtifactContent(input.content);
-      const fingerprint = requestFingerprint({
-        artifactId: input.artifactId,
-        expectedRevision: input.expectedRevision,
-        contentSha256: content.sha256,
-        byteCount: content.bytes.byteLength
-      });
-      const replay = replayedOperation(draft, {
-        operationId: input.clientOperationId,
-        type: 'ARTIFACT_UPDATED',
-        artifactId: input.artifactId,
-        requestFingerprint: fingerprint
-      });
-      if (replay) return requireArtifact(draft, input.artifactId);
-      const index = draft.artifacts.findIndex(
-        (candidate) => candidate.id === input.artifactId
-      );
-      if (index < 0) throw new Error(`Agent runtime artifact not found: ${input.artifactId}`);
-      const existing = draft.artifacts[index]!;
-      if (existing.recordRevision !== input.expectedRevision) {
-        throw new Error('Agent runtime artifact changed before the requested update.');
-      }
-      const revision = existing.recordRevision + 1;
-      const storageKey = artifactStorageKey(existing.id, revision);
-      await writeImmutableArtifact(
-        this.artifactsDir,
-        storageKey,
-        content.bytes,
-        this.syncDirectoryHook
-      );
-      const stored: AgentRuntimeArtifactRecord = {
-        ...existing,
-        clientOperationId: input.clientOperationId,
-        requestFingerprint: fingerprint,
-        storageKey,
-        contentSha256: content.sha256,
-        byteCount: content.bytes.byteLength,
-        recordRevision: revision,
-        updatedAt: this.now()
-      };
-      draft.artifacts[index] = stored;
-      appendEvent(draft, this.createId, stored.updatedAt, {
-        type: 'ARTIFACT_UPDATED',
-        owner: stored.owner,
-        runId: stored.runId,
-        artifactId: stored.id,
-        operationId: input.clientOperationId,
-        payload: {
-          kind: stored.kind,
-          contentSha256: stored.contentSha256,
-          byteCount: stored.byteCount,
+    requireOperationId(input.clientOperationId);
+    await this.init();
+    this.assertManagedFilePublicationAllowed();
+    const content = encodeArtifactContent(input.content);
+    const fingerprint = requestFingerprint({
+      artifactId: input.artifactId,
+      expectedRevision: input.expectedRevision,
+      contentSha256: content.sha256,
+      byteCount: content.bytes.byteLength
+    });
+    const current = requireArtifact(this.state, input.artifactId);
+    if (
+      await this.database.read((reader) =>
+        replayedOperation(reader, {
+          owner: current.owner,
+          operationId: input.clientOperationId,
+          type: 'ARTIFACT_UPDATED',
+          artifactId: input.artifactId,
           requestFingerprint: fingerprint
+        })
+      )
+    ) {
+      return clone(requireArtifact(this.state, input.artifactId));
+    }
+    if (current.recordRevision !== input.expectedRevision) {
+      throw new Error('Agent runtime artifact changed before the requested update.');
+    }
+    const revision = current.recordRevision + 1;
+    const reference = await this.managedFiles.publish(
+      artifactStorageKey(current.id, revision),
+      content.bytes
+    );
+    let stored: AgentRuntimeArtifactRecord;
+    try {
+      stored = await this.mutate((draft, transaction) => {
+        const existingArtifact = requireArtifact(draft, input.artifactId);
+        const replay = replayedOperation(transaction, {
+          owner: existingArtifact.owner,
+          operationId: input.clientOperationId,
+          type: 'ARTIFACT_UPDATED',
+          artifactId: input.artifactId,
+          requestFingerprint: fingerprint
+        });
+        if (replay) return requireArtifact(draft, input.artifactId);
+        const index = draft.artifacts.findIndex(
+          (candidate) => candidate.id === input.artifactId
+        );
+        if (index < 0) {
+          throw new Error(`Agent runtime artifact not found: ${input.artifactId}`);
         }
+        const existing = draft.artifacts[index]!;
+        if (existing.recordRevision !== input.expectedRevision) {
+          throw new Error('Agent runtime artifact changed before the requested update.');
+        }
+        const stored: AgentRuntimeArtifactRecord = {
+          ...existing,
+          clientOperationId: input.clientOperationId,
+          requestFingerprint: fingerprint,
+          storageKey: reference.storageKey,
+          contentSha256: reference.sha256,
+          byteCount: reference.byteCount,
+          recordRevision: revision,
+          updatedAt: this.now()
+        };
+        draft.artifacts[index] = stored;
+        appendEvent(draft, this.createId, stored.updatedAt, {
+          type: 'ARTIFACT_UPDATED',
+          owner: stored.owner,
+          runId: stored.runId,
+          artifactId: stored.id,
+          operationId: input.clientOperationId,
+          payload: {
+            kind: stored.kind,
+            contentSha256: stored.contentSha256,
+            byteCount: stored.byteCount,
+            requestFingerprint: fingerprint
+          }
+        });
+        return stored;
       });
-      return stored;
-    }, { cleanupUnreferencedArtifacts: true });
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences([reference]);
+      throw error;
+    }
+    await this.stateMapper.retryPendingGarbageCollection();
+    return stored;
   }
 
   async appendArtifact(
@@ -897,19 +1119,49 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     chunk: string,
     operationId: string
   ): Promise<AgentRuntimeArtifactRecord> {
-    let rollback: (() => Promise<void>) | undefined;
-    let artifact: AgentRuntimeArtifactRecord;
-    try {
-      artifact = await this.mutate(async (draft) => {
-        requireOperationId(operationId);
-        const bytes = Buffer.from(chunk, 'utf8');
-        const fingerprint = requestFingerprint({
+    requireOperationId(operationId);
+    await this.init();
+    this.assertManagedFilePublicationAllowed();
+    const bytes = Buffer.from(chunk, 'utf8');
+    const fingerprint = requestFingerprint({
+      artifactId,
+      chunkSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      byteCount: bytes.byteLength
+    });
+    const currentArtifact = requireArtifact(this.state, artifactId);
+    if (
+      await this.database.read((reader) =>
+        replayedOperation(reader, {
+          owner: currentArtifact.owner,
+          operationId,
+          type: 'ARTIFACT_UPDATED',
           artifactId,
-          chunkSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
-          byteCount: bytes.byteLength
-        });
+          requestFingerprint: fingerprint
+        })
+      )
+    ) {
+      return clone(requireArtifact(this.state, artifactId));
+    }
+    const current = await this.managedFiles.read(
+      managedReference(currentArtifact),
+      AGENT_RUNTIME_LIMITS.maxArtifactBytes
+    );
+    const combined = Buffer.concat([current, bytes]);
+    if (combined.byteLength > AGENT_RUNTIME_LIMITS.maxArtifactBytes) {
+      throw new Error('Agent runtime artifact exceeds its safety limit.');
+    }
+    const revision = currentArtifact.recordRevision + 1;
+    const reference = await this.managedFiles.publish(
+      artifactStorageKey(currentArtifact.id, revision),
+      combined
+    );
+    let stored: AgentRuntimeArtifactRecord;
+    try {
+      stored = await this.mutate((draft, transaction) => {
+        const existingArtifact = requireArtifact(draft, artifactId);
         if (
-          replayedOperation(draft, {
+          replayedOperation(transaction, {
+            owner: existingArtifact.owner,
             operationId,
             type: 'ARTIFACT_UPDATED',
             artifactId,
@@ -918,25 +1170,27 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         ) {
           return requireArtifact(draft, artifactId);
         }
-        const index = draft.artifacts.findIndex((candidate) => candidate.id === artifactId);
-        if (index < 0) throw new Error(`Agent runtime artifact not found: ${artifactId}`);
+        const index = draft.artifacts.findIndex(
+          (candidate) => candidate.id === artifactId
+        );
+        if (index < 0) {
+          throw new Error(`Agent runtime artifact not found: ${artifactId}`);
+        }
         const existing = draft.artifacts[index]!;
         if (existing.kind !== 'OUTPUT' && existing.kind !== 'DIAGNOSTIC') {
           throw new Error('Only streamed Agent runtime artifacts can be appended.');
         }
-        const appended = await appendVerifiedArtifact(
-          this.artifactsDir,
-          existing,
-          bytes
-        );
-        rollback = appended.rollback;
+        if (existing.recordRevision !== currentArtifact.recordRevision) {
+          throw new Error('Agent runtime artifact changed before the requested append.');
+        }
         const stored: AgentRuntimeArtifactRecord = {
           ...existing,
           clientOperationId: operationId,
           requestFingerprint: fingerprint,
-          contentSha256: appended.contentSha256,
-          byteCount: appended.byteCount,
-          recordRevision: existing.recordRevision + 1,
+          storageKey: reference.storageKey,
+          contentSha256: reference.sha256,
+          byteCount: reference.byteCount,
+          recordRevision: revision,
           updatedAt: this.now()
         };
         draft.artifacts[index] = stored;
@@ -956,33 +1210,12 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         });
         return stored;
       });
-    } catch (cause) {
-      if (cause instanceof AgentRuntimeStorePublishedError) {
-        throw translateArtifactMutationError(cause);
-      }
-      if (cause instanceof AgentRuntimeArtifactMutationAmbiguousError) {
-        this.publishedFailure = true;
-        throw cause;
-      }
-      if (rollback) {
-        try {
-          await rollback();
-        } catch (rollbackCause) {
-          this.publishedFailure = true;
-          throw new AgentRuntimeArtifactMutationAmbiguousError(
-            'Agent runtime artifact append failed and its prior bytes could not be restored.',
-            {
-              cause: new AggregateError(
-                [cause, rollbackCause],
-                'Agent runtime artifact append and rollback both failed.'
-              )
-            }
-          );
-        }
-      }
-      throw cause;
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences([reference]);
+      throw error;
     }
-    return artifact;
+    await this.stateMapper.retryPendingGarbageCollection();
+    return stored;
   }
 
   async writeFinalArtifact(input: {
@@ -992,88 +1225,103 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     clientOperationId: string;
     content: string;
   }): Promise<AgentRuntimeArtifactRecord> {
-    return this.mutate(async (draft) => {
-      requireSafeId(input.artifactId, 'artifact id');
-      requireOperationId(input.clientOperationId);
-      const run = requireRun(draft, input.runId);
-      if (agentOwnerScopeKey(run.owner) !== agentOwnerScopeKey(input.owner)) {
-        throw new Error('Agent runtime final artifact ownership does not match its run.');
+    requireSafeId(input.artifactId, 'artifact id');
+    requireOperationId(input.clientOperationId);
+    await this.init();
+    this.assertManagedFilePublicationAllowed();
+    const currentRun = requireRun(this.state, input.runId);
+    const content = encodeArtifactContent(input.content);
+    if (currentRun.finalArtifactId) {
+      const existing = requireArtifact(this.state, currentRun.finalArtifactId);
+      if (existing.contentSha256 !== content.sha256) {
+        throw new Error('Agent runtime final artifact already exists with different content.');
       }
-      const content = encodeArtifactContent(input.content);
-      const fingerprint = requestFingerprint({
-        artifactId: input.artifactId,
-        owner: input.owner,
-        runId: input.runId,
-        contentSha256: content.sha256,
-        byteCount: content.bytes.byteLength
-      });
-      if (
-        replayedOperation(draft, {
-          operationId: input.clientOperationId,
-          type: 'ARTIFACT_CREATED',
-          runId: input.runId,
+      return clone(existing);
+    }
+    const reference = await this.managedFiles.publish(
+      artifactStorageKey(input.artifactId, 1),
+      content.bytes
+    );
+    try {
+      return await this.mutate((draft, transaction) => {
+        const run = requireRun(draft, input.runId);
+        if (agentOwnerScopeKey(run.owner) !== agentOwnerScopeKey(input.owner)) {
+          throw new Error('Agent runtime final artifact ownership does not match its run.');
+        }
+        const fingerprint = requestFingerprint({
           artifactId: input.artifactId,
-          requestFingerprint: fingerprint
-        })
-      ) {
-        return requireArtifact(draft, input.artifactId);
-      }
-      if (run.finalArtifactId) {
-        const existing = requireArtifact(draft, run.finalArtifactId);
-        if (existing.contentSha256 !== content.sha256) {
-          throw new Error('Agent runtime final artifact already exists with different content.');
+          owner: input.owner,
+          runId: input.runId,
+          contentSha256: content.sha256,
+          byteCount: content.bytes.byteLength
+        });
+        if (
+          replayedOperation(transaction, {
+            owner: input.owner,
+            operationId: input.clientOperationId,
+            type: 'ARTIFACT_CREATED',
+            runId: input.runId,
+            artifactId: input.artifactId,
+            requestFingerprint: fingerprint
+          })
+        ) {
+          return requireArtifact(draft, input.artifactId);
         }
-        return existing;
-      }
-      if (draft.artifacts.some((candidate) => candidate.id === input.artifactId)) {
-        throw new Error(`Agent runtime artifact already exists: ${input.artifactId}`);
-      }
-      if (draft.artifacts.length >= AGENT_RUNTIME_LIMITS.maxArtifacts) {
-        throw new Error('Agent runtime artifact limit reached.');
-      }
-      const storageKey = artifactStorageKey(input.artifactId, 1);
-      await writeImmutableArtifact(
-        this.artifactsDir,
-        storageKey,
-        content.bytes,
-        this.syncDirectoryHook
-      );
-      const now = this.now();
-      const stored: AgentRuntimeArtifactRecord = {
-        id: input.artifactId,
-        owner: clone(input.owner),
-        runId: input.runId,
-        kind: 'FINAL',
-        clientOperationId: input.clientOperationId,
-        requestFingerprint: fingerprint,
-        storageKey,
-        contentSha256: content.sha256,
-        byteCount: content.bytes.byteLength,
-        recordRevision: 1,
-        createdAt: now,
-        updatedAt: now
-      };
-      draft.artifacts.push(stored);
-      replaceRun(draft, {
-        ...run,
-        finalArtifactId: stored.id,
-        recordRevision: run.recordRevision + 1
-      });
-      appendEvent(draft, this.createId, now, {
-        type: 'ARTIFACT_CREATED',
-        owner: stored.owner,
-        runId: stored.runId,
-        artifactId: stored.id,
-        operationId: input.clientOperationId,
-        payload: {
-          kind: stored.kind,
-          contentSha256: stored.contentSha256,
-          byteCount: stored.byteCount,
-          requestFingerprint: fingerprint
+        if (run.finalArtifactId) {
+          const existing = requireArtifact(draft, run.finalArtifactId);
+          if (existing.contentSha256 !== content.sha256) {
+            throw new Error(
+              'Agent runtime final artifact already exists with different content.'
+            );
+          }
+          return existing;
         }
+        if (draft.artifacts.some((candidate) => candidate.id === input.artifactId)) {
+          throw new Error(`Agent runtime artifact already exists: ${input.artifactId}`);
+        }
+        if (draft.artifacts.length >= AGENT_RUNTIME_LIMITS.maxArtifacts) {
+          throw new Error('Agent runtime artifact limit reached.');
+        }
+        const now = this.now();
+        const stored: AgentRuntimeArtifactRecord = {
+          id: input.artifactId,
+          owner: clone(input.owner),
+          runId: input.runId,
+          kind: 'FINAL',
+          clientOperationId: input.clientOperationId,
+          requestFingerprint: fingerprint,
+          storageKey: reference.storageKey,
+          contentSha256: reference.sha256,
+          byteCount: reference.byteCount,
+          recordRevision: 1,
+          createdAt: now,
+          updatedAt: now
+        };
+        draft.artifacts.push(stored);
+        replaceRun(draft, {
+          ...run,
+          finalArtifactId: stored.id,
+          recordRevision: run.recordRevision + 1
+        });
+        appendEvent(draft, this.createId, now, {
+          type: 'ARTIFACT_CREATED',
+          owner: stored.owner,
+          runId: stored.runId,
+          artifactId: stored.id,
+          operationId: input.clientOperationId,
+          payload: {
+            kind: stored.kind,
+            contentSha256: stored.contentSha256,
+            byteCount: stored.byteCount,
+            requestFingerprint: fingerprint
+          }
+        });
+        return stored;
       });
-      return stored;
-    });
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences([reference]);
+      throw error;
+    }
   }
 
   async getArtifact(artifactId: string): Promise<AgentRuntimeArtifactRecord | undefined> {
@@ -1082,37 +1330,31 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   }
 
   async readArtifact(artifactId: string): Promise<string> {
-    if (this.closePromise) {
-      throw new Error('Agent runtime store is closed.');
-    }
-    const initialization = this.ensureInitialized();
-    const queued = this.operationQueue.catch(() => undefined).then(async () => {
-      await initialization;
-      if (this.publishedFailure) {
-        throw new Error(
-          'Agent runtime state was published without confirmed directory sync; restart before continuing.'
-        );
-      }
-      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
-      if (!artifact) throw new Error(`Agent runtime artifact not found: ${artifactId}`);
-      return readVerifiedArtifact(this.artifactsDir, artifact);
-    });
-    this.operationQueue = queued.catch(() => undefined);
-    return queued;
+    await this.init();
+    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+    if (!artifact) throw new Error(`Agent runtime artifact not found: ${artifactId}`);
+    const bytes = await this.managedFiles.read(
+      managedReference(artifact),
+      AGENT_RUNTIME_LIMITS.maxArtifactBytes
+    );
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   }
 
-  async recordTelemetry(input: {
-    id: string;
-    kind: AgentRuntimeTelemetryKind;
-    owner?: AgentOwnerScope;
-    sessionId?: string;
-    runId?: string;
-    serverInstanceId?: string;
-    providerIdentity?: string;
-    clientOperationId: string;
-    payload: unknown;
-    observedAt: string;
-  }): Promise<AgentRuntimeTelemetryRecord> {
+  async recordTelemetry(
+    input: RecordRuntimeTelemetryInput
+  ): Promise<AgentRuntimeTelemetryRecord> {
+    // A caller already inside an application transaction must update the
+    // transaction-local state so the complete operation can commit or roll back.
+    if (this.database.hasCurrentWriteTransaction()) {
+      return this.recordTelemetryInCurrentTransaction(input);
+    }
+    await this.init();
+    return this.recordTelemetryDirect(clone(input));
+  }
+
+  private recordTelemetryInCurrentTransaction(
+    input: RecordRuntimeTelemetryInput
+  ): Promise<AgentRuntimeTelemetryRecord> {
     return this.mutate((draft) => {
       requireSafeId(input.id, 'telemetry id');
       requireOperationId(input.clientOperationId);
@@ -1161,6 +1403,196 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     });
   }
 
+  private async recordTelemetryDirect(
+    input: RecordRuntimeTelemetryInput
+  ): Promise<AgentRuntimeTelemetryRecord> {
+    requireSafeId(input.id, 'telemetry id');
+    if (!TELEMETRY_KINDS.has(input.kind)) {
+      throw new Error('Agent runtime telemetry kind is invalid.');
+    }
+    requireOperationId(input.clientOperationId);
+    requireTimestamp(input.observedAt);
+    assertTelemetryPayload(input.payload);
+    if (input.owner) assertAgentOwnerScope(input.owner);
+    const fingerprint = requestFingerprint(input);
+    const owner = runtimeOwnerColumns(input.owner);
+
+    const stored = await this.database.write((transaction) => {
+      const receiptReplay = replayedOperation(transaction, {
+        owner: input.owner,
+        operationId: input.clientOperationId,
+        type: 'TELEMETRY_RECORDED',
+        requestFingerprint: fingerprint
+      });
+      const replay = transaction.get<{
+        request_fingerprint: string;
+        payload_json: string;
+      }>(
+        `SELECT request_fingerprint, payload_json
+         FROM runtime_telemetry
+         WHERE coalesce(owner_kind, 'APP') = ?
+           AND coalesce(task_id, '') = ?
+           AND coalesce(generation_id, '') = ?
+           AND coalesce(request_id, '') = ?
+           AND coalesce(conversation_id, '') = ?
+           AND coalesce(stable_participant_id, '') = ?
+           AND client_operation_id = ?`,
+        [
+          owner.owner_kind ?? 'APP',
+          owner.task_id ?? '',
+          owner.generation_id ?? '',
+          owner.request_id ?? '',
+          owner.conversation_id ?? '',
+          owner.stable_participant_id ?? '',
+          input.clientOperationId
+        ]
+      );
+      if (replay) {
+        if (replay.request_fingerprint !== fingerprint) {
+          throw new Error('Agent runtime telemetry operation conflicts with its durable request.');
+        }
+        const record = parseStoredTelemetry(replay.payload_json);
+        if (!receiptReplay) {
+          persistRuntimeOperationReceipt(transaction, {
+            owner: record.owner,
+            operationId: record.clientOperationId,
+            type: 'TELEMETRY_RECORDED',
+            sessionId: record.sessionId,
+            runId: record.runId,
+            requestFingerprint: record.requestFingerprint,
+            createdAt: record.createdAt
+          });
+        }
+        return record;
+      }
+      if (receiptReplay) {
+        throw new Error('Agent runtime telemetry receipt target is missing.');
+      }
+      if (
+        transaction.get('SELECT 1 AS present FROM runtime_telemetry WHERE id = ?', [input.id])
+      ) {
+        throw new Error(`Agent runtime telemetry already exists: ${input.id}`);
+      }
+
+      const state = this.committedState;
+      if (state.telemetryRecords.length >= AGENT_RUNTIME_LIMITS.maxTelemetryRecords) {
+        throw new Error('Agent runtime telemetry limit reached.');
+      }
+      assertTelemetryReferencesInDatabase(transaction, input, owner);
+
+      const metadata = transaction.get<RuntimeMetadataRecord>(
+        `SELECT record_revision, next_event_ordinal, next_queue_ordinal, shutdown_latched
+         FROM store_metadata WHERE domain = 'RUNTIME'`
+      );
+      if (
+        !metadata ||
+        Number(metadata.record_revision) !== state.revision ||
+        Number(metadata.next_event_ordinal) !== state.nextEventOrdinal ||
+        Number(metadata.next_queue_ordinal) !== state.nextQueueOrdinal ||
+        (metadata.shutdown_latched === 1 || metadata.shutdown_latched === 1n) !==
+          state.shutdownLatched
+      ) {
+        throw new Error('Runtime persistence metadata does not match its in-memory projection.');
+      }
+
+      const createdAt = this.now();
+      requireTimestamp(createdAt);
+      const record: AgentRuntimeTelemetryRecord = {
+        ...input,
+        requestFingerprint: fingerprint,
+        createdAt
+      };
+      const event: AgentRuntimeEventRecord = {
+        id: this.createId(),
+        ordinal: state.nextEventOrdinal,
+        type: 'TELEMETRY_RECORDED',
+        owner: record.owner,
+        runId: record.runId,
+        sessionId: record.sessionId,
+        operationId: record.clientOperationId,
+        occurredAt: createdAt,
+        payload: {
+          telemetryId: record.id,
+          kind: record.kind,
+          requestFingerprint: record.requestFingerprint
+        }
+      };
+      requireSafeId(event.id, 'runtime event id');
+
+      transaction.run(
+        `INSERT INTO runtime_telemetry (
+           id, kind, owner_kind, task_id, generation_id, request_id, conversation_id,
+           stable_participant_id, session_id, run_id, server_instance_id,
+           provider_identity, client_operation_id, request_fingerprint,
+           observed_at, created_at, payload_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          record.id,
+          record.kind,
+          owner.owner_kind,
+          owner.task_id,
+          owner.generation_id,
+          owner.request_id,
+          owner.conversation_id,
+          owner.stable_participant_id,
+          record.sessionId ?? null,
+          record.runId ?? null,
+          record.serverInstanceId ?? null,
+          record.providerIdentity ?? null,
+          record.clientOperationId,
+          record.requestFingerprint,
+          record.observedAt,
+          record.createdAt,
+          JSON.stringify(record)
+        ]
+      );
+      transaction.run(
+        `INSERT INTO runtime_events (
+           id, event_ordinal, type, run_id, session_id, queue_entry_id,
+           artifact_id, operation_id, occurred_at, payload_json
+         ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+        [
+          event.id,
+          event.ordinal,
+          event.type,
+          event.runId ?? null,
+          event.sessionId ?? null,
+          event.operationId,
+          event.occurredAt,
+          JSON.stringify(event)
+        ]
+      );
+      const compactedEvent = state.events.length >= AGENT_RUNTIME_LIMITS.maxEvents
+        ? state.events[0]
+        : undefined;
+      if (compactedEvent) {
+        transaction.run('DELETE FROM runtime_events WHERE id = ?', [compactedEvent.id]);
+      }
+      persistRuntimeOperationReceipts(transaction, [event]);
+      const nextRevision = state.revision + 1;
+      const nextEventOrdinal = state.nextEventOrdinal + 1;
+      const metadataUpdate = transaction.run(
+        `UPDATE store_metadata
+         SET record_revision = ?, next_event_ordinal = ?, updated_at = ?
+         WHERE domain = 'RUNTIME'`,
+        [nextRevision, nextEventOrdinal, new Date().toISOString()]
+      );
+      if (Number(metadataUpdate.changes) !== 1) {
+        throw new Error('Runtime persistence metadata is missing.');
+      }
+
+      transaction.afterCommit(() => {
+        state.telemetryRecords.push(record);
+        if (compactedEvent) state.events.shift();
+        state.events.push(event);
+        state.revision = nextRevision;
+        state.nextEventOrdinal = nextEventOrdinal;
+      });
+      return record;
+    });
+    return clone(stored);
+  }
+
   async listTelemetryByOwner(owner: AgentOwnerScope): Promise<AgentRuntimeTelemetryRecord[]> {
     await this.init();
     const ownerKey = agentOwnerScopeKey(owner);
@@ -1200,9 +1632,10 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     >,
     operationId: string
   ): Promise<AgentRuntimeRunRecord> {
-    return this.mutate((draft) =>
+    return this.mutate((draft, transaction) =>
       updateRuntimeRunRecord(
         draft,
+        transaction,
         runId,
         expectedRevision,
         update,
@@ -1214,12 +1647,13 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   }
 
   async upsertItem(input: CreateRuntimeItemInput): Promise<AgentRuntimeItemRecord> {
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       requireOperationId(input.clientOperationId);
       const run = requireOwnedRun(draft, input.owner, input.runId, input.sessionId);
       const fingerprint = requestFingerprint(input);
       if (
-        replayedOperation(draft, {
+        replayedOperation(transaction, {
+          owner: run.owner,
           operationId: input.clientOperationId,
           type: 'ITEM_UPSERTED',
           runId: input.runId,
@@ -1308,7 +1742,7 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   async createInteraction(
     input: CreateRuntimeInteractionInput
   ): Promise<AgentRuntimeInteractionRecord> {
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       requireOperationId(input.clientOperationId);
       const run = requireOwnedRun(draft, input.owner, input.runId, input.sessionId);
       const session = requireSession(draft, input.sessionId);
@@ -1331,7 +1765,8 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       );
       if (sameOccurrence) {
         if (
-          replayedOperation(draft, {
+          replayedOperation(transaction, {
+            owner: run.owner,
             operationId: input.clientOperationId,
             type: 'INTERACTION_CREATED',
             runId: input.runId,
@@ -1440,21 +1875,22 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     update: RuntimeInteractionUpdate,
     operationId: string
   ): Promise<AgentRuntimeInteractionRecord> {
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       requireOperationId(operationId);
+      const existing = requireInteraction(draft, id);
       const fingerprint = requestFingerprint({ id, expectedStatus, update });
       if (
-        replayedOperation(draft, {
+        replayedOperation(transaction, {
+          owner: existing.owner,
           operationId,
           type: 'INTERACTION_UPDATED',
           requestFingerprint: fingerprint
         })
       ) {
-        return requireInteraction(draft, id);
+        return existing;
       }
       const index = draft.interactions.findIndex((interaction) => interaction.id === id);
       if (index < 0) throw new Error(`Agent runtime interaction not found: ${id}`);
-      const existing = draft.interactions[index]!;
       if (existing.recordRevision !== expectedRevision) {
         throw new Error('Agent runtime interaction changed before the requested update.');
       }
@@ -1932,29 +2368,29 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         }
       },
       async applyTaskRuntimeEvent(event, operationId) {
-        await store.applyTaskRuntimeEventInternal(event, undefined, operationId);
-        try {
+        const apply = () => store.database.write(async () => {
+          await store.applyTaskRuntimeEventInternal(event, undefined, operationId);
           await eventSink?.(event, operationId);
-        } catch (cause) {
-          await store.markTaskTerminalPublicationForRecovery(event, operationId);
-          throw cause;
-        }
+        });
+        await (eventSink?.withTaskMutation
+          ? eventSink.withTaskMutation(apply)
+          : apply());
       },
       async applyTaskRuntimeEventIfRunStatus(event, statuses, operationId) {
-        const applied = await store.applyTaskRuntimeEventInternal(
-          event,
-          statuses,
-          operationId
-        );
-        if (applied) {
-          try {
+        const apply = () => store.database.write(async () => {
+          const applied = await store.applyTaskRuntimeEventInternal(
+            event,
+            statuses,
+            operationId
+          );
+          if (applied) {
             await eventSink?.(event, operationId);
-          } catch (cause) {
-            await store.markTaskTerminalPublicationForRecovery(event, operationId);
-            throw cause;
           }
-        }
-        return applied;
+          return applied;
+        });
+        return eventSink?.withTaskMutation
+          ? eventSink.withTaskMutation(apply)
+          : apply();
       }
     };
   }
@@ -2040,7 +2476,24 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   }
 
   private async createTaskRun(input: CreateTaskRuntimeRunInput): Promise<RunRecord> {
-    const stored = await this.mutate(async (draft) => {
+    await this.init();
+    this.assertManagedFilePublicationAllowed();
+    const currentSession = requireSession(this.state, input.sessionId);
+    const prepared = await this.publishInitialRunArtifacts({
+      run: {
+        id: input.id,
+        owner: currentSession.owner,
+        promptArtifactId: `prompt-${input.id}`,
+        outputArtifactId: `output-${input.id}`,
+        diagnosticArtifactId: `diagnostic-${input.id}`
+      },
+      operationId: input.operationId,
+      prompt: input.prompt,
+      now: this.now()
+    });
+    let stored: AgentRuntimeRunRecord;
+    try {
+      stored = await this.mutate((draft) => {
       requireOperationId(input.operationId);
       const session = requireSession(draft, input.sessionId);
       if (
@@ -2099,19 +2552,19 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         this.createId
       );
       if (!draft.artifacts.some((artifact) => artifact.runId === run.id)) {
-        await appendInitialRunArtifacts({
+        appendInitialRunArtifacts({
           draft,
           run,
-          artifactsDir: this.artifactsDir,
-          syncDirectory: this.syncDirectoryHook,
           createId: this.createId,
-          now: this.now(),
-          operationId: input.operationId,
-          prompt: input.prompt
+          artifacts: prepared
         });
       }
       return run;
-    });
+      });
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences(prepared);
+      throw error;
+    }
     return projectTaskRun(stored, this.state);
   }
 
@@ -2337,7 +2790,33 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     input: TaskCreateObservedSubagentRunInput,
     operationId: string
   ): Promise<RunRecord> {
-    const stored = await this.mutate(async (draft) => {
+    await this.init();
+    this.assertManagedFilePublicationAllowed();
+    requireOperationId(operationId);
+    const currentSession = requireSession(this.state, input.session.id);
+    const now = this.now();
+    const runId = this.createId();
+    requireSafeId(runId, 'run id');
+    const promptArtifactId = `prompt-${runId}`;
+    const outputArtifactId = `output-${runId}`;
+    const diagnosticArtifactId = `diagnostic-${runId}`;
+    const prompt =
+      input.prompt ?? currentSession.delegatedPrompt ?? 'Provider-observed subagent turn.';
+    const prepared = await this.publishInitialRunArtifacts({
+      run: {
+        id: runId,
+        owner: currentSession.owner,
+        promptArtifactId,
+        outputArtifactId,
+        diagnosticArtifactId
+      },
+      operationId,
+      prompt,
+      now
+    });
+    let stored: AgentRuntimeRunRecord;
+    try {
+      stored = await this.mutate((draft) => {
       requireOperationId(operationId);
       const session = requireSession(draft, input.session.id);
       if (session.owner.kind !== 'TASK' || session.role !== 'SUBAGENT') {
@@ -2361,14 +2840,6 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         }
         return existing;
       }
-      const now = this.now();
-      const runId = this.createId();
-      requireSafeId(runId, 'run id');
-      const promptArtifactId = `prompt-${runId}`;
-      const outputArtifactId = `output-${runId}`;
-      const diagnosticArtifactId = `diagnostic-${runId}`;
-      const prompt =
-        input.prompt ?? session.delegatedPrompt ?? 'Provider-observed subagent turn.';
       const run = insertRuntimeRun(
         draft,
         {
@@ -2408,18 +2879,18 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         now,
         this.createId
       );
-      await appendInitialRunArtifacts({
+      appendInitialRunArtifacts({
         draft,
         run,
-        artifactsDir: this.artifactsDir,
-        syncDirectory: this.syncDirectoryHook,
         createId: this.createId,
-        now,
-        operationId,
-        prompt
+        artifacts: prepared
       });
       return run;
-    });
+      });
+    } catch (error) {
+      await this.deletePreparedFilesWithoutReferences(prepared);
+      throw error;
+    }
     return projectTaskRun(stored, this.state);
   }
 
@@ -2429,17 +2900,21 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     operationId: string
   ): Promise<boolean> {
     if (!event.runId) return false;
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       requireOperationId(operationId);
       const eventFingerprint = domainEventFingerprint(event);
-      const prior = draft.events.find(
-        (candidate) => candidate.operationId === operationId
-      );
-      if (prior) {
-        if (prior.payload.domainEventFingerprint === eventFingerprint) return true;
-        throw new Error('Agent runtime operation conflicts with its durable event.');
-      }
       const existing = requireRun(draft, event.runId!);
+      if (
+        replayedOperation(transaction, {
+          owner: existing.owner,
+          operationId,
+          type: 'RUN_UPDATED',
+          runId: existing.id,
+          requestFingerprint: eventFingerprint
+        })
+      ) {
+        return true;
+      }
       if (existing.owner.kind !== 'TASK' || existing.owner.taskId !== event.taskId) {
         throw new Error('Task runtime event ownership does not match its run.');
       }
@@ -2453,15 +2928,27 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       const current = projectTaskRun(existing, draft);
       if (statuses && !statuses.includes(current.status)) return false;
       const reduced = reduceRun(current, event);
-      if (stableStringify(reduced) === stableStringify(current)) return true;
+      if (stableStringify(reduced) === stableStringify(current)) {
+        persistRuntimeOperationReceipt(transaction, {
+          owner: existing.owner,
+          operationId,
+          type: 'RUN_UPDATED',
+          runId: existing.id,
+          requestFingerprint: eventFingerprint,
+          createdAt: event.receivedAt
+        });
+        return true;
+      }
       const stored = updateRuntimeRunRecord(
         draft,
+        transaction,
         existing.id,
         existing.recordRevision,
         runtimeRunUpdate(existing, reduced, event.receivedAt),
         operationId,
         event.receivedAt,
-        this.createId
+        this.createId,
+        eventFingerprint
       );
       const applied = draft.events[draft.events.length - 1];
       if (applied?.runId === stored.id && applied.operationId === operationId) {
@@ -2469,41 +2956,6 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         applied.payload.domainEventId = event.id;
       }
       return true;
-    });
-  }
-
-  private async markTaskTerminalPublicationForRecovery(
-    event: DomainEvent,
-    operationId: string
-  ): Promise<void> {
-    if (
-      !event.runId ||
-      !['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'].includes(
-        event.type
-      )
-    ) {
-      return;
-    }
-    const recoveryOperationId = `task-event-recovery:${requestFingerprint({
-      operationId,
-      eventId: event.id
-    })}`;
-    await this.mutate((draft) => {
-      const run = requireRun(draft, event.runId!);
-      if (!isTerminalRuntimeStatus(run.status)) return;
-      updateRuntimeRunRecord(
-        draft,
-        run.id,
-        run.recordRevision,
-        {
-          status: 'RECOVERY_REQUIRED',
-          recoveryState: 'RECONCILING',
-          endedAt: undefined
-        },
-        recoveryOperationId,
-        this.now(),
-        this.createId
-      );
     });
   }
 
@@ -2539,22 +2991,23 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     expectedRevision: number,
     operationId: string
   ): Promise<AgentSchedulerQueueEntry> {
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       requireOperationId(operationId);
+      const existing = requireQueueEntry(draft, entryId);
       const fingerprint = requestFingerprint({ entryId });
       if (
-        replayedOperation(draft, {
+        replayedOperation(transaction, {
+          owner: existing.owner,
           operationId,
           type: 'QUEUE_RELEASED',
           queueEntryId: entryId,
           requestFingerprint: fingerprint
         })
       ) {
-        return requireQueueEntry(draft, entryId);
+        return existing;
       }
       const index = draft.queueEntries.findIndex((entry) => entry.id === entryId);
       if (index < 0) throw new Error(`Agent runtime queue entry not found: ${entryId}`);
-      const existing = draft.queueEntries[index]!;
       if (existing.recordRevision !== expectedRevision) {
         throw new Error('Agent runtime queue entry changed before the requested update.');
       }
@@ -2620,7 +3073,8 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     return this.purgeRuntimeOwner(
       (owner) =>
         owner?.kind === 'DISCOURSE' && owner.conversationId === conversationId,
-      'conversation'
+      'conversation',
+      { kind: 'PREFIX', ownerIdPrefix: `discourse:${conversationId}:` }
     );
   }
 
@@ -2633,7 +3087,8 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     requireSafeId(taskId, 'task id');
     return this.purgeRuntimeOwner(
       (owner) => owner?.kind === 'TASK' && owner.taskId === taskId,
-      'task'
+      'task',
+      { kind: 'EXACT', ownerId: `task:${taskId}` }
     );
   }
 
@@ -2647,7 +3102,8 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     return this.purgeRuntimeOwner(
       (owner) =>
         owner?.kind === 'PROMPT_REFINEMENT' && owner.requestId === requestId,
-      'prompt refinement'
+      'prompt refinement',
+      { kind: 'EXACT', ownerId: `prompt-refinement:${requestId}` }
     );
   }
 
@@ -2667,20 +3123,25 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         owner?.kind === 'PREVIEW_RECIPE_GENERATION' &&
         owner.taskId === taskId &&
         owner.generationId === generationId,
-      'preview-recipe generation'
+      'preview-recipe generation',
+      {
+        kind: 'EXACT',
+        ownerId: `preview-recipe-generation:${taskId}:${generationId}`
+      }
     );
   }
 
   private async purgeRuntimeOwner(
     owns: (owner: AgentOwnerScope | undefined) => boolean,
-    label: string
+    label: string,
+    receiptOwner: RuntimeReceiptOwnerSelector
   ): Promise<{
     sessionCount: number;
     runCount: number;
     artifactCount: number;
     queueEntryCount: number;
   }> {
-    return this.mutate((draft) => {
+    const result = await this.mutate((draft, transaction) => {
       const sessions = draft.sessions.filter((session) => owns(session.owner));
       const sessionIds = new Set(sessions.map((session) => session.id));
       const runs = draft.runs.filter(
@@ -2728,25 +3189,39 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
           !(event.queueEntryId && queueEntryIds.has(event.queueEntryId)) &&
           !(event.artifactId && artifactIds.has(event.artifactId))
       );
+      deleteRuntimeOperationReceipts(transaction, receiptOwner);
       return {
         sessionCount: sessions.length,
         runCount: runs.length,
         artifactCount: artifacts.length,
         queueEntryCount: queueEntries.length
       };
-    }, {
-      collectTerminalServers: true,
-      cleanupUnreferencedArtifacts: true
-    });
+    }, true);
+    if (!this.database.hasCurrentWriteTransaction()) {
+      await this.stateMapper.retryPendingGarbageCollection();
+    }
+    return result;
   }
 
   async setShutdownLatched(latched: boolean, operationId: string): Promise<void> {
-    await this.mutate((draft) => {
+    if (this.database.hasCurrentWriteTransaction()) {
+      return this.setShutdownLatchedInCurrentTransaction(latched, operationId);
+    }
+    await this.init();
+    return this.setShutdownLatchedDirect(latched, operationId);
+  }
+
+  private setShutdownLatchedInCurrentTransaction(
+    latched: boolean,
+    operationId: string
+  ): Promise<void> {
+    return this.mutate((draft, transaction) => {
       requireOperationId(operationId);
       const type = latched ? 'SHUTDOWN_LATCHED' : 'SHUTDOWN_CLEARED';
       const fingerprint = requestFingerprint({ latched });
       if (
-        replayedOperation(draft, {
+        replayedOperation(transaction, {
+          owner: undefined,
           operationId,
           type,
           requestFingerprint: fingerprint
@@ -2754,14 +3229,126 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       ) {
         return undefined;
       }
-      if (draft.shutdownLatched === latched) return undefined;
+      const occurredAt = this.now();
+      if (draft.shutdownLatched === latched) {
+        persistRuntimeOperationReceipt(transaction, {
+          owner: undefined,
+          operationId,
+          type,
+          requestFingerprint: fingerprint,
+          createdAt: occurredAt
+        });
+        return undefined;
+      }
       draft.shutdownLatched = latched;
-      appendEvent(draft, this.createId, this.now(), {
+      appendEvent(draft, this.createId, occurredAt, {
         type,
         operationId,
         payload: { requestFingerprint: fingerprint }
       });
       return undefined;
+    });
+  }
+
+  private async setShutdownLatchedDirect(
+    latched: boolean,
+    operationId: string
+  ): Promise<void> {
+    requireOperationId(operationId);
+    const type = latched ? 'SHUTDOWN_LATCHED' : 'SHUTDOWN_CLEARED';
+    const fingerprint = requestFingerprint({ latched });
+
+    await this.database.write((transaction) => {
+      if (
+        replayedOperation(transaction, {
+          owner: undefined,
+          operationId,
+          type,
+          requestFingerprint: fingerprint
+        })
+      ) {
+        return;
+      }
+
+      const state = this.committedState;
+      const metadata = transaction.get<RuntimeMetadataRecord>(
+        `SELECT record_revision, next_event_ordinal, next_queue_ordinal, shutdown_latched
+         FROM store_metadata WHERE domain = 'RUNTIME'`
+      );
+      if (
+        !metadata ||
+        Number(metadata.record_revision) !== state.revision ||
+        Number(metadata.next_event_ordinal) !== state.nextEventOrdinal ||
+        Number(metadata.next_queue_ordinal) !== state.nextQueueOrdinal ||
+        (metadata.shutdown_latched === 1 || metadata.shutdown_latched === 1n) !==
+          state.shutdownLatched
+      ) {
+        throw new Error('Runtime persistence metadata does not match its in-memory projection.');
+      }
+
+      const occurredAt = this.now();
+      requireTimestamp(occurredAt);
+      if (state.shutdownLatched === latched) {
+        persistRuntimeOperationReceipt(transaction, {
+          owner: undefined,
+          operationId,
+          type,
+          requestFingerprint: fingerprint,
+          createdAt: occurredAt
+        });
+        return;
+      }
+
+      const event: AgentRuntimeEventRecord = {
+        id: this.createId(),
+        ordinal: state.nextEventOrdinal,
+        type,
+        operationId,
+        occurredAt,
+        payload: { requestFingerprint: fingerprint }
+      };
+      requireSafeId(event.id, 'runtime event id');
+      transaction.run(
+        `INSERT INTO runtime_events (
+           id, event_ordinal, type, run_id, session_id, queue_entry_id,
+           artifact_id, operation_id, occurred_at, payload_json
+         ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
+        [
+          event.id,
+          event.ordinal,
+          event.type,
+          event.operationId,
+          event.occurredAt,
+          JSON.stringify(event)
+        ]
+      );
+      const compactedEvent = state.events.length >= AGENT_RUNTIME_LIMITS.maxEvents
+        ? state.events[0]
+        : undefined;
+      if (compactedEvent) {
+        transaction.run('DELETE FROM runtime_events WHERE id = ?', [compactedEvent.id]);
+      }
+      persistRuntimeOperationReceipts(transaction, [event]);
+
+      const nextRevision = state.revision + 1;
+      const nextEventOrdinal = state.nextEventOrdinal + 1;
+      const updated = transaction.run(
+        `UPDATE store_metadata
+         SET record_revision = ?, next_event_ordinal = ?, shutdown_latched = ?, updated_at = ?
+         WHERE domain = 'RUNTIME'`,
+        [nextRevision, nextEventOrdinal, latched ? 1 : 0, occurredAt]
+      );
+      if (Number(updated.changes) !== 1) {
+        throw new Error('Runtime persistence metadata is missing.');
+      }
+
+      transaction.afterCommit(() => {
+        if (compactedEvent) state.events.shift();
+        state.events.push(event);
+        state.revision = nextRevision;
+        state.nextEventOrdinal = nextEventOrdinal;
+        state.shutdownLatched = latched;
+      });
     });
   }
 
@@ -2772,14 +3359,16 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
     status: 'LEASED' | 'CANCELED' | 'SETTLED',
     cancelReason?: string
   ): Promise<AgentSchedulerQueueEntry> {
-    return this.mutate((draft) => {
+    return this.mutate((draft, transaction) => {
       requireOperationId(operationId);
+      const existing = requireQueueEntry(draft, entryId);
       const fingerprint = requestFingerprint({
         entryId,
         status,
         cancelReason: cancelReason ?? null
       });
-      const replay = replayedOperation(draft, {
+      const replay = replayedOperation(transaction, {
+        owner: existing.owner,
         operationId,
         type:
           status === 'LEASED'
@@ -2791,11 +3380,10 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
         requestFingerprint: fingerprint
       });
       if (replay) {
-        return requireQueueEntry(draft, entryId);
+        return existing;
       }
       const index = draft.queueEntries.findIndex((entry) => entry.id === entryId);
       if (index < 0) throw new Error(`Agent runtime queue entry not found: ${entryId}`);
-      const existing = draft.queueEntries[index]!;
       if (existing.recordRevision !== expectedRevision) {
         throw new Error('Agent runtime queue entry changed before the requested update.');
       }
@@ -2843,66 +3431,25 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
   }
 
   private async initialize(): Promise<void> {
-    await ensurePrivateDirectory(this.rootDir);
-    await ensurePrivateDirectory(this.artifactsDir);
-    await cleanupTemporaryFiles(this.rootDir, this.storePath);
-    try {
-      const raw = await readPrivateStateFile(this.storePath);
-      const parsed = JSON.parse(raw) as AgentRuntimeStoreState;
-      validateState(parsed);
-      this.state = parsed;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      this.state = emptyState();
-      await this.persist(this.state);
-    }
-    await this.reconcileArtifacts();
-    const prunedServerIds = pruneUnreferencedTerminalAgentServers(this.state);
+    await this.managedFiles.init();
+    const loaded = await this.stateMapper.load(emptyState);
+    validateState(loaded);
+    await this.database.read(validateRuntimeOperationReceipts);
+    await this.stateMapper.verifyArtifacts(loaded.artifacts);
+    await this.stateMapper.retryPendingGarbageCollection();
+
+    const initial = clone(loaded);
+    const prunedServerIds = pruneUnreferencedTerminalAgentServers(loaded);
     if (prunedServerIds.length > 0) {
-      this.state.revision += 1;
-      validateState(this.state);
-      await this.persist(this.state);
+      loaded.revision += 1;
+      validateState(loaded);
     }
+    await this.stateMapper.persist(initial, loaded);
+    this.state = loaded;
+    await cleanupPrunedServerJournals(this.protocolJournal, prunedServerIds);
     await this.protocolJournal.reconcileServers(
-      this.state.servers.map((server) => server.id)
+      loaded.servers.map((server) => server.id)
     );
-  }
-
-  private async reconcileArtifacts(): Promise<void> {
-    const expected = new Set(this.state.artifacts.map((artifact) => artifact.storageKey));
-    for (const artifact of this.state.artifacts) {
-      await reconcileArtifactFile(this.artifactsDir, artifact);
-    }
-    for (const entry of await fs.readdir(this.artifactsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || entry.isSymbolicLink() || !ARTIFACT_FILE.test(entry.name)) {
-        throw new Error('Agent runtime artifact directory contains an unsafe entry.');
-      }
-      if (!expected.has(entry.name)) {
-        const candidate = path.join(this.artifactsDir, entry.name);
-        const stat = await fs.lstat(candidate);
-        if (!isOwnedByCurrentUser(stat) || !hasNoGroupOrOtherPosixAccess(stat)) {
-          throw new Error('Agent runtime orphan artifact failed its integrity check.');
-        }
-        await fs.unlink(candidate);
-      }
-    }
-    await this.syncDirectoryHook(this.artifactsDir);
-  }
-
-  private async cleanupUnreferencedArtifactFiles(): Promise<void> {
-    const expected = new Set(this.state.artifacts.map((artifact) => artifact.storageKey));
-    let removed = false;
-    for (const entry of await fs.readdir(this.artifactsDir, { withFileTypes: true })) {
-      if (!ARTIFACT_FILE.test(entry.name) || expected.has(entry.name)) continue;
-      const candidate = path.join(this.artifactsDir, entry.name);
-      const stat = await fs.lstat(candidate);
-      if (!stat.isFile() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat)) {
-        throw new Error('Agent runtime orphan artifact failed its integrity check.');
-      }
-      await fs.unlink(candidate);
-      removed = true;
-    }
-    if (removed) await this.syncDirectoryHook(this.artifactsDir);
   }
 
   private withProtocolJournal<T>(operation: () => Promise<T>): Promise<T> {
@@ -2910,105 +3457,72 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       return Promise.reject(new Error('Agent runtime store is closed.'));
     }
     const initialization = this.ensureInitialized();
-    const admittedMutations = this.operationQueue.catch(() => undefined);
     const running = (async () => {
       await initialization;
-      await admittedMutations;
       return operation();
     })();
-    this.activeProtocolOperations.add(running);
-    void running.then(
-      () => this.activeProtocolOperations.delete(running),
-      () => this.activeProtocolOperations.delete(running)
-    );
+    this.trackProtocolOperation(running);
     return running;
   }
 
+  private trackProtocolOperation(operation: Promise<unknown>): void {
+    this.activeProtocolOperations.add(operation);
+    void operation.then(
+      () => this.activeProtocolOperations.delete(operation),
+      () => this.activeProtocolOperations.delete(operation)
+    );
+  }
+
+  private async drainProtocolOperations(): Promise<void> {
+    while (this.activeProtocolOperations.size > 0) {
+      await Promise.allSettled([...this.activeProtocolOperations]);
+    }
+  }
+
   private mutate<T>(
-    operation: (draft: AgentRuntimeStoreState) => T | Promise<T>,
-    options: MutationOptions = {}
+    operation: (
+      draft: AgentRuntimeStoreState,
+      transaction: AppDatabaseTransaction
+    ) => T | Promise<T>,
+    collectTerminalServers = false
   ): Promise<T> {
     if (this.closePromise) {
       return Promise.reject(new Error('Agent runtime store is closed.'));
     }
-    const initialization = this.ensureInitialized();
-    const queued = this.operationQueue.catch(() => undefined).then(async () => {
-      await initialization;
-      if (this.publishedFailure) {
-        throw new Error(
-          'Agent runtime state was published without confirmed directory sync; restart before continuing.'
+    return (async () => {
+      await this.ensureInitialized();
+      const stored = await this.database.write(async (transaction) => {
+        const previous = this.state;
+        const draft = clone(previous);
+        const before = stableStringify(draft);
+        const result = await operation(draft, transaction);
+        const prunedServerIds = collectTerminalServers
+          ? pruneUnreferencedTerminalAgentServers(draft)
+          : [];
+        if (stableStringify(draft) === before) return clone(result);
+        draft.revision += 1;
+        validateState(draft);
+        await this.stateMapper.persist(previous, draft);
+        persistRuntimeOperationReceipts(
+          transaction,
+          draft.events.filter((event) => event.ordinal >= previous.nextEventOrdinal)
         );
-      }
-      const draft = clone(this.state);
-      const before = stableStringify(draft);
-      const result = await operation(draft);
-      const prunedServerIds = options.collectTerminalServers
-        ? pruneUnreferencedTerminalAgentServers(draft)
-        : [];
-      if (stableStringify(draft) === before) {
-        if (options.cleanupUnreferencedArtifacts) {
-          await this.cleanupUnreferencedArtifactFiles();
-        }
+        transaction.setLocal(this.transactionStateKey, { state: draft });
+        transaction.afterCommit(() => {
+          this.state = draft;
+        });
+        transaction.afterCommitDeferred(() => {
+          const cleanup = cleanupPrunedServerJournals(
+            this.protocolJournal,
+            prunedServerIds
+          );
+          this.trackProtocolOperation(cleanup);
+          return cleanup;
+        });
         return clone(result);
-      }
-      draft.revision += 1;
-      validateState(draft);
-      try {
-        await this.persist(draft);
-      } catch (error) {
-        if (error instanceof AgentRuntimeStorePublishedError) this.publishedFailure = true;
-        throw error;
-      }
-      this.state = draft;
-      await cleanupPrunedServerJournals(this.protocolJournal, prunedServerIds);
-      if (options.cleanupUnreferencedArtifacts) {
-        await this.cleanupUnreferencedArtifactFiles();
-      }
-      return clone(result);
-    });
-    this.operationQueue = queued.catch(() => undefined);
-    return queued;
-  }
-
-  private async persist(state: AgentRuntimeStoreState): Promise<void> {
-    const encoded = `${JSON.stringify(state, null, 2)}\n`;
-    if (Buffer.byteLength(encoded, 'utf8') > AGENT_RUNTIME_LIMITS.maxRuntimeStateBytes) {
-      throw new Error('Agent runtime store exceeds its bounded state limit.');
-    }
-    const temporaryPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
-    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-    let published = false;
-    try {
-      handle = await fs.open(
-        temporaryPath,
-        fsConstants.O_WRONLY |
-          fsConstants.O_CREAT |
-          fsConstants.O_EXCL |
-          (fsConstants.O_NOFOLLOW ?? 0),
-        0o600
-      );
-      await handle.writeFile(encoded, 'utf8');
-      await handle.sync();
-      await enforcePosixMode(handle, 0o600);
-      await handle.sync();
-      await this.afterFileSync();
-      await handle.close();
-      handle = undefined;
-      await fs.rename(temporaryPath, this.storePath);
-      published = true;
-      await this.afterRename();
-      await this.syncDirectoryHook(this.rootDir);
-    } catch (error) {
-      await handle?.close().catch(() => undefined);
-      await fs.unlink(temporaryPath).catch(() => undefined);
-      if (published) {
-        throw new AgentRuntimeStorePublishedError(
-          'Agent runtime state was published but its directory sync did not complete.',
-          { cause: error }
-        );
-      }
-      throw error;
-    }
+      });
+      return stored;
+    })();
   }
 }
 
@@ -3110,15 +3624,15 @@ function appendEvent(
   occurredAt: string,
   event: Omit<AgentRuntimeEventRecord, 'id' | 'ordinal' | 'occurredAt'>
 ): void {
-  if (state.events.length >= AGENT_RUNTIME_LIMITS.maxEvents) {
-    throw new Error('Agent runtime event limit reached.');
-  }
   state.events.push({
     ...event,
     id: createId(),
     ordinal: state.nextEventOrdinal++,
     occurredAt
   });
+  if (state.events.length > AGENT_RUNTIME_LIMITS.maxEvents) {
+    state.events.splice(0, state.events.length - AGENT_RUNTIME_LIMITS.maxEvents);
+  }
 }
 
 function insertRuntimeSession(
@@ -3314,26 +3828,29 @@ type RuntimeRunUpdate = Parameters<AgentRuntimeStore['updateRun']>[2];
 
 function updateRuntimeRunRecord(
   draft: AgentRuntimeStoreState,
+  transaction: SqlReader,
   runId: string,
   expectedRevision: number,
   update: RuntimeRunUpdate,
   operationId: string,
   occurredAt: string,
-  createId: () => string
+  createId: () => string,
+  operationFingerprint?: string
 ): AgentRuntimeRunRecord {
   requireOperationId(operationId);
-  const fingerprint = requestFingerprint({ runId, update });
+  const existing = requireRun(draft, runId);
+  const fingerprint = operationFingerprint ?? requestFingerprint({ runId, update });
   if (
-    replayedOperation(draft, {
+    replayedOperation(transaction, {
+      owner: existing.owner,
       operationId,
       type: 'RUN_UPDATED',
       runId,
       requestFingerprint: fingerprint
     })
   ) {
-    return requireRun(draft, runId);
+    return existing;
   }
-  const existing = requireRun(draft, runId);
   if (existing.recordRevision !== expectedRevision) {
     throw new Error('Agent runtime run changed before the requested update.');
   }
@@ -3395,62 +3912,30 @@ function updateRuntimeRunRecord(
   return stored;
 }
 
-async function appendInitialRunArtifacts(input: {
+function appendInitialRunArtifacts(input: {
   draft: AgentRuntimeStoreState;
   run: AgentRuntimeRunRecord;
-  artifactsDir: string;
-  syncDirectory: (directory: string) => Promise<void>;
   createId: () => string;
-  now: string;
-  operationId: string;
-  prompt: string;
-}): Promise<void> {
-  const entries = [
-    { id: input.run.promptArtifactId, kind: 'PROMPT' as const, content: input.prompt },
-    { id: input.run.outputArtifactId, kind: 'OUTPUT' as const, content: '' },
-    {
-      id: input.run.diagnosticArtifactId,
-      kind: 'DIAGNOSTIC' as const,
-      content: ''
+  artifacts: readonly AgentRuntimeArtifactRecord[];
+}): void {
+  if (input.artifacts.length !== 3) {
+    throw new Error('Prepared agent runtime work requires three initial artifacts.');
+  }
+  for (const artifact of input.artifacts) {
+    if (
+      artifact.runId !== input.run.id ||
+      agentOwnerScopeKey(artifact.owner) !== agentOwnerScopeKey(input.run.owner) ||
+      !artifactMatchesRunReference(artifact, input.run)
+    ) {
+      throw new Error('Prepared agent runtime artifact ownership is inconsistent.');
     }
-  ];
-  for (const entry of entries) {
-    const encoded = encodeArtifactContent(entry.content);
-    const storageKey = artifactStorageKey(entry.id, 1);
-    await writeImmutableArtifact(
-      input.artifactsDir,
-      storageKey,
-      encoded.bytes,
-      input.syncDirectory
-    );
-    const artifactOperationId = derivedOperationId(input.operationId, entry.kind);
-    const artifact: AgentRuntimeArtifactRecord = {
-      id: entry.id,
-      owner: clone(input.run.owner),
-      runId: input.run.id,
-      kind: entry.kind,
-      clientOperationId: artifactOperationId,
-      requestFingerprint: requestFingerprint({
-        id: entry.id,
-        runId: input.run.id,
-        kind: entry.kind,
-        contentSha256: encoded.sha256,
-        byteCount: encoded.bytes.byteLength
-      }),
-      storageKey,
-      contentSha256: encoded.sha256,
-      byteCount: encoded.bytes.byteLength,
-      recordRevision: 1,
-      createdAt: input.now,
-      updatedAt: input.now
-    };
     input.draft.artifacts.push(artifact);
-    appendEvent(input.draft, input.createId, input.now, {
+    appendEvent(input.draft, input.createId, artifact.createdAt, {
       type: 'ARTIFACT_CREATED',
       owner: artifact.owner,
       runId: input.run.id,
       artifactId: artifact.id,
-      operationId: artifactOperationId,
+      operationId: artifact.clientOperationId,
       payload: {
         kind: artifact.kind,
         contentSha256: artifact.contentSha256,
@@ -3459,6 +3944,20 @@ async function appendInitialRunArtifacts(input: {
       }
     });
   }
+}
+
+function initialArtifactEntries(
+  run: Pick<
+    AgentRuntimeRunRecord,
+    'promptArtifactId' | 'outputArtifactId' | 'diagnosticArtifactId'
+  >,
+  prompt: string
+): Array<{ id: string; kind: Exclude<AgentRuntimeArtifactKind, 'FINAL'>; content: string }> {
+  return [
+    { id: run.promptArtifactId, kind: 'PROMPT', content: prompt },
+    { id: run.outputArtifactId, kind: 'OUTPUT', content: '' },
+    { id: run.diagnosticArtifactId, kind: 'DIAGNOSTIC', content: '' }
+  ];
 }
 
 function assertCompleteInitialRunArtifacts(
@@ -3728,7 +4227,7 @@ function validateState(state: AgentRuntimeStoreState): void {
       !run ||
       agentOwnerScopeKey(run.owner) !== agentOwnerScopeKey(artifact.owner) ||
       !artifactMatchesRunReference(artifact, run) ||
-      !artifactStorageKeyMatchesRecord(artifact) ||
+      artifact.storageKey !== artifactStorageKey(artifact.id, artifact.recordRevision) ||
       !HASH.test(artifact.contentSha256) ||
       !HASH.test(artifact.requestFingerprint) ||
       !Number.isSafeInteger(artifact.byteCount) ||
@@ -4589,12 +5088,7 @@ function derivedOperationId(operationId: string, part: string): string {
 }
 
 function translateArtifactMutationError(cause: unknown): unknown {
-  return cause instanceof AgentRuntimeStorePublishedError
-    ? new AgentRuntimeArtifactMutationAmbiguousError(
-        'Agent runtime artifact bytes may have been published before durable sync failed.',
-        { cause }
-      )
-    : cause;
+  return cause;
 }
 
 function isActiveRuntimeStatus(status: AgentRuntimeRunRecord['status']): boolean {
@@ -5096,8 +5590,9 @@ function requireQueueEntry(
 }
 
 function replayedOperation(
-  state: AgentRuntimeStoreState,
+  reader: SqlReader,
   input: {
+    owner: AgentOwnerScope | undefined;
     operationId: string;
     type: AgentRuntimeEventRecord['type'];
     requestFingerprint: string;
@@ -5107,18 +5602,208 @@ function replayedOperation(
     artifactId?: string;
   }
 ): boolean {
-  const events = state.events.filter((event) => event.operationId === input.operationId);
-  if (events.length === 0) return false;
-  const matching = events.find(
-    (event) =>
-      event.type === input.type &&
-      (input.sessionId === undefined || event.sessionId === input.sessionId) &&
-      (input.runId === undefined || event.runId === input.runId) &&
-      (input.queueEntryId === undefined || event.queueEntryId === input.queueEntryId) &&
-      (input.artifactId === undefined || event.artifactId === input.artifactId)
+  requireOperationId(input.operationId);
+  const receipt = reader.get<RuntimeOperationReceiptRow>(
+    `SELECT request_fingerprint, result_json, created_at
+     FROM operation_receipts
+     WHERE domain = ? AND owner_id = ? AND client_operation_id = ?`,
+    [
+      RUNTIME_RECEIPT_DOMAIN,
+      runtimeReceiptOwnerId(input.owner, input.type),
+      input.operationId
+    ]
   );
-  if (matching?.payload.requestFingerprint === input.requestFingerprint) return true;
+  if (!receipt) return false;
+  const result = parseRuntimeOperationReceiptResult(receipt.result_json);
+  if (
+    receipt.request_fingerprint === input.requestFingerprint &&
+    result.type === input.type &&
+    (input.sessionId === undefined || result.sessionId === input.sessionId) &&
+    (input.runId === undefined || result.runId === input.runId) &&
+    (input.queueEntryId === undefined || result.queueEntryId === input.queueEntryId) &&
+    (input.artifactId === undefined || result.artifactId === input.artifactId)
+  ) {
+    return true;
+  }
   throw new Error('Agent runtime operation conflicts with its durable request.');
+}
+
+function persistRuntimeOperationReceipts(
+  transaction: AppDatabaseTransaction,
+  events: readonly AgentRuntimeEventRecord[]
+): void {
+  for (const event of events) {
+    const requestFingerprint = event.payload.requestFingerprint;
+    if (typeof requestFingerprint !== 'string') continue;
+    persistRuntimeOperationReceipt(transaction, {
+      owner: event.owner,
+      operationId: event.operationId,
+      type: event.type,
+      sessionId: event.sessionId,
+      runId: event.runId,
+      queueEntryId: event.queueEntryId,
+      artifactId: event.artifactId,
+      requestFingerprint,
+      createdAt: event.occurredAt
+    });
+  }
+}
+
+function persistRuntimeOperationReceipt(
+  transaction: AppDatabaseTransaction,
+  input: RuntimeOperationReceiptInput
+): void {
+  if (!HASH.test(input.requestFingerprint)) {
+    throw new Error('Agent runtime event request fingerprint is invalid.');
+  }
+  requireTimestamp(input.createdAt);
+  if (replayedOperation(transaction, input)) return;
+
+  const ownerId = runtimeReceiptOwnerId(input.owner, input.type);
+  if (isGlobalRuntimeReceiptOwner(ownerId)) {
+    pruneGlobalRuntimeOperationReceiptsForInsert(transaction, ownerId);
+  }
+  const result: RuntimeOperationReceiptResult = {
+    type: input.type,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.runId ? { runId: input.runId } : {}),
+    ...(input.queueEntryId ? { queueEntryId: input.queueEntryId } : {}),
+    ...(input.artifactId ? { artifactId: input.artifactId } : {})
+  };
+  transaction.run(
+    `INSERT INTO operation_receipts (
+       domain, client_operation_id, owner_id, request_fingerprint, result_json, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      RUNTIME_RECEIPT_DOMAIN,
+      input.operationId,
+      ownerId,
+      input.requestFingerprint,
+      JSON.stringify(result),
+      input.createdAt
+    ]
+  );
+}
+
+function pruneGlobalRuntimeOperationReceiptsForInsert(
+  transaction: AppDatabaseTransaction,
+  ownerId: string
+): void {
+  const count = Number(
+    transaction.get<{ count: number | bigint }>(
+      `SELECT count(*) AS count FROM operation_receipts
+       WHERE domain = ? AND owner_id = ?`,
+      [RUNTIME_RECEIPT_DOMAIN, ownerId]
+    )?.count ?? 0
+  );
+  const removeCount = count - AGENT_RUNTIME_LIMITS.maxGlobalOperationReceipts + 1;
+  if (removeCount <= 0) return;
+  transaction.run(
+    `DELETE FROM operation_receipts
+     WHERE domain = ? AND owner_id = ? AND client_operation_id IN (
+       SELECT client_operation_id
+       FROM operation_receipts
+       WHERE domain = ? AND owner_id = ?
+       ORDER BY created_at, client_operation_id
+       LIMIT ?
+     )`,
+    [
+      RUNTIME_RECEIPT_DOMAIN,
+      ownerId,
+      RUNTIME_RECEIPT_DOMAIN,
+      ownerId,
+      removeCount
+    ]
+  );
+}
+
+function deleteRuntimeOperationReceipts(
+  transaction: AppDatabaseTransaction,
+  selector: RuntimeReceiptOwnerSelector
+): void {
+  if (selector.kind === 'EXACT') {
+    transaction.run(
+      'DELETE FROM operation_receipts WHERE domain = ? AND owner_id = ?',
+      [RUNTIME_RECEIPT_DOMAIN, selector.ownerId]
+    );
+    return;
+  }
+  transaction.run(
+    `DELETE FROM operation_receipts
+     WHERE domain = ? AND substr(owner_id, 1, length(?)) = ?`,
+    [RUNTIME_RECEIPT_DOMAIN, selector.ownerIdPrefix, selector.ownerIdPrefix]
+  );
+}
+
+function validateRuntimeOperationReceipts(reader: SqlReader): void {
+  const rows = reader.all<RuntimeOperationReceiptRow>(
+    `SELECT owner_id, client_operation_id, request_fingerprint, result_json, created_at
+     FROM operation_receipts
+     WHERE domain = ?`,
+    [RUNTIME_RECEIPT_DOMAIN]
+  );
+  const globalCounts = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.owner_id || !row.client_operation_id) {
+      throw new Error('Agent runtime operation receipt identity is invalid.');
+    }
+    if (isGlobalRuntimeReceiptOwner(row.owner_id)) {
+      globalCounts.set(row.owner_id, (globalCounts.get(row.owner_id) ?? 0) + 1);
+    }
+    requireOperationId(row.client_operation_id);
+    if (!HASH.test(row.request_fingerprint)) {
+      throw new Error('Agent runtime operation receipt fingerprint is invalid.');
+    }
+    requireTimestamp(row.created_at);
+    parseRuntimeOperationReceiptResult(row.result_json);
+  }
+  if (
+    [...globalCounts.values()].some(
+      (count) => count > AGENT_RUNTIME_LIMITS.maxGlobalOperationReceipts
+    )
+  ) {
+    throw new Error('Agent runtime global operation receipts exceed their safety limit.');
+  }
+}
+
+function parseRuntimeOperationReceiptResult(
+  payload: string
+): RuntimeOperationReceiptResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (error) {
+    throw new Error('Agent runtime operation receipt result is invalid.', { cause: error });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Agent runtime operation receipt result is invalid.');
+  }
+  const result = parsed as Partial<RuntimeOperationReceiptResult>;
+  if (
+    !result.type ||
+    !RUNTIME_EVENT_TYPES.has(result.type) ||
+    [result.sessionId, result.runId, result.queueEntryId, result.artifactId].some(
+      (value) => value !== undefined && (typeof value !== 'string' || !value)
+    )
+  ) {
+    throw new Error('Agent runtime operation receipt result is invalid.');
+  }
+  return result as RuntimeOperationReceiptResult;
+}
+
+function runtimeReceiptOwnerId(
+  owner: AgentOwnerScope | undefined,
+  type: AgentRuntimeEventRecord['type']
+): string {
+  if (owner) return agentOwnerScopeKey(owner);
+  return type === 'TELEMETRY_RECORDED'
+    ? GLOBAL_RUNTIME_TELEMETRY_RECEIPT_OWNER
+    : GLOBAL_RUNTIME_SHUTDOWN_RECEIPT_OWNER;
+}
+
+function isGlobalRuntimeReceiptOwner(ownerId: string): boolean {
+  return ownerId === GLOBAL_RUNTIME_SHUTDOWN_RECEIPT_OWNER ||
+    ownerId === GLOBAL_RUNTIME_TELEMETRY_RECEIPT_OWNER;
 }
 
 function requireRevision(value: number): void {
@@ -5188,6 +5873,112 @@ function assertTelemetryReferences(
       throw new Error('Agent runtime telemetry run/session references do not match.');
     }
   }
+}
+
+function runtimeOwnerColumns(owner: AgentOwnerScope | undefined): RuntimeOwnerRecord {
+  if (!owner) {
+    return {
+      owner_kind: null,
+      task_id: null,
+      generation_id: null,
+      request_id: null,
+      conversation_id: null,
+      stable_participant_id: null
+    };
+  }
+  return {
+    owner_kind: owner.kind,
+    task_id:
+      owner.kind === 'TASK' || owner.kind === 'PREVIEW_RECIPE_GENERATION'
+        ? owner.taskId
+        : null,
+    generation_id:
+      owner.kind === 'PREVIEW_RECIPE_GENERATION' ? owner.generationId : null,
+    request_id: owner.kind === 'PROMPT_REFINEMENT' ? owner.requestId : null,
+    conversation_id: owner.kind === 'DISCOURSE' ? owner.conversationId : null,
+    stable_participant_id:
+      owner.kind === 'DISCOURSE' ? owner.stableParticipantId : null
+  };
+}
+
+function assertTelemetryReferencesInDatabase(
+  transaction: AppDatabaseTransaction,
+  input: Pick<
+    AgentRuntimeTelemetryRecord,
+    'owner' | 'sessionId' | 'runId' | 'serverInstanceId' | 'providerIdentity'
+  >,
+  owner: RuntimeOwnerRecord
+): void {
+  if ((input.sessionId || input.runId) && !input.owner) {
+    throw new Error('Scoped agent telemetry requires an owner.');
+  }
+  if (input.serverInstanceId) {
+    requireSafeId(input.serverInstanceId, 'telemetry server id');
+    if (
+      !transaction.get('SELECT 1 AS present FROM runtime_servers WHERE id = ?', [
+        input.serverInstanceId
+      ])
+    ) {
+      throw new Error('Agent runtime telemetry references an invalid server.');
+    }
+  }
+  if (
+    input.providerIdentity &&
+    Buffer.byteLength(input.providerIdentity, 'utf8') > AGENT_RUNTIME_LIMITS.maxOwnerIdBytes
+  ) {
+    throw new Error('Agent runtime telemetry provider identity is invalid.');
+  }
+  if (input.sessionId) {
+    const session = transaction.get<RuntimeOwnerRecord>(
+      `SELECT owner_kind, task_id, generation_id, request_id, conversation_id, stable_participant_id
+       FROM runtime_sessions WHERE id = ?`,
+      [input.sessionId]
+    );
+    if (!session || !sameRuntimeOwnerColumns(session, owner)) {
+      throw new Error('Agent runtime telemetry references an invalid session owner.');
+    }
+  }
+  if (input.runId) {
+    const run = transaction.get<RuntimeOwnerRecord & { session_id: string }>(
+      `SELECT owner_kind, task_id, generation_id, request_id, conversation_id,
+              stable_participant_id, session_id
+       FROM runtime_runs WHERE id = ?`,
+      [input.runId]
+    );
+    if (!run || !sameRuntimeOwnerColumns(run, owner)) {
+      throw new Error('Agent runtime telemetry references an invalid run owner.');
+    }
+    if (input.sessionId && run.session_id !== input.sessionId) {
+      throw new Error('Agent runtime telemetry run/session references do not match.');
+    }
+  }
+}
+
+function sameRuntimeOwnerColumns(
+  left: RuntimeOwnerRecord,
+  right: RuntimeOwnerRecord
+): boolean {
+  return (
+    left.owner_kind === right.owner_kind &&
+    left.task_id === right.task_id &&
+    left.generation_id === right.generation_id &&
+    left.request_id === right.request_id &&
+    left.conversation_id === right.conversation_id &&
+    left.stable_participant_id === right.stable_participant_id
+  );
+}
+
+function parseStoredTelemetry(payloadJson: string): AgentRuntimeTelemetryRecord {
+  let value: unknown;
+  try {
+    value = JSON.parse(payloadJson);
+  } catch (error) {
+    throw new Error('Runtime telemetry contains invalid JSON.', { cause: error });
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Runtime telemetry contains an invalid logical record.');
+  }
+  return value as AgentRuntimeTelemetryRecord;
 }
 
 function assertRuntimeRunLifecycle(run: AgentRuntimeRunRecord): void {
@@ -5295,25 +6086,15 @@ function requireSafeId(value: string, label: string): void {
 function artifactStorageKey(artifactId: string, revision: number): string {
   requireSafeId(artifactId, 'artifact id');
   requireRevision(revision);
-  return `${artifactId}-r${revision}.txt`;
+  return `runtime/artifacts/${artifactId}-r${revision}.txt`;
 }
 
-function artifactStorageKeyMatchesRecord(
-  artifact: Pick<
-    AgentRuntimeArtifactRecord,
-    'id' | 'kind' | 'recordRevision' | 'storageKey'
-  >
-): boolean {
-  const match = ARTIFACT_FILE.exec(artifact.storageKey);
-  if (!match || match[1] !== artifact.id) return false;
-  const storageRevision = Number(match[2]);
-  return (
-    Number.isSafeInteger(storageRevision) &&
-    storageRevision >= 1 &&
-    (storageRevision === artifact.recordRevision ||
-      ((artifact.kind === 'OUTPUT' || artifact.kind === 'DIAGNOSTIC') &&
-        storageRevision < artifact.recordRevision))
-  );
+function managedReference(artifact: AgentRuntimeArtifactRecord): ManagedFileReference {
+  return {
+    storageKey: artifact.storageKey,
+    byteCount: artifact.byteCount,
+    sha256: artifact.contentSha256
+  };
 }
 
 function encodeArtifactContent(content: string): { bytes: Buffer; sha256: string } {
@@ -5327,255 +6108,6 @@ function encodeArtifactContent(content: string): { bytes: Buffer; sha256: string
   };
 }
 
-async function writeImmutableArtifact(
-  directory: string,
-  storageKey: string,
-  bytes: Buffer,
-  syncDirectory: (directory: string) => Promise<void>
-): Promise<void> {
-  if (!ARTIFACT_FILE.test(storageKey)) {
-    throw new Error('Agent runtime artifact storage key is invalid.');
-  }
-  const filePath = path.join(directory, storageKey);
-  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-  try {
-    handle = await fs.open(
-      filePath,
-      fsConstants.O_WRONLY |
-        fsConstants.O_CREAT |
-        fsConstants.O_EXCL |
-        (fsConstants.O_NOFOLLOW ?? 0),
-      0o600
-    );
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await enforcePosixMode(handle, 0o600);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await syncDirectory(directory);
-  } catch (error) {
-    await handle?.close().catch(() => undefined);
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const existing = await fs.readFile(filePath);
-    if (!existing.equals(bytes)) {
-      throw new Error('Agent runtime artifact revision already exists with different content.');
-    }
-  }
-}
-
-async function appendVerifiedArtifact(
-  directory: string,
-  artifact: AgentRuntimeArtifactRecord,
-  bytes: Buffer
-): Promise<{
-  byteCount: number;
-  contentSha256: string;
-  rollback: () => Promise<void>;
-}> {
-  if (!artifactStorageKeyMatchesRecord(artifact)) {
-    throw new Error('Agent runtime artifact storage key is invalid.');
-  }
-  if (artifact.byteCount + bytes.byteLength > AGENT_RUNTIME_LIMITS.maxArtifactBytes) {
-    throw new Error('Agent runtime artifact exceeds its safety limit.');
-  }
-  const filePath = path.join(directory, artifact.storageKey);
-  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-  let writeAttempted = false;
-  let contentSha256: string | undefined;
-  try {
-    handle = await fs.open(
-      filePath,
-      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
-    );
-    const stat = await handle.stat();
-    assertMutableArtifactStat(stat);
-    if (stat.size !== artifact.byteCount) {
-      throw new Error('Agent runtime artifact changed during append.');
-    }
-    const current = Buffer.alloc(artifact.byteCount);
-    await readAllAt(handle, current, 0);
-    if (
-      crypto.createHash('sha256').update(current).digest('hex') !== artifact.contentSha256
-    ) {
-      throw new Error('Agent runtime artifact content failed its integrity check.');
-    }
-    new TextDecoder('utf-8', { fatal: true }).decode(current);
-    contentSha256 = crypto
-      .createHash('sha256')
-      .update(current)
-      .update(bytes)
-      .digest('hex');
-    writeAttempted = bytes.byteLength > 0;
-    await writeAllAt(handle, bytes, artifact.byteCount);
-    await handle.sync();
-    const updated = await handle.stat();
-    assertMutableArtifactStat(updated);
-    if (updated.size !== artifact.byteCount + bytes.byteLength) {
-      throw new Error('Agent runtime artifact changed during append.');
-    }
-    await handle.close();
-    handle = undefined;
-  } catch (cause) {
-    await handle?.close().catch(() => undefined);
-    if (writeAttempted) {
-      try {
-        await restoreArtifactPrefix(filePath, artifact);
-      } catch (rollbackCause) {
-        throw new AgentRuntimeArtifactMutationAmbiguousError(
-          'Agent runtime artifact append failed and its prior bytes could not be restored.',
-          {
-            cause: new AggregateError(
-              [cause, rollbackCause],
-              'Agent runtime artifact append and rollback both failed.'
-            )
-          }
-        );
-      }
-    }
-    throw cause;
-  }
-
-  return {
-    byteCount: artifact.byteCount + bytes.byteLength,
-    contentSha256: contentSha256!,
-    rollback: () => restoreArtifactPrefix(filePath, artifact)
-  };
-}
-
-async function reconcileArtifactFile(
-  directory: string,
-  artifact: AgentRuntimeArtifactRecord
-): Promise<void> {
-  if (artifact.kind === 'OUTPUT' || artifact.kind === 'DIAGNOSTIC') {
-    await restoreArtifactPrefix(path.join(directory, artifact.storageKey), artifact);
-    return;
-  }
-  await readVerifiedArtifact(directory, artifact);
-}
-
-async function restoreArtifactPrefix(
-  filePath: string,
-  artifact: AgentRuntimeArtifactRecord
-): Promise<void> {
-  if (!artifactStorageKeyMatchesRecord(artifact)) {
-    throw new Error('Agent runtime artifact storage key is invalid.');
-  }
-  const handle = await fs.open(
-    filePath,
-    fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
-  );
-  try {
-    const stat = await handle.stat();
-    assertMutableArtifactStat(stat);
-    if (stat.size < artifact.byteCount) {
-      throw new Error('Agent runtime artifact rollback could not verify its prior bytes.');
-    }
-    const prefix = Buffer.alloc(artifact.byteCount);
-    await readAllAt(handle, prefix, 0);
-    if (
-      crypto.createHash('sha256').update(prefix).digest('hex') !== artifact.contentSha256
-    ) {
-      throw new Error('Agent runtime artifact rollback found changed prior bytes.');
-    }
-    if (stat.size > artifact.byteCount) {
-      await handle.truncate(artifact.byteCount);
-      await handle.sync();
-    }
-  } finally {
-    await handle.close();
-  }
-}
-
-async function readVerifiedArtifact(
-  directory: string,
-  artifact: AgentRuntimeArtifactRecord
-): Promise<string> {
-  if (!artifactStorageKeyMatchesRecord(artifact)) {
-    throw new Error('Agent runtime artifact storage key is invalid.');
-  }
-  const filePath = path.join(directory, artifact.storageKey);
-  const handle = await fs.open(
-    filePath,
-    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
-  );
-  try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.size !== artifact.byteCount ||
-      !hasNoGroupOrOtherPosixAccess(stat) ||
-      !isOwnedByCurrentUser(stat)
-    ) {
-      throw new Error('Agent runtime artifact file failed its integrity check.');
-    }
-    const bytes = await handle.readFile();
-    if (
-      bytes.byteLength !== artifact.byteCount ||
-      crypto.createHash('sha256').update(bytes).digest('hex') !== artifact.contentSha256
-    ) {
-      throw new Error('Agent runtime artifact content failed its integrity check.');
-    }
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function writeAllAt(
-  handle: Awaited<ReturnType<typeof fs.open>>,
-  bytes: Buffer,
-  position: number
-): Promise<void> {
-  let written = 0;
-  while (written < bytes.byteLength) {
-    const result = await handle.write(
-      bytes,
-      written,
-      bytes.byteLength - written,
-      position + written
-    );
-    if (result.bytesWritten <= 0) {
-      throw new Error('Agent runtime artifact write made no progress.');
-    }
-    written += result.bytesWritten;
-  }
-}
-
-async function readAllAt(
-  handle: Awaited<ReturnType<typeof fs.open>>,
-  bytes: Buffer,
-  position: number
-): Promise<void> {
-  let read = 0;
-  while (read < bytes.byteLength) {
-    const result = await handle.read(
-      bytes,
-      read,
-      bytes.byteLength - read,
-      position + read
-    );
-    if (result.bytesRead <= 0) {
-      throw new Error('Agent runtime artifact changed while it was being read.');
-    }
-    read += result.bytesRead;
-  }
-}
-
-function assertMutableArtifactStat(stat: {
-  isFile(): boolean;
-  mode: number | bigint;
-  uid: number | bigint;
-}): void {
-  if (
-    !stat.isFile() ||
-    !isOwnedByCurrentUser(stat) ||
-    !posixModeMatches(stat, 0o600)
-  ) {
-    throw new Error('Agent runtime artifact file failed its integrity check.');
-  }
-}
-
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
@@ -5585,69 +6117,6 @@ function stableStringify(value: unknown): string {
     .sort(compareCodeUnits)
     .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
     .join(',')}}`;
-}
-
-async function ensurePrivateDirectory(directory: string): Promise<void> {
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  const stat = await fs.lstat(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat)) {
-    throw new Error('Agent runtime store root failed its integrity check.');
-  }
-  let handle: Awaited<ReturnType<typeof fs.open>>;
-  try {
-    handle = await fs.open(
-      directory,
-      fsConstants.O_RDONLY |
-        (fsConstants.O_DIRECTORY ?? 0) |
-        (fsConstants.O_NOFOLLOW ?? 0)
-    );
-  } catch {
-    throw new Error('Agent runtime store root failed its integrity check.');
-  }
-  try {
-    await enforcePosixMode(handle, 0o700);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function readPrivateStateFile(filePath: string): Promise<string> {
-  const handle = await fs.open(
-    filePath,
-    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
-  );
-  try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.size <= 0 ||
-      stat.size > AGENT_RUNTIME_LIMITS.maxRuntimeStateBytes ||
-      !hasNoGroupOrOtherPosixAccess(stat) ||
-      !isOwnedByCurrentUser(stat)
-    ) {
-      throw new Error('Agent runtime store file failed its integrity check.');
-    }
-    const bytes = await handle.readFile();
-    if (bytes.byteLength !== stat.size) {
-      throw new Error('Agent runtime store file changed while it was read.');
-    }
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function cleanupTemporaryFiles(directory: string, storePath: string): Promise<void> {
-  const name = path.basename(storePath);
-  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-    if (!(entry.name.startsWith(`${name}.`) && entry.name.endsWith('.tmp'))) continue;
-    const candidate = path.join(directory, entry.name);
-    const stat = await fs.lstat(candidate);
-    if (!stat.isFile() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat)) {
-      throw new Error('Agent runtime temporary file failed its integrity check.');
-    }
-    await fs.unlink(candidate);
-  }
 }
 
 function clone<T>(value: T): T {

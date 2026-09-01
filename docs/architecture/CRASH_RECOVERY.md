@@ -4,7 +4,8 @@ Date: 2026-07-25
 
 This document describes Task Monki's application-level recovery boundary. The
 provider-, Preview-, review-, and delivery-specific documents remain
-authoritative for their own protocols.
+authoritative for their own protocols. Store opening, integrity checks,
+quarantine, backup, and restore are defined in `PERSISTENCE_ARCHITECTURE.md`.
 
 ## Central Rule
 
