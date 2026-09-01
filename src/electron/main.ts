@@ -119,6 +119,7 @@ import {
   assertAttachmentIpcBatch
 } from './attachmentIpcSecurity';
 import { createElectronOpenTargetHost } from './openTargetHost';
+import { buildDesktopCliPath } from './desktopCliPath';
 import { getMacDockIconPath } from './dockIcon';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
@@ -1117,27 +1118,12 @@ function beginApplicationShutdown(): Promise<void> {
 }
 
 function configureDesktopCliPath(): void {
-  const existingPath = process.env.PATH ?? '';
-  const existingEntries = existingPath.split(path.delimiter).filter(Boolean);
-  const windowsLocalGitPath = process.env.LOCALAPPDATA
-    ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'cmd')
-    : undefined;
-  const commonEntries =
-    process.platform === 'darwin'
-      ? ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
-      : process.platform === 'linux'
-        ? ['/usr/local/bin', '/usr/bin', '/bin']
-        : [
-            'C:\\Program Files\\Git\\cmd',
-            'C:\\Program Files\\GitHub CLI',
-            windowsLocalGitPath
-          ];
-
-  const entries = [
-    ...commonEntries.filter((entry): entry is string => Boolean(entry)),
-    ...existingEntries
-  ];
-  process.env.PATH = [...new Set(entries)].join(path.delimiter);
+  process.env.PATH = buildDesktopCliPath({
+    platform: process.platform,
+    existingPath: process.env.PATH,
+    homeDir: app.getPath('home'),
+    localAppData: process.env.LOCALAPPDATA
+  });
 }
 
 function resolveDefaultRepositoryPath(): string {

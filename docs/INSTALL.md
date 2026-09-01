@@ -34,6 +34,8 @@ configuration remain owned by the selected runtime.
 Settings provides custom executable paths for Git, GitHub CLI, Codex CLI,
 OpenCode, and every registered ACP runtime. Use Auto-detect to
 return a saved path to environment-override and then PATH-based discovery.
+On macOS, the packaged app also checks common user CLI locations because apps
+opened from Finder do not receive the interactive shell PATH.
 
 Environment variables are supported as debug overrides and take precedence over
 saved Settings values:
