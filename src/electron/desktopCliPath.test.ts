@@ -50,13 +50,15 @@ describe('buildDesktopCliPath', () => {
   });
 
   it('keeps non-macOS path construction unchanged', () => {
+    const existingPath = ['/custom/bin', '/usr/bin'].join(path.delimiter);
+
     expect(
       buildDesktopCliPath({
         platform: 'linux',
         homeDir: '/home/example',
-        existingPath: '/custom/bin:/usr/bin'
+        existingPath
       })
-    ).toBe('/usr/local/bin:/usr/bin:/bin:/custom/bin');
+    ).toBe(['/usr/local/bin', '/usr/bin', '/bin', '/custom/bin'].join(path.delimiter));
   });
 });
 
