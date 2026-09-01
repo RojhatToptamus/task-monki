@@ -150,11 +150,11 @@ async function createFixture(taskIds: string[]): Promise<{
 }> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-private-vault-'));
   roots.push(root);
-  const databasePath = path.join(root, 'storage-v2', 'task-monki.sqlite3');
+  const databasePath = path.join(root, 'storage', 'task-monki.sqlite3');
   const database = await AppDatabase.open(databasePath);
   databases.push(database);
   for (const taskId of taskIds) await insertTask(database, taskId);
-  const files = new ManagedFileStore(path.join(root, 'storage-v2', 'files'));
+  const files = new ManagedFileStore(path.join(root, 'storage', 'files'));
   const vault = new PreviewPrivateVault(database, files, protector);
   return { root, databasePath, database, files, vault };
 }

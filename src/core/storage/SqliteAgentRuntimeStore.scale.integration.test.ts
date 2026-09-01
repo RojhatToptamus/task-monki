@@ -11,9 +11,9 @@ const TAIL_APPENDS = 1_000;
 const TIMESTAMP = '2026-08-30T00:00:00.000Z';
 const FINGERPRINT = 'a'.repeat(64);
 
-describe('SqliteAgentRuntimeStore accumulated-history scale', () => {
+describe('Agent runtime persistence scale', () => {
   it(
-    'cold-loads one hundred thousand telemetry events and keeps tail appends row-native',
+    'loads one hundred thousand telemetry events and appends one thousand more within budget',
     async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-scale-'));
       const databasePath = path.join(root, 'task-monki.sqlite3');
@@ -50,15 +50,15 @@ describe('SqliteAgentRuntimeStore accumulated-history scale', () => {
         });
       }
 
-      const aggregateMutationStartedAt = performance.now();
+      const shutdownLatchStartedAt = performance.now();
       await store.setShutdownLatched(true, 'scale-shutdown-latch');
-      const aggregateMutationMilliseconds = performance.now() - aggregateMutationStartedAt;
+      const shutdownLatchMilliseconds = performance.now() - shutdownLatchStartedAt;
 
       const complete = await store.snapshot();
       expect(complete.telemetryRecords).toHaveLength(SEEDED_RECORDS + TAIL_APPENDS);
       expect(complete.events).toHaveLength(SEEDED_RECORDS + TAIL_APPENDS + 1);
       expect(complete.shutdownLatched).toBe(true);
-      expect(aggregateMutationMilliseconds).toBeLessThan(10_000);
+      expect(shutdownLatchMilliseconds).toBeLessThan(10_000);
       expect(process.memoryUsage().heapUsed - heapBefore).toBeLessThan(512 * 1024 * 1024);
 
       await store.close();

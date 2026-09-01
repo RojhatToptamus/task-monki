@@ -148,7 +148,7 @@ export interface ScriptedTaskManagerPersistence
   store: SqliteTaskStore;
 }
 
-/** Opens one SQLite profile and wires its canonical Task runtime projection. */
+/** Opens one profile with its shared Task and runtime stores. */
 export async function openScriptedTaskManagerPersistence(
   profileRoot: string
 ): Promise<ScriptedTaskManagerPersistence> {
@@ -160,7 +160,7 @@ export async function openScriptedTaskManagerPersistence(
   };
 }
 
-/** One canonical runtime store and Task view for tests that use the scripted provider. */
+/** Uses one profile's Task and runtime stores with the scripted provider. */
 export function createScriptedAgentRuntimeFixture(
   persistence: ApplicationPersistence
 ): ScriptedAgentRuntimeFixture {

@@ -20,9 +20,9 @@ profile.
 | Provider servers, sessions, runs, items, interactions, queues, usage, telemetry, operation receipts, and recovery records | The Task Monki runtime store owns its records. Providers remain authoritative for external runtime state. | Normalized SQLite tables |
 | Discourse conversations, participants, messages, context, waves, jobs, concerns, summaries, drafts, and tombstones | Task Monki Discourse store | Normalized SQLite tables |
 | Application settings | Task Monki settings store | One revisioned SQLite record |
-| Attachment, artifact, and encrypted Preview-private bytes | SQLite owns identity, reachability, size, digest, and media metadata. `ManagedFileStore` owns byte publication and verification. | Immutable files below `storage-v2/files` |
-| Managed Design source | The managed Git repository owns commits, trees, and refs. SQLite owns Task Monki's repository and Design records. | Git repositories below `storage-v2/design-repositories` |
-| Redacted provider protocol diagnostics | The runtime server record owns retention. The journal owns bounded byte segments. | NDJSON below `storage-v2/protocol-journals` |
+| Attachment, artifact, and encrypted Preview-private bytes | SQLite owns identity, reachability, size, digest, and media metadata. `ManagedFileStore` owns byte publication and verification. | Immutable files below `storage/files` |
+| Managed Design source | The managed Git repository owns commits, trees, and refs. SQLite owns Task Monki's repository and Design records. | Git repositories below `storage/design-repositories` |
+| Redacted provider protocol diagnostics | The runtime server record owns retention. The journal owns bounded byte segments. | NDJSON below `storage/protocol-journals` |
 | User repositories, ordinary task worktrees, Git remotes, GitHub, provider processes, and Preview runtime objects | Their external systems | Task Monki observes and reconciles them. It does not copy them into application persistence. |
 
 Many SQLite records retain a complete JSON payload and typed columns for
@@ -31,7 +31,7 @@ The columns are constrained projections. The Task and runtime mappers verify
 their indexed columns and joins against each payload. A disagreement stops the
 load. Discourse loaders verify their focused relationship and integrity rules.
 Runtime records are not duplicated into Task-owned tables. `SqliteTaskStore`
-joins the canonical runtime projection for existing callers without persisting
+joins the runtime projection for existing callers without persisting
 that projection.
 
 Runtime events are a bounded recent diagnostic stream, not the durable owner of
@@ -54,15 +54,15 @@ For a profile root, current application-owned paths are:
 
 ```text
 <profile>/
-  .task-monki-storage-v2.owner.lock
-  storage-v2/
+  .task-monki-storage.owner.lock
+  storage/
     task-monki.sqlite3
     files/
     protocol-journals/
     design-repositories/
     design-worktrees/
     task-artifact-captures/
-  backups-v2/
+  backups/
     backup-<timestamp>-<id>/
 ```
 
@@ -106,7 +106,7 @@ deletions share an admission queue, so a read that selected the old revision
 finishes before post-commit cleanup can unlink it. A deletion barrier keeps
 referenced bytes stable during a backup.
 
-Shutdown first drains backup work and accepted facade operations. It then drains
+Shutdown first drains backup work and accepted store operations. It then drains
 the database admission queue and `ManagedFileStore` cleanup before closing
 SQLite and releasing the profile lease.
 
@@ -148,7 +148,7 @@ interrupted local record.
 `ApplicationPersistenceRecovery` is the offline recovery owner. Restore and
 quarantine acquire the same profile lease used by the live application, so all
 live database handles must be closed. Quarantine atomically renames the complete
-live `storage-v2` directory and performs no automatic salvage or replacement.
+live `storage` directory and performs no automatic salvage or replacement.
 These core recovery operations have no end-user interface. Startup does not
 restore or quarantine data automatically.
 
@@ -163,9 +163,8 @@ application id, or unidentified application tables.
 
 A file-backed upgrade from an existing SQLite schema must first create and
 verify a `PRE_UPGRADE` backup. A migration error rolls back the transaction.
-The backup remains available for explicit recovery. Current builds do not read
-or migrate the former v0.1/v0.2 JSON stores. New profiles start at SQLite schema
-version 1. Future changes add new SQLite migrations.
+The backup remains available for explicit recovery. New profiles start at
+SQLite schema version 1. Future changes add new SQLite migrations.
 
 ## Backup And Restore
 
@@ -192,7 +191,7 @@ rejects extra, missing, changed, unrelated, or unsafe files. The service does
 not schedule, upload, compress, merge, or expire backups.
 
 Restore first verifies the complete backup. It constructs a new private
-`storage-v2` staging root. Then it verifies the SQLite snapshot and restores the
+`storage` staging root. Then it verifies the SQLite snapshot and restores the
 managed Design repositories. It runs `fsck` on each repository. It creates an
 empty Design worktree directory.
 
@@ -226,12 +225,12 @@ events. It then appends 1,000 telemetry records and changes the application
 shutdown latch. The test requires less than 512 MiB of heap growth and a
 60-second completion time.
 
-A normal telemetry append uses a row-native path. One transaction writes one
-telemetry row, one event row, and runtime metadata. It does not diff or rewrite
-the full runtime aggregate. A top-level shutdown-latch change uses the same
-row-native rule. Either operation uses the aggregate mapper when it joins an
-existing application transaction, which preserves transaction-local state and
-rollback behavior.
+A normal telemetry append writes only the affected rows. One transaction writes
+one telemetry row, one event row, and runtime metadata. It does not diff or
+rewrite unrelated runtime records. A top-level shutdown-latch change also
+updates only its event and runtime metadata. When either operation joins an
+existing application transaction, it updates the transaction-local state so
+the complete operation commits or rolls back together.
 
 Cold startup still materializes runtime telemetry and events in memory. This
 gate is a verified workload, not a storage limit or a pagination claim.

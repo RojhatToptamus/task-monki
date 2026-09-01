@@ -18,7 +18,7 @@ import { AgentRuntimeStateMapper } from './AgentRuntimeStateMapper';
 import { AppDatabase } from './AppDatabase';
 import { ManagedFileStore } from './ManagedFileStore';
 
-describe('SqliteAgentRuntimeStore persistence', () => {
+describe('Agent runtime persistence across restarts and transactions', () => {
   const fixtures: RuntimeFixture[] = [];
 
   afterEach(async () => {
@@ -48,7 +48,6 @@ describe('SqliteAgentRuntimeStore persistence', () => {
       'Keep this prompt durable.'
     );
     expect(await fixture.store.readArtifact(run.outputArtifactId)).toBe('streamed output');
-    expect(await fileExists(path.join(fixture.root, 'runtime.json'))).toBe(false);
 
     await fixture.reopen();
     const restarted = await fixture.store.snapshot();

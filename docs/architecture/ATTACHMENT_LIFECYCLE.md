@@ -123,13 +123,13 @@ reachability. Immutable bytes live below the shared Task Monki managed-file
 root:
 
 ```text
-storage-v2/files/task/attachments/
+storage/files/task/attachments/
   staging/<draft-id>/<attachment-id>.<safe-extension>
   tasks/<task-id>/<attachment-id>.<safe-extension>
 ```
 
 Directories are private and immutable attachment files are `0400` on POSIX.
-There is no staging manifest or attachment JSON store. Node does not provide
+Attachment metadata is stored only in SQLite. Node does not provide
 equivalent owner/group/other mode enforcement on Windows, and Task Monki does
 not treat Windows `chmod` as an ACL boundary. Packaged Windows storage instead
 lives under the app's per-user data directory and inherits that managed root's
@@ -148,7 +148,7 @@ keeps the atomic temporary-write/link-or-rename publication boundary without
 claiming the additional POSIX directory-flush guarantee.
 
 Store shutdown stops admitting attachment operations synchronously, drains
-every operation already admitted, closes the attachment facade, and only then
+every operation already admitted, closes the attachment store, and only then
 releases the application-wide profile lease. A caller cannot begin attachment
 I/O against a closing or closed store.
 
@@ -161,7 +161,7 @@ managed-file references are removed. Physical byte deletion happens only after
 that reference deletion commits. Startup reconciles interrupted or failed
 physical cleanup.
 
-The attachment facade validates the complete draft or task selection against
+The attachment store validates the complete draft or task selection against
 SQLite size, digest, ownership, order, and storage-key metadata before exposing
 verified paths or bytes.
 

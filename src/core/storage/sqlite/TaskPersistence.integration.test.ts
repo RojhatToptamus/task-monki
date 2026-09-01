@@ -8,7 +8,7 @@ import { ManagedFileStore } from './ManagedFileStore';
 
 async function createFixture(name: string) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), name));
-  const databasePath = path.join(root, 'task-monki.sqlite');
+  const databasePath = path.join(root, 'task-monki.sqlite3');
   const managedFileRoot = path.join(root, 'managed-files');
   const database = await AppDatabase.open(databasePath);
   const managedFiles = new ManagedFileStore(managedFileRoot);
@@ -30,8 +30,8 @@ async function addRepository(store: SqliteTaskStore, root: string) {
   });
 }
 
-describe('SqliteTaskStore persistence', () => {
-  it('reconstructs Task collections from normalized rows without a JSON snapshot', async () => {
+describe('Task persistence', () => {
+  it('reconstructs Task records and managed files after restart', async () => {
     const fixture = await createFixture('task-monki-sqlite-task-reload-');
     const repository = await addRepository(fixture.store, fixture.root);
     const draft = await fixture.store.createAttachmentDraft();

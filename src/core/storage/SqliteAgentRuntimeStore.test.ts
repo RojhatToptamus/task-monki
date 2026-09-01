@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 describe('SqliteAgentRuntimeStore', () => {
-  it('creates and restarts one canonical Task runtime projection with atomic artifacts', async () => {
+  it('creates and restarts the shared Task runtime projection with atomic artifacts', async () => {
     const fixture = await storeFixture();
     const delivered: string[] = [];
     const runtime = fixture.store.taskAgentRuntimeAccess(async (event) => {
@@ -509,7 +509,7 @@ describe('SqliteAgentRuntimeStore', () => {
     ).rejects.toThrow('conflicts');
   });
 
-  it('rolls back both telemetry rows and their event when the row-native transaction fails', async () => {
+  it('rolls back both telemetry rows and their event when the direct transaction fails', async () => {
     const fixture = await storeFixture();
     const before = await fixture.store.snapshot();
     await fixture.database.write((transaction) => {
@@ -555,7 +555,7 @@ describe('SqliteAgentRuntimeStore', () => {
     expect((await restarted.snapshot()).telemetryRecords).toEqual([stored]);
   });
 
-  it('uses the aggregate fallback so telemetry participates in an outer rollback', async () => {
+  it('includes telemetry in an existing transaction so an outer rollback removes it', async () => {
     const fixture = await storeFixture();
     const request = {
       id: 'telemetry-outer-rollback',

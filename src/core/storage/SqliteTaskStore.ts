@@ -638,8 +638,8 @@ export class SqliteTaskStore {
   }
 
   /**
-   * Binds the canonical runtime owner. Runtime records remain a derived view
-   * and are never written to Task-owned database tables.
+   * Binds the runtime store. The Task store reads its projection and never
+   * writes runtime records to Task-owned tables.
    */
   bindAgentRuntime(runtime: TaskAgentRuntimeAccess): void {
     if (this.taskRuntime && this.taskRuntime !== runtime) {
@@ -655,12 +655,12 @@ export class SqliteTaskStore {
   createAgentRuntimeEventSink(): TaskRuntimeEventSink {
     const sink: TaskRuntimeEventSink = (event, operationId) =>
       this.recordAgentRuntimeEvent(event, operationId);
-    sink.serializeMutation = (operation) => this.serializePersistenceMutation(operation);
+    sink.withTaskMutation = (operation) => this.serializePersistenceMutation(operation);
     return sink;
   }
 
   /**
-   * Coordinates a mutation that spans this store and another facade on the
+   * Coordinates a mutation that spans this store and another store on the
    * same AppDatabase. The callback must not perform external I/O.
    */
   serializePersistenceMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -4376,8 +4376,7 @@ export class SqliteTaskStore {
 
   /**
    * Publishes the Task-owned link to a session that already exists in the
-   * canonical agent runtime store. Provider session state is never persisted
-   * by the SQLite Task store.
+   * runtime store. Provider session state is never persisted by the Task store.
    */
   async recordAgentSessionCreated(
     session: AgentSessionRecord
@@ -4468,8 +4467,8 @@ export class SqliteTaskStore {
   }
 
   /**
-   * Publishes Task workflow state for a run that the canonical runtime store
-   * has already created. The run and its artifacts remain runtime-owned.
+   * Publishes Task workflow state for a run that the runtime store has already
+   * created. The run and its artifacts remain runtime-owned.
    */
   async recordAgentRunStarted(run: RunRecord): Promise<RunRecord> {
     return this.serializeMutation(async () => {

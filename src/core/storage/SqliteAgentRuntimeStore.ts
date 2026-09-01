@@ -1343,17 +1343,16 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
   async recordTelemetry(
     input: RecordRuntimeTelemetryInput
   ): Promise<AgentRuntimeTelemetryRecord> {
-    // A caller already inside the application transaction may be composing
-    // telemetry with another runtime mutation. Keep that path on the aggregate
-    // mapper so its transaction-local projection remains authoritative.
+    // A caller already inside an application transaction must update the
+    // transaction-local state so the complete operation can commit or roll back.
     if (this.database.hasCurrentWriteTransaction()) {
-      return this.recordTelemetryThroughAggregate(input);
+      return this.recordTelemetryInCurrentTransaction(input);
     }
     await this.init();
     return this.recordTelemetryDirect(clone(input));
   }
 
-  private recordTelemetryThroughAggregate(
+  private recordTelemetryInCurrentTransaction(
     input: RecordRuntimeTelemetryInput
   ): Promise<AgentRuntimeTelemetryRecord> {
     return this.mutate((draft) => {
@@ -2373,8 +2372,8 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
           await store.applyTaskRuntimeEventInternal(event, undefined, operationId);
           await eventSink?.(event, operationId);
         });
-        await (eventSink?.serializeMutation
-          ? eventSink.serializeMutation(apply)
+        await (eventSink?.withTaskMutation
+          ? eventSink.withTaskMutation(apply)
           : apply());
       },
       async applyTaskRuntimeEventIfRunStatus(event, statuses, operationId) {
@@ -2389,8 +2388,8 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
           }
           return applied;
         });
-        return eventSink?.serializeMutation
-          ? eventSink.serializeMutation(apply)
+        return eventSink?.withTaskMutation
+          ? eventSink.withTaskMutation(apply)
           : apply();
       }
     };
@@ -3206,13 +3205,13 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
 
   async setShutdownLatched(latched: boolean, operationId: string): Promise<void> {
     if (this.database.hasCurrentWriteTransaction()) {
-      return this.setShutdownLatchedThroughAggregate(latched, operationId);
+      return this.setShutdownLatchedInCurrentTransaction(latched, operationId);
     }
     await this.init();
     return this.setShutdownLatchedDirect(latched, operationId);
   }
 
-  private setShutdownLatchedThroughAggregate(
+  private setShutdownLatchedInCurrentTransaction(
     latched: boolean,
     operationId: string
   ): Promise<void> {

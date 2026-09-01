@@ -29,10 +29,10 @@ import { ManagedFileStore } from './ManagedFileStore';
 import { SqliteDiscourseStore } from './SqliteDiscourseStore';
 import { SqlitePersistenceError } from './SqliteErrors';
 
-const STORAGE_DIRECTORY = 'storage-v2';
-const BACKUPS_DIRECTORY = 'backups-v2';
+const STORAGE_DIRECTORY = 'storage';
+const BACKUPS_DIRECTORY = 'backups';
 const DATABASE_FILE = 'task-monki.sqlite3';
-const OWNERSHIP_LEASE_FILE = '.task-monki-storage-v2.owner.lock';
+const OWNERSHIP_LEASE_FILE = '.task-monki-storage.owner.lock';
 const DURABLE_STORAGE_WITHOUT_DATABASE = new Set([
   'files',
   'protocol-journals',
@@ -63,9 +63,9 @@ export interface OpenApplicationPersistenceOptions {
 }
 
 /**
- * Composition root for all authoritative local application persistence.
- * Facades share one connection so cross-domain mutations can use one SQLite
- * transaction; filesystem services own only their explicit byte roots.
+ * Owns all authoritative local persistence for one application profile.
+ * Stores share one connection so cross-domain mutations can use one SQLite
+ * transaction. Filesystem services own only their explicit byte roots.
  */
 export class ApplicationPersistence {
   readonly database: AppDatabase;
@@ -247,7 +247,7 @@ export class ApplicationPersistence {
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       .map((result) => result.reason));
     try {
-      // Flush every database operation admitted by a facade before draining
+      // Flush every database operation admitted by a store before draining
       // filesystem work scheduled by its commit callbacks.
       await this.database.read(() => undefined);
     } catch (error) {

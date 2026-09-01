@@ -51,7 +51,7 @@ function designAgentSettings() {
 }
 
 describe('ApplicationPersistence', () => {
-  it('owns one database and one profile lease for every persistence facade', async () => {
+  it('owns one database and one profile lease for every persistence store', async () => {
     const profileRoot = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-application-persistence-')
     );
@@ -69,13 +69,13 @@ describe('ApplicationPersistence', () => {
     ).rejects.toThrow('already owned');
 
     expect(persistence.paths.databasePath).toBe(
-      path.join(profileRoot, 'storage-v2', 'task-monki.sqlite3')
+      path.join(profileRoot, 'storage', 'task-monki.sqlite3')
     );
     expect(persistence.managedFiles.rootPath).toBe(
-      path.join(profileRoot, 'storage-v2', 'files')
+      path.join(profileRoot, 'storage', 'files')
     );
     expect(persistence.paths.designWorktreeRoot).toBe(
-      path.join(profileRoot, 'storage-v2', 'design-worktrees')
+      path.join(profileRoot, 'storage', 'design-worktrees')
     );
     expect(persistence.taskRuntime).toBeDefined();
     expect(persistence.database.checkIntegrity('quick')).toMatchObject({ mode: 'quick' });
@@ -570,7 +570,7 @@ describe('ApplicationPersistence', () => {
     await expect(
       fs.readFile(path.join(quarantine.quarantinePath, 'task-monki.sqlite3'), 'utf8')
     ).resolves.toBe('not a sqlite database');
-    await expect(fs.stat(path.join(profileRoot, 'storage-v2'))).rejects.toMatchObject({
+    await expect(fs.stat(path.join(profileRoot, 'storage'))).rejects.toMatchObject({
       code: 'ENOENT'
     });
 

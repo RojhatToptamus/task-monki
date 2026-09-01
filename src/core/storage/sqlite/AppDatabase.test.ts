@@ -483,7 +483,7 @@ async function createDatabase(): Promise<{
   root: string;
 }> {
   const root = await createRoot();
-  const databasePath = path.join(root, 'storage-v2', 'task-monki.sqlite3');
+  const databasePath = path.join(root, 'storage', 'task-monki.sqlite3');
   const database = await AppDatabase.open(databasePath);
   databases.push(database);
   return { database, databasePath, root };

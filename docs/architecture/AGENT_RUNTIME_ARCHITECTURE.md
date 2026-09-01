@@ -24,7 +24,7 @@ The architecture has three main owners:
 - `AgentOrchestrator` owns the shared runtime lifecycle.
 - Each provider adapter owns its protocol and local provider resources.
 
-`SqliteAgentRuntimeStore` is the durable runtime store facade over the shared application database.
+`SqliteAgentRuntimeStore` is the durable runtime store in the shared application database.
 Domain stores remain authoritative for product state.
 
 ## Core rules
@@ -84,7 +84,7 @@ A detached review can use another explicit runtime and session.
 `src/core/app/AgentRuntimeComposition.ts` creates the built-in adapters.
 `TaskManagerService` registers them in `AgentRuntimeRegistry`.
 `ApplicationPersistence` supplies the shared SQLite-backed runtime and domain stores,
-and the service creates one `AgentOrchestrator` over those facades.
+and the service creates one `AgentOrchestrator` over those stores.
 
 The registry owns initialization, shutdown, lookup, catalogs, and readiness.
 It does not own workflow prompts or domain state.

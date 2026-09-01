@@ -41,7 +41,7 @@ describe('BackupRestoreService', () => {
 
   beforeEach(async () => {
     temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-backup-'));
-    storageRoot = path.join(temporaryRoot, 'storage-v2');
+    storageRoot = path.join(temporaryRoot, 'storage');
     backupsRoot = path.join(temporaryRoot, 'backups');
     database = await AppDatabase.open(path.join(storageRoot, 'task-monki.sqlite3'), {
       acquireLease: false
@@ -228,7 +228,7 @@ describe('BackupRestoreService', () => {
     ).resolves.toBe('{"event":"first"}\n{"event":"concurrent"}\n');
   });
 
-  it('creates a complete pre-upgrade backup before runtime facades are initialized', async () => {
+  it('creates a complete pre-upgrade backup before runtime stores are initialized', async () => {
     const source = new DesignSourceService({
       repositoryRoot: path.join(storageRoot, 'design-repositories'),
       worktreeRoot: path.join(storageRoot, 'design-worktrees')

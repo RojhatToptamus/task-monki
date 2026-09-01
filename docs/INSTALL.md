@@ -234,9 +234,8 @@ Startup rejects an unidentified, newer, or corrupt database and any invalid
 managed file required during initialization. Other managed bytes are verified
 before use and fail closed. Do not delete individual persistence files. The
 core recovery API can restore a verified backup or quarantine a closed
-`storage-v2` root. The desktop UI does not expose these operations. Startup does
-not run them automatically. Current builds intentionally do not import former
-JSON-store formats.
+`storage` root. The desktop UI does not expose these operations. Startup does
+not run them automatically.
 
 ## First Launch
 

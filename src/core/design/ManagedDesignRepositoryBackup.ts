@@ -40,7 +40,7 @@ export interface DesignRepositoryBackupMetadata {
   repositoryId: string;
   objectFormat: 'sha1' | 'sha256';
   headReference: string;
-  /** Exact repository HEAD recorded in the SQLite snapshot that owns this backup. */
+  /** Exact repository HEAD recorded in the SQLite backup snapshot. */
   headSha: string;
   refs: DesignGitReference[];
   requiredObjects: string[];

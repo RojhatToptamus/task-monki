@@ -59,8 +59,7 @@ export class AgentRuntimeArtifactMutationAmbiguousError extends Error {
 
 export interface TaskRuntimeEventSink {
   (event: DomainEvent, operationId: string): Promise<void>;
-  /** Acquires the Task store's mutation boundary before the shared database. */
-  serializeMutation?<T>(operation: () => Promise<T>): Promise<T>;
+  withTaskMutation?<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export interface AgentProviderRuntimeStore {
