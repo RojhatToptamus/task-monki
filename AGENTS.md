@@ -310,3 +310,180 @@ Tracked docs should explain current behavior and architecture. Keep private
 strategy, future opportunity lists, phase snapshots, generated mockups,
 screenshots, and status handoffs out of git. Use `docs/private/`,
 `docs/plans/`, or an external private workspace for that material.
+
+## Pull Request Copy
+
+### Source of truth
+
+- Read the complete diff against the PR base.
+- Use test output from the current branch.
+- Describe the final behavior and implementation.
+- Treat task messages and agent reports as private work context.
+- Make sure that every claim matches the diff or test evidence.
+- Do not invent results, causes, support claims, or limitations.
+
+### Do not narrate the work history
+
+Describe the final change. Do not describe the conversation that produced it.
+
+Do not include:
+
+- user instructions or quoted prompts
+- internal reasoning
+- abandoned implementations
+- trial-and-error steps
+- reviewer conversations
+- requests that later changed
+- comparisons with ideas that never entered the base branch
+- statements such as “changed from X to Y” when X was only a proposal
+
+Mention previous behavior only when it exists in the base branch and explains:
+
+- a user-visible problem
+- a migration
+- a compatibility change
+- a security boundary
+- a remaining limitation
+
+Write:
+
+- Routes Design questions through ACP form elicitation.
+- Keeps model selection stable while a provider catalog loads.
+
+Do not write:
+
+- Replaces the first transcript-based approach with ACP forms.
+- Uses live capabilities instead of the allowlist requested earlier.
+- Does not use the previous proposed architecture.
+
+### Title
+
+- Use sentence case.
+- Use an imperative verb.
+- State the main result.
+- Keep the title under 72 characters when practical.
+- Do not use marketing words.
+- Do not add a commit prefix unless the repository adopts that format.
+
+### Writing style
+
+- Use active, present-tense language.
+- Keep the tone direct and technical.
+- Start with the result.
+- Use one fact per bullet.
+- Use backticks for identifiers, commands, routes, flags, and paths.
+- Do not start with “This pull request introduces.”
+- Do not repeat the title.
+- Do not list every changed file.
+- Replace vague claims with exact behavior.
+
+Avoid words such as:
+
+- comprehensive
+- robust
+- powerful
+- enhanced
+- seamless
+- flexible
+- scalable
+- future-proof
+- production-ready
+
+### Required content
+
+Include only sections that contain useful information.
+
+#### summary
+
+Write one sentence that states the change and its main effect.
+
+#### changes
+
+Use two to six bullets.
+
+Mention important changes to:
+
+- user-visible behavior
+- runtime ownership
+- persistence
+- provider capabilities
+- cancellation and recovery
+- security boundaries
+- APIs and IPC contracts
+
+Explicitly name new:
+
+- environment variables
+- command-line flags
+- API routes
+- database migrations
+- permissions
+- settings
+- UI controls
+
+#### why
+
+State the verified product problem or technical cause.
+
+Omit this section when the summary already explains the reason.
+
+#### testing
+
+List the exact checks that ran and their results.
+
+Do not write “all tests pass” without exact evidence.
+
+If an important check did not run, state that fact and give the reason.
+
+#### limitations
+
+Include only real limits that affect users, reviewers, or the release decision.
+
+Do not include speculative risks or future ideas.
+
+#### out of scope
+
+Use this optional section only when a nearby feature can cause reviewer confusion.
+
+### File references
+
+- Use repository paths in `code` by default.
+- Link a file only when the link helps the reviewer.
+- Link to the PR head branch or a commit from the PR.
+- Do not link to the default branch.
+- Do not use `diffhunk://` links.
+- Do not add unstable line anchors.
+- Reference no more than three files unless more links are necessary.
+
+### Length
+
+- Keep a small fix under approximately 200 words.
+- Add detail only for migrations, security, recovery, or large product changes.
+- Prefer an accurate summary over a file-by-file inventory.
+
+### PR body template
+
+```markdown
+## summary
+
+One sentence that states the final change and its main effect.
+
+## changes
+
+- Concrete product or code change.
+- Concrete lifecycle, storage, API, or UI change.
+- Important setting, route, flag, migration, or permission change.
+
+## why
+
+- Verified problem or root cause.
+
+## testing
+
+- `exact command` — result
+- Packaged or manual scenario — result
+
+## limitations
+
+- Real remaining limitation.
+```

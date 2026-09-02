@@ -26,16 +26,22 @@ import {
 describe('prompt templates', () => {
   it('keeps Design ownership and offline runtime rules in one developer instruction profile', () => {
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
-      'Start a clear first brief without setup questions.'
+      'Start a clear first brief without setup questions when you can infer a useful direction.'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
-      'ask one combined question round.'
+      'Ask one combined question round only when the answer is necessary'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
-      'Do not invent a product meaning from its name.'
+      'Do not ask the user to make a reasonable design decision that you can make yourself.'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
-      'you must ask one combined question round before you build.'
+      'Never ask a blocking question as ordinary transcript text.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'If no structured question tool is available, make a reasonable decision and continue.'
+    );
+    expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
+      'Task Monki supplies custom input and a Decide for me action'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
       'preserve the current aesthetic direction and unrelated work.'
@@ -109,7 +115,7 @@ describe('prompt templates', () => {
       'product designer who builds a running interface',
       'The user manages the product direction',
       'current request, original brief, current source, latest ready revision, active references',
-      'important missing fact can change the audience, scope, context, or main direction',
+      'Ask one combined question round only when the answer is necessary',
       'Use real, specific content from the brief and project.',
       'Select one purposeful direction',
       'Preserve the project stack, build tools, components, tokens, brand choices',

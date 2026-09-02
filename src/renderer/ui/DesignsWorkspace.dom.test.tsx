@@ -1168,7 +1168,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getAllByText('Blocked').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Needs input').length).toBeGreaterThan(0);
     const choices = screen.getByRole('group', { name: 'Theme' });
     fireEvent.click(within(choices).getByRole('radio', { name: /Light/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Submit answers' }));

@@ -3689,6 +3689,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
+          elicitation: { form: {} },
           session: { configOptions: { boolean: {} } }
         }
       });
@@ -4796,7 +4797,171 @@ describe('AcpRuntimeAdapter native settings', () => {
   });
 });
 
-describe('AcpRuntimeAdapter permission materialization', () => {
+describe('AcpRuntimeAdapter interaction materialization', () => {
+  it('pauses for a native form question and resumes the same turn with custom input', async () => {
+    const harness = await createPermissionHarness({
+      runtimeId: 'test-acp-form-elicitation',
+      approvalPolicy: 'on-request'
+    });
+    const { adapter, client, events, run, server, store, task } = harness;
+
+    try {
+      const requestId = 'question-1';
+      const request = {
+        jsonrpc: '2.0' as const,
+        id: requestId,
+        method: 'elicitation/create',
+        params: {
+          sessionId: 'permission-materialization-session',
+          toolCallId: 'ask-user-1',
+          mode: 'form',
+          message: 'Choose a direction for the page.',
+          requestedSchema: {
+            type: 'object',
+            properties: {
+              question_0: {
+                type: 'string',
+                title: 'Direction',
+                description: 'Which direction fits best?',
+                oneOf: [
+                  {
+                    const: 'Informational',
+                    title: 'Informational',
+                    description: 'Explain the market and its schedule.'
+                  },
+                  {
+                    const: 'Shopping',
+                    title: 'Shopping',
+                    description: 'Let visitors browse products.'
+                  }
+                ]
+              },
+              question_0_custom: {
+                type: 'string',
+                title: 'Other',
+                _meta: {
+                  _askUserQuestionCustomAnswer: {
+                    questionId: 'question_0',
+                    isCustomAnswer: true
+                  }
+                }
+              }
+            },
+            required: ['question_0']
+          }
+        }
+      };
+      const raw = await appendTestProtocolMessage(
+        store,
+        server.id,
+        'INBOUND',
+        JSON.stringify(request)
+      );
+      client.events.emit('request', request, raw);
+
+      const pending = await waitFor(async () =>
+        (await store.snapshot()).interactionRequests.find(
+          (interaction) =>
+            interaction.providerRequestId === requestId &&
+            interaction.status === 'PENDING'
+        )
+      );
+      expect(pending).toMatchObject({
+        runId: run.id,
+        sessionId: run.sessionId,
+        type: 'USER_INPUT',
+        allowedActions: ['ANSWER'],
+        request: {
+          questions: [
+            {
+              id: 'question_0',
+              header: 'Direction',
+              question: 'Which direction fits best?',
+              isOther: true,
+              options: [
+                { label: 'Informational' },
+                { label: 'Shopping' }
+              ]
+            }
+          ]
+        }
+      });
+      expect(await store.getRun(run.id)).toMatchObject({
+        status: 'AWAITING_USER_INPUT'
+      });
+
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
+      await interactionService.respond({
+        taskId: task.id,
+        runId: run.id,
+        interactionRequestId: pending.id,
+        decision: {
+          interactionType: 'USER_INPUT',
+          action: 'ANSWER',
+          answers: { question_0: ['Decide for me'] }
+        }
+      });
+
+      expect(await readProtocolMessages(server.protocolJournalPath)).toContainEqual({
+        jsonrpc: '2.0',
+        id: requestId,
+        result: {
+          action: 'accept',
+          content: { question_0_custom: 'Decide for me' }
+        }
+      });
+      expect(await store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+      expect(await store.getInteractionRequest(pending.id)).toMatchObject({
+        status: 'RESOLVED'
+      });
+
+      const cancelRequest = {
+        ...request,
+        id: 'question-2',
+        params: {
+          ...request.params,
+          toolCallId: 'ask-user-2'
+        }
+      };
+      const cancelRaw = await appendTestProtocolMessage(
+        store,
+        server.id,
+        'INBOUND',
+        JSON.stringify(cancelRequest)
+      );
+      client.events.emit('request', cancelRequest, cancelRaw);
+      const cancelPending = await waitFor(async () =>
+        (await store.snapshot()).interactionRequests.find(
+          (interaction) =>
+            interaction.providerRequestId === cancelRequest.id &&
+            interaction.status === 'PENDING'
+        )
+      );
+      const activeRun = await store.getRun(run.id);
+      expect(activeRun?.providerTurnId).toBeTruthy();
+
+      await adapter.interruptTurn({
+        session: { localSessionId: run.sessionId },
+        providerTurnId: activeRun!.providerTurnId!
+      });
+
+      expect(await readProtocolMessages(server.protocolJournalPath)).toContainEqual({
+        jsonrpc: '2.0',
+        id: cancelRequest.id,
+        result: { action: 'cancel' }
+      });
+      expect(await store.getInteractionRequest(cancelPending.id)).toMatchObject({
+        status: 'CANCELED'
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  }, 15_000);
+
   it('correlates a sparse permission request with the preceding tool call', async () => {
     const runtimeId = 'test-acp-correlated-permission';
     const harness = await createPermissionHarness({

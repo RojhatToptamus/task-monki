@@ -378,6 +378,7 @@ export function DesignConversation({
         <InteractionPanel
           interactions={[...project.interactions]}
           sessions={[...project.sessions]}
+          offerAgentDecision
           onRespond={onRespond}
         />
       </div>

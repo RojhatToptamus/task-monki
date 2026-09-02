@@ -96,7 +96,7 @@ describe('Design workspace view model', () => {
       tone: 'working'
     });
     expect(designStatusView('NEEDS_INPUT')).toMatchObject({
-      label: 'Blocked',
+      label: 'Needs input',
       tone: 'waiting'
     });
     expect(designStatusView('READY')).toMatchObject({

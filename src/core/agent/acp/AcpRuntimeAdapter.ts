@@ -73,11 +73,15 @@ import {
   completeAttachmentSubmissions,
   type AgentTurnAttachment
 } from '../AgentAttachmentDelivery';
-import { interactionTerminalStatus } from '../AgentInteractionPolicy';
+import {
+  buildInteractionPolicy,
+  interactionTerminalStatus
+} from '../AgentInteractionPolicy';
 import {
   flattenSelectOptions,
   mergeAcpToolCallUpdate,
   parseConfigOptions,
+  parseFormElicitationRequest,
   parseNewSessionResponse,
   parseParameterizedModelCatalog,
   parsePermissionRequest,
@@ -96,6 +100,10 @@ import {
   type AcpStdioMcpServer,
   type AcpToolCallUpdate
 } from './AcpProtocol';
+import {
+  mapAcpElicitationResponse,
+  mapAcpFormElicitation
+} from './AcpElicitation';
 import {
   AcpAmbiguousMutationError,
   type AcpRpcClient,
@@ -2169,7 +2177,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     try {
       await client.notify('session/cancel', { sessionId: session.providerSessionId });
-      await this.cancelPendingPermissions(run, client);
+      await this.cancelPendingInteractions(run, client);
     } catch (cause) {
       await this.staleRunInteractions(
         run,
@@ -2203,20 +2211,27 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (!client || !server || server.id !== interaction.serverInstanceId) {
       throw new Error('ACP interaction belongs to a prior runtime process.');
     }
-    if (input.decision.interactionType !== 'COMMAND_APPROVAL') {
-      throw new Error('ACP stable v1 exposes only permission-option interactions.');
-    }
-    const options = providerOptions(interaction);
-    const outcome = permissionOutcomeForDecision(
-      options,
-      input.decision as AgentCommandApprovalDecision
-    );
+    const method = interaction.type === 'COMMAND_APPROVAL'
+      ? 'session/request_permission'
+      : 'elicitation/create';
+    const result = interaction.type === 'COMMAND_APPROVAL'
+      ? {
+          outcome: permissionOutcomeForDecision(
+            providerOptions(interaction),
+            input.decision as AgentCommandApprovalDecision
+          )
+        }
+      : mapAcpElicitationResponse(
+          interaction.type,
+          interaction.request,
+          input.decision
+        );
     let responseEvidencePersisted = false;
     let responseRaw: AgentProtocolMessageReference;
     try {
       responseRaw = await client.respond(
         interaction.providerRequestId,
-        { outcome },
+        result,
         async (raw) => {
           await this.taskRuntime.transitionInteractionRequest(interaction.id, 'RESPONDING', {
             status: 'RESPONDING',
@@ -2228,12 +2243,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     } catch (cause) {
       if (responseEvidencePersisted) {
         await this.quarantineRuntimeAfterAmbiguousMutation(
-          'session/request_permission',
-          `Permission response delivery could not be confirmed for interaction ${interaction.id}.`
+          method,
+          `Interaction response delivery could not be confirmed for interaction ${interaction.id}.`
         );
         throw new AgentMutationAmbiguousError(
-          'session/request_permission',
-          `ACP permission response delivery is ambiguous after durable submission: ${errorMessage(cause)}`
+          method,
+          `ACP interaction response delivery is ambiguous after durable submission: ${errorMessage(cause)}`
         );
       }
       throw cause;
@@ -2246,7 +2261,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         {
           status: interactionTerminalStatus(input.decision),
           responseRawMessage: responseRaw,
-          resolution: { outcome },
+          resolution: result,
           resolvedAt: new Date().toISOString()
         },
         acpProtocolOperationId('interaction/response-acknowledged', responseRaw, interaction.id)
@@ -2259,8 +2274,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       const reason =
         `The provider accepted interaction ${interaction.id}, but local completion persistence failed.`;
       const ambiguity = new AgentMutationAmbiguousError(
-        'session/request_permission',
-        `ACP permission response was delivered, but local completion persistence failed: ${errorMessage(cause)}`
+        method,
+        `ACP interaction response was delivered, but local completion persistence failed: ${errorMessage(cause)}`
       );
       const recoveryFailures: unknown[] = [];
       const run = await this.taskRuntime.getRun(interaction.runId).catch((failure) => {
@@ -2273,7 +2288,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         });
       }
       await this.quarantineRuntimeAfterAmbiguousMutation(
-        'session/request_permission',
+        method,
         reason,
         false
       ).catch((failure) => {
@@ -2282,7 +2297,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       if (recoveryFailures.length > 0) {
         throw new AggregateError(
           [ambiguity, ...recoveryFailures],
-          'ACP permission response was ambiguous and safe recovery was incomplete.'
+          'ACP interaction response was ambiguous and safe recovery was incomplete.'
         );
       }
       throw ambiguity;
@@ -3699,6 +3714,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
+    if (request.method === 'elicitation/create') {
+      await this.handleElicitationRequest(client, generation, request, raw);
+      return;
+    }
     if (request.method !== 'session/request_permission') {
       if (this.ownsTaskSessions()) {
         await this.recordExtensionTelemetry(request.method, request.params, raw);
@@ -3850,14 +3869,137 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         requestRawMessage: raw
       }, acpProtocolOperationId('interaction/create', raw, run.id, request.id));
     } catch (cause) {
-      await this.recoverPermissionMaterializationFailure({
+      await this.recoverInteractionMaterializationFailure({
         client,
         generation,
         request,
         raw,
         run,
         session,
-        cause
+        cause,
+        method: 'session/request_permission',
+        label: 'permission request',
+        cancelResult: { outcome: { outcome: 'cancelled' } }
+      });
+      return;
+    }
+    this.emitInteractionUpdate(interaction);
+  }
+
+  private async handleElicitationRequest(
+    client: AcpRpcClient,
+    generation: number,
+    request: AcpJsonRpcRequest,
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
+    let elicitation;
+    try {
+      elicitation = parseFormElicitationRequest(request.params);
+    } catch (cause) {
+      await this.recordProtocolIncident(errorMessage(cause), raw);
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
+      await client.respondError(request.id, -32602, errorMessage(cause));
+      return;
+    }
+
+    const runtimeTarget = await this.findActiveRuntimeTarget(elicitation.sessionId);
+    if (
+      runtimeTarget ||
+      (await this.isKnownRuntimeSession(elicitation.sessionId))
+    ) {
+      if (this.isCurrentClientEvent(client, generation, raw)) {
+        await client.respond(request.id, { action: 'cancel' });
+      }
+      return;
+    }
+    if (!this.ownsTaskSessions()) {
+      if (this.isCurrentClientEvent(client, generation, raw)) {
+        await client.respond(request.id, { action: 'cancel' });
+      }
+      return;
+    }
+
+    const session = await this.taskRuntime.getAgentSessionByProviderId(
+      this.descriptor.id,
+      elicitation.sessionId
+    );
+    const activeRun = session
+      ? await this.taskRuntime.getActiveRunForSession(session.id)
+      : undefined;
+    const run = activeRun && this.activePromptRunIds.has(activeRun.id)
+      ? activeRun
+      : undefined;
+    const server = this.supervisor?.currentServer;
+    if (
+      !this.isCurrentClientEvent(client, generation, raw) ||
+      !session ||
+      !run ||
+      !server ||
+      server.id !== raw.serverInstanceId
+    ) {
+      if (this.isCurrentClientEvent(client, generation, raw)) {
+        await client.respond(request.id, { action: 'cancel' });
+      }
+      return;
+    }
+    if (
+      request.id === null ||
+      [
+        typeof request.id === 'string' ? request.id : undefined,
+        elicitation.toolCallId
+      ].some(
+        (value) =>
+          typeof value === 'string' &&
+          !isSafeProviderIdentifier(value, this.sensitiveValues)
+      )
+    ) {
+      await this.recordProtocolIncident(
+        'ACP elicitation contained an invalid or sensitive identifier and was cancelled.',
+        raw
+      );
+      if (this.isCurrentClientEvent(client, generation, raw)) {
+        await client.respond(request.id, { action: 'cancel' });
+      }
+      return;
+    }
+
+    const mapped = mapAcpFormElicitation(elicitation, this.descriptor.displayName);
+    const policy = buildInteractionPolicy({
+      type: mapped.type,
+      request: mapped.request,
+      session,
+      run
+    });
+    let interaction: InteractionRequestRecord;
+    try {
+      interaction = await this.taskRuntime.createInteractionRequest({
+        runtimeId: this.descriptor.id,
+        serverInstanceId: server.id,
+        providerRequestId: request.id,
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        sessionId: session.id,
+        providerTurnId: run.providerTurnId,
+        ...(elicitation.toolCallId ? { providerItemId: elicitation.toolCallId } : {}),
+        type: mapped.type,
+        request: this.redactProviderValue(mapped.request),
+        allowedActions: policy.allowedActions,
+        policyWarnings: policy.warnings,
+        requestRawMessage: raw
+      }, acpProtocolOperationId('interaction/create', raw, run.id, request.id));
+    } catch (cause) {
+      await this.recoverInteractionMaterializationFailure({
+        client,
+        generation,
+        request,
+        raw,
+        run,
+        session,
+        cause,
+        method: 'elicitation/create',
+        label: 'elicitation',
+        cancelResult: { action: 'cancel' }
       });
       return;
     }
@@ -5404,14 +5546,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   /**
-   * A provider permission request is already blocking its prompt when it
+   * A provider interaction is already blocking its prompt when it
    * reaches this boundary. If Task Monki cannot durably expose the request and
    * its awaiting state together, cancel it when the same client generation is
    * still writable, publish no-replay recovery, and fence the application-
    * scoped process. The provider must never remain blocked behind an action the
    * user cannot see.
    */
-  private async recoverPermissionMaterializationFailure(input: {
+  private async recoverInteractionMaterializationFailure(input: {
     client: AcpRpcClient;
     generation: number;
     request: AcpJsonRpcRequest;
@@ -5419,6 +5561,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     run: RunRecord;
     session: AgentSessionRecord;
     cause: unknown;
+    method: 'session/request_permission' | 'elicitation/create';
+    label: 'permission request' | 'elicitation';
+    cancelResult: unknown;
   }): Promise<void> {
     const { client, generation, request, raw, run, session, cause } = input;
     this.activePromptRunIds.delete(run.id);
@@ -5428,21 +5573,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     let cancellationFailure: unknown;
     if (this.isCurrentClientEvent(client, generation, raw)) {
       try {
-        cancellationRawMessage = await client.respond(request.id, {
-          outcome: { outcome: 'cancelled' }
-        });
+        cancellationRawMessage = await client.respond(request.id, input.cancelResult);
       } catch (responseCause) {
         cancellationFailure = responseCause;
       }
     } else {
       cancellationFailure = new Error(
-        'The permission request belongs to a client generation that is no longer current.'
+        `The ${input.label} belongs to a client generation that is no longer current.`
       );
     }
 
     const materializationError = this.redactProviderText(errorMessage(cause));
     const reason =
-      `ACP permission request could not be materialized durably: ${materializationError}. ` +
+      `ACP ${input.label} could not be materialized durably: ${materializationError}. ` +
       'Task Monki will not approve or replay the blocked prompt.';
     let recoveryPublicationFailure: unknown;
     try {
@@ -5457,7 +5600,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           serverInstanceId: run.serverInstanceId,
           source: 'provider',
           payload: {
-            operation: 'session/request_permission/materialize',
+            operation: `${input.method}/materialize`,
             reason,
             automaticResubmission: false,
             requestRawMessage: raw,
@@ -5465,7 +5608,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           }
         }),
         PROMPT_OWNED_RUN_STATUSES,
-        acpProtocolOperationId('event/permission-materialization-failed', raw, run.id, reason)
+        acpProtocolOperationId('event/interaction-materialization-failed', raw, run.id, reason)
       );
     } catch (recoveryCause) {
       recoveryPublicationFailure = recoveryCause;
@@ -5476,7 +5619,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await this.taskRuntime.updateAgentSession(
         session.id,
         { status: 'NOT_LOADED' },
-        acpProtocolOperationId('session/permission-materialization-failed', raw, session.id, run.id)
+        acpProtocolOperationId('session/interaction-materialization-failed', raw, session.id, run.id)
       );
     } catch (sessionCause) {
       sessionPublicationFailure = sessionCause;
@@ -5492,7 +5635,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     let quarantineFailure: unknown;
     try {
       await this.quarantineRuntimeAfterAmbiguousMutation(
-        'session/request_permission materialization',
+        `${input.method} materialization`,
         `${reason} Cancellation delivery was ${
           cancellationRawMessage ? 'submitted' : 'not confirmed'
         }.`,
@@ -5540,7 +5683,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           interactionPublicationFailure,
           quarantineFailure
         ].filter((value) => value !== undefined),
-        'ACP permission materialization failed and safe recovery ownership could not be established.'
+        'ACP interaction materialization failed and safe recovery ownership could not be established.'
       );
       throw this.latchRuntimeSafetyFence(failure);
     }
@@ -5548,9 +5691,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     this.preflightState = appendRuntimeDiagnostic(
       this.preflightState,
       warningDiagnostic(
-        'PERMISSION_MATERIALIZATION_FAILED',
+        'INTERACTION_MATERIALIZATION_FAILED',
         'HEALTH',
-        'ACP permission request could not be exposed safely.',
+        `ACP ${input.label} could not be exposed safely.`,
         `${reason} Cancellation delivery was ${
           cancellationRawMessage ? 'submitted before quarantine' : 'not confirmed before quarantine'
         }.`
@@ -5564,7 +5707,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       runId: run.id,
       worktreeId: run.worktreeId,
       payload: {
-        eventType: 'session/request_permission/materialization-recovery',
+        eventType: `${input.method}/materialization-recovery`,
         recoveryState: currentRun?.recoveryState,
         cancellationSubmitted: Boolean(cancellationRawMessage),
         automaticReplay: false
@@ -6012,7 +6155,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     return JSON.stringify(argv) === JSON.stringify(expected);
   }
 
-  private async cancelPendingPermissions(run: RunRecord, client: AcpRpcClient): Promise<void> {
+  private async cancelPendingInteractions(run: RunRecord, client: AcpRpcClient): Promise<void> {
     const snapshot = await this.taskRuntime.snapshot();
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) => candidate.runId === run.id && candidate.status === 'PENDING'
@@ -6022,14 +6165,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         'PENDING',
         {
           status: 'RESPONDING',
-          decision: { interactionType: 'COMMAND_APPROVAL', action: 'CANCEL' },
           respondedAt: new Date().toISOString()
         },
         acpRuntimeOperationId('interaction/cancel-intent', interaction.id, interaction.requestedAt)
       );
       const raw = await client.respond(
         responding.providerRequestId,
-        { outcome: { outcome: 'cancelled' } },
+        responding.type === 'COMMAND_APPROVAL'
+          ? { outcome: { outcome: 'cancelled' } }
+          : { action: 'cancel' },
         async (reference) => {
           await this.taskRuntime.transitionInteractionRequest(responding.id, 'RESPONDING', {
             status: 'RESPONDING',
@@ -6043,7 +6187,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         {
           status: 'CANCELED',
           responseRawMessage: raw,
-          resolution: { outcome: 'cancelled' },
+          resolution: responding.type === 'COMMAND_APPROVAL'
+            ? { outcome: 'cancelled' }
+            : { action: 'cancel' },
           resolvedAt: new Date().toISOString()
         },
         acpProtocolOperationId('interaction/cancel-acknowledged', raw, responding.id)

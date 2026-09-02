@@ -28,6 +28,7 @@ const POLL_MS = 250;
 const MAX_SOURCE_FILES = 256;
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const FOCUSED_SCENARIOS = [
+  'structured-question',
   'form-invalid-corrected-success',
   'menu-dialog-keyboard',
   'responsive-wide-narrow',
@@ -206,6 +207,34 @@ async function main(): Promise<void> {
       ]?.maturity !== 'stable'
     ) {
       throw new Error(`${runtimeId} does not report Design browser verification.`);
+    }
+    if (!focusedScenario || focusedScenario === 'structured-question') {
+      const question = await createAndWait(service, store, {
+        name: 'structured-question',
+        runtimeId,
+        modelProvider,
+        brief: [
+          'Create a farmers market website, but do not choose its product scope yet.',
+          'Ask one structured question that lets me choose between a public shopper guide and an internal vendor operations page.',
+          'After I answer, continue the same turn and build the selected direction.',
+          'Keep structure in index.html, CSS in styles.css, and JavaScript in app.js.',
+          'Use realistic local content and no network service.'
+        ].join(' '),
+        model,
+        reasoningEffort,
+        timeoutMs,
+        expectedQuestionRounds: 1,
+        answerQuestions: (questions) =>
+          Object.fromEntries(
+            questions.map((item) => [item.id, ['Decide for me']])
+          ),
+        browser: { openAtLeast: 1 },
+        sourceChecks: [
+          ['builds a market page', /farmer|vendor|market/iu],
+          ['includes a clear primary flow', /browse|visit|apply|manage|schedule|inventory/iu]
+        ]
+      });
+      scenarios.push(question.result);
     }
     if (!focusedScenario || focusedScenario === 'form-invalid-corrected-success') {
       const interactive = await createAndWait(service, store, {

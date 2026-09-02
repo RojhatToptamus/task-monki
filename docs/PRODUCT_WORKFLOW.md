@@ -333,11 +333,12 @@ In Progress:
   The detailed data flow and invariants are documented in
   `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
 - Allow steering, approval/input responses, and interrupt controls.
-- A native structured question from Codex or OpenCode puts the exact active run
+- A native structured question from Codex, OpenCode, or an ACP form puts the exact active run
   in **Needs input** and shows its choices or free-text fields. Submit one answer
   to that same run and keep the interaction visible as responding until the
   native protocol confirms delivery or lifecycle cleanup. A normal prose
-  question is not an interaction; answer it with the ordinary Continue action.
+  question is not a blocking interaction. Design agents must use structured
+  questions or make a reasonable decision and continue.
 - After an interrupted, lost, or recovery-required implementation run, keep the
   task in progress and make Continue work the primary recovery action. After a
   definitive failure, make Retry implementation primary. Both actions and Fork

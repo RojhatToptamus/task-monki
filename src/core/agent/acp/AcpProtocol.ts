@@ -45,6 +45,7 @@ export type AcpJsonRpcMessage =
 export interface AcpClientCapabilities {
   fs: { readTextFile: false; writeTextFile: false };
   terminal: false;
+  elicitation: { form: Record<string, never> };
   session: {
     configOptions: {
       boolean: { _meta?: Record<string, unknown> | null };
@@ -56,6 +57,7 @@ export interface AcpClientCapabilities {
 export const ACP_CLIENT_CAPABILITIES = {
   fs: { readTextFile: false, writeTextFile: false },
   terminal: false,
+  elicitation: { form: {} },
   session: { configOptions: { boolean: {} } }
 } as const satisfies AcpClientCapabilities;
 
@@ -173,6 +175,15 @@ export interface AcpRequestPermissionParams {
   sessionId: string;
   toolCall: AcpToolCallUpdate;
   options: AcpPermissionOption[];
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface AcpCreateFormElicitationParams {
+  sessionId: string;
+  toolCallId?: string;
+  mode: 'form';
+  message: string;
+  requestedSchema: Record<string, unknown>;
   _meta?: Record<string, unknown> | null;
 }
 
@@ -668,6 +679,42 @@ export function parsePermissionRequest(value: unknown): AcpRequestPermissionPara
       _meta: optionalMeta(toolCall._meta)
     },
     options,
+    _meta: optionalMeta(record._meta)
+  };
+}
+
+export function parseFormElicitationRequest(
+  value: unknown
+): AcpCreateFormElicitationParams {
+  const record = requireRecord(value, 'ACP elicitation request');
+  if (record.mode !== 'form') {
+    throw new Error('Task Monki supports only ACP form elicitation.');
+  }
+  if (typeof record.sessionId !== 'string' || !record.sessionId) {
+    throw new Error('ACP elicitation request has no sessionId.');
+  }
+  if (typeof record.message !== 'string' || !record.message.trim()) {
+    throw new Error('ACP elicitation request has no message.');
+  }
+  if (
+    record.toolCallId !== undefined &&
+    (typeof record.toolCallId !== 'string' || !record.toolCallId)
+  ) {
+    throw new Error('ACP elicitation request has an invalid toolCallId.');
+  }
+  const requestedSchema = requireRecord(
+    record.requestedSchema,
+    'ACP elicitation requestedSchema'
+  );
+  if (requestedSchema.type !== 'object' || !isRecord(requestedSchema.properties)) {
+    throw new Error('ACP form elicitation requires an object schema with properties.');
+  }
+  return {
+    sessionId: record.sessionId,
+    ...(record.toolCallId ? { toolCallId: record.toolCallId } : {}),
+    mode: 'form',
+    message: record.message,
+    requestedSchema,
     _meta: optionalMeta(record._meta)
   };
 }

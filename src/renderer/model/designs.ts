@@ -91,7 +91,7 @@ const STATUS_VIEWS: Record<DesignProjectStatus, DesignStatusView> = {
     tone: 'verified'
   },
   NEEDS_INPUT: {
-    label: 'Blocked',
+    label: 'Needs input',
     detail: 'The Design agent needs your response before it can continue.',
     tone: 'waiting'
   },

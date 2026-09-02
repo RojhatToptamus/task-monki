@@ -46,6 +46,7 @@ describe('AcpStdioSupervisor', () => {
     expect(clientCapabilitiesForAcpProfile(CURSOR_ACP_PROFILE)).toEqual({
       fs: { readTextFile: false, writeTextFile: false },
       terminal: false,
+      elicitation: { form: {} },
       session: { configOptions: { boolean: {} } },
       _meta: { parameterizedModelPicker: true }
     });
@@ -159,6 +160,7 @@ describe('AcpStdioSupervisor', () => {
       expect(initialize.params.clientCapabilities).toEqual({
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
+        elicitation: { form: {} },
         session: { configOptions: { boolean: {} } }
       });
     } finally {
