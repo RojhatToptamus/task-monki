@@ -28,7 +28,7 @@ describe('projectAgentExecutionSupport', () => {
     ).toEqual({ supported: true });
   });
 
-  it('uses one shared read-only qualification for refinement, review, and Discourse', () => {
+  it('keeps every runtime available for shared read-only workflows', () => {
     const capabilities = supportedCapabilities({
       readOnlyTurns: {
         maturity: 'unsupported',
@@ -42,14 +42,12 @@ describe('projectAgentExecutionSupport', () => {
       'DISCOURSE'
     ] as const) {
       expect(projectAgentExecutionSupport(capabilities, operation)).toEqual({
-        supported: false,
-        reason:
-          'This profile can still mutate through child agents. Normal Tasks remain available.'
+        supported: true
       });
     }
   });
 
-  it('allows isolated Preview generation without enabling repository read-only workflows', () => {
+  it('does not use runtime or model allowlists for Preview generation', () => {
     const capabilities = supportedCapabilities({
       readOnlyTurns: {
         maturity: 'unsupported',
@@ -67,21 +65,12 @@ describe('projectAgentExecutionSupport', () => {
     expect(
       projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION', {
         model: {
-          inputModalities: ['text'],
-          previewRecipeGenerationSupport: {
-            maturity: 'unsupported',
-            detail: 'This exact model was not qualified.'
-          }
+          inputModalities: ['text']
         }
       })
-    ).toEqual({
-      supported: false,
-      reason: 'This exact model was not qualified.'
-    });
+    ).toEqual({ supported: true });
     expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
-      supported: false,
-      reason:
-        'This profile can still mutate a repository. Normal Tasks remain available.'
+      supported: true
     });
   });
 
@@ -102,13 +91,13 @@ describe('projectAgentExecutionSupport', () => {
           inputModalities: ['text', 'image'],
           designSupport: {
             maturity: 'unsupported',
-            detail: 'This exact model has not passed Design qualification.'
+            detail: 'This model does not report the required Design capabilities.'
           }
         }
       })
     ).toEqual({
       supported: false,
-      reason: 'This exact model has not passed Design qualification.'
+      reason: 'This model does not report the required Design capabilities.'
     });
     expect(
       projectAgentExecutionSupport(
@@ -172,7 +161,7 @@ describe('projectAgentExecutionSupport', () => {
       inputModalities: ['text'],
       designSupport: {
         maturity: 'unsupported' as const,
-        detail: 'This exact model has not passed Design qualification.'
+        detail: 'This candidate does not report the required Design capabilities.'
       }
     };
 

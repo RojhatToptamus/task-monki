@@ -167,8 +167,8 @@ The generated Codex protocol currently exposes `text`, `image`, `localImage`,
 turn input. Task Monki therefore sends supported images through `localImage`
 after reverifying the immutable task-owned file. It provides supported
 text-like files through an untrusted-data prompt manifest. A qualified runtime
-uses the exact read-only managed path. An older restricted runtime uses bounded
-inline text. Task-owned files remain outside Git worktrees and are reused
+uses the exact read-only managed path. Runtime discovery verifies the required
+permission-profile contract. Task-owned files remain outside Git worktrees and are reused
 across runs and reviews. PDFs, Office files, video, audio, archives,
 databases, and arbitrary binaries remain unsupported because they require a
 separately secured extraction or tool boundary.

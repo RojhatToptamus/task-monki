@@ -126,13 +126,13 @@ describe('mounted Design workspace', () => {
     );
   });
 
-  it('keeps an unqualified model visible but creates only with a qualified model', async () => {
-    const reason = 'This exact provider version and model failed Design verification.';
-    const unqualifiedModel: AgentModel = {
+  it('keeps an unsupported model visible but creates only with a supported model', async () => {
+    const reason = 'This model does not report the capabilities required by Design Mode.';
+    const unsupportedModel: AgentModel = {
       ...designModel,
-      id: 'codex:unqualified',
-      model: 'unqualified',
-      displayName: 'Unqualified',
+      id: 'codex:unsupported',
+      model: 'unsupported',
+      displayName: 'Unsupported',
       isDefault: true,
       designSupport: { maturity: 'unsupported', detail: reason }
     };
@@ -143,10 +143,10 @@ describe('mounted Design workspace', () => {
           designs: [],
           selectedDesignId: undefined,
           project: undefined,
-          models: [unqualifiedModel, { ...designModel, isDefault: false }],
+          models: [unsupportedModel, { ...designModel, isDefault: false }],
           defaultAgentSettings: {
             runtimeId: 'codex',
-            model: 'unqualified',
+            model: 'unsupported',
             reasoningEffort: 'medium'
           },
           onCreateBlankDesign
@@ -156,12 +156,12 @@ describe('mounted Design workspace', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Design: Codex · Luna/ }));
     const unavailableOption = screen.getByRole('option', {
-      name: `Unqualified via Codex, unavailable. ${reason}`
+      name: `Unsupported via Codex, unavailable. ${reason}`
     });
     expect(unavailableOption.getAttribute('aria-disabled')).toBe('true');
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
-      target: { value: 'Build with the qualified model.' }
+      target: { value: 'Build with the supported model.' }
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
 
@@ -494,8 +494,8 @@ describe('mounted Design workspace', () => {
     );
   });
 
-  it('keeps an existing Design readable when its exact model is no longer qualified', () => {
-    const reason = 'This exact provider version and model failed Design verification.';
+  it('keeps an existing Design readable when its model is no longer supported', () => {
+    const reason = 'This model does not report the capabilities required by Design Mode.';
     const onSubmitRefinement = vi.fn(async () => undefined);
     render(
       <DesignsWorkspace

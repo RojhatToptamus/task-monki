@@ -833,7 +833,7 @@ export interface InteractionRequestRecord {
 }
 
 export interface AgentModel {
-  /** Runtime-qualified stable identity used by settings and selectors. */
+  /** Runtime-owned stable identity used by settings and selectors. */
   id: string;
   runtimeId: AgentRuntimeId;
   /** Upstream provider identity, when the runtime's catalog reports it. */
@@ -847,8 +847,6 @@ export interface AgentModel {
   serviceTiers: string[];
   defaultServiceTier?: string;
   inputModalities: string[];
-  /** Model-specific support for generating Preview YAML, when a runtime requires qualification. */
-  previewRecipeGenerationSupport?: AgentCapability;
   /** Provider-owned model support for the full Design workflow. */
   designSupport?: AgentDesignCapability;
   isDefault: boolean;

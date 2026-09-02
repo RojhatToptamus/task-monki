@@ -438,7 +438,7 @@ export function buildAgentReviewPrompt(input: {
     '',
     target,
     `Repository root: ${input.worktree.worktreePath}`,
-    'Do not modify repository files. Do not commit, push, merge, or change repository settings.',
+    'Do not commit, push, merge, or change repository settings.',
     'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.'
   ].join('\n');
 }
@@ -469,7 +469,8 @@ export function buildPromptRefinementInstruction(input: {
   return [
     'Rewrite the user request into the best prompt for a coding agent working in the repository in your current directory.',
     '',
-    'Work in one bounded pass: understand the request, inspect only useful evidence, and then write the result. Use read-only commands and never modify repository or attachment files.',
+    'Do not modify files.',
+    'Work in one bounded pass: understand the request, inspect only useful evidence, and then write the result. Use read-only commands.',
     '',
     'Inspection and stopping rules:',
     '- First infer the likely task boundary from the request. A clear, simple task may require no repository inspection.',

@@ -352,8 +352,9 @@ delivered.
 
 Discourse execution uses the immutable `runtimeId` through `AgentOrchestrator`.
 There is no default-runtime fallback.
-A runtime is available only when it has a qualified native mutation-denial policy.
-The policy must have no approval exceptions.
+Every ready runtime and model is available.
+The prompt tells the agent not to modify files, and the adapter applies its native
+restriction when one is available.
 The adapter must use the common runtime operations to:
 
 - build and attest the provider-native read-only execution context.
@@ -361,19 +362,18 @@ The adapter must use the common runtime operations to:
 - correlate deltas, terminal output, and recovery-required events with that
   exact run.
 
-The conversation selector receives the attested Discourse runtime catalog, not
-the general task-runtime list. It may offer only runtimes that are ready and
-provide the required native policy.
+The conversation selector receives the Discourse runtime catalog, not the general
+task-runtime list. It offers every ready runtime and model.
 Core repeats the same validation at send time.
 The renderer is not the security boundary.
 
 Codex uses an attested App Server read-only profile.
 OpenCode uses a dedicated `--pure` session and native deny rules.
 Cursor ACP uses native Ask mode and rejects every permission request.
-Claude Agent ACP 0.70.0 is unavailable for Discourse because its plan mode
-completed a native Write tool call during the packaged mutation probe.
-Grok Build 1.0.13 on macOS uses a separate process with its native read-only
-sandbox. These four profiles can participate in Discourse.
+Claude Agent ACP uses plan mode, although a packaged mutation probe showed that
+this mode can still complete a Write tool call.
+Grok Build on macOS uses a separate process with its native read-only sandbox.
+All five current profiles can participate in Discourse.
 
 OpenCode and Cursor still run with normal user permissions. Their policies are
 not operating-system sandboxes. Grok uses a separate sandboxed ACP process for

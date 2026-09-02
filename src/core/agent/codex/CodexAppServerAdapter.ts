@@ -179,11 +179,8 @@ import {
   type DesignSkillPack
 } from '../../design/DesignSkillPack';
 import {
-  assertCodexInlineRequestSize,
-  codexAttachmentSupport,
   codexExactGrantAttachments,
-  prepareCodexAttachmentDelivery,
-  type CodexAttachmentSupport
+  prepareCodexAttachmentDelivery
 } from './CodexAttachmentDelivery';
 import { CodexProtocolSanitizer } from './CodexProtocolSanitizer';
 import {
@@ -302,7 +299,6 @@ interface CodexTurnTransportInput {
   settings: AgentExecutionSettings;
   prompt: string;
   localImagePaths: readonly string[];
-  enforceInlineRequestSize?: boolean;
   approvalPolicy: NonNullable<TurnStartParams['approvalPolicy']>;
   approvalsReviewer: NonNullable<TurnStartParams['approvalsReviewer']>;
   collaborationMode?: CollaborationMode;
@@ -648,12 +644,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   ): Promise<AgentExecutionContext> {
     const primaryCwd = path.resolve(input.primaryCwd);
     await this.ensureClient();
-    const support = this.currentAttachmentSupport();
     const attachments = await verifyAgentTurnAttachments(input.attachments ?? []);
     const grantAttachments = codexExactGrantAttachments({
       sandbox: 'restricted',
-      attachments,
-      support
+      attachments
     });
     const readRoots = input.readRoots.map((root) => ({
       ...root,
@@ -816,9 +810,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           ? { collaborationMode: input.collaborationMode }
           : {})
       };
-      if (input.enforceInlineRequestSize) {
-        assertCodexInlineRequestSize(params);
-      }
       const response = await input.client.requestMutation('turn/start', params);
       this.pendingRunByProviderTurn.set(response.turn.id, input.localRunId);
       return response;
@@ -853,14 +844,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           input.run.attachmentSelection,
           input.attachments
         );
-        const support = this.currentAttachmentSupport();
         const attachmentDelivery = prepareCodexAttachmentDelivery({
           prompt: input.prompt,
           sandbox: 'restricted',
-          attachments: await verifyAgentTurnAttachments(input.attachments, {
-            includeBytes: () => !support.exactFileAccess
-          }),
-          support
+          attachments: await verifyAgentTurnAttachments(input.attachments)
         });
         const profile = await codexReadOnlyScopeProfile({
           sessionId: input.session.id,
@@ -882,8 +869,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           input.executionContext.managedAttachments,
           codexExactGrantAttachments({
             sandbox: 'restricted',
-            attachments: input.attachments,
-            support
+            attachments: input.attachments
           })
         );
         return { attachmentDelivery, profile };
@@ -958,7 +944,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         settings,
         prompt: attachmentDelivery.prompt,
         localImagePaths: attachmentDelivery.localImagePaths,
-        enforceInlineRequestSize: attachmentDelivery.hasInlineText,
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       });
@@ -1152,11 +1137,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     attachments: readonly AgentTurnAttachment[]
   ): Promise<AgentSessionRecord> {
     await this.ensureClient();
-    const support = this.currentAttachmentSupport();
     const grantAttachments = codexExactGrantAttachments({
       sandbox: codexAttachmentSandbox(settings),
-      attachments,
-      support
+      attachments
     });
     const config = await this.permissionProfileConfigForSession(
       session,
@@ -1371,11 +1354,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       throw new Error(`Cannot submit missing Codex run ${input.localRunId}.`);
     }
     assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
-    const support = this.currentAttachmentSupport();
-    const verifiedAttachments = await verifyAgentTurnAttachments(attachments, {
-      includeBytes: () =>
-        settings.sandbox !== 'DANGER_FULL_ACCESS' && !support.exactFileAccess
-    });
+    const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
     if (!session.providerSessionId) {
       session = await this.createSession({
         runtimeId: this.descriptor.id,
@@ -1392,8 +1371,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const attachmentDelivery = prepareCodexAttachmentDelivery({
       prompt: input.prompt,
       sandbox: codexAttachmentSandbox(settings),
-      attachments: verifiedAttachments,
-      support
+      attachments: verifiedAttachments
     });
     const requiresFirstTurnFence = !session.materialized;
     let client: CodexRpcClient;
@@ -1516,7 +1494,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         settings,
         prompt: attachmentDelivery.prompt,
         localImagePaths: attachmentDelivery.localImagePaths,
-        enforceInlineRequestSize: attachmentDelivery.hasInlineText,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
         ...(collaboration
@@ -1733,8 +1710,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
     const grantAttachments = codexExactGrantAttachments({
       sandbox: codexAttachmentSandbox(input.settings),
-      attachments: verifiedAttachments,
-      support: this.currentAttachmentSupport()
+      attachments: verifiedAttachments
     });
     const providerSessionId =
       input.sourceSession.providerSessionId ?? source.providerSessionId;
@@ -2969,9 +2945,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       models.push(...response.data);
       cursor = response.nextCursor;
     } while (cursor);
-    this.models = models.map((model) =>
-      mapModel(model, this.supervisor.currentServer?.runtimeVersion)
-    );
+    this.models = models.map(mapModel);
   }
 
   private async handleNotification(
@@ -6159,8 +6133,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     let session = inputSession;
     const grantAttachments = codexExactGrantAttachments({
       sandbox: codexAttachmentSandbox(settings),
-      attachments,
-      support: this.currentAttachmentSupport()
+      attachments
     });
     const config = await this.permissionProfileConfigForSession(
       session,
@@ -6283,8 +6256,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const client = await this.ensureClient();
     const grantAttachments = codexExactGrantAttachments({
       sandbox: codexAttachmentSandbox(settings),
-      attachments,
-      support: this.currentAttachmentSupport()
+      attachments
     });
     const attachmentPaths = grantAttachments.map((attachment) => attachment.path);
     const config = await this.permissionProfileConfigForSession(
@@ -6520,10 +6492,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         isolateHome: session.role === 'REVIEW'
       })
     };
-  }
-
-  private currentAttachmentSupport(): CodexAttachmentSupport {
-    return codexAttachmentSupport(this.supervisor.currentServer?.runtimeVersion);
   }
 
   private async persistAttachmentAccessContext(

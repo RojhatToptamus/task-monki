@@ -126,7 +126,6 @@ import {
   acpDesignSupport,
   acpImageInputSupport,
   acpModelInputModalities,
-  acpPreviewRecipeGenerationSupport,
   defaultAcpModel,
   type AcpRuntimeProfile
 } from './AcpRuntimeProfiles';
@@ -342,6 +341,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private profileModelState?: AcpSessionModelState;
   private parameterizedModelCatalog?: AcpParameterizedModelCatalog;
   private parameterizedModelDiscovery?: Promise<void>;
+  private sessionModelCatalog?: AcpParameterizedModelCatalog;
+  private sessionModelDiscovery?: Promise<void>;
   private initialized = false;
   private nativeSessions = new Map<string, AcpNativeSessionState>();
   private models: AgentModel[];
@@ -551,19 +552,103 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   async discoverModels(): Promise<void> {
     const contract = this.profile.parameterizedModelCatalog;
-    if (!contract) {
+    if (!contract && !this.profile.discoverModelsFromSession) {
       if (!this.initialized) await this.initialize();
       await this.ensureClient();
       return;
     }
-    if (this.parameterizedModelCatalog) return;
-    if (!this.parameterizedModelDiscovery) {
-      this.parameterizedModelDiscovery = this.discoverParameterizedModels(contract)
-        .finally(() => {
-          this.parameterizedModelDiscovery = undefined;
-        });
+    if (contract) {
+      if (this.parameterizedModelCatalog) return;
+      if (!this.parameterizedModelDiscovery) {
+        this.parameterizedModelDiscovery = this.discoverParameterizedModels(contract)
+          .finally(() => {
+            this.parameterizedModelDiscovery = undefined;
+          });
+      }
+      await this.parameterizedModelDiscovery;
+      return;
     }
-    await this.parameterizedModelDiscovery;
+    if (this.sessionModelCatalog) return;
+    if (!this.sessionModelDiscovery) {
+      this.sessionModelDiscovery = this.discoverSessionModels().finally(() => {
+        this.sessionModelDiscovery = undefined;
+      });
+    }
+    await this.sessionModelDiscovery;
+  }
+
+  private async discoverSessionModels(): Promise<void> {
+    if (!this.initialized) await this.initialize();
+    const client = await this.ensureClient();
+    const generation = this.boundClientGeneration;
+    if (!this.initializeResponse?.agentCapabilities.sessionCapabilities?.close) {
+      throw new Error(
+        `${this.descriptor.displayName} cannot discover session models because it did not advertise session/close.`
+      );
+    }
+    const created = await this.createNativeSession(this.options.cwd);
+    const providerSessionId = created.state.sessionId;
+    try {
+      const modelOptions = created.state.configOptions.filter(
+        (
+          option
+        ): option is Extract<AcpSessionConfigOption, { type: 'select' }> =>
+          option.type === 'select' && option.category === 'model'
+      );
+      if (modelOptions.length !== 1) {
+        throw new Error(
+          `${this.descriptor.displayName} session did not expose one ACP model selector.`
+        );
+      }
+      const selector = modelOptions[0]!;
+      const models = flattenSelectOptions(selector).map((choice) => ({
+        value: choice.value,
+        name: choice.name
+      }));
+      if (
+        models.length === 0 ||
+        !models.some((model) => model.value === selector.currentValue)
+      ) {
+        throw new Error(
+          `${this.descriptor.displayName} returned an invalid ACP session model catalog.`
+        );
+      }
+      if (containsSensitiveProviderValue(models, this.sensitiveValues)) {
+        this.noteSensitiveIdentifierOmission();
+        throw new Error(
+          `${this.descriptor.displayName} model catalog contained a value matching a runtime credential.`
+        );
+      }
+      await this.requestBoundedMutation(
+        client,
+        'session/close',
+        { sessionId: providerSessionId },
+        `The outcome of closing temporary provider session ${providerSessionId} could not be confirmed.`
+      );
+      if (
+        this.boundClient !== client ||
+        this.boundClientGeneration !== generation
+      ) {
+        throw new Error(
+          `${this.descriptor.displayName} model discovery completed for a superseded ACP process.`
+        );
+      }
+      this.sessionModelCatalog = { models };
+      this.refreshModels();
+      this.setConnectedPreflight();
+      this.emitRuntimeUpdate();
+    } catch (cause) {
+      if (this.nativeSessions.has(providerSessionId)) {
+        await this.quarantineRuntimeAfterAmbiguousMutation(
+          'session/close',
+          `Temporary provider session ${providerSessionId} could not be closed after model discovery.`
+        );
+      }
+      this.setModelDiscoveryFailure(cause);
+      throw cause;
+    } finally {
+      this.nativeSessions.delete(providerSessionId);
+    }
   }
 
   private async discoverParameterizedModels(
@@ -603,14 +688,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         this.boundClient === client &&
         this.boundClientGeneration === generation
       ) {
-        this.setParameterizedModelDiscoveryFailure(cause);
+        this.setModelDiscoveryFailure(cause);
       }
       throw cause;
     }
   }
 
-  private setParameterizedModelDiscoveryFailure(cause: unknown): void {
-    this.invalidateParameterizedModelCatalog();
+  private setModelDiscoveryFailure(cause: unknown): void {
+    this.invalidateDiscoveredModelCatalogs();
     const classified = acpSessionFailureReadiness(
       this.profile,
       cause,
@@ -662,7 +747,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         (this.profile.sessionModelExtension?.initializeResponseMetaField &&
           this.profileModelState) ||
           (this.profile.parameterizedModelCatalog && this.parameterizedModelCatalog) ||
-          this.profileQualifiedModels().length > 0
+          (this.profile.discoverModelsFromSession && this.sessionModelCatalog)
       );
     const authenticationAdvertised = initialize.authMethods.length > 0;
     this.preflightState = {
@@ -714,8 +799,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         warningDiagnostic(
           'ACP_IMAGE_CAPABILITY_DRIFT',
           'COMPATIBILITY',
-          `${this.descriptor.displayName} reports no ACP image support, but an exact packaged image test passed.`,
-          `Task Monki enables native image input only for ${drift.map(({ model }) => model.displayName).join(', ')} on ${runtimeVersion ?? 'the qualified runtime'}. Other versions and models remain disabled.`
+          `${this.descriptor.displayName} reports no ACP image support, but its native image transport works.`,
+          `Task Monki accepts the provider-local compatibility result for models returned by the live catalog. Current models: ${drift.map(({ model }) => model.displayName).join(', ')}. Runtime: ${runtimeVersion ?? 'unknown'}.`
         )
       );
     }
@@ -728,7 +813,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         infoDiagnostic(
           'ACP_IMAGE_INPUT_UNQUALIFIED',
           'MODEL_CATALOG',
-          `${unavailable.length} current ${this.descriptor.displayName} model${unavailable.length === 1 ? ' is' : 's are'} not image-qualified.`,
+          `${unavailable.length} current ${this.descriptor.displayName} model${unavailable.length === 1 ? ' does' : 's do'} not support image input.`,
           `${reasons.join(' ')}${unavailable.length > reasons.length ? ` ${unavailable.length - reasons.length} more current models remain disabled.` : ''}`
         )
       );
@@ -933,6 +1018,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       ? `its ${extensionCatalogContract.contractId} provider catalog`
       : this.profile.parameterizedModelCatalog && this.parameterizedModelCatalog
         ? `its ${this.profile.parameterizedModelCatalog.contractId} provider catalog`
+        : this.profile.discoverModelsFromSession && this.sessionModelCatalog
+          ? 'its ACP session model catalog'
         : undefined;
     const authoritativeModels = authoritativeCatalog
       ? this.models
@@ -985,9 +1072,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         model: requestedModel,
         displayName: requestedModel,
         inputModalities: this.modelInputModalities(requestedModel),
-        ...this.previewRecipeGenerationModelSupport(requestedModel),
         designSupport: acpDesignSupport({
           profile: this.profile,
+          promptCapabilities:
+            this.initializeResponse?.agentCapabilities.promptCapabilities,
           runtimeVersion: this.resolvedRuntime?.version,
           modelId: requestedModel
         }),
@@ -1005,7 +1093,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const reasoningEffort = requestedSettings.reasoningEffort;
     if (
       reasoningEffort &&
-      (authoritativeCatalog || model.supportedReasoningEfforts.length > 0) &&
+      ((authoritativeCatalog && !this.sessionModelCatalog) ||
+        model.supportedReasoningEfforts.length > 0) &&
       !model.supportedReasoningEfforts.includes(reasoningEffort)
     ) {
       throw new Error(
@@ -1564,13 +1653,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (this.readOnlyLane) return this.readOnlyLane.startRuntimeTurn(input);
     await this.waitForRuntimeQuarantine();
     const previewQualification =
-      this.profile.previewRecipeGenerationQualification;
+      this.profile.isolatedPreviewRecipeGeneration;
     const isolatedPreviewQualification =
       input.run.purpose === 'PREVIEW_RECIPE_GENERATION' &&
       previewQualification !== undefined &&
-      previewQualification.runtimeVersion === this.resolvedRuntime?.version &&
-      previewQualification.modelId ===
-        input.executionContext.modelSettings.model &&
       input.executionContext.readRoots.length === 1 &&
       input.executionContext.readRoots[0]?.kind === 'EMPTY_MANAGED' &&
       input.executionContext.readRoots[0].entityId === undefined &&
@@ -1582,14 +1668,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       !isolatedPreviewQualification
     ) {
       throw new Error(
-        `${this.descriptor.displayName} Preview generation requires ${previewQualification.runtimeVersion} with ${previewQualification.modelId} and one app-owned isolated evidence directory.`
+        `${this.descriptor.displayName} Preview generation requires one app-owned isolated evidence directory.`
       );
-    }
-    if (
-      this.profile.readOnlyTurnUnavailableReason &&
-      !isolatedPreviewQualification
-    ) {
-      throw new Error(this.profile.readOnlyTurnUnavailableReason);
     }
     const policy = requireAcpReadOnlyTurnPolicy(this.profile);
     if (
@@ -2870,11 +2950,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           if (
             this.options.runtimeLane === 'READ_ONLY' &&
             this.profile.readOnlyTurnPolicy?.kind === 'DEDICATED_PROCESS' &&
-            (runtime.version !== this.profile.readOnlyTurnPolicy.runtimeVersion ||
-              process.platform !== this.profile.readOnlyTurnPolicy.platform)
+            process.platform !== this.profile.readOnlyTurnPolicy.platform
           ) {
             throw new Error(
-              `${this.descriptor.displayName} read-only work is qualified only for ${this.profile.readOnlyTurnPolicy.runtimeVersion} on ${this.profile.readOnlyTurnPolicy.platform}. Found ${runtime.version} on ${process.platform}.`
+              `${this.descriptor.displayName} read-only work requires its native read-only launch contract on ${this.profile.readOnlyTurnPolicy.platform}. Found ${process.platform}.`
             );
           }
           this.resolvedRuntime = runtime;
@@ -3016,7 +3095,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             initialization: 'NOT_STARTED',
             authentication: 'UNKNOWN',
             modelCatalog:
-              this.profile.parameterizedModelCatalog && this.parameterizedModelCatalog
+              (this.profile.parameterizedModelCatalog && this.parameterizedModelCatalog) ||
+              (this.profile.discoverModelsFromSession && this.sessionModelCatalog)
                 ? 'AVAILABLE'
                 : 'UNKNOWN'
           },
@@ -3085,7 +3165,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       readiness.status === 'AUTHENTICATION_REQUIRED' ||
       readiness.status === 'ACCOUNT_UNSUPPORTED'
     ) {
-      this.invalidateParameterizedModelCatalog();
+      this.invalidateDiscoveredModelCatalogs();
     }
     this.preflightState = {
       ...this.preflightState,
@@ -3099,7 +3179,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       if (!deferUntilInitialized) this.activateStartupDispatch(client);
       return;
     }
-    this.invalidateParameterizedModelCatalog();
+    this.invalidateDiscoveredModelCatalogs();
     this.boundClient = client;
     const generation = ++this.clientGeneration;
     this.boundClientGeneration = generation;
@@ -3209,13 +3289,16 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     this.boundClient = undefined;
     this.boundClientGeneration = ++this.clientGeneration;
     this.startupDispatch = undefined;
-    this.invalidateParameterizedModelCatalog();
+    this.invalidateDiscoveredModelCatalogs();
   }
 
-  private invalidateParameterizedModelCatalog(): void {
-    if (!this.profile.parameterizedModelCatalog) return;
+  private invalidateDiscoveredModelCatalogs(): void {
+    const changed = Boolean(
+      this.parameterizedModelCatalog || this.sessionModelCatalog
+    );
     this.parameterizedModelCatalog = undefined;
-    this.refreshModels();
+    this.sessionModelCatalog = undefined;
+    if (changed) this.refreshModels();
   }
 
   private parseSessionModels(value: unknown): AcpNativeSessionState['models'] {
@@ -4426,9 +4509,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const providerText = textFromAcpContent(update.content);
     if (providerText === undefined) return;
-    const messageId = typeof update.messageId === 'string'
+    const providerMessageId = typeof update.messageId === 'string'
       ? update.messageId
       : `${run.id}:${update.sessionUpdate}`;
+    // ACP providers can reuse one messageId while moving output from a thought
+    // stream to the final assistant stream. The semantic channel is therefore
+    // part of Task Monki's durable item identity.
+    const messageId = `${update.sessionUpdate}:${providerMessageId}`;
     const type =
       update.sessionUpdate === 'agent_message_chunk'
         ? 'AGENT_MESSAGE'
@@ -6086,7 +6173,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       ? await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     const run = session ? await this.taskRuntime.getActiveRunForSession(session.id) : undefined;
-    if (run) await this.recordRunActivity(run, `extension:${method}`, raw);
+    if (run && this.activePromptRunIds.has(run.id)) {
+      await this.recordRunActivity(run, `extension:${method}`, raw);
+    }
   }
 
   private async recordProtocolIncident(
@@ -6472,9 +6561,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           defaultReasoningEffort: providerDefaultReasoningEffort,
           serviceTiers: [],
           inputModalities: this.modelInputModalities(model.modelId),
-          ...this.previewRecipeGenerationModelSupport(model.modelId),
           designSupport: acpDesignSupport({
             profile: this.profile,
+            promptCapabilities:
+              this.initializeResponse?.agentCapabilities.promptCapabilities,
             runtimeVersion: this.resolvedRuntime?.version,
             modelId: model.modelId
           }),
@@ -6501,8 +6591,20 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       this.noteSensitiveIdentifierOmission();
     }
     const parameterizedContract = this.profile.parameterizedModelCatalog;
-    if (parameterizedContract && this.parameterizedModelCatalog) {
-      this.models = this.parameterizedModelCatalog.models.map((model) => {
+    const discoveredCatalog = parameterizedContract && this.parameterizedModelCatalog
+      ? {
+          catalog: this.parameterizedModelCatalog,
+          source: 'provider-parameterized-model-catalog',
+          contractId: parameterizedContract.contractId
+        }
+      : this.profile.discoverModelsFromSession && this.sessionModelCatalog
+        ? {
+            catalog: this.sessionModelCatalog,
+            source: 'provider-session-model-catalog'
+          }
+        : undefined;
+    if (discoveredCatalog) {
+      this.models = discoveredCatalog.catalog.models.map((model) => {
         const reasoning = parameterizedModelReasoningSelector(
           model.configOptions ?? []
         );
@@ -6524,86 +6626,40 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           defaultReasoningEffort,
           serviceTiers: [],
           inputModalities: this.modelInputModalities(model.value),
-          ...this.previewRecipeGenerationModelSupport(model.value),
           designSupport: acpDesignSupport({
             profile: this.profile,
+            promptCapabilities:
+              this.initializeResponse?.agentCapabilities.promptCapabilities,
             runtimeVersion: this.resolvedRuntime?.version,
             modelId: model.value
           }),
           isDefault: model.value === this.profile.defaultModel,
           native: {
-            source: 'provider-parameterized-model-catalog',
-            contractId: parameterizedContract.contractId,
+            source: discoveredCatalog.source,
+            ...('contractId' in discoveredCatalog
+              ? { contractId: discoveredCatalog.contractId }
+              : {}),
             ...(reasoning ? { reasoningConfigId: reasoning.id } : {})
           }
         };
       });
       return;
     }
-    // Stable ACP model selectors remain scoped to the provider session that
-    // advertised them. An exact packaged qualification may expose a known
-    // model before session creation; every session still has to advertise and
-    // accept that model selector before Task Monki sends the prompt.
-    const qualifiedModels = this.profileQualifiedModels();
     this.models = [
       {
         ...defaultAcpModel(
           this.profile,
           this.modelInputModalities(this.profile.defaultModel)
         ),
-        ...this.previewRecipeGenerationModelSupport(this.profile.defaultModel),
         designSupport: acpDesignSupport({
           profile: this.profile,
+          promptCapabilities:
+            this.initializeResponse?.agentCapabilities.promptCapabilities,
           runtimeVersion: this.resolvedRuntime?.version,
           modelId: this.profile.defaultModel
         })
-      },
-      ...qualifiedModels
-    ];
-  }
-
-  private profileQualifiedModels(): AgentModel[] {
-    if (this.profile.sessionModelExtension || this.profile.parameterizedModelCatalog) {
-      return [];
-    }
-    const runtimeVersion = this.resolvedRuntime?.version;
-    if (!runtimeVersion) return [];
-    const modelIds = new Set(
-      [
-        ...(this.profile.imageInputQualifications ?? []),
-        ...(this.profile.designQualifications ?? []),
-        ...(this.profile.previewRecipeGenerationQualification
-          ? [this.profile.previewRecipeGenerationQualification]
-          : [])
-      ]
-        .filter((qualification) => qualification.runtimeVersion === runtimeVersion)
-        .map((qualification) => qualification.modelId)
-        .filter((modelId) => modelId !== this.profile.defaultModel)
-    );
-    return [...modelIds].sort().map((modelId) => ({
-      id: `${this.descriptor.id}:${this.profile.defaultModelProvider}/${modelId}`,
-      runtimeId: this.descriptor.id,
-      modelProvider: this.profile.defaultModelProvider,
-      model: modelId,
-      displayName: modelId,
-      description:
-        'Exact packaged model qualification; the provider session validates this selection before prompt delivery.',
-      hidden: false,
-      supportedReasoningEfforts: [],
-      serviceTiers: [],
-      inputModalities: this.modelInputModalities(modelId),
-      ...this.previewRecipeGenerationModelSupport(modelId),
-      designSupport: acpDesignSupport({
-        profile: this.profile,
-        runtimeVersion,
-        modelId
-      }),
-      isDefault: false,
-      native: {
-        source: 'profile-qualified-model',
-        runtimeVersion
       }
-    }));
+    ];
   }
 
   private modelInputModalities(modelId: string): string[] {
@@ -6614,17 +6670,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       runtimeVersion: this.resolvedRuntime?.version,
       modelId
     });
-  }
-
-  private previewRecipeGenerationModelSupport(
-    modelId: string
-  ): Pick<AgentModel, 'previewRecipeGenerationSupport'> {
-    const support = acpPreviewRecipeGenerationSupport({
-      profile: this.profile,
-      runtimeVersion: this.resolvedRuntime?.version,
-      modelId
-    });
-    return support ? { previewRecipeGenerationSupport: support } : {};
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
@@ -7065,8 +7110,7 @@ export function requireAcpReadOnlyTurnPolicy(
 ): NonNullable<AcpRuntimeProfile['readOnlyTurnPolicy']> {
   if (!profile.readOnlyTurnPolicy) {
     throw new Error(
-      profile.readOnlyTurnUnavailableReason ??
-        `${profile.descriptor.displayName} has no qualified native read-only policy.`
+      `${profile.descriptor.displayName} has no read-only execution policy.`
     );
   }
   return profile.readOnlyTurnPolicy;

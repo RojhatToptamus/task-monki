@@ -30,6 +30,7 @@ describe('DiscoursePromptBuilder', () => {
     expect(prompt).toContain('Lead answer');
     expect(prompt).not.toContain('Poisoned peer review');
     expect(prompt).toContain('NO_CONCERN_FOUND');
+    expect(prompt.match(/Do not modify files\./g)).toHaveLength(1);
   });
 
   it('gives correction only eligible material concerns and preserves selected synthesis sources', () => {

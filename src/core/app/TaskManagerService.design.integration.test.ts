@@ -232,19 +232,19 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(scenario.service.listDesigns()).resolves.toEqual([]);
   });
 
-  it('fails before repository creation when the selected model is not Design-qualified', async () => {
+  it('fails before repository creation when the selected model cannot run Design Mode', async () => {
     const scenario = await createTaskMonkiScenario({
-      name: 'task-monki-design-model-unqualified',
+      name: 'task-monki-design-model-unsupported',
       previewEnabled: true,
       designMode: true
     });
     vi.spyOn(scenario.agent, 'listModels').mockResolvedValue([
       {
-        id: 'codex:openai/unqualified-model',
+        id: 'codex:openai/unsupported-model',
         runtimeId: 'codex',
         modelProvider: 'openai',
-        model: 'unqualified-model',
-        displayName: 'Unqualified model',
+        model: 'unsupported-model',
+        displayName: 'Unsupported model',
         hidden: false,
         supportedReasoningEfforts: ['medium'],
         defaultReasoningEffort: 'medium',
@@ -252,7 +252,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
         inputModalities: ['text', 'image'],
         designSupport: {
           maturity: 'unsupported',
-          detail: 'This exact provider version and model did not pass Design verification.'
+          detail: 'This model does not report the image and tool capabilities required by Design Mode.'
         },
         isDefault: true
       }
@@ -269,18 +269,18 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await expect(
       scenario.service.createBlankDesign({
         brief: 'Create a compact status page.',
-        creationToken: 'design-model-unqualified',
+        creationToken: 'design-model-unsupported',
         runtimeId: 'codex',
-        model: 'unqualified-model'
+        model: 'unsupported-model'
       })
     ).rejects.toThrow(
-      'This exact provider version and model did not pass Design verification.'
+      'This model does not report the image and tool capabilities required by Design Mode.'
     );
     expect(prepareBlankRepository).not.toHaveBeenCalled();
     await expect(scenario.service.listDesigns()).resolves.toEqual([]);
   });
 
-  it('uses a qualified model Design reasoning default', async () => {
+  it('uses the supported model Design reasoning default', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-reasoning-default',
       previewEnabled: true,
@@ -320,7 +320,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     expect(scenario.agent.startedTurns[0]?.settings?.reasoningEffort).toBe('low');
   });
 
-  it('lets the Design acceptance harness run an unqualified exact model across turn rechecks', async () => {
+  it('lets the Design acceptance harness run a candidate with unreported capabilities', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-model-candidate-qualification',
       previewEnabled: true,
@@ -341,7 +341,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
         inputModalities: ['text'],
         designSupport: {
           maturity: 'unsupported',
-          detail: 'This exact model still needs Design qualification.'
+          detail: 'This candidate model has not reported Design capabilities.'
         },
         isDefault: true
       }
@@ -375,7 +375,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     expect(scenario.agent.startedTurns[1]!.settings!.model).toBe('candidate-model');
   }, 15_000);
 
-  it('does not accept a later Design turn after exact model qualification is withdrawn', async () => {
+  it('does not accept a later Design turn after model capability support is withdrawn', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-model-qualification-drift',
       previewEnabled: true,
@@ -401,7 +401,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
         inputModalities: ['text', 'image'],
         designSupport: {
           maturity: 'unsupported',
-          detail: 'This model qualification is no longer valid.'
+          detail: 'This model no longer reports the required Design capabilities.'
         },
         isDefault: true
       }
@@ -414,11 +414,11 @@ describeMac('TaskManagerService Design vertical slice', () => {
         message: 'Make the page more spacious.',
         referenceIds: []
       })
-    ).rejects.toThrow('This model qualification is no longer valid.');
+    ).rejects.toThrow('This model no longer reports the required Design capabilities.');
     expect((await scenario.service.getDesign(detail.design.id)).turns).toHaveLength(1);
   });
 
-  it('does not dispatch a queued Design turn after exact model qualification is withdrawn', async () => {
+  it('does not dispatch a queued Design turn after model capability support is withdrawn', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-queued-qualification-drift',
       previewEnabled: true,
@@ -453,7 +453,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
         inputModalities: ['text', 'image'],
         designSupport: {
           maturity: 'unsupported',
-          detail: 'This queued model qualification is no longer valid.'
+          detail: 'This queued model no longer reports the required Design capabilities.'
         },
         isDefault: true
       }
@@ -470,7 +470,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       (candidate) => candidate.turns.at(-1)?.outcome === 'FAILED'
     );
     expect(detail.turns.at(-1)?.failureReason).toContain(
-      'This queued model qualification is no longer valid.'
+      'This queued model no longer reports the required Design capabilities.'
     );
     expect(scenario.agent.startedTurns).toHaveLength(1);
   }, 15_000);

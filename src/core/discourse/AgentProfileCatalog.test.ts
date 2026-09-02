@@ -125,7 +125,7 @@ describe('AgentProfileCatalog', () => {
     });
   });
 
-  it('keeps roles visible and explains an unqualified read-only profile', () => {
+  it('keeps roles available when a runtime lacks native mutation denial', () => {
     const catalog = runtimeCatalog();
     catalog.defaultRuntimeId = 'opencode';
     catalog.runtimes = catalog.runtimes.filter(
@@ -145,9 +145,7 @@ describe('AgentProfileCatalog', () => {
     };
 
     expect(new AgentProfileCatalog().list(catalog).profiles[0]).toMatchObject({
-      availability: 'UNAVAILABLE',
-      unavailableReason:
-        'This profile can still mutate through shell commands. Normal Tasks remain available.'
+      availability: 'AVAILABLE'
     });
   });
 

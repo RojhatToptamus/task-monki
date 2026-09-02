@@ -72,7 +72,7 @@ describe('AgentModelSelector', () => {
 
   it('shows the exact reason for a model that the workflow cannot use', () => {
     const onSelectionChange = vi.fn();
-    const reason = 'This exact provider version and model failed Design verification.';
+    const reason = 'This model does not report the capabilities required by Design Mode.';
     render(
       <AgentModelSelector
         label="Design"

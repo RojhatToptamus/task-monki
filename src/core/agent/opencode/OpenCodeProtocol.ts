@@ -151,6 +151,7 @@ export interface OpenCodeProviderModel {
   capabilities?: {
     reasoning?: boolean;
     attachment?: boolean;
+    toolcall?: boolean;
     input?: Record<string, boolean>;
   };
   variants?: Record<string, unknown>;
@@ -349,6 +350,10 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
         const modalities = Object.entries(model.capabilities?.input ?? { text: true })
           .filter(([, supported]) => supported === true)
           .map(([modality]) => modality);
+        const acceptsImages = modalities.some(
+          (modality) => modality.toLowerCase() === 'image'
+        );
+        const supportsTools = model.capabilities?.toolcall === true;
         const variants = Object.keys(model.variants ?? {});
         return {
           id: `${OPENCODE_RUNTIME_ID}:${provider.id}/${modelId}`,
@@ -362,6 +367,22 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
           defaultReasoningEffort: undefined,
           serviceTiers: [],
           inputModalities: modalities.length > 0 ? modalities : ['text'],
+          designSupport:
+            acceptsImages && supportsTools
+              ? {
+                  maturity: 'stable',
+                  detail:
+                    'The connected OpenCode model catalog reports the image input and tool calls required by Design Mode.'
+                }
+              : {
+                  maturity: 'unsupported',
+                  detail: openCodeDesignUnavailableReason({
+                    modelProvider: provider.id,
+                    model: modelId,
+                    acceptsImages,
+                    supportsTools
+                  })
+                },
           isDefault: catalog.defaults[provider.id] === modelId,
           native: jsonValue({
             providerName: provider.name ?? provider.id,
@@ -380,6 +401,19 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
       if (left.isDefault !== right.isDefault) return left.isDefault ? -1 : 1;
       return left.displayName.localeCompare(right.displayName);
     });
+}
+
+function openCodeDesignUnavailableReason(input: {
+  modelProvider: string;
+  model: string;
+  acceptsImages: boolean;
+  supportsTools: boolean;
+}): string {
+  const missing = [
+    ...(!input.acceptsImages ? ['image input'] : []),
+    ...(!input.supportsTools ? ['tool calls'] : [])
+  ];
+  return `The connected OpenCode model catalog reports no ${missing.join(' or ')} for ${input.modelProvider}/${input.model}. Design Mode requires both.`;
 }
 
 export function mapOpenCodeSessionStatus(value: unknown): AgentSessionStatus {

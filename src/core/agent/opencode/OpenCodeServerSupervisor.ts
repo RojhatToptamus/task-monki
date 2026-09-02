@@ -18,7 +18,7 @@ import {
   parseOpenCodeQuestions
 } from './OpenCodeProtocol';
 import type { ResolvedOpenCodeRuntime } from './OpenCodeRuntimeResolver';
-import { isCompatibleOpenCodeVersion, OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
+import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
 import {
   openCodeEnvironmentKeys,
   openCodeSensitiveEnvironmentValues
@@ -41,8 +41,6 @@ export interface OpenCodeServerSupervisorOptions {
   requestTimeoutMs?: number;
   startupTimeoutMs?: number;
   eventProbeTimeoutMs?: number;
-  minimumVersion?: string;
-  maximumMajor?: number;
   /** Starts OpenCode without external plugins for provider-native read-only turns. */
   pure?: boolean;
   processSupervisor?: ProcessSupervisor;
@@ -410,16 +408,9 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
 
   private async probeProtocol(client: OpenCodeHttpClient): Promise<void> {
     const health = parseOpenCodeHealth((await client.get<unknown>('/global/health')).data);
-    if (
-      health.version !== this.options.runtime.version ||
-      !isCompatibleOpenCodeVersion(
-        health.version,
-        this.options.minimumVersion,
-        this.options.maximumMajor
-      )
-    ) {
+    if (health.version !== this.options.runtime.version) {
       throw new Error(
-        `OpenCode server version ${health.version} does not match the compatible executable ${this.options.runtime.version}.`
+        `OpenCode server version ${health.version} does not match the discovered executable ${this.options.runtime.version}.`
       );
     }
     parseOpenCodeProviderCatalog((await client.get<unknown>('/provider')).data);

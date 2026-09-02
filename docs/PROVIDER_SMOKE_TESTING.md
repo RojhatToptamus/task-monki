@@ -74,11 +74,10 @@ runs one DIRECT Discourse turn for each selected provider profile.
 The Discourse prompt requests one write to a unique probe file. It prohibits
 approval requests, retries, alternate tools, and alternate paths.
 
-Task Monki attempts the turn only for a profile that advertises a native
-read-only policy. The probe qualifies that policy. The report gives the reason
-for each unsupported profile.
-Normal Tasks remain available for an unsupported read-only profile.
-Grok Build 1.0.13 on macOS uses a separate ACP process for read-only work.
+The mutation probe runs for every selected ready runtime. It records the effect
+of the prompt, the provider-native restriction when present, and the final
+repository comparison. Its result does not create a provider or model allowlist.
+Grok Build on macOS uses a separate ACP process for read-only work.
 Normal Task and Design sessions keep the normal writable process. The
 read-only process uses Grok's native sandbox and denies edit, write, and MCP
 tools. It also refuses shared-leader routing.
@@ -96,11 +95,12 @@ A qualification passes only when all these conditions are true:
 - The source repository remains clean.
 - The checked-out ref and `HEAD` remain unchanged.
 
-Codex, OpenCode, and Cursor use provider controls. These controls are not
-operating-system sandboxes. Grok uses a separate process with its native
-operating-system sandbox. Claude Agent ACP 0.70.0 plan mode failed this probe,
-so its read-only workflows are disabled. The independent file and Git checks
-still detect a provider that changes the source repository.
+Codex, OpenCode, Cursor, and Claude use provider controls. These controls are
+not operating-system sandboxes. Grok uses a separate process with its native
+operating-system sandbox. A recorded Claude plan-mode test completed a Write
+tool call. Task Monki therefore treats the prompt and provider mode as guidance,
+not confinement. The independent file and Git checks reject a result when any
+provider changes the source repository.
 
 If a write occurs, the harness does not erase it. It keeps the changed
 repository, runtime records, Discourse records, and `report.json` as evidence.
@@ -130,9 +130,9 @@ If the selected model supports image input, the command also attaches
 `src/testSupport/fixtures/provider-smoke-image.png`. The provider must report
 an unrevealed visual code, the ordered shapes, and the background color. The
 report includes the payload size and the model's effective input modes.
-Effective support normally follows ACP negotiation and exact model
-qualification. It can also include one exact provider-local exception for a
-proven false capability flag.
+Effective support follows a native model catalog when the protocol provides
+one. ACP v1 supplies an agent-level image flag. It can also include one narrow
+provider-local exception for a proven false capability flag.
 
 The report stores only path-free selection and submission evidence. It does not
 store attachment paths or bytes. A supported qualification fails if the
@@ -145,7 +145,7 @@ provider journal as independent native request evidence. The journal must keep
 the content shape and replace attachment bytes, data URLs, and managed paths.
 
 The report keeps the advertised image flag separate from verified behavior.
-It reports `ADVERTISED_FALSE_VERIFIED_TRUE` when an exact image test passes
+It reports `ADVERTISED_FALSE_VERIFIED_TRUE` when an image test passes
 despite an explicit false flag. It reports
 `ADVERTISED_TRUE_VERIFICATION_FAILED` only when text and delivery evidence pass
 but image understanding fails. Account, network, timeout, and cancellation

@@ -73,6 +73,7 @@ interface MainColumnProps {
   addingRepository: boolean;
   onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
+  onGoToDesigns(): void;
   onSelect(taskId: string, trigger?: HTMLElement): void;
   onRespondToInteraction(
     interaction: InteractionRequestRecord,
@@ -125,11 +126,11 @@ const SETUP_VIEW_TITLES: Record<
   },
   needsRepository: {
     title: 'Set up Task Monki',
-    subtitle: 'Add a Git repository before creating tasks'
+    subtitle: 'Choose a repository and default model. Both stay editable in Settings.'
   },
   needsReview: {
     title: 'Set up Task Monki',
-    subtitle: 'Review tools and defaults before entering the board'
+    subtitle: 'Choose a repository and default model. Both stay editable in Settings.'
   }
 };
 
@@ -162,6 +163,7 @@ export function MainColumn({
   addingRepository,
   onAddRepository,
   onFinishSetup,
+  onGoToDesigns,
   onSelect,
   onRespondToInteraction,
   onArchive,
@@ -218,9 +220,9 @@ export function MainColumn({
           activeRepositoryPath={activeRepository?.path ?? ''}
           onAddRepository={onAddRepository}
           onFinishSetup={onFinishSetup}
+          onGoToDesigns={onGoToDesigns}
           onRefreshExternalTools={onRefreshExternalTools}
           onDiscoverAgentRuntimeModels={onDiscoverAgentRuntimeModels}
-          onTestExternalTool={onTestExternalTool}
           onSetAppSettings={onSetAppSettings}
         />
       ) : null}

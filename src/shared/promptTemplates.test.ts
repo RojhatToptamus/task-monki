@@ -11,6 +11,7 @@ import {
   TASK_MONKI_CONTEXT_LINE,
   TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
   TASK_MONKI_PROGRESS_CONTRACT,
+  buildAgentReviewPrompt,
   buildContinuationPrompt,
   buildDesignAgentDeveloperInstructions,
   buildForkAlternativeTaskPrompt,
@@ -329,6 +330,17 @@ describe('prompt templates', () => {
     expect(prompt).toContain('Do not copy generic engineering rules');
     expect(prompt).toContain('Never invent commands');
     expect(prompt).toContain('Downstream implementation model: Sol');
+    expect(prompt.match(/Do not modify files\./g)).toHaveLength(1);
+  });
+
+  it('gives a review turn one direct no-modification instruction', () => {
+    const prompt = buildAgentReviewPrompt({
+      task: taskFixture(),
+      worktree: worktreeFixture(),
+      target: { type: 'UNCOMMITTED_CHANGES' }
+    });
+
+    expect(prompt.match(/Do not modify files\./g)).toHaveLength(1);
   });
 
   it('keeps engineering quality guidance focused on source-of-truth fixes and honest verification', () => {

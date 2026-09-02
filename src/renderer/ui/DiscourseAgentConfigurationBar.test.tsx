@@ -10,7 +10,7 @@ import type { DiscourseMentionCatalogSnapshot } from '../../shared/discourse';
 import { DiscourseAgentConfigurationBar } from './DiscourseAgentConfigurationBar';
 
 describe('DiscourseAgentConfigurationBar', () => {
-  it('shows an unqualified provider with its disabled read-only reason', () => {
+  it('keeps a provider selectable when native mutation denial is unavailable', () => {
     const codexModel = model('codex', 'codex:model', 'Codex model');
     const blockedModel = model('blocked', 'blocked:model', 'Blocked model');
     const blockedRuntime: AgentRuntimeState = {
@@ -116,13 +116,11 @@ describe('DiscourseAgentConfigurationBar', () => {
       />
     );
 
-    expect(html).toContain(
-      'This provider can still mutate through child agents. Normal Tasks remain available.'
-    );
+    expect(html).not.toContain('This provider can still mutate through child agents.');
     expect(html).toContain('tm-agent-console--compact');
     expect(html).toContain('>Codex model</span>');
     expect(html).toMatch(
-      /<button[^>]*disabled=""[^>]*aria-label="Blocked model via Blocked provider/u
+      /<button[^>]*aria-disabled="false"[^>]*aria-label="Blocked model via Blocked provider/u
     );
   });
 });

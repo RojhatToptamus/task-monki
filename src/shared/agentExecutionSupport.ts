@@ -12,11 +12,8 @@ export type AgentExecutionOperation =
   | 'DISCOURSE';
 
 export interface AgentExecutionSupportContext {
-  model?: Pick<
-    AgentModel,
-    'inputModalities' | 'previewRecipeGenerationSupport' | 'designSupport'
-  >;
-  /** Lets the explicit Design qualification harness test an unqualified candidate model and its image-result path. */
+  model?: Pick<AgentModel, 'inputModalities' | 'designSupport'>;
+  /** Lets the live Design harness test a candidate model whose capabilities are not reported. */
   allowCandidateDesignModel?: boolean;
 }
 
@@ -41,25 +38,13 @@ export function projectAgentExecutionSupport(
         : unsupported('This agent cannot add instructions to an active turn.');
 
     case 'PROMPT_REFINEMENT':
-      return readOnlyTurnSupport(capabilities);
+      return supported();
 
     case 'PREVIEW_RECIPE_GENERATION':
-      if (
-        capabilities.extensions['task-monki.preview-recipe-generation']
-          ?.maturity === 'stable'
-      ) {
-        const modelSupport = context.model?.previewRecipeGenerationSupport;
-        return modelSupport?.maturity === 'unsupported'
-          ? unsupported(
-              modelSupport.detail?.trim() ||
-                'This model has not passed Preview generation qualification.'
-            )
-          : supported();
-      }
-      return readOnlyTurnSupport(capabilities);
+      return supported();
 
     case 'REVIEW':
-      return readOnlyTurnSupport(capabilities);
+      return supported();
 
     case 'DESIGN': {
       const extensions = capabilities.extensions;
@@ -96,7 +81,7 @@ export function projectAgentExecutionSupport(
         if (context.model && context.model.designSupport?.maturity !== 'stable') {
           return unsupported(
             context.model?.designSupport?.detail?.trim() ||
-              'This provider version and model have not passed the required Design Mode technical qualification.'
+              'This provider or model does not report the image input required by Design Mode.'
           );
         }
       }
@@ -104,26 +89,9 @@ export function projectAgentExecutionSupport(
     }
 
     case 'DISCOURSE': {
-      return readOnlyTurnSupport(capabilities);
+      return supported();
     }
   }
-}
-
-function readOnlyTurnSupport(
-  capabilities: AgentRuntimeCapabilities
-): AgentExecutionSupport {
-  if (capabilities.readOnlyTurns.maturity === 'stable') {
-    return supported();
-  }
-
-  const reason =
-    capabilities.readOnlyTurns.detail?.trim() ||
-    'This agent profile has no qualified native policy that denies repository changes.';
-  return unsupported(
-    /normal tasks remain available\.?$/iu.test(reason)
-      ? reason
-      : `${reason.replace(/[.\s]+$/u, '')}. Normal Tasks remain available.`
-  );
 }
 
 function supported(): AgentExecutionSupport {

@@ -53,6 +53,12 @@ export interface AcpRuntimeProfile {
    * stay gated by an exact, versioned profile contract.
    */
   parameterizedModelCatalog?: AcpParameterizedModelCatalogContract;
+  /**
+   * Stable ACP exposes model choices only after session creation. Profiles
+   * with no pre-session catalog can discover those choices through one
+   * temporary session that is closed before the catalog is published.
+   */
+  discoverModelsFromSession?: true;
   /** Access policies Task Monki can enforce for this provider's ACP requests. */
   approvalPolicies?: readonly AcpApprovalPolicy[];
   /**
@@ -71,17 +77,12 @@ export interface AcpRuntimeProfile {
         kind: 'DEDICATED_PROCESS';
         policyId: string;
         detail: string;
-        runtimeVersion: string;
         platform: NodeJS.Platform;
         launchArgv: readonly string[];
         startupFailurePattern: RegExp;
       };
-  /** Why this profile cannot currently run shared read-only workflows. */
-  readOnlyTurnUnavailableReason?: string;
-  /** Exact runtime that can generate Preview YAML from a disposable evidence copy. */
-  previewRecipeGenerationQualification?: {
-    runtimeVersion: string;
-    modelId: string;
+  /** Preview YAML may run only from the app-owned disposable evidence copy. */
+  isolatedPreviewRecipeGeneration?: {
     detail: string;
   };
   /**
@@ -99,34 +100,26 @@ export interface AcpRuntimeProfile {
   attachmentTextTransport?: 'embedded-resource' | 'text-block';
   /** Why this profile has no qualified managed-attachment delivery. */
   attachmentDeliveryUnavailableReason?: string;
-  /** Exact runtime/model pairs proven to consume native ACP image blocks. */
-  imageInputQualifications?: readonly AcpImageInputQualification[];
-  /** Exact runtime/model pairs proven to support the required Design infrastructure in packaged runs. */
-  designQualifications?: readonly AcpDesignQualification[];
+  /** Image formats Task Monki can send when the ACP agent advertises image input. */
+  imageMediaTypes?: readonly [string, ...string[]];
+  /** Provider-local transport evidence for an ACP agent with a proven false image flag. */
+  imageInputCompatibility?: AcpImageInputCompatibility;
+  /** Optional Design-only default owned by this provider profile. */
+  designDefaultReasoningEffort?: string;
   /** The qualified Design path needs ACP additional-directories access to the app-owned skill root. */
   designSkillAdditionalDirectoryRequired?: true;
 }
 
-export interface AcpImageInputQualification {
-  runtimeVersion: string;
-  modelId: string;
-  /** Narrow compatibility exception for an agent with a proven false capability flag. */
-  allowWhenNotAdvertised?: true;
-  /** Provider/model formats allowed through this exact qualified path. */
+export interface AcpImageInputCompatibility {
+  /** Formats proven to work through this provider despite its false capability flag. */
   mediaTypes: readonly [string, ...string[]];
-}
-
-export interface AcpDesignQualification {
-  runtimeVersion: string;
-  modelId: string;
-  /** Optional Design-only default proven by the exact packaged qualification. */
-  defaultReasoningEffort?: string;
 }
 
 export interface AcpImageInputSupport {
   advertised?: boolean;
   enabled: boolean;
-  qualification?: AcpImageInputQualification;
+  mediaTypes?: readonly [string, ...string[]];
+  compatibility?: AcpImageInputCompatibility;
   capabilityDrift: boolean;
   unavailableReason?: string;
 }
@@ -179,6 +172,12 @@ const descriptor = (id: AgentRuntimeId, displayName: string): AgentRuntimeDescri
   startupPolicy: 'ON_DEMAND'
 });
 
+const ACP_IMAGE_MEDIA_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/webp'
+] as const;
+
 /**
  * Provider profiles are intentionally explicit. ACP standardizes transport and
  * session control; it does not erase each agent's own authentication, model
@@ -219,10 +218,9 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
   readOnlyTurnPolicy: {
     kind: 'DEDICATED_PROCESS',
-    policyId: 'grok-build/read-only-process@1.0.13',
+    policyId: 'grok-build/read-only-process@v1',
     detail:
       'A separate Grok Build process uses its read-only sandbox, denies direct edit, write, and MCP tools, and denies Task Monki permission requests.',
-    runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
     platform: 'darwin',
     launchArgv: [
       '--no-auto-update',
@@ -247,21 +245,11 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   },
   allowRememberedPermissions: true,
   attachmentTextTransport: 'embedded-resource',
-  imageInputQualifications: [
-    {
-      runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
-      modelId: 'grok-4.6',
-      allowWhenNotAdvertised: true,
-      mediaTypes: ['image/png']
-    }
-  ],
-  designQualifications: [
-    {
-      runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
-      modelId: 'grok-4.6',
-      defaultReasoningEffort: 'low'
-    }
-  ],
+  imageMediaTypes: ACP_IMAGE_MEDIA_TYPES,
+  imageInputCompatibility: {
+    mediaTypes: ['image/png', 'image/jpeg']
+  },
+  designDefaultReasoningEffort: 'low',
   environmentPolicy: {
     contractId: 'task-monki/grok-acp-environment@v1',
     allowedKeys: [
@@ -317,19 +305,7 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   },
   allowRememberedPermissions: true,
   attachmentTextTransport: 'text-block',
-  imageInputQualifications: [
-    {
-      runtimeVersion: '2026.08.25-3e8eec8',
-      modelId: 'composer-2.5',
-      mediaTypes: ['image/png']
-    }
-  ],
-  designQualifications: [
-    {
-      runtimeVersion: '2026.08.25-3e8eec8',
-      modelId: 'composer-2.5'
-    }
-  ],
+  imageMediaTypes: ACP_IMAGE_MEDIA_TYPES,
   environmentPolicy: {
     contractId: 'task-monki/cursor-agent-acp-environment@v1',
     allowedKeys: [
@@ -368,30 +344,15 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
     modeId: 'plan',
     policyId: 'claude-agent-acp/plan-preview-generation@v1',
     detail:
-      'Claude Agent ACP plan mode is used only with the app-owned disposable Preview evidence copy.'
+      'Claude Agent ACP plan mode limits normal edits. Task Monki also tells the agent not to modify files, denies reported permission requests, and compares repository state after the turn.'
   },
-  readOnlyTurnUnavailableReason:
-    'Claude Agent ACP 0.70.0 plan mode executed a file write during the packaged mutation test. Repository read-only workflows stay unavailable until a native mutation-denial mode passes qualification.',
-  previewRecipeGenerationQualification: {
-    runtimeVersion: '0.70.0',
-    modelId: 'sonnet',
+  isolatedPreviewRecipeGeneration: {
     detail:
-      'Claude Agent ACP 0.70.0 with Sonnet passed Preview YAML generation from an app-owned disposable evidence copy. It receives no source repository path.'
+      'Claude Agent ACP generates Preview YAML from an app-owned disposable evidence copy. It receives no source repository path.'
   },
   attachmentTextTransport: 'embedded-resource',
-  imageInputQualifications: [
-    {
-      runtimeVersion: '0.70.0',
-      modelId: 'sonnet',
-      mediaTypes: ['image/png']
-    }
-  ],
-  designQualifications: [
-    {
-      runtimeVersion: '0.70.0',
-      modelId: 'sonnet'
-    }
-  ],
+  imageMediaTypes: ACP_IMAGE_MEDIA_TYPES,
+  discoverModelsFromSession: true,
   designSkillAdditionalDirectoryRequired: true,
   environmentPolicy: {
     contractId: 'task-monki/claude-agent-acp-environment@v1',
@@ -451,13 +412,6 @@ export function acpCapabilities(
     ? 'Enabled only when advertised by the connected ACP agent.'
     : 'Pending ACP initialize capability negotiation.';
   const approvalPolicies = profile.approvalPolicies ?? ['on-request'];
-  const hasQualifiedModelSelections = Boolean(
-    !profile.sessionModelExtension &&
-      !profile.parameterizedModelCatalog &&
-      (profile.imageInputQualifications?.length ||
-        profile.designQualifications?.length ||
-        profile.previewRecipeGenerationQualification)
-  );
   const normalExecutionPresets = approvalPolicies.map((approvalPolicy) => {
     switch (approvalPolicy) {
       case 'on-request':
@@ -501,10 +455,8 @@ export function acpCapabilities(
   const configuredReadOnlyPolicy = profile.readOnlyTurnPolicy;
   const dedicatedProcessQualified =
     configuredReadOnlyPolicy?.kind !== 'DEDICATED_PROCESS' ||
-    (negotiated?.runtimeVersion === configuredReadOnlyPolicy.runtimeVersion &&
-      negotiated.platform === configuredReadOnlyPolicy.platform);
-  const readOnlyPolicy = dedicatedProcessQualified &&
-    !profile.readOnlyTurnUnavailableReason
+    negotiated?.platform === configuredReadOnlyPolicy.platform;
+  const readOnlyPolicy = dedicatedProcessQualified
     ? configuredReadOnlyPolicy
     : undefined;
   const executionPresets = [
@@ -533,9 +485,8 @@ export function acpCapabilities(
         maturity: 'unsupported' as const,
         detail:
           configuredReadOnlyPolicy?.kind === 'DEDICATED_PROCESS'
-            ? `${profile.descriptor.displayName} read-only work requires ${configuredReadOnlyPolicy.runtimeVersion} on ${configuredReadOnlyPolicy.platform}. Found ${negotiated?.runtimeVersion ?? 'an unknown runtime version'} on ${negotiated?.platform ?? 'an unknown platform'}.`
-            : profile.readOnlyTurnUnavailableReason ??
-              `${profile.descriptor.displayName} has no qualified native repository-mutation denial policy.`
+            ? `${profile.descriptor.displayName} read-only work requires its native read-only launch contract on ${configuredReadOnlyPolicy.platform}. Found ${negotiated?.platform ?? 'an unknown platform'}.`
+            : `${profile.descriptor.displayName} has no read-only execution policy.`
       };
   return {
     runtimeId: profile.descriptor.id,
@@ -550,15 +501,15 @@ export function acpCapabilities(
     readOnlyTurns: readOnlyCapability,
     modelCatalog: {
       maturity: 'inferred',
-      ...(profile.parameterizedModelCatalog || hasQualifiedModelSelections
+      ...(profile.parameterizedModelCatalog || profile.discoverModelsFromSession
         ? { activation: 'EXPLICIT' as const }
         : {}),
       detail: profile.sessionModelExtension
         ? `${profile.descriptor.displayName} session models use the explicit ${profile.sessionModelExtension.contractId} provider extension; stable ACP model-category config selectors remain a separate path.`
         : profile.parameterizedModelCatalog
           ? `Models are loaded on demand through the explicit ${profile.parameterizedModelCatalog.contractId} provider extension and revalidated by every new session.`
-          : hasQualifiedModelSelections
-            ? 'Exact packaged model selections are shown before session creation. The connected provider session must advertise and accept the selected model before prompt delivery.'
+          : profile.discoverModelsFromSession
+            ? 'Models are loaded on demand from the stable ACP model selector in a temporary provider session. The session is closed before the catalog is published.'
             : 'ACP has no global model-list method; model-category config selectors are preserved after session setup.'
     },
     activeTurnSteering: {
@@ -577,18 +528,14 @@ export function acpCapabilities(
         detail: 'ACP cannot attest a restricted app-owned read root for Design skills.'
       },
       'task-monki.preview-recipe-generation':
-        profile.previewRecipeGenerationQualification &&
-        profile.previewRecipeGenerationQualification.runtimeVersion ===
-          negotiated?.runtimeVersion
+        profile.isolatedPreviewRecipeGeneration
           ? {
               maturity: 'stable',
-              detail: profile.previewRecipeGenerationQualification.detail
+              detail: profile.isolatedPreviewRecipeGeneration.detail
             }
           : {
               maturity: 'unsupported',
-              detail: profile.previewRecipeGenerationQualification
-                ? `${profile.descriptor.displayName} Preview generation requires ${profile.previewRecipeGenerationQualification.runtimeVersion}. Found ${negotiated?.runtimeVersion ?? 'an unknown runtime version'}.`
-                : `${profile.descriptor.displayName} uses its qualified shared read-only turn path for Preview generation.`
+              detail: `${profile.descriptor.displayName} uses its shared read-only turn path for Preview generation.`
             }
     }
   };
@@ -648,37 +595,36 @@ export function acpImageInputSupport(input: {
   modelId: string;
 }): AcpImageInputSupport {
   const advertised = input.promptCapabilities?.image;
-  const qualification = input.runtimeVersion && input.modelId !== 'default'
-    ? input.profile.imageInputQualifications?.find(
-        (candidate) =>
-          candidate.runtimeVersion === input.runtimeVersion &&
-          candidate.modelId === input.modelId
-      )
-    : undefined;
-  const capabilityDrift = Boolean(
-    qualification?.allowWhenNotAdvertised && advertised === false
-  );
-  const enabled = Boolean(qualification && (advertised || capabilityDrift));
-  if (enabled) {
-    return { advertised, enabled, qualification, capabilityDrift };
+  const compatibility = input.profile.imageInputCompatibility;
+  const capabilityDrift = Boolean(compatibility && advertised === false);
+  if (advertised === true && input.profile.imageMediaTypes) {
+    return {
+      advertised,
+      enabled: true,
+      mediaTypes: input.profile.imageMediaTypes,
+      capabilityDrift: false
+    };
+  }
+  if (capabilityDrift && compatibility) {
+    return {
+      advertised,
+      enabled: true,
+      mediaTypes: compatibility.mediaTypes,
+      compatibility,
+      capabilityDrift: true
+    };
   }
 
   const runtime = input.runtimeVersion ?? 'an unknown runtime version';
-  const unavailableReason = input.modelId === 'default'
-    ? `${input.profile.descriptor.displayName} automatic model selection is not image-qualified.`
-    : !qualification
-      ? advertised === true
-        ? `${input.profile.descriptor.displayName} advertises ACP image input, but ${input.modelId} on ${runtime} has not passed Task Monki image qualification.`
-        : advertised === false
-          ? `${input.profile.descriptor.displayName} did not advertise ACP image input, and ${input.modelId} on ${runtime} has no verified compatibility exception.`
-          : `${input.profile.descriptor.displayName} did not report whether ACP image input is supported for ${input.modelId} on ${runtime}.`
-      : advertised === false
-        ? `${input.profile.descriptor.displayName} did not advertise ACP image input for ${input.modelId} on ${runtime}.`
-        : `${input.profile.descriptor.displayName} did not report ACP image support for ${input.modelId} on ${runtime}.`;
+  const unavailableReason = advertised === false
+    ? `${input.profile.descriptor.displayName} did not advertise ACP image input for ${input.modelId} on ${runtime}.`
+    : advertised === true
+      ? `${input.profile.descriptor.displayName} advertises ACP image input, but Task Monki has no native image transport for this profile.`
+      : `${input.profile.descriptor.displayName} did not report whether ACP image input is supported for ${input.modelId} on ${runtime}.`;
   return {
     advertised,
     enabled: false,
-    qualification,
+    compatibility,
     capabilityDrift: false,
     unavailableReason
   };
@@ -686,57 +632,30 @@ export function acpImageInputSupport(input: {
 
 export function acpDesignSupport(input: {
   profile: AcpRuntimeProfile;
+  promptCapabilities?: { image?: boolean };
   runtimeVersion?: string;
   modelId: string;
 }): AgentDesignCapability {
-  const qualification = input.runtimeVersion
-    ? input.profile.designQualifications?.find(
-        (candidate) =>
-          candidate.runtimeVersion === input.runtimeVersion &&
-          candidate.modelId === input.modelId
-      )
-    : undefined;
-  return qualification
+  const imageSupport = acpImageInputSupport(input);
+  return imageSupport.enabled
     ? {
         maturity: 'stable',
-        detail: `${input.profile.descriptor.displayName} ${qualification.runtimeVersion} with ${qualification.modelId} passed the packaged Design instruction, skill, MCP image-result, browser, candidate, and cleanup qualification.`,
-        ...(qualification.defaultReasoningEffort
-          ? { defaultReasoningEffort: qualification.defaultReasoningEffort }
+        detail: `${input.profile.descriptor.displayName} and this model support the native image input required by Design Mode.`,
+        ...(input.profile.designDefaultReasoningEffort
+          ? { defaultReasoningEffort: input.profile.designDefaultReasoningEffort }
           : {})
       }
     : {
         maturity: 'unsupported',
-        detail: `${input.profile.descriptor.displayName} ${input.runtimeVersion ?? 'unknown version'} model ${input.modelId} has not passed the required packaged Design technical qualification.`
+        detail: imageSupport.unavailableReason ??
+          `${input.profile.descriptor.displayName} does not support the image input required by Design Mode.`
       };
-}
-
-export function acpPreviewRecipeGenerationSupport(input: {
-  profile: AcpRuntimeProfile;
-  runtimeVersion?: string;
-  modelId: string;
-}): AgentCapability | undefined {
-  const qualification = input.profile.previewRecipeGenerationQualification;
-  if (!qualification) return undefined;
-  if (
-    qualification.runtimeVersion === input.runtimeVersion &&
-    qualification.modelId === input.modelId
-  ) {
-    return { maturity: 'stable', detail: qualification.detail };
-  }
-  return {
-    maturity: 'unsupported',
-    detail: `${input.profile.descriptor.displayName} Preview generation requires ${qualification.runtimeVersion} with ${qualification.modelId}. Found ${input.runtimeVersion ?? 'an unknown runtime version'} with ${input.modelId}.`
-  };
 }
 
 export function defaultAcpModel(
   profile: AcpRuntimeProfile,
   inputModalities: string[] = ['text']
 ): AgentModel {
-  const previewRecipeGenerationSupport = acpPreviewRecipeGenerationSupport({
-    profile,
-    modelId: profile.defaultModel
-  });
   return {
     id: `${profile.descriptor.id}:${profile.defaultModelProvider}/${profile.defaultModel}`,
     runtimeId: profile.descriptor.id,
@@ -752,7 +671,6 @@ export function defaultAcpModel(
     supportedReasoningEfforts: [],
     serviceTiers: [],
     inputModalities,
-    ...(previewRecipeGenerationSupport ? { previewRecipeGenerationSupport } : {}),
     isDefault: true,
     native: {
       source: profile.parameterizedModelCatalog?.contractId ?? 'profile-default'

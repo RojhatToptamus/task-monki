@@ -7,7 +7,7 @@ Status: Current architecture.
 This document defines the shared agent runtime in Task Monki.
 It records current ownership and runtime rules.
 
-For exact provider versions and qualified workflows, read
+For current provider capabilities and recorded qualification evidence, read
 `docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md`.
 
 ## Purpose
@@ -138,15 +138,18 @@ Task Monki must inspect local evidence before workflow state changes.
 Review, prompt refinement, and Discourse use the same read-only turn path.
 Each workflow still owns its prompt, parsing, budget, queue, and result state.
 
-The selected adapter must provide a qualified native mutation-denial policy.
-Task Monki also compares repository state before and after each applicable turn.
+Every ready runtime and model can use the shared path.
+The workflow prompt tells the agent not to modify files.
+Each adapter applies its provider-native restriction when one is available.
+Task Monki compares repository state before and after each applicable turn.
 
 If the repository changes, the turn fails.
 Task Monki preserves the change as evidence.
 It does not erase the provider change.
 
 A provider policy is not an operating-system sandbox.
-The UI must describe its real boundary.
+The repository comparison detects a change after it occurs; it does not confine the
+provider process. The UI must describe this boundary correctly.
 
 ### Preview recipe generation
 
@@ -154,8 +157,8 @@ Preview recipe generation uses the runtime and model selected in Settings.
 It does not use an app-owned fallback model.
 
 The normal path uses the shared transient read-only turn.
-An adapter can qualify an exact runtime and model for a disposable evidence copy.
-That copy must not expose the source repository path.
+An adapter can use a disposable evidence copy when it cannot safely receive the
+source repository. That copy must not expose the source repository path.
 
 The Preview generation service owns the prompt, parsing, schema validation,
 cancellation, and user-visible error.
@@ -188,10 +191,11 @@ The projection uses these facts:
 - attachment transport.
 - interruption support.
 - required app-owned tool transport.
-- exact qualification rules in the adapter.
+- provider-native capability mapping in the adapter.
 
 The projection returns either support or a clear reason.
-Normal Tasks remain available when only a read-only workflow is unsupported.
+Read-only workflows do not use provider or model allowlists.
+Runtime readiness, authentication, and required attachment input types still apply.
 
 Do not add a capability field without a production consumer.
 Do not duplicate optional adapter methods as descriptive flags.
@@ -442,8 +446,9 @@ npm run smoke:providers
 git diff --check
 ```
 
-Run provider scenarios with the exact packaged runtime and model.
-Record unsupported combinations and the exact reason.
+Run provider scenarios with each installed packaged runtime and a selected live
+model. Record the tested version and model as evidence. Do not turn that record
+into a runtime-version allowlist.
 
 ## Related documents
 

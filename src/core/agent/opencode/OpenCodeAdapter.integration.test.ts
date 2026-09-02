@@ -334,13 +334,19 @@ describe('OpenCodeAdapter', () => {
               id: 'catalog-image-model',
               name: 'Catalog image model',
               status: 'active',
-              capabilities: { input: { text: true, image: true } }
+              capabilities: { toolcall: true, input: { text: true, image: true } }
             },
             'catalog-text-model': {
               id: 'catalog-text-model',
               name: 'Catalog text model',
               status: 'active',
-              capabilities: { input: { text: true, image: false } }
+              capabilities: { toolcall: true, input: { text: true, image: false } }
+            },
+            'catalog-image-no-tools': {
+              id: 'catalog-image-no-tools',
+              name: 'Catalog image model without tools',
+              status: 'active',
+              capabilities: { toolcall: false, input: { text: true, image: true } }
             }
           }
         },
@@ -352,13 +358,13 @@ describe('OpenCodeAdapter', () => {
               id: 'gpt-5.6-luna',
               name: 'GPT-5.6 Luna',
               status: 'active',
-              capabilities: { input: { text: true, image: true } }
+              capabilities: { toolcall: true, input: { text: true, image: true } }
             },
             'second-image-model': {
               id: 'second-image-model',
               name: 'Second image model',
               status: 'active',
-              capabilities: { input: { text: true, image: true } },
+              capabilities: { toolcall: true, input: { text: true, image: true } },
               cost: { input: 0, output: 0 }
             }
           }
@@ -384,7 +390,7 @@ describe('OpenCodeAdapter', () => {
           model: 'catalog-image-model',
           designSupport: {
             maturity: 'stable',
-            detail: expect.stringContaining('reports image input support')
+            detail: expect.stringContaining('image input and tool calls')
           }
         }),
         expect.objectContaining({
@@ -392,7 +398,7 @@ describe('OpenCodeAdapter', () => {
           model: 'second-image-model',
           designSupport: {
             maturity: 'stable',
-            detail: expect.stringContaining('reports image input support')
+            detail: expect.stringContaining('image input and tool calls')
           }
         }),
         expect.objectContaining({
@@ -400,7 +406,15 @@ describe('OpenCodeAdapter', () => {
           model: 'catalog-text-model',
           designSupport: {
             maturity: 'unsupported',
-            detail: expect.stringContaining('reports no image input support')
+            detail: expect.stringContaining('reports no image input')
+          }
+        }),
+        expect.objectContaining({
+          modelProvider: 'opencode',
+          model: 'catalog-image-no-tools',
+          designSupport: {
+            maturity: 'unsupported',
+            detail: expect.stringContaining('reports no tool calls')
           }
         })
       ])
@@ -447,7 +461,7 @@ describe('OpenCodeAdapter', () => {
         authoritativeGoal: 'Create and verify the Design.',
         settings: SETTINGS
       })
-    ).rejects.toThrow('reports no image input support');
+    ).rejects.toThrow('reports no image input');
     expect(fixture.harness.promptBodies).toHaveLength(0);
     expect(fixture.harness.sessions.size).toBe(0);
     await fixture.adapter.shutdown();
@@ -6701,7 +6715,7 @@ function defaultProviderCatalog(): unknown {
             id: 'claude-test',
             name: 'Claude Test',
             status: 'active',
-            capabilities: { input: { text: true, image: true } },
+            capabilities: { toolcall: true, input: { text: true, image: true } },
             variants: { low: {}, high: {} }
           }
         }

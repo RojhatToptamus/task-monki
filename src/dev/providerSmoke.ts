@@ -31,7 +31,6 @@ import type {
 } from '../shared/attachments';
 import { projectAgentExecutionSupport } from '../shared/agentExecutionSupport';
 import { toAgentAttachmentSelectionFromRecords } from '../core/agent/AgentAttachmentDelivery';
-import { codexAttachmentSupport } from '../core/agent/codex/CodexAttachmentDelivery';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
@@ -1270,10 +1269,7 @@ function expectedAttachmentSubmissions(
             ? 'embedded-resource'
             : target.runtimeId === 'cursor-agent-acp'
               ? 'text-block'
-              : target.executionSettings?.sandbox === 'DANGER_FULL_ACCESS' ||
-                  codexAttachmentSupport(target.runtimeVersion).exactFileAccess
-                ? 'managed-path'
-                : 'text-block'
+              : 'managed-path'
   }));
 }
 
@@ -1850,8 +1846,13 @@ function hasConcreteImageObservation(message: string): boolean {
   const positionedOuterShapes = /\btriangle\b[^.\n]{0,60}\b(?:with|between)\b[^.\n]{0,60}\bcircle\b[^.\n]{0,40}\bleft\b[^.\n]{0,80}\b(?:square|rectangle)\b[^.\n]{0,40}\bright\b/u.test(
     normalized
   );
+  const triangleBetweenOuterShapes = /\btriangle\b[^.\n]{0,40}\bbetween\b[^.\n]{0,40}\bcircle\b[^.\n]{0,40}\b(?:and|&)\b[^.\n]{0,40}\b(?:square|rectangle)\b/u.test(
+    normalized
+  );
   const background = /\b(?:navy|dark blue|deep blue)\b/u.test(normalized);
-  return code && (orderedShapes || positionedOuterShapes) && background;
+  return code &&
+    (orderedShapes || positionedOuterShapes || triangleBetweenOuterShapes) &&
+    background;
 }
 
 interface SmokeWorktreeVerification {
@@ -2494,7 +2495,7 @@ function usage(): string {
     --confirm-throwaway \\
     --confirm-provider-usage
 
-Optional repeatable filters: --runtime <runtime-id>, --model <qualified-model-id>
+Optional repeatable filters: --runtime <runtime-id>, --model <model-id>
 Other options:
   --qualify-read-only, --qualify-attachments
   --timeout-seconds <10-3600>, --state-root <empty-path>, --help
@@ -2502,9 +2503,9 @@ Other options:
 The repository must be a clean Git root with a commit and no remotes. Runs are
 sequential, interactions are never approved, and report.json retains the result.
 Read-only qualification adds one DIRECT Discourse mutation-denial probe for
-each selected profile that advertises a qualified native read-only policy.
+each selected profile that advertises a native read-only policy.
 Attachment qualification adds managed text to each supported profile. It also
-adds the visual qualification fixture when the selected model has qualified image input.`;
+adds the visual qualification fixture when the selected model reports image input.`;
 }
 
 async function main(): Promise<void> {

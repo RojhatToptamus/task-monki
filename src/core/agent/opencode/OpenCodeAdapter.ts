@@ -1274,9 +1274,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const projectCatalog = parseOpenCodeProviderCatalog(
         (await running.client.get<unknown>('/provider')).data
       );
-      const projectModels = mapOpenCodeModels(projectCatalog).map(
-        withOpenCodeDesignSupport
-      );
+      const projectModels = mapOpenCodeModels(projectCatalog);
       const selectedModel = this.resolveExecutionFromModels(
         { settings, attachments },
         this.safePublishedModels(projectModels),
@@ -2274,7 +2272,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     catalog: ReturnType<typeof parseOpenCodeProviderCatalog>,
     runtime: ResolvedOpenCodeRuntime
   ): void {
-    this.operationalModels = mapOpenCodeModels(catalog).map(withOpenCodeDesignSupport);
+    this.operationalModels = mapOpenCodeModels(catalog);
     this.models = this.safePublishedModels(this.operationalModels);
     const safeProviderIds = new Set(
       catalog.providers
@@ -3294,8 +3292,6 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       environment: this.options.environment,
       requestTimeoutMs: this.options.requestTimeoutMs,
       startupTimeoutMs: this.options.startupTimeoutMs,
-      minimumVersion: this.options.minimumVersion,
-      maximumMajor: this.options.maximumMajor,
       pure
     };
     return this.options.supervisorFactory
@@ -6600,24 +6596,6 @@ function deferredOpenCodeModel(
     native: {
       discovery: 'deferred-to-worktree-catalog'
     }
-  };
-}
-
-function withOpenCodeDesignSupport(model: AgentModel): AgentModel {
-  const acceptsImages = model.inputModalities.some(
-    (modality) => modality.toLowerCase() === 'image'
-  );
-  return {
-    ...model,
-    designSupport: acceptsImages
-      ? {
-          maturity: 'stable',
-          detail: 'The connected OpenCode model catalog reports image input support required by Design Mode.'
-        }
-      : {
-          maturity: 'unsupported',
-          detail: `The connected OpenCode model catalog reports no image input support for ${model.modelProvider ?? 'unknown'}/${model.model}. Design Mode requires image input.`
-        }
   };
 }
 

@@ -407,6 +407,48 @@ describe('runProviderSmoke', () => {
     });
   });
 
+  it('accepts an image observation that puts the center shape before its neighbors', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model(
+      'grok-acp:xai/grok-4.6',
+      [],
+      undefined,
+      ['text', 'image']
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([
+        runtime(
+          'grok-acp',
+          'READY',
+          true,
+          [candidate],
+          false,
+          { maturity: 'stable' },
+          {
+            kind: 'ACP_AGENT',
+            runtimeVersion: 'current',
+            advertisedImageInput: false
+          }
+        )
+      ])],
+      imageObservation:
+        'The image shows code Q7 on a yellow triangle between a cyan circle and a pink square on a dark navy background.'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      qualifyAttachments: true
+    });
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'PASSED',
+      attachmentQualification: {
+        status: 'PASSED',
+        imageContentUsed: true,
+        capabilityDrift: 'ADVERTISED_FALSE_VERIFIED_TRUE'
+      }
+    });
+  });
+
   it('rejects a positional image observation with the wrong shape order', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model(
@@ -695,7 +737,7 @@ describe('runProviderSmoke', () => {
     expect(report.authoritative).toBe(true);
   });
 
-  it('reports an unsupported profile without sending a qualification turn', async () => {
+  it('does not use missing native policy metadata as a workflow allowlist', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model('grok-acp:xai/grok-build');
     const service = new FakeProviderSmokeService(repositoryPath, {
@@ -706,12 +748,13 @@ describe('runProviderSmoke', () => {
       qualifyReadOnly: true
     });
 
-    expect(service.readOnlySendCount).toBe(0);
+    expect(service.readOnlySendCount).toBe(1);
     expect(report.readOnlyQualifications).toEqual([
       expect.objectContaining({
         runtimeId: 'grok-acp',
-        status: 'UNSUPPORTED',
-        reason: expect.stringContaining('no qualified native policy')
+        modelId: candidate.id,
+        status: 'PASSED',
+        repositoryIntegrity: 'UNCHANGED'
       })
     ]);
     expect(report.authoritative).toBe(true);

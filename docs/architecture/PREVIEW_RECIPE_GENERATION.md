@@ -127,12 +127,10 @@ Monki creates a bounded JSON evidence bundle in app-owned scratch storage. It co
 from the task worktree. It runs a transient turn through the configured
 provider and model only when that combination supports Preview recipe
 generation. The normal path uses the adapter's native read-only permission
-mapping. An adapter can make one exact runtime-and-model exception only after
-real qualification against the disposable evidence directory. Such an
-exception does not enable repository read-only workflows. The turn uses:
+mapping. An adapter can instead use only the disposable evidence directory.
+That isolated path does not enable repository read-only workflows. The turn uses:
 
-- a native read-only policy or the exact adapter-local disposable-evidence
-  qualification;
+- a native read-only policy or the adapter-local disposable-evidence boundary;
 - the packaged provider runtime and its normal cancellation and cleanup path;
 - no additional live repository path;
 - sanitized process environment;

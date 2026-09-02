@@ -36,9 +36,8 @@ Preview workspace offers **Generate with agent** and **Write manually**.
 
 Generation opens a review modal immediately and shows progress while an
 ephemeral agent inspects only a bounded sanitized evidence bundle. The normal
-provider path uses its qualified read-only policy. An exact adapter-local
-qualification can instead permit one provider version and model to use only
-this disposable directory. Likely
+provider path uses its provider-native restriction when available. An
+adapter-local isolated path can instead use only this disposable directory. Likely
 secret-bearing, binary, generated, dependency/cache, and oversized content is excluded.
 The agent receives no worktree path. It is instructed not to run the app,
 tests, scripts, Docker, or network services. Task Monki rejects the result if

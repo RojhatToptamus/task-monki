@@ -13,7 +13,8 @@ Install these before using Task Monki:
 - Git
 - at least one supported coding-agent runtime, installed and authenticated:
   - Codex CLI with a compatible App Server;
-  - OpenCode `>=1.4.0` and `<2.0.0` with one or more configured model providers;
+  - OpenCode with the native `opencode serve` API and one or more configured
+    model providers;
   - an ACP profile: Grok Build, Cursor Agent, or `claude-agent-acp`;
 - Optional: GitHub CLI, installed and authenticated, for branch publishing and
   draft pull-request features

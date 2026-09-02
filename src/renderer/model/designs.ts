@@ -319,9 +319,9 @@ export function eligibleDesignRuntimeCatalog(
     runtimes.map((runtime) => runtime.preflight.runtime.id)
   );
   const models = catalog.models.filter((model) => runtimeIds.has(model.runtimeId));
-  const qualifiedModels = qualifiedDesignModels(runtimes, models);
+  const supportedModels = supportedDesignModels(runtimes, models);
   const supportedModelRuntimeIds = new Set(
-    qualifiedModels.map((model) => model.runtimeId)
+    supportedModels.map((model) => model.runtimeId)
   );
   return {
     ...catalog,
@@ -338,7 +338,7 @@ export function eligibleDesignRuntimeCatalog(
   };
 }
 
-export function qualifiedDesignModels(
+export function supportedDesignModels(
   runtimes: readonly AgentRuntimeState[],
   models: readonly AgentModel[]
 ): AgentModel[] {
@@ -378,17 +378,17 @@ export function designRuntimeUnavailableReason(
   if (!runtime.preflight.readiness.canStart) {
     return runtime.preflight.readiness.detail || runtime.preflight.readiness.summary;
   }
-  const runtimeSupport = projectAgentExecutionSupport(
-    runtime.preflight.capabilities,
-    'DESIGN'
-  );
-  if (!runtimeSupport.supported) return runtimeSupport.reason;
   if (
     runtime.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
     runtime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
   ) {
     return undefined;
   }
+  const runtimeSupport = projectAgentExecutionSupport(
+    runtime.preflight.capabilities,
+    'DESIGN'
+  );
+  if (!runtimeSupport.supported) return runtimeSupport.reason;
   const runtimeModels = models.filter((model) => model.runtimeId === runtimeId);
   const modelResults = runtimeModels.map((model) =>
     projectAgentExecutionSupport(runtime.preflight.capabilities, 'DESIGN', {

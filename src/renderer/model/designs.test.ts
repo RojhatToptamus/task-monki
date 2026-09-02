@@ -20,7 +20,7 @@ import {
   finiteDesignCanvasBounds,
   mergeDesignConversationPage,
   mergeDesignDetailHistory,
-  qualifiedDesignModels,
+  supportedDesignModels,
   sortedDesignProjects,
   visibleDesignProjects,
   type DesignProjectDetail
@@ -297,13 +297,13 @@ describe('Design workspace view model', () => {
           designSupport: { maturity: 'stable' }
         },
         {
-          id: 'codex:unqualified',
+          id: 'codex:unsupported',
           runtimeId: 'codex',
-          model: 'unqualified',
+          model: 'unsupported',
           inputModalities: ['text', 'image'],
           designSupport: {
             maturity: 'unsupported',
-            detail: 'This exact model failed Design verification.'
+            detail: 'This model does not support Design Mode.'
           }
         }
       ],
@@ -317,10 +317,10 @@ describe('Design workspace view model', () => {
         { id: 'stop:model' },
         { id: 'attachments:model' },
         { id: 'codex:model' },
-        { id: 'codex:unqualified' }
+        { id: 'codex:unsupported' }
       ]
     });
-    expect(qualifiedDesignModels(catalog.runtimes, catalog.models)).toEqual([
+    expect(supportedDesignModels(catalog.runtimes, catalog.models)).toEqual([
       expect.objectContaining({ id: 'codex:model' })
     ]);
     expect(designRuntimeUnavailableReason(unsupportedStop, [])).toContain(
@@ -328,14 +328,15 @@ describe('Design workspace view model', () => {
     );
   });
 
-  it('keeps explicit model discovery available before a Design model is qualified', () => {
+  it('keeps explicit model discovery available before capabilities are loaded', () => {
     const capabilities = {
       ...codexCapabilities(),
       runtimeId: 'cursor-agent-acp',
       modelCatalog: {
         ...codexCapabilities().modelCatalog,
         activation: 'EXPLICIT' as const
-      }
+      },
+      extensions: {}
     };
     const runtime = runtimeState('cursor-agent-acp', capabilities);
     runtime.models = [
@@ -360,16 +361,16 @@ describe('Design workspace view model', () => {
     expect(designRuntimeUnavailableReason(runtime, runtime.models)).toBeUndefined();
   });
 
-  it('keeps an exact unqualified model reason without qualifying the model', () => {
+  it('keeps the provider reason for an unsupported Design model', () => {
     const runtime = runtimeState('codex', codexCapabilities());
     runtime.models = [{
-      id: 'codex:unqualified',
+      id: 'codex:unsupported',
       runtimeId: 'codex',
-      model: 'unqualified',
+      model: 'unsupported',
       inputModalities: ['text', 'image'],
       designSupport: {
         maturity: 'unsupported',
-        detail: 'This exact provider version and model failed Design verification.'
+        detail: 'This model does not report the capabilities required by Design Mode.'
       }
     }] as AgentRuntimeCatalog['models'];
     const catalog = {
@@ -380,14 +381,14 @@ describe('Design workspace view model', () => {
 
     expect(eligibleDesignRuntimeCatalog(catalog)).toMatchObject({
       runtimes: [{ preflight: { runtime: { id: 'codex' } } }],
-      models: [{ id: 'codex:unqualified' }]
+      models: [{ id: 'codex:unsupported' }]
     });
-    expect(qualifiedDesignModels([runtime], runtime.models)).toEqual([]);
+    expect(supportedDesignModels([runtime], runtime.models)).toEqual([]);
     expect(designModelUnavailableReason(runtime, runtime.models[0]!)).toBe(
-      'This exact provider version and model failed Design verification.'
+      'This model does not report the capabilities required by Design Mode.'
     );
     expect(designRuntimeUnavailableReason(runtime, runtime.models)).toBe(
-      'This exact provider version and model failed Design verification.'
+      'This model does not report the capabilities required by Design Mode.'
     );
   });
 
