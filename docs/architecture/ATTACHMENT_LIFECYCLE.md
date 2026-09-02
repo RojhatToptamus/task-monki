@@ -193,26 +193,24 @@ described above. No run cache or second physical representation exists.
 
 Delivery is selected by the owning runtime:
 
-- Codex uses `localImage` for images. It uses an exact managed path for text
-  when the runtime supports exact files. Older restricted runtimes use bounded
-  inline text.
+- Codex uses `localImage` for images and exact managed paths for text.
+  Runtime discovery rejects App Servers that cannot apply the required
+  permission profile.
 - OpenCode uses bounded native file parts with verified `data:` URLs. It uses
   `text/plain` for admitted text and the admitted media type for images.
-- Grok ACP uses an embedded text resource. The exact Grok Build 1.0.13 and
-  Grok 4.6 pair also sends qualified PNG input as a native ACP image block.
-  Its handshake reports no image support, so Task Monki shows capability drift.
-- Cursor ACP uses a bounded text block. Cursor 2026.08.25-3e8eec8 sends
-  qualified PNG images to Composer 2.5 as native ACP image blocks. Other
-  versions, models, and image formats remain text-only. Cursor `Auto` remains
-  text-only.
-- Claude Agent ACP uses an embedded text resource. Version 0.70.0 sends
-  qualified PNG images to Sonnet as native ACP image blocks. Other versions,
-  models, and image formats remain unqualified.
+- Grok ACP uses an embedded text resource. Its provider profile also permits
+  PNG and JPEG image blocks because Grok Build accepts them while its ACP
+  handshake reports no image support. This rule does not list versions or models.
+- Cursor ACP uses a bounded text block. It sends admitted images as native ACP
+  image blocks when the connected agent advertises image input.
+- Claude Agent ACP uses an embedded text resource. It sends admitted images as
+  native ACP image blocks when the connected agent advertises image input.
 
-The selected model and runtime must have qualified effective image support.
-ACP negotiation is the default transport fact. An exact provider-local row can
-override a false flag only after a real packaged test. The adapter must report
-that mismatch as capability drift.
+The selected model and runtime must have effective image support. Codex and
+OpenCode report this per model. ACP v1 reports it for the agent, so catalog
+models use that negotiated fact. A narrow provider-local row can override a
+false flag after a real packaged test. The adapter reports the mismatch as
+capability drift.
 
 Before submission, the run stores the exact ordered path-free selection.
 After admission, it stores matching path-free submission evidence. The evidence

@@ -5,8 +5,8 @@ description: Use when a new or changed Design request lacks an important fact th
 
 # Discovery questions
 
-Ask one focused question round when missing context can change the result.
-Bad designs often come from missing context, not missing skill.
+Ask one focused question round only when meaningful user input is necessary.
+Use your design judgment when a reasonable direction is available.
 
 ## Read the available context
 
@@ -22,7 +22,7 @@ Do not ask for information that is already available.
 
 ## Decide whether a question is necessary
 
-Ask when the answer can change a main design decision, such as:
+Ask only when different plausible answers would materially change a main design decision, such as:
 
 - who will use the interface
 - what task or outcome matters most
@@ -30,23 +30,21 @@ Ask when the answer can change a main design decision, such as:
 - which existing product, brand, or system the work must match
 - whether an open request needs a specific format or level of fidelity
 
-For a new project, the product type, primary user, and main user outcome are essential.
-If the brief does not identify any of them, you must ask one combined question round before you build.
-Do not invent the product meaning from its name.
-Do not treat a vague request to decide what it needs as permission to invent these facts.
-
-Start work without a question when the brief gives enough direction.
+Start work without a question when the brief and context support a useful interpretation.
+Infer likely audience, outcome, product shape, and content when those decisions are reasonable and reversible.
 Skip discovery for a focused refinement or exact recreation.
-Make safe minor choices yourself.
+Make safe design choices yourself.
 Do not ask about small labels, spacing, colors, or equivalent implementation details.
 
 ## Ask one combined round
 
-Use `request_user_input` for one combined round.
+Use the provider's structured question tool for one combined round.
+Never ask a blocking question as ordinary transcript text.
+If no structured question tool is available, choose a reasonable direction and continue.
 Ask only questions whose answers can change the design.
 Keep each question short and concrete.
-Prefer mutually exclusive choices when they make the answer easier.
-Include a free-form choice only when the answer cannot fit useful options.
+Use two to four mutually exclusive choices with short descriptions when they make the answer easier.
+Task Monki supplies custom input and a Decide for me action. Do not add those as choices.
 
 Do not use a fixed question count.
 Do not split discovery across several turns.

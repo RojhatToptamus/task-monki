@@ -32,9 +32,11 @@ until the same repository ID is reconnected to a valid path.
 
 On first launch, when no repository has been configured, the main workflow area
 shows setup instead of an empty board. Adding a repository completes only the
-repository step. The setup surface remains open so the user can review required
-tool status and defaults, then explicitly finish setup before entering the
-board and creating tasks. Finishing setup re-checks required Git and the
+repository step. The setup surface puts the default model above the tool checks
+that it controls. It stays open until the user explicitly finishes setup before
+entering the board and creating tasks. A user can enter Designs without a source
+repository because standalone Designs use Task Monki-managed storage. Finishing
+setup re-checks required Git and the
 selected default agent runtime before the completion flag is saved; GitHub CLI
 remains optional because it only affects PR delivery. A passively discovered
 on-demand runtime is startable but is not labeled Ready until its runtime-owned
@@ -57,7 +59,8 @@ successful Create clears the preserved text draft.
 Refine is a reversible proposal, not an automatic append or overwrite. One
 short-lived read-only agent run receives the current title and description.
 It also receives the selected downstream model capabilities and supported staged attachments.
-The adapter applies its qualified native mutation-denial policy.
+The prompt tells the agent not to modify files.
+The adapter also applies its provider-native restriction when one is available.
 Task Monki grants only the exact selected attachments. It does not grant
 app-owned web, MCP, app, dynamic-tool, or approval access for the turn.
 An ACP provider can still expose its own tools when its native policy permits them.
@@ -83,10 +86,10 @@ copy their generic rules into every task prompt.
 First-launch defaults, New Task, and Settings use the same runtime/model
 selector. Implementation defaults can use every enabled runtime.
 Prompt refinement, review, and Discourse use one shared read-only support projection.
-The projection requires qualified native mutation denial. Preview recipe generation
-normally uses that path. An adapter can instead qualify an exact runtime and model for
-the app-owned disposable evidence copy, which contains no source repository path.
-Unsupported providers remain visible with the reason that blocks the operation.
+All ready runtimes and models can use this path. Preview recipe generation normally
+uses that path. An adapter can instead use the app-owned disposable
+evidence copy, which contains no source repository path.
+An unavailable or unauthenticated runtime remains visible with its exact readiness reason.
 Reasoning choices come from the selected model's native catalog.
 
 ## Discourse
@@ -99,13 +102,14 @@ correction. It never creates a hidden task or treats an agent response as Git,
 test, GitHub, workflow, or acceptance evidence.
 
 Task and repository context is explicit per message or explicitly pinned.
-Agent turns use immutable context snapshots and a provider-native read-only policy.
+Agent turns use immutable context snapshots and a clear instruction not to modify files.
+Adapters also apply their provider-native restrictions when available.
 Task Monki grants no app-owned external tools for these turns and compares repository state after the turn.
 Provider-owned tools remain subject to the selected native policy.
 Runtime and model identity remain frozen in participant revisions.
 A reply is never silently rerouted to the current default runtime.
-Only qualified runtimes are offered.
-Unsupported runtimes remain visible with their reason instead of falling back.
+All ready runtimes and models are offered.
+Unavailable runtimes remain visible with their reason instead of falling back.
 
 See `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md` for response policies,
 waiting, review/correction, stale context, cancellation, recovery, and limits.
@@ -329,11 +333,12 @@ In Progress:
   The detailed data flow and invariants are documented in
   `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
 - Allow steering, approval/input responses, and interrupt controls.
-- A native structured question from Codex or OpenCode puts the exact active run
+- A native structured question from Codex, OpenCode, or an ACP form puts the exact active run
   in **Needs input** and shows its choices or free-text fields. Submit one answer
   to that same run and keep the interaction visible as responding until the
   native protocol confirms delivery or lifecycle cleanup. A normal prose
-  question is not an interaction; answer it with the ordinary Continue action.
+  question is not a blocking interaction. Design agents must use structured
+  questions or make a reasonable decision and continue.
 - After an interrupted, lost, or recovery-required implementation run, keep the
   task in progress and make Continue work the primary recovery action. After a
   definitive failure, make Retry implementation primary. Both actions and Fork

@@ -7,8 +7,6 @@ import { execFileOwnedPortable } from '../../process/ownedProcess';
 
 export const OPENCODE_RUNTIME_ID = 'opencode' as const;
 export const TASK_MONKI_OPENCODE_BIN_ENV = 'TASK_MONKI_OPENCODE_BIN';
-export const MINIMUM_OPENCODE_VERSION = '1.4.0';
-export const MAXIMUM_OPENCODE_MAJOR = 1;
 
 export const REQUIRED_OPENCODE_HTTP_CAPABILITIES = [
   'GET /global/health',
@@ -31,8 +29,6 @@ export interface OpenCodeRuntimeResolverOptions {
   executable?: string;
   cwd: string;
   environment?: NodeJS.ProcessEnv;
-  minimumVersion?: string;
-  maximumMajor?: number;
 }
 
 export interface ResolvedOpenCodeRuntime {
@@ -69,27 +65,20 @@ export async function resolveOpenCodeRuntime(
         options.cwd,
         environment
       );
-      const compatible = isCompatibleOpenCodeVersion(
-        version,
-        options.minimumVersion,
-        options.maximumMajor
-      );
-      const help = compatible
-        ? await execFileOwnedPortable(candidate.executable, ['serve', '--help'], {
-            cwd: options.cwd,
-            env: sanitizeEnvironment(environment),
-            timeout: 10_000,
-            maxBuffer: 1024 * 1024
-          })
-        : undefined;
-      const helpOutput = help ? `${help.stdout}\n${help.stderr}` : '';
+      const help = await execFileOwnedPortable(candidate.executable, ['serve', '--help'], {
+        cwd: options.cwd,
+        env: sanitizeEnvironment(environment),
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024
+      });
+      const helpOutput = `${help.stdout}\n${help.stderr}`;
       const hasHttpServer = Boolean(
         help &&
           /\bopencode\s+serve\b/u.test(helpOutput) &&
           /--hostname\b/u.test(helpOutput) &&
           /--port\b/u.test(helpOutput)
       );
-      const accepted = compatible && hasHttpServer;
+      const accepted = hasHttpServer;
       probes.push({
         executable: candidate.executable,
         source: candidate.source,
@@ -102,10 +91,8 @@ export async function resolveOpenCodeRuntime(
         launchForm: accepted ? 'native-http-sse' : undefined,
         missingCapabilities: hasHttpServer ? undefined : ['opencode serve --hostname/--port'],
         detail: accepted
-          ? `Compatible OpenCode ${version} native HTTP/SSE runtime.`
-          : compatible
-            ? 'OpenCode does not expose the required headless server flags.'
-            : supportedVersionMessage(options.minimumVersion, options.maximumMajor)
+          ? `OpenCode ${version} exposes the required native HTTP/SSE runtime.`
+          : 'OpenCode does not expose the required headless server flags.'
       });
       if (accepted) {
         return {
@@ -170,16 +157,6 @@ export async function probeOpenCodeVersion(
   return stderrVersions[0];
 }
 
-export function isCompatibleOpenCodeVersion(
-  version: string,
-  minimumVersion = MINIMUM_OPENCODE_VERSION,
-  maximumMajor = MAXIMUM_OPENCODE_MAJOR
-): boolean {
-  const parsed = parseVersion(version);
-  const minimum = parseVersion(minimumVersion);
-  return parsed.major === maximumMajor && compareVersion(parsed, minimum) >= 0;
-}
-
 async function pathCandidates(
   environment: NodeJS.ProcessEnv
 ): Promise<Array<{ executable: string; source: 'path'; explicit: false }>> {
@@ -210,29 +187,12 @@ async function pathCandidates(
   return resolved;
 }
 
-function parseVersion(version: string): { major: number; minor: number; patch: number } {
-  const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/u);
-  if (!match) throw new Error(`Invalid semantic version: ${version}`);
-  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) };
-}
-
-function compareVersion(
-  left: { major: number; minor: number; patch: number },
-  right: { major: number; minor: number; patch: number }
-): number {
-  return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
-}
-
 function semanticVersionsIn(value: string): string[] {
   const versions = new Set<string>();
   for (const match of value.matchAll(/(?:^|\s)v?(\d+\.\d+\.\d+)(?=[-+\s]|$)/gu)) {
     versions.add(match[1]);
   }
   return [...versions];
-}
-
-function supportedVersionMessage(minimum = MINIMUM_OPENCODE_VERSION, maximumMajor = MAXIMUM_OPENCODE_MAJOR): string {
-  return `Task Monki requires OpenCode >=${minimum} and <${maximumMajor + 1}.0.0.`;
 }
 
 function formatResolutionError(diagnostics: AgentRuntimeResolutionDiagnostics): string {

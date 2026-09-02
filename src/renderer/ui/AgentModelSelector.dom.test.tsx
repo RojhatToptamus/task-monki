@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
@@ -49,9 +49,13 @@ const readyRuntime: AgentRuntimeState = {
 };
 
 describe('AgentModelSelector', () => {
-  it('discovers models only after the operator requests it', () => {
-    const discover = vi.fn(async () => undefined);
-    render(
+  it('keeps the requested provider in place while its models load', async () => {
+    let finishDiscovery: (() => void) | undefined;
+    const discoveryPending = new Promise<void>((resolve) => {
+      finishDiscovery = resolve;
+    });
+    const discover = vi.fn(() => discoveryPending);
+    const view = render(
       <AgentModelSetting
         label="Implementation"
         runtimeId="cursor-agent-acp"
@@ -65,14 +69,50 @@ describe('AgentModelSelector', () => {
 
     expect(discover).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Implementation: Cursor Agent · Auto' }));
-    fireEvent.click(screen.getByRole('option', { name: 'Load models via Cursor Agent' }));
+    const search = screen.getByRole('combobox', {
+      name: 'Search models and providers'
+    });
+    const loadOption = screen.getByRole('option', {
+      name: 'Load models via Cursor Agent'
+    });
+    const loadOptionId = loadOption.id;
+    fireEvent.click(loadOption);
+
     expect(discover).toHaveBeenCalledOnce();
     expect(discover).toHaveBeenCalledWith('cursor-agent-acp');
+    expect(
+      screen.getByRole('option', { name: 'Loading models… via Cursor Agent' }).id
+    ).toBe(loadOptionId);
+    expect(search.getAttribute('aria-activedescendant')).toBe(loadOptionId);
+
+    view.rerender(
+      <AgentModelSetting
+        label="Implementation"
+        runtimeId="cursor-agent-acp"
+        modelId={model.id}
+        models={[model]}
+        runtimes={[readyRuntime]}
+        onDiscoverModels={discover}
+        onSelectionChange={() => undefined}
+      />
+    );
+
+    expect(
+      screen.getByRole('option', { name: 'Loading models… via Cursor Agent' }).id
+    ).toBe(loadOptionId);
+    expect(search.getAttribute('aria-activedescendant')).toBe(loadOptionId);
+
+    await act(async () => finishDiscovery?.());
+    await waitFor(() =>
+      expect(search.getAttribute('aria-activedescendant')).toBe(
+        screen.getByRole('option', { name: 'Auto via Cursor Agent' }).id
+      )
+    );
   });
 
   it('shows the exact reason for a model that the workflow cannot use', () => {
     const onSelectionChange = vi.fn();
-    const reason = 'This exact provider version and model failed Design verification.';
+    const reason = 'This model does not report the capabilities required by Design Mode.';
     render(
       <AgentModelSelector
         label="Design"

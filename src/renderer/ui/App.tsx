@@ -76,7 +76,7 @@ import {
   eligibleDesignRuntimeCatalog,
   mergeDesignConversationPage,
   mergeDesignDetailHistory,
-  qualifiedDesignModels,
+  supportedDesignModels,
   type DesignCanvasExternalLinkRequest
 } from '../model/designs';
 import {
@@ -1750,7 +1750,7 @@ export function App() {
     () =>
       designRuntimeCatalog
         ? resolveModelExecutionSettings(
-            qualifiedDesignModels(
+            supportedDesignModels(
               designRuntimeCatalog.runtimes,
               designRuntimeCatalog.models
             ),
@@ -3203,6 +3203,7 @@ export function App() {
             addingRepository={isAddingRepository}
             onAddRepository={addRepository}
             onFinishSetup={finishFirstLaunchSetup}
+            onGoToDesigns={() => showView('designs')}
             onSelect={selectTask}
             onRespondToInteraction={respondToInteraction}
             onArchive={archiveTask}

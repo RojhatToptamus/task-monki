@@ -9,7 +9,7 @@ import {
 } from './CodexEventMapper';
 
 describe('Codex event mapping', () => {
-  it('qualifies Codex Design only for the exact packaged runtime and model', () => {
+  it('uses live Codex model image capabilities for Design availability', () => {
     const model = {
       id: 'gpt-5.6-luna',
       model: 'gpt-5.6-luna',
@@ -23,27 +23,16 @@ describe('Codex event mapping', () => {
       defaultServiceTier: null,
       isDefault: true
     };
-    expect(mapModel(model as never, '0.150.0-alpha.12.2').designSupport).toMatchObject({
-      maturity: 'unsupported',
-      detail: expect.stringContaining('has not passed')
-    });
-    expect(mapModel(model as never, '0.151.0-alpha.7.2').designSupport).toMatchObject({
+    expect(mapModel(model as never).designSupport).toMatchObject({
       maturity: 'stable',
-      detail: expect.stringContaining('passed the packaged Design')
-    });
-    expect(mapModel(model as never, '0.151.0-alpha.7.1').designSupport).toMatchObject({
-      maturity: 'unsupported'
-    });
-    expect(mapModel(model as never, '0.150.0-alpha.12.3').designSupport).toMatchObject({
-      maturity: 'unsupported',
-      detail: expect.stringContaining('has not passed')
+      detail: expect.stringContaining('model catalog reports image input')
     });
     expect(
-      mapModel(
-        { ...model, id: 'gpt-5.6-sol', model: 'gpt-5.6-sol' } as never,
-        '0.150.0-alpha.12.2'
-      ).designSupport
-    ).toMatchObject({ maturity: 'unsupported' });
+      mapModel({ ...model, inputModalities: ['text'] } as never).designSupport
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('reports no image input support')
+    });
   });
 
   it('does not invent a provider that model/list did not report', () => {

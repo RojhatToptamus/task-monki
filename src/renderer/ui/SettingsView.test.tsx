@@ -450,7 +450,7 @@ describe('SettingsView', () => {
     expect(selected.selectedPreviewRecipeGenerationModel?.id).toBe(codexModel.id);
   });
 
-  it('keeps an unsupported workflow provider visible with its reason', () => {
+  it('keeps every ready provider selectable for read-only workflows', () => {
     const providerModel: AgentModel = {
       ...codexModel,
       id: 'provider-runtime:provider/model',
@@ -512,11 +512,9 @@ describe('SettingsView', () => {
       />
     );
 
-    expect(html).toContain(
-      'This profile cannot deny shell changes. Normal Tasks remain available.'
-    );
+    expect(html).not.toContain('This profile cannot deny shell changes.');
     expect(html).toMatch(
-      /<button[^>]*disabled=""[^>]*aria-label="Provider model via Provider runtime/u
+      /<button[^>]*aria-disabled="false"[^>]*aria-label="Provider model via Provider runtime/u
     );
   });
 

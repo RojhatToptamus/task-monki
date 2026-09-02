@@ -3,36 +3,17 @@ import { describe, expect, it } from 'vitest';
 import type { VerifiedAgentTurnAttachment } from '../AgentAttachmentDelivery';
 import {
   CODEX_ATTACHMENT_PROMPT_MARKER,
-  CODEX_ATTACHMENT_WIRE_MAX_BYTES,
-  assertCodexInlineRequestSize,
-  codexAttachmentSupport,
   prepareCodexAttachmentDelivery
 } from './CodexAttachmentDelivery';
 
 describe('Codex attachment delivery', () => {
-  it('qualifies exact files and restricted images only for tested App Server versions', () => {
-    expect(codexAttachmentSupport(undefined)).toEqual({
-      exactFileAccess: false,
-      restrictedLocalImages: false
-    });
-    expect(codexAttachmentSupport('0.140.9')).toEqual({
-      exactFileAccess: false,
-      restrictedLocalImages: false
-    });
-    expect(codexAttachmentSupport('0.141.0')).toEqual({
-      exactFileAccess: true,
-      restrictedLocalImages: true
-    });
-  });
-
   it('uses exact restricted file grants and sends selected images on every turn', () => {
     const text = attachment('text-1', 0, 'text', 'notes.txt');
     const image = attachment('image-1', 1, 'image', 'reference.png');
     const input = {
       prompt: 'Use both references.',
       sandbox: 'restricted' as const,
-      attachments: [text, image],
-      support: codexAttachmentSupport('0.141.0')
+      attachments: [text, image]
     };
 
     const first = prepareCodexAttachmentDelivery(input);
@@ -52,48 +33,13 @@ describe('Codex attachment delivery', () => {
     ]);
   });
 
-  it('falls back to verified inline text without widening restricted filesystem access', () => {
-    const text = {
-      ...attachment('text-1', 0, 'text', 'notes.txt'),
-      bytes: Buffer.from('verified reference text', 'utf8')
-    };
-    const prepared = prepareCodexAttachmentDelivery({
-      prompt: 'Summarize it.',
-      sandbox: 'restricted',
-      attachments: [text],
-      support: codexAttachmentSupport('0.140.9')
-    });
-
-    expect(prepared.exactGrantPaths).toEqual([]);
-    expect(prepared.localImagePaths).toEqual([]);
-    expect(prepared.hasInlineText).toBe(true);
-    expect(prepared.prompt).toContain('verified reference text');
-    expect(prepared.prompt).not.toContain(text.path);
-    expect(prepared.prompt).not.toContain(JSON.stringify(text.path).slice(1, -1));
-    expect(prepared.submissions).toEqual([
-      expect.objectContaining({ attachmentId: text.attachmentId, transport: 'text-block' })
-    ]);
-  });
-
-  it('fails before submission when an older restricted runtime cannot deliver images', () => {
-    expect(() =>
-      prepareCodexAttachmentDelivery({
-        prompt: 'Inspect it.',
-        sandbox: 'restricted',
-        attachments: [attachment('image-1', 0, 'image', 'reference.png')],
-        support: codexAttachmentSupport('0.140.9')
-      })
-    ).toThrow('cannot safely deliver images');
-  });
-
   it('uses native paths without adding a managed grant in Full access', () => {
     const text = attachment('text-1', 0, 'text', 'notes.txt');
     const image = attachment('image-1', 1, 'image', 'reference.png');
     const prepared = prepareCodexAttachmentDelivery({
       prompt: 'Use both.',
       sandbox: 'danger-full-access',
-      attachments: [text, image],
-      support: codexAttachmentSupport(undefined)
+      attachments: [text, image]
     });
 
     expect(prepared.exactGrantPaths).toEqual([]);
@@ -103,14 +49,6 @@ describe('Codex attachment delivery', () => {
     });
   });
 
-  it('rejects a complete inline request above the Codex wire limit', () => {
-    expect(() => assertCodexInlineRequestSize({ prompt: 'small' })).not.toThrow();
-    expect(() =>
-      assertCodexInlineRequestSize({
-        prompt: 'x'.repeat(CODEX_ATTACHMENT_WIRE_MAX_BYTES)
-      })
-    ).toThrow('above');
-  });
 });
 
 function attachment(

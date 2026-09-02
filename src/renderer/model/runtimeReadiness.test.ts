@@ -115,7 +115,7 @@ describe('runtimeReadinessView', () => {
     });
   });
 
-  it('does not replace an unavailable configured workflow runtime with another provider', () => {
+  it('uses the configured runtime even when it lacks native mutation denial', () => {
     const configured = state(createRuntimeReadiness('READY', 'Ready'));
     configured.preflight.runtime = {
       ...configured.preflight.runtime,
@@ -163,10 +163,7 @@ describe('runtimeReadinessView', () => {
         'configured',
         'PROMPT_REFINEMENT'
       )
-    ).toEqual({
-      unavailableReason:
-        'Configured cannot deny repository changes. Normal Tasks remain available.'
-    });
+    ).toEqual({ runtime: configured });
   });
 
   it('uses typed runtime readiness detail before workflow capability support', () => {
@@ -182,7 +179,7 @@ describe('runtimeReadinessView', () => {
     );
   });
 
-  it('projects an exact model qualification failure for Preview generation', () => {
+  it('does not block a Preview model with stale workflow capability metadata', () => {
     const runtime = state(createRuntimeReadiness('READY', 'Ready'));
     runtime.preflight.capabilities.extensions['task-monki.preview-recipe-generation'] = {
       maturity: 'stable'
@@ -195,17 +192,11 @@ describe('runtimeReadinessView', () => {
         'PREVIEW_RECIPE_GENERATION',
         {
           model: {
-            inputModalities: ['text'],
-            previewRecipeGenerationSupport: {
-              maturity: 'unsupported',
-              detail: 'Preview generation requires the qualified model.'
-            }
+            inputModalities: ['text']
           }
         }
       )
-    ).toEqual({
-      unavailableReason: 'Preview generation requires the qualified model.'
-    });
+    ).toEqual({ runtime });
   });
 });
 

@@ -106,7 +106,6 @@ async function createDualProcessFixture() {
       kind: 'DEDICATED_PROCESS',
       policyId: 'test-acp/process-read-only@v1',
       detail: 'A separate test process owns read-only execution.',
-      runtimeVersion: process.version,
       platform: process.platform,
       launchArgv: [agentScript, 'read-only-lane'],
       startupFailurePattern: /sandbox unavailable/iu
@@ -1120,7 +1119,6 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         kind: 'DEDICATED_PROCESS',
         policyId: 'test-acp/process-read-only@v1',
         detail: 'A separate test process owns read-only execution.',
-        runtimeVersion: process.version,
         platform: process.platform,
         launchArgv: ['--read-only-acp'],
         startupFailurePattern: /sandbox unavailable/iu
@@ -1188,8 +1186,6 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     );
     temporaryDirectories.push(directory);
     const runtimeId = 'test-acp-preview-root';
-    const unavailableReason =
-      'Repository read-only workflows are unavailable for this test provider.';
     const profile: AcpRuntimeProfile = {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
@@ -1199,11 +1195,8 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         policyId: 'test-acp/isolated-preview@v1',
         detail: 'Plan mode is qualified only for disposable Preview evidence.'
       },
-      readOnlyTurnUnavailableReason: unavailableReason,
-      previewRecipeGenerationQualification: {
-        runtimeVersion: process.version,
-        modelId: 'default',
-        detail: 'The exact test runtime and model passed isolated Preview generation.'
+      isolatedPreviewRecipeGeneration: {
+        detail: 'The test provider generates Preview YAML only from isolated evidence.'
       }
     };
     const store = await createTestStore(path.join(directory, 'store'));
@@ -2227,20 +2220,25 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     }
   });
 
-  it('preserves deferred explicit models for ACP profiles without an initialize catalog', async () => {
+  it('discovers stable ACP session models once and closes the temporary session', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-generic-acp-model-')
     );
     temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'session-model-agent.cjs');
+    const messageLog = path.join(directory, 'messages.ndjson');
+    await fs.writeFile(
+      agentScript,
+      sessionModelDiscoveryAgentSource(messageLog),
+      { mode: 0o600 }
+    );
     const store = await createTestStore(path.join(directory, 'store'));
     const profile: AcpRuntimeProfile = {
       ...TEST_ACP_PROFILE,
-      designQualifications: [
-        {
-          runtimeVersion: process.version,
-          modelId: 'provider-specific-model'
-        }
-      ]
+      executableCandidates: [process.execPath],
+      argv: [agentScript],
+      discoverModelsFromSession: true,
+      imageMediaTypes: ['image/png']
     };
     const adapter = createTestAdapter(
       store,
@@ -2255,7 +2253,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             selectedExecutable: process.execPath,
             selectedSource: 'test',
             selectedVersion: process.version,
-            selectedLaunchArgv: [],
+            selectedLaunchArgv: [agentScript],
             requiredCapabilities: ['ACP protocolVersion=1'],
             probes: []
           }
@@ -2264,8 +2262,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     );
     const settings = {
       runtimeId: profile.descriptor.id,
-      model: 'provider-specific-model',
+      model: 'haiku',
       modelProvider: 'test-provider',
+      reasoningEffort: 'low',
       sandbox: 'DANGER_FULL_ACCESS' as const,
       networkAccess: true,
       approvalPolicy: 'on-request',
@@ -2274,30 +2273,44 @@ describe('AcpRuntimeAdapter end-to-end', () => {
 
     try {
       await adapter.initialize();
+      await Promise.all([adapter.discoverModels(), adapter.discoverModels()]);
       await expect(adapter.listModels()).resolves.toEqual([
         expect.objectContaining({ model: 'default', isDefault: true }),
         expect.objectContaining({
-          model: 'provider-specific-model',
+          model: 'haiku',
           modelProvider: 'test-provider',
           designSupport: expect.objectContaining({ maturity: 'stable' }),
-          native: expect.objectContaining({ source: 'profile-qualified-model' })
+          native: expect.objectContaining({ source: 'provider-session-model-catalog' })
+        }),
+        expect.objectContaining({
+          model: 'sonnet',
+          designSupport: expect.objectContaining({ maturity: 'stable' })
         })
       ]);
       await expect(
         adapter.resolveExecution({ settings, attachments: [] })
       ).resolves.toMatchObject({
         settings: {
-          model: 'provider-specific-model',
-          modelProvider: 'test-provider'
+          model: 'haiku',
+          modelProvider: 'test-provider',
+          reasoningEffort: 'low'
         },
         model: {
-          model: 'provider-specific-model',
+          model: 'haiku',
           modelProvider: 'test-provider',
           designSupport: { maturity: 'stable' },
-          native: { source: 'profile-qualified-model' }
+          native: { source: 'provider-session-model-catalog' }
         }
       });
-      expect((await store.snapshot()).agentServers).toEqual([]);
+      const methods = (await fs.readFile(messageLog, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { method?: string })
+        .map((message) => message.method);
+      expect(methods.filter((method) => method === 'session/new')).toHaveLength(1);
+      expect(methods.filter((method) => method === 'session/close')).toHaveLength(1);
+      const internals = adapter as unknown as { nativeSessions: Map<string, unknown> };
+      expect(internals.nativeSessions.size).toBe(0);
     } finally {
       await adapter.shutdown();
     }
@@ -2640,13 +2653,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       defaultModelProvider: 'xai',
       defaultModel: 'grok-build',
       sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
-      designQualifications: [
-        {
-          runtimeVersion: process.version,
-          modelId: 'grok-4.5',
-          defaultReasoningEffort: 'low'
-        }
-      ],
+      imageMediaTypes: ['image/png'],
+      imageInputCompatibility: {
+        mediaTypes: ['image/png']
+      },
+      designDefaultReasoningEffort: 'low',
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
@@ -2682,7 +2693,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           designSupport: {
             maturity: 'stable',
             defaultReasoningEffort: 'low',
-            detail: expect.stringContaining('passed the packaged Design')
+            detail: expect.stringContaining('support the native image input')
           },
           isDefault: true,
           native: expect.objectContaining({
@@ -3013,7 +3024,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
 
       const snapshot = await store.snapshot();
       const acceptedItems = snapshot.agentItems.filter(
-        (item) => item.runId === run.id && item.providerItemId === 'accepted-old-message'
+        (item) =>
+          item.runId === run.id &&
+          item.providerItemId === 'agent_message_chunk:accepted-old-message'
       );
       const outputArtifact = snapshot.artifacts.find(
         (artifact) => artifact.id === run.outputArtifactId
@@ -3676,6 +3689,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
+          elicitation: { form: {} },
           session: { configOptions: { boolean: {} } }
         }
       });
@@ -3708,7 +3722,10 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         input,
         operationId
       ) => {
-        if (input.runId === highVolumeRun.id && input.providerItemId === 'message-high-volume') {
+        if (
+          input.runId === highVolumeRun.id &&
+          input.providerItemId === 'agent_message_chunk:message-high-volume'
+        ) {
           highVolumeItemWrites += 1;
         }
         return originalUpsertAgentItem(input, operationId);
@@ -3732,7 +3749,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(highVolumeItemWrites).toBe(1);
       expect(
         itemPayloadText(
-          await getTestAgentItemByProviderId(store, highVolumeRun.id, 'message-high-volume')
+          await getTestAgentItemByProviderId(
+            store,
+            highVolumeRun.id,
+            'agent_message_chunk:message-high-volume'
+          )
         )
       ).toBe(expectedHighVolumeOutput);
       const highVolumeSnapshot = await store.snapshot();
@@ -4776,7 +4797,171 @@ describe('AcpRuntimeAdapter native settings', () => {
   });
 });
 
-describe('AcpRuntimeAdapter permission materialization', () => {
+describe('AcpRuntimeAdapter interaction materialization', () => {
+  it('pauses for a native form question and resumes the same turn with custom input', async () => {
+    const harness = await createPermissionHarness({
+      runtimeId: 'test-acp-form-elicitation',
+      approvalPolicy: 'on-request'
+    });
+    const { adapter, client, events, run, server, store, task } = harness;
+
+    try {
+      const requestId = 'question-1';
+      const request = {
+        jsonrpc: '2.0' as const,
+        id: requestId,
+        method: 'elicitation/create',
+        params: {
+          sessionId: 'permission-materialization-session',
+          toolCallId: 'ask-user-1',
+          mode: 'form',
+          message: 'Choose a direction for the page.',
+          requestedSchema: {
+            type: 'object',
+            properties: {
+              question_0: {
+                type: 'string',
+                title: 'Direction',
+                description: 'Which direction fits best?',
+                oneOf: [
+                  {
+                    const: 'Informational',
+                    title: 'Informational',
+                    description: 'Explain the market and its schedule.'
+                  },
+                  {
+                    const: 'Shopping',
+                    title: 'Shopping',
+                    description: 'Let visitors browse products.'
+                  }
+                ]
+              },
+              question_0_custom: {
+                type: 'string',
+                title: 'Other',
+                _meta: {
+                  _askUserQuestionCustomAnswer: {
+                    questionId: 'question_0',
+                    isCustomAnswer: true
+                  }
+                }
+              }
+            },
+            required: ['question_0']
+          }
+        }
+      };
+      const raw = await appendTestProtocolMessage(
+        store,
+        server.id,
+        'INBOUND',
+        JSON.stringify(request)
+      );
+      client.events.emit('request', request, raw);
+
+      const pending = await waitFor(async () =>
+        (await store.snapshot()).interactionRequests.find(
+          (interaction) =>
+            interaction.providerRequestId === requestId &&
+            interaction.status === 'PENDING'
+        )
+      );
+      expect(pending).toMatchObject({
+        runId: run.id,
+        sessionId: run.sessionId,
+        type: 'USER_INPUT',
+        allowedActions: ['ANSWER'],
+        request: {
+          questions: [
+            {
+              id: 'question_0',
+              header: 'Direction',
+              question: 'Which direction fits best?',
+              isOther: true,
+              options: [
+                { label: 'Informational' },
+                { label: 'Shopping' }
+              ]
+            }
+          ]
+        }
+      });
+      expect(await store.getRun(run.id)).toMatchObject({
+        status: 'AWAITING_USER_INPUT'
+      });
+
+      const interactionService = new AgentInteractionService(
+        runtimeFixture(store).runtime,
+        events,
+        () => adapter
+      );
+      await interactionService.respond({
+        taskId: task.id,
+        runId: run.id,
+        interactionRequestId: pending.id,
+        decision: {
+          interactionType: 'USER_INPUT',
+          action: 'ANSWER',
+          answers: { question_0: ['Decide for me'] }
+        }
+      });
+
+      expect(await readProtocolMessages(server.protocolJournalPath)).toContainEqual({
+        jsonrpc: '2.0',
+        id: requestId,
+        result: {
+          action: 'accept',
+          content: { question_0_custom: 'Decide for me' }
+        }
+      });
+      expect(await store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
+      expect(await store.getInteractionRequest(pending.id)).toMatchObject({
+        status: 'RESOLVED'
+      });
+
+      const cancelRequest = {
+        ...request,
+        id: 'question-2',
+        params: {
+          ...request.params,
+          toolCallId: 'ask-user-2'
+        }
+      };
+      const cancelRaw = await appendTestProtocolMessage(
+        store,
+        server.id,
+        'INBOUND',
+        JSON.stringify(cancelRequest)
+      );
+      client.events.emit('request', cancelRequest, cancelRaw);
+      const cancelPending = await waitFor(async () =>
+        (await store.snapshot()).interactionRequests.find(
+          (interaction) =>
+            interaction.providerRequestId === cancelRequest.id &&
+            interaction.status === 'PENDING'
+        )
+      );
+      const activeRun = await store.getRun(run.id);
+      expect(activeRun?.providerTurnId).toBeTruthy();
+
+      await adapter.interruptTurn({
+        session: { localSessionId: run.sessionId },
+        providerTurnId: activeRun!.providerTurnId!
+      });
+
+      expect(await readProtocolMessages(server.protocolJournalPath)).toContainEqual({
+        jsonrpc: '2.0',
+        id: cancelRequest.id,
+        result: { action: 'cancel' }
+      });
+      expect(await store.getInteractionRequest(cancelPending.id)).toMatchObject({
+        status: 'CANCELED'
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  }, 15_000);
+
   it('correlates a sparse permission request with the preceding tool call', async () => {
     const runtimeId = 'test-acp-correlated-permission';
     const harness = await createPermissionHarness({
@@ -5641,14 +5826,46 @@ describe('AcpRuntimeAdapter stream safety', () => {
 
       expect(completed.finalMessage).toBe('one [REDACTED]\ntwo');
       expect(
-        itemPayloadText(messages.find((item) => item.providerItemId === 'stream-message-1'))
+        itemPayloadText(
+          messages.find(
+            (item) => item.providerItemId === 'agent_message_chunk:stream-message-1'
+          )
+        )
       ).toBe('one [REDACTED]');
       expect(
-        itemPayloadText(messages.find((item) => item.providerItemId === 'stream-message-2'))
+        itemPayloadText(
+          messages.find(
+            (item) => item.providerItemId === 'agent_message_chunk:stream-message-2'
+          )
+        )
       ).toBe('two');
       expect(artifact ? await fs.readFile(artifact.path, 'utf8') : '').toContain(
         'one [REDACTED]two'
       );
+    } finally {
+      await harness.adapter.shutdown();
+    }
+  });
+
+  it('keeps thought and final-answer streams separate when ACP reuses one message id', async () => {
+    const harness = await createStreamSafetyHarness('message-type-transition');
+    try {
+      await harness.start();
+      const completed = await waitFor(async () => {
+        const run = await getTestRun(harness.store, harness.run.id);
+        return run?.status === 'COMPLETED' ? run : undefined;
+      });
+      const items = (await harness.store.snapshot()).agentItems.filter(
+        (item) => item.runId === harness.run.id
+      );
+
+      expect(completed.finalMessage).toBe('Final answer.');
+      expect(
+        items.find((item) => item.type === 'REASONING_SUMMARY')?.payload
+      ).toMatchObject({ text: 'Internal thought.' });
+      expect(
+        items.find((item) => item.type === 'AGENT_MESSAGE')?.payload
+      ).toMatchObject({ text: 'Final answer.' });
     } finally {
       await harness.adapter.shutdown();
     }
@@ -5918,6 +6135,57 @@ async function readCursorAgentMessages(messageLog: string): Promise<CursorAgentM
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line) as CursorAgentMessage);
+}
+
+function sessionModelDiscoveryAgentSource(messageLog: string): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+const record = (message) => fs.appendFileSync(
+  ${JSON.stringify(messageLog)},
+  JSON.stringify({ method: message.method, params: message.params }) + '\\n'
+);
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  record(message);
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: {
+        promptCapabilities: { image: true },
+        sessionCapabilities: { close: {} }
+      },
+      agentInfo: { name: 'session-model-agent', version: '9.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: 'model-discovery-session',
+      configOptions: [{
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'default',
+        options: [
+          { value: 'default', name: 'Default' },
+          { value: 'haiku', name: 'Haiku' },
+          { value: 'sonnet', name: 'Sonnet' }
+        ]
+      }]
+    }});
+    return;
+  }
+  if (message.method === 'session/close') {
+    send({ jsonrpc: '2.0', id: message.id, result: {} });
+    return;
+  }
+  send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
 }
 
 function cursorParameterizedModelAgentSource(
@@ -6493,6 +6761,27 @@ input.on('line', (line) => {
     send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
     return;
   }
+  if (prompt.includes('message-type-transition')) {
+    const messageId = 'shared-message';
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: 'stream-safety-session',
+      update: {
+        sessionUpdate: 'agent_thought_chunk',
+        messageId,
+        content: { type: 'text', text: 'Internal thought.' }
+      }
+    }});
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: 'stream-safety-session',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId,
+        content: { type: 'text', text: 'Final answer.' }
+      }
+    }});
+    send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+    return;
+  }
   if (prompt.includes('split-credential')) {
     const secret = process.env.TEST_ACP_API_KEY;
     stream('before ' + secret.slice(0, 14));
@@ -6670,6 +6959,10 @@ input.on('line', (line) => {
   }
   if (message.method === 'session/set_model') {
     currentModelId = message.params.modelId;
+    send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: {
+      sessionId: 'provider-session-1',
+      update: { sessionUpdate: 'model_changed', currentModelId }
+    }});
     send({ jsonrpc: '2.0', id: message.id, result: {
       _meta: { model: { Ok: currentModelId } }
     }});

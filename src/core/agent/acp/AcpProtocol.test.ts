@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ACP_CLIENT_CAPABILITIES,
   decodeAcpMessage,
   flattenSelectOptions,
   mergeAcpToolCallUpdate,
   parseConfigOptions,
+  parseFormElicitationRequest,
   parseInitializeResponse,
   parseInitializeModelExtension,
   parseNewSessionResponse,
@@ -15,6 +17,35 @@ import {
 } from './AcpProtocol';
 
 describe('ACP stable-v1 protocol codec', () => {
+  it('advertises and validates form-only elicitation', () => {
+    expect(ACP_CLIENT_CAPABILITIES.elicitation).toEqual({ form: {} });
+    expect(
+      parseFormElicitationRequest({
+        sessionId: 'session-1',
+        toolCallId: 'tool-1',
+        mode: 'form',
+        message: 'Choose a direction.',
+        requestedSchema: {
+          type: 'object',
+          properties: { direction: { type: 'string' } }
+        }
+      })
+    ).toMatchObject({
+      sessionId: 'session-1',
+      toolCallId: 'tool-1',
+      mode: 'form',
+      message: 'Choose a direction.'
+    });
+    expect(() =>
+      parseFormElicitationRequest({
+        sessionId: 'session-1',
+        mode: 'url',
+        message: 'Open a website.',
+        requestedSchema: { type: 'object', properties: {} }
+      })
+    ).toThrow('only ACP form elicitation');
+  });
+
   it('merges sparse permission tool calls with the prior tool state', () => {
     const merged = mergeAcpToolCallUpdate(
       {

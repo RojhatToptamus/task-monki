@@ -85,14 +85,20 @@ export function assertAcpAttachmentsSupported(input: {
           `${input.profile.descriptor.displayName} has no qualified ACP image input.`
       );
     }
-    const mediaTypes = support.qualification!.mediaTypes;
+    const mediaTypes = support.mediaTypes;
+    if (!mediaTypes) {
+      throw new AgentAttachmentDeliveryError(
+        'MODEL_DOES_NOT_SUPPORT_IMAGES',
+        `${input.profile.descriptor.displayName} did not provide an image transport for this model.`
+      );
+    }
     const unsupported = images.find(
       (attachment) => !mediaTypes.includes(attachment.mediaType)
     );
     if (unsupported) {
       throw new AgentAttachmentDeliveryError(
         'MODEL_DOES_NOT_SUPPORT_IMAGES',
-        `${input.profile.descriptor.displayName} ${input.model.displayName} accepts ${mediaTypes.join(', ')} images through this qualified path, not ${unsupported.mediaType}.`
+        `${input.profile.descriptor.displayName} ${input.model.displayName} accepts ${mediaTypes.join(', ')} images through this native path, not ${unsupported.mediaType}.`
       );
     }
   }

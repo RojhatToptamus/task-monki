@@ -28,7 +28,7 @@ import {
   designStatusView,
   designWorkspaceLayout,
   formatDesignUpdatedAt,
-  qualifiedDesignModels,
+  supportedDesignModels,
   visibleDesignProjects,
   type DesignHistoryFilter,
   type DesignProjectDetail,
@@ -810,7 +810,7 @@ function BlankDesignForm({
 }) {
   const [brief, setBrief] = useState('');
   const [creationToken] = useState(() => crypto.randomUUID());
-  const selectableModels = qualifiedDesignModels(runtimes, models);
+  const selectableModels = supportedDesignModels(runtimes, models);
   const preferredRuntimeId = defaultAgentSettings?.runtimeId;
   const initialRuntimeId =
     (selectableModels.some((model) => model.runtimeId === preferredRuntimeId)

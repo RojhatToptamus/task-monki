@@ -86,7 +86,7 @@ Expected UI:
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
    agent session.
 5. Task Monki sends the provider-neutral review prompt as a normal read-only turn.
-6. The selected runtime must provide a qualified native mutation-denial policy.
+6. The prompt tells the selected runtime not to modify files.
 7. `AgentOrchestrator` records repository state before provider delivery.
 8. It compares repository state after terminal output.
 9. A changed or unreadable repository fails the review.
@@ -108,17 +108,17 @@ ignore system/user Git configuration so the read-only sandbox does not need
 home-directory or temporary-cache grants.
 
 Review execution always requests read-only repository access with no approval exceptions.
-Each adapter maps that request to its qualified native policy.
+Each adapter applies its provider-native restriction when one is available.
 Selecting Full access for implementation does not weaken the review policy.
 
 Codex uses an attested read-only permission profile.
 OpenCode uses native deny rules in a dedicated `--pure` session.
-Grok Build 1.0.13 on macOS uses its native read-only sandbox in a dedicated process.
+Grok Build on macOS uses its native read-only sandbox in a dedicated process.
 Cursor ACP uses native Ask mode and rejects every permission request.
-Claude Agent ACP 0.70.0 is unavailable for review because its plan mode
-completed a native Write tool call during the packaged mutation probe.
-The OpenCode and Cursor processes are not operating-system sandboxes.
-Task Monki uses repository comparison as an independent backstop.
+Claude Agent ACP uses plan mode, but a packaged probe showed that this mode can
+still complete a Write tool call. The OpenCode, Cursor, and Claude processes are
+not operating-system sandboxes. Task Monki tells every review agent not to modify
+files and uses repository comparison as the final acceptance boundary.
 Managed attachments use the shared provider delivery path.
 Each selected runtime and model must support the attachment type.
 
@@ -306,7 +306,7 @@ Agent review:
 - Uses a local review session with `role: "REVIEW"`.
 - May use a different registered runtime from the source implementation.
 - Creates a fresh provider session for one normal read-only review turn.
-- Requires a qualified native mutation-denial policy from the selected runtime.
+- Tells the selected runtime not to modify files and applies its native restriction when available.
 - Uses the same `AgentOrchestrator` and `SqliteAgentRuntimeStore` lifecycle as other turns.
 - The review run id is tracked through `projection.agentReview.runId`.
 

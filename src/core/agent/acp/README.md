@@ -257,7 +257,7 @@ allow/deny rules still apply before ACP requests reach Task Monki. The current
 Grok ACP may offer only `allow_once` and `reject_once`; Task Monki displays those
 exact choices and does not manufacture `allow_always` or a rule scope.
 
-Grok Build 1.0.13 on macOS uses a second, adapter-owned ACP process for review,
+Grok Build on macOS uses a second, adapter-owned ACP process for review,
 prompt refinement, and Discourse. That process starts with Grok's native
 read-only sandbox. It denies edit, write, and MCP tools and refuses shared
 leader routing. Normal Task and Design sessions stay on the writable process.
@@ -275,10 +275,11 @@ Normal Task settings that request a restricted workspace, read-only access,
 network-disabled access, or an automated reviewer are rejected. Task Monki
 does not silently downgrade these settings.
 
-Task Monki sends managed attachments only through qualified profile mappings.
+Task Monki sends managed attachments only through profile-owned mappings.
 Cursor receives bounded text blocks. Grok and Claude receive embedded text
-resources. Exact qualified model pairs receive native ACP image blocks. An
-unsupported media type, version, or model fails before prompt submission.
+resources. Negotiated ACP image support enables native ACP image blocks.
+Grok Build has one provider-local PNG and JPEG rule for its known false
+capability flag. An unsupported media type fails before prompt submission.
 Task Monki keeps attachment bytes and paths out of durable protocol records.
 
 ## Recovery semantics
@@ -330,8 +331,9 @@ session, or submitting any prompt.
 
 - Active-turn steering, true pause, session fork, provider goals, general user
   input, and standardized subagent lifecycle (not in stable ACP v1).
-- A provider-native detached review primitive. Higher-level generic review must
-  remain gated on an attested read-only execution policy.
+- A provider-native detached review primitive. Higher-level review uses the
+  shared prompt, repository comparison, and provider-native restrictions that
+  are available.
 - Full token input/output/cache breakdown: stable ACP reports current context
   `used`/`size` and optional cost, not the richer common breakdown.
 - Automatic authentication flows and session list/delete/close UI. Task Monki

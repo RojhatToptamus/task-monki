@@ -121,6 +121,7 @@ import {
 import { createElectronOpenTargetHost } from './openTargetHost';
 import { buildDesktopCliPath } from './desktopCliPath';
 import { getMacDockIconPath } from './dockIcon';
+import { resolveProviderRuntimeCwd } from './providerRuntimeCwd';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
 import { SoftwareUpdateController } from './SoftwareUpdateController';
@@ -1142,6 +1143,10 @@ void app.whenReady().then(async () => {
   configureMacDockIcon();
   const defaultRepositoryPath = resolveDefaultRepositoryPath();
   const userDataDir = app.getPath('userData');
+  const providerRuntimeCwd = resolveProviderRuntimeCwd({
+    defaultRepositoryPath,
+    userDataDir
+  });
   configureOwnedProcessLauncher({
     launcherPath: resolveOwnedProcessLauncherPath({
       isPackaged: app.isPackaged,
@@ -1181,7 +1186,7 @@ void app.whenReady().then(async () => {
     defaultRepositoryPath,
     undefined,
     {
-      agentCwd: defaultRepositoryPath || app.getPath('home'),
+      agentCwd: providerRuntimeCwd,
       appSettingsStore: persistence.settings,
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,

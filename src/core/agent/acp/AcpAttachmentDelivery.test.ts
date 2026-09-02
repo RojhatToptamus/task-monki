@@ -155,12 +155,14 @@ describe('ACP attachment delivery', () => {
       prepareAcpAttachmentDelivery({
         profile: CURSOR_ACP_PROFILE,
         initialize: initialize({ image: true }),
-        runtimeVersion: '2026.08.25-3e8eec8',
+        runtimeVersion: 'a-newer-version',
         model: cursorModel,
         prompt: 'Inspect this.',
         attachments: [webp]
       })
-    ).rejects.toThrow('not image/webp');
+    ).resolves.toMatchObject({
+      prompt: [expect.anything(), { type: 'image', mimeType: 'image/webp' }]
+    });
   });
 
   it('removes inspect_design image bytes from nested ACP tool results', () => {
@@ -197,7 +199,7 @@ describe('ACP attachment delivery', () => {
     ).rejects.toThrow('did not negotiate ACP embedded context');
   });
 
-  it('uses the exact Grok image exception and rejects unqualified formats and models', async () => {
+  it('uses Grok native image delivery despite its false ACP flag and rejects other formats', async () => {
     const image = await managedAttachment(
       'screen.png',
       Buffer.from([0x89, 0x50, 0x4e, 0x47]),
@@ -245,12 +247,14 @@ describe('ACP attachment delivery', () => {
       prepareAcpAttachmentDelivery({
         profile: GROK_ACP_PROFILE,
         initialize: initialize({ image: false }),
-        runtimeVersion: 'grok 1.0.13 (5e9a58528b76) [stable]',
-        model: { ...grokModel, model: 'grok-4.5', displayName: 'Grok 4.5' },
+        runtimeVersion: 'a-newer-version',
+        model: { ...grokModel, model: 'new-image-model', displayName: 'New image model' },
         prompt: 'Inspect it.',
         attachments: [image]
       })
-    ).rejects.toThrow('no verified compatibility exception');
+    ).resolves.toMatchObject({
+      prompt: expect.arrayContaining([expect.objectContaining({ type: 'image' })])
+    });
   });
 
   it('maps Claude text through its advertised embedded-resource transport', async () => {
