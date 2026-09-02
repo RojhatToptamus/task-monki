@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lisbon Trip Planner</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #f5f5f2; color: #20211f; font-family: Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0; }
+    button { font: inherit; }
+    .shell { display: grid; grid-template-rows: 62px 1fr; height: 100%; }
+    header { display: flex; align-items: center; gap: 22px; padding: 0 24px; border-bottom: 1px solid #d9dad5; background: #fff; }
+    .brand { font-family: Georgia, serif; font-size: 23px; font-weight: 700; }
+    nav { display: flex; gap: 18px; color: #6d7069; font-size: 13px; }
+    nav strong { color: #20211f; }
+    .avatar { display: grid; width: 32px; height: 32px; margin-left: auto; place-items: center; border-radius: 50%; background: #1f433b; color: #fff; font-size: 11px; }
+    main { display: grid; grid-template-columns: 495px 1fr; min-height: 0; }
+    .itinerary { overflow: hidden; border-right: 1px solid #d5d6d1; background: #fff; }
+    .trip-hero { position: relative; height: 180px; overflow: hidden; background: #d8d5cb; }
+    .trip-hero img { width: 100%; height: 100%; object-fit: cover; }
+    .trip-hero::after { content: ''; position: absolute; inset: 0; background: linear-gradient(to top, rgba(16,19,17,.72), rgba(16,19,17,0) 68%); }
+    .trip-title { position: absolute; left: 24px; right: 24px; bottom: 18px; z-index: 2; color: #fff; }
+    .trip-title h1 { margin: 0; font-family: Georgia, serif; font-size: 34px; line-height: 1; }
+    .trip-title p { margin: 8px 0 0; font-size: 12px; }
+    .days { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; padding: 14px 18px; border-bottom: 1px solid #e2e2de; }
+    .day { height: 42px; border: 0; border-radius: 5px; background: #f1f2ef; color: #6d7069; font-size: 11px; line-height: 1.25; }
+    .day strong { display: block; color: inherit; font-size: 12px; }
+    .day.active { background: #1f433b; color: #fff; }
+    .day-plan { height: calc(100% - 236px); overflow: hidden; padding: 16px 18px 18px; }
+    .day-head { display: flex; align-items: center; margin-bottom: 12px; }
+    .day-head h2 { margin: 0; font-size: 16px; }
+    .day-head span { margin-left: 8px; color: #8a8c86; font-size: 11px; }
+    .add { margin-left: auto; height: 32px; padding: 0 11px; border: 1px solid #cfd1cc; border-radius: 5px; background: #fff; color: #30322f; font-size: 12px; font-weight: 650; }
+    .place { display: grid; grid-template-columns: 54px 1fr 18px; gap: 11px; min-height: 72px; padding: 10px 8px; border-top: 1px solid #ecece8; cursor: grab; }
+    .place:first-of-type { border-top: 0; }
+    .time { color: #777a74; font-size: 11px; padding-top: 3px; }
+    .place h3 { margin: 0; font-size: 13px; font-weight: 680; }
+    .place p { margin: 5px 0 0; color: #858880; font-size: 11px; }
+    .handle { color: #a0a29c; font-size: 15px; }
+    .travel-time { display: flex; height: 25px; align-items: center; margin-left: 65px; color: #858880; font-size: 10px; }
+    .travel-time::before { content: ''; width: 14px; margin-right: 7px; border-top: 1px dashed #b7b9b2; }
+    .map { position: relative; overflow: hidden; background: #dfe4dc; }
+    .tiles { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(3, 1fr); transform: scale(1.14); }
+    .tiles img { width: 100%; height: 100%; object-fit: cover; filter: saturate(.8) contrast(.95) brightness(1.04); }
+    .map::after { content: ''; position: absolute; inset: 0; background: rgba(236,239,232,.12); pointer-events: none; }
+    .map-toolbar { position: absolute; left: 20px; top: 20px; z-index: 4; display: flex; gap: 8px; }
+    .map-toolbar button { height: 36px; padding: 0 13px; border: 1px solid #d0d1cc; border-radius: 5px; background: rgba(255,255,255,.95); color: #343632; font-size: 12px; box-shadow: 0 6px 18px rgba(40,45,39,.1); }
+    .route { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; }
+    .route path { fill: none; stroke: #d34d3f; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 1px 1px rgba(255,255,255,.9)); }
+    .pin { position: absolute; z-index: 5; display: grid; width: 32px; height: 32px; place-items: center; border: 3px solid #fff; border-radius: 50%; background: #1f433b; color: #fff; font-size: 11px; font-weight: 760; box-shadow: 0 6px 15px rgba(25,45,39,.28); }
+    .p1 { left: 22%; top: 60%; } .p2 { left: 39%; top: 45%; } .p3 { left: 58%; top: 58%; } .p4 { left: 69%; top: 26%; }
+    .saved { position: absolute; left: 20px; right: 20px; bottom: 18px; z-index: 6; display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)); gap: 8px; align-items: stretch; }
+    .saved-title { display: grid; width: 86px; place-items: center; border-radius: 6px 0 0 6px; background: #1f433b; color: #fff; font-size: 11px; font-weight: 700; }
+    .saved-place { min-width: 0; padding: 11px 12px; border: 1px solid #dadbd6; border-radius: 5px; background: rgba(255,255,255,.96); box-shadow: 0 7px 20px rgba(30,36,31,.12); }
+    .saved-place strong { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .saved-place span { display: block; margin-top: 5px; color: #7b7e77; font-size: 10px; }
+    .attribution { position: absolute; right: 7px; bottom: 4px; z-index: 8; color: #5d625b; font-size: 8px; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header><div class="brand">Roamday</div><nav><strong>Trips</strong><span>Explore</span><span>Saved places</span></nav><div class="avatar">RT</div></header>
+    <main>
+      <section class="itinerary">
+        <div class="trip-hero"><img src="./lisbon.png" alt="Lisbon at golden hour"><div class="trip-title"><h1>Lisbon in 5 days</h1><p>September 18–22 · 12 saved places</p></div></div>
+        <div class="days" role="tablist"><button class="day active"><strong>Thu 18</strong>Day 1</button><button class="day"><strong>Fri 19</strong>Day 2</button><button class="day"><strong>Sat 20</strong>Day 3</button><button class="day"><strong>Sun 21</strong>Day 4</button><button class="day"><strong>Mon 22</strong>Day 5</button></div>
+        <div class="day-plan" data-drop-zone>
+          <div class="day-head"><h2>Belém and old Lisbon</h2><span>4 stops · 5.2 km</span><button class="add">+ Add place</button></div>
+          <article class="place" draggable="true"><div class="time">09:00</div><div><h3>Pastéis de Belém</h3><p>Breakfast · 45 min</p></div><div class="handle">⋮</div></article>
+          <div class="travel-time">6 min walk</div>
+          <article class="place" draggable="true"><div class="time">10:00</div><div><h3>Jerónimos Monastery</h3><p>Architecture · 1 hr 30 min</p></div><div class="handle">⋮</div></article>
+          <div class="travel-time">18 min tram</div>
+          <article class="place" draggable="true"><div class="time">13:15</div><div><h3>Time Out Market</h3><p>Lunch · 1 hr</p></div><div class="handle">⋮</div></article>
+          <div class="travel-time">21 min tram</div>
+          <article class="place" draggable="true"><div class="time">17:45</div><div><h3>Miradouro da Senhora</h3><p>Sunset view · 1 hr</p></div><div class="handle">⋮</div></article>
+        </div>
+      </section>
+      <section class="map">
+        <div class="tiles">
+          <img src="https://tile.openstreetmap.org/13/3887/3137.png" alt=""><img src="https://tile.openstreetmap.org/13/3888/3137.png" alt=""><img src="https://tile.openstreetmap.org/13/3889/3137.png" alt=""><img src="https://tile.openstreetmap.org/13/3890/3137.png" alt="">
+          <img src="https://tile.openstreetmap.org/13/3887/3138.png" alt=""><img src="https://tile.openstreetmap.org/13/3888/3138.png" alt=""><img src="https://tile.openstreetmap.org/13/3889/3138.png" alt=""><img src="https://tile.openstreetmap.org/13/3890/3138.png" alt="">
+          <img src="https://tile.openstreetmap.org/13/3887/3139.png" alt=""><img src="https://tile.openstreetmap.org/13/3888/3139.png" alt=""><img src="https://tile.openstreetmap.org/13/3889/3139.png" alt=""><img src="https://tile.openstreetmap.org/13/3890/3139.png" alt="">
+        </div>
+        <div class="map-toolbar"><button>Day 1 route</button><button>Travel times</button></div>
+        <svg class="route" viewBox="0 0 800 800" preserveAspectRatio="none" aria-hidden="true"><path d="M190 510 C250 455 290 410 335 370 S430 425 495 475 S570 360 605 235" /></svg>
+        <span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span>
+        <div class="saved"><div class="saved-title">Saved</div><div class="saved-place"><strong>MAAT</strong><span>Museum · 4.8</span></div><div class="saved-place"><strong>Prado Mercearia</strong><span>Dinner · 4.7</span></div><div class="saved-place"><strong>Feira da Ladra</strong><span>Market · Saturdays</span></div></div>
+        <div class="attribution">© OpenStreetMap contributors</div>
+      </section>
+    </main>
+  </div>
+  <script>
+    document.querySelectorAll('.day').forEach((button) => button.addEventListener('click', () => {
+      document.querySelectorAll('.day').forEach((day) => day.classList.remove('active'));
+      button.classList.add('active');
+    }));
+    let dragged;
+    document.querySelectorAll('.place').forEach((place) => {
+      place.addEventListener('dragstart', () => { dragged = place; });
+      place.addEventListener('dragover', (event) => event.preventDefault());
+      place.addEventListener('drop', (event) => {
+        event.preventDefault();
+        if (dragged && dragged !== place) place.before(dragged);
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Checkout API Console</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #0b0c0f; color: #edf0f4; font-family: Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0; }
+    button, textarea { font: inherit; }
+    .shell { display: grid; grid-template-rows: 64px 1fr; height: 100%; }
+    header { display: flex; align-items: center; gap: 18px; padding: 0 24px; border-bottom: 1px solid #272a31; background: #111318; }
+    .brand { display: flex; align-items: center; gap: 11px; font-size: 17px; font-weight: 720; }
+    .brand-mark { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid #4d6ba9; border-radius: 6px; background: #1c2840; color: #b8ccff; font-size: 12px; }
+    .env { margin-left: 18px; padding-left: 18px; border-left: 1px solid #2d3037; color: #9da5b2; font-size: 13px; }
+    .env strong { margin-left: 8px; color: #9ee0bb; font-weight: 660; }
+    .head-actions { display: flex; margin-left: auto; align-items: center; gap: 10px; }
+    .ghost { height: 34px; padding: 0 13px; border: 1px solid #353941; border-radius: 5px; background: #191c22; color: #d8dce3; }
+    main { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: 0; }
+    aside { padding: 22px 16px; border-right: 1px solid #272a31; background: #0f1115; }
+    .aside-label { margin: 0 8px 12px; color: #7f8794; font-size: 11px; font-weight: 720; text-transform: uppercase; }
+    .endpoint { width: 100%; margin-bottom: 8px; padding: 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #aeb4bf; text-align: left; }
+    .endpoint.active { border-color: #354766; background: #171e2b; color: #f4f6f8; }
+    .method { display: inline-flex; width: 46px; color: #8fb2ff; font-family: ui-monospace, monospace; font-size: 11px; font-weight: 800; }
+    .endpoint small { display: block; margin: 7px 0 0 49px; color: #737b87; }
+    .history { margin-top: 26px; padding: 16px 12px 0; border-top: 1px solid #272a31; }
+    .history-row { display: flex; align-items: center; gap: 9px; margin: 11px 0; color: #9ca4af; font-size: 12px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #e2a96c; }
+    .dot.green { background: #70cf98; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(380px, .92fr); gap: 20px; padding: 24px; min-width: 0; background: #0b0c0f; }
+    .panel { min-width: 0; border: 1px solid #2c3038; border-radius: 7px; background: #14161b; box-shadow: 0 16px 44px rgba(0,0,0,.24); }
+    .panel-head { display: flex; min-height: 62px; align-items: center; padding: 0 18px; border-bottom: 1px solid #2b2e35; }
+    .panel-head h2 { margin: 0; font-size: 16px; font-weight: 690; }
+    .panel-head span { margin-left: auto; color: #838b97; font-size: 12px; }
+    .request-line { display: grid; grid-template-columns: 88px 1fr auto; gap: 10px; padding: 18px; }
+    .request-line code, .url { display: flex; height: 44px; align-items: center; border: 1px solid #353941; border-radius: 5px; background: #0f1115; }
+    .request-line code { justify-content: center; color: #8fb2ff; font-size: 12px; font-weight: 800; }
+    .url { padding: 0 14px; color: #dfe3e9; font-family: ui-monospace, monospace; font-size: 13px; }
+    .send { min-width: 122px; border: 0; border-radius: 5px; background: #e9edf4; color: #111318; font-weight: 720; }
+    .tabs { display: flex; gap: 24px; height: 40px; align-items: flex-end; padding: 0 18px; border-bottom: 1px solid #2b2e35; color: #838b97; font-size: 12px; }
+    .tabs strong { height: 40px; padding-top: 12px; border-bottom: 2px solid #8fb2ff; color: #eef1f5; }
+    .editor { margin: 18px; overflow: hidden; border: 1px solid #30343c; border-radius: 6px; background: #0c0e12; }
+    .editor-bar { display: flex; height: 38px; align-items: center; padding: 0 12px; border-bottom: 1px solid #292d34; color: #7f8794; font-size: 11px; }
+    .editor-bar strong { color: #aeb5c0; }
+    .editor-bar span { margin-left: auto; }
+    textarea { width: 100%; height: 360px; resize: none; border: 0; outline: 0; padding: 18px; background: transparent; color: #f0c98f; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; line-height: 1.6; }
+    .hint { margin: -4px 18px 18px; color: #7f8794; font-size: 12px; }
+    .response { display: grid; grid-template-rows: auto auto 1fr; }
+    .status-row { display: flex; align-items: center; gap: 11px; padding: 18px; }
+    .status { padding: 7px 9px; border: 1px solid #7c4f42; border-radius: 5px; background: #2b1c19; color: #f2aa95; font-family: ui-monospace, monospace; font-size: 12px; font-weight: 760; }
+    .duration { color: #848c98; font-size: 12px; }
+    .validated { margin-left: auto; color: #9ee0bb; font-size: 12px; }
+    pre { margin: 0 18px; padding: 18px; border: 1px solid #30343c; border-radius: 6px; background: #0c0e12; color: #d7dce4; font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    .key { color: #9bbcff; } .value { color: #f3c98f; }
+    .checks { align-self: end; margin: 18px; border-top: 1px solid #2a2e35; padding-top: 16px; }
+    .check { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: #aeb5bf; font-size: 12px; }
+    .check b { color: #7bd39e; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand"><span class="brand-mark">API</span> Checkout Console</div>
+      <div class="env">Preview environment <strong>healthy</strong></div>
+      <div class="head-actions"><button class="ghost">Examples</button><button class="ghost">Environment</button></div>
+    </header>
+    <main>
+      <aside>
+        <p class="aside-label">Checkout routes</p>
+        <button class="endpoint active"><span class="method">POST</span>/orders/validate<small>Validate an order payload</small></button>
+        <button class="endpoint"><span class="method">POST</span>/orders<small>Create an order</small></button>
+        <button class="endpoint"><span class="method">GET</span>/orders/:id<small>Read order status</small></button>
+        <div class="history">
+          <p class="aside-label">Recent</p>
+          <div class="history-row"><span class="dot"></span>400 · null body · just now</div>
+          <div class="history-row"><span class="dot green"></span>200 · valid order · 1m</div>
+          <div class="history-row"><span class="dot green"></span>200 · valid order · 3m</div>
+        </div>
+      </aside>
+      <section class="workspace">
+        <div class="panel request">
+          <div class="panel-head"><h2>Request</h2><span>application/json</span></div>
+          <div class="request-line"><code>POST</code><div class="url">/api/orders/validate</div><button class="send" id="send">Send request</button></div>
+          <div class="tabs"><strong>Body</strong><span>Headers 4</span><span>Auth</span></div>
+          <div class="editor"><div class="editor-bar"><strong>JSON</strong><span>Ln 1, Col 5</span></div><textarea aria-label="JSON request body">null</textarea></div>
+          <p class="hint">Testing the null-body edge case from the review finding.</p>
+        </div>
+        <div class="panel response">
+          <div class="panel-head"><h2>Response</h2><span>Preview · isolated database</span></div>
+          <div class="status-row"><span class="status">400 BAD REQUEST</span><span class="duration">42 ms</span><span class="validated">validation handled</span></div>
+          <pre>{
+  <span class="key">"error"</span>: <span class="value">"INVALID_JSON_BODY"</span>,
+  <span class="key">"message"</span>: <span class="value">"Expected a JSON object"</span>,
+  <span class="key">"field"</span>: <span class="value">"body"</span>
+}</pre>
+          <div class="checks"><p class="aside-label">Preview checks</p><div class="check"><b>PASS</b> Health endpoint responded</div><div class="check"><b>PASS</b> PostgreSQL connection isolated</div><div class="check"><b>PASS</b> Null body returns validation error</div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+    document.getElementById('send').addEventListener('click', (event) => {
+      const button = event.currentTarget;
+      button.textContent = 'Sent';
+      setTimeout(() => { button.textContent = 'Send request'; }, 900);
+    });
+  </script>
+</body>
+</html>

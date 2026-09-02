@@ -1,0 +1,362 @@
+{
+  "durationSeconds": 142,
+  "fps": 30,
+  "scenes": [
+    {
+      "id": "board",
+      "image": "captures/01-board.png",
+      "start": 0,
+      "duration": 6,
+      "sourceKind": "task-monki",
+      "focus": { "x": 960, "y": 520, "zoom": 1.05 },
+      "chapter": { "eyebrow": "LOCAL AI WORKSPACE", "title": "From request to pull request" },
+      "action": { "at": 4.8, "x": 1848, "y": 25, "kind": "click" }
+    },
+    {
+      "id": "providers",
+      "image": "captures/02-providers.png",
+      "start": 6,
+      "duration": 6,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1500, "y": 610, "zoom": 1.1 },
+      "label": "Codex · Claude · OpenCode · Grok · Cursor"
+    },
+    {
+      "id": "new-task-empty",
+      "image": "captures/03-new-task-empty.png",
+      "start": 12,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1510, "y": 360, "zoom": 1.08 },
+      "chapter": { "eyebrow": "CREATE", "title": "Plain language in. Isolated worktree out." },
+      "action": { "at": 2.8, "x": 1460, "y": 224, "kind": "click" }
+    },
+    {
+      "id": "new-task-rough",
+      "image": "captures/04-new-task-rough.png",
+      "start": 16,
+      "duration": 5,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1510, "y": 420, "zoom": 1.08 },
+      "action": { "at": 4, "x": 1750, "y": 310, "kind": "click" }
+    },
+    {
+      "id": "new-task-refined",
+      "image": "captures/05-new-task-refined.png",
+      "start": 21,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1510, "y": 430, "zoom": 1.09 },
+      "label": "Refined with repository context"
+    },
+    {
+      "id": "run-configuration",
+      "image": "captures/06-run-configuration.png",
+      "start": 25,
+      "duration": 3,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1510, "y": 690, "zoom": 1.09 },
+      "action": { "at": 2.2, "x": 1720, "y": 1012, "kind": "click" }
+    },
+    {
+      "id": "task-ready",
+      "image": "captures/07-task-ready.png",
+      "start": 28,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1000, "y": 300, "zoom": 1.06 },
+      "action": { "at": 3.1, "x": 1740, "y": 110, "kind": "click" }
+    },
+    {
+      "id": "agent-running",
+      "image": "captures/08-agent-running.png",
+      "start": 32,
+      "duration": 6,
+      "sourceKind": "task-monki",
+      "focus": { "x": 900, "y": 470, "zoom": 1.07 },
+      "chapter": { "eyebrow": "AGENT PROGRESS", "title": "Plan, files, commands, and live output" },
+      "action": { "at": 5, "x": 475, "y": 155, "kind": "click" }
+    },
+    {
+      "id": "agent-debug",
+      "image": "captures/09-agent-debug.png",
+      "start": 38,
+      "duration": 5,
+      "sourceKind": "task-monki",
+      "focus": { "x": 980, "y": 480, "zoom": 1.07 },
+      "action": { "at": 4.1, "x": 235, "y": 155, "kind": "click" }
+    },
+    {
+      "id": "preview-missing",
+      "image": "captures/10-preview-missing.png",
+      "start": 43,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 900, "y": 330, "zoom": 1.08 },
+      "chapter": { "eyebrow": "PREVIEW SETUP", "title": "Task Monki does not guess how to run a repository" },
+      "action": { "at": 3.1, "x": 696, "y": 325, "kind": "click" }
+    },
+    {
+      "id": "preview-setup",
+      "image": "captures/11-preview-setup.png",
+      "start": 47,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 920, "y": 365, "zoom": 1.09 },
+      "label": "Generate a reviewable plan"
+    },
+    {
+      "id": "preview-plan",
+      "image": "captures/12-preview-plan.png",
+      "start": 51,
+      "duration": 7,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1020, "y": 520, "zoom": 1.05 },
+      "label": "PostgreSQL · setup jobs · health checks · app route",
+      "action": { "at": 5.8, "x": 695, "y": 280, "kind": "focus" }
+    },
+    {
+      "id": "preview-details",
+      "image": "captures/13-preview-details.png",
+      "start": 58,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1060, "y": 595, "zoom": 1.07 },
+      "label": "Nothing runs until approval",
+      "action": { "at": 3.1, "x": 694, "y": 279, "kind": "click" }
+    },
+    {
+      "id": "preview-ready",
+      "image": "captures/14-preview-ready.png",
+      "start": 62,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1030, "y": 420, "zoom": 1.06 },
+      "chapter": { "eyebrow": "LIVE PREVIEW", "title": "A clean environment for the real application" },
+      "action": { "at": 3.1, "x": 720, "y": 315, "kind": "click" }
+    },
+    {
+      "id": "preview-app",
+      "image": "captures/15-preview-app.png",
+      "backgroundImage": "captures/14-preview-ready.png",
+      "start": 66,
+      "duration": 6,
+      "sourceKind": "preview-inset",
+      "focus": { "x": 1080, "y": 575, "zoom": 1.03 },
+      "action": { "at": 4.7, "x": 1560, "y": 678, "kind": "click" }
+    },
+    {
+      "id": "review-needs-changes",
+      "image": "captures/16-review-needs-changes.png",
+      "start": 72,
+      "duration": 6,
+      "sourceKind": "task-monki",
+      "focus": { "x": 880, "y": 595, "zoom": 1.07 },
+      "chapter": { "eyebrow": "DETACHED REVIEW", "title": "A finding becomes focused follow-up work" },
+      "action": { "at": 4.9, "x": 735, "y": 735, "kind": "click" }
+    },
+    {
+      "id": "review-drawer",
+      "image": "captures/17-review-drawer.png",
+      "start": 78,
+      "duration": 6,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1530, "y": 520, "zoom": 1.08 },
+      "label": "null JSON body returns the wrong error",
+      "action": { "at": 5, "x": 1778, "y": 1012, "kind": "click" }
+    },
+    {
+      "id": "follow-up-running",
+      "image": "captures/18-follow-up-running.png",
+      "start": 84,
+      "duration": 6,
+      "sourceKind": "task-monki",
+      "focus": { "x": 900, "y": 500, "zoom": 1.07 },
+      "label": "Fixing review feedback in the same workflow"
+    },
+    {
+      "id": "draft-pr",
+      "image": "captures/19-draft-pr.png",
+      "start": 90,
+      "duration": 6,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1450, "y": 300, "zoom": 1.09 },
+      "chapter": { "eyebrow": "PULL REQUEST", "title": "Commit, push, draft PR, and CI in context" }
+    },
+    {
+      "id": "ready-pr",
+      "image": "captures/20-ready-pr.png",
+      "start": 96,
+      "duration": 7,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1450, "y": 300, "zoom": 1.09 },
+      "label": "Approved · Mergeable · Checks passing",
+      "action": { "at": 5.8, "x": 1585, "y": 220, "kind": "click" }
+    },
+    {
+      "id": "design-new",
+      "image": "captures/21-design-new.png",
+      "start": 103,
+      "duration": 5,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1290, "y": 470, "zoom": 1.06 },
+      "chapter": { "eyebrow": "DESIGN MODE", "title": "A brief becomes a working interface" },
+      "action": { "at": 3.9, "x": 1210, "y": 330, "kind": "click" }
+    },
+    {
+      "id": "design-prompt",
+      "image": "captures/22-design-prompt.png",
+      "start": 108,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1290, "y": 470, "zoom": 1.06 },
+      "label": "Five days in Lisbon",
+      "action": { "at": 3.1, "x": 1745, "y": 785, "kind": "click" }
+    },
+    {
+      "id": "design-canvas",
+      "image": "captures/23-design-shell.png",
+      "prototypeImage": "captures/23-travel-prototype.png",
+      "start": 112,
+      "duration": 6,
+      "sourceKind": "design-composite",
+      "focus": { "x": 1410, "y": 585, "zoom": 1.03 },
+      "label": "Preview and refine with any supported provider"
+    },
+    {
+      "id": "discourse-list",
+      "image": "captures/24-discourse-list.png",
+      "start": 118,
+      "duration": 3,
+      "sourceKind": "task-monki",
+      "focus": { "x": 880, "y": 430, "zoom": 1.04 },
+      "chapter": { "eyebrow": "DISCOURSE", "title": "Three agents examine one hard question" },
+      "action": { "at": 2.2, "x": 315, "y": 280, "kind": "click" }
+    },
+    {
+      "id": "discourse-answer",
+      "image": "captures/25-discourse-answer.png",
+      "start": 121,
+      "duration": 7,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1120, "y": 575, "zoom": 1.08 },
+      "label": "Lead revised · Verifier found 1 concern"
+    },
+    {
+      "id": "evidence",
+      "image": "captures/26-evidence.png",
+      "start": 128,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1050, "y": 610, "zoom": 1.08 },
+      "chapter": { "eyebrow": "EVIDENCE + DEBUG", "title": "The branch facts stay inspectable" },
+      "action": { "at": 3.1, "x": 470, "y": 155, "kind": "click" }
+    },
+    {
+      "id": "debug",
+      "image": "captures/27-debug.png",
+      "start": 132,
+      "duration": 3,
+      "sourceKind": "task-monki",
+      "focus": { "x": 1010, "y": 505, "zoom": 1.07 },
+      "label": "Provider timeline when you need it"
+    },
+    {
+      "id": "closing-board",
+      "image": "captures/28-closing-board.png",
+      "start": 135,
+      "duration": 4,
+      "sourceKind": "task-monki",
+      "focus": { "x": 960, "y": 525, "zoom": 1.04 },
+      "chapter": { "eyebrow": "TASK MONKI", "title": "Local software workflows, end to end" }
+    },
+    {
+      "id": "outro",
+      "image": "captures/28-closing-board.png",
+      "start": 139,
+      "duration": 3,
+      "sourceKind": "task-monki",
+      "focus": { "x": 960, "y": 525, "zoom": 1.07 },
+      "outro": true
+    }
+  ],
+  "voiceover": [
+    {
+      "id": "what",
+      "file": "audio/voiceover/01-what.wav",
+      "start": 0,
+      "duration": 12,
+      "text": "Task Monkey is a local task board that takes software work from a plain-language request to a pull request. It works with Codex, Claude, OpenCode, Grok, Cursor, and other providers."
+    },
+    {
+      "id": "create",
+      "file": "audio/voiceover/02-create.wav",
+      "start": 12,
+      "duration": 20,
+      "text": "Let's create a task. Describe the change in plain language. Task Monkey can refine it against the repository and any attached files. Start the task, and it creates a dedicated Git worktree, so tasks and agents can work independently without touching one another."
+    },
+    {
+      "id": "progress",
+      "file": "audio/voiceover/03-progress.wav",
+      "start": 32,
+      "duration": 11,
+      "text": "The agent starts working inside that worktree. We can follow its plan, progress, file activity, and commands while it works."
+    },
+    {
+      "id": "preview-setup",
+      "file": "audio/voiceover/04-preview-setup.wav",
+      "start": 43,
+      "duration": 19,
+      "text": "The implementation is complete, and Task Monkey has captured the Git diff. This repository has no preview configuration, so instead of guessing, it asks an agent to prepare one. The plan covers dependencies, database setup, a managed PostgreSQL container, health checks, and the application route. Nothing runs until we review and approve it."
+    },
+    {
+      "id": "running-app",
+      "file": "audio/voiceover/05-running-app.wav",
+      "start": 62,
+      "duration": 10,
+      "text": "Once approved, Task Monkey starts the application in an isolated preview. Now we can test the real change without leaving the app, with a clean environment and database."
+    },
+    {
+      "id": "review",
+      "file": "audio/voiceover/06-review.wav",
+      "start": 72,
+      "duration": 18,
+      "text": "Next, another agent reviews the actual worktree diff. Here it finds an edge case where a null JSON body returns the wrong error. We send the finding back, and the implementation agent fixes it in the same workflow."
+    },
+    {
+      "id": "pull-request",
+      "file": "audio/voiceover/07-pull-request.wav",
+      "start": 90,
+      "duration": 13,
+      "text": "When everything looks good, Task Monkey can commit the changes, push the branch, and open a draft pull request. The pull request and CI status stay visible inside Task Monkey."
+    },
+    {
+      "id": "design",
+      "file": "audio/voiceover/08-design.wav",
+      "start": 103,
+      "duration": 15,
+      "text": "Task Monkey also has Design Mode. Give it a brief and references; it can ask questions when a real product decision is needed, then build a working prototype. Preview and refine the design in place, using different AI providers."
+    },
+    {
+      "id": "discourse",
+      "file": "audio/voiceover/09-discourse.wav",
+      "start": 118,
+      "duration": 10,
+      "text": "In Discourse, several agents examine one question. The Lead answers first. The Skeptic and Verifier challenge it independently, and the Lead revises when they find a problem."
+    },
+    {
+      "id": "evidence",
+      "file": "audio/voiceover/10-evidence.wav",
+      "start": 128,
+      "duration": 7,
+      "text": "Evidence keeps the changes and results easy to inspect. Debug shows the lower-level agent timeline and provider details."
+    },
+    {
+      "id": "close",
+      "file": "audio/voiceover/11-close.wav",
+      "start": 135,
+      "duration": 7,
+      "text": "That's Task Monkey. It's free and open source, and you can try it at monki dot work."
+    }
+  ]
+}
