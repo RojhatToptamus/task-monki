@@ -43,7 +43,7 @@ interface AgentModelSelectorProps {
 
 interface DiscoveryState {
   runtimeId: string;
-  status: Exclude<ModelDiscoveryStatus, 'idle'>;
+  status: Exclude<ModelDiscoveryStatus, 'idle'> | 'resolved';
 }
 
 type PickerOptionKind = 'model' | 'provider-default' | 'discovery';
@@ -64,7 +64,6 @@ interface PickerGroup {
   label: string;
   meta: string;
   options: PickerOption[];
-  loading: boolean;
 }
 
 const MODEL_MENU_GAP = 6;
@@ -168,6 +167,14 @@ export function AgentModelSelector({
   const defaultActiveOptionId =
     interactiveOptions.find((option) => option.selected)?.id ??
     interactiveOptions[0]?.id;
+  const resolvedDiscoveryOptionId =
+    discovery?.status === 'resolved'
+      ? pickerGroups
+          .find((group) => group.runtimeId === discovery.runtimeId)
+          ?.options.find(
+            (option) => option.kind !== 'discovery' && !option.unavailableReason
+          )?.id
+      : undefined;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -215,6 +222,14 @@ export function AgentModelSelector({
       return defaultActiveOptionId;
     });
   }, [defaultActiveOptionId, interactiveOptionIds, open, query]);
+
+  useLayoutEffect(() => {
+    if (!open || discovery?.status !== 'resolved') return;
+    if (resolvedDiscoveryOptionId) {
+      setActiveOptionId(resolvedDiscoveryOptionId);
+    }
+    setDiscovery(undefined);
+  }, [discovery?.status, open, resolvedDiscoveryOptionId]);
 
   useEffect(() => {
     if (!open || !activeOptionId) return;
@@ -284,7 +299,7 @@ export function AgentModelSelector({
       if (!mountedRef.current || discoveryRevisionRef.current !== revision) {
         return;
       }
-      setDiscovery(undefined);
+      setDiscovery({ runtimeId: nextRuntimeId, status: 'resolved' });
       onDiscoveryStatusChange?.('idle');
     } catch {
       if (!mountedRef.current || discoveryRevisionRef.current !== revision) {
@@ -311,6 +326,7 @@ export function AgentModelSelector({
   const choose = async (option: PickerOption) => {
     if (option.unavailableReason) return;
     if (option.kind === 'discovery') {
+      setActiveOptionId(option.id);
       await discover(option.runtime);
       return;
     }
@@ -507,12 +523,21 @@ export function AgentModelSelector({
                       discovery.status === 'failed') ||
                       option.runtime.preflight.readiness.checks.modelCatalog ===
                         'FAILED');
+                  const discoveryLoading =
+                    option.kind === 'discovery' &&
+                    discovery?.runtimeId ===
+                      option.runtime.preflight.runtime.id &&
+                    discovery.status === 'loading';
                   const optionLabel =
                     option.kind === 'discovery'
-                      ? discoveryFailed
-                        ? 'Retry model discovery'
-                        : 'Load models'
+                      ? discoveryLoading
+                        ? 'Loading models…'
+                        : discoveryFailed
+                          ? 'Retry model discovery'
+                          : 'Load models'
                       : option.model?.displayName ?? 'Provider default';
+                  const optionDisabled =
+                    Boolean(option.unavailableReason) || discoveryLoading;
                   return (
                     <button
                       type="button"
@@ -520,8 +545,9 @@ export function AgentModelSelector({
                       role="option"
                       tabIndex={-1}
                       aria-selected={option.selected}
-                      aria-disabled={Boolean(option.unavailableReason)}
-                      disabled={Boolean(option.unavailableReason)}
+                      aria-disabled={optionDisabled}
+                      aria-busy={discoveryLoading || undefined}
+                      disabled={optionDisabled}
                       aria-label={`${optionLabel} via ${group.label}${
                         option.unavailableReason
                           ? `, unavailable. ${option.unavailableReason}`
@@ -537,12 +563,14 @@ export function AgentModelSelector({
                       key={option.id}
                       title={option.title}
                       onMouseMove={() => {
-                        if (!option.unavailableReason) setActiveOptionId(option.id);
+                        if (!optionDisabled) setActiveOptionId(option.id);
                       }}
                       onClick={() => void choose(option)}
                     >
                       <span className="tm-agent-console__option-name">
-                        {option.kind === 'discovery' ? (
+                        {discoveryLoading ? (
+                          <SpinnerIcon />
+                        ) : option.kind === 'discovery' ? (
                           <RefreshCw
                             aria-hidden="true"
                             size={13}
@@ -565,12 +593,6 @@ export function AgentModelSelector({
                     </button>
                   );
                 })}
-                {group.loading ? (
-                  <div className="tm-agent-console__catalog-state" role="status">
-                    <SpinnerIcon />
-                    <span>Loading models…</span>
-                  </div>
-                ) : null}
               </div>
             ))}
             {runtimes.length === 0 ? (
@@ -712,6 +734,10 @@ function buildPickerGroups(input: {
       (!readiness.canStart ? readiness.detail : undefined);
     const providerMatches = query.length === 0 || matches(label);
     const needsDiscovery = modelCatalogNeedsActivation(runtime);
+    const discoveryInProgress =
+      input.discovery?.runtimeId === runtimeId &&
+      input.discovery.status === 'loading';
+    const showDiscoveryOption = needsDiscovery || discoveryInProgress;
     const candidateModels = input.models
       .filter(
         (model) =>
@@ -739,34 +765,28 @@ function buildPickerGroups(input: {
       });
 
     if (
-      (needsDiscovery && !providerMatches) ||
+      (showDiscoveryOption && !providerMatches) ||
       (!providerMatches && candidateModels.length === 0)
     ) {
       return [];
     }
 
-    const loading =
-      needsDiscovery &&
-      input.discovery?.runtimeId === runtimeId &&
-      input.discovery.status === 'loading';
     let options: PickerOption[] = [];
 
-    if (needsDiscovery) {
-      if (!loading) {
-        options = [
-          {
-            id: pickerOptionId(input.popupId, runtimeId, 'discovery'),
-            kind: 'discovery',
-            runtime,
-            selected: false,
-            meta: '',
-            title: runtimeUnavailableReason ?? `Load models from ${label}.`,
-            ...(runtimeUnavailableReason
-              ? { unavailableReason: runtimeUnavailableReason }
-              : {})
-          }
-        ];
-      }
+    if (showDiscoveryOption) {
+      options = [
+        {
+          id: pickerOptionId(input.popupId, runtimeId, 'discovery'),
+          kind: 'discovery',
+          runtime,
+          selected: false,
+          meta: '',
+          title: runtimeUnavailableReason ?? `Load models from ${label}.`,
+          ...(runtimeUnavailableReason
+            ? { unavailableReason: runtimeUnavailableReason }
+            : {})
+        }
+      ];
     } else if (candidateModels.length > 0) {
       options = candidateModels.map(({ model, unavailableReason }) => ({
         id: pickerOptionId(input.popupId, runtimeId, model.id),
@@ -797,7 +817,7 @@ function buildPickerGroups(input: {
       ];
     }
 
-    if (options.length === 0 && !loading) return [];
+    if (options.length === 0) return [];
 
     const unavailableCount = options.filter(
       (option) => option.kind === 'model' && option.unavailableReason
@@ -809,7 +829,7 @@ function buildPickerGroups(input: {
       : unavailableCount > 0
         ? `${unavailableCount} unavailable`
         : '';
-    return [{ runtimeId, label, meta, options, loading }];
+    return [{ runtimeId, label, meta, options }];
   });
 }
 

@@ -3076,19 +3076,10 @@ button.tm-software-update:hover {
   color: var(--text);
 }
 
-.tm-agent-console__catalog-state,
 .tm-agent-console__empty {
   border-radius: 7px;
   color: var(--muted);
   font-size: 12px;
-}
-
-.tm-agent-console__catalog-state {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 0 7px;
 }
 
 .tm-agent-console__empty {
