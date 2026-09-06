@@ -12,6 +12,7 @@ import {
   TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
   TASK_MONKI_PROGRESS_CONTRACT,
   buildContinuationPrompt,
+  buildAgentReviewPrompt,
   buildDesignAgentDeveloperInstructions,
   buildForkAlternativeTaskPrompt,
   buildInitialRunPrompt,
@@ -23,6 +24,22 @@ import {
 } from './promptTemplates';
 
 describe('prompt templates', () => {
+  it('preserves an explicit first instruction and the complete review scope for shared work', () => {
+    const worktree: WorktreeRecord = { ...worktreeFixture(), ownership: 'EXTERNAL', branchName: 'feature', baseSha: 'selected-base' };
+    const implementation = buildInitialRunPrompt({
+      task: taskFixture(), worktree, settings: {}, readOnlyMode: false,
+      instruction: 'Fix only the selected input-validation finding.'
+    });
+    expect(implementation).toContain('existing shared checkout');
+    expect(implementation).toContain('Preserve unrelated external work');
+    expect(implementation.endsWith('Current implementation instruction:\nFix only the selected input-validation finding.')).toBe(true);
+    const target = 'Review selected-base..HEAD together with staged, unstaged, and untracked changes.';
+    const review = buildAgentReviewPrompt({ task: taskFixture(), worktree, target: { type: 'CUSTOM', instructions: target } });
+    expect(review).toContain(target);
+    expect(review).toContain('Comparison anchor: selected-base');
+    expect(review).toContain('Expected branch: feature');
+    expect(review).toContain('Do not modify repository files');
+  });
   it('keeps Design ownership and offline runtime rules in one developer instruction profile', () => {
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
       'Start a clear first brief without setup questions.'

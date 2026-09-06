@@ -257,6 +257,94 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     expect(reviewed.mode).toBe('REVIEW');
   });
 
+  it('reviews an attached checkout without creating primary history, then starts implementation in a fresh primary session', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-run-free-review-'));
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
+    const { task, iteration, worktree } = await attachedTask(store, repositoryDir);
+    const nativeReview = vi.spyOn(adapter, 'startReview');
+    const target = { type: 'CUSTOM' as const, instructions: 'Review committed changes from base to HEAD, staged, unstaged, and untracked changes.' };
+    const reviewed = await orchestrator.startReview({ task, iteration, worktree, target, settings: { sandbox: 'DANGER_FULL_ACCESS' } });
+    expect(nativeReview).not.toHaveBeenCalled();
+    expect(adapter.lastStart).toMatchObject({ mode: 'REVIEW', settings: { sandbox: 'READ_ONLY' } });
+    expect(adapter.lastStart?.prompt).toContain(target.instructions);
+    expect(reviewed.continuedFromRunId).toBeUndefined();
+    const reviewSession = (await store.getAgentSession(reviewed.sessionId))!;
+    expect(reviewSession).toMatchObject({ role: 'REVIEW', worktreePath: repositoryDir });
+    expect(reviewSession.parentSessionId).toBeUndefined();
+    expect(reviewSession.forkedFromSessionId).toBeUndefined();
+    expect((await store.getTask(task.id))?.currentRunId).toBeUndefined();
+    expect((await store.getTask(task.id))?.currentAgentSessionId).toBeUndefined();
+
+    await terminal(store, reviewed, 'AGENT_RUN_COMPLETED');
+    const implementation = await orchestrator.startTurn({
+      task: (await store.getTask(task.id))!, iteration, worktree,
+      mode: 'IMPLEMENTATION', prompt: 'Fix the selected finding.', settings: {}
+    });
+    expect(implementation.sessionId).not.toBe(reviewed.sessionId);
+    expect((await store.getAgentSession(implementation.sessionId))?.role).toBe('PRIMARY');
+    expect((await store.getTask(task.id))?.currentRunId).toBe(implementation.id);
+    await terminal(store, implementation, 'AGENT_RUN_FAILED');
+    await expect(orchestrator.startReview({ task, iteration, worktree, target, settings: {} }))
+      .rejects.toThrow('without a primary run');
+    await expect(orchestrator.startReview({ task, iteration, worktree, sourceRun: (await store.getRun(implementation.id))!, target, settings: {} }))
+      .rejects.toThrow('current completed implementation');
+    await store.close();
+  });
+
+  it.each(['unsupported-isolation', 'writable-settings'] as const)('rejects unsafe source-free review before creating history: %s', async (failure) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-isolation-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
+    const { task, iteration, worktree } = await attachedTask(store, dir);
+    if (failure === 'unsupported-isolation') {
+      vi.spyOn(adapter, 'capabilities').mockResolvedValue({ ...runtimeCapabilities(), detachedReview: { maturity: 'unsupported', detail: 'No isolation.' } });
+    } else {
+      const resolveExecution = adapter.resolveExecution.bind(adapter);
+      vi.spyOn(adapter, 'resolveExecution').mockImplementation(async (input) => {
+        const resolved = await resolveExecution(input);
+        return { ...resolved, settings: { ...resolved.settings, sandbox: 'DANGER_FULL_ACCESS' } };
+      });
+    }
+    await expect(orchestrator.startReview({
+      task, iteration, worktree,
+      target: { type: 'CUSTOM', instructions: 'Review all selected changes.' }, settings: {}
+    })).rejects.toThrow(failure === 'unsupported-isolation'
+      ? 'stable read-only review isolation'
+      : 'cannot preserve read-only review settings');
+    expect((await store.snapshot()).runs).toHaveLength(0);
+    expect((await store.snapshot()).agentSessions).toHaveLength(0);
+    await store.close();
+  });
+
+  it.each(['explicit', 'fallback'] as const)('starts a fresh primary session after reconnect with %s selection without rewriting history', async (selection) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-reconnected-session-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
+    const { task, iteration, worktree } = await attachedTask(store, dir);
+    const first = await orchestrator.startTurn({ task, iteration, worktree, mode: 'IMPLEMENTATION', prompt: task.prompt, settings: {} });
+    await terminal(store, first, 'AGENT_RUN_COMPLETED');
+    const attached = await store.updateExternalWorktree(task.id, async () => ({
+      ...worktree, worktreePath: path.join(dir, 'moved')
+    }));
+    const following = await orchestrator.startTurn({
+      task: (await store.getTask(task.id))!, iteration, worktree: attached,
+      sessionId: selection === 'explicit' ? first.sessionId : undefined,
+      continuedFromRunId: first.id, mode: 'FOLLOW_UP',
+      prompt: 'Continue in the verified new directory.', settings: {}
+    });
+    expect(following.sessionId).not.toBe(first.sessionId);
+    expect((await store.getAgentSession(first.sessionId))?.worktreePath).toBe(dir);
+    expect((await store.getAgentSession(following.sessionId))?.worktreePath).toBe(attached.worktreePath);
+    expect((await store.getTask(task.id))?.currentAgentSessionId).toBe(following.sessionId);
+    await store.close();
+  });
+
   it('recreates a missing provider session and retries the same follow-up run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-session-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -1514,6 +1602,28 @@ async function createTaskContext(
     baseSha: 'base'
   });
   return { task, iteration, worktree };
+}
+
+async function attachedTask(store: FileTaskStore, worktreePath: string) {
+  const { task } = await store.createAttachedTask({
+    title: 'External work',
+    prompt: 'Review the existing external feature.',
+    repositoryId: (await addTestRepository(store, worktreePath)).id,
+    creationToken: 'attached-task-lifecycle-fixture',
+    importSource: {
+      worktreePath,
+      branchName: 'feature',
+      comparison: { type: 'COMMIT', ref: 'base' },
+      readyForReview: true
+    }
+  }, async () => ({
+    worktree: { worktreePath, branchName: 'feature', baseRef: 'base', baseSha: 'base', headSha: 'head' }
+  }));
+  return {
+    task,
+    iteration: (await store.getCurrentIteration(task.id))!,
+    worktree: (await store.getCurrentWorktree(task.id))!
+  };
 }
 
 async function terminal(

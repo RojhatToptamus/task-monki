@@ -62,6 +62,7 @@ async function canonicalExecutable(executable: string): Promise<string> {
 export async function resolveAgentGitMetadata(input: {
   repositoryPath: string;
   worktreePath: string;
+  expectedBranch?: string;
 }): Promise<AgentGitMetadata> {
   try {
     const repositoryPath = await canonicalDirectory(
@@ -157,6 +158,14 @@ export async function resolveAgentGitMetadata(input: {
 
     await assertWorktreeGitEntry(worktreeRoot, gitDir);
     assertNarrowPermissionDirectory(gitCommonDir);
+    if (input.expectedBranch !== undefined) {
+      const branch = (await git(worktreeRoot, ['branch', '--show-current'])).trim();
+      if (branch !== input.expectedBranch) {
+        throw new Error(
+          `Expected branch ${input.expectedBranch}; found ${branch || 'a detached HEAD'}.`
+        );
+      }
+    }
 
     return { repositoryRoot, worktreeRoot, gitDir, gitCommonDir };
   } catch (error) {

@@ -21,6 +21,8 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
         label: 'Iteration created',
         detail: `Branch ${stringField(payload, 'branchName') ?? 'unknown'} prepared.`
       };
+    case 'WORKTREE_ATTACHED':
+      return { label: 'Checkout attached', detail: stringField(payload, 'worktreePath') ?? 'Existing work is attached.' };
     case 'WORKTREE_CREATED':
     case 'WORKTREE_VERIFIED':
       return {
@@ -32,6 +34,8 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
         label: 'Git evidence refreshed',
         detail: `Status ${stringField(payload, 'status') ?? 'unknown'}, changed files ${numberField(payload, 'workingDiffFileCount') ?? 0}.`
       };
+    case 'GIT_OBSERVATION_FAILED':
+      return { label: 'Git refresh unavailable', detail: stringField(payload, 'error') ?? 'Refresh to check the attached checkout again.' };
     case 'AGENT_ACTIVITY_RECEIVED':
       return {
         label: 'Agent update',
@@ -135,6 +139,8 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
       return { label: 'Branch pushed', detail: stringField(payload, 'remoteRef') ?? 'Remote branch updated.' };
     case 'BRANCH_PUBLISH_FAILED':
       return { label: 'Branch push failed', detail: stringField(payload, 'error') ?? 'Remote push failed.' };
+    case 'PR_DISCOVERY_COMPLETED':
+      return { label: 'Pull requests checked', detail: 'No open pull request was found for this branch.' };
     case 'PR_SNAPSHOT_CAPTURED':
       return {
         label: 'Pull request synced',

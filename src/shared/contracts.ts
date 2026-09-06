@@ -81,7 +81,7 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 23 as const;
+export const TASK_STORE_SCHEMA_VERSION = 24 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -122,6 +122,19 @@ export function completionPolicyRequiresMerge(policy: CompletionPolicy): boolean
 
 export function completionPolicyRequiresPassingChecks(policy: CompletionPolicy): boolean {
   return policy === 'MERGED_AND_VERIFIED';
+}
+
+export function localGitMatchesPullRequest(input: {
+  gitStatus?: GitStatus;
+  gitHeadSha?: string;
+  gitOperationInProgress?: string;
+  pullRequestHeadSha?: string;
+}): boolean {
+  return Boolean(
+    input.gitHeadSha && input.gitHeadSha === input.pullRequestHeadSha &&
+    !input.gitOperationInProgress &&
+    ['CLEAN', 'PUSHED', 'COMMITTED_UNPUSHED'].includes(input.gitStatus ?? '')
+  );
 }
 
 export interface VerifiedChecksEvidence {
@@ -339,9 +352,11 @@ export const DOMAIN_EVENT_TYPES = [
   'TRANSITION_BLOCKED',
   'WORKTREE_CREATE_REQUESTED',
   'WORKTREE_CREATED',
+  'WORKTREE_ATTACHED',
   'WORKTREE_VERIFIED',
   'WORKTREE_FAILED',
   'GIT_SNAPSHOT_CAPTURED',
+  'GIT_OBSERVATION_FAILED',
   'DELIVERY_COMMIT_CREATED',
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
@@ -350,6 +365,7 @@ export const DOMAIN_EVENT_TYPES = [
   'BRANCH_PUBLISHED',
   'BRANCH_PUBLISH_FAILED',
   'PR_CREATE_REQUESTED',
+  'PR_DISCOVERY_COMPLETED',
   'PR_BODY_ARTIFACT_CREATED',
   'PR_SNAPSHOT_CAPTURED',
   'CI_ROLLUP_CAPTURED',
@@ -511,6 +527,8 @@ export interface WorktreeRecord {
   taskId: string;
   iterationId: string;
   repositoryId: string;
+  /** Directory lifecycle authority, independent of the task's agent runtime. */
+  ownership: 'TASK_MONKI' | 'EXTERNAL';
   worktreePath: string;
   branchName: string;
   baseRef?: string;
@@ -615,6 +633,7 @@ export interface BranchPublicationRecord {
   iterationId: string;
   worktreeId: string;
   remoteName: string;
+  remoteUrl?: string;
   branchName: string;
   remoteRef: string;
   headSha?: string;
@@ -994,8 +1013,67 @@ export interface CreateTaskRequest {
 
 export interface StartRunRequest {
   taskId: string;
+  instruction?: string;
+  sourceReviewRunId?: string;
   mode?: AgentRunMode;
   settings?: AgentExecutionSettings;
+}
+
+export interface WorktreeComparison {
+  type: 'MERGE_BASE' | 'COMMIT';
+  ref: string;
+}
+
+export interface ExistingWorktreeOption {
+  worktreePath: string;
+  branchName?: string;
+  headSha?: string;
+  unavailableReason?: string;
+  existingTask?: Pick<Task, 'id' | 'title' | 'workflowPhase'>;
+}
+
+export interface InspectWorktreeImportRequest {
+  repositoryId: string;
+  worktreePath: string;
+  branchName: string;
+  comparison: WorktreeComparison;
+}
+
+export interface WorktreeImportInspection {
+  worktreePath: string;
+  branchName: string;
+  headSha: string;
+  baseRef: string;
+  baseSha: string;
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+  conflictedCount: number;
+  operationInProgress?: string;
+  pullRequest?: Pick<PullRequestSnapshotRecord, 'number' | 'url' | 'baseRefName'>;
+  gitHubError?: string;
+}
+
+export interface ImportTaskRequest extends InspectWorktreeImportRequest {
+  title: string;
+  prompt?: string;
+  creationToken: string;
+  readyForReview?: boolean;
+}
+
+export interface ImportTaskResult {
+  task: Task;
+  existing: boolean;
+}
+
+export interface ReconnectWorktreeRequest {
+  taskId: string;
+  worktreePath: string;
+}
+
+export interface UpdateWorktreeComparisonRequest {
+  taskId: string;
+  comparison: WorktreeComparison;
 }
 
 export interface CancelRunRequest {
@@ -1012,6 +1090,7 @@ export interface ContinueRunRequest {
   taskId: string;
   runId: string;
   instruction?: string;
+  sourceReviewRunId?: string;
   settings?: AgentExecutionSettings;
 }
 
@@ -1470,6 +1549,11 @@ export interface TaskManagerApi {
   readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent>;
   readClipboardImage(): Promise<ClipboardAttachmentImage | undefined>;
   createTask(input: CreateTaskRequest): Promise<Task>;
+  listExistingWorktrees(repositoryId: string): Promise<ExistingWorktreeOption[]>;
+  inspectWorktreeImport(input: InspectWorktreeImportRequest): Promise<WorktreeImportInspection>;
+  importTask(input: ImportTaskRequest): Promise<ImportTaskResult>;
+  reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord>;
+  updateWorktreeComparison(input: UpdateWorktreeComparisonRequest): Promise<WorktreeRecord>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   cancelPromptRefinement(input: CancelPromptRefinementRequest): Promise<void>;
   prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;

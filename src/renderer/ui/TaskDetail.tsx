@@ -10,7 +10,10 @@ import {
 } from 'react';
 import { RefreshCw } from 'lucide-react';
 import {
+  completionPolicyRequiresMerge,
   getImplementationRetryReason,
+  isImplementationRunMode,
+  localGitMatchesPullRequest,
   normalizePullRequestTitle
 } from '../../shared/contracts';
 import type {
@@ -55,13 +58,15 @@ import type {
   RunRecord,
   Task,
   WorkflowPhase,
+  WorktreeComparison,
   WorktreeRecord
 } from '../../shared/contracts';
 import type { TaskAttachmentRecord } from '../../shared/attachments';
 import {
   canCreateDeliveryCommit,
   canPrepareWorktree,
-  canStartRun
+  canStartRun,
+  getAttachedWorktreeActionBlocker
 } from '../model/selectors';
 import { describeHealthFinding } from '../model/debugDiagnostics';
 import { AgentControlPanel } from './AgentControlPanel';
@@ -140,6 +145,8 @@ import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { PreviewTaskRouteOption } from '../../shared/preview';
 import {
+  hasCurrentReviewEvidence,
+  isRunFreeAttachedTask,
   isReviewPhase,
   shouldShowMoveToReviewHeaderAction
 } from '../model/taskReviewActions';
@@ -199,12 +206,15 @@ interface TaskDetailProps {
   showMascot: boolean;
   reviewDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
-  onStart(taskId: string): Promise<void>;
+  onStart(taskId: string, instruction?: string, sourceReviewRunId?: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
   onSteer(runId: string, instruction: string): Promise<void>;
-  onContinue(runId: string, instruction?: string): Promise<void>;
+  onContinue(runId: string, instruction?: string, sourceReviewRunId?: string): Promise<void>;
   onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string): Promise<void>;
-  onReview(runId: string): Promise<void>;
+  onReview(runId?: string): Promise<void>;
+  onRefreshEvidence(taskId: string): Promise<void>;
+  onReconnectWorktree(taskId: string): Promise<void>;
+  onUpdateWorktreeComparison(taskId: string, comparison: WorktreeComparison): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
   onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
   onRespondToInteraction(
@@ -296,7 +306,11 @@ export function TaskDetail(props: TaskDetailProps) {
     mergeSnapshot
   } = props;
   const [tab, setTab] = useState<DetailTab>('overview');
-  const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
+  const [requestDrawer, setRequestDrawer] = useState<{
+    taskId: string;
+    sourceReviewRunId?: string;
+    checksHeadSha?: string;
+  }>();
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
@@ -322,7 +336,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const focusActivityHistoryRef = useRef(false);
   const repositoryContextId = useId();
   const taskDetailModalOpen = Boolean(
-    markDoneModal || draftPrModalOpen || requestDrawerOpen || previewModalOpen
+    markDoneModal || draftPrModalOpen || requestDrawer || previewModalOpen
   );
   const prefersReducedMotion = usePrefersReducedMotion();
   const reviewGate = task ? taskReviewGate(task) : undefined;
@@ -350,6 +364,8 @@ export function TaskDetail(props: TaskDetailProps) {
   const prStatus = task
     ? buildPrStatusViewModel({
         task,
+        worktree,
+        events: props.events,
         gitSnapshot,
         branchPublication,
         pullRequest,
@@ -390,7 +406,7 @@ export function TaskDetail(props: TaskDetailProps) {
   useEffect(() => {
     setReviewStartPending(false);
     setReviewMascotHoldGeneration(0);
-    setRequestDrawerOpen(false);
+    setRequestDrawer(undefined);
     setSelectedReviewFindingIds([]);
     setRequestNote('');
     setRequestReviewOutput(undefined);
@@ -452,6 +468,15 @@ export function TaskDetail(props: TaskDetailProps) {
   }
 
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
+  const attached = worktree?.ownership === 'EXTERNAL';
+  const attachedBlocker = getAttachedWorktreeActionBlocker(task, worktree, gitSnapshot);
+  const primarySessionMatches = !attached || Boolean(session && session.worktreePath === worktree.worktreePath);
+  const canStartFresh = attached && (!task.currentRunId || Boolean(session && !primarySessionMatches)) &&
+    !['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase);
+  const firstStartBlocker = canStartFresh && props.runtimeState?.preflight.readiness.canStart === false
+    ? props.runtimeState.preflight.readiness.summary
+    : undefined;
+  const runFreeReview = isRunFreeAttachedTask(task, worktree);
   const promptLineCount = task.prompt.split(/\r?\n/).length;
   const reviewFindings = reviewGate.result?.findings ?? [];
   const reviewActivity = buildReviewActivityViewModel({
@@ -471,7 +496,7 @@ export function TaskDetail(props: TaskDetailProps) {
     reviewRun?.mode === 'REVIEW' || reviewGate.status !== 'NOT_RUN';
   const reviewPhaseVisible =
     hasHistoricalReviewContext ||
-    (isReviewPhase(task.workflowPhase) && Boolean(actionableReviewSourceRun));
+    (isReviewPhase(task.workflowPhase) && Boolean(actionableReviewSourceRun || runFreeReview));
   const activeImplementationRun = run && isActiveNonReviewRun(run) ? run : undefined;
   const reviewPauseReason: ReviewActionPauseReason | undefined = reviewIsRunning
     ? 'review-running'
@@ -483,25 +508,36 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewActionsPausedReason: ReviewActionPauseReason | undefined =
     deliveryActionBusy ? 'delivery-running' : reviewPauseReason;
   const reviewActionsPaused = Boolean(reviewActionsPausedReason);
-  const deliverySourceRun =
-    (task.currentRunId
-      ? props.runs.find((candidate) => candidate.id === task.currentRunId && candidate.mode !== 'REVIEW')
-      : undefined) ??
-    props.runs.find(
-      (candidate) =>
-        candidate.mode !== 'REVIEW' &&
-        candidate.iterationId === task.currentIterationId &&
-        ['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
-          candidate.status
-        )
-    );
+  const deliverySourceRun = primarySessionMatches && run && isImplementationRunMode(run.mode) ? run : undefined;
   const prActionState = buildPrStatusActionState({
     view: prStatus,
     deliveryBusy: deliveryActionBusy,
     pauseReason: reviewPauseReason,
     implementationRetryReason: getImplementationRetryReason(task),
-    hasInvestigationSource: Boolean(deliverySourceRun)
+    hasInvestigationSource: Boolean(deliverySourceRun || canStartFresh)
   });
+  const reviewHasOutput = Boolean(reviewGate.result) || Boolean(
+    reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
+    (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
+  );
+  const reviewChangesEligible = isReviewPhase(task.workflowPhase) &&
+    Boolean((actionableReviewSourceRun && primarySessionMatches) || canStartFresh) &&
+    hasCurrentReviewEvidence(task, reviewRun, gitSnapshots) &&
+    canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
+  const requestDisabledReason = requestDrawer && (
+    requestDrawer.taskId !== task.id ? 'The selected task changed. Reopen the instruction.' :
+    attachedBlocker ?? firstStartBlocker ?? (
+      props.repository?.status !== 'AVAILABLE' ? 'Reconnect this repository before continuing.' :
+      reviewActionsPaused ? 'Wait for the current task action to finish.' :
+      requestDrawer.sourceReviewRunId && (
+        requestDrawer.sourceReviewRunId !== reviewGate.runId || !reviewChangesEligible
+      ) ? 'This review is no longer current. Close this drawer and run review again.' :
+      !requestDrawer.sourceReviewRunId && !canStartFresh ? 'A new implementation is no longer available.' :
+      requestDrawer.checksHeadSha && (
+        requestDrawer.checksHeadSha !== prStatus.prHeadSha || !prStatus.canInvestigateFailure
+      ) ? 'The PR evidence changed. Refresh PR status before investigating.' : undefined
+    )
+  );
   const taskActivityLedger = useMemo(
     () =>
       buildTaskActivityLedger({
@@ -569,8 +605,8 @@ export function TaskDetail(props: TaskDetailProps) {
     }
   };
 
-  const runReview = async (sourceRunId: string) => {
-    if (reviewActionInFlightRef.current) {
+  const runReview = async (sourceRunId?: string) => {
+    if (reviewActionInFlightRef.current || nextActionState('run-review').disabled) {
       return;
     }
     setReviewStartPending(true);
@@ -617,7 +653,7 @@ export function TaskDetail(props: TaskDetailProps) {
         (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
       );
     if (
-      !actionableReviewSourceRun ||
+      !reviewChangesEligible || attachedBlocker ||
       reviewActionsPaused ||
       !canRequestReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
     ) {
@@ -640,17 +676,29 @@ export function TaskDetail(props: TaskDetailProps) {
     setRequestInstruction(
       buildReviewFollowUpInstruction(task, reviewGate, reviewOutput, selectedIds)
     );
-    setRequestDrawerOpen(true);
+    setRequestDrawer({ taskId: task.id, sourceReviewRunId: reviewRun!.id });
+  };
+
+  const openFirstImplementation = (instruction = '', checksHeadSha?: string) => {
+    if (!canStartFresh || attachedBlocker || reviewActionsPaused) return;
+    setSelectedReviewFindingIds([]);
+    setRequestNote('');
+    setRequestInstruction(instruction);
+    setRequestDrawer({ taskId: task.id, checksHeadSha });
   };
 
   const submitRequestChanges = async () => {
-    if (!actionableReviewSourceRun || !requestInstruction.trim() || reviewActionsPaused) {
+    if (!requestDrawer || requestDisabledReason || !requestInstruction.trim()) {
       return;
     }
     await runReviewAction(async () => {
       try {
-        await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim());
-        setRequestDrawerOpen(false);
+        if (canStartFresh) {
+          await props.onStart(task.id, requestInstruction.trim(), requestDrawer.sourceReviewRunId);
+        } else if (actionableReviewSourceRun && primarySessionMatches) {
+          await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim(), requestDrawer.sourceReviewRunId);
+        } else return;
+        setRequestDrawer(undefined);
       } catch {
         // The app shell reports the error. Keep the drawer open so the user can retry.
       }
@@ -658,6 +706,7 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const toggleSelectedReviewFinding = async (findingId: string) => {
+    if (requestDisabledReason) return;
     const next = selectedReviewFindingIds.includes(findingId)
       ? selectedReviewFindingIds.filter((id) => id !== findingId)
       : [...selectedReviewFindingIds, findingId];
@@ -677,6 +726,7 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const updateRequestNote = (note: string) => {
+    if (requestDisabledReason) return;
     setRequestNote(note);
     setRequestInstruction(
       buildReviewFollowUpInstruction(
@@ -690,7 +740,7 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const markDone = async () => {
-    if (reviewActionsPaused) {
+    if (reviewActionsPaused || finishEvidence.mode === 'blocked') {
       return;
     }
     await runReviewAction(async () => {
@@ -704,9 +754,14 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const investigateFailingChecks = async () => {
-    if (!deliverySourceRun || !prStatus.canInvestigateFailure || prActionState.investigateDisabled) {
+    if (!prStatus.canInvestigateFailure || prActionState.investigateDisabled || attachedBlocker) {
       return;
     }
+    if (canStartFresh) {
+      openFirstImplementation(buildFailingChecksInvestigationPrompt(prStatus), prStatus.prHeadSha);
+      return;
+    }
+    if (!deliverySourceRun) return;
     await runDeliveryAction(async () => {
       await props.onContinue(
         deliverySourceRun.id,
@@ -744,14 +799,15 @@ export function TaskDetail(props: TaskDetailProps) {
     switch (id) {
       case 'run-review':
       case 'run-review-again':
-        if (actionableReviewSourceRun) {
-          void runReview(actionableReviewSourceRun.id);
+        if (actionableReviewSourceRun || runFreeReview) {
+          void runReview(actionableReviewSourceRun?.id);
         }
         return;
       case 'request-changes':
         void openRequestChanges();
         return;
       case 'commit':
+        if (!canCreateDeliveryCommit(task, worktree)) return;
         void runDeliveryAction(async () => {
           await props.onCreateDeliveryCommit(task.id);
         });
@@ -763,6 +819,7 @@ export function TaskDetail(props: TaskDetailProps) {
         setMarkDoneModal('issues');
         return;
       case 'move-to-review':
+        if (nextActionState(id).disabled) return;
         void props.onTransition(task.id, 'REVIEW');
         return;
     }
@@ -782,7 +839,7 @@ export function TaskDetail(props: TaskDetailProps) {
     const busy = reviewActionBusy || deliveryActionBusy;
     if (
       props.repository?.status !== 'AVAILABLE' &&
-      ['run-review', 'run-review-again', 'request-changes', 'commit'].includes(id)
+      ['run-review', 'run-review-again', 'request-changes', 'commit', 'move-to-review'].includes(id)
     ) {
       return {
         disabled: true,
@@ -792,8 +849,8 @@ export function TaskDetail(props: TaskDetailProps) {
     switch (id) {
       case 'run-review':
       case 'run-review-again': {
-        const title = props.reviewDisabledReason ??
-          (!actionableReviewSourceRun
+        const title = props.reviewDisabledReason ?? attachedBlocker ??
+          (!actionableReviewSourceRun && !runFreeReview
             ? 'Complete an implementation run before starting review.'
             : reviewActionPauseTitle ?? (busy ? taskActionBusyTitle : undefined));
         return {
@@ -802,13 +859,13 @@ export function TaskDetail(props: TaskDetailProps) {
         };
       }
       case 'request-changes': {
-        const title = reviewActionPauseTitle ?? (
+        const title = attachedBlocker ?? (!reviewChangesEligible ? 'Run a current review before requesting changes.' : undefined) ?? reviewActionPauseTitle ?? (
           reviewActionBusy ? 'A review action is in progress.' : undefined
         );
         return { disabled: Boolean(title), title };
       }
       case 'commit': {
-        const title = !canCreateDeliveryCommit(task)
+        const title = !canCreateDeliveryCommit(task, worktree)
           ? 'A delivery commit is not available for the current tree.'
           : reviewActionPauseTitle ?? (busy ? taskActionBusyTitle : undefined);
         return { disabled: Boolean(title), title };
@@ -821,7 +878,7 @@ export function TaskDetail(props: TaskDetailProps) {
         return { disabled: Boolean(title), title };
       }
       case 'move-to-review': {
-        const title = busy ? taskActionBusyTitle : undefined;
+        const title = attachedBlocker ?? reviewActionPauseTitle ?? (busy ? taskActionBusyTitle : undefined);
         return { disabled: Boolean(title), title };
       }
       default:
@@ -831,17 +888,20 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const primaryAction = getPrimaryAction({
     task,
+    worktree,
+    canStartFresh,
     onPrepareWorktree: props.onPrepareWorktree,
-    onStart: props.onStart
+    onStart: attached ? async () => openFirstImplementation() : props.onStart
   });
   const implementationRetryRequired = isImplementationRetryRequired(task, run);
 
   const headActions: HeadAction[] = [];
-  if (shouldShowMoveToReviewHeaderAction(task, run)) {
+  if (shouldShowMoveToReviewHeaderAction(task, run, worktree)) {
     headActions.push({
       label: 'Move to review',
       kind: 'soft',
-      onClick: () => void props.onTransition(task.id, 'REVIEW')
+      ...nextActionState('move-to-review'),
+      onClick: () => onNextAction('move-to-review')
     });
   }
   if (primaryAction) {
@@ -850,12 +910,13 @@ export function TaskDetail(props: TaskDetailProps) {
       kind: 'primary',
       disabled:
         primaryAction.disabled ||
+        Boolean(attachedBlocker || firstStartBlocker) ||
         reviewActionsPaused ||
         props.repository?.status !== 'AVAILABLE',
       title:
         props.repository?.status !== 'AVAILABLE'
           ? 'Reconnect this repository before running repository actions.'
-          : undefined,
+          : attachedBlocker ?? firstStartBlocker,
       onClick: primaryAction.onClick
     });
   }
@@ -896,6 +957,21 @@ export function TaskDetail(props: TaskDetailProps) {
     finishCiStatus,
     finishVerifiedChecksEvidence
   );
+  const localMergeBlocked = attached && completionPolicyRequiresMerge(task.completionPolicy) && (
+    Boolean(attachedBlocker) || !localGitMatchesPullRequest({
+      gitStatus: gitSnapshot?.status,
+      gitHeadSha: gitSnapshot?.headSha,
+      gitOperationInProgress: gitSnapshot?.operationInProgress,
+      pullRequestHeadSha: mergeSnapshot?.headSha
+    }) || dirtyFileCount > 0
+  );
+  if (localMergeBlocked) {
+    finishEvidence.mode = 'blocked';
+    finishEvidence.warnings.push({
+      title: 'Local work does not match the merged PR.',
+      detail: 'Refresh Git and PR status. This task requires a clean checkout at the merged PR head.'
+    });
+  }
   const finishRequirements = finishRequirementsForTask(
     task,
     reviewPending ? 'RUNNING' : reviewGate.status,
@@ -904,28 +980,23 @@ export function TaskDetail(props: TaskDetailProps) {
     finishCiStatus,
     finishVerifiedChecksEvidence
   );
+  if (localMergeBlocked) finishRequirements.push({
+    label: 'Local work', detail: 'must match the merged PR head', tone: 'action', unresolved: true
+  });
   const runFailure = describeRunFailureBanner(task);
 
   // The single "what next" model for the rail. Kept in one place so the header,
   // run surface, and rail all agree instead of each inventing an action.
-  const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run);
-  const reviewHasOutput =
-    Boolean(reviewGate.result) ||
-    Boolean(
-      reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
-      (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
-    );
-  const reviewHasActionableFindings =
-    Boolean(actionableReviewSourceRun) &&
-    canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
+  const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run, worktree);
+  const reviewHasActionableFindings = reviewChangesEligible;
   const nextAction = selectNextAction({
     task,
     reviewStatus: reviewPending ? 'RUNNING' : reviewGate.status,
     finishEvidence,
     requirements: finishRequirements,
-    hasReviewSource: Boolean(actionableReviewSourceRun),
+    hasReviewSource: Boolean(actionableReviewSourceRun || runFreeReview),
     reviewHasActionableFindings,
-    canCommit: canCreateDeliveryCommit(task),
+    canCommit: canCreateDeliveryCommit(task, worktree),
     awaitingMoveToReview,
     runInFlight: Boolean(activeImplementationRun) || reviewPending,
     implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status,
@@ -1197,7 +1268,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 ) : null}
 
                 <AgentControlPanel
-                  run={run}
+                  run={primarySessionMatches ? run : undefined}
                   requiresRecovery={implementationRetryRequired}
                   interactions={interactions}
                   onSteer={props.onSteer}
@@ -1238,6 +1309,18 @@ export function TaskDetail(props: TaskDetailProps) {
             {/* CONTEXT RAIL — delivery state and history stay secondary to the
                 current decision and the work stream. */}
             <div className="tm-overview__col">
+              {attached && worktree ? (
+                <AttachedWorktreePanel
+                  key={`${worktree.id}:${worktree.worktreePath}:${worktree.baseSha}`}
+                  task={task}
+                  worktree={worktree}
+                  gitSnapshot={gitSnapshot}
+                  busy={reviewActionsPaused || reviewActionBusy || deliveryActionBusy}
+                  onRefresh={() => runDeliveryAction(() => props.onRefreshEvidence(task.id))}
+                  onReconnect={() => runDeliveryAction(() => props.onReconnectWorktree(task.id))}
+                  onUpdateComparison={(comparison) => runDeliveryAction(() => props.onUpdateWorktreeComparison(task.id, comparison))}
+                />
+              ) : null}
               {showPrStatus ? (
                 <PrStatusCard
                   view={prStatus}
@@ -1353,6 +1436,7 @@ export function TaskDetail(props: TaskDetailProps) {
               : []
           }
           busy={reviewActionBusy}
+          disabledReason={finishEvidence.mode === 'blocked' ? 'Finish requirements changed. Refresh the evidence before marking done.' : reviewActionPauseTitle}
           onCancel={() => setMarkDoneModal(undefined)}
           onConfirm={() => void markDone()}
           fallbackReturnFocusRef={detailRootRef}
@@ -1373,9 +1457,12 @@ export function TaskDetail(props: TaskDetailProps) {
         />
       ) : null}
 
-      {requestDrawerOpen ? (
+      {requestDrawer ? (
         <ReviewRequestDrawer
           task={task}
+          firstImplementation={!requestDrawer.sourceReviewRunId}
+          sharedCheckout={attached}
+          disabledReason={requestDisabledReason || undefined}
           findings={reviewFindings}
           selectedFindingIds={selectedReviewFindingIds}
           note={requestNote}
@@ -1384,7 +1471,7 @@ export function TaskDetail(props: TaskDetailProps) {
           onToggleFinding={toggleSelectedReviewFinding}
           onNoteChange={updateRequestNote}
           onInstructionChange={setRequestInstruction}
-          onCancel={() => setRequestDrawerOpen(false)}
+          onCancel={() => setRequestDrawer(undefined)}
           onSubmit={() => void submitRequestChanges()}
           fallbackReturnFocusRef={detailRootRef}
         />
@@ -1631,7 +1718,7 @@ function PrStatusCard({
     view,
     actionState.createOrPushReason
   );
-  const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(view.kind);
+  const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED', 'HEAD_MISMATCH'].includes(view.kind);
   const stateMark = prStatusMark(view);
 
   return (
@@ -1787,7 +1874,7 @@ function prStatusMark(view: PrStatusViewModel): StatusGlyphKind {
   if (view.tone === 'error') return 'blocked';
   if (
     view.tone === 'action' &&
-    !['CHECKS_PENDING', 'STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(view.kind)
+    !['CHECKS_PENDING', 'STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED', 'HEAD_MISMATCH'].includes(view.kind)
   ) return 'waiting';
   return 'idle';
 }
@@ -1883,14 +1970,20 @@ function healthFindingTone(severity: Finding['severity']): Tone {
 
 function getPrimaryAction(input: {
   task: Task;
+  worktree?: WorktreeRecord;
+  canStartFresh?: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
 }): { label: string; disabled?: boolean; onClick(): void } | undefined {
+  if (input.canStartFresh) return {
+    label: 'Start implementation',
+    onClick: () => { void input.onStart(input.task.id).catch(() => {}); }
+  };
   if (['IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(input.task.workflowPhase)) {
     return undefined;
   }
 
-  if (canPrepareWorktree(input.task)) {
+  if (canPrepareWorktree(input.task, input.worktree)) {
     return {
       label: 'Prepare worktree',
       onClick: () => void input.onPrepareWorktree(input.task.id)
@@ -1900,9 +1993,62 @@ function getPrimaryAction(input: {
   if (canStartRun(input.task)) {
     return {
       label: 'Start implementation',
-      onClick: () => void input.onStart(input.task.id)
+      onClick: () => { void input.onStart(input.task.id).catch(() => {}); }
     };
   }
 
   return undefined;
+}
+
+function AttachedWorktreePanel({ task, worktree, gitSnapshot, busy, onRefresh, onReconnect, onUpdateComparison }: {
+  task: Task;
+  worktree: WorktreeRecord;
+  gitSnapshot?: GitSnapshotRecord;
+  busy: boolean;
+  onRefresh(): Promise<void>;
+  onReconnect(): Promise<void>;
+  onUpdateComparison(comparison: WorktreeComparison): Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [comparisonType, setComparisonType] = useState<WorktreeComparison['type']>('MERGE_BASE');
+  const [comparisonRef, setComparisonRef] = useState('');
+  const unavailable = worktree.status !== 'PRESENT' || task.projection.worktree !== 'PRESENT' || task.projection.git === 'UNAVAILABLE';
+  return (
+    <section className="tm-panel" aria-label="Attached worktree">
+      <h3 className="tm-panel__title">Worktree</h3>
+      <div className="tm-config tm-config--worktree">
+        <ConfigRow k="Path" v={worktree.worktreePath} />
+        <ConfigRow k="Branch" v={worktree.branchName} />
+        <ConfigRow k="Compare with" v={worktree.baseRef ?? worktree.baseSha} />
+        <ConfigRow k="Last observed" v={gitSnapshot ? new Date(gitSnapshot.capturedAt).toLocaleString() : 'Not inspected'} />
+      </div>
+      <div className="tm-prstatus__actions">
+        <button type="button" className="outline-button" disabled={busy} onClick={() => void onRefresh()}>Refresh Git</button>
+        {unavailable ? <button type="button" className="outline-button" disabled={busy} onClick={() => void onReconnect()}>Reconnect worktree</button> : null}
+        <button type="button" className="outline-button" disabled={busy} onClick={() => {
+          setComparisonType(!worktree.baseRef || worktree.baseRef === worktree.baseSha ? 'COMMIT' : 'MERGE_BASE');
+          setComparisonRef(worktree.baseRef ?? worktree.baseSha);
+          setEditing(true);
+        }}>Edit comparison</button>
+      </div>
+      {editing ? <form onSubmit={(event) => {
+        event.preventDefault();
+        if (busy || !comparisonRef.trim()) return;
+        void onUpdateComparison({ type: comparisonType, ref: comparisonRef.trim() }).then(() => setEditing(false)).catch(() => {});
+      }}>
+        <label className="field"><span className="field__label">Comparison</span>
+          <select disabled={busy} value={comparisonType} onChange={(event) => setComparisonType(event.target.value as WorktreeComparison['type'])}>
+            <option value="MERGE_BASE">Merge base</option><option value="COMMIT">Commit</option>
+          </select>
+        </label>
+        <label className="field"><span className="field__label">Reference</span>
+          <input disabled={busy} value={comparisonRef} onChange={(event) => setComparisonRef(event.target.value)} />
+        </label>
+        <div className="tm-prstatus__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button>
+          <button type="submit" className="primary-button" disabled={busy || !comparisonRef.trim()}>Save comparison</button>
+        </div>
+      </form> : null}
+    </section>
+  );
 }

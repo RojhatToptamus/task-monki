@@ -411,7 +411,7 @@ function designContext(): PreviewTaskContext {
     },
     worktree: {
       id: 'worktree-1', taskId: 'design-1', iterationId: 'iteration-1',
-      repositoryId: 'repository-1', worktreePath: '/tmp/design', branchName: 'design/design-1',
+      repositoryId: 'repository-1', ownership: 'TASK_MONKI' as const, worktreePath: '/tmp/design', branchName: 'design/design-1',
       baseSha: 'b'.repeat(40), status: 'PRESENT', createdAt: now, updatedAt: now
     }
   };

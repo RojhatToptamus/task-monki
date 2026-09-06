@@ -84,6 +84,10 @@ Expected UI:
 2. `TaskManagerService.startReview` rejects active implementation-side runs.
 3. The current source run must be the latest successfully completed
    implementation-side run. Failed and superseded runs are rejected.
+   An externally owned checkout without a primary run uses the current task,
+   iteration, and fresh Git evidence instead. Its review session is independent
+   and read-only. Its custom target covers committed and uncommitted changes
+   against the selected comparison anchor.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
    agent session.
 5. When the selected review runtime is the source runtime and advertises a
@@ -141,6 +145,12 @@ Expected UI:
 
 ### Review completion
 
+A completed provider turn does not immediately establish a current verdict.
+The review remains inconclusive until post-review Git evidence is available.
+Task Monki compares HEAD, dirty content, branch, path, and comparison context
+before it exposes a passed or needs-changes verdict. A changed scope makes the
+review stale. External writes do not establish a reviewer policy violation.
+
 When the review run emits a terminal event:
 
 - `AGENT_RUN_COMPLETED`
@@ -184,6 +194,10 @@ Expected UI:
 2. The drawer lets the user select findings and edit the instruction.
 3. `TaskManagerService.continueRun` starts a `mode: "FOLLOW_UP"` run from the
    source implementation run.
+   Without a primary run, `startRun` starts the first implementation with the
+   selected instruction. Both requests include the source review ID and reject
+   stale findings after fresh Git observation. An open drawer cannot bypass
+   this validation.
 4. Reducer moves the task to `IN_PROGRESS`.
 5. Reducer marks the old agent review `STALE`.
 6. The old review findings remain visible only as previous-review context.

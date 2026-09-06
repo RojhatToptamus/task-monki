@@ -111,6 +111,9 @@ export function CreateDraftPrModal({
 
 export function ReviewRequestDrawer({
   task,
+  firstImplementation = false,
+  sharedCheckout = false,
+  disabledReason,
   findings,
   selectedFindingIds,
   note,
@@ -124,6 +127,9 @@ export function ReviewRequestDrawer({
   fallbackReturnFocusRef
 }: {
   task: Task;
+  firstImplementation?: boolean;
+  sharedCheckout?: boolean;
+  disabledReason?: string;
   findings: AgentReviewFinding[];
   selectedFindingIds: string[];
   note: string;
@@ -139,34 +145,51 @@ export function ReviewRequestDrawer({
   const selectedCount = selectedFindingIds.length;
   const panelRef = useRef<HTMLElement>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
+  const instructionRef = useRef<HTMLTextAreaElement>(null);
+  const disabled = busy || Boolean(disabledReason);
+  const title = firstImplementation ? 'Start implementation' : 'Request changes';
   useDialogFocusBoundary({
     dialogRef: panelRef,
-    initialFocusRef: noteRef,
+    initialFocusRef: firstImplementation ? instructionRef : noteRef,
     fallbackReturnFocusRef,
     busy,
     onClose: onCancel
   });
   return (
-    <div className="tm-reviewdrawer" role="dialog" aria-modal="true" aria-label="Request changes">
+    <div className="tm-reviewdrawer" role="dialog" aria-modal="true" aria-label={title}>
       <div className="tm-reviewdrawer__scrim" onClick={busy ? undefined : onCancel} />
       <aside ref={panelRef} className="tm-reviewdrawer__panel" tabIndex={-1}>
         <header className="tm-reviewdrawer__header">
           <div>
-            <h3>Request changes</h3>
-            <p>Start a follow-up run with the selected findings for #{formatShortId(task.id)}.</p>
+            <h3>{title}</h3>
+            <p>{firstImplementation ? 'Describe the work to perform' : 'Start a follow-up run with the selected findings'} for #{formatShortId(task.id)}.</p>
           </div>
           <button
             type="button"
             className="tm-reviewdrawer__close"
             disabled={busy}
-            aria-label="Close request changes"
+            aria-label={`Close ${title.toLowerCase()}`}
             onClick={onCancel}
           >
             <X aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />
           </button>
         </header>
 
-        <div className="tm-reviewdrawer__body" inert={busy ? true : undefined}>
+        <div className="tm-reviewdrawer__body">
+          {sharedCheckout ? <p className="form-warning">This starts work in the shared checkout. Avoid concurrent edits in another app.</p> : null}
+          {disabledReason ? <p className="form-warning" role="status">{disabledReason}</p> : null}
+          {firstImplementation ? (
+            <label className="tm-reviewdrawer__section">
+              <h4>Instruction to agent</h4>
+              <textarea
+                ref={instructionRef}
+                value={instruction}
+                disabled={disabled}
+                onChange={(event) => onInstructionChange(event.target.value)}
+                rows={11}
+              />
+            </label>
+          ) : <div inert={disabled ? true : undefined}>
           <section className="tm-reviewdrawer__section">
             <h4>Findings to attach · {selectedCount} selected</h4>
             {findings.length > 0 ? (
@@ -201,7 +224,7 @@ export function ReviewRequestDrawer({
               ref={noteRef}
               className="tm-reviewdrawer__note"
               value={note}
-              disabled={busy}
+              disabled={disabled}
               placeholder="Add context for the follow-up"
               onChange={(event) => onNoteChange(event.target.value)}
               rows={3}
@@ -214,17 +237,18 @@ export function ReviewRequestDrawer({
               <span>Instruction to agent</span>
               <textarea
                 value={instruction}
-                disabled={busy}
+                disabled={disabled}
                 onChange={(event) => onInstructionChange(event.target.value)}
                 rows={11}
               />
               <small>Generated from the selected findings and optional note. Editable.</small>
             </label>
           </details>
+          </div>}
         </div>
 
         <footer className="tm-reviewdrawer__footer">
-          <span>Returns to Review when the follow-up finishes.</span>
+          <span>Returns to Review when the work finishes.</span>
           <div>
             <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
               Cancel
@@ -232,7 +256,7 @@ export function ReviewRequestDrawer({
             <button
               type="button"
               className="primary-button"
-              disabled={busy || !instruction.trim()}
+              disabled={disabled || !instruction.trim()}
               onClick={onSubmit}
             >
               {busy ? 'Sending...' : 'Send to agent'}
@@ -250,6 +274,7 @@ export function MarkDoneModal({
   hasPullRequest,
   requirements,
   busy,
+  disabledReason,
   onCancel,
   onConfirm,
   fallbackReturnFocusRef
@@ -259,6 +284,7 @@ export function MarkDoneModal({
   hasPullRequest: boolean;
   requirements: FinishRequirement[];
   busy: boolean;
+  disabledReason?: string;
   onCancel(): void;
   onConfirm(): void;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
@@ -279,6 +305,7 @@ export function MarkDoneModal({
       <div ref={panelRef} className="tm-modal__panel" tabIndex={-1}>
         <h3 id="mark-done-title">{copy.title}</h3>
         <p>{copy.body}</p>
+        {disabledReason ? <p className="form-warning" role="status">{disabledReason}</p> : null}
         {withIssues && requirements.length > 0 ? (
           <div className="tm-modal__requirements">
             <div className="tm-modal__requirements-title">Unresolved</div>
@@ -310,7 +337,7 @@ export function MarkDoneModal({
           >
             Cancel
           </button>
-          <button type="button" className="primary-button" disabled={busy} onClick={onConfirm}>
+          <button type="button" className="primary-button" disabled={busy || Boolean(disabledReason)} onClick={onConfirm}>
             {copy.confirmLabel}
           </button>
         </div>

@@ -180,6 +180,17 @@ describe('task card view model', () => {
     expect(vm.stateTone).toBe('action');
   });
 
+  it('does not describe run-free work awaiting its first review as already reviewing', () => {
+    const task = createTask({
+      currentRunId: undefined,
+      workflowPhase: 'REVIEW',
+      projection: { ...createInitialProjection(now), agentReview: { status: 'NOT_RUN' } }
+    });
+    expect(describeTaskHeaderState(task).label).toBe('Ready for review');
+    task.projection.agentReview = { status: 'RUNNING' };
+    expect(describeTaskHeaderState(task).label).toBe('Reviewing');
+  });
+
   it('keeps review verdicts out of the task detail header state', () => {
     const task = createTask({
       projection: {

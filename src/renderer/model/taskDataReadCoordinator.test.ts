@@ -136,7 +136,7 @@ describe('createTaskDataReadCoordinator', () => {
 
 function board(title: string): BoardSnapshot {
   return {
-    schemaVersion: 23,
+    schemaVersion: 24,
     repositories: [],
     boards: [],
     tasks: [{

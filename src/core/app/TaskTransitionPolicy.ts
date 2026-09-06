@@ -2,13 +2,15 @@ import type {
   GitSnapshotRecord,
   RunRecord,
   Task,
-  TaskSnapshot
+  TaskSnapshot,
+  WorktreeRecord
 } from '../../shared/contracts';
 import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   getImplementationRetryReason,
   isImplementationRunMode,
+  localGitMatchesPullRequest,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 
@@ -24,11 +26,13 @@ export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new S
 
 export interface TaskTransitionEvidence {
   hasWorktree: boolean;
+  worktreeOwnership?: WorktreeRecord['ownership'];
   currentRun?: Pick<RunRecord, 'id' | 'mode' | 'status'>;
   hasGitSnapshot?: boolean;
   gitStatus?: Task['projection']['git'];
   gitHeadSha?: string;
   gitDirtyFingerprint?: string;
+  gitOperationInProgress?: string;
   pullRequestStatus?: Task['projection']['githubPullRequest'];
   pullRequestHeadSha?: string;
   ciStatus?: Task['projection']['ciChecks'];
@@ -76,6 +80,11 @@ export function transitionBlocker(
     if (!evidence.hasWorktree) {
       return 'A task worktree is required before review.';
     }
+    if (evidence.worktreeOwnership === 'EXTERNAL' && !task.currentRunId) {
+      return evidence.hasGitSnapshot && !evidence.gitOperationInProgress &&
+        !['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN', 'NOT_INSPECTED'].includes(evidence.gitStatus ?? 'NOT_INSPECTED')
+        ? undefined : 'Refresh the attached checkout and resolve Git conflicts or operations before review.';
+    }
     if (
       !evidence.currentRun ||
       evidence.currentRun.id !== task.currentRunId ||
@@ -89,6 +98,11 @@ export function transitionBlocker(
   if (toPhase === 'IN_REVIEW') {
     const retryReason = getImplementationRetryReason(task);
     if (retryReason) return retryReason;
+    if (evidence.worktreeOwnership === 'EXTERNAL' && (
+      !['REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) || !localGitMatchesPullRequest(evidence)
+    )) {
+      return 'Mark the work ready for review and refresh matching local and pull request evidence first.';
+    }
     if (
       evidence.pullRequestStatus !== 'OPEN_DRAFT' &&
       evidence.pullRequestStatus !== 'OPEN_READY'
@@ -107,6 +121,11 @@ export function transitionBlocker(
   if (toPhase === 'DONE') {
     const retryReason = getImplementationRetryReason(task);
     if (retryReason) return retryReason;
+    if (evidence.worktreeOwnership === 'EXTERNAL' && completionPolicyRequiresMerge(task.completionPolicy) && (
+      !['REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) || !localGitMatchesPullRequest(evidence)
+    )) {
+      return 'Ready, clean local work must match the merged pull request before DONE.';
+    }
     if (
       completionPolicyRequiresMerge(task.completionPolicy) &&
       evidence.mergeStatus !== 'MERGED'

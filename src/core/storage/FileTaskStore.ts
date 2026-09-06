@@ -29,6 +29,8 @@ import type {
   CreateBoardRequest,
   CreateBlankDesignRequest,
   CreateTaskRequest,
+  ImportTaskRequest,
+  ImportTaskResult,
   DuplicateDesignRequest,
   DesignConversationEntry,
   DesignDetailSnapshot,
@@ -89,6 +91,7 @@ import {
   getImplementationRetryReason,
   isImplementationRunMode,
   isTaskCreationToken,
+  localGitMatchesPullRequest,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import {
@@ -102,7 +105,7 @@ import {
   posixModeMatches,
   syncDirectoryIfSupported
 } from '../filesystem/secureFilesystem';
-import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
+import { applyEventToState, createEmptyState, reconcileTaskReviewEvidence, type StoreState } from '../projection/reducer';
 import { createDomainEvent } from './domainEvent';
 import {
   AttachmentAdoptionAmbiguousError,
@@ -144,7 +147,13 @@ export interface CreateTaskStoreInput extends CreateTaskRequest {
    * resolved settings. It is never copied into the durable task record.
    */
   creationFingerprintInput?: CreateTaskRequest;
+  importSource?: Pick<ImportTaskRequest, 'worktreePath' | 'branchName' | 'comparison' | 'readyForReview'>;
 }
+
+export type AttachedWorktreeInput = Pick<
+  WorktreeRecord,
+  'worktreePath' | 'branchName' | 'baseRef' | 'baseSha' | 'headSha'
+>;
 
 export interface CreateRunInput {
   task: Task;
@@ -638,7 +647,8 @@ function taskCreationMetadata(
       ),
       runtimeId: requestedRuntimeId,
       agentSettings: { ...portableAgentSettings, runtimeId: requestedRuntimeId },
-      attachmentDraftId: fingerprintInput.attachmentDraftId ?? null
+      attachmentDraftId: fingerprintInput.attachmentDraftId ?? null,
+      importSource: input.importSource
     });
   } catch {
     throw new TaskCreationRequestError(
@@ -2532,6 +2542,14 @@ export class FileTaskStore {
       runs: this.state.runs.map((run) => (run.id === runId ? stored : run)),
       designReferences
     };
+    if (stored.mode === 'REVIEW' && update.afterGitSnapshotId) {
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) => task.id === stored.taskId
+          ? reconcileTaskReviewEvidence(task, this.state.runs, this.state.gitSnapshots)
+          : task)
+      };
+    }
     await this.persistSnapshot();
     return clone(stored);
   }
@@ -3755,6 +3773,32 @@ export class FileTaskStore {
     return this.serializeMutation(() => this.createTaskRecord(input, 'ui'));
   }
 
+  async createAttachedTask(
+    input: CreateTaskStoreInput,
+    validate: (state: TaskSnapshot) => Promise<{
+      worktree: AttachedWorktreeInput;
+      existingTaskId?: string;
+    }>
+  ): Promise<ImportTaskResult> {
+    return this.serializeMutation(async () => {
+      if (!isTaskCreationToken(input.creationToken) || !input.importSource || input.attachmentDraftId) {
+        throw new Error('The checkout attachment request is invalid.');
+      }
+      const acknowledged = this.resolveTaskCreationRetryFromState(input);
+      if (acknowledged) return { task: clone(acknowledged), existing: true };
+      // Git identity and duplicate checks run within the existing publication
+      // boundary. No other attachment can publish between validation and create.
+      const validated = await validate(await this.snapshot());
+      if (validated.existingTaskId) {
+        const existing = this.state.tasks.find((task) => task.id === validated.existingTaskId);
+        if (!existing) throw new Error('The existing task is no longer available.');
+        return { task: clone(existing), existing: true };
+      }
+      const task = await this.createTaskRecord(input, 'ui', undefined, validated.worktree);
+      return { task, existing: false };
+    });
+  }
+
   async createForkedAlternativeTask(input: CreateForkedAlternativeTaskInput): Promise<Task> {
     return this.serializeMutation(() =>
       this.createTaskRecord(input, 'ui', {
@@ -3769,7 +3813,7 @@ export class FileTaskStore {
    * attachment draft. A token reused with different normalized input is a
    * conflict, never permission to return the first task.
    */
-  async resolveTaskCreationRetry(input: CreateTaskRequest): Promise<Task | undefined> {
+  async resolveTaskCreationRetry(input: CreateTaskStoreInput): Promise<Task | undefined> {
     await this.init();
     return clone(this.resolveTaskCreationRetryFromState(input));
   }
@@ -4036,7 +4080,8 @@ export class FileTaskStore {
   private async createTaskRecord(
     input: CreateTaskStoreInput,
     source: DomainEvent['source'],
-    fork?: { sourceTaskId: string; sourceRunId: string }
+    fork?: { sourceTaskId: string; sourceRunId: string },
+    attachment?: AttachedWorktreeInput
   ): Promise<Task> {
     await this.init();
 
@@ -4075,7 +4120,7 @@ export class FileTaskStore {
       repositoryId: input.repositoryId.trim(),
       creationToken: creationMetadata?.token,
       creationRequestFingerprint: creationMetadata?.fingerprint,
-      workflowPhase: 'READY',
+      workflowPhase: attachment ? (input.importSource?.readyForReview ? 'REVIEW' : 'IN_PROGRESS') : 'READY',
       resolution: 'NONE',
       completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
       phaseVersion: 1,
@@ -4166,6 +4211,50 @@ export class FileTaskStore {
         })
       );
 
+      if (attachment) {
+        const iteration: TaskIteration = {
+          id: randomUUID(),
+          taskId: task.id,
+          actionRequestId: randomUUID(),
+          generationKey: randomUUID(),
+          status: 'ACTIVE',
+          branchName: attachment.branchName,
+          baseRef: attachment.baseRef,
+          baseSha: attachment.baseSha,
+          createdAt: now,
+          updatedAt: now
+        };
+        const worktree: WorktreeRecord = {
+          ...attachment,
+          id: randomUUID(),
+          taskId: task.id,
+          repositoryId: task.repositoryId,
+          iterationId: iteration.id,
+          ownership: 'EXTERNAL',
+          status: 'PRESENT',
+          createdAt: now,
+          updatedAt: now,
+          lastVerifiedAt: now
+        };
+        iteration.worktreeId = worktree.id;
+        task.currentIterationId = iteration.id;
+        task.currentWorktreeId = worktree.id;
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((candidate) => candidate.id === task.id ? task : candidate),
+          iterations: [iteration, ...this.state.iterations],
+          worktrees: [worktree, ...this.state.worktrees]
+        };
+        this.state = applyEventToState(this.state, createDomainEvent({
+          type: 'WORKTREE_ATTACHED',
+          taskId: task.id,
+          iterationId: iteration.id,
+          worktreeId: worktree.id,
+          source,
+          payload: { worktreePath: worktree.worktreePath, branchName: worktree.branchName }
+        }));
+      }
+
       if (fork) {
         this.state = applyEventToState(
           this.state,
@@ -4205,7 +4294,7 @@ export class FileTaskStore {
         () => undefined
       );
     }
-    return clone(task);
+    return clone(this.state.tasks.find((candidate) => candidate.id === task.id)!);
   }
 
   private requireDesign(designId: string): Task {
@@ -4901,6 +4990,8 @@ export class FileTaskStore {
             (session) =>
               session.taskId === input.task.id &&
               session.iterationId === input.iteration.id &&
+              session.worktreeId === input.worktree.id &&
+              session.worktreePath === input.worktree.worktreePath &&
               session.role === 'PRIMARY'
           )
         : undefined;
@@ -5907,6 +5998,7 @@ export class FileTaskStore {
       taskId: input.task.id,
       iterationId: iteration.id,
       repositoryId: input.task.repositoryId,
+      ownership: 'TASK_MONKI',
       worktreePath: input.worktreePath,
       branchName: input.branchName,
       baseRef: input.baseRef,
@@ -5970,9 +6062,58 @@ export class FileTaskStore {
   }
 
   async updateWorktree(worktree: WorktreeRecord, eventType: 'WORKTREE_CREATED' | 'WORKTREE_VERIFIED' | 'WORKTREE_FAILED'): Promise<WorktreeRecord> {
-    return this.serializeMutation(() =>
-      this.updateWorktreeInternal(worktree, eventType)
-    );
+    return this.serializeMutation(async () => {
+      const current = this.state.worktrees.find((candidate) => candidate.id === worktree.id);
+      if (
+        !current || current.ownership !== worktree.ownership ||
+        current.worktreePath !== worktree.worktreePath || current.branchName !== worktree.branchName ||
+        current.baseSha !== worktree.baseSha || current.baseRef !== worktree.baseRef
+      ) {
+        throw new Error('The worktree context changed before its observation was saved. Refresh the task.');
+      }
+      return this.updateWorktreeInternal(worktree, eventType);
+    });
+  }
+
+  async updateExternalWorktree(
+    taskId: string,
+    validate: (state: TaskSnapshot, worktree: WorktreeRecord) => Promise<AttachedWorktreeInput>
+  ): Promise<WorktreeRecord> {
+    return this.serializeMutation(async () => {
+      const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+      const current = this.state.worktrees.find((candidate) => candidate.id === task?.currentWorktreeId);
+      if (!task || !current || current.ownership !== 'EXTERNAL') {
+        throw new Error('This task has no external checkout attachment.');
+      }
+      const attachment = await validate(await this.snapshot(), clone(current));
+      const now = new Date().toISOString();
+      const changedPath = current.worktreePath !== attachment.worktreePath;
+      this.state = {
+        ...this.state,
+        iterations: this.state.iterations.map((iteration) => iteration.id === current.iterationId
+          ? { ...iteration, baseRef: attachment.baseRef, baseSha: attachment.baseSha, updatedAt: now }
+          : iteration),
+        tasks: this.state.tasks.map((candidate) => candidate.id === taskId
+          ? { ...candidate, currentAgentSessionId: changedPath ? undefined : candidate.currentAgentSessionId, updatedAt: now }
+          : candidate)
+      };
+      await this.appendEvent(createDomainEvent({
+        type: 'GIT_OBSERVATION_FAILED',
+        taskId,
+        iterationId: current.iterationId,
+        worktreeId: current.id,
+        source: 'git',
+        payload: { error: 'The attachment context changed. Refresh Git evidence.' }
+      }), false);
+      return this.updateWorktreeInternal({
+        ...current,
+        ...attachment,
+        status: 'PRESENT',
+        error: undefined,
+        updatedAt: now,
+        lastVerifiedAt: now
+      }, 'WORKTREE_VERIFIED');
+    });
   }
 
   private async updateWorktreeInternal(
@@ -6026,6 +6167,15 @@ export class FileTaskStore {
     diffEvidence: string
   ): Promise<GitSnapshotRecord> {
     await this.init();
+
+    const worktree = this.state.worktrees.find((candidate) => candidate.id === snapshot.worktreeId);
+    if (worktree?.ownership === 'EXTERNAL' && (
+      worktree.taskId !== snapshot.taskId || worktree.iterationId !== snapshot.iterationId ||
+      worktree.worktreePath !== snapshot.worktreePath || worktree.branchName !== snapshot.branch ||
+      worktree.baseSha !== snapshot.baseSha || worktree.baseRef !== snapshot.baseRef
+    )) {
+      throw new Error('The attached checkout changed before its Git evidence was saved. Refresh the task.');
+    }
 
     const diffArtifact = await this.createTextArtifact(snapshot.taskId, 'diff', diffEvidence);
     const stored: GitSnapshotRecord = {
@@ -6178,13 +6328,15 @@ export class FileTaskStore {
     task: Task,
     worktree: WorktreeRecord,
     remoteName: string,
-    headSha: string
+    headSha: string,
+    remoteUrl?: string
   ): Promise<BranchPublicationRecord> {
     return this.recordBranchPublication({
       taskId: task.id,
       iterationId: worktree.iterationId,
       worktreeId: worktree.id,
       remoteName,
+      remoteUrl,
       branchName: worktree.branchName,
       remoteRef: `${remoteName}/${worktree.branchName}`,
       headSha,
@@ -6359,8 +6511,19 @@ export class FileTaskStore {
       false
     );
     const taskBeforeMerge = this.state.tasks.find((task) => task.id === merge.taskId);
+    const mergedWorktree = this.state.worktrees.find((worktree) => worktree.id === merge.worktreeId);
+    const localGit = this.state.gitSnapshots.find((snapshot) => snapshot.worktreeId === merge.worktreeId);
+    const externalWorkMatches = mergedWorktree?.ownership !== 'EXTERNAL' || (
+      taskBeforeMerge?.projection.git !== 'UNAVAILABLE' &&
+      localGitMatchesPullRequest({
+        gitStatus: localGit?.status,
+        gitHeadSha: localGit?.headSha,
+        gitOperationInProgress: localGit?.operationInProgress,
+        pullRequestHeadSha: pullRequest.headRefOid
+      })
+    );
     const shouldComplete = taskBeforeMerge
-      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge)
+      ? externalWorkMatches && shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge)
       : false;
     await this.appendEvent(
       createDomainEvent({
@@ -7564,7 +7727,7 @@ function validatePersistedRelationships(state: StoreState): void {
       !worktree ||
       worktree.taskId !== session.taskId ||
       worktree.iterationId !== session.iterationId ||
-      worktree.worktreePath !== session.worktreePath
+      (worktree.ownership !== 'EXTERNAL' && worktree.worktreePath !== session.worktreePath)
     ) {
       invalidPersistedRelationship('agent session ownership');
     }
@@ -7637,7 +7800,7 @@ function validatePersistedRelationships(state: StoreState): void {
       snapshot,
       'git snapshot ownership'
     );
-    if (snapshot.worktreePath !== worktree.worktreePath) {
+    if (worktree.ownership !== 'EXTERNAL' && snapshot.worktreePath !== worktree.worktreePath) {
       invalidPersistedRelationship('git snapshot ownership');
     }
     if (snapshot.diffArtifactId) {

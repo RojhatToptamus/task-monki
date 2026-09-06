@@ -68,6 +68,19 @@ action revalidates the repository and creates the same Task Monki-owned
 worktree record, branch, and iteration. It refuses conflicting paths or branch
 ownership through the existing worktree checks.
 
+`WorktreeRecord.ownership` distinguishes `TASK_MONKI` from `EXTERNAL` directory
+lifecycle authority. External attachments never use automatic create, recreate,
+remove, or permission repair. Verification requires the recorded branch and
+physical Git repository. Missing paths retain their task history and recovery
+controls. A failed observation invalidates current Git and review evidence.
+Explicit reconnect changes the current path but retains the comparison anchor.
+If that commit is unavailable, reconnect first, then correct the comparison.
+Historical Git evidence and provider session paths remain unchanged. Coding
+after a path change requires a fresh provider session.
+
+Task-store schema 24 requires explicit worktree ownership. Older stores fail
+validation without deletion or guessed ownership. No legacy migration runs.
+
 ## Provider Runs And Interactions
 
 Persisted ownership remains recoverable for `QUEUED`, `STARTING`, `RUNNING`,

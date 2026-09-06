@@ -80,6 +80,10 @@
   flex: 1;
 }
 
+.tm-titlebar > .outline-button {
+  height: var(--h-toolbar);
+}
+
 .tm-newtask {
   display: inline-flex;
   align-items: center;

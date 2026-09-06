@@ -32,6 +32,26 @@ GitHub delivery actions.
 
 ## Source Of Truth
 
+For external attachments, Refresh PR also discovers an unlinked PR. Discovery
+requires an exact, unambiguous repository and head-branch match. A GitHub error
+leaves remote evidence unavailable or stale. It does not establish that no PR
+exists. Local and remote HEAD differences do not establish direction without
+additional evidence. External publication needs no Task Monki push record.
+
+Push and Create PR require clean attached files and never stage or commit them.
+Publication verifies the current branch, destination, and expected HEAD. It uses
+normal fast-forward rules without changing upstream configuration. Linking an
+existing matching PR requires no push. Managed tasks keep automatic delivery
+commits and their existing upstream behavior.
+
+External push records retain the attempted destination URL before execution.
+Recovery checks that destination, even if the checkout's remote configuration
+changes. An ambiguous remote result blocks another mutation until resolved.
+
+Merge-based completion requires fresh, clean local evidence that matches the PR
+head. An imported task in In Progress cannot complete from an old merged PR.
+Finding a PR does not mark external work ready for review.
+
 Task Monki owns workflow and evidence. GitHub and agent-runtime output are not
 workflow truth until Task Monki records them.
 

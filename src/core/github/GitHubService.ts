@@ -48,7 +48,7 @@ export class GitHubService {
   }
 
   async preflight(task: Task, worktree: WorktreeRecord): Promise<Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>> {
-    const remote = await detectGitHubRemote(worktree.worktreePath);
+    const remote = await detectGitHubRemote(worktree.worktreePath, worktree.ownership === 'EXTERNAL');
     if (!remote) {
       return {
         taskId: task.id,
@@ -104,17 +104,32 @@ export class GitHubService {
     task: Task;
     worktree: WorktreeRecord;
     remoteName?: string;
+    expectedHeadSha?: string;
+    expectedRemoteUrl?: string;
   }): Promise<Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>> {
     const remoteName = input.remoteName ?? 'origin';
     const branchName = input.worktree.branchName;
-    const headSha = (await git(input.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+    let headSha: string;
+    let pushRemoteUrl: string | undefined;
+    let pushArgs = ['push', '--set-upstream', remoteName, 'HEAD'];
+    if (input.worktree.ownership === 'EXTERNAL') {
+      const remote = await this.validateExternalDeliverySource({ ...input, remoteName });
+      headSha = input.expectedHeadSha!;
+      // Pin the explicit action's source and destination, not the task's future
+      // configuration. Do not change upstream or push a later external commit.
+      pushArgs = ['push', remote.remoteUrl, `${headSha}:refs/heads/${branchName}`];
+      pushRemoteUrl = remote.remoteUrl;
+    } else {
+      headSha = (await git(input.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+    }
     try {
-      await git(input.worktree.worktreePath, ['push', '--set-upstream', remoteName, 'HEAD'], 120_000);
+      await git(input.worktree.worktreePath, pushArgs, 120_000);
       return {
         taskId: input.task.id,
         iterationId: input.worktree.iterationId,
         worktreeId: input.worktree.id,
         remoteName,
+        ...(pushRemoteUrl ? { remoteUrl: pushRemoteUrl } : {}),
         branchName,
         remoteRef: `${remoteName}/${branchName}`,
         headSha,
@@ -128,6 +143,7 @@ export class GitHubService {
           iterationId: input.worktree.iterationId,
           worktreeId: input.worktree.id,
           remoteName,
+          ...(pushRemoteUrl ? { remoteUrl: pushRemoteUrl } : {}),
           branchName,
           remoteRef: `${remoteName}/${branchName}`,
           headSha,
@@ -139,6 +155,7 @@ export class GitHubService {
         task: input.task,
         worktree: input.worktree,
         remoteName,
+        remoteUrl: pushRemoteUrl,
         expectedHeadSha: headSha,
         failureDetail: pushError
       });
@@ -149,6 +166,7 @@ export class GitHubService {
     task: Task;
     worktree: WorktreeRecord;
     remoteName: string;
+    remoteUrl?: string;
     expectedHeadSha?: string;
     failureDetail?: string;
   }): Promise<Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>> {
@@ -158,16 +176,24 @@ export class GitHubService {
       iterationId: input.worktree.iterationId,
       worktreeId: input.worktree.id,
       remoteName: input.remoteName,
+      ...(input.remoteUrl ? { remoteUrl: input.remoteUrl } : {}),
       branchName,
       remoteRef: `${input.remoteName}/${branchName}`,
       headSha: input.expectedHeadSha
     };
+    if (input.worktree.ownership === 'EXTERNAL' && !input.remoteUrl) {
+      return {
+        ...base,
+        status: 'AMBIGUOUS',
+        error: 'The interrupted push did not retain its destination URL. Inspect the original remote before retrying.'
+      };
+    }
     let remoteHeadSha: string | undefined;
     try {
       const output = await git(input.worktree.worktreePath, [
         'ls-remote',
         '--heads',
-        input.remoteName,
+        input.remoteUrl ?? input.remoteName,
         `refs/heads/${branchName}`
       ]);
       remoteHeadSha = output.trim().split(/\s+/)[0] || undefined;
@@ -207,14 +233,27 @@ export class GitHubService {
   async createOrFindDraftPullRequest(input: {
     worktree: WorktreeRecord;
     baseRef?: string;
+    expectedHeadSha?: string;
+    expectedRemoteUrl?: string;
     body: string;
     title: string;
   }): Promise<GitHubPrSync> {
     const existing = await this.findOpenPullRequest(input.worktree);
+    const externalRemote = input.worktree.ownership === 'EXTERNAL'
+      ? await this.validateExternalDeliverySource(input)
+      : undefined;
     if (existing) {
+      if (externalRemote && existing.pullRequest.headRefOid !== input.expectedHeadSha) {
+        throw new Error('The GitHub pull request head does not match the delivered commit. Refresh before continuing.');
+      }
       return existing;
     }
 
+    const repositoryArgs = externalRemote
+      ? ['--repo', `${externalRemote.host}/${externalRemote.owner}/${externalRemote.repo}`]
+      : [];
+    const baseRef = input.baseRef ?? input.worktree.baseRef ?? 'main';
+    await this.validatePullRequestBase(input.worktree, baseRef);
     const createResult = await this.exec(
       [
         'pr',
@@ -225,9 +264,10 @@ export class GitHubService {
         '--body-file',
         '-',
         '--base',
-        input.baseRef ?? input.worktree.baseRef ?? 'main',
+        baseRef,
         '--head',
-        input.worktree.branchName
+        input.worktree.branchName,
+        ...repositoryArgs
       ],
       input.worktree.worktreePath,
       120_000,
@@ -236,10 +276,49 @@ export class GitHubService {
     );
 
     const url = createResult.stdout.trim().split(/\s+/).find((value) => value.startsWith('http'));
-    return this.viewPullRequest(input.worktree, url ?? input.worktree.branchName);
+    const sync = await this.viewPullRequest(input.worktree, url ?? input.worktree.branchName);
+    if (externalRemote && sync.pullRequest.headRefOid !== input.expectedHeadSha) {
+      throw new Error('The GitHub pull request head does not match the delivered commit. Refresh before continuing.');
+    }
+    return sync;
+  }
+
+  async validatePullRequestBase(
+    worktree: WorktreeRecord,
+    baseRef = worktree.baseRef ?? 'main'
+  ): Promise<void> {
+    if (worktree.ownership === 'EXTERNAL') {
+      await git(worktree.worktreePath, ['check-ref-format', '--branch', baseRef]);
+      if (baseRef === worktree.branchName || /^[a-f0-9]{40,64}$/i.test(baseRef) || baseRef === 'HEAD') {
+        throw new Error('Select a different base branch before creating a pull request.');
+      }
+    }
+  }
+
+  private async validateExternalDeliverySource(input: {
+    worktree: WorktreeRecord;
+    remoteName?: string;
+    expectedHeadSha?: string;
+    expectedRemoteUrl?: string;
+  }): Promise<GitHubRemote> {
+    const cwd = input.worktree.worktreePath;
+    const remote = await detectGitHubRemote(cwd, true);
+    const dirty = await git(cwd, ['-c', 'core.fsmonitor=false', 'status', '--porcelain', '-z'], { env: { GIT_OPTIONAL_LOCKS: '0' } });
+    const headSha = (await git(cwd, ['rev-parse', 'HEAD'])).trim();
+    const branch = (await git(cwd, ['branch', '--show-current'])).trim();
+    if (
+      !input.expectedHeadSha || headSha !== input.expectedHeadSha || branch !== input.worktree.branchName ||
+      !remote || remote.remoteUrl !== input.expectedRemoteUrl ||
+      (input.remoteName !== undefined && remote.remoteName !== input.remoteName)
+    ) {
+      throw new Error('The shared checkout or delivery destination changed. Refresh before GitHub delivery.');
+    }
+    if (dirty) throw new Error('Commit shared-checkout changes in your existing application before GitHub delivery.');
+    return remote;
   }
 
   async findOpenPullRequest(worktree: WorktreeRecord): Promise<GitHubPrSync | undefined> {
+    const repositoryArgs = await this.repositoryArgs(worktree);
     const result = await this.exec(
       [
         'pr',
@@ -251,11 +330,26 @@ export class GitHubService {
         '--limit',
         '10',
         '--json',
-        prJsonFields
+        worktree.ownership === 'EXTERNAL' ? externalPrJsonFields : prJsonFields,
+        ...repositoryArgs
       ],
       worktree.worktreePath
     );
-    const rows = parseJson<unknown[]>(result.stdout, []);
+    const rows = worktree.ownership === 'EXTERNAL' ? JSON.parse(result.stdout) as unknown : parseJson<unknown[]>(result.stdout, []);
+    if (!Array.isArray(rows)) throw new Error('GitHub returned an invalid pull request list.');
+    if (worktree.ownership === 'EXTERNAL') {
+      if (rows.length >= 10) throw new Error('The branch has too many pull request matches to identify one safely.');
+      const remote = await detectGitHubRemote(worktree.worktreePath, true);
+      if (!remote) throw new Error('No unambiguous GitHub repository is available.');
+      const matches = rows.filter((row) => matchesAttachedPullRequest(row, worktree, remote));
+      if (matches.length !== rows.length || matches.length > 1) {
+        throw new Error('GitHub pull request matches are ambiguous or belong to another repository.');
+      }
+      if (!matches.length) return undefined;
+      const number = numberField(matches[0] as Record<string, unknown>, 'number');
+      if (!number) throw new Error('GitHub did not identify the matching pull request.');
+      return this.viewPullRequest(worktree, number);
+    }
     const match = rows.map((row) => parsePrView(row, worktree)).find((row) => row.pullRequest.number);
     return match?.pullRequest.number
       ? this.viewPullRequest(worktree, match.pullRequest.number)
@@ -263,17 +357,25 @@ export class GitHubService {
   }
 
   async viewPullRequest(worktree: WorktreeRecord, selector: string | number): Promise<GitHubPrSync> {
+    const repositoryArgs = await this.repositoryArgs(worktree);
     const [viewResult, checksResult] = await Promise.all([
-      this.exec(['pr', 'view', String(selector), '--json', prJsonFields], worktree.worktreePath),
+      this.exec(['pr', 'view', String(selector), '--json', worktree.ownership === 'EXTERNAL' ? externalPrJsonFields : prJsonFields, ...repositoryArgs], worktree.worktreePath),
       this.exec(
-        ['pr', 'checks', String(selector), '--json', prChecksJsonFields],
+        ['pr', 'checks', String(selector), '--json', prChecksJsonFields, ...repositoryArgs],
         worktree.worktreePath,
         30_000,
         [8]
       ).catch(() => undefined)
     ]);
+    const raw = worktree.ownership === 'EXTERNAL' ? JSON.parse(viewResult.stdout) : parseJson<Record<string, unknown>>(viewResult.stdout, {});
+    if (worktree.ownership === 'EXTERNAL') {
+      const remote = await detectGitHubRemote(worktree.worktreePath, true);
+      if (!remote || !matchesAttachedPullRequest(raw, worktree, remote)) {
+        throw new Error('The pull request does not match the attached repository and branch.');
+      }
+    }
     return parsePrView(
-      parseJson<Record<string, unknown>>(viewResult.stdout, {}),
+      raw,
       worktree,
       checksResult ? parseJson<unknown[]>(checksResult.stdout, []) : undefined
     );
@@ -293,15 +395,19 @@ export class GitHubService {
       '',
       `- Diff stat: ${input.gitDiffStat?.trim().slice(0, 4000) || 'No diff stat captured.'}`,
       '',
-      '## Agent summary',
-      '',
-      input.agentSummary?.trim().slice(0, 8000) || 'No agent final summary captured.',
-      '',
+      ...(input.agentSummary?.trim() ? ['## Agent summary', '', input.agentSummary.trim().slice(0, 8000), ''] : []),
       '## Delivery note',
       '',
       'Created by Task Monki as a draft PR. Merge remains a human/GitHub decision.',
       ''
     ].join('\n');
+  }
+
+  private async repositoryArgs(worktree: WorktreeRecord): Promise<string[]> {
+    if (worktree.ownership !== 'EXTERNAL') return [];
+    const remote = await detectGitHubRemote(worktree.worktreePath, true);
+    if (!remote) throw new Error('No unambiguous GitHub remote was found.');
+    return ['--repo', `${remote.host}/${remote.owner}/${remote.repo}`];
   }
 
   private async exec(
@@ -342,8 +448,9 @@ export class GitHubService {
   }
 }
 
-export async function detectGitHubRemote(worktreePath: string): Promise<GitHubRemote | undefined> {
+export async function detectGitHubRemote(worktreePath: string, requireUnambiguous = false): Promise<GitHubRemote | undefined> {
   const output = await git(worktreePath, ['remote', '-v']);
+  const remotes: GitHubRemote[] = [];
   for (const line of output.split('\n')) {
     const match = /^(?<name>\S+)\s+(?<url>\S+)\s+\((?<direction>fetch|push)\)$/.exec(line.trim());
     if (!match?.groups || match.groups.direction !== 'fetch') {
@@ -351,14 +458,42 @@ export async function detectGitHubRemote(worktreePath: string): Promise<GitHubRe
     }
     const parsed = parseGitHubRemoteUrl(match.groups.url);
     if (parsed) {
-      return {
+      const remote = {
         remoteName: match.groups.name,
         remoteUrl: match.groups.url,
         ...parsed
       };
+      if (!requireUnambiguous) return remote;
+      remotes.push(remote);
     }
   }
-  return undefined;
+  if (!remotes.length) return undefined;
+  const identities = new Set(remotes.map((remote) => `${remote.host}/${remote.owner}/${remote.repo}`.toLowerCase()));
+  if (identities.size !== 1) throw new Error('Select one GitHub destination in the existing repository before delivery.');
+  const selected = remotes.find((remote) => remote.remoteName === 'origin') ?? remotes[0];
+  const pushUrls = (await git(worktreePath, ['remote', 'get-url', '--push', '--all', selected.remoteName])).trim().split('\n');
+  const pushRemote = pushUrls.length === 1 ? parseGitHubRemoteUrl(pushUrls[0]) : undefined;
+  if (!pushRemote || `${pushRemote.host}/${pushRemote.owner}/${pushRemote.repo}`.toLowerCase() !== [...identities][0]) {
+    throw new Error('The fetch and push destinations do not identify one GitHub repository.');
+  }
+  return { ...selected, remoteUrl: pushUrls[0] };
+}
+
+function matchesAttachedPullRequest(raw: unknown, worktree: WorktreeRecord, remote: GitHubRemote): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const data = raw as Record<string, unknown>;
+  const headRepository = data.headRepository as Record<string, unknown> | undefined;
+  const headOwner = data.headRepositoryOwner as Record<string, unknown> | undefined;
+  try {
+    const url = new URL(String(data.url));
+    const expectedRepository = `${remote.owner}/${remote.repo}`.toLowerCase();
+    return data.isCrossRepository === false && data.headRefName === worktree.branchName &&
+      `${headOwner?.login}/${headRepository?.name}`.toLowerCase() === expectedRepository &&
+      url.protocol === 'https:' && url.hostname.toLowerCase() === remote.host.toLowerCase() &&
+      url.pathname.toLowerCase() === `/${expectedRepository}/pull/${data.number}`;
+  } catch {
+    return false;
+  }
 }
 
 export function parseGitHubRemoteUrl(
@@ -568,6 +703,7 @@ const prJsonFields = [
   'mergeStateStatus',
   'title'
 ].join(',');
+const externalPrJsonFields = `${prJsonFields},headRepository,headRepositoryOwner,isCrossRepository`;
 
 const prChecksJsonFields = [
   'bucket',

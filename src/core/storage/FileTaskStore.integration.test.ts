@@ -2989,13 +2989,17 @@ describe('FileTaskStore', () => {
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
     });
+    const before = await recordTestPreviewSnapshot(store, task.id, iteration, worktree, dir);
     const reviewRun = await store.createRun({
       task: reviewTask,
       session: reviewSession,
       mode: 'REVIEW',
+      beforeGitSnapshotId: before.id,
       prompt: 'Review current changes.',
       continuedFromRunId: implementationRun.id
     });
+    const after = await recordTestPreviewSnapshot(store, task.id, iteration, worktree, dir);
+    await store.updateRun(reviewRun.id, { afterGitSnapshotId: after.id });
     await store.appendEvent(
       createDomainEvent({
         type: 'AGENT_RUN_COMPLETED',
@@ -3737,13 +3741,17 @@ describe('FileTaskStore', () => {
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
     });
+    const before = await recordTestPreviewSnapshot(store, task.id, iteration, worktree, dir);
     const reviewRun = await store.createRun({
       task: reviewTask,
       session: reviewSession,
       mode: 'REVIEW',
+      beforeGitSnapshotId: before.id,
       prompt: 'Review current changes.',
       continuedFromRunId: implementationRun.id
     });
+    const after = await recordTestPreviewSnapshot(store, task.id, iteration, worktree, dir);
+    await store.updateRun(reviewRun.id, { afterGitSnapshotId: after.id });
 
     const finalMessage = `Review found a blocker.
 
@@ -3852,13 +3860,17 @@ describe('FileTaskStore', () => {
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
     });
+    const before = await recordTestPreviewSnapshot(store, task.id, iteration, worktree, dir);
     const reviewRun = await store.createRun({
       task: reviewTask,
       session: reviewSession,
       mode: 'REVIEW',
+      beforeGitSnapshotId: before.id,
       prompt: 'Review current changes.',
       continuedFromRunId: implementationRun.id
     });
+    const after = await recordTestPreviewSnapshot(store, task.id, iteration, worktree, dir);
+    await store.updateRun(reviewRun.id, { afterGitSnapshotId: after.id });
 
     const finalMessage = `The patch introduces review-flow regressions that can bypass the review gate.
 

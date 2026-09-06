@@ -4,6 +4,7 @@ import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppEventBus } from '../core/runner/AppEventBus';
 import { AttachmentStoreError } from '../core/storage/AttachmentFileStore';
 import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
+import { createBrowserTaskManagerApi } from '../renderer/api/taskManagerClient';
 import {
   DEV_API_TOKEN_HEADER,
   devRendererOrigin,
@@ -83,6 +84,47 @@ describe('development HTTP server', () => {
       runs: [{ id: 'run-1' }]
     });
     expect(getTaskDetail).toHaveBeenCalledWith('task-1');
+  });
+
+  it('carries attachment, recovery, and review-derived instructions through the browser contract', async () => {
+    const methods = {
+      listExistingWorktrees: vi.fn(async () => []),
+      inspectWorktreeImport: vi.fn(async (input: unknown) => input),
+      importTask: vi.fn(async (input: unknown) => ({ task: input, existing: false })),
+      reconnectWorktree: vi.fn(async (input: unknown) => input),
+      updateWorktreeComparison: vi.fn(async (input: unknown) => input),
+      startRun: vi.fn(async (input: unknown) => input),
+      continueRun: vi.fn(async (input: unknown) => input)
+    };
+    const running = await startServer(methods);
+    const transport = globalThis.fetch;
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => transport(url, {
+      ...init, headers: { ...running.headers, ...init?.headers }
+    }));
+    try {
+      const api = createBrowserTaskManagerApi(running.baseUrl);
+      const inspection = {
+        repositoryId: 'repository/with spaces', worktreePath: '/outside/linked checkout',
+        branchName: 'feature/external', comparison: { type: 'MERGE_BASE' as const, ref: 'main' }
+      };
+      const request = { ...inspection, title: 'Existing work', creationToken: 'unique-token', readyForReview: true };
+      await api.listExistingWorktrees(inspection.repositoryId);
+      await api.inspectWorktreeImport(inspection);
+      await api.importTask(request);
+      await api.reconnectWorktree({ taskId: 'task-1', worktreePath: '/outside/moved checkout' });
+      await api.updateWorktreeComparison({ taskId: 'task-1', comparison: { type: 'COMMIT', ref: 'abcd' } });
+      await api.startRun({ taskId: 'task-1', instruction: 'Fix the finding.', sourceReviewRunId: 'review-1' });
+      await api.continueRun({ taskId: 'task-1', runId: 'run-1', instruction: 'Fix the finding.', sourceReviewRunId: 'review-2' });
+      expect(methods.listExistingWorktrees).toHaveBeenCalledExactlyOnceWith(inspection.repositoryId);
+      expect(methods.inspectWorktreeImport).toHaveBeenCalledExactlyOnceWith(inspection);
+      expect(methods.importTask).toHaveBeenCalledExactlyOnceWith(request);
+      expect(methods.reconnectWorktree).toHaveBeenCalledExactlyOnceWith({ taskId: 'task-1', worktreePath: '/outside/moved checkout' });
+      expect(methods.updateWorktreeComparison).toHaveBeenCalledExactlyOnceWith({ taskId: 'task-1', comparison: { type: 'COMMIT', ref: 'abcd' } });
+      expect(methods.startRun).toHaveBeenCalledExactlyOnceWith({ taskId: 'task-1', instruction: 'Fix the finding.', sourceReviewRunId: 'review-1' });
+      expect(methods.continueRun).toHaveBeenCalledExactlyOnceWith({ taskId: 'task-1', runId: 'run-1', instruction: 'Fix the finding.', sourceReviewRunId: 'review-2' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('routes Design conversation and project actions with path-owned ids', async () => {

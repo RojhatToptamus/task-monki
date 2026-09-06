@@ -179,12 +179,16 @@ export function buildInitialRunPrompt(input: {
   worktree: WorktreeRecord;
   settings: AgentExecutionSettings;
   readOnlyMode: boolean;
+  instruction?: string;
 }): string {
+  const instruction = input.instruction?.trim();
   return [
     TASK_MONKI_CONTEXT_LINE,
     '',
     'Always-applicable Task Monki execution boundary:',
-    input.readOnlyMode
+    input.worktree.ownership === 'EXTERNAL'
+      ? 'Perform this task in the existing shared checkout. Preserve unrelated external work.'
+      : input.readOnlyMode
       ? 'Perform this task in an isolated Git worktree without modifying files.'
       : 'Perform this task in an isolated Git worktree.',
     `Repository root: ${input.worktree.worktreePath}`,
@@ -198,8 +202,12 @@ export function buildInitialRunPrompt(input: {
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
-    `Authoritative Task Monki goal:\n${input.task.prompt}`
-  ].join('\n');
+    `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    instruction ? '' : undefined,
+    instruction ? `Current implementation instruction:\n${instruction}` : undefined
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join('\n');
 }
 
 export function buildInitialDesignPrompt(input: {
@@ -351,7 +359,7 @@ function buildExistingWorktreePrompt(
     '',
     'Always-applicable Task Monki execution boundary:',
     `Repository root: ${input.gitSnapshot.worktreePath}`,
-    'Continue in the existing isolated task worktree.',
+    'Continue in the existing task worktree. Preserve unrelated work.',
     'Only modify files inside this worktree.',
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
     'This execution boundary remains authoritative even when task-specific instructions conflict.',
@@ -437,6 +445,9 @@ export function buildAgentReviewPrompt(input: {
     '',
     target,
     `Repository root: ${input.worktree.worktreePath}`,
+    `Expected branch: ${input.worktree.branchName}`,
+    `Comparison anchor: ${input.worktree.baseSha}`,
+    'If the checkout or comparison scope changes during review, report the uncertainty. Do not infer which application changed the files.',
     'Do not modify repository files. Do not commit, push, merge, or change repository settings.',
     'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.'
   ].join('\n');

@@ -19,6 +19,7 @@ import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import type { FileTaskStore } from '../storage/FileTaskStore';
 import { buildAgentReviewPrompt } from '../../shared/promptTemplates';
+import { isImplementationRunMode } from '../../shared/contracts';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
@@ -94,7 +95,7 @@ export interface StartOrchestratedReview {
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
-  sourceRun: RunRecord;
+  sourceRun?: RunRecord;
   target: AgentReviewTarget;
   settings: AgentExecutionSettings;
   generationKey?: string;
@@ -332,6 +333,22 @@ export class AgentOrchestrator {
     let session = input.sessionId
       ? await this.requireSession(input.sessionId)
       : await this.store.getPrimaryAgentSession(input.task.id, input.iteration.id);
+    if (session?.role === 'REVIEW') {
+      throw new Error('A detached review session cannot run implementation work.');
+    }
+    if (session && session.worktreePath !== input.worktree.worktreePath) {
+      if (input.worktree.ownership !== 'EXTERNAL') {
+        throw new Error('Selected agent session worktree path does not match the task.');
+      }
+      await this.assertNoPendingInteractions(session.id);
+      const unresolved = (await this.store.snapshot()).runs.some(
+        (run) => run.sessionId === session!.id && RECOVERABLE_RUN_STATUSES.includes(run.status)
+      );
+      if (unresolved) {
+        throw new Error('Resolve the previous session run before starting work in the reconnected checkout.');
+      }
+      session = undefined;
+    }
     const runtimeId = session?.runtimeId ?? input.task.runtimeId;
     if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
       throw new Error(
@@ -361,7 +378,8 @@ export class AgentOrchestrator {
     if (
       session.taskId !== input.task.id ||
       session.iterationId !== input.iteration.id ||
-      session.worktreeId !== input.worktree.id
+      session.worktreeId !== input.worktree.id ||
+      session.worktreePath !== input.worktree.worktreePath
     ) {
       throw new Error('Selected agent session does not belong to this task iteration.');
     }
@@ -459,14 +477,31 @@ export class AgentOrchestrator {
     input: StartOrchestratedReview
   ): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
-    const sourceSession = await this.requireSession(input.sourceRun.sessionId);
-    if (input.sourceRun.runtimeId !== sourceSession.runtimeId) {
+    const sourceRun = input.sourceRun;
+    const currentTask = await this.store.getTask(input.task.id);
+    if (sourceRun && (
+      currentTask?.currentRunId !== sourceRun.id ||
+      sourceRun.taskId !== input.task.id ||
+      sourceRun.iterationId !== input.iteration.id ||
+      sourceRun.worktreeId !== input.worktree.id ||
+      !isImplementationRunMode(sourceRun.mode) ||
+      sourceRun.status !== 'COMPLETED'
+    )) {
+      throw new Error('A review source must be the current completed implementation run.');
+    }
+    if (!sourceRun && (input.worktree.ownership !== 'EXTERNAL' || currentTask?.currentRunId)) {
+      throw new Error('Only an attached task without a primary run can start a source-free review.');
+    }
+    const sourceSession = sourceRun ? await this.requireSession(sourceRun.sessionId) : undefined;
+    if (sourceRun && sourceRun.runtimeId !== sourceSession?.runtimeId) {
       throw new Error('Review source runtime ownership is inconsistent.');
     }
-    const reviewRuntimeId = input.settings.runtimeId ?? sourceSession.runtimeId;
+    const reviewRuntimeId = input.settings.runtimeId ?? sourceSession?.runtimeId ?? input.task.runtimeId;
     const adapter = this.runtimes.require(reviewRuntimeId);
     const capabilities = await adapter.capabilities();
     const useNativeReview =
+      sourceSession !== undefined &&
+      sourceSession.worktreePath === input.worktree.worktreePath &&
       reviewRuntimeId === sourceSession.runtimeId &&
       capabilities.review.maturity !== 'unsupported' &&
       typeof adapter.startReview === 'function';
@@ -479,15 +514,18 @@ export class AgentOrchestrator {
     const taskAttachments = await this.store.getTaskAttachments(input.task.id);
     const settings = await this.validateSettings(
       adapter,
-      { ...input.settings, runtimeId: reviewRuntimeId },
+      { ...input.settings, runtimeId: reviewRuntimeId, sandbox: 'READ_ONLY' },
       taskAttachments
     );
+    if (settings.sandbox !== 'READ_ONLY') {
+      throw new Error('The selected runtime cannot preserve read-only review settings.');
+    }
     await this.assertCapacity();
-    if (useNativeReview) {
-      this.assertBrowserDevSettings(input.sourceRun.requestedSettings, 'Review source run');
-      if (input.sourceRun.observedSettings) {
+    if (useNativeReview && sourceRun) {
+      this.assertBrowserDevSettings(sourceRun.requestedSettings, 'Review source run');
+      if (sourceRun.observedSettings) {
         this.assertBrowserDevSettings(
-          input.sourceRun.observedSettings,
+          sourceRun.observedSettings,
           'Review source run observed settings'
         );
       }
@@ -501,7 +539,7 @@ export class AgentOrchestrator {
       runtimeId: reviewRuntimeId,
       role: 'REVIEW',
       requestedSettings: settings,
-      parentSessionId: sourceSession.id,
+      parentSessionId: sourceSession?.id,
       forkedFromSessionId: useNativeReview ? sourceSession.id : undefined
     });
     const prompt = buildAgentReviewPrompt({
@@ -517,7 +555,7 @@ export class AgentOrchestrator {
       generationKey: input.generationKey,
       requestedSettings: settings,
       beforeGitSnapshotId: input.beforeGitSnapshotId,
-      continuedFromRunId: input.sourceRun.id
+      continuedFromRunId: sourceRun?.id
     });
     let attachments: AgentTurnAttachment[] = [];
     try {

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type {
   AgentReviewGateStatus,
   AgentSessionRecord,
@@ -10,6 +11,7 @@ import {
   isImplementationRunMode
 } from '../../shared/contracts';
 import type { StoreState } from '../projection/reducer';
+import { reconcileTaskReviewEvidence } from '../projection/reducer';
 import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
@@ -81,6 +83,10 @@ export function normalizeLoadedState(
     const currentRun = findReviewRunForRepair(normalizedTask, runs);
     if (!currentRun) return normalizedTask;
 
+    const runFreeAttachment = state.worktrees.some(
+      (worktree) => worktree.id === normalizedTask.currentWorktreeId && worktree.ownership === 'EXTERNAL'
+    ) && (!taskCurrentRun || (taskCurrentRun.mode === 'REVIEW' && !taskCurrentRun.continuedFromRunId));
+
     const hasActiveNonReviewRun =
       taskCurrentRun !== undefined &&
       taskCurrentRun.mode !== 'REVIEW' &&
@@ -94,6 +100,7 @@ export function normalizeLoadedState(
         )
     );
     const shouldRepairPhase =
+      !runFreeAttachment &&
       !shouldRepairImplementationPhase &&
       !getImplementationRetryReason(normalizedTask) &&
       !hasActiveNonReviewRun &&
@@ -111,22 +118,21 @@ export function normalizeLoadedState(
         ? currentReview?.status
         : undefined;
     const reviewStatus: AgentReviewGateStatus =
-      (sameProjectedReview && currentReview?.status === 'STALE'
+      sameProjectedReview && currentReview?.status === 'STALE'
         ? 'STALE'
-        : agentReviewStatusFromResult(reviewResult)) ??
-      projectedReviewStatus ??
-      (currentRun.status === 'COMPLETED'
-        ? 'INCONCLUSIVE'
-        : currentRun.status === 'INTERRUPTED'
-          ? 'CANCELED'
-          : ['FAILED', 'RECOVERY_REQUIRED', 'LOST'].includes(currentRun.status)
-            ? 'FAILED'
-            : 'RUNNING');
+        : currentRun.status === 'COMPLETED'
+          ? agentReviewStatusFromResult(reviewResult) ?? projectedReviewStatus ?? 'INCONCLUSIVE'
+          : currentRun.status === 'INTERRUPTED'
+            ? 'CANCELED'
+            : ['FAILED', 'RECOVERY_REQUIRED', 'LOST'].includes(currentRun.status)
+              ? 'FAILED'
+              : 'RUNNING';
     const repairedSourceRun =
-      taskCurrentRun?.mode === 'REVIEW'
+      taskCurrentRun?.mode === 'REVIEW' && !runFreeAttachment
         ? findSourceRunForReviewRepair(currentRun, runs)
         : undefined;
-    const shouldRepairCurrentRun = Boolean(repairedSourceRun);
+    const clearReviewPointers = taskCurrentRun?.mode === 'REVIEW' && !repairedSourceRun;
+    const shouldRepairCurrentRun = Boolean(repairedSourceRun) || clearReviewPointers;
     const shouldRepairReview =
       !currentReview ||
       currentReview.runId !== currentRun.id ||
@@ -134,10 +140,10 @@ export function normalizeLoadedState(
       (!currentReview.result && Boolean(reviewResult));
 
     if (!shouldRepairPhase && !shouldRepairReview && !shouldRepairCurrentRun) {
-      return normalizedTask;
+      const reconciled = reconcileTaskReviewEvidence(normalizedTask, runs, state.gitSnapshots);
+      if (reconciled === normalizedTask) return normalizedTask;
     }
 
-    changed = true;
     const reviewedSnapshot = currentRun.beforeGitSnapshotId
       ? state.gitSnapshots.find(
           (snapshot) => snapshot.id === currentRun.beforeGitSnapshotId
@@ -146,19 +152,20 @@ export function normalizeLoadedState(
     const repairedAgentRun = repairedSourceRun?.status as
       | StatusProjection['agentRun']
       | undefined;
-    return {
+    const repairedTask: Task = {
       ...normalizedTask,
       workflowPhase: shouldRepairPhase ? 'REVIEW' : normalizedTask.workflowPhase,
-      currentRunId: repairedSourceRun?.id ?? normalizedTask.currentRunId,
-      currentAgentSessionId:
-        repairedSourceRun?.sessionId ?? normalizedTask.currentAgentSessionId,
+      currentRunId: clearReviewPointers ? undefined : repairedSourceRun?.id ?? normalizedTask.currentRunId,
+      currentAgentSessionId: clearReviewPointers
+        ? undefined
+        : repairedSourceRun?.sessionId ?? normalizedTask.currentAgentSessionId,
       currentIterationId:
         repairedSourceRun?.iterationId ?? normalizedTask.currentIterationId,
       currentWorktreeId:
         repairedSourceRun?.worktreeId ?? normalizedTask.currentWorktreeId,
       projection: {
         ...normalizedTask.projection,
-        agentRun: repairedAgentRun ?? normalizedTask.projection.agentRun,
+        agentRun: clearReviewPointers ? 'IDLE' : repairedAgentRun ?? normalizedTask.projection.agentRun,
         agentReview: {
           ...currentReview,
           status: reviewStatus,
@@ -169,10 +176,13 @@ export function normalizeLoadedState(
             currentRun.beforeGitSnapshotId ??
             currentReview?.reviewedGitSnapshotId,
           reviewedHeadSha:
-            reviewedSnapshot?.headSha ?? currentReview?.reviewedHeadSha,
+            sameProjectedReview && currentReview?.reviewedHeadSha
+              ? currentReview.reviewedHeadSha
+              : reviewedSnapshot?.headSha,
           reviewedDirtyFingerprint:
-            reviewedSnapshot?.dirtyFingerprint ??
-            currentReview?.reviewedDirtyFingerprint,
+            sameProjectedReview && currentReview?.reviewedHeadSha
+              ? currentReview.reviewedDirtyFingerprint
+              : reviewedSnapshot?.dirtyFingerprint,
           finalArtifactId:
             currentRun.finalArtifactId ?? currentReview?.finalArtifactId,
           result: reviewResult ?? currentReview?.result,
@@ -197,6 +207,10 @@ export function normalizeLoadedState(
       updatedAt:
         currentRun.lastEventAt ?? currentRun.startedAt ?? normalizedTask.updatedAt
     };
+    const reconciled = reconcileTaskReviewEvidence(repairedTask, runs, state.gitSnapshots);
+    if (isDeepStrictEqual(reconciled, normalizedTask)) return normalizedTask;
+    changed = true;
+    return reconciled;
   });
 
   return changed

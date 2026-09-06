@@ -9,7 +9,7 @@ is not just an AI chat UI.
 
 1. User creates a task in one repository with a goal, model, and
    reasoning effort.
-2. Task Monki prepares an isolated Git worktree.
+2. Task Monki prepares an isolated Git worktree, or the user imports an existing checkout.
 3. The selected coding-agent runtime runs in that worktree.
 4. Task Monki records provider activity, approvals, Git evidence, GitHub
    delivery evidence, and audit history.
@@ -71,6 +71,54 @@ when the panel closes, and accepts a proposal only while its repository, title,
 description, target model, and attachment revision still match. Project and
 Task Monki instructions remain downstream instructions; refinement does not
 copy their generic rules into every task prompt.
+
+## Import existing work
+
+Import attaches an existing primary or linked checkout on its current named
+branch. It creates no checkout, branch, clone, file mirror, or external agent
+session. The task, iteration, and external worktree record publish together.
+Repeated submissions and duplicate checkout selections open the existing task.
+
+The task starts In Progress with no Task Monki agent run. Ready for review is
+an explicit choice, available during import or later. External commits do not
+advance the workflow or imply successful tests. A saved view remains a filter.
+
+The user continues in the same external application and directory. Saved files,
+staged changes, and local commits are shared directly. Unsaved editor buffers
+are not available to Task Monki. The comparison uses an explicit commit or the
+initial merge base of a selected branch. Refresh preserves that comparison
+anchor. An explicit comparison edit rebuilds the diff and invalidates review.
+
+Task open, window focus, and Refresh Git request a local Git observation.
+Ordinary record reloads do not inspect Git. Repeated focus events coalesce,
+and unchanged observations reuse stored evidence. Failed observation preserves
+history but makes current Git evidence unavailable. There is no continuous
+file watcher or background polling of the checkout.
+
+Refresh PR reads GitHub independently. Import also discovers an unambiguous
+same-repository PR without publishing the branch. GitHub errors mean unavailable
+remote evidence, not proof that no PR exists. PR discovery does not override
+the initial In Progress choice.
+
+Run agent review works without an implementation run. Request changes and
+Start implementation require an explicit instruction before Task Monki writes
+to the shared checkout. The user must avoid concurrent external writes during
+that action. Review findings remain historical after external edits.
+
+Preview uses its existing source capture. Refresh Git can mark that capture
+stale but does not change the running preview. Replace captures newer saved
+source. External servers remain outside Task Monki ownership.
+
+Import accepts dirty work and records conflicts or unfinished Git operations.
+Those states block coding, review, and delivery. A switched branch or missing
+path blocks branch-sensitive actions without automatic repair. Reconnect
+accepts the recorded branch in the same physical repository. It preserves
+historical paths and requires a new coding session after a path change.
+
+Delete removes Task Monki records and its owned resources, not the attached
+checkout. Commit all is unavailable for attached work. Push and Create PR
+require clean files and do not change upstream configuration. Managed tasks
+retain their existing commit and delivery behavior.
 
 ## Runtime and model configuration
 
@@ -249,9 +297,11 @@ across surfaces.
 - In Progress
   - Implementation-side work is active, being corrected, or waiting for a
     retry after an unsuccessful run.
+  - Imported work can remain here with no Task Monki agent run.
 - Review
   - Implementation-side work completed successfully and is ready for
     inspection, review gate, acceptance, commit, or PR creation.
+  - Imported work without a primary run enters this phase by explicit user choice.
 - In Review
   - A PR or external review process exists.
 - Done
@@ -348,6 +398,8 @@ Review:
 - Allow Run agent review when no implementation-side run is active.
 - Require the current implementation-side run to have completed successfully;
   unsuccessful or older superseded runs are not valid review sources.
+- An attached checkout without a primary run uses fresh Git evidence as its
+  review scope. It does not need a fictional implementation result.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.

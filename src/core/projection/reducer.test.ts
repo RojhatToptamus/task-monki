@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection } from '../../shared/contracts';
-import type { DomainEvent, RunRecord, Task } from '../../shared/contracts';
-import { applyEventToState, createEmptyState, reduceProjection, reduceRun } from './reducer';
+import type { DomainEvent, GitSnapshotRecord, RunRecord, Task } from '../../shared/contracts';
+import { makeGitSnapshotRecord } from '../../testSupport/rendererRecords';
+import { applyEventToState, createEmptyState, reconcileTaskReviewEvidence, reduceProjection, reduceRun } from './reducer';
 
 const now = '2026-06-20T10:00:00.000Z';
 
 describe('projection reducer', () => {
+  it('replaces a failed GitHub discovery summary only after a successful no-PR observation', () => {
+    const failed = reduceProjection(createInitialProjection(now), createEvent('GITHUB_SYNC_FAILED', { error: 'GitHub unavailable' }));
+    const observed = reduceProjection(failed, createEvent('PR_DISCOVERY_COMPLETED', { found: false }));
+    expect(observed.githubPullRequest).toBe('NOT_CREATED');
+    expect(observed.summary).toBe('No open pull request found for this branch.');
+    expect(observed.agentRun).toBe(failed.agentRun);
+  });
+
   it('keeps preview lifecycle events out of task workflow and agent projections', () => {
     const state = createEmptyState();
     const task = createTask();
@@ -415,7 +424,7 @@ describe('projection reducer', () => {
     expect(completed.tasks[0].projection.agentRun).toBe('COMPLETED');
   });
 
-  it('stores structured Codex review findings and derives needs-changes status', () => {
+  it('retains review findings as historical output until post-review Git evidence is verified', () => {
     const task: Task = {
       id: 'task-1',
       kind: 'NORMAL',
@@ -430,6 +439,7 @@ describe('projection reducer', () => {
       forkedAlternativeTaskIds: [],
       currentIterationId: 'iteration-1',
       currentRunId: 'implementation-run',
+      currentWorktreeId: 'worktree-1',
       agentSettings: {},
       createdAt: now,
       updatedAt: now,
@@ -445,7 +455,7 @@ describe('projection reducer', () => {
         tasks: [task],
         runs: [
           createRun({ id: 'implementation-run', mode: 'IMPLEMENTATION', status: 'COMPLETED' }),
-          createRun({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' })
+          createRun({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING', beforeGitSnapshotId: 'before' })
         ]
       },
       {
@@ -473,9 +483,16 @@ describe('projection reducer', () => {
 
     const review = completed.tasks[0].projection.agentReview;
     expect(completed.tasks[0].projection.agentRun).toBe('COMPLETED');
-    expect(review?.status).toBe('NEEDS_CHANGES');
-    expect(review?.summary).toBe('Found a blocker despite provider verdict.');
+    expect(review?.status).toBe('INCONCLUSIVE');
+    expect(review?.result?.summary).toBe('Found a blocker despite provider verdict.');
     expect(review?.result?.findings[0]?.severity).toBe('BLOCKER');
+    const verified = reconcileTaskReviewEvidence(
+      completed.tasks[0],
+      completed.runs.map((run) => run.mode === 'REVIEW' ? { ...run, afterGitSnapshotId: 'after' } : run),
+      [reviewSnapshot('after'), reviewSnapshot('before')]
+    );
+    expect(verified.projection.agentReview?.status).toBe('NEEDS_CHANGES');
+    expect(verified.currentRunId).toBe('implementation-run');
   });
 
   it('marks review results stale when the diff changes or follow-up work starts', () => {
@@ -570,6 +587,7 @@ describe('projection reducer', () => {
       forkedAlternativeTaskIds: [],
       currentIterationId: 'iteration-1',
       currentRunId: 'implementation-run',
+      currentWorktreeId: 'worktree-1',
       agentSettings: {},
       createdAt: now,
       updatedAt: now,
@@ -581,7 +599,8 @@ describe('projection reducer', () => {
           status: 'PASSED',
           runId: 'review-run',
           reviewedHeadSha: 'abc',
-          reviewedDirtyFingerprint: 'fp-1'
+          reviewedDirtyFingerprint: 'fp-1',
+          result: { schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'No findings.', findings: [] }
         }
       }
     };
@@ -592,8 +611,9 @@ describe('projection reducer', () => {
         tasks: [task],
         runs: [
           createRun({ id: 'implementation-run', mode: 'IMPLEMENTATION', status: 'COMPLETED' }),
-          createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED' })
-        ]
+          createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED', beforeGitSnapshotId: 'before', afterGitSnapshotId: 'after' })
+        ],
+        gitSnapshots: [reviewSnapshot('after'), reviewSnapshot('before')]
       },
       {
         ...createEvent('DELIVERY_COMMIT_CREATED', {
@@ -604,7 +624,13 @@ describe('projection reducer', () => {
       }
     );
 
-    const refreshed = applyEventToState(committed, {
+    const refreshed = applyEventToState({
+      ...committed,
+      gitSnapshots: [reviewSnapshot('git-committed', {
+        headSha: 'commit-1', dirtyFingerprint: 'clean-fp', stagedCount: 0, unstagedCount: 0,
+        untrackedCount: 0, status: 'COMMITTED_UNPUSHED', capturedAt: '2026-06-20T10:02:00.000Z'
+      }), ...committed.gitSnapshots]
+    }, {
       ...createEvent('GIT_SNAPSHOT_CAPTURED', {
         id: 'git-committed',
         headSha: 'commit-1',
@@ -742,6 +768,82 @@ describe('projection reducer', () => {
     });
   });
 });
+
+describe('post-review evidence', () => {
+  it.each([
+    { headSha: 'new-head' },
+    { dirtyFingerprint: 'new-content' },
+    { branch: 'another-branch' },
+    { baseSha: 'another-base' },
+    { baseRef: 'another-base-ref' },
+    { worktreePath: '/another-checkout' }
+  ])('makes a completed review stale when its observed scope changes: %j', (change) => {
+    const { task, run } = completedReview();
+    const after = reviewSnapshot('after', change);
+    const next = reconcileTaskReviewEvidence(task, [run], [after, reviewSnapshot('before')]);
+    expect(next.projection.agentReview?.status).toBe('STALE');
+    expect(next.projection.agentReview?.result).toEqual(task.projection.agentReview?.result);
+    expect(next.currentRunId).toBeUndefined();
+    expect(next.workflowPhase).toBe('REVIEW');
+  });
+
+  it('does not accept a change observed during review even when the source is restored before completion', () => {
+    const { task, run } = completedReview();
+    const next = reconcileTaskReviewEvidence(task, [run], [
+      reviewSnapshot('after'),
+      reviewSnapshot('during', { dirtyFingerprint: 'temporary-change', capturedAt: '2026-06-20T10:00:30.000Z' }),
+      reviewSnapshot('before')
+    ]);
+    expect(next.projection.agentReview?.status).toBe('STALE');
+  });
+
+  it('retains history but invalidates a verified review when Git observation fails', () => {
+    const { task, run } = completedReview();
+    const snapshots = [reviewSnapshot('after'), reviewSnapshot('before')];
+    const verified = reconcileTaskReviewEvidence(task, [run], snapshots);
+    expect(verified.projection.agentReview?.status).toBe('PASSED');
+    const failed = applyEventToState({ ...createEmptyState(), tasks: [verified], runs: [run], gitSnapshots: snapshots }, {
+      ...createEvent('GIT_OBSERVATION_FAILED', { error: 'Checkout is unavailable.' }), runId: run.id
+    });
+    expect(failed.tasks[0].projection.git).toBe('UNAVAILABLE');
+    expect(failed.tasks[0].projection.agentReview?.status).toBe('STALE');
+    expect(failed.tasks[0].projection.agentReview?.result).toEqual(verified.projection.agentReview?.result);
+    expect(failed.gitSnapshots).toEqual(snapshots);
+  });
+
+  it('keeps provider terminal output non-actionable when the post-review snapshot is absent or belongs to another worktree', () => {
+    const { task, run } = completedReview();
+    for (const snapshots of [
+      [reviewSnapshot('before')],
+      [reviewSnapshot('after', { worktreeId: 'other-worktree' }), reviewSnapshot('before')]
+    ]) {
+      expect(reconcileTaskReviewEvidence(task, [run], snapshots).projection.agentReview?.status).toBe('INCONCLUSIVE');
+    }
+  });
+});
+
+function completedReview() {
+  const run = createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED', beforeGitSnapshotId: 'before', afterGitSnapshotId: 'after' });
+  const task = createTask({
+    workflowPhase: 'REVIEW', currentWorktreeId: 'worktree-1',
+    projection: {
+      ...createInitialProjection(now), git: 'DIRTY',
+      agentReview: {
+        status: 'INCONCLUSIVE', runId: run.id, reviewedHeadSha: 'abc', reviewedDirtyFingerprint: 'fp-1',
+        result: { schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'No findings.', findings: [] }
+      }
+    }
+  });
+  return { task, run };
+}
+
+function reviewSnapshot(id: string, overrides: Partial<GitSnapshotRecord> = {}): GitSnapshotRecord {
+  return makeGitSnapshotRecord({
+    id, headSha: 'abc', dirtyFingerprint: 'fp-1', branch: 'task/task-1', baseRef: 'main', baseSha: 'base',
+    capturedAt: id === 'before' ? now : '2026-06-20T10:01:00.000Z',
+    ...overrides
+  });
+}
 
 describe('run reducer', () => {
   it('updates run event counts and terminal agent state', () => {

@@ -37,6 +37,7 @@ import { AppEventBus } from '../core/runner/AppEventBus';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { agentReviewStatusFromResult, parseAgentReviewResult } from '../core/review/AgentReviewContract';
 import { assertModelSupportsAttachments } from '../core/agent/AgentAttachmentDelivery';
 import type { PreviewRecipeGenerationService } from '../core/preview/generation/PreviewRecipeGenerationService';
 
@@ -244,9 +245,14 @@ export async function createTaskMonkiScenario(
         }
       }
       const artifact = await store.writeFinalArtifact(run.taskId, run.id, finalMessage);
+      const agentReviewResult = run.mode === 'REVIEW' ? parseAgentReviewResult(finalMessage) : undefined;
       await appendRunEvent(store, run, 'AGENT_RUN_COMPLETED', {
         terminalStatus: 'completed',
-        finalArtifactId: artifact.id
+        finalArtifactId: artifact.id,
+        ...(run.mode === 'REVIEW' ? {
+          agentReviewResult,
+          agentReviewStatus: agentReviewStatusFromResult(agentReviewResult)
+        } : {})
       });
       events.emit({
         type: 'run.terminal',

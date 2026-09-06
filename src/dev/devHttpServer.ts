@@ -638,6 +638,27 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/worktrees/existing') {
+        sendJson(response, requestId, 200, await options.service.listExistingWorktrees(requiredQueryParameter(url, 'repositoryId')));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/worktrees/inspect-import') {
+        sendJson(response, requestId, 200, await options.service.inspectWorktreeImport((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/tasks/import') {
+        sendJson(response, requestId, 200, await options.service.importTask((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/worktrees/reconnect') {
+        sendJson(response, requestId, 200, await options.service.reconnectWorktree((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/worktrees/comparison') {
+        sendJson(response, requestId, 200, await options.service.updateWorktreeComparison((await readJson()) as never));
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/tasks') {
         sendJson(
           response,

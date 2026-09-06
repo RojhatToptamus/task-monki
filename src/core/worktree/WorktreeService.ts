@@ -12,6 +12,7 @@ import {
   isOwnedByCurrentUser
 } from '../filesystem/secureFilesystem';
 import { git, gitSucceeds } from '../git/gitCli';
+import { resolveAgentGitMetadata } from '../git/AgentGitMetadata';
 
 export interface WorktreeSpec {
   branchName: string;
@@ -66,6 +67,7 @@ export class WorktreeService {
   }
 
   async create(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    assertManagedOwnership(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
 
@@ -95,6 +97,34 @@ export class WorktreeService {
   }
 
   async verify(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    if (record.ownership === 'EXTERNAL') {
+      const now = new Date().toISOString();
+      try {
+        await resolveAgentGitMetadata({
+          repositoryPath,
+          worktreePath: record.worktreePath,
+          expectedBranch: record.branchName
+        });
+        const headSha = (await git(record.worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
+        return {
+          ...record,
+          // A Git worktree lock protects its lifecycle, not access to its files.
+          status: 'PRESENT',
+          headSha,
+          error: undefined,
+          updatedAt: now,
+          lastVerifiedAt: now
+        };
+      } catch (error) {
+        return {
+          ...record,
+          status: await pathExists(record.worktreePath) ? 'ERROR' : 'MISSING',
+          error: error instanceof Error ? error.message : String(error),
+          updatedAt: now,
+          lastVerifiedAt: now
+        };
+      }
+    }
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
     const parsed = await listGitWorktrees(repositoryPath);
@@ -127,6 +157,7 @@ export class WorktreeService {
   }
 
   async remove(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    assertManagedOwnership(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
     repositoryPath = await canonicalPath(repositoryPath);
@@ -172,6 +203,7 @@ export class WorktreeService {
     record: WorktreeRecord,
     repository: Pick<Repository, 'kind' | 'path'>
   ): Promise<WorktreeRecord> {
+    assertManagedOwnership(record);
     if (repository.kind !== 'DESIGN_MANAGED') {
       throw new Error('Forced worktree removal is limited to managed Design repositories.');
     }
@@ -274,6 +306,12 @@ export class WorktreeService {
     ) {
       throw new Error('Task worktree path failed its ownership check.');
     }
+  }
+}
+
+function assertManagedOwnership(record: WorktreeRecord): void {
+  if (record.ownership !== 'TASK_MONKI') {
+    throw new Error('Task Monki cannot create or remove an externally owned checkout.');
   }
 }
 

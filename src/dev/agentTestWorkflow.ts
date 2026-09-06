@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AcpRuntimeAdapter } from '../core/agent/acp/AcpRuntimeAdapter';
 import type { AcpRuntimeProfile } from '../core/agent/acp/AcpRuntimeProfiles';
+import { CodexAppServerAdapter } from '../core/agent/codex/CodexAppServerAdapter';
 import { git } from '../core/git/gitCli';
 import {
   spawnPortable,
@@ -101,6 +102,28 @@ export interface AgentTestWorkflowReport {
     providerLogTail: string;
   };
   scenarios: AgentTestScenarioReport[];
+  attachedWork: {
+    taskId: string;
+    initialPhase: Task['workflowPhase'];
+    importStartedNoAgent: boolean;
+    indexAndConfigPreserved: boolean;
+    refreshedHead: string;
+    review: {
+      runtimeId: 'codex';
+      stableStatus: string;
+      changedDuringReviewStatus: string;
+      noPrimaryRun: boolean;
+      processId: number;
+    };
+    preview: {
+      attempted: boolean;
+      skippedReason?: string;
+      staleCapturePreserved: boolean;
+      replacementServedNewBytes: boolean;
+      processesJoined: boolean;
+    };
+    deletionPreservedCheckoutAndServer: boolean;
+  };
   timingsMs: {
     setup: number;
     execution: number;
@@ -253,6 +276,7 @@ interface AgentTestEnvironment {
 
 interface AgentTestEnvironmentOptions {
   previewEnabled?: boolean;
+  attachedWork?: boolean;
   repositoryHistoryCount?: number;
 }
 
@@ -290,12 +314,16 @@ interface StressOptions {
 export async function runAgentTestWorkflow(): Promise<AgentTestWorkflowReport> {
   const totalStartedAt = performance.now();
   const setupStartedAt = performance.now();
-  const environment = await createAgentTestEnvironment();
+  const environment = await createAgentTestEnvironment({
+    previewEnabled: process.platform === 'darwin',
+    attachedWork: true
+  });
   const setup = elapsed(setupStartedAt);
   let serviceStopped = false;
   let runtimeProcessIds: number[] = [];
   let runtimeReport: Omit<AgentTestWorkflowReport['runtime'], 'processJoined'> | undefined;
   let scenarios: AgentTestScenarioReport[] = [];
+  let attachedWork: AgentTestWorkflowReport['attachedWork'] | undefined;
   let sourceRepository: AgentTestWorkflowReport['sourceRepository'] | undefined;
   let execution = 0;
   const cleanupStartedAt = { value: 0 };
@@ -304,6 +332,7 @@ export async function runAgentTestWorkflow(): Promise<AgentTestWorkflowReport> {
 
   try {
     const executionStartedAt = performance.now();
+    attachedWork = await exerciseAttachedWork(environment);
     scenarios = await exerciseRepresentativeScenarios(environment);
     const snapshot = await environment.store.snapshot();
     runtimeReport = await collectRuntimeReport(snapshot, environment.providerLogPath);
@@ -337,7 +366,7 @@ export async function runAgentTestWorkflow(): Promise<AgentTestWorkflowReport> {
   if (workflowError) {
     throw workflowError;
   }
-  if (!runtimeReport || !sourceRepository) {
+  if (!runtimeReport || !sourceRepository || !attachedWork) {
     throw new Error('Agent workflow report was not materialized before cleanup.');
   }
 
@@ -351,6 +380,7 @@ export async function runAgentTestWorkflow(): Promise<AgentTestWorkflowReport> {
       processJoined: cleanupResult.processJoined
     },
     scenarios,
+    attachedWork,
     timingsMs: {
       setup,
       execution,
@@ -1455,7 +1485,8 @@ async function createAgentTestEnvironment(
       firstLaunchSetupCompleted: true,
       defaultRuntimeId: RUNTIME_ID,
       defaultModel: 'deterministic',
-      defaultModelProvider: 'task-monki-test'
+      defaultModelProvider: 'task-monki-test',
+      ...(options.attachedWork ? { disabledRuntimeIds: ['codex'] } : {})
     });
     const events = new AppEventBus();
     const profile = deterministicAcpProfile(providerScriptPath);
@@ -1485,10 +1516,42 @@ async function createAgentTestEnvironment(
         }
       })
     });
+    // ACP cannot attest detached read-only review. The fixture speaks the
+    // production App Server protocol for that boundary; enable it only after
+    // proving that Import itself starts no process or provider session.
+    const reviewAdapter = options.attachedWork
+      ? new CodexAppServerAdapter(store, events, {
+          cwd: rootDir,
+          environment: {
+            PATH: process.env.PATH,
+            HOME: runtimeHome,
+            TMPDIR: temporaryDir,
+            TMP: temporaryDir,
+            TEMP: temporaryDir
+          },
+          requestTimeoutMs: 3_000,
+          restartDelaysMs: [],
+          argvResolver: async () => [
+            path.join(PROJECT_ROOT, 'src/dev/agentTestReviewFixture.cjs'),
+            rootDir,
+            path.join(runtimeRoot, 'review-provider.log')
+          ],
+          runtimeResolver: async () => ({
+            executable: process.execPath,
+            source: 'config',
+            version: '0.141.0',
+            compatibility: {
+              launch: { argv: ['app-server', '--stdio'], transport: 'STDIO', form: 'stdio-flag' },
+              requiredMethods: []
+            },
+            diagnostics: []
+          })
+        })
+      : undefined;
     service = new TaskManagerService(store, sourceRepositoryPath, events, {
       worktreeRoot,
       appSettingsStore,
-      agentRuntimeAdapters: [adapter],
+      agentRuntimeAdapters: [adapter, ...(reviewAdapter ? [reviewAdapter] : [])],
       agentRuntimeStore: new FileAgentRuntimeStore(path.join(rootDir, 'agent-runtime')),
       discourseStore: new FileDiscourseStore(path.join(rootDir, 'discourse')),
       discourseWorkspaceRoot: path.join(rootDir, 'discourse-workspaces'),
@@ -1594,6 +1657,247 @@ async function exerciseRepresentativeScenarios(
   return reports;
 }
 
+async function exerciseAttachedWork(
+  environment: AgentTestEnvironment
+): Promise<AgentTestWorkflowReport['attachedWork']> {
+  const { service, store, sourceRepositoryPath, rootDir } = environment;
+  const checkout = path.join(rootDir, 'external-checkout');
+  const branch = 'external-work';
+  await git(sourceRepositoryPath, ['worktree', 'add', '-b', branch, checkout]);
+  await git(checkout, ['branch', '--set-upstream-to=origin/main']);
+  await fs.mkdir(path.join(checkout, '.taskmonki'));
+  await fs.writeFile(path.join(checkout, '.taskmonki/preview.yaml'), `version: 1
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /ready }
+routes:
+  app: { service: web, port: http, primary: true }
+`);
+  await fs.writeFile(path.join(checkout, 'content.txt'), 'external version one\n');
+  await fs.writeFile(path.join(checkout, 'server.mjs'), `import http from 'node:http';
+import fs from 'node:fs';
+const server = http.createServer((request, response) => {
+  response.end(request.url === '/ready' ? 'ready' : fs.readFileSync(new URL('./content.txt', import.meta.url)));
+});
+server.listen(Number(process.env.PORT), '127.0.0.1', () => console.log(server.address().port));
+const stop = () => server.close(() => process.exit(0));
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
+`);
+  await git(checkout, ['add', '.taskmonki/preview.yaml', 'content.txt', 'server.mjs']);
+  await git(checkout, ['commit', '-m', 'External preview fixture']);
+  await fs.writeFile(path.join(checkout, 'staged.txt'), 'staged bytes\n');
+  await git(checkout, ['add', 'staged.txt']);
+  await fs.writeFile(path.join(checkout, 'staged.txt'), 'staged and unstaged bytes\n');
+  await fs.writeFile(path.join(checkout, 'untracked.txt'), 'external untracked bytes\n');
+  const gitDir = (await git(checkout, ['rev-parse', '--absolute-git-dir'])).trim();
+  const indexPath = path.join(gitDir, 'index');
+  const configPath = path.join(sourceRepositoryPath, '.git/config');
+  const indexBefore = await fs.readFile(indexPath);
+  const configBefore = await fs.readFile(configPath);
+  const worktreesBefore = await git(sourceRepositoryPath, ['worktree', 'list', '--porcelain']);
+  const importResult = await service.importTask({
+    repositoryId: environment.repositoryId, worktreePath: checkout, branchName: branch,
+    comparison: { type: 'MERGE_BASE', ref: 'main' },
+    title: '[agent-test:attached] Continued external work',
+    creationToken: 'agent-test-attached'
+  });
+  const taskId = importResult.task.id;
+  const imported = await service.getTaskDetail(taskId);
+  const importedGit = requireValue(imported.gitSnapshots[0], 'Import produced no Git observation.');
+  const worktree = requireValue(imported.worktrees[0], 'Import produced no checkout record.');
+  assert(imported.task.workflowPhase === 'IN_PROGRESS', 'Import implicitly marked external work ready.');
+  assert(worktree.ownership === 'EXTERNAL' && worktree.worktreePath === await fs.realpath(checkout) &&
+    worktree.branchName === branch, 'Import did not attach the exact external checkout.');
+  assert(importedGit.stagedCount === 1 && importedGit.unstagedCount === 1 && importedGit.untrackedCount === 1,
+    'Import lost staged, unstaged, or untracked evidence.');
+  assert(imported.runs.length === 0 && imported.agentSessions.length === 0 &&
+    !imported.task.currentRunId && (await store.snapshot()).agentServers.length === 0,
+    'Import started an agent or fabricated primary history.');
+  assert(!imported.events.some((event) => ['WORKTREE_CREATE_REQUESTED', 'WORKTREE_CREATED', 'AGENT_RUN_STARTED'].includes(event.type)),
+    'Attachment emitted managed worktree or provider execution events.');
+  assert((await fs.readFile(indexPath)).equals(indexBefore) && (await fs.readFile(configPath)).equals(configBefore),
+    'Import changed the external index or repository configuration.');
+  assert(await git(sourceRepositoryPath, ['worktree', 'list', '--porcelain']) === worktreesBefore,
+    'Import changed Git worktree registration.');
+  assert(await fs.readFile(path.join(checkout, 'staged.txt'), 'utf8') === 'staged and unstaged bytes\n' &&
+    await fs.readFile(path.join(checkout, 'untracked.txt'), 'utf8') === 'external untracked bytes\n',
+    'Import changed external file bytes.');
+
+  // Explicit initial readiness also works for an existing primary checkout.
+  const ready = await service.importTask({
+    repositoryId: environment.repositoryId, worktreePath: sourceRepositoryPath, branchName: 'main',
+    comparison: { type: 'COMMIT', ref: environment.initialHead },
+    title: '[agent-test:attached-ready] Existing primary checkout',
+    creationToken: 'agent-test-attached-ready', readyForReview: true
+  });
+  assert(ready.task.workflowPhase === 'REVIEW' && !ready.task.currentRunId,
+    'Explicit initial readiness required fictional implementation history.');
+  await service.deleteTask({ taskId: ready.task.id });
+
+  // This is an independent Git client, not a Task Monki delivery action.
+  await fs.writeFile(path.join(checkout, 'content.txt'), 'external version two\n');
+  await git(checkout, ['add', 'staged.txt', 'content.txt']);
+  await git(checkout, ['commit', '-m', 'External progress after attachment']);
+  const refreshedHead = (await git(checkout, ['rev-parse', 'HEAD'])).trim();
+  const indexAfterCommit = await fs.readFile(indexPath);
+  const storedDetail = await service.getTaskDetail(taskId);
+  assert(storedDetail.gitSnapshots[0]?.id === importedGit.id && importedGit.headSha !== refreshedHead,
+    'A record reload claimed a fresh external Git observation.');
+  const refreshed = await service.refreshEvidence({ taskId });
+  assert(refreshed.headSha === refreshedHead && refreshed.untrackedCount === 1,
+    'Refresh did not observe the independent commit and remaining untracked file.');
+  assert((await store.getTask(taskId))?.workflowPhase === 'IN_PROGRESS', 'External commit advanced readiness.');
+  const unchanged = await service.refreshEvidence({ taskId });
+  assert(unchanged.id === refreshed.id, 'Unchanged refresh appended duplicate evidence.');
+  assert((await fs.readFile(indexPath)).equals(indexAfterCommit) && (await fs.readFile(configPath)).equals(configBefore),
+    'Local refresh changed the external index or configuration.');
+  await service.transitionTask({ taskId, toPhase: 'REVIEW' });
+  await service.updateAppSettings({ disabledRuntimeIds: [], reviewRuntimeId: 'codex' });
+
+  const reviewStatuses: string[] = [];
+  for (const changeDuringReview of [false, true]) {
+    const review = await service.startReview({ taskId, settings: {
+      runtimeId: 'codex', modelProvider: 'openai', model: 'deterministic-review',
+      sandbox: 'READ_ONLY', networkAccess: false, approvalPolicy: 'never', approvalsReviewer: 'user'
+    } });
+    const turnId = requireValue(review.providerTurnId, 'Review did not cross the provider turn boundary.');
+    const reviewLogPath = path.join(rootDir, 'runtime/review-provider.log');
+    const deadline = Date.now() + TIMEOUT_MS;
+    while (!(await fs.readFile(reviewLogPath, 'utf8')).includes(`"turnId":"${turnId}"`)) {
+      assert(Date.now() < deadline, 'Review fixture did not read the external source.');
+      await delay(POLL_INTERVAL_MS);
+    }
+    if (changeDuringReview) {
+      // Do not refresh here: completion must perform its own independent check.
+      await fs.writeFile(path.join(checkout, 'content.txt'), 'external edit during review\n');
+    }
+    await fs.writeFile(path.join(rootDir, 'runtime', `${turnId}.release`), 'release\n');
+    const completed = await waitForSnapshot(store, (state) => {
+      const run = state.runs.find((candidate) => candidate.id === review.id);
+      const gate = state.tasks.find((candidate) => candidate.id === taskId)?.projection.agentReview;
+      return Boolean(run?.afterGitSnapshotId && gate?.runId === review.id && gate.status !== 'RUNNING');
+    });
+    const task = requireValue(completed.tasks.find((candidate) => candidate.id === taskId), 'Reviewed task missing.');
+    const gate = requireValue(task.projection.agentReview, 'Detached review produced no review gate.');
+    assert(changeDuringReview ? ['STALE', 'INCONCLUSIVE'].includes(gate.status) : gate.status === 'PASSED',
+      `Detached review ${changeDuringReview ? 'with external change' : 'of stable source'} ended ${gate.status}.`);
+    assert(!task.currentRunId && completed.runs.filter((run) => run.taskId === taskId).every((run) =>
+      run.mode === 'REVIEW' && !run.continuedFromRunId && run.requestedSettings.sandbox === 'READ_ONLY'),
+    'Detached review became a primary run or lost its read-only settings.');
+    assert(completed.agentSessions.filter((session) => session.taskId === taskId).every((session) =>
+      session.role === 'REVIEW' && !session.parentSessionId && session.worktreePath === worktree.worktreePath),
+    'Runless review fabricated a primary session or used a different checkout.');
+    reviewStatuses.push(gate.status);
+  }
+  const reviewed = await store.snapshot();
+  const reviewOwnerPid = requireValue(reviewed.agentServers.find((server) => server.runtimeId === 'codex')?.pid,
+    'Review provider process was not recorded.');
+  const reviewProcessId = requireValue(providerProcessIds(await fs.readFile(
+    path.join(rootDir, 'runtime/review-provider.log'), 'utf8'
+  ))[0], 'Review fixture did not report its process identity.');
+  assert(processIsRunning(reviewOwnerPid) && processIsRunning(reviewProcessId),
+    'Review did not use a live owned fixture process.');
+
+  const externalPort = await reserveLoopbackPort();
+  const externalServer = spawnPortable(process.execPath, ['server.mjs'], {
+    cwd: checkout, env: { PATH: process.env.PATH, PORT: String(externalPort) },
+    stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32'
+  });
+  const externalOutput = [''];
+  externalServer.stdout?.on('data', (chunk: Buffer) => { externalOutput[0] = boundedTail(externalOutput[0] + chunk.toString(), 2_000); });
+  externalServer.stderr?.on('data', (chunk: Buffer) => { externalOutput[0] = boundedTail(externalOutput[0] + chunk.toString(), 2_000); });
+  let preview: AgentTestWorkflowReport['attachedWork']['preview'] = {
+    attempted: false, skippedReason: `Native Preview requires macOS; current platform is ${process.platform}.`,
+    staleCapturePreserved: false, replacementServedNewBytes: false, processesJoined: true
+  };
+  const previewPids = new Set<number>();
+  const previewPorts = new Set<number>();
+  try {
+    await waitForHttp(`http://127.0.0.1:${externalPort}/ready`, externalServer, externalOutput);
+    if (process.platform === 'darwin') {
+      const resolution = await service.resolvePreview({ taskId });
+      assert(resolution.status === 'PLAN', 'Attached native Preview did not resolve a recipe.');
+      if (!resolution.approval) await service.approvePreviewPlan({
+        taskId, planId: resolution.plan.id, executionDigest: resolution.plan.executionDigest
+      });
+      const oldPreview = await service.startPreview({ taskId });
+      assert(oldPreview.state === 'READY', `Attached Preview failed: ${oldPreview.failureReason}`);
+      const oldSource = path.join(oldPreview.workspacePath, 'source/content.txt');
+      const capturedBytes = await fs.readFile(oldSource, 'utf8');
+      const captureArtifactId = requireValue(oldPreview.sourceManifestArtifactId, 'Preview capture evidence missing.');
+      const captureEvidence = await store.readArtifact(captureArtifactId);
+      const oldPort = requireValue(oldPreview.routes[0]?.targetPort, 'Preview route missing.');
+      assert(await readLoopbackText(oldPort) === capturedBytes,
+        'Native Preview did not serve its captured source.');
+      await fs.writeFile(path.join(checkout, 'content.txt'), 'external preview replacement\n');
+      await service.refreshEvidence({ taskId });
+      const stale = (await store.snapshot()).previewGenerations.find((generation) => generation.id === oldPreview.id);
+      assert(stale?.freshness === 'STALE' && stale.state === 'READY', 'Git refresh did not mark the active Preview stale.');
+      assert(await fs.readFile(oldSource, 'utf8') === capturedBytes &&
+        await readLoopbackText(oldPort) === capturedBytes,
+      'Git refresh changed the old captured source or running Preview bytes.');
+      const replacement = await service.startPreview({ taskId });
+      assert(replacement.state === 'READY' && replacement.replacesGenerationId === oldPreview.id,
+        `Preview replacement did not become ready: ${replacement.failureReason}`);
+      const newPort = requireValue(replacement.routes[0]?.targetPort, 'Replacement route missing.');
+      assert(await fs.readFile(path.join(replacement.workspacePath, 'source/content.txt'), 'utf8') === 'external preview replacement\n' &&
+        await readLoopbackText(newPort) === 'external preview replacement\n',
+      'Preview replacement did not capture and serve the new external bytes.');
+      // Successful native cutover cleans the retired workspace. Its captured
+      // bytes stayed unchanged while active, and its historical evidence stays
+      // unchanged after retirement rather than becoming the new capture.
+      const retired = (await store.snapshot()).previewGenerations.find((generation) => generation.id === oldPreview.id);
+      assert(retired?.state === 'STOPPED' && retired.routingState === 'RETIRED' &&
+        !(await pathExists(oldPreview.workspacePath)) && await store.readArtifact(captureArtifactId) === captureEvidence,
+      'Replacement did not retire the old capture with unchanged historical evidence.');
+      for (const resource of (await store.snapshot()).previewResources.filter((resource) => resource.taskId === taskId)) {
+        if (resource.native?.launcher.pid) previewPids.add(resource.native.launcher.pid);
+        if (resource.native?.target?.pid) previewPids.add(resource.native.target.pid);
+        if (resource.targetPort) previewPorts.add(resource.targetPort);
+      }
+      preview = { attempted: true, staleCapturePreserved: true, replacementServedNewBytes: true, processesJoined: false };
+    }
+    const beforeDelete = await fs.readFile(path.join(checkout, 'content.txt'), 'utf8');
+    await service.transitionTask({ taskId, toPhase: 'ARCHIVED' });
+    assert(await readLoopbackText(externalPort) === beforeDelete,
+      'Archiving the task stopped the external server.');
+    await service.deleteTask({ taskId });
+    assert(!(await store.getTask(taskId)), 'Task deletion left the task record.');
+    assert(await fs.readFile(path.join(checkout, 'content.txt'), 'utf8') === beforeDelete &&
+      (await git(checkout, ['branch', '--show-current'])).trim() === branch &&
+      (await git(checkout, ['rev-parse', 'HEAD'])).trim() === refreshedHead &&
+      (await fs.readFile(indexPath)).equals(indexAfterCommit) &&
+      (await fs.readFile(configPath)).equals(configBefore) &&
+      await fs.readFile(path.join(checkout, 'untracked.txt'), 'utf8') === 'external untracked bytes\n',
+    'Review, Preview, or deletion changed the external index, branch, configuration, or unrelated file.');
+    assert(await readLoopbackText(externalPort) === beforeDelete &&
+      Boolean(externalServer.pid && processIsRunning(externalServer.pid)), 'Task deletion stopped the external server.');
+    await waitForProcessesToExit([...previewPids], 5_000);
+    assert([...previewPids].every((pid) => !processIsRunning(pid)) && await allPortsClosed(previewPorts),
+      'Task deletion left an owned Preview process or port.');
+    preview.processesJoined = true;
+  } finally {
+    await stopChild(externalServer);
+    assert(!(await isLoopbackPortListening(externalPort)), 'The workflow external-server cleanup left a port listening.');
+  }
+  return {
+    taskId, initialPhase: imported.task.workflowPhase, importStartedNoAgent: true,
+    indexAndConfigPreserved: true, refreshedHead,
+    review: { runtimeId: 'codex', stableStatus: reviewStatuses[0], changedDuringReviewStatus: reviewStatuses[1],
+      noPrimaryRun: true, processId: reviewProcessId },
+    preview, deletionPreservedCheckoutAndServer: true
+  };
+}
+
+async function readLoopbackText(port: number): Promise<string> {
+  const response = await fetch(`http://127.0.0.1:${port}`, { signal: AbortSignal.timeout(3_000) });
+  assert(response.ok, `Workflow server on port ${port} returned ${response.status}.`);
+  return response.text();
+}
+
 async function buildScenarioReport(
   kind: ScenarioKind,
   taskId: string,
@@ -1658,10 +1962,11 @@ async function collectRuntimeReport(
   snapshot: TaskSnapshot,
   providerLogPath: string
 ): Promise<Omit<AgentTestWorkflowReport['runtime'], 'processJoined'>> {
+  const servers = snapshot.agentServers.filter((server) => server.runtimeId === RUNTIME_ID);
   const providerLog = await fs.readFile(providerLogPath, 'utf8').catch(() => '');
   const processIds = [
     ...new Set([
-      ...snapshot.agentServers.flatMap((server) =>
+      ...servers.flatMap((server) =>
         typeof server.pid === 'number' ? [server.pid] : []
       ),
       ...providerProcessIds(providerLog)
@@ -1671,7 +1976,7 @@ async function collectRuntimeReport(
     ...new Set(
       (
         await Promise.all(
-          snapshot.agentServers.map(async (server) => {
+          servers.map(async (server) => {
             const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
             return journal
               .split('\n')
@@ -1690,7 +1995,7 @@ async function collectRuntimeReport(
   ].sort();
   return {
     runtimeId: RUNTIME_ID,
-    serverCount: snapshot.agentServers.length,
+    serverCount: servers.length,
     providerStartCount: providerEventCount(providerLog, 'started'),
     processIds,
     processWasObserved: processIds.length > 0,
@@ -1788,6 +2093,9 @@ async function collectFailureDiagnostics(
       finalMessage: run.finalMessage,
       terminalReason: run.terminalReason
     })),
+    reviewProviderLog: boundedTail(await fs.readFile(
+      path.join(environment.rootDir, 'runtime/review-provider.log'), 'utf8'
+    ).catch(() => ''), MAX_DIAGNOSTIC_TAIL),
     events: snapshot?.events.slice(-30).map((event) => ({
       type: event.type,
       taskId: event.taskId,
@@ -2478,10 +2786,18 @@ async function cleanupAgentTestEnvironment(
     for (const server of snapshot.agentServers) {
       if (typeof server.pid === 'number') processIds.add(server.pid);
     }
+    for (const resource of snapshot.previewResources) {
+      if (resource.native?.launcher.pid) processIds.add(resource.native.launcher.pid);
+      if (resource.native?.target?.pid) processIds.add(resource.native.target.pid);
+    }
     const providerLog = await fs
       .readFile(environment.providerLogPath, 'utf8')
       .catch(() => '');
     for (const pid of providerProcessIds(providerLog)) processIds.add(pid);
+    const reviewProviderLog = await fs.readFile(
+      path.join(environment.rootDir, 'runtime/review-provider.log'), 'utf8'
+    ).catch(() => '');
+    for (const pid of providerProcessIds(reviewProviderLog)) processIds.add(pid);
   }, errors);
   if (options.ui) {
     await attemptCleanup(async () => {

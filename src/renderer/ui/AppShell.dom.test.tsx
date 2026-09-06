@@ -2,9 +2,30 @@ import { createRef } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { NavItem } from './AppNavigation';
-import { BoardEditorModal, DesignExternalLinkModal } from './AppOverlays';
+import { BoardEditorModal, DeleteTaskModal, DesignExternalLinkModal } from './AppOverlays';
+import { makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 
 describe('mounted application shell behavior', () => {
+  it('deletes an attached task without offering or requesting checkout removal', async () => {
+    const task = makeTaskRecord({ workflowPhase: 'ARCHIVED' });
+    const onConfirm = vi.fn(async () => ({ taskId: task.id, removedWorktree: false }));
+    render(<DeleteTaskModal
+      task={task}
+      worktree={{
+        id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryId: task.repositoryId,
+        ownership: 'EXTERNAL', worktreePath: '/outside/existing-work', branchName: 'feature',
+        baseSha: 'base', status: 'PRESENT', createdAt: TEST_NOW, updatedAt: TEST_NOW
+      }}
+      onCancel={vi.fn()}
+      onConfirm={onConfirm}
+      fallbackReturnFocusRef={createRef<HTMLElement>()}
+    />);
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.getByText('The attached checkout and its files stay on disk.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete task' }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledExactlyOnceWith(false));
+  });
+
   it('dispatches navigation without duplicating its count in the accessible name', () => {
     const onClick = vi.fn();
     render(

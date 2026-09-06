@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { runAgentTestWorkflow } from './agentTestWorkflow';
 
 describe('deterministic agent test workflow', () => {
-  it('crosses the real ACP process boundary, observes Git, and removes its root', async () => {
+  it('executes managed and external work through provider processes and joins owned resources', async () => {
     const report = await runAgentTestWorkflow();
 
     expect(report.verdict).toBe('PASSED');
@@ -50,11 +50,27 @@ describe('deterministic agent test workflow', () => {
       clean: true,
       unchanged: true
     });
+    expect(report.attachedWork).toMatchObject({
+      initialPhase: 'IN_PROGRESS',
+      importStartedNoAgent: true,
+      indexAndConfigPreserved: true,
+      review: {
+        runtimeId: 'codex',
+        stableStatus: 'PASSED',
+        changedDuringReviewStatus: expect.stringMatching(/^(STALE|INCONCLUSIVE)$/),
+        noPrimaryRun: true
+      },
+      deletionPreservedCheckoutAndServer: true
+    });
+    expect(report.attachedWork.review.processId).toBeGreaterThan(0);
+    expect(report.attachedWork.preview).toMatchObject(process.platform === 'darwin'
+      ? { attempted: true, staleCapturePreserved: true, replacementServedNewBytes: true, processesJoined: true }
+      : { attempted: false, skippedReason: expect.stringContaining('requires macOS') });
     expect(report.cleanup).toEqual({
       serviceStopped: true,
       uiStopped: true,
       rootRemoved: true
     });
     await expect(fs.access(report.rootDir)).rejects.toMatchObject({ code: 'ENOENT' });
-  }, 30_000);
+  }, 60_000);
 });

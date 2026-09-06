@@ -96,6 +96,7 @@ function context(): PreviewTaskContext {
       taskId: 'task-design',
       iterationId: 'iteration-design',
       repositoryId: 'repository-design',
+      ownership: 'TASK_MONKI' as const,
       worktreePath: '/tmp/design-worktree',
       branchName: 'design/task-design',
       baseSha: 'a'.repeat(40),

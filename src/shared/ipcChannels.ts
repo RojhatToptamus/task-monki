@@ -117,8 +117,13 @@ export const IPC_INVOKE_CHANNELS = [
   'task:delete',
   'task:getBoardSnapshot',
   'task:getDetail',
+  'task:import',
   'task:transition',
-  'worktree:prepare'
+  'worktree:inspectImport',
+  'worktree:listExisting',
+  'worktree:prepare',
+  'worktree:reconnect',
+  'worktree:updateComparison'
 ] as const;
 
 export type IpcInvokeChannel = (typeof IPC_INVOKE_CHANNELS)[number];

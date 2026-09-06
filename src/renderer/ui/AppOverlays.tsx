@@ -542,7 +542,7 @@ export function DeleteTaskModal({
           ]}
         />
 
-        <label
+        {worktree?.ownership !== 'EXTERNAL' ? <label
           className={`tm-delete-modal__worktree ${
             canRemoveWorktree ? '' : 'tm-delete-modal__worktree--disabled'
           } ${worktreeRemoval.status === 'dirty' ? 'tm-delete-modal__worktree--blocked' : ''}`}
@@ -557,7 +557,7 @@ export function DeleteTaskModal({
             <strong>Also remove local worktree</strong>
             <small>{worktreeRemoval.detail}</small>
           </span>
-        </label>
+        </label> : <p>The attached checkout and its files stay on disk.</p>}
 
         <div className="tm-modal__actions">
           <button
@@ -587,6 +587,9 @@ function describeWorktreeRemoval(
       status: 'none',
       detail: 'No local worktree is recorded for this task.'
     };
+  }
+  if (worktree.ownership === 'EXTERNAL') {
+    return { status: 'unavailable', detail: 'The attached checkout is kept on disk.' };
   }
   if (worktree.status === 'MISSING' || worktree.status === 'REMOVED') {
     return {

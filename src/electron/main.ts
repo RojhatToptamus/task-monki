@@ -33,6 +33,10 @@ import type {
   CreateBoardRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  ImportTaskRequest,
+  InspectWorktreeImportRequest,
+  ReconnectWorktreeRequest,
+  UpdateWorktreeComparisonRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteDesignDraftRequest,
@@ -738,6 +742,12 @@ function installIpcHandlers(): void {
     });
     return task;
   });
+
+  handleTrustedIpc('task:import', (_, input: ImportTaskRequest) => service.importTask(input));
+  handleTrustedIpc('worktree:listExisting', (_, repositoryId: string) => service.listExistingWorktrees(repositoryId));
+  handleTrustedIpc('worktree:inspectImport', (_, input: InspectWorktreeImportRequest) => service.inspectWorktreeImport(input));
+  handleTrustedIpc('worktree:reconnect', (_, input: ReconnectWorktreeRequest) => service.reconnectWorktree(input));
+  handleTrustedIpc('worktree:updateComparison', (_, input: UpdateWorktreeComparisonRequest) => service.updateWorktreeComparison(input));
 
   handleTrustedIpc('prompt:refine', async (_, input: RefinePromptRequest) => {
     return service.refinePrompt(input);

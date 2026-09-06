@@ -215,6 +215,11 @@ const api: TaskManagerApi = {
       invokeIpc('attachment:clipboard:readImage')
     ),
   createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
+  listExistingWorktrees: (repositoryId) => invokeIpc('worktree:listExisting', repositoryId),
+  inspectWorktreeImport: (input) => invokeIpc('worktree:inspectImport', input),
+  importTask: (input) => invokeIpc('task:import', input),
+  reconnectWorktree: (input) => invokeIpc('worktree:reconnect', input),
+  updateWorktreeComparison: (input) => invokeIpc('worktree:updateComparison', input),
   listDesigns: () => invokeIpc('design:list'),
   getDesign: (designId: string) => invokeIpc('design:get', designId),
   listDesignConversation: (input: ListDesignConversationRequest) =>

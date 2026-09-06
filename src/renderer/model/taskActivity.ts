@@ -310,6 +310,10 @@ function itemForEvent(
         evidence('Respond before the run can continue.', evidenceRows(interactionDetail(payload))),
         'action'
       );
+    case 'WORKTREE_ATTACHED':
+      return item(event, 'git', 'Git', 'Checkout attached', evidence(stringField(payload, 'worktreePath') ?? 'Existing checkout attached.'), 'neutral');
+    case 'GIT_OBSERVATION_FAILED':
+      return item(event, 'git', 'Git', 'Git refresh unavailable', evidence(stringField(payload, 'error') ?? 'Refresh to retry.'), 'action');
     case 'GIT_SNAPSHOT_CAPTURED':
       return gitSnapshotItem(event, payload, state);
     case 'DELIVERY_COMMIT_CREATED':

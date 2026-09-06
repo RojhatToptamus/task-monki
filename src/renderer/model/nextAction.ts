@@ -194,7 +194,9 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
 
   if (awaitingMoveToReview) {
     return {
-      sentence: 'Implementation finished. Move it to review to run the quality gate.',
+      sentence: task.currentRunId
+        ? 'Implementation finished. Move it to review to run the quality gate.'
+        : 'Move this work to review when it is ready to inspect.',
       primary: MOVE_TO_REVIEW,
       secondaries: []
     };
@@ -265,8 +267,8 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
   if (finishEvidence.mode === 'override') {
     return {
       sentence: gate
-        ? `Review passed. ${gate} — commit it or mark done anyway.`
-        : 'Review passed with unresolved checks — commit or mark done anyway.',
+        ? `Review passed. ${gate}${canCommit ? ' — commit it or mark done anyway.' : '.'}`
+        : 'Review passed with unresolved checks.',
       primary: canCommit ? COMMIT : markDone(true),
       secondaries: canCommit ? [markDone(true)] : []
     };

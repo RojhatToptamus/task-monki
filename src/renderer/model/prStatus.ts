@@ -2,15 +2,18 @@ import type {
   BranchPublicationRecord,
   BoardTaskSummary,
   CiRollupRecord,
+  DomainEvent,
   GitHubCheckDetailRecord,
   GitSnapshotRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   ReviewRollupRecord,
-  Task
+  Task,
+  WorktreeRecord
 } from '../../shared/contracts';
 import { getImplementationRetryReason } from '../../shared/contracts';
 import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
+import { getAttachedWorktreeActionBlocker } from './selectors';
 
 export type PrStatusTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
@@ -31,6 +34,7 @@ export type PrStatusKind =
   | 'LOCAL_NOT_PUSHED'
   | 'PR_NEWER_COMMITS'
   | 'BRANCH_DIVERGED'
+  | 'HEAD_MISMATCH'
   | 'UNKNOWN';
 
 export type PrStatusActionPauseReason =
@@ -154,6 +158,8 @@ function prStatusPauseText(reason: PrStatusActionPauseReason | undefined): strin
 
 export function buildPrStatusViewModel(input: {
   task: Task;
+  worktree?: WorktreeRecord;
+  events?: readonly DomainEvent[];
   gitSnapshot?: GitSnapshotRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -163,6 +169,7 @@ export function buildPrStatusViewModel(input: {
 }): PrStatusViewModel {
   const {
     task,
+    worktree,
     gitSnapshot,
     branchPublication,
     pullRequest,
@@ -170,19 +177,43 @@ export function buildPrStatusViewModel(input: {
     reviewRollup,
     mergeSnapshot
   } = input;
+  const attached = worktree?.ownership === 'EXTERNAL';
+  const attachedBlocker = getAttachedWorktreeActionBlocker(task, worktree, gitSnapshot);
+  const attachedPublicationBlocker = attachedBlocker ?? (attached && gitSnapshot && (
+    gitSnapshot.status === 'DIRTY' ||
+    gitSnapshot.stagedCount + gitSnapshot.unstagedCount + gitSnapshot.untrackedCount > 0
+  ) ? 'Commit shared-checkout changes in the existing application before publishing.' : undefined);
+  const observation = latestGitHubObservation(task, input.events ?? []);
   const hasPullRequest = Boolean(pullRequest?.number || pullRequest?.url);
 
-  if (!hasPullRequest || !pullRequest) {
-    const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication);
+  if (observation?.type === 'GITHUB_SYNC_FAILED') {
     return {
-      kind: 'NO_PR',
-      headline: 'No PR',
+      ...(pullRequest && hasPullRequest ? baseStatus(pullRequest) : {
+        hasPullRequest: false, canCreateDraftPr: false, canPushUpdate: false,
+        canInvestigateFailure: false, checkGroups: []
+      }),
+      kind: 'STALE',
+      headline: 'PR status unavailable',
+      tone: 'action',
+      overviewRelevant: true,
+      canRefresh: Boolean(worktree || hasPullRequest),
+      guidanceLine: hasPullRequest
+        ? 'Last known PR information. Refresh PR status to retry.'
+        : 'Refresh PR status to check for an existing pull request.'
+    };
+  }
+
+  if (!hasPullRequest || !pullRequest) {
+    const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, attachedPublicationBlocker);
+    return {
+      kind: attached && !observation ? 'UNKNOWN' : 'NO_PR',
+      headline: attached && !observation ? 'PR not checked' : 'No PR',
       tone: 'neutral',
-      overviewRelevant: createDraftPr.overviewRelevant,
+      overviewRelevant: attached || createDraftPr.overviewRelevant,
       hasPullRequest: false,
       leadLine: createDraftPr.line,
       canCreateDraftPr: createDraftPr.showAction,
-      canRefresh: false,
+      canRefresh: attached,
       canInvestigateFailure: false,
       canPushUpdate: false,
       createDraftPrDisabledReason: createDraftPr.disabledReason,
@@ -191,6 +222,8 @@ export function buildPrStatusViewModel(input: {
   }
 
   const freshness = deriveFreshness({
+    attached,
+    attachedBlocker,
     gitSnapshot,
     branchPublication,
     pullRequest,
@@ -204,7 +237,7 @@ export function buildPrStatusViewModel(input: {
 
   if (terminal) {
     if (terminal.kind === 'CLOSED_UNMERGED') {
-      const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication);
+      const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, attachedPublicationBlocker);
       return {
         ...baseStatus(pullRequest),
         ...terminal,
@@ -215,7 +248,8 @@ export function buildPrStatusViewModel(input: {
     }
     return {
       ...baseStatus(pullRequest),
-      ...terminal
+      ...terminal,
+      freshnessLine: attached ? freshness.line : undefined
     };
   }
 
@@ -228,7 +262,7 @@ export function buildPrStatusViewModel(input: {
       canPushUpdate:
         freshness.kind === 'LOCAL_NOT_PUSHED' ||
         branchPublication?.status === 'AMBIGUOUS',
-      pushUpdateDisabledReason: freshness.pushUpdateDisabledReason
+      pushUpdateDisabledReason: attachedPublicationBlocker ?? freshness.pushUpdateDisabledReason
     };
   }
 
@@ -335,13 +369,22 @@ function hasCheckCounts(ciRollup: CiRollupRecord): boolean {
 function createDraftPrAvailability(
   task: Task,
   gitSnapshot?: GitSnapshotRecord,
-  branchPublication?: BranchPublicationRecord
+  branchPublication?: BranchPublicationRecord,
+  attachedBlocker?: string
 ): {
   showAction: boolean;
   overviewRelevant: boolean;
   line?: string;
   disabledReason?: string;
 } {
+  if (attachedBlocker) {
+    return {
+      showAction: true,
+      overviewRelevant: true,
+      line: attachedBlocker,
+      disabledReason: attachedBlocker
+    };
+  }
   const retryReason = getImplementationRetryReason(task);
   if (retryReason) {
     return {
@@ -555,6 +598,8 @@ function terminalPrStatus(
 }
 
 function deriveFreshness(input: {
+  attached?: boolean;
+  attachedBlocker?: string;
   gitSnapshot?: GitSnapshotRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest: PullRequestSnapshotRecord;
@@ -562,8 +607,13 @@ function deriveFreshness(input: {
   reviewRollup?: ReviewRollupRecord;
   mergeSnapshot?: MergeSnapshotRecord;
 }): { kind?: PrStatusKind; line?: string; pushUpdateDisabledReason?: string } {
-  const { gitSnapshot, branchPublication, pullRequest, ciRollup, reviewRollup, mergeSnapshot } = input;
+  const { gitSnapshot, pullRequest, ciRollup, reviewRollup, mergeSnapshot } = input;
+  // A historical Task Monki push says nothing about a later external commit.
+  const branchPublication = !input.attached || input.branchPublication?.headSha === gitSnapshot?.headSha
+    ? input.branchPublication
+    : undefined;
   const prHead = pullRequest.headRefOid;
+  if (input.attachedBlocker) return { kind: 'STALE', line: input.attachedBlocker };
   const staleEvidence = [ciRollup?.headSha, reviewRollup?.headSha, mergeSnapshot?.headSha].some(
     (headSha) => Boolean(headSha && prHead && headSha !== prHead)
   );
@@ -588,8 +638,10 @@ function deriveFreshness(input: {
     };
   }
   if (
+    (!input.attached || gitSnapshot?.upstreamSha === prHead) && (
     gitSnapshot?.status === 'DIVERGED' ||
     ((gitSnapshot?.aheadCount ?? 0) > 0 && (gitSnapshot?.behindCount ?? 0) > 0)
+    )
   ) {
     return {
       kind: 'BRANCH_DIVERGED',
@@ -615,6 +667,15 @@ function deriveFreshness(input: {
   }
   const localHead = gitSnapshot?.headSha;
   if (localHead && prHead && localHead !== prHead) {
+    if (input.attached) {
+      if (gitSnapshot.upstreamSha === prHead && gitSnapshot.behindCount === 0 && gitSnapshot.aheadCount > 0) {
+        return { kind: 'LOCAL_NOT_PUSHED', line: 'Local branch has commits not in the recorded PR.' };
+      }
+      if (gitSnapshot.upstreamSha === prHead && gitSnapshot.aheadCount === 0 && gitSnapshot.behindCount > 0) {
+        return { kind: 'PR_NEWER_COMMITS', line: 'This worktree is behind the PR.' };
+      }
+      return { kind: 'HEAD_MISMATCH', line: 'Local and PR commits differ. Refresh PR status before continuing.' };
+    }
     if (gitSnapshot.status === 'COMMITTED_UNPUSHED' || branchPublication?.headSha !== localHead) {
       return {
         kind: 'LOCAL_NOT_PUSHED',
@@ -633,6 +694,8 @@ function freshnessToStatus(
   freshness: { kind?: PrStatusKind; line?: string }
 ): Pick<PrStatusViewModel, 'kind' | 'headline' | 'tone'> | undefined {
   switch (freshness.kind) {
+    case 'HEAD_MISMATCH':
+      return { kind: 'HEAD_MISMATCH', headline: 'Local and PR differ', tone: 'neutral' };
     case 'BRANCH_DIVERGED':
       return { kind: 'BRANCH_DIVERGED', headline: 'Branch diverged', tone: 'error' };
     case 'STALE':
@@ -644,6 +707,19 @@ function freshnessToStatus(
     default:
       return undefined;
   }
+}
+
+function latestGitHubObservation(task: Task, events: readonly DomainEvent[]): DomainEvent | undefined {
+  let latest: DomainEvent | undefined;
+  for (const event of events) {
+    if (
+      event.taskId === task.id &&
+      (!event.iterationId || event.iterationId === task.currentIterationId) &&
+      ['GITHUB_SYNC_FAILED', 'PR_DISCOVERY_COMPLETED', 'PR_SNAPSHOT_CAPTURED'].includes(event.type) &&
+      (!latest || event.receivedAt >= latest.receivedAt)
+    ) latest = event;
+  }
+  return latest;
 }
 
 function isRemoteNewerPublicationError(error: string | undefined): boolean {

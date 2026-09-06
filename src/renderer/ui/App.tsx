@@ -37,7 +37,8 @@ import {
   type TaskManagerAppSettings,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
-  type WorkflowPhase
+  type WorkflowPhase,
+  type WorktreeComparison
 } from '../../shared/contracts';
 import type {
   HideDesignCanvasRequest,
@@ -108,6 +109,7 @@ import {
 } from './theme';
 import { computeNavCounts, type NavView } from '../model/taskView';
 import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
+import { ImportTaskPanel } from './ImportTaskPanel';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
@@ -241,6 +243,7 @@ export function App() {
   const [isTaskDetailModalOpen, setIsTaskDetailModalOpen] = useState(false);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
+  const [taskEntryMode, setTaskEntryMode] = useState<'new' | 'import'>('new');
   const [isNewTaskClosing, setIsNewTaskClosing] = useState(false);
   const [newTaskTextDraft, setNewTaskTextDraft] = useState<NewTaskTextDraft>({
     title: '',
@@ -269,6 +272,7 @@ export function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isCanvasDragging, setIsCanvasDragging] = useState(false);
   const newTaskButtonRef = useRef<HTMLButtonElement>(null);
+  const importTaskButtonRef = useRef<HTMLButtonElement>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
   const focusedHistoryCompactRef = useRef(
     focusedWorkspaceUsesCompactHistory(window.innerWidth)
@@ -360,10 +364,11 @@ export function App() {
     panCanvasTo(viewport.scrollWidth - viewport.clientWidth);
   }, [panCanvasTo]);
 
-  const openNewTask = useCallback(() => {
+  const openNewTask = useCallback((mode: 'new' | 'import' = 'new') => {
     if (isNewTaskClosing) {
       return;
     }
+    setTaskEntryMode(mode);
     if (isNewTaskOpen) {
       revealNewTaskPanel();
       return;
@@ -1678,6 +1683,38 @@ export function App() {
   const selectedWorktree = selectedTask && taskDetail
     ? selectCurrentWorktree(taskDetail, selectedTask)
     : undefined;
+  const attachedTaskId = isDetailOpen && selectedWorktree?.ownership === 'EXTERNAL'
+    ? selectedWorktree.taskId : undefined;
+  useEffect(() => {
+    if (!attachedTaskId) return;
+    let active = true;
+    const observer = createUpdateRefreshScheduler({
+      delayMs: AUTHORITATIVE_REFRESH_DELAY_MS,
+      refresh: async () => {
+        try {
+          await taskManagerApi.refreshEvidence({ taskId: attachedTaskId });
+        } catch {
+          // The service records unavailable Git evidence. Preserve the task
+          // detail so that its recovery controls remain reachable.
+        }
+        if (active) await taskDataCoordinator.refreshSelectedTask();
+      },
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const observeVisible = () => {
+      if (document.visibilityState !== 'hidden') observer.request();
+    };
+    observeVisible();
+    window.addEventListener('focus', observeVisible);
+    document.addEventListener('visibilitychange', observeVisible);
+    return () => {
+      active = false;
+      observer.dispose();
+      window.removeEventListener('focus', observeVisible);
+      document.removeEventListener('visibilitychange', observeVisible);
+    };
+  }, [attachedTaskId, taskDataCoordinator]);
   const selectedGitSnapshot = selectedTask && taskDetail
     ? selectLatestGitSnapshot(taskDetail, selectedTask)
     : undefined;
@@ -1913,14 +1950,51 @@ export function App() {
     });
   };
 
-  const startRun = async (taskId: string) => {
+  const startRun = async (taskId: string, instruction?: string, sourceReviewRunId?: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.startRun({ taskId, mode: 'IMPLEMENTATION' });
+      await taskManagerApi.startRun({ taskId, mode: 'IMPLEMENTATION', instruction, sourceReviewRunId });
       notify('Agent run started.', 'success');
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start run.');
+      throw caught;
+    }
+  };
+
+  const refreshEvidence = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.refreshEvidence({ taskId });
+    } catch (caught) {
+      reportActionError(caught, 'Could not refresh Git evidence.');
+    } finally {
+      await refresh();
+    }
+  };
+
+  const reconnectWorktree = async (taskId: string) => {
+    setError(undefined);
+    try {
+      const worktreePath = await taskManagerApi.chooseRepositoryFolder();
+      if (!worktreePath) return;
+      await taskManagerApi.reconnectWorktree({ taskId, worktreePath });
+    } catch (caught) {
+      reportActionError(caught, 'Could not reconnect the checkout.');
+    } finally {
+      await refresh();
+    }
+  };
+
+  const updateWorktreeComparison = async (taskId: string, comparison: WorktreeComparison) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.updateWorktreeComparison({ taskId, comparison });
+    } catch (caught) {
+      reportActionError(caught, 'Could not update the comparison.');
+      throw caught;
+    } finally {
+      await refresh();
     }
   };
 
@@ -2277,7 +2351,7 @@ export function App() {
     }
   };
 
-  const continueRun = async (runId: string, instruction?: string) => {
+  const continueRun = async (runId: string, instruction?: string, sourceReviewRunId?: string) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
@@ -2287,7 +2361,7 @@ export function App() {
       const recoveryContinuation =
         run.status !== 'COMPLETED' ||
         Boolean(selectedTask && getImplementationRetryReason(selectedTask));
-      await taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction });
+      await taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, sourceReviewRunId });
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
         'success'
@@ -2339,16 +2413,16 @@ export function App() {
     }
   };
 
-  const startReview = async (runId: string) => {
+  const startReview = async (runId?: string) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
-      if (!run) {
+      if (runId ? !run : !selectedTask) {
         throw new Error('Run not found.');
       }
       notify(REVIEW_STARTED_NOTICE, 'info');
       await taskManagerApi.startReview({
-        taskId: run.taskId,
+        taskId: run?.taskId ?? selectedTask!.id,
         runId,
         target: { type: 'UNCOMMITTED_CHANGES' },
         settings: reviewExecutionSettings
@@ -2768,10 +2842,20 @@ export function App() {
               </div>
               <div className="tm-titlebar__spacer" />
               <button
+                ref={importTaskButtonRef}
+                type="button"
+                className="outline-button"
+                onClick={() => openNewTask('import')}
+                disabled={!canCreateTask}
+                title={canCreateTask ? 'Import existing work' : 'Finish setup before importing tasks'}
+              >
+                Import
+              </button>
+              <button
                 ref={newTaskButtonRef}
                 type="button"
                 className="tm-newtask"
-                onClick={openNewTask}
+                onClick={() => openNewTask()}
                 disabled={!canCreateTask}
                 title={canCreateTask ? 'New task' : 'Finish setup before creating tasks'}
               >
@@ -3016,6 +3100,9 @@ export function App() {
               : undefined}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
+            onRefreshEvidence={refreshEvidence}
+            onReconnectWorktree={reconnectWorktree}
+            onUpdateWorktreeComparison={updateWorktreeComparison}
             onStart={startRun}
             onCancel={cancelRun}
             onSteer={steerRun}
@@ -3179,7 +3266,25 @@ export function App() {
           </div>
 
           {isNewTaskOpen ? (
-            <NewTaskPanel
+            taskEntryMode === 'import' ? <ImportTaskPanel
+              repositories={snapshot.repositories}
+              initialRepositoryId={activeRepositoryId}
+              returnFocusRef={importTaskButtonRef}
+              fallbackReturnFocusRef={appRootRef}
+              onResize={keepNewTaskPanelInView}
+              onClose={closeNewTask}
+              onAddRepository={async (checkoutPath) => {
+                const repository = await taskManagerApi.addRepository(checkoutPath);
+                await taskDataCoordinator.refreshBoard();
+                return repository;
+              }}
+              onImported={async (taskId) => {
+                taskNavigationReturnFocusRef.current = importTaskButtonRef.current;
+                await taskDataCoordinator.refreshBoard();
+                await openTaskDetail(taskId);
+                closeNewTask();
+              }}
+            /> : <NewTaskPanel
               repositoryId={activeRepositoryId}
               repositories={snapshot.repositories}
               models={enabledRuntimeModels}

@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { GitSnapshotRecord, GitStatus, WorktreeRecord } from '../../shared/contracts';
+import { resolveAgentGitMetadata } from './AgentGitMetadata';
 import { git } from './gitCli';
 
 interface ParsedStatus {
@@ -24,6 +26,58 @@ const GIT_STATUS_ARGS = [
   '-z'
 ] as const;
 
+/**
+ * Checks checkout identity and Git state before and after evidence capture.
+ * This detects observed changes; it does not lock out external writers.
+ */
+export async function captureGitObservation(
+  worktree: WorktreeRecord,
+  repositoryPath: string
+): Promise<{
+  snapshot: Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>;
+  diffEvidence: string;
+}> {
+  const beforeIdentity = await inspectGitIdentity(worktree, repositoryPath);
+  const snapshot = await inspectGitSnapshot(worktree);
+  const diffEvidence = await buildDiffEvidence(worktree);
+  const after = await inspectGitSnapshot(worktree);
+  const afterIdentity = await inspectGitIdentity(worktree, repositoryPath);
+  if (
+    beforeIdentity !== afterIdentity ||
+    snapshot.branch !== worktree.branchName ||
+    after.branch !== worktree.branchName ||
+    JSON.stringify(snapshot) !== JSON.stringify(after)
+  ) {
+    throw new Error('Git changed during observation. Refresh to capture the current checkout.');
+  }
+  return { snapshot, diffEvidence };
+}
+
+async function inspectGitIdentity(worktree: WorktreeRecord, repositoryPath: string): Promise<string> {
+  const metadata = await resolveAgentGitMetadata({
+    repositoryPath,
+    worktreePath: worktree.worktreePath,
+    expectedBranch: worktree.branchName
+  });
+  const directories = await Promise.all(
+    [metadata.repositoryRoot, metadata.worktreeRoot, metadata.gitDir, metadata.gitCommonDir]
+      .map(async (directory) => {
+        const stat = await fs.stat(directory);
+        return [directory, stat.dev, stat.ino];
+      })
+  );
+  return JSON.stringify(directories);
+}
+
+function readGit(cwd: string, argv: string[]): Promise<string> {
+  const args = argv[0] === 'diff'
+    ? ['diff', '--no-ext-diff', '--no-textconv', ...argv.slice(1)]
+    : argv;
+  return git(cwd, ['-c', 'core.fsmonitor=false', ...args], {
+    env: { GIT_OPTIONAL_LOCKS: '0' }
+  });
+}
+
 export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>> {
   const [
     repoRoot,
@@ -31,31 +85,36 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
     statusOutput,
     headSha,
     branch,
-    upstreamSha,
     committedDiffNames,
     workingDiffNames,
     diffStat,
     dirtyFingerprint,
     commitsAheadOfBase
   ] = await Promise.all([
-    git(worktree.worktreePath, ['rev-parse', '--show-toplevel']),
-    git(worktree.worktreePath, ['rev-parse', '--git-common-dir']),
-    git(worktree.worktreePath, [...GIT_STATUS_ARGS]),
-    git(worktree.worktreePath, ['rev-parse', 'HEAD']).catch(() => ''),
-    git(worktree.worktreePath, ['branch', '--show-current']).catch(() => ''),
-    git(worktree.worktreePath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
-      .then((ref) => git(worktree.worktreePath, ['rev-parse', ref.trim()]))
-      .catch(() => ''),
-    git(worktree.worktreePath, ['diff', '--name-only', `${worktree.baseSha}..HEAD`]).catch(() => ''),
-    git(worktree.worktreePath, ['diff', '--name-only']).catch(() => ''),
+    readGit(worktree.worktreePath, ['rev-parse', '--show-toplevel']),
+    readGit(worktree.worktreePath, ['rev-parse', '--git-common-dir']),
+    readGit(worktree.worktreePath, [...GIT_STATUS_ARGS]),
+    readGit(worktree.worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}']),
+    readGit(worktree.worktreePath, ['branch', '--show-current']),
+    readGit(worktree.worktreePath, ['diff', '--name-only', `${worktree.baseSha}..HEAD`]),
+    readGit(worktree.worktreePath, ['diff', '--name-only']),
     buildDiffStat(worktree),
-    computeDirtyFingerprint(worktree.worktreePath),
-    git(worktree.worktreePath, ['rev-list', '--count', `${worktree.baseSha}..HEAD`])
-      .then((value) => Number(value.trim()) || 0)
-      .catch(() => 0)
+    inspectGitWorkingTreeFingerprint(worktree.worktreePath),
+    readGit(worktree.worktreePath, ['rev-list', '--count', `${worktree.baseSha}..HEAD`])
+      .then((value) => Number(value.trim()))
   ]);
 
   const parsedStatus = parseGitStatusPorcelain(statusOutput);
+  if (
+    parsedStatus.headSha !== headSha.trim() ||
+    parsedStatus.branch !== (branch.trim() || '(detached)') ||
+    (worktree.ownership === 'EXTERNAL' && branch.trim() !== worktree.branchName)
+  ) {
+    throw new Error('Git branch or HEAD changed during observation. Refresh the expected branch.');
+  }
+  const upstreamSha = parsedStatus.upstreamRef
+    ? (await readGit(worktree.worktreePath, ['rev-parse', '--verify', `${parsedStatus.upstreamRef}^{commit}`])).trim()
+    : undefined;
   const committedDiffFileCount = countLines(committedDiffNames);
   const workingDiffFileCount = new Set([
     ...workingDiffNames.split('\n').filter(Boolean),
@@ -74,7 +133,7 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
     baseRef: worktree.baseRef,
     baseSha: worktree.baseSha,
     upstreamRef: parsedStatus.upstreamRef,
-    upstreamSha: upstreamSha.trim() || undefined,
+    upstreamSha,
     aheadCount: parsedStatus.aheadCount,
     behindCount: parsedStatus.behindCount,
     stagedCount: parsedStatus.stagedCount,
@@ -97,13 +156,9 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
 
 export async function buildDiffEvidence(worktree: WorktreeRecord): Promise<string> {
   const [committed, staged, unstaged, untracked, stat] = await Promise.all([
-    git(worktree.worktreePath, ['diff', `${worktree.baseSha}..HEAD`]).catch((error) =>
-      formatGitError('Committed diff', error)
-    ),
-    git(worktree.worktreePath, ['diff', '--cached']).catch((error) =>
-      formatGitError('Staged diff', error)
-    ),
-    git(worktree.worktreePath, ['diff']).catch((error) => formatGitError('Unstaged diff', error)),
+    readGit(worktree.worktreePath, ['diff', `${worktree.baseSha}..HEAD`]),
+    readGit(worktree.worktreePath, ['diff', '--cached']),
+    readGit(worktree.worktreePath, ['diff']),
     buildUntrackedDiff(worktree.worktreePath),
     buildDiffStat(worktree)
   ]);
@@ -195,8 +250,8 @@ export function parseGitStatusPorcelain(output: string): ParsedStatus {
 
 async function buildDiffStat(worktree: WorktreeRecord): Promise<string> {
   const [committed, working, untracked] = await Promise.all([
-    git(worktree.worktreePath, ['diff', '--stat', `${worktree.baseSha}..HEAD`]).catch(() => ''),
-    git(worktree.worktreePath, ['diff', '--stat']).catch(() => ''),
+    readGit(worktree.worktreePath, ['diff', '--stat', `${worktree.baseSha}..HEAD`]),
+    readGit(worktree.worktreePath, ['diff', '--stat']),
     buildUntrackedDiffStat(worktree.worktreePath)
   ]);
   return [committed.trim(), working.trim(), untracked.trim()].filter(Boolean).join('\n');
@@ -207,21 +262,17 @@ async function buildUntrackedDiff(worktreePath: string): Promise<string> {
   const chunks: string[] = [];
 
   for (const relativePath of paths) {
-    try {
-      const diff = await gitDiffAllowingChanges(worktreePath, [
-        'diff',
-        '--no-index',
-        '--',
-        '/dev/null',
-        relativePath
-      ]);
-      const normalizedDiff = hasDiffFileHeader(diff)
-        ? diff.trimEnd()
-        : syntheticAddedFileDiff(relativePath);
-      chunks.push(normalizedDiff);
-    } catch (error) {
-      chunks.push(formatGitError(`Untracked diff for ${relativePath}`, error));
-    }
+    const diff = await gitDiffAllowingChanges(worktreePath, [
+      'diff',
+      '--no-index',
+      '--',
+      '/dev/null',
+      relativePath
+    ]);
+    const normalizedDiff = hasDiffFileHeader(diff)
+      ? diff.trimEnd()
+      : syntheticAddedFileDiff(relativePath);
+    chunks.push(normalizedDiff);
   }
 
   return chunks.join('\n');
@@ -253,7 +304,7 @@ async function buildUntrackedDiffStat(worktreePath: string): Promise<string> {
       '--',
       '/dev/null',
       relativePath
-    ]).catch(() => '');
+    ]);
     if (stat.trim()) {
       chunks.push(stat.trimEnd());
     }
@@ -263,42 +314,32 @@ async function buildUntrackedDiffStat(worktreePath: string): Promise<string> {
 }
 
 async function getUntrackedPaths(worktreePath: string): Promise<string[]> {
-  const statusOutput = await git(worktreePath, [...GIT_STATUS_ARGS]).catch(() => '');
+  const statusOutput = await readGit(worktreePath, [...GIT_STATUS_ARGS]);
   return parseGitStatusPorcelain(statusOutput).untrackedPaths.sort();
 }
 
 async function gitDiffAllowingChanges(cwd: string, argv: string[]): Promise<string> {
   try {
-    return await git(cwd, argv);
+    return await readGit(cwd, argv);
   } catch (error) {
     const gitError = error as { code?: unknown; stdout?: unknown };
-    if (gitError.code === 1 && typeof gitError.stdout === 'string') {
+    // --no-index also exits 1 for an unreadable path, with no diff output.
+    if (gitError.code === 1 && typeof gitError.stdout === 'string' && gitError.stdout.length > 0) {
       return gitError.stdout;
     }
     throw error;
   }
 }
 
-async function computeDirtyFingerprint(worktreePath: string): Promise<string> {
-  const [statusOutput, unstaged, staged] = await Promise.all([
-    git(worktreePath, [...GIT_STATUS_ARGS]).catch(() => ''),
-    git(worktreePath, ['diff', '--binary']).catch(() => ''),
-    git(worktreePath, ['diff', '--cached', '--binary']).catch(() => '')
-  ]);
-  return hashDirtyFingerprint(worktreePath, statusOutput, unstaged, staged);
-}
-
 /**
- * Captures the live Git working-tree generation used by immutable discourse
- * context. Unlike the workflow snapshot helper above, inspection failures are
- * not converted into an apparently stable empty fingerprint: context
- * freshness must fail closed when Git evidence cannot be observed.
+ * Captures live Git content for evidence and discourse context. Required reads
+ * fail closed, and observation never runs configured diff/textconv helpers.
  */
 export async function inspectGitWorkingTreeFingerprint(worktreePath: string): Promise<string> {
   const [statusOutput, unstaged, staged] = await Promise.all([
-    git(worktreePath, [...GIT_STATUS_ARGS]),
-    git(worktreePath, ['diff', '--binary']),
-    git(worktreePath, ['diff', '--cached', '--binary'])
+    readGit(worktreePath, [...GIT_STATUS_ARGS]),
+    readGit(worktreePath, ['diff', '--binary']),
+    readGit(worktreePath, ['diff', '--cached', '--binary'])
   ]);
   return hashDirtyFingerprint(worktreePath, statusOutput, unstaged, staged);
 }
@@ -319,20 +360,39 @@ async function hashDirtyFingerprint(
 
   for (const relativePath of parsed.untrackedPaths.sort()) {
     const absolutePath = path.resolve(worktreePath, relativePath);
-    if (!absolutePath.startsWith(path.resolve(worktreePath))) {
+    const relative = path.relative(path.resolve(worktreePath), absolutePath);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error('Untracked Git path escaped the worktree.');
+    }
+    const stat = await fs.lstat(absolutePath);
+    hash.update('\0untracked\0');
+    hash.update(relativePath);
+    if (stat.isSymbolicLink()) {
+      hash.update('\0mode:120000\0');
+      hash.update(await fs.readlink(absolutePath));
       continue;
     }
+    if (!stat.isFile()) {
+      throw new Error(`Cannot fingerprint untracked Git entry: ${relativePath}`);
+    }
+    const handle = await fs.open(absolutePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
     try {
-      const stat = await fs.stat(absolutePath);
-      if (stat.isFile() && stat.size <= 1024 * 1024) {
-        hash.update('\0untracked\0');
-        hash.update(relativePath);
-        hash.update(await fs.readFile(absolutePath));
-      } else {
-        hash.update(`\0untracked-meta\0${relativePath}:${stat.size}:${stat.mtimeMs}`);
+      const before = await handle.stat();
+      if (!before.isFile()) throw new Error(`Cannot fingerprint untracked Git entry: ${relativePath}`);
+      // Git records file type and the owner's executable bit, not all permissions.
+      hash.update(before.mode & 0o100 ? '\0mode:100755\0' : '\0mode:100644\0');
+      // Bound the stream to the observed size even when an external process appends.
+      if (before.size > 0) {
+        for await (const chunk of handle.createReadStream({ autoClose: false, end: before.size - 1 })) {
+          hash.update(chunk);
+        }
       }
-    } catch {
-      hash.update(`\0untracked-missing\0${relativePath}`);
+      const after = await handle.stat();
+      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+        throw new Error('Untracked file changed during observation. Refresh to capture its current content.');
+      }
+    } finally {
+      await handle.close();
     }
   }
 
@@ -340,7 +400,7 @@ async function hashDirtyFingerprint(
 }
 
 async function detectOperationInProgress(worktreePath: string): Promise<string | undefined> {
-  const gitDir = (await git(worktreePath, ['rev-parse', '--git-dir'])).trim();
+  const gitDir = (await readGit(worktreePath, ['rev-parse', '--git-dir'])).trim();
   const markers: Array<[string, string]> = [
     ['MERGE_HEAD', 'merge'],
     ['rebase-merge', 'rebase'],
@@ -354,8 +414,8 @@ async function detectOperationInProgress(worktreePath: string): Promise<string |
     try {
       await fs.access(path.resolve(worktreePath, gitDir, marker));
       return label;
-    } catch {
-      // continue
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
 
@@ -380,8 +440,4 @@ function deriveGitStatus(input: ParsedStatus & { committedDiffFileCount: number;
 
 function countLines(value: string): number {
   return value.split('\n').filter(Boolean).length;
-}
-
-function formatGitError(label: string, error: unknown): string {
-  return `## ${label} unavailable\n\n${error instanceof Error ? error.message : String(error)}`;
 }

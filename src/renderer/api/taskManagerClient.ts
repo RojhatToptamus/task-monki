@@ -13,6 +13,9 @@ import type {
   BranchPublicationRecord,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  ExistingWorktreeOption,
+  WorktreeImportInspection,
+  ImportTaskResult,
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteDesignDraftRequest,
@@ -343,6 +346,12 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       ),
     readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
+    listExistingWorktrees: (repositoryId) =>
+      get<ExistingWorktreeOption[]>(baseUrl, `/api/worktrees/existing?${new URLSearchParams({ repositoryId })}`),
+    inspectWorktreeImport: (input) => post<WorktreeImportInspection>(baseUrl, '/api/worktrees/inspect-import', input),
+    importTask: (input) => post<ImportTaskResult>(baseUrl, '/api/tasks/import', input),
+    reconnectWorktree: (input) => post<WorktreeRecord>(baseUrl, '/api/worktrees/reconnect', input),
+    updateWorktreeComparison: (input) => post<WorktreeRecord>(baseUrl, '/api/worktrees/comparison', input),
     listDesigns: () => get<DesignListItem[]>(baseUrl, '/api/designs'),
     getDesign: (designId: string) =>
       get<DesignDetailSnapshot>(baseUrl, `/api/designs/${encodeURIComponent(designId)}`),

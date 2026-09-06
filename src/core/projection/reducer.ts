@@ -8,6 +8,7 @@ import type {
   StatusProjection,
   Task,
   TaskSnapshot,
+  GitSnapshotRecord,
   PullRequestSnapshotRecord
 } from '../../shared/contracts';
 import {
@@ -147,15 +148,102 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
       return next;
     }
 
-    next.tasks[taskIndex] = {
+    const projectedTask = {
       ...task,
       workflowPhase: reduceWorkflowPhase(task, event, currentRun),
       projection: reduceProjection(task.projection, event, currentRun),
       updatedAt: event.receivedAt
     };
+    next.tasks[taskIndex] = ['AGENT_RUN_COMPLETED', 'AGENT_RUNTIME_RECONCILED', 'GIT_SNAPSHOT_CAPTURED'].includes(event.type)
+      ? reconcileTaskReviewEvidence(projectedTask, next.runs, next.gitSnapshots)
+      : projectedTask;
   }
 
   return next;
+}
+
+/** Rebuild the review gate after a run's post-review snapshot reference is stored. */
+export function reconcileTaskReviewEvidence(
+  task: Task,
+  runs: readonly RunRecord[],
+  gitSnapshots: readonly GitSnapshotRecord[]
+): Task {
+  const review = task.projection.agentReview;
+  if (!review?.runId || review.status === 'STALE') return task;
+  const run = runs.find((candidate) => candidate.id === review.runId);
+  if (!run || run.mode !== 'REVIEW' || run.status !== 'COMPLETED') return task;
+  const belongsToReview = (snapshot: GitSnapshotRecord) =>
+    snapshot.taskId === task.id &&
+    snapshot.iterationId === run.iterationId &&
+    snapshot.worktreeId === run.worktreeId;
+  const before = gitSnapshots.find((snapshot) => snapshot.id === run.beforeGitSnapshotId);
+  const after = gitSnapshots.find((snapshot) => snapshot.id === run.afterGitSnapshotId);
+  let latest: GitSnapshotRecord | undefined;
+  for (const snapshot of gitSnapshots) {
+    if (belongsToReview(snapshot) && (!latest || snapshot.capturedAt > latest.capturedAt)) {
+      latest = snapshot;
+    }
+  }
+  let status: NonNullable<StatusProjection['agentReview']>['status'] = 'INCONCLUSIVE';
+  let summary = 'Review output is available, but post-review Git evidence has not been verified.';
+  if (
+    run.taskId === task.id &&
+    run.iterationId === task.currentIterationId &&
+    run.worktreeId === task.currentWorktreeId &&
+    before && after && latest &&
+    belongsToReview(before) && belongsToReview(after) &&
+    completeReviewSnapshot(before) && completeReviewSnapshot(after) &&
+    task.projection.git !== 'UNAVAILABLE'
+  ) {
+    const changedDuringReview = !sameReviewScope(before, after) || gitSnapshots.some(
+      (snapshot) => belongsToReview(snapshot) &&
+        snapshot.capturedAt > before.capturedAt &&
+        snapshot.capturedAt < after.capturedAt &&
+        !sameReviewScope(before, snapshot)
+    );
+    // An explicit delivery commit may record the reviewed dirty tree unchanged.
+    const deliveryCommit = review.reviewedHeadSha !== before.headSha &&
+      Boolean(review.reviewedHeadSha) && review.reviewedDirtyFingerprint === undefined;
+    const currentScopeMatches = deliveryCommit
+      ? completeReviewSnapshot(latest) &&
+        latest.headSha === review.reviewedHeadSha &&
+        latest.branch === before.branch && latest.baseSha === before.baseSha &&
+        latest.baseRef === before.baseRef && latest.worktreePath === before.worktreePath &&
+        latest.stagedCount + latest.unstagedCount + latest.untrackedCount === 0
+      : sameReviewScope(before, latest);
+    if (changedDuringReview || !currentScopeMatches) {
+      status = 'STALE';
+      summary = 'The checkout or comparison scope changed during or after this review.';
+    } else {
+      status = reviewGateStatusFromResult(review.result) ?? 'INCONCLUSIVE';
+      summary = review.result?.summary ?? 'Agent review completed without a structured verdict.';
+    }
+  }
+  if (review.status === status && review.summary === summary) return task;
+  return {
+    ...task,
+    projection: {
+      ...task.projection,
+      agentReview: { ...review, status, summary },
+      summary
+    }
+  };
+}
+
+function completeReviewSnapshot(snapshot: GitSnapshotRecord): boolean {
+  return Boolean(snapshot.headSha && snapshot.dirtyFingerprint && snapshot.branch && snapshot.baseSha) &&
+    !['UNAVAILABLE', 'UNKNOWN', 'CONFLICTED'].includes(snapshot.status) &&
+    !snapshot.operationInProgress;
+}
+
+function sameReviewScope(before: GitSnapshotRecord, after: GitSnapshotRecord): boolean {
+  return completeReviewSnapshot(after) &&
+    before.headSha === after.headSha &&
+    before.dirtyFingerprint === after.dirtyFingerprint &&
+    before.branch === after.branch &&
+    before.baseSha === after.baseSha &&
+    before.baseRef === after.baseRef &&
+    before.worktreePath === after.worktreePath;
 }
 
 function isAgentRunScopedEvent(eventType: DomainEvent['type']): boolean {
@@ -385,6 +473,23 @@ export function reduceProjection(
   }
 
   switch (event.type) {
+    case 'GIT_OBSERVATION_FAILED':
+      return {
+        ...base,
+        git: 'UNAVAILABLE',
+        agentReview: base.agentReview?.status === 'NOT_RUN' || !base.agentReview
+          ? base.agentReview
+          : {
+              ...base.agentReview,
+              status: base.agentReview.status === 'RUNNING' ? 'RUNNING' : 'STALE',
+              summary: 'Current Git evidence is unavailable; review output is historical.',
+              updatedAt: event.receivedAt
+            },
+        health: 'WARNING',
+        summary: getString(event.payload, 'error') ?? 'Current Git evidence is unavailable.',
+        findings,
+        updatedAt: event.receivedAt
+      };
     case 'REPOSITORY_PREFLIGHT_COMPLETED':
       return {
         ...base,
@@ -404,6 +509,16 @@ export function reduceProjection(
         worktree: 'CREATING',
         git: 'NOT_INSPECTED',
         summary: 'Task iteration created; preparing isolated worktree.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'WORKTREE_ATTACHED':
+      return {
+        ...base,
+        requestedAction: 'NONE',
+        worktree: 'PRESENT',
+        git: 'NOT_INSPECTED',
+        summary: 'Existing checkout attached. No agent run started.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -617,6 +732,16 @@ export function reduceProjection(
         updatedAt: event.receivedAt
       };
     }
+    case 'PR_DISCOVERY_COMPLETED':
+      return {
+        ...base,
+        githubPullRequest: getBoolean(event.payload, 'found') === false ? 'NOT_CREATED' : base.githubPullRequest,
+        summary: getBoolean(event.payload, 'found') === false
+          ? 'No open pull request found for this branch.'
+          : base.summary,
+        findings,
+        updatedAt: event.receivedAt
+      };
     case 'GITHUB_SYNC_FAILED':
       return {
         ...base,
@@ -790,7 +915,7 @@ export function reduceProjection(
       return {
         ...base,
         health: 'ERROR',
-        summary: 'A read-only review changed independent Git state.',
+        summary: 'Git state changed during the read-only review.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -857,10 +982,12 @@ function isAgentReviewProjectionEvent(
   run?: RunRecord
 ): boolean {
   return (
-    getString(event.payload, 'mode') === 'REVIEW' ||
-    Boolean(
-      event.runId &&
-        (run?.mode === 'REVIEW' || projection.agentReview?.runId === event.runId)
+    !event.type.startsWith('GIT_') && (
+      getString(event.payload, 'mode') === 'REVIEW' ||
+      Boolean(
+        event.runId &&
+          (run?.mode === 'REVIEW' || projection.agentReview?.runId === event.runId)
+      )
     )
   );
 }
@@ -889,6 +1016,19 @@ function reduceReviewProjection(
         updatedAt: event.receivedAt
       };
     }
+    case 'AGENT_REVIEW_POLICY_VIOLATION':
+      return {
+        ...base,
+        agentReview: base.agentReview ? {
+          ...base.agentReview,
+          status: 'STALE',
+          summary: 'Git state changed during the read-only review.',
+          updatedAt: event.receivedAt
+        } : base.agentReview,
+        findings,
+        summary: 'Git state changed during the read-only review.',
+        updatedAt: event.receivedAt
+      };
     case 'AGENT_ACTIVITY_RECEIVED':
       return {
         ...base,
@@ -985,15 +1125,13 @@ function reduceAgentReview(
       const result = getAgentReviewResult(event.payload);
       return {
         ...base,
-        status:
-          reviewGateStatusFromPayload(event.payload) ??
-          reviewGateStatusFromResult(result) ??
-          'INCONCLUSIVE',
+        status: base.status === 'STALE' ? 'STALE' : 'INCONCLUSIVE',
         finalArtifactId: getString(event.payload, 'finalArtifactId') ?? base.finalArtifactId,
         result,
         summary:
-          result?.summary ??
-          'Agent review completed, but no structured pass/fail verdict was provided.',
+          base.status === 'STALE'
+            ? base.summary
+            : 'Review output is available, but post-review Git evidence has not been verified.',
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_FAILED':
@@ -1135,19 +1273,6 @@ function snapshotDiffersFromReview(
   return Boolean(review.reviewedGitSnapshotId && snapshotId && review.reviewedGitSnapshotId !== snapshotId);
 }
 
-function reviewGateStatusFromPayload(
-  payload: unknown
-): Extract<
-  NonNullable<StatusProjection['agentReview']>['status'],
-  'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'
-> | undefined {
-  const value = getString(payload, 'agentReviewStatus');
-  if (value === 'PASSED' || value === 'NEEDS_CHANGES' || value === 'INCONCLUSIVE') {
-    return value;
-  }
-  return undefined;
-}
-
 function reviewGateStatusFromResult(
   result: AgentReviewResult | undefined
 ): Extract<
@@ -1265,7 +1390,7 @@ function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {
         id: `${event.id}:review-policy`,
         code: 'AGENT_REVIEW_CHANGED_GIT',
         severity: 'ERROR',
-        message: 'The provider review changed Git state despite a read-only policy.',
+        message: 'Git state changed during the read-only review; the writer is unknown.',
         createdAt: event.receivedAt
       }
     ];

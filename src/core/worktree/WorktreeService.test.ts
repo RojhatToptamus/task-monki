@@ -80,6 +80,7 @@ describe('WorktreeService', () => {
       taskId: 'task-1',
       iterationId: 'iteration-1',
       repositoryId: 'repository-1',
+      ownership: 'TASK_MONKI' as const,
       worktreePath: path.join(worktreeRoot, 'task-1'),
       branchName: 'codex/task-test',
       baseSha,
@@ -93,6 +94,56 @@ describe('WorktreeService', () => {
     expect(created.headSha).toBe(baseSha);
     await expect(fs.access(path.join(record.worktreePath, 'README.md'))).resolves.toBeUndefined();
   }, 15_000);
+
+  it.each(['EXTERNAL', 'TASK_MONKI'] as const)(
+    'preserves a %s checkout lock while applying its ownership-specific availability rule',
+    async (ownership) => {
+      const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-locked-worktree-')));
+      try {
+        const repo = path.join(dir, 'repo');
+        const worktreeRoot = path.join(dir, 'worktrees');
+        const worktreePath = ownership === 'EXTERNAL'
+          ? path.join(dir, 'external-checkout')
+          : path.join(worktreeRoot, 'task-1');
+        await fs.mkdir(repo);
+        await git(repo, ['init', '-b', 'main']);
+        await git(repo, ['config', 'user.email', 'test@example.com']);
+        await git(repo, ['config', 'user.name', 'Test User']);
+        await fs.writeFile(path.join(repo, 'README.md'), '# Repo\n', 'utf8');
+        await git(repo, ['add', 'README.md']);
+        await git(repo, ['commit', '-m', 'init']);
+        const baseSha = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+        await git(repo, ['worktree', 'add', '-b', 'feature', worktreePath]);
+        await git(repo, ['worktree', 'lock', '--reason', 'Preserve this checkout', worktreePath]);
+        const worktreesBefore = await git(repo, ['worktree', 'list', '--porcelain', '-z']);
+        const now = new Date().toISOString();
+        const record: WorktreeRecord = {
+          id: 'worktree-1', taskId: 'task-1', iterationId: 'iteration-1',
+          repositoryId: 'repository-1', ownership, worktreePath,
+          branchName: 'feature', baseSha, status: 'LOCKED',
+          createdAt: now, updatedAt: now
+        };
+        const service = new WorktreeService(worktreeRoot);
+
+        const verified = await service.verify(record, repo);
+
+        expect(verified).toMatchObject({
+          ownership,
+          status: ownership === 'EXTERNAL' ? 'PRESENT' : 'LOCKED',
+          headSha: baseSha,
+          error: undefined
+        });
+        await expect(service.remove(verified, repo)).rejects.toThrow(
+          ownership === 'EXTERNAL' ? 'externally owned' : 'locked'
+        );
+        expect(await git(repo, ['worktree', 'list', '--porcelain', '-z'])).toBe(worktreesBefore);
+        expect(await fs.readFile(path.join(worktreePath, 'README.md'), 'utf8')).toBe('# Repo\n');
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    },
+    15_000
+  );
 
   it('removes only the exact managed Design branch and worktree', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-shared-design-'));
@@ -126,6 +177,7 @@ describe('WorktreeService', () => {
         taskId,
         iterationId: `iteration-${index + 1}`,
         repositoryId: repository.id,
+        ownership: 'TASK_MONKI' as const,
         worktreePath: path.join(worktreeRoot, taskId),
         branchName: `task-monki/task-${taskId.slice(0, 8)}-${index + 1}`,
         baseSha,

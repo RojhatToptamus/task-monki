@@ -4044,6 +4044,14 @@
   margin-top: 14px;
 }
 
+.tm-config--worktree {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.tm-config--worktree .tm-config__k {
+  flex-shrink: 0;
+}
+
 .tm-config__row {
   display: flex;
   justify-content: space-between;

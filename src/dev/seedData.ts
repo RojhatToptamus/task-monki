@@ -24,7 +24,7 @@ import type {
   PreviewGenerationState
 } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
-import { buildDiffEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotService';
+import { buildDiffEvidence, captureGitObservation, inspectGitSnapshot } from '../core/git/GitSnapshotService';
 import { git } from '../core/git/gitCli';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
@@ -32,6 +32,7 @@ import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { DesignSourceService } from '../core/design/DesignSourceService';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
+import { findExistingWorktreeTask, inspectExistingCheckout } from '../core/worktree/WorktreeImport';
 import { validateRepositoryPath } from '../core/repository/RepositoryPreflight';
 import { previewRouteHostname } from '../core/preview/PreviewRouteHostname';
 import { DETERMINISTIC_DEV_SEED_ENV_VAR } from './devSeedEnvironment';
@@ -65,6 +66,7 @@ export interface DevSeedManifestScenario extends DevSeedScenarioDefinition {
   taskId?: string;
   conversationId?: string;
   relatedTaskIds?: string[];
+  worktreePath?: string;
 }
 
 export interface DevSeedManifest {
@@ -186,7 +188,31 @@ interface SeededTaskState {
 interface SeededScenarioResult {
   task: Task;
   relatedTaskIds?: string[];
+  worktreePath?: string;
 }
+
+const IMPORT_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
+  {
+    slug: 'import-in-progress', group: 'board', title: 'External work in progress',
+    description: 'An attached linked checkout with staged, unstaged, and untracked work, without an agent run.',
+    tags: ['ownership:EXTERNAL', 'phase:IN_PROGRESS', 'git:DIRTY']
+  },
+  {
+    slug: 'import-ready-for-review', group: 'review', title: 'External work ready for review',
+    description: 'Committed external work is ready for its first detached review, without implementation history.',
+    tags: ['ownership:EXTERNAL', 'phase:REVIEW', 'agent-review:NOT_RUN']
+  },
+  {
+    slug: 'import-stale-review', group: 'review', title: 'External changes after review',
+    description: 'An external commit changed the same checkout after a detached review. Refresh observed the stale result.',
+    tags: ['ownership:EXTERNAL', 'phase:REVIEW', 'agent-review:STALE']
+  },
+  {
+    slug: 'import-missing-path', group: 'board', title: 'External checkout moved',
+    description: 'The attached checkout moved outside Task Monki. Historical Git evidence remains, but the recorded path is unavailable.',
+    tags: ['ownership:EXTERNAL', 'worktree:MISSING', 'git:UNAVAILABLE']
+  }
+];
 
 export function defaultDevSeedRoot(cwd = process.cwd()): string {
   return path.resolve(cwd, '.local/task-monki-dev-seed');
@@ -284,7 +310,8 @@ export async function seedTaskMonkiDevelopmentData(
     ctx.scenarios.push({
       ...definition,
       taskId: result.task.id,
-      relatedTaskIds: result.relatedTaskIds
+      relatedTaskIds: result.relatedTaskIds,
+      worktreePath: result.worktreePath
     });
   }
   if (scenarioSet === 'all') {
@@ -1363,9 +1390,10 @@ function requireSeedJob(
 }
 
 function scenariosForSet(set: DevSeedScenarioSet): DevSeedScenarioDefinition[] {
+  const scenarios = [...DEV_SEED_SCENARIOS, ...IMPORT_SEED_SCENARIOS];
   return set === 'all'
-    ? DEV_SEED_SCENARIOS
-    : DEV_SEED_SCENARIOS.filter((scenarioDefinition) => scenarioDefinition.group === set);
+    ? scenarios
+    : scenarios.filter((scenarioDefinition) => scenarioDefinition.group === set);
 }
 
 function assertValidScenarioSet(value: string): asserts value is DevSeedScenarioSet {
@@ -1468,6 +1496,11 @@ async function seedScenario(
   definition: DevSeedScenarioDefinition
 ): Promise<SeededScenarioResult> {
   switch (definition.slug) {
+    case 'import-in-progress':
+    case 'import-ready-for-review':
+    case 'import-stale-review':
+    case 'import-missing-path':
+      return createImportedScenario(ctx, definition);
     case 'board-backlog': {
       const task = await createSeedTask(ctx, definition);
       return { task: await ctx.store.transitionTask(task.id, 'BACKLOG', 'Seed backlog state') };
@@ -1594,6 +1627,72 @@ async function createSeedTask(
     completionPolicy,
     agentSettings: DEFAULT_AGENT_SETTINGS
   });
+}
+
+async function createImportedScenario(
+  ctx: SeedContext,
+  definition: DevSeedScenarioDefinition
+): Promise<SeededScenarioResult> {
+  const externalRoot = path.join(ctx.rootDir, 'external-checkouts');
+  const worktreePath = path.join(externalRoot, definition.slug);
+  const branchName = `codex/seed-${definition.slug}`;
+  const relativeFile = `scenarios/${definition.slug}.txt`;
+  await fs.mkdir(externalRoot, { recursive: true });
+  await git(ctx.repositoryPath, ['worktree', 'add', '-b', branchName, worktreePath, ctx.baseSha]);
+  // These writes stand in for the external application, before attachment.
+  await commitWorktreeFile({ worktreePath }, relativeFile, 'Committed external work.\n');
+  if (definition.slug === 'import-in-progress') {
+    await writeWorktreeFile({ worktreePath }, relativeFile, 'Staged external work.\n');
+    await git(worktreePath, ['add', relativeFile]);
+    await writeWorktreeFile({ worktreePath }, relativeFile, 'Saved after staging.\n');
+    await writeWorktreeFile({ worktreePath }, 'external-notes.txt', 'Untracked external context.\n');
+  }
+
+  const comparison = { type: 'MERGE_BASE' as const, ref: 'main' };
+  const { task } = await ctx.store.createAttachedTask({
+    title: `[seed:${definition.slug}] ${definition.title}`,
+    prompt: definition.description,
+    repositoryId: ctx.repositoryId,
+    creationToken: randomUUID(),
+    agentSettings: DEFAULT_AGENT_SETTINGS,
+    importSource: {
+      worktreePath, branchName, comparison,
+      readyForReview: definition.group === 'review'
+    }
+  }, async (snapshot) => {
+    const { gitCommonDir, ...worktree } = await inspectExistingCheckout(ctx.repositoryPath, {
+      repositoryId: ctx.repositoryId, worktreePath, branchName, comparison
+    });
+    const existing = await findExistingWorktreeTask(snapshot, {
+      ...worktree, gitCommonDir, repositoryId: ctx.repositoryId
+    });
+    return { worktree, existingTaskId: existing?.id };
+  });
+  const worktree = await ctx.store.getCurrentWorktree(task.id);
+  const iteration = await ctx.store.getCurrentIteration(task.id);
+  if (!worktree || !iteration) throw new Error(`Seed attachment is incomplete: ${definition.slug}`);
+  const gitSnapshot = await captureGitSnapshot(ctx, worktree);
+
+  if (definition.slug === 'import-stale-review') {
+    const review = await createRun(ctx, { task, iteration, worktree, gitSnapshot }, 'REVIEW',
+      'Review the committed external work.', { beforeGitSnapshotId: gitSnapshot.id });
+    const afterReview = await captureGitSnapshot(ctx, worktree);
+    const result = reviewResultFor('review-passed');
+    await completeRun(ctx, review, result.summary, afterReview.id, { agentReviewResult: result });
+    await commitWorktreeFile(worktree, relativeFile, 'External changes made after review.\n');
+    await refreshStoredWorktree(ctx, worktree);
+    await captureGitSnapshot(ctx, worktree);
+  } else if (definition.slug === 'import-missing-path') {
+    await git(ctx.repositoryPath, ['worktree', 'move', worktree.worktreePath, `${worktree.worktreePath}-moved`]);
+    const verified = await refreshStoredWorktree(ctx, worktree);
+    if (verified.status !== 'MISSING') throw new Error('The moved seed checkout must be missing at its recorded path.');
+    await ctx.store.appendEvent(createDomainEvent({
+      type: 'GIT_OBSERVATION_FAILED', taskId: task.id,
+      iterationId: iteration.id, worktreeId: worktree.id, source: 'git',
+      payload: { error: verified.error ?? 'The attached checkout is missing.' }
+    }));
+  }
+  return { task: await requireTask(ctx, task.id), worktreePath: worktree.worktreePath };
 }
 
 async function createWorktreeState(
@@ -2623,13 +2722,16 @@ async function createRun(
   } = {}
 ): Promise<RunRecord> {
   const task = await requireTask(ctx, state.task.id);
+  const requestedSettings: AgentExecutionSettings = mode === 'REVIEW'
+    ? { ...DEFAULT_AGENT_SETTINGS, sandbox: 'READ_ONLY' }
+    : DEFAULT_AGENT_SETTINGS;
   const session = await ctx.store.createAgentSession({
     task,
     iteration: state.iteration,
     worktree: state.worktree,
     runtimeId: 'codex',
     role: options.role ?? (mode === 'REVIEW' ? 'REVIEW' : 'PRIMARY'),
-    requestedSettings: DEFAULT_AGENT_SETTINGS
+    requestedSettings
   });
   await ctx.store.updateAgentSession(session.id, {
     providerSessionId: `seed-thread-${state.task.id.slice(0, 8)}-${ctx.turnCounter + 1}`,
@@ -2646,7 +2748,7 @@ async function createRun(
     serverInstanceId: ctx.serverInstanceId,
     continuedFromRunId: options.continuedFromRunId,
     beforeGitSnapshotId: options.beforeGitSnapshotId,
-    requestedSettings: DEFAULT_AGENT_SETTINGS
+    requestedSettings
   });
   ctx.turnCounter += 1;
   await ctx.store.updateRun(run.id, {
@@ -2772,6 +2874,10 @@ async function captureGitSnapshot(
   ctx: SeedContext,
   worktree: WorktreeRecord
 ): Promise<GitSnapshotRecord> {
+  if (worktree.ownership === 'EXTERNAL') {
+    const observation = await captureGitObservation(worktree, ctx.repositoryPath);
+    return ctx.store.recordGitSnapshot(observation.snapshot, observation.diffEvidence);
+  }
   return ctx.store.recordGitSnapshot(
     await inspectGitSnapshot(worktree),
     await buildDiffEvidence(worktree)
@@ -3012,7 +3118,7 @@ async function initSeedRepository(
 }
 
 async function writeWorktreeFile(
-  worktree: WorktreeRecord,
+  worktree: Pick<WorktreeRecord, 'worktreePath'>,
   relativePath: string,
   content: string
 ): Promise<void> {
@@ -3022,7 +3128,7 @@ async function writeWorktreeFile(
 }
 
 async function commitWorktreeFile(
-  worktree: WorktreeRecord,
+  worktree: Pick<WorktreeRecord, 'worktreePath'>,
   relativePath: string,
   content: string
 ): Promise<string> {

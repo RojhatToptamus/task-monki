@@ -8,6 +8,7 @@ import {
   codexCapabilities
 } from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { git } from '../core/git/gitCli';
 import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
@@ -104,7 +105,8 @@ describe('Task Monki development seed data', () => {
     expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
-      DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)
+      [...DEV_SEED_SCENARIOS.map((scenario) => scenario.slug),
+        'import-in-progress', 'import-ready-for-review', 'import-stale-review', 'import-missing-path']
     );
     expect(new Set(manifest.scenarios.map((scenario) => scenario.slug)).size).toBe(
       manifest.scenarios.length
@@ -137,6 +139,87 @@ describe('Task Monki development seed data', () => {
     expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
       taskForScenario(manifest, snapshot, 'board-backlog').id
     ]);
+  });
+
+  it('attaches real external checkouts with observable dirty work and explicit readiness, without implementation history', async () => {
+    const store = new FileTaskStore(manifest.storeDir);
+    try {
+      for (const slug of ['import-in-progress', 'import-ready-for-review']) {
+        const task = taskForScenario(manifest, snapshot, slug);
+        const worktree = snapshot.worktrees.find((record) => record.id === task.currentWorktreeId)!;
+        const observed = selectLatestGitSnapshot(snapshot, task)!;
+        const entry = manifest.scenarios.find((scenario) => scenario.slug === slug)!;
+        const progress = slug === 'import-in-progress';
+        expect(task).toMatchObject({
+          workflowPhase: progress ? 'IN_PROGRESS' : 'REVIEW',
+          projection: { agentRun: 'IDLE', worktree: 'PRESENT', agentReview: { status: 'NOT_RUN' } }
+        });
+        expect(task.currentRunId).toBeUndefined();
+        expect(task.currentAgentSessionId).toBeUndefined();
+        expect(snapshot.runs.filter((record) => record.taskId === task.id)).toEqual([]);
+        expect(snapshot.agentSessions.filter((record) => record.taskId === task.id)).toEqual([]);
+        expect(worktree.ownership).toBe('EXTERNAL');
+        expect(worktree.worktreePath).toBe(await fs.realpath(entry.worktreePath!));
+        expect(path.relative(await fs.realpath(manifest.worktreeRoot), worktree.worktreePath).startsWith('..')).toBe(true);
+        expect(observed).toMatchObject({
+          worktreePath: worktree.worktreePath,
+          headSha: (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim(),
+          branch: worktree.branchName,
+          gitCommonDir: await fs.realpath(path.join(manifest.repositoryPath, '.git')),
+          stagedCount: progress ? 1 : 0, unstagedCount: progress ? 1 : 0, untrackedCount: progress ? 1 : 0,
+          commitsAheadOfBase: 1
+        });
+        const diff = await store.readArtifact(observed.diffArtifactId!);
+        expect(diff).toContain(`scenarios/${slug}.txt`);
+        const events = snapshot.events.filter((event) => event.taskId === task.id);
+        expect(events.some((event) => event.type === 'WORKTREE_ATTACHED')).toBe(true);
+        expect(events.some((event) => ['WORKTREE_CREATE_REQUESTED', 'WORKTREE_CREATED', 'AGENT_RUN_STARTED'].includes(event.type))).toBe(false);
+        if (progress) {
+          expect(await fs.readFile(path.join(worktree.worktreePath, `scenarios/${slug}.txt`), 'utf8')).toBe('Saved after staging.\n');
+          expect(await git(worktree.worktreePath, ['show', `:scenarios/${slug}.txt`])).toBe('Staged external work.\n');
+          expect(await fs.readFile(path.join(worktree.worktreePath, 'external-notes.txt'), 'utf8')).toBe('Untracked external context.\n');
+        }
+      }
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('makes detached review stale through an external commit and real Git observation, without inventing an implementation run', async () => {
+    const task = taskForScenario(manifest, snapshot, 'import-stale-review');
+    const runs = snapshot.runs.filter((run) => run.taskId === task.id);
+    expect(runs).toHaveLength(1);
+    const review = runs[0]!;
+    expect(review).toMatchObject({ mode: 'REVIEW', status: 'COMPLETED', requestedSettings: { sandbox: 'READ_ONLY' } });
+    expect(review.continuedFromRunId).toBeUndefined();
+    expect(snapshot.agentSessions.find((session) => session.id === review.sessionId)).toMatchObject({ role: 'REVIEW' });
+    expect(task).toMatchObject({ workflowPhase: 'REVIEW', projection: { agentRun: 'IDLE', agentReview: { status: 'STALE', runId: review.id } } });
+    expect(task.currentRunId).toBeUndefined();
+    expect(task.currentAgentSessionId).toBeUndefined();
+    expect(task.projection.agentReview?.sourceRunId).toBeUndefined();
+    const before = snapshot.gitSnapshots.find((record) => record.id === review.beforeGitSnapshotId)!;
+    const after = snapshot.gitSnapshots.find((record) => record.id === review.afterGitSnapshotId)!;
+    const latest = selectLatestGitSnapshot(snapshot, task)!;
+    expect(after.headSha).toBe(before.headSha);
+    expect(after.dirtyFingerprint).toBe(before.dirtyFingerprint);
+    expect(latest.headSha).not.toBe(after.headSha);
+    expect(latest.worktreePath).toBe(before.worktreePath);
+    expect(latest.headSha).toBe((await git(latest.worktreePath, ['rev-parse', 'HEAD'])).trim());
+  });
+
+  it('records an actually missing external path while retaining its historical evidence and moved files', async () => {
+    const task = taskForScenario(manifest, snapshot, 'import-missing-path');
+    const worktree = snapshot.worktrees.find((record) => record.id === task.currentWorktreeId)!;
+    const entry = manifest.scenarios.find((scenario) => scenario.slug === 'import-missing-path')!;
+    expect(entry.worktreePath).toBe(worktree.worktreePath);
+    expect(worktree).toMatchObject({ ownership: 'EXTERNAL', status: 'MISSING' });
+    expect(await pathExists(worktree.worktreePath)).toBe(false);
+    expect(await fs.readFile(path.join(`${worktree.worktreePath}-moved`, 'scenarios/import-missing-path.txt'), 'utf8')).toBe('Committed external work.\n');
+    expect(task).toMatchObject({ workflowPhase: 'IN_PROGRESS', projection: { worktree: 'MISSING', git: 'UNAVAILABLE', agentRun: 'IDLE' } });
+    expect(selectLatestGitSnapshot(snapshot, task)).toMatchObject({ worktreePath: worktree.worktreePath, status: 'COMMITTED_UNPUSHED' });
+    expect(snapshot.gitSnapshots.filter((record) => record.taskId === task.id)).toHaveLength(1);
+    expect(snapshot.events.some((event) => event.taskId === task.id && event.type === 'GIT_OBSERVATION_FAILED')).toBe(true);
+    expect(snapshot.runs.filter((run) => run.taskId === task.id)).toEqual([]);
   });
 
   it('materializes Design starting and recovery states', async () => {
@@ -595,7 +678,7 @@ describe('Task Monki development seed data', () => {
       });
       for (const run of after.runs) {
         expect(run.requestedSettings).toMatchObject({
-          sandbox: 'WORKSPACE_WRITE',
+          sandbox: run.mode === 'REVIEW' ? 'READ_ONLY' : 'WORKSPACE_WRITE',
           networkAccess: false,
           approvalPolicy: 'never',
           approvalsReviewer: 'user'

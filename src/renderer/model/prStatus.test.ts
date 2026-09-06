@@ -7,8 +7,10 @@ import {
   type MergeSnapshotRecord,
   type PullRequestSnapshotRecord,
   type ReviewRollupRecord,
-  type Task
+  type Task,
+  type WorktreeRecord
 } from '../../shared/contracts';
+import { createDomainEvent } from '../../core/storage/domainEvent';
 import {
   buildBoardDeliveryLine,
   buildFailingChecksInvestigationPrompt,
@@ -21,6 +23,57 @@ import {
 const now = '2026-07-01T10:00:00.000Z';
 
 describe('buildPrStatusViewModel', () => {
+  const attachedWorktree: WorktreeRecord = {
+    id: 'worktree-1', taskId: 'task-1', iterationId: 'iteration-1', repositoryId: '/tmp/repo',
+    ownership: 'EXTERNAL', worktreePath: '/tmp/repo', branchName: 'task/auth-refresh',
+    baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now
+  };
+  const attachedTask = () => taskFixture({
+    currentWorktreeId: 'worktree-1', currentIterationId: 'iteration-1',
+    projection: { ...createInitialProjection(now), worktree: 'PRESENT', git: 'CLEAN' }
+  });
+
+  it('keeps failed GitHub discovery distinct from an observed absence and allows read-only refresh', () => {
+    const task = attachedTask();
+    const failed = createDomainEvent({ type: 'GITHUB_SYNC_FAILED', taskId: task.id, iterationId: task.currentIterationId, source: 'github', payload: { error: 'Offline' } });
+    const input = { task, worktree: attachedWorktree, gitSnapshot: gitFixture() };
+    const unavailable = buildPrStatusViewModel({ ...input, events: [failed] });
+    expect(unavailable.kind).toBe('STALE');
+    expect(unavailable.headline).toBe('PR status unavailable');
+    expect(unavailable.canRefresh).toBe(true);
+    expect(unavailable.canCreateDraftPr).toBe(false);
+    const discovered = createDomainEvent({ type: 'PR_DISCOVERY_COMPLETED', taskId: task.id, iterationId: task.currentIterationId, source: 'github', payload: { found: false } });
+    expect(buildPrStatusViewModel({ ...input, events: [failed, discovered] }).kind).toBe('NO_PR');
+    expect(buildPrStatusViewModel(input).kind).toBe('UNKNOWN');
+    const lastKnown = buildPrStatusViewModel({ ...input, pullRequest: prFixture(), ciRollup: ciFixture(), events: [failed] });
+    expect(lastKnown.kind).toBe('STALE');
+    expect(lastKnown.prUrl).toBe(prFixture().url);
+    expect(lastKnown.canInvestigateFailure).toBe(false);
+  });
+
+  it('requires evidence of direction before offering an update for different attached and PR heads', () => {
+    const input = { task: attachedTask(), worktree: attachedWorktree, pullRequest: prFixture() };
+    const different = gitFixture({ headSha: 'other-head', aheadCount: 2 });
+    const view = buildPrStatusViewModel({ ...input, gitSnapshot: different });
+    expect(view.kind).toBe('HEAD_MISMATCH');
+    expect(view.tone).toBe('neutral');
+    expect(view.canPushUpdate).toBe(false);
+    expect(view.canInvestigateFailure).toBe(false);
+    const verifiedAhead = buildPrStatusViewModel({ ...input, gitSnapshot: { ...different, upstreamSha: 'abc123' } });
+    expect(verifiedAhead.kind).toBe('LOCAL_NOT_PUSHED');
+    expect(verifiedAhead.canPushUpdate).toBe(true);
+    const dirty = buildPrStatusViewModel({ ...input, gitSnapshot: { ...different, upstreamSha: 'abc123', unstagedCount: 1, status: 'DIRTY' } });
+    expect(buildPrStatusActionState({ view: dirty }).createOrPushDisabled).toBe(true);
+    expect(dirty.canInvestigateFailure).toBe(false);
+  });
+
+  it('accepts matching external publication without a Task Monki push record, but not stale checkout evidence', () => {
+    const input = { task: attachedTask(), worktree: attachedWorktree, pullRequest: prFixture(), gitSnapshot: gitFixture(), ciRollup: ciFixture({ status: 'FAILING', failingCount: 1 }) };
+    expect(buildPrStatusViewModel(input).canInvestigateFailure).toBe(true);
+    expect(buildPrStatusViewModel({ ...input, worktree: { ...attachedWorktree, status: 'MISSING' } }).canInvestigateFailure).toBe(false);
+    expect(buildPrStatusViewModel({ ...input, worktree: { ...attachedWorktree, worktreePath: '/tmp/moved' } }).kind).toBe('STALE');
+  });
+
   it('shows no PR before delivery exists', () => {
     const view = buildPrStatusViewModel({ task: taskFixture() });
 

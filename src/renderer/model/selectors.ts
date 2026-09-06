@@ -27,7 +27,7 @@ export function selectTaskEvents(snapshot: Pick<TaskSnapshot, 'events'>, taskId:
 }
 
 export function selectActiveRun(task: Task, runs: RunRecord[]): RunRecord | undefined {
-  return runs.find((run) => run.id === task.currentRunId) ?? runs[0];
+  return runs.find((run) => run.id === task.currentRunId && run.mode !== 'REVIEW');
 }
 
 export function selectCurrentWorktree(
@@ -114,16 +114,48 @@ export function canStartRun(task: Task): boolean {
   ].includes(task.projection.agentRun);
 }
 
-export function canPrepareWorktree(task: Task): boolean {
-  return !['CREATING', 'PRESENT'].includes(task.projection.worktree);
+export function canPrepareWorktree(task: Task, worktree?: WorktreeRecord): boolean {
+  return worktree?.ownership !== 'EXTERNAL' && !['CREATING', 'PRESENT'].includes(task.projection.worktree);
 }
 
-export function canCreateDeliveryCommit(task: Task): boolean {
+export function canCreateDeliveryCommit(task: Task, worktree?: WorktreeRecord): boolean {
   return (
+    worktree?.ownership !== 'EXTERNAL' &&
     task.projection.worktree === 'PRESENT' &&
     task.projection.git === 'DIRTY' &&
     !getImplementationRetryReason(task)
   );
+}
+
+/** Historical snapshots cannot authorize actions against an unavailable attachment. */
+export function getAttachedWorktreeActionBlocker(
+  task: Task,
+  worktree: WorktreeRecord | undefined,
+  gitSnapshot: GitSnapshotRecord | undefined
+): string | undefined {
+  if (worktree?.ownership !== 'EXTERNAL') return undefined;
+  if (worktree.status !== 'PRESENT' || task.projection.worktree !== 'PRESENT') {
+    return 'Reconnect or refresh this worktree before continuing.';
+  }
+  if (
+    !gitSnapshot ||
+    ['UNAVAILABLE', 'UNKNOWN', 'NOT_INSPECTED'].includes(task.projection.git) ||
+    ['UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status) ||
+    gitSnapshot.worktreeId !== worktree.id ||
+    gitSnapshot.worktreePath !== worktree.worktreePath ||
+    gitSnapshot.branch !== worktree.branchName ||
+    gitSnapshot.baseSha !== worktree.baseSha ||
+    gitSnapshot.baseRef !== worktree.baseRef
+  ) {
+    return 'Refresh Git evidence for the attached checkout before continuing.';
+  }
+  if (gitSnapshot.conflictedCount > 0 || gitSnapshot.status === 'CONFLICTED') {
+    return 'Resolve Git conflicts in the existing application, then refresh Git.';
+  }
+  if (gitSnapshot.operationInProgress) {
+    return 'Finish the Git operation in the existing application, then refresh Git.';
+  }
+  return undefined;
 }
 
 export function canCancelRun(run: RunRecord | undefined): boolean {

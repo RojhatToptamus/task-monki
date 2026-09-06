@@ -4276,7 +4276,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       task,
       iteration,
       worktree,
-      sourceRun,
+      sourceRun: (await store.getRun(sourceRun.id))!,
       target: { type: 'UNCOMMITTED_CHANGES' },
       settings: task.agentSettings
     });
@@ -4351,7 +4351,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       task,
       iteration,
       worktree,
-      sourceRun,
+      sourceRun: (await store.getRun(sourceRun.id))!,
       target: { type: 'UNCOMMITTED_CHANGES' },
       settings: reviewSettings
     });
@@ -4522,7 +4522,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         task,
         iteration,
         worktree,
-        sourceRun,
+        sourceRun: (await store.getRun(sourceRun.id))!,
         target: { type: 'UNCOMMITTED_CHANGES' },
         settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
       })
@@ -4855,7 +4855,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         task,
         iteration,
         worktree,
-        sourceRun,
+        sourceRun: (await store.getRun(sourceRun.id))!,
         target: { type: 'UNCOMMITTED_CHANGES' },
         settings: { ...task.agentSettings, reasoningEffort: 'low' }
       })
@@ -4936,7 +4936,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         task,
         iteration,
         worktree,
-        sourceRun,
+        sourceRun: (await store.getRun(sourceRun.id))!,
         target: { type: 'UNCOMMITTED_CHANGES' },
         settings: { ...task.agentSettings, reasoningEffort: 'low' }
       })
@@ -5013,7 +5013,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       task,
       iteration,
       worktree,
-      sourceRun,
+      sourceRun: (await store.getRun(sourceRun.id))!,
       target: { type: 'UNCOMMITTED_CHANGES' },
       settings: task.agentSettings
     });
@@ -5075,7 +5075,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       task,
       iteration,
       worktree,
-      sourceRun,
+      sourceRun: (await store.getRun(sourceRun.id))!,
       target: { type: 'UNCOMMITTED_CHANGES' },
       settings: task.agentSettings
     });
@@ -5128,7 +5128,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       task,
       iteration,
       worktree,
-      sourceRun,
+      sourceRun: (await store.getRun(sourceRun.id))!,
       target: { type: 'UNCOMMITTED_CHANGES' },
       settings: task.agentSettings
     });

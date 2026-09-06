@@ -452,6 +452,7 @@ function worktreeFixture(worktreePath: string): WorktreeRecord {
     taskId: 'task-1',
     iterationId: 'iteration-1',
     repositoryId: 'repository-1',
+    ownership: 'TASK_MONKI' as const,
     worktreePath,
     branchName: 'codex/task-test',
     baseSha: 'base',

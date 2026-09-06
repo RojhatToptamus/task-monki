@@ -218,11 +218,16 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
     return { label: 'Re-verify', tone: 'action' };
   }
 
+  if (task.workflowPhase === 'REVIEW' && !task.currentRunId &&
+    (!task.projection.agentReview || task.projection.agentReview.status === 'NOT_RUN')) {
+    return { label: 'Ready for review', tone: 'action' };
+  }
+
   if (task.workflowPhase === 'REVIEW' || task.workflowPhase === 'IN_REVIEW') {
     return { label: 'Reviewing', tone: 'neutral' };
   }
   if (task.workflowPhase === 'IN_PROGRESS') {
-    return { label: 'Implementing', tone: 'info' };
+    return { label: 'In progress', tone: 'neutral' };
   }
 
   return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };

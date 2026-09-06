@@ -80,7 +80,7 @@ describe('PreviewPlanResolver', () => {
     const plan = await resolver.resolve({
       task: { id: 'task', kind: 'NORMAL', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', runtimeId: 'codex', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
       iteration: { id: 'iteration', taskId: 'task', actionRequestId: 'action', generationKey: 'generation', branchName: 'codex/task', baseSha: 'base', status: 'ACTIVE', worktreeId: 'worktree', createdAt: now, updatedAt: now },
-      worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
+      worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', ownership: 'TASK_MONKI' as const, worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
       parsed: parsePreviewRecipe(`
 version: 1
 compose:
@@ -109,7 +109,7 @@ function resolve(worktreePath: string, cwd: string) {
   return new PreviewPlanResolver().resolve({
     task: { id: 'task', kind: 'NORMAL', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', runtimeId: 'codex', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
     iteration: { id: 'iteration', taskId: 'task', actionRequestId: 'action', generationKey: 'generation', branchName: 'codex/task', baseSha: 'base', status: 'ACTIVE', worktreeId: 'worktree', createdAt: now, updatedAt: now },
-    worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
+    worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', ownership: 'TASK_MONKI' as const, worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
     parsed: parsePreviewRecipe(`version: 1
 services:
   web:
@@ -149,7 +149,7 @@ function resolveOci(
   return resolver.resolve({
     task: { id: 'task', kind: 'NORMAL', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', runtimeId: 'codex', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
     iteration: { id: 'iteration', taskId: 'task', actionRequestId: 'action', generationKey: 'generation', branchName: 'codex/task', baseSha: 'base', status: 'ACTIVE', worktreeId: 'worktree', createdAt: now, updatedAt: now },
-    worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
+    worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', ownership: 'TASK_MONKI' as const, worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
     parsed: parsePreviewRecipe(`version: 1
 resources:
   database:

@@ -195,6 +195,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     optionalStrings(worktree, 'worktrees', ['baseRef', 'headSha', 'error']);
     uuidFields(worktree, 'worktrees', ['id', 'taskId', 'iterationId', 'repositoryId']);
     enumField(worktree, 'status', WORKTREE_STATUSES, 'worktrees');
+    enumField(worktree, 'ownership', ['TASK_MONKI', 'EXTERNAL'] as const, 'worktrees');
     timestamp(worktree, 'createdAt', 'worktrees');
     timestamp(worktree, 'updatedAt', 'worktrees');
     optionalTimestamp(worktree, 'lastVerifiedAt', 'worktrees');
@@ -1096,7 +1097,7 @@ function validateGitHubRecords(state: StoreState): void {
   }
   for (const record of state.branchPublications) {
     strings(record, 'branchPublications', ['remoteName', 'branchName', 'remoteRef']);
-    optionalStrings(record, 'branchPublications', ['headSha', 'error']);
+    optionalStrings(record, 'branchPublications', ['headSha', 'remoteUrl', 'error']);
     enumField(record, 'status', BRANCH_PUBLICATION_STATUSES, 'branchPublications');
     timestamp(record, 'requestedAt', 'branchPublications');
     timestamp(record, 'updatedAt', 'branchPublications');
