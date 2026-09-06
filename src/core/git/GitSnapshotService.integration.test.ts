@@ -102,6 +102,25 @@ describe('captureGitObservation', () => {
     }
   );
 
+  it.each(['TASK_MONKI', 'EXTERNAL'] as const)('observes healthy %s work after upstream pruning, but rejects a broken upstream', async (ownership) => {
+    const { worktree } = await createFixture();
+    worktree.ownership = ownership;
+    const cwd = worktree.worktreePath;
+    const ref = `refs/remotes/origin/${worktree.branchName}`;
+    await runGit(cwd, ['remote', 'add', 'origin', 'https://example.invalid/repo.git']);
+    await runGit(cwd, ['config', `branch.${worktree.branchName}.remote`, 'origin']);
+    await runGit(cwd, ['config', `branch.${worktree.branchName}.merge`, `refs/heads/${worktree.branchName}`]);
+    await runGit(cwd, ['update-ref', ref, worktree.baseSha]);
+    expect((await inspectGitSnapshot(worktree)).upstreamSha).toBe(worktree.baseSha);
+    await runGit(cwd, ['update-ref', '-d', ref]);
+    expect(await inspectGitSnapshot(worktree)).toMatchObject({ status: 'CLEAN', upstreamRef: `origin/${worktree.branchName}`, upstreamSha: undefined });
+
+    const refPath = path.resolve(cwd, (await runGit(cwd, ['rev-parse', '--git-path', ref])).trim());
+    await fs.mkdir(path.dirname(refPath), { recursive: true });
+    await fs.writeFile(refPath, `${'1'.repeat(40)}\n`);
+    await expect(inspectGitSnapshot(worktree)).rejects.toThrow();
+  });
+
   it.each(['edit', 'stage', 'untracked edit', 'commit', 'branch switch', 'metadata replacement'] as const)(
     'rejects an external %s between snapshot and diff capture',
     async (change) => {

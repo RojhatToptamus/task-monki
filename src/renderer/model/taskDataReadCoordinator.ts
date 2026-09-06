@@ -3,9 +3,11 @@ import type {
   TaskDetailSnapshot
 } from '../../shared/contracts';
 
+export type TaskOpenResult = 'opened' | 'failed' | 'superseded';
+
 export interface TaskDataReadCoordinator {
   refreshBoard(): Promise<void>;
-  openTask(taskId: string): Promise<void>;
+  openTask(taskId: string): Promise<TaskOpenResult>;
   refreshSelectedTask(): Promise<void>;
   closeTask(): void;
   selectedTaskId(): string | undefined;
@@ -22,6 +24,7 @@ export function createTaskDataReadCoordinator(input: {
   let boardGeneration = 0;
   let detailGeneration = 0;
   let activeTaskId: string | undefined;
+  let activeDetailRead: Promise<TaskOpenResult> | undefined;
 
   const refreshBoard = async () => {
     const generation = ++boardGeneration;
@@ -33,7 +36,7 @@ export function createTaskDataReadCoordinator(input: {
     }
   };
 
-  const readActiveTask = async (taskId: string, generation: number) => {
+  const readActiveTask = async (taskId: string, generation: number): Promise<TaskOpenResult> => {
     try {
       const detail = await input.readTaskDetail(taskId);
       if (
@@ -41,6 +44,7 @@ export function createTaskDataReadCoordinator(input: {
         taskId === activeTaskId
       ) {
         input.applyTaskDetail(detail);
+        return 'opened';
       }
     } catch (error) {
       if (
@@ -48,8 +52,13 @@ export function createTaskDataReadCoordinator(input: {
         taskId === activeTaskId
       ) {
         input.reportTaskDetailError(taskId, error);
+        return 'failed';
       }
     }
+    // A refresh of this same task may overtake its opening read. Navigation
+    // follows that read's result; switching to a different task is not an error.
+    return taskId === activeTaskId && activeDetailRead
+      ? activeDetailRead : 'superseded';
   };
 
   return {
@@ -57,15 +66,18 @@ export function createTaskDataReadCoordinator(input: {
     openTask(taskId) {
       activeTaskId = taskId;
       const generation = ++detailGeneration;
-      return readActiveTask(taskId, generation);
+      activeDetailRead = readActiveTask(taskId, generation);
+      return activeDetailRead;
     },
-    refreshSelectedTask() {
-      if (!activeTaskId) return Promise.resolve();
+    async refreshSelectedTask() {
+      if (!activeTaskId) return;
       const generation = ++detailGeneration;
-      return readActiveTask(activeTaskId, generation);
+      activeDetailRead = readActiveTask(activeTaskId, generation);
+      await activeDetailRead;
     },
     closeTask() {
       activeTaskId = undefined;
+      activeDetailRead = undefined;
       detailGeneration += 1;
     },
     selectedTaskId() {

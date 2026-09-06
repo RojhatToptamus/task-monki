@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
@@ -102,6 +103,7 @@ interface NewTaskPanelProps {
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
   onResize?(): void;
   onClose(): void;
+  closeRequestRef?: RefObject<((afterClose: () => void) => void) | null>;
 }
 
 export function ExecutionPolicySelect({
@@ -232,7 +234,8 @@ export function NewTaskPanel({
   returnFocusRef,
   fallbackReturnFocusRef,
   onResize,
-  onClose
+  onClose,
+  closeRequestRef
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState(initialTextDraft?.title ?? '');
   const [prompt, setPrompt] = useState(initialTextDraft?.prompt ?? '');
@@ -449,8 +452,9 @@ export function NewTaskPanel({
     slideoverRef.current?.style.setProperty('--slideover-width', `${panelWidth}px`);
   }, [panelWidth]);
 
-  const closePanel = useCallback(() => {
-    if (panelClosedRef.current || submittingRef.current) return;
+  const closePanel = useCallback((afterClose = onClose) => {
+    if (panelClosedRef.current || submittingRef.current || isClosing) return;
+    if (afterClose !== onClose) returnFocusAfterCloseRef.current = false;
     setIsClosing(true);
     const activeRefinement = activeRefinementRef.current;
     activeRefinementRef.current = undefined;
@@ -460,13 +464,15 @@ export function NewTaskPanel({
         .catch(() => undefined)
         .finally(() => {
           closeAttachments();
-          onClose();
+          afterClose();
         });
       return;
     }
     closeAttachments();
-    onClose();
-  }, [closeAttachments, onCancelPromptRefinement, onClose, panelClosedRef]);
+    afterClose();
+  }, [closeAttachments, isClosing, onCancelPromptRefinement, onClose, panelClosedRef]);
+
+  useImperativeHandle(closeRequestRef, () => closePanel, [closePanel]);
 
   useDialogFocusBoundary({
     dialogRef: panelRef,
@@ -728,7 +734,7 @@ export function NewTaskPanel({
             className="slideover__close"
             aria-label="Close"
             disabled={isSubmitting}
-            onClick={closePanel}
+            onClick={() => closePanel()}
           >
             <CloseIcon />
           </button>
@@ -998,7 +1004,7 @@ export function NewTaskPanel({
               type="button"
               className="outline-button"
               disabled={isSubmitting}
-              onClick={closePanel}
+              onClick={() => closePanel()}
             >
               {creationOutcomeUnknown ? 'Close' : 'Cancel'}
             </button>

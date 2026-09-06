@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentModel, Repository } from '../../shared/contracts';
 import {
@@ -13,6 +14,38 @@ type RefinePromptInput = Parameters<
 >[0];
 
 describe('mounted NewTaskPanel prompt refinement', () => {
+  it('uses the close lifecycle for an entry-mode switch, waiting for refinement cancellation', async () => {
+    const closeRequestRef = createRef<((afterClose: () => void) => void)>();
+    let cancel!: () => void;
+    const onCancelPromptRefinement = vi.fn(() => new Promise<void>((resolve) => { cancel = resolve; }));
+    const onRefinePrompt = vi.fn(() => new Promise<never>(() => undefined));
+    const switchPanel = vi.fn();
+    const onClose = vi.fn();
+    renderPanel({ closeRequestRef, onRefinePrompt, onCancelPromptRefinement, onClose });
+    fireEvent.click(screen.getByRole('button', { name: 'Refine' }));
+    await waitFor(() => expect(onRefinePrompt).toHaveBeenCalledOnce());
+    act(() => closeRequestRef.current!(switchPanel));
+    expect(onCancelPromptRefinement).toHaveBeenCalledOnce();
+    expect(switchPanel).not.toHaveBeenCalled();
+    await act(async () => cancel());
+    expect(switchPanel).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps the current entry panel mounted while task creation is pending', async () => {
+    const closeRequestRef = createRef<((afterClose: () => void) => void)>();
+    let finish!: () => void;
+    const onCreate = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const switchPanel = vi.fn();
+    renderPanel({ closeRequestRef, onCreate });
+    fireEvent.submit(screen.getByRole('form', { name: 'New task' }));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    act(() => closeRequestRef.current!(switchPanel));
+    expect(switchPanel).not.toHaveBeenCalled();
+    expect(screen.getByRole('form', { name: 'New task' })).toBeTruthy();
+    await act(async () => finish());
+  });
+
   it('sends the full refinement input and invalidates a proposal when that input changes', async () => {
     const onRefinePrompt = vi.fn(async (_input: RefinePromptInput) => ({
       titleSuggestion: 'Clarify the sync badge',
@@ -102,6 +135,8 @@ function renderPanel(overrides: {
     typeof NewTaskPanel
   >['onCancelPromptRefinement'];
   onClose?: () => void;
+  onCreate?: React.ComponentProps<typeof NewTaskPanel>['onCreate'];
+  closeRequestRef?: React.ComponentProps<typeof NewTaskPanel>['closeRequestRef'];
 } = {}) {
   const model: AgentModel = {
     id: 'codex:test-model',
@@ -143,7 +178,8 @@ function renderPanel(overrides: {
       ]}
       defaultAgentSettings={{ runtimeId: 'codex', model: 'test-model' }}
       initialTextDraft={{ title: 'Sync badge', prompt: 'add a sync badge' }}
-      onCreate={async () => undefined}
+      onCreate={overrides.onCreate ?? (async () => undefined)}
+      closeRequestRef={overrides.closeRequestRef}
       onRefinePrompt={
         overrides.onRefinePrompt ??
         (async () => ({

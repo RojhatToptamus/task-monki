@@ -273,6 +273,7 @@ export function App() {
   const [isCanvasDragging, setIsCanvasDragging] = useState(false);
   const newTaskButtonRef = useRef<HTMLButtonElement>(null);
   const importTaskButtonRef = useRef<HTMLButtonElement>(null);
+  const taskEntryCloseRef = useRef<((afterClose: () => void) => void) | null>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
   const focusedHistoryCompactRef = useRef(
     focusedWorkspaceUsesCompactHistory(window.innerWidth)
@@ -368,13 +369,16 @@ export function App() {
     if (isNewTaskClosing) {
       return;
     }
-    setTaskEntryMode(mode);
     if (isNewTaskOpen) {
+      if (mode !== taskEntryMode) {
+        taskEntryCloseRef.current?.(() => setTaskEntryMode(mode));
+      }
       revealNewTaskPanel();
       return;
     }
+    setTaskEntryMode(mode);
     setIsNewTaskOpen(true);
-  }, [isNewTaskClosing, isNewTaskOpen, revealNewTaskPanel]);
+  }, [isNewTaskClosing, isNewTaskOpen, revealNewTaskPanel, taskEntryMode]);
 
   const closeNewTask = useCallback(() => {
     if (isNewTaskClosing) {
@@ -1683,38 +1687,6 @@ export function App() {
   const selectedWorktree = selectedTask && taskDetail
     ? selectCurrentWorktree(taskDetail, selectedTask)
     : undefined;
-  const attachedTaskId = isDetailOpen && selectedWorktree?.ownership === 'EXTERNAL'
-    ? selectedWorktree.taskId : undefined;
-  useEffect(() => {
-    if (!attachedTaskId) return;
-    let active = true;
-    const observer = createUpdateRefreshScheduler({
-      delayMs: AUTHORITATIVE_REFRESH_DELAY_MS,
-      refresh: async () => {
-        try {
-          await taskManagerApi.refreshEvidence({ taskId: attachedTaskId });
-        } catch {
-          // The service records unavailable Git evidence. Preserve the task
-          // detail so that its recovery controls remain reachable.
-        }
-        if (active) await taskDataCoordinator.refreshSelectedTask();
-      },
-      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
-      clearTimer: (handle) => window.clearTimeout(handle as number)
-    });
-    const observeVisible = () => {
-      if (document.visibilityState !== 'hidden') observer.request();
-    };
-    observeVisible();
-    window.addEventListener('focus', observeVisible);
-    document.addEventListener('visibilitychange', observeVisible);
-    return () => {
-      active = false;
-      observer.dispose();
-      window.removeEventListener('focus', observeVisible);
-      document.removeEventListener('visibilitychange', observeVisible);
-    };
-  }, [attachedTaskId, taskDataCoordinator]);
   const selectedGitSnapshot = selectedTask && taskDetail
     ? selectLatestGitSnapshot(taskDetail, selectedTask)
     : undefined;
@@ -1972,6 +1944,18 @@ export function App() {
       await refresh();
     }
   };
+
+  const observeWorktree = useCallback(async (taskId: string) => {
+    try {
+      await taskManagerApi.refreshEvidence({ taskId });
+    } catch {
+      // Reload the service's evidence and recovery controls without turning a
+      // background observation into a user-action error notification.
+    }
+    if (taskDataCoordinator.selectedTaskId() === taskId) {
+      await taskDataCoordinator.refreshSelectedTask();
+    }
+  }, [taskDataCoordinator]);
 
   const reconnectWorktree = async (taskId: string) => {
     setError(undefined);
@@ -3101,6 +3085,7 @@ export function App() {
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onRefreshEvidence={refreshEvidence}
+            onObserveWorktree={observeWorktree}
             onReconnectWorktree={reconnectWorktree}
             onUpdateWorktreeComparison={updateWorktreeComparison}
             onStart={startRun}
@@ -3281,10 +3266,15 @@ export function App() {
               onImported={async (taskId) => {
                 taskNavigationReturnFocusRef.current = importTaskButtonRef.current;
                 await taskDataCoordinator.refreshBoard();
-                await openTaskDetail(taskId);
-                closeNewTask();
+                const result = await openTaskDetail(taskId);
+                if (result === 'failed') {
+                  throw new Error('Could not open the imported task. Try Open task again.');
+                }
+                if (result === 'opened') closeNewTask();
               }}
+              closeRequestRef={taskEntryCloseRef}
             /> : <NewTaskPanel
+              closeRequestRef={taskEntryCloseRef}
               repositoryId={activeRepositoryId}
               repositories={snapshot.repositories}
               models={enabledRuntimeModels}

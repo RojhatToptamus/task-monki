@@ -114,6 +114,7 @@ export function ReviewRequestDrawer({
   firstImplementation = false,
   sharedCheckout = false,
   disabledReason,
+  error,
   findings,
   selectedFindingIds,
   note,
@@ -130,6 +131,7 @@ export function ReviewRequestDrawer({
   firstImplementation?: boolean;
   sharedCheckout?: boolean;
   disabledReason?: string;
+  error?: string;
   findings: AgentReviewFinding[];
   selectedFindingIds: string[];
   note: string;
@@ -160,13 +162,10 @@ export function ReviewRequestDrawer({
       <div className="tm-reviewdrawer__scrim" onClick={busy ? undefined : onCancel} />
       <aside ref={panelRef} className="tm-reviewdrawer__panel" tabIndex={-1}>
         <header className="tm-reviewdrawer__header">
-          <div>
-            <h3>{title}</h3>
-            <p>{firstImplementation ? 'Describe the work to perform' : 'Start a follow-up run with the selected findings'} for #{formatShortId(task.id)}.</p>
-          </div>
+          <h3>{title}</h3>
           <button
             type="button"
-            className="tm-reviewdrawer__close"
+            className="tm-iconbtn tm-reviewdrawer__close"
             disabled={busy}
             aria-label={`Close ${title.toLowerCase()}`}
             onClick={onCancel}
@@ -176,20 +175,21 @@ export function ReviewRequestDrawer({
         </header>
 
         <div className="tm-reviewdrawer__body">
+          <p className="tm-reviewdrawer__context"><span>#{formatShortId(task.id)}</span>{task.title}</p>
           {sharedCheckout ? <p className="form-warning">This starts work in the shared checkout. Avoid concurrent edits in another app.</p> : null}
           {disabledReason ? <p className="form-warning" role="status">{disabledReason}</p> : null}
           {firstImplementation ? (
-            <label className="tm-reviewdrawer__section">
-              <h4>Instruction to agent</h4>
+            <label className="field tm-reviewdrawer__section">
+              <span className="field__label">Instruction to agent</span>
               <textarea
                 ref={instructionRef}
                 value={instruction}
                 disabled={disabled}
                 onChange={(event) => onInstructionChange(event.target.value)}
-                rows={11}
+                rows={8}
               />
             </label>
-          ) : <div inert={disabled ? true : undefined}>
+          ) : <div className="tm-reviewdrawer__sections" inert={disabled ? true : undefined}>
           <section className="tm-reviewdrawer__section">
             <h4>Findings to attach · {selectedCount} selected</h4>
             {findings.length > 0 ? (
@@ -218,11 +218,10 @@ export function ReviewRequestDrawer({
             )}
           </section>
 
-          <label className="tm-reviewdrawer__section">
-            <h4>Optional note</h4>
+          <label className="field tm-reviewdrawer__section">
+            <span className="field__label">Optional note</span>
             <textarea
               ref={noteRef}
-              className="tm-reviewdrawer__note"
               value={note}
               disabled={disabled}
               placeholder="Add context for the follow-up"
@@ -233,8 +232,8 @@ export function ReviewRequestDrawer({
 
           <details className="tm-reviewdrawer__instruction">
             <summary><DisclosureChevron /><span>Full instruction</span></summary>
-            <label>
-              <span>Instruction to agent</span>
+            <label className="field">
+              <span className="field__label">Instruction to agent</span>
               <textarea
                 value={instruction}
                 disabled={disabled}
@@ -248,7 +247,7 @@ export function ReviewRequestDrawer({
         </div>
 
         <footer className="tm-reviewdrawer__footer">
-          <span>Returns to Review when the work finishes.</span>
+          {error ? <p className="form-error" role="alert">Could not start the run. {error} Your instruction is preserved.</p> : null}
           <div>
             <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
               Cancel
@@ -257,6 +256,7 @@ export function ReviewRequestDrawer({
               type="button"
               className="primary-button"
               disabled={disabled || !instruction.trim()}
+              title={!instruction.trim() ? 'Enter an instruction before sending.' : disabledReason}
               onClick={onSubmit}
             >
               {busy ? 'Sending...' : 'Send to agent'}

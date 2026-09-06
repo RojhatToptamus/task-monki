@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import type {
@@ -349,7 +350,6 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   readonly steeredTurns: SteerAgentTurn[] = [];
   ambiguousStart = false;
   ambiguousInterrupt = false;
-  private threadCounter = 0;
   private turnCounter = 0;
 
   constructor(private readonly store: FileTaskStore) {}
@@ -404,10 +404,10 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
-    this.threadCounter += 1;
+    const providerSessionId = `scenario-thread-${randomUUID()}`;
     return this.store.updateAgentSession(input.localSessionId, {
-      providerSessionId: `scenario-thread-${this.threadCounter}`,
-      providerSessionTreeId: `scenario-thread-${this.threadCounter}`,
+      providerSessionId,
+      providerSessionTreeId: providerSessionId,
       status: 'IDLE',
       materialized: true,
       requestedSettings: input.settings
@@ -473,10 +473,10 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   async startReview(input: StartAgentReview): Promise<AgentTurn> {
     this.startedReviews.push(input);
-    this.threadCounter += 1;
+    const providerSessionId = `scenario-review-thread-${randomUUID()}`;
     await this.store.updateAgentSession(input.reviewSessionId, {
-      providerSessionId: `scenario-review-thread-${this.threadCounter}`,
-      providerSessionTreeId: `scenario-review-thread-${this.threadCounter}`,
+      providerSessionId,
+      providerSessionTreeId: providerSessionId,
       status: 'ACTIVE',
       materialized: true
     });
@@ -508,7 +508,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     prefix: string
   ): Promise<AgentTurn> {
     this.turnCounter += 1;
-    const providerTurnId = `${prefix}-${this.turnCounter}`;
+    const providerTurnId = `${prefix}-${randomUUID()}`;
     const run = await requireRun(this.store, localRunId);
     await this.store.updateAgentSession(localSessionId, { status: 'ACTIVE' });
     await this.store.updateRun(localRunId, {

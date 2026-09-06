@@ -19,6 +19,62 @@ beforeEach(() => {
 });
 
 describe('attached work in TaskDetail', () => {
+  it('preserves a failed instruction for retry and pauses automatic Git refresh while the drawer is open', async () => {
+    const onObserveWorktree = vi.fn().mockResolvedValue(undefined);
+    const onStart = vi.fn().mockRejectedValueOnce(new Error('Provider is unavailable.')).mockResolvedValue(undefined);
+    render(<TaskDetail {...fixture({ onObserveWorktree, onStart })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
+    const drawer = screen.getByRole('dialog', { name: 'Start implementation' });
+    const instruction = within(drawer).getByRole('textbox', { name: 'Instruction to agent' }) as HTMLTextAreaElement;
+    fireEvent.change(instruction, { target: { value: 'Preserve the existing changes.' } });
+    fireEvent(window, new Event('focus'));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+    expect(onObserveWorktree).not.toHaveBeenCalled();
+    expect(instruction.disabled).toBe(false);
+    const send = within(drawer).getByRole('button', { name: 'Send to agent' });
+    fireEvent.click(send);
+    expect((await within(drawer).findByRole('alert')).textContent).toContain('instruction is preserved');
+    expect(instruction.value).toBe('Preserve the existing changes.');
+    expect(instruction.disabled).toBe(false);
+    fireEvent.click(send);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Start implementation' })).toBeNull());
+    expect(onStart).toHaveBeenNthCalledWith(2, 'task-1', 'Preserve the existing changes.', undefined);
+    await waitFor(() => expect(onObserveWorktree).toHaveBeenCalledOnce());
+  });
+
+  it('coordinates background observation with reconnect and defers focus refresh until the picker action finishes', async () => {
+    let finishObservation!: () => void;
+    let finishReconnect!: () => void;
+    const onObserveWorktree = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { finishObservation = resolve; }))
+      .mockResolvedValue(undefined);
+    const onReconnectWorktree = vi.fn(() => new Promise<void>((resolve) => { finishReconnect = resolve; }));
+    const props = fixture({ worktree: { ...worktree, status: 'MISSING' }, onObserveWorktree, onReconnectWorktree });
+    const { unmount } = render(<TaskDetail {...props} />);
+    await waitFor(() => expect(onObserveWorktree).toHaveBeenCalledWith('task-1'));
+    const reconnect = screen.getByRole('button', { name: 'Reconnect worktree' }) as HTMLButtonElement;
+    expect(reconnect.disabled).toBe(true);
+    fireEvent.click(reconnect);
+    expect(onReconnectWorktree).not.toHaveBeenCalled();
+
+    await act(async () => finishObservation());
+    fireEvent.click(reconnect);
+    expect(onReconnectWorktree).toHaveBeenCalledOnce();
+    fireEvent(window, new Event('focus'));
+    fireEvent(window, new Event('focus'));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+    expect(onObserveWorktree).toHaveBeenCalledOnce();
+    expect((screen.getByRole('button', { name: 'Refresh Git' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => finishReconnect());
+    await waitFor(() => expect(onObserveWorktree).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(reconnect.disabled).toBe(false));
+
+    unmount();
+    fireEvent(window, new Event('focus'));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(onObserveWorktree).toHaveBeenCalledTimes(2);
+  });
+
   it('offers a detached review without inventing a primary run', async () => {
     const props = fixture();
     render(<TaskDetail {...props} />);

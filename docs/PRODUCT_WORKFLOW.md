@@ -78,6 +78,9 @@ Import attaches an existing primary or linked checkout on its current named
 branch. It creates no checkout, branch, clone, file mirror, or external agent
 session. The task, iteration, and external worktree record publish together.
 Repeated submissions and duplicate checkout selections open the existing task.
+If the task cannot load, Import retains the selection and offers another attempt.
+Switching between New task and Import uses the outgoing panel's normal cleanup.
+An active submission keeps its panel open until the request finishes.
 
 The task starts In Progress with no Task Monki agent run. Ready for review is
 an explicit choice, available during import or later. External commits do not
@@ -93,7 +96,8 @@ Task open, window focus, and Refresh Git request a local Git observation.
 Ordinary record reloads do not inspect Git. Repeated focus events coalesce,
 and unchanged observations reuse stored evidence. Failed observation preserves
 history but makes current Git evidence unavailable. There is no continuous
-file watcher or background polling of the checkout.
+file watcher or background polling of the checkout. Automatic observations wait
+for active task actions and dialogs to finish, including the reconnect folder picker.
 
 Refresh PR reads GitHub independently. Import also discovers an unambiguous
 same-repository PR without publishing the branch. GitHub errors mean unavailable
@@ -104,6 +108,11 @@ Run agent review works without an implementation run. Request changes and
 Start implementation require an explicit instruction before Task Monki writes
 to the shared checkout. The user must avoid concurrent external writes during
 that action. Review findings remain historical after external edits.
+
+Retry retains the saved instruction and any earlier retry guidance, even after
+provider startup fails. It appends current Git evidence and new guidance without
+changing the task description or native goal. Incomplete saved prompts and retries
+that exceed the artifact limit require a new explicit instruction through Continue work.
 
 Preview uses its existing source capture. Refresh Git can mark that capture
 stale but does not change the running preview. Replace captures newer saved

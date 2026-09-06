@@ -5,8 +5,9 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ImportTaskRequest } from '../../shared/contracts';
+import { buildRetryPrompt } from '../../shared/promptTemplates';
 import { ScriptedAgentRuntimeAdapter, TaskMonkiScenarioRegistry, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { AGENT_PROMPT_CONTENT_BYTE_LIMIT, FileTaskStore } from '../storage/FileTaskStore';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { TaskManagerService } from './TaskManagerService';
 
@@ -18,6 +19,124 @@ afterEach(async () => {
 });
 
 describe('existing checkout attachment', () => {
+  it.each(['truncated source', 'exact ceiling', 'UTF-8 overflow'] as const)(
+    'retries only complete saved instructions: %s', async (boundary) => {
+      const scenario = await scenarios.create();
+      const { task } = await scenario.service.importTask(await linkedRequest(scenario));
+      const create = vi.spyOn(scenario.agent, 'createSession')
+        .mockRejectedValueOnce(new Error('Provider startup failed'));
+      await expect(scenario.service.startRun({
+        taskId: task.id,
+        instruction: boundary === 'truncated source'
+          ? 'x'.repeat(AGENT_PROMPT_CONTENT_BYTE_LIMIT + 1) : 'Preserve existing work.'
+      })).rejects.toThrow('Provider startup failed');
+      create.mockRestore();
+      const before = await scenario.waitForSnapshot((state) => Boolean(state.runs[0]?.afterGitSnapshotId));
+      const run = before.runs[0]!;
+      let instruction: string | undefined;
+      if (boundary !== 'truncated source') {
+        const previousPrompt = await scenario.store.readArtifact(run.promptArtifactId);
+        const minimum = buildRetryPrompt({
+          task, run, previousPrompt, instruction: 'g',
+          gitSnapshot: before.gitSnapshots.find((snapshot) => snapshot.id === run.beforeGitSnapshotId)!
+        });
+        const available = AGENT_PROMPT_CONTENT_BYTE_LIMIT - Buffer.byteLength(minimum, 'utf8') + 1;
+        instruction = boundary === 'exact ceiling'
+          ? 'g'.repeat(available) : 'g'.repeat(available - 1) + 'é';
+      }
+      const retry = scenario.service.retryRun({ taskId: task.id, runId: run.id, strategy: 'SAME_SESSION', instruction });
+      if (boundary === 'exact ceiling') {
+        const retried = await retry;
+        const delivered = scenario.agent.startedTurns.at(-1)!.prompt;
+        expect(Buffer.byteLength(delivered, 'utf8')).toBe(AGENT_PROMPT_CONTENT_BYTE_LIMIT);
+        expect(await scenario.store.readArtifact(retried.promptArtifactId)).toBe(delivered);
+      } else {
+        await expect(retry).rejects.toThrow(boundary === 'truncated source' ? 'previous request is incomplete' : 'exceeds the saved prompt limit');
+        const after = await scenario.store.snapshot();
+        expect(after.runs).toEqual(before.runs);
+        expect(after.agentSessions).toEqual(before.agentSessions);
+        expect(after.tasks[0]?.currentRunId).toBe(run.id);
+        expect(scenario.agent.startedTurns).toEqual([]);
+      }
+    }, 30_000
+  );
+
+  it('retains the explicit request across failed provider startup and repeated retries', async () => {
+    const scenario = await scenarios.create();
+    const { task } = await scenario.service.importTask(await linkedRequest(scenario));
+    const instruction = 'Add exactly one regression test for checkout recovery; change nothing else.';
+    const create = vi.spyOn(scenario.agent, 'createSession')
+      .mockRejectedValueOnce(new Error('Temporary provider startup failure'));
+    await expect(scenario.service.startRun({ taskId: task.id, instruction }))
+      .rejects.toThrow('Temporary provider startup failure');
+    expect(scenario.agent.startedTurns).toEqual([]);
+    create.mockRestore();
+    const failed = (await scenario.store.snapshot()).runs[0]!;
+    const guidance = 'Do not change migration SQL.';
+    const secondFailure = vi.spyOn(scenario.agent, 'createSession')
+      .mockRejectedValueOnce(new Error('Another startup failure'));
+    await expect(scenario.service.retryRun({
+      taskId: task.id, runId: failed.id, strategy: 'SAME_SESSION', instruction: guidance
+    })).rejects.toThrow('Another startup failure');
+    secondFailure.mockRestore();
+    expect(scenario.agent.startedTurns).toEqual([]);
+    const second = (await scenario.store.snapshot()).runs[0]!;
+    let source = second;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const retry = await scenario.service.retryRun({
+        taskId: task.id, runId: source.id, strategy: 'SAME_SESSION'
+      });
+      const delivered = scenario.agent.startedTurns.at(-1)!;
+      expect(delivered.prompt).toContain(instruction);
+      expect(delivered.prompt).toContain(guidance);
+      expect(delivered.authoritativeGoal).toBe(task.prompt);
+      expect(delivered.prompt.split(instruction)).toHaveLength(2);
+      await scenario.store.updateRun(retry.id, { status: 'FAILED', terminalReason: 'Provider exited.' });
+      source = retry;
+    }
+    expect((await scenario.store.getTask(task.id))?.prompt).toBe(task.prompt);
+  }, 30_000);
+
+  it('reopens safely after replacement-run artifact failure and then binds the new session with its run', async () => {
+    const scenario = await scenarios.create();
+    const request = await linkedRequest(scenario);
+    const { task } = await scenario.service.importTask(request);
+    const original = await scenario.service.startRun({ taskId: task.id, instruction: 'Inspect this fixture.' });
+    const originalSession = await scenario.store.getAgentSession(original.sessionId);
+    await scenario.completeRun(original.id);
+    await scenario.waitForSnapshot((state) => Boolean(state.runs.find((run) => run.id === original.id)?.afterGitSnapshotId));
+    const moved = path.join(scenario.rootDir, 'moved-external');
+    await externalGit(scenario.repositoryPath, ['worktree', 'move', request.worktreePath, moved]);
+    await scenario.service.reconnectWorktree({ taskId: task.id, worktreePath: moved });
+    const open = fs.open.bind(fs);
+    const fail = vi.spyOn(fs, 'open').mockImplementation(async (file, ...args) => {
+      if (String(file).includes('-agent-prompt-')) {
+        throw Object.assign(new Error('ENOSPC opening run prompt'), { code: 'ENOSPC' });
+      }
+      return open(file, ...args);
+    });
+    await expect(scenario.service.startRun({ taskId: task.id, instruction: 'Inspect the moved fixture.' }))
+      .rejects.toThrow('ENOSPC');
+    fail.mockRestore();
+    await scenario.service.shutdown();
+    const store = new FileTaskStore(path.join(scenario.rootDir, 'store'));
+    const restarted = new TaskManagerService(store, scenario.repositoryPath, undefined, {
+      worktreeRoot: scenario.worktreeRoot,
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+    });
+    try {
+      await restarted.init();
+      expect(await store.getTask(task.id)).toMatchObject({ currentRunId: original.id });
+      const next = await restarted.startRun({ taskId: task.id, instruction: 'Inspect the moved fixture.' });
+      expect(next.sessionId).not.toBe(original.sessionId);
+      expect(await store.getTask(task.id)).toMatchObject({ currentRunId: next.id, currentAgentSessionId: next.sessionId });
+      expect((await store.snapshot()).agentSessions.find((session) => session.id === original.sessionId)?.worktreePath)
+        .toBe(originalSession?.worktreePath);
+    } finally {
+      await restarted.shutdown();
+    }
+  }, 30_000);
+
   it('shares a dirty linked checkout without changing files, index, upstream, or agent history', async () => {
     const scenario = await scenarios.create();
     const request = await linkedRequest(scenario);

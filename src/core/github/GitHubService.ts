@@ -109,20 +109,22 @@ export class GitHubService {
   }): Promise<Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>> {
     const remoteName = input.remoteName ?? 'origin';
     const branchName = input.worktree.branchName;
-    let headSha: string;
-    let pushRemoteUrl: string | undefined;
+    let headSha = input.expectedHeadSha;
+    let pushRemoteUrl = input.worktree.ownership === 'EXTERNAL' ? input.expectedRemoteUrl : undefined;
     let pushArgs = ['push', '--set-upstream', remoteName, 'HEAD'];
-    if (input.worktree.ownership === 'EXTERNAL') {
-      const remote = await this.validateExternalDeliverySource({ ...input, remoteName });
-      headSha = input.expectedHeadSha!;
-      // Pin the explicit action's source and destination, not the task's future
-      // configuration. Do not change upstream or push a later external commit.
-      pushArgs = ['push', remote.remoteUrl, `${headSha}:refs/heads/${branchName}`];
-      pushRemoteUrl = remote.remoteUrl;
-    } else {
-      headSha = (await git(input.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
-    }
+    let pushAttempted = false;
     try {
+      if (input.worktree.ownership === 'EXTERNAL') {
+        const remote = await this.validateExternalDeliverySource({ ...input, remoteName });
+        headSha = input.expectedHeadSha!;
+        // Pin the explicit action's source and destination, not the task's future
+        // configuration. Do not change upstream or push a later external commit.
+        pushArgs = ['push', remote.remoteUrl, `${headSha}:refs/heads/${branchName}`];
+        pushRemoteUrl = remote.remoteUrl;
+      } else {
+        headSha = (await git(input.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+      }
+      pushAttempted = true;
       await git(input.worktree.worktreePath, pushArgs, 120_000);
       return {
         taskId: input.task.id,
@@ -137,7 +139,7 @@ export class GitHubService {
       };
     } catch (error) {
       const pushError = publishBranchErrorMessage(error);
-      if (isRejectedPushError(error)) {
+      if (!pushAttempted || isRejectedPushError(error)) {
         return {
           taskId: input.task.id,
           iterationId: input.worktree.iterationId,

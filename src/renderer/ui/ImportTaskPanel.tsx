@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
+import { useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
 import { FolderOpen, X } from 'lucide-react';
 import type {
   ExistingWorktreeOption,
@@ -22,6 +22,7 @@ export interface ImportTaskPanelProps {
   repositories: Repository[];
   initialRepositoryId?: string;
   onClose(): void;
+  closeRequestRef?: RefObject<((afterClose: () => void) => void) | null>;
   /** Open the task and close the panel through the parent workspace. */
   onImported(taskId: string): Promise<void> | void;
   /** Register the picked checkout and update the parent's repository list. */
@@ -35,6 +36,7 @@ export function ImportTaskPanel({
   repositories,
   initialRepositoryId,
   onClose,
+  closeRequestRef,
   onImported,
   onAddRepository,
   returnFocusRef,
@@ -139,6 +141,8 @@ export function ImportTaskPanel({
     slideoverRef.current?.style.setProperty('--slideover-width', `${panelWidth}px`);
   }, [panelWidth]);
 
+  useImperativeHandle(closeRequestRef, () => close);
+
   useDialogFocusBoundary({
     dialogRef: panelRef,
     initialFocusRef: titleInputRef,
@@ -216,11 +220,12 @@ export function ImportTaskPanel({
     if (id === repositoryId) setRefresh((value) => value + 1);
   }
 
-  function close() {
+  function close(afterClose = onClose) {
     if (closed || submitting) return;
+    if (afterClose !== onClose) returnFocusAfterClose.current = false;
     lifecycle.current += 1;
     setClosed(true);
-    onClose();
+    afterClose();
   }
 
   async function chooseFolder() {
@@ -324,7 +329,7 @@ export function ImportTaskPanel({
         />
         <header className="slideover__header">
           <div className="slideover__heading"><strong>Import existing work</strong></div>
-          <button type="button" className="slideover__close" aria-label="Close" title="Close" disabled={submitting} onClick={close}>
+          <button type="button" className="slideover__close" aria-label="Close" title="Close" disabled={submitting} onClick={() => close()}>
             <X aria-hidden="true" size={16} strokeWidth={1.5} />
           </button>
         </header>
@@ -446,7 +451,7 @@ export function ImportTaskPanel({
         </div>
         <footer className="slideover__footer">
           <div className="slideover__footer-actions">
-            <button type="button" className="outline-button" disabled={submitting} onClick={close}>Cancel</button>
+            <button type="button" className="outline-button" disabled={submitting} onClick={() => close()}>Cancel</button>
             <button type="submit" className="primary-button" disabled={Boolean(disabledReason)} title={disabledReason} aria-busy={submitting} aria-keyshortcuts="Meta+Enter Control+Enter">
               {submitting ? duplicate ? 'Opening…' : 'Importing…' : duplicate ? 'Open task' : 'Import task'}
             </button>

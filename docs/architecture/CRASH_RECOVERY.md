@@ -77,6 +77,8 @@ Explicit reconnect changes the current path but retains the comparison anchor.
 If that commit is unavailable, reconnect first, then correct the comparison.
 Historical Git evidence and provider session paths remain unchanged. Coding
 after a path change requires a fresh provider session.
+The replacement session and run become current together. If setup fails before
+the replacement run is saved, the previous run remains current and the store can reopen.
 
 Task-store schema 24 requires explicit worktree ownership. Older stores fail
 validation without deletion or guessed ownership. No legacy migration runs.
@@ -115,8 +117,10 @@ reconciliation.
 Commit recovery reads local Git; it does not run another commit automatically.
 
 Before pushing, Task Monki durably records `PUSHING` with the exact local HEAD,
-remote, and branch. After a crash or an uncertain push result it reads the exact
-remote ref:
+remote, and branch. A validation failure within this attempt, before the push,
+records `FAILED` and permits an explicit retry. An older remote commit does not
+make an unattempted push ambiguous. After a crash or an uncertain push result
+it reads the exact remote ref:
 
 - the attempted SHA is present: record `PUSHED`;
 - the ref is absent: record `FAILED` and allow an explicit safe retry;

@@ -112,8 +112,23 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
   ) {
     throw new Error('Git branch or HEAD changed during observation. Refresh the expected branch.');
   }
-  const upstreamSha = parsedStatus.upstreamRef
-    ? (await readGit(worktree.worktreePath, ['rev-parse', '--verify', `${parsedStatus.upstreamRef}^{commit}`])).trim()
+  // Git retains branch.upstream after pruning a remote-tracking branch. Ask
+  // Git for its full ref before resolving it; a present but broken ref still
+  // fails observation rather than being mistaken for an absent upstream.
+  const upstreamRef = parsedStatus.upstreamRef
+    ? (await readGit(worktree.worktreePath, [
+        'for-each-ref', '--format=%(upstream)', `refs/heads/${branch.trim()}`
+      ])).trim()
+    : '';
+  const upstreamExists = upstreamRef
+    ? await readGit(worktree.worktreePath, ['show-ref', '--verify', '--quiet', upstreamRef])
+        .then(() => true, (error: unknown) => {
+          if ((error as { code?: unknown }).code === 1) return false;
+          throw error;
+        })
+    : false;
+  const upstreamSha = upstreamExists
+    ? (await readGit(worktree.worktreePath, ['rev-parse', '--verify', `${upstreamRef}^{commit}`])).trim()
     : undefined;
   const committedDiffFileCount = countLines(committedDiffNames);
   const workingDiffFileCount = new Set([

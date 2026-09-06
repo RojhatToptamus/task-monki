@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useEffectEvent,
   useId,
   useLayoutEffect,
   useMemo,
@@ -9,6 +10,7 @@ import {
   type RefObject
 } from 'react';
 import { RefreshCw } from 'lucide-react';
+import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
 import {
   completionPolicyRequiresMerge,
   getImplementationRetryReason,
@@ -213,6 +215,7 @@ interface TaskDetailProps {
   onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string): Promise<void>;
   onReview(runId?: string): Promise<void>;
   onRefreshEvidence(taskId: string): Promise<void>;
+  onObserveWorktree?(taskId: string): Promise<void>;
   onReconnectWorktree(taskId: string): Promise<void>;
   onUpdateWorktreeComparison(taskId: string, comparison: WorktreeComparison): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
@@ -318,6 +321,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const [draftPrTitle, setDraftPrTitle] = useState('');
   const [requestNote, setRequestNote] = useState('');
   const [requestInstruction, setRequestInstruction] = useState('');
+  const [requestError, setRequestError] = useState<string>();
   const [requestReviewOutput, setRequestReviewOutput] = useState<string>();
   const [loadedReviewOutput, setLoadedReviewOutput] = useState<string>();
   const [reviewOutputLoading, setReviewOutputLoading] = useState(false);
@@ -329,6 +333,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const [reviewMascotHoldGeneration, setReviewMascotHoldGeneration] = useState(0);
   const reviewActionInFlightRef = useRef(false);
   const deliveryActionInFlightRef = useRef(false);
+  const pendingGitObservationRef = useRef<(() => void) | undefined>(undefined);
   const detailRootRef = useRef<HTMLElement>(null);
   const previewModalRootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -384,6 +389,54 @@ export function TaskDetail(props: TaskDetailProps) {
       })
     : 'idle';
   const mascotVideoSource = MASCOT_VIDEO_SOURCES[mascotState];
+  const runDeliveryAction = async (action: () => Promise<void>) => {
+    if (deliveryActionInFlightRef.current || reviewActionInFlightRef.current) {
+      return;
+    }
+    deliveryActionInFlightRef.current = true;
+    setDeliveryActionBusy(true);
+    try {
+      await action();
+    } finally {
+      deliveryActionInFlightRef.current = false;
+      setDeliveryActionBusy(false);
+      const pending = pendingGitObservationRef.current;
+      pendingGitObservationRef.current = undefined;
+      pending?.();
+    }
+  };
+  const observeWorktree = useEffectEvent(async (taskId: string) => {
+    await runDeliveryAction(async () => { await props.onObserveWorktree?.(taskId); });
+  });
+  const attachedTaskId = worktree?.ownership === 'EXTERNAL' && props.onObserveWorktree
+    ? task?.id : undefined;
+  useEffect(() => {
+    if (!attachedTaskId || taskDetailModalOpen) return;
+    const observer = createUpdateRefreshScheduler({
+      delayMs: 50,
+      refresh: async () => {
+        if (deliveryActionInFlightRef.current || reviewActionInFlightRef.current) {
+          pendingGitObservationRef.current = request;
+          return;
+        }
+        await observeWorktree(attachedTaskId);
+      },
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const request = () => {
+      if (document.visibilityState !== 'hidden') observer.request();
+    };
+    request();
+    window.addEventListener('focus', request);
+    document.addEventListener('visibilitychange', request);
+    return () => {
+      observer.dispose();
+      if (pendingGitObservationRef.current === request) pendingGitObservationRef.current = undefined;
+      window.removeEventListener('focus', request);
+      document.removeEventListener('visibilitychange', request);
+    };
+  }, [attachedTaskId, taskDetailModalOpen]);
   useLayoutEffect(() => {
     props.onModalOpenChange(taskDetailModalOpen);
   }, [props.onModalOpenChange, taskDetailModalOpen]);
@@ -410,6 +463,7 @@ export function TaskDetail(props: TaskDetailProps) {
     setSelectedReviewFindingIds([]);
     setRequestNote('');
     setRequestReviewOutput(undefined);
+    setRequestError(undefined);
     setDraftPrModalOpen(false);
     setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
     setEvidenceGitSnapshotId(undefined);
@@ -578,7 +632,7 @@ export function TaskDetail(props: TaskDetailProps) {
     : gitSnapshot;
 
   const runReviewAction = async (action: () => Promise<void>) => {
-    if (reviewActionInFlightRef.current) {
+    if (reviewActionInFlightRef.current || deliveryActionInFlightRef.current) {
       return;
     }
     reviewActionInFlightRef.current = true;
@@ -588,20 +642,9 @@ export function TaskDetail(props: TaskDetailProps) {
     } finally {
       reviewActionInFlightRef.current = false;
       setReviewActionBusy(false);
-    }
-  };
-
-  const runDeliveryAction = async (action: () => Promise<void>) => {
-    if (deliveryActionInFlightRef.current) {
-      return;
-    }
-    deliveryActionInFlightRef.current = true;
-    setDeliveryActionBusy(true);
-    try {
-      await action();
-    } finally {
-      deliveryActionInFlightRef.current = false;
-      setDeliveryActionBusy(false);
+      const pending = pendingGitObservationRef.current;
+      pendingGitObservationRef.current = undefined;
+      pending?.();
     }
   };
 
@@ -671,6 +714,7 @@ export function TaskDetail(props: TaskDetailProps) {
       }
     }
     setSelectedReviewFindingIds(selectedIds);
+    setRequestError(undefined);
     setRequestNote('');
     setRequestReviewOutput(reviewOutput);
     setRequestInstruction(
@@ -681,6 +725,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const openFirstImplementation = (instruction = '', checksHeadSha?: string) => {
     if (!canStartFresh || attachedBlocker || reviewActionsPaused) return;
+    setRequestError(undefined);
     setSelectedReviewFindingIds([]);
     setRequestNote('');
     setRequestInstruction(instruction);
@@ -692,6 +737,7 @@ export function TaskDetail(props: TaskDetailProps) {
       return;
     }
     await runReviewAction(async () => {
+      setRequestError(undefined);
       try {
         if (canStartFresh) {
           await props.onStart(task.id, requestInstruction.trim(), requestDrawer.sourceReviewRunId);
@@ -699,8 +745,8 @@ export function TaskDetail(props: TaskDetailProps) {
           await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim(), requestDrawer.sourceReviewRunId);
         } else return;
         setRequestDrawer(undefined);
-      } catch {
-        // The app shell reports the error. Keep the drawer open so the user can retry.
+      } catch (caught) {
+        setRequestError(caught instanceof Error ? caught.message : 'The run could not be started.');
       }
     });
   };
@@ -1179,7 +1225,7 @@ export function TaskDetail(props: TaskDetailProps) {
         inert={taskDetailModalOpen ? true : undefined}
         aria-hidden={taskDetailModalOpen ? true : undefined}
       >
-        {error ? <div className="tm-error">{error}</div> : null}
+        {error && !requestDrawer ? <div className="tm-error">{error}</div> : null}
 
         {tab === 'overview' ? (
           <div className="tm-overview">
@@ -1463,6 +1509,7 @@ export function TaskDetail(props: TaskDetailProps) {
           firstImplementation={!requestDrawer.sourceReviewRunId}
           sharedCheckout={attached}
           disabledReason={requestDisabledReason || undefined}
+          error={requestError}
           findings={reviewFindings}
           selectedFindingIds={selectedReviewFindingIds}
           note={requestNote}

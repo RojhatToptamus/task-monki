@@ -324,7 +324,22 @@ export function buildRetryPrompt(input: {
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
+  if (input.previousPrompt !== undefined) {
+    return [
+      input.previousPrompt,
+      '',
+      previousRunContext(input.run, `Retry after unsuccessful run ${input.run.id}.`),
+      `Current worktree: ${input.gitSnapshot.worktreePath}`,
+      `Current independent Git evidence: status=${input.gitSnapshot.status}, head=${input.gitSnapshot.headSha ?? 'unknown'}, dirtyFingerprint=${input.gitSnapshot.dirtyFingerprint}.`,
+      'Earlier Git observations are historical. This observation supersedes them.',
+      'Preserve earlier user instructions unless newer explicit guidance changes them.',
+      'Inspect current files and external state before acting. Preserve correct existing work.',
+      'Do not blindly repeat operations with external side effects.',
+      input.instruction?.trim() ? `Additional retry guidance:\n${input.instruction.trim()}` : undefined
+    ].filter((line): line is string => line !== undefined).join('\n');
+  }
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
     intent: [

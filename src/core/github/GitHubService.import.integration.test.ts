@@ -114,10 +114,38 @@ describe('external checkout GitHub delivery', { timeout: 30_000 }, () => {
       else if (change === 'branch') await externalGit(fixture.worktree.worktreePath, ['switch', '-c', 'different-branch']);
       else if (change === 'repository') await externalGit(fixture.worktree.worktreePath, ['remote', 'set-url', 'origin', otherRemoteUrl]);
       else await fs.writeFile(path.join(fixture.worktree.worktreePath, 'change.txt'), 'dirty\n');
-      await expect(fixture.github.publishBranch({ task: fixture.task, worktree: fixture.worktree, remoteName: 'origin', expectedHeadSha: fixture.head, expectedRemoteUrl: remoteUrl })).rejects.toThrow();
+      await expect(fixture.github.publishBranch({ task: fixture.task, worktree: fixture.worktree, remoteName: 'origin', expectedHeadSha: fixture.head, expectedRemoteUrl: remoteUrl }))
+        .resolves.toMatchObject({ status: 'FAILED', headSha: fixture.head, remoteUrl });
       expect(fixture.pushes).toEqual([]);
     }
   );
+
+  it('keeps pre-push rejection retryable when an older commit is already published', async () => {
+    const fixture = await createFixture();
+    await fixture.scenario.service.publishBranch({ taskId: fixture.task.id });
+    await fixture.commit('Next external change');
+    const nextHead = await externalGit(fixture.worktree.worktreePath, ['rev-parse', 'HEAD']);
+    const filename = path.join(fixture.worktree.worktreePath, 'change.txt');
+    const clean = await fs.readFile(filename);
+    fixture.afterGh = async (args) => {
+      if (args[0] !== 'auth') return;
+      fixture.afterGh = undefined;
+      await fs.writeFile(filename, 'Concurrent external edit\n');
+    };
+
+    await expect(fixture.scenario.service.publishBranch({ taskId: fixture.task.id }))
+      .rejects.toThrow('Commit shared-checkout changes');
+    expect(fixture.pushes).toHaveLength(1);
+    expect((await fixture.scenario.store.snapshot()).branchPublications[0])
+      .toMatchObject({ status: 'FAILED', headSha: nextHead, remoteUrl });
+    expect(await externalGit(fixture.bare, ['rev-parse', 'refs/heads/external-work'])).toBe(fixture.head);
+
+    await fs.writeFile(filename, clean);
+    await expect(fixture.scenario.service.publishBranch({ taskId: fixture.task.id }))
+      .resolves.toMatchObject({ status: 'PUSHED', headSha: nextHead });
+    expect(fixture.pushes).toHaveLength(2);
+    expect(await externalGit(fixture.bare, ['rev-parse', 'refs/heads/external-work'])).toBe(nextHead);
+  });
 
   it('reconciles an interrupted push against its actual destination even if origin changes', async () => {
     const fixture = await createFixture();

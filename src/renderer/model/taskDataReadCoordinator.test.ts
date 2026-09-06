@@ -6,6 +6,23 @@ import type {
 import { createTaskDataReadCoordinator } from './taskDataReadCoordinator';
 
 describe('createTaskDataReadCoordinator', () => {
+  it('reports failed navigation as unsuccessful and accepts an explicit open retry', async () => {
+    const applyTaskDetail = vi.fn();
+    const reportTaskDetailError = vi.fn();
+    const coordinator = createTaskDataReadCoordinator({
+      readBoard: vi.fn(),
+      readTaskDetail: vi.fn().mockRejectedValueOnce(new Error('Temporarily unavailable'))
+        .mockResolvedValue(detail('task-a')),
+      applyBoard: vi.fn(), applyTaskDetail,
+      reportBoardError: vi.fn(), reportTaskDetailError
+    });
+    expect(await coordinator.openTask('task-a')).toBe('failed');
+    expect(reportTaskDetailError).toHaveBeenCalledWith('task-a', expect.any(Error));
+    expect(applyTaskDetail).not.toHaveBeenCalled();
+    expect(await coordinator.openTask('task-a')).toBe('opened');
+    expect(applyTaskDetail).toHaveBeenCalledWith(detail('task-a'));
+  });
+
   it('does not let an older board read replace a newer result', async () => {
     const first = deferred<BoardSnapshot>();
     const second = deferred<BoardSnapshot>();
@@ -50,12 +67,33 @@ describe('createTaskDataReadCoordinator', () => {
     const firstRead = coordinator.openTask('task-a');
     const secondRead = coordinator.openTask('task-b');
     taskB.resolve(detail('task-b'));
-    await secondRead;
+    expect(await secondRead).toBe('opened');
     taskA.resolve(detail('task-a'));
-    await firstRead;
+    expect(await firstRead).toBe('superseded');
 
     expect(applyTaskDetail).toHaveBeenCalledTimes(1);
     expect(applyTaskDetail).toHaveBeenCalledWith(detail('task-b'));
+  });
+
+  it.each(['opened', 'failed'] as const)('follows a superseding same-task refresh when navigation is %s', async (result) => {
+    const opening = deferred<TaskDetailSnapshot>();
+    const refreshing = deferred<TaskDetailSnapshot>();
+    const applyTaskDetail = vi.fn();
+    const reportTaskDetailError = vi.fn();
+    const coordinator = createTaskDataReadCoordinator({
+      readBoard: vi.fn(), readTaskDetail: vi.fn()
+        .mockReturnValueOnce(opening.promise).mockReturnValueOnce(refreshing.promise),
+      applyBoard: vi.fn(), applyTaskDetail, reportBoardError: vi.fn(), reportTaskDetailError
+    });
+    const navigation = coordinator.openTask('task-a');
+    const refresh = coordinator.refreshSelectedTask();
+    opening.resolve(detail('task-a'));
+    if (result === 'opened') refreshing.resolve(detail('task-a'));
+    else refreshing.reject(new Error('Refresh unavailable'));
+    await refresh;
+    expect(await navigation).toBe(result);
+    expect(applyTaskDetail).toHaveBeenCalledTimes(result === 'opened' ? 1 : 0);
+    expect(reportTaskDetailError).toHaveBeenCalledTimes(result === 'failed' ? 1 : 0);
   });
 
   it('does not let an older activity detail read replace a terminal result', async () => {
@@ -180,8 +218,10 @@ function detail(
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolver) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolver, rejecter) => {
     resolve = resolver;
+    reject = rejecter;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }

@@ -456,6 +456,8 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'preview-stdout': 256 * 1024,
   'preview-stderr': 256 * 1024
 };
+export const AGENT_PROMPT_CONTENT_BYTE_LIMIT = ARTIFACT_BYTE_LIMITS['agent-prompt'] -
+  artifactTruncationMarker('agent-prompt', ARTIFACT_BYTE_LIMITS['agent-prompt']).byteLength;
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_FILE_SEGMENT_PATTERN = new RegExp(`^${UUID_FILE_SEGMENT}$`, 'u');
@@ -5033,7 +5035,9 @@ export class FileTaskStore {
       ...this.state,
       agentSessions: [session, ...this.state.agentSessions],
       tasks: this.state.tasks.map((task) =>
-        task.id === input.task.id && role === 'PRIMARY'
+        // createRun publishes replacement session/run pointers together. Until
+        // then, a failed run setup must leave the previous run loadable.
+        task.id === input.task.id && role === 'PRIMARY' && !task.currentRunId
           ? { ...task, currentAgentSessionId: session.id, updatedAt: now }
           : task
       )

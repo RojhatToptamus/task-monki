@@ -162,7 +162,7 @@ import { validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { AGENT_PROMPT_CONTENT_BYTE_LIMIT, FileTaskStore } from '../storage/FileTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
@@ -2379,12 +2379,27 @@ export class TaskManagerService {
           throw new Error('Resolve Git conflicts or operations before starting Task Monki agent work.');
         }
         const settings = followUpSettings(task, run, input.settings, false);
+        let previousPrompt: string | undefined;
+        if (worktree.ownership === 'EXTERNAL') {
+          // The saved request also retains guidance added on earlier retries,
+          // including when provider startup failed before accepting any prompt.
+          const artifact = snapshot.artifacts.find((candidate) => candidate.id === run.promptArtifactId);
+          if (!artifact || artifact.byteCount > AGENT_PROMPT_CONTENT_BYTE_LIMIT) {
+            throw new Error('The previous request is incomplete. Use Continue work with an explicit instruction.');
+          }
+          previousPrompt = await this.store.readArtifact(run.promptArtifactId);
+          if (!previousPrompt.trim()) throw new Error('The previous request is empty. Use Continue work with an explicit instruction.');
+        }
         const prompt = buildRetryPrompt({
           task,
           run,
           gitSnapshot,
-          instruction: input.instruction
+          instruction: input.instruction,
+          previousPrompt
         });
+        if (previousPrompt !== undefined && Buffer.byteLength(prompt, 'utf8') > AGENT_PROMPT_CONTENT_BYTE_LIMIT) {
+          throw new Error('The retry request exceeds the saved prompt limit. Use Continue work with an explicit instruction.');
+        }
         await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.agents.startTurn({
           task,

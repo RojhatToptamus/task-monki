@@ -712,7 +712,6 @@
 }
 
 .field > input:not(:disabled):hover,
-.field > textarea:not(:disabled):hover,
 .field > select:not(:disabled):hover {
   background: var(--field-hover);
 }
