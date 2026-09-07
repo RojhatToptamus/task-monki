@@ -118,6 +118,7 @@ export const IPC_INVOKE_CHANNELS = [
   'task:getBoardSnapshot',
   'task:getDetail',
   'task:import',
+  'task:importPreview',
   'task:transition',
   'worktree:comparison',
   'worktree:list',

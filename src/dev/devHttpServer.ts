@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { TaskCreationRequestError } from '../core/storage/SqliteTaskStore';
+import { ImportPreviewError } from '../core/git/ImportPreview';
 import type {
   AppUpdateEvent,
   CreateBoardRequest,
@@ -650,6 +651,10 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
 
       if (request.method === 'POST' && url.pathname === '/api/tasks/import') {
         sendJson(response, requestId, 200, await options.service.importTask((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/tasks/import/preview') {
+        sendJson(response, requestId, 200, await options.service.previewImport((await readJson()) as never));
         return;
       }
       if (request.method === 'GET' && url.pathname === '/api/worktrees') {
@@ -1392,6 +1397,9 @@ function optionalPositiveIntegerQueryParameter(url: URL, name: string): number |
 function toSafeHttpError(error: unknown): DevApiHttpError | undefined {
   if (error instanceof DevApiHttpError) {
     return error;
+  }
+  if (error instanceof ImportPreviewError) {
+    return new DevApiHttpError(400, 'INVALID_IMPORT_COMPARISON', error.message);
   }
   if (error instanceof TaskCreationRequestError) {
     return new DevApiHttpError(error.httpStatus, error.code, error.message);

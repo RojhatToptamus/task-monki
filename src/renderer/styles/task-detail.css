@@ -78,11 +78,6 @@
   flex: 0 0 auto;
 }
 
-.tm-detail__taskmenu .tm-taskmenu__menu {
-  right: auto;
-  left: 0;
-}
-
 .tm-detail__mascot {
   position: absolute;
   top: 14px;
@@ -4492,8 +4487,12 @@
 .tm-filefilter__search input {
   flex: 1;
   min-width: 0;
+  height: 100%;
+  padding: 0;
   border: 0;
+  border-radius: 0;
   background: transparent;
+  box-shadow: none;
   color: var(--text);
   font: 12.5px/1 var(--font-ui);
   outline: none;
@@ -4505,7 +4504,8 @@
 }
 
 .tm-filefilter__search input:focus,
-.tm-filefilter__search input:focus-visible {
+.tm-filefilter__search input:focus-visible,
+.app-shell[data-input-modality='keyboard'] .tm-filefilter__search input:focus {
   background: transparent;
   box-shadow: none;
 }

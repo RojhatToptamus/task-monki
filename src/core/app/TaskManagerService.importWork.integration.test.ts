@@ -85,6 +85,19 @@ describe('Import existing work', () => {
     const request = await importRequest(s, checkout);
     const capabilities = vi.spyOn(s.agent, 'capabilities');
     const before = await git(checkout, ['status', '--porcelain=v2']);
+    const indexPath = path.resolve(checkout, (await git(checkout, ['rev-parse', '--git-path', 'index'])).trim());
+    const indexBefore = await fs.readFile(indexPath);
+    const preview = await s.service.previewImport({ ...request, baseRef: undefined });
+    expect(preview).toMatchObject({
+      baseRef: 'refs/heads/main', commitCount: 1, fileCount: 2,
+      commits: [{ sha: expect.any(String), subject: 'External feature' }],
+      files: [{ path: 'README.md', status: 'MM' }, { path: 'untracked.txt', status: '??' }]
+    });
+    expect(await fs.readFile(indexPath)).toEqual(indexBefore);
+    expect((await s.store.snapshot()).tasks).toEqual([]);
+    expect((await s.store.snapshot()).artifacts).toEqual([]);
+    await expect(s.service.previewImport({ ...request, baseRef: 'HEAD' })).resolves.toMatchObject({ commitCount: 0, fileCount: 2 });
+    await expect(s.service.previewImport({ ...request, baseRef: '--not-a-commit' })).rejects.toThrow('valid local branch or commit');
     const [first, second] = await Promise.all([s.service.importTask(request), s.service.importTask(request)]);
     expect(first.id).toBe(second.id);
     expect(first).toMatchObject({ workflowPhase: 'IN_PROGRESS', projection: { requestedAction: 'NONE' } });
@@ -143,6 +156,49 @@ describe('Import existing work', () => {
     const task = await s.service.importTask(request);
     expect(task.currentWorktreeId).toBeDefined();
     expect((await s.store.snapshot()).tasks).toHaveLength(1);
+  });
+
+  it('imports a clean checkout without a description while new work still requires one', async () => {
+    const s = await scenarios.create();
+    const request = { ...await importRequest(s), prompt: '' };
+    await expect(s.store.createTask(request)).rejects.toThrow('Task prompt is required');
+    await expect(s.service.previewImport({ ...request, baseRef: 'HEAD' })).resolves.toMatchObject({ commitCount: 0, fileCount: 0 });
+    const task = await s.service.importTask(request);
+    expect(task).toMatchObject({ prompt: '', workflowPhase: 'IN_PROGRESS' });
+    expect(s.agent.startedTurns).toEqual([]);
+    await s.service.shutdown();
+    await s.persistence.close();
+    const reopened = await openTestPersistence(path.join(s.rootDir, 'profile'));
+    try { await expect(reopened.tasks.getTask(task.id)).resolves.toMatchObject({ prompt: '', workflowPhase: 'IN_PROGRESS' }); }
+    finally { await reopened.close(); }
+  });
+
+  it('previews non-main branches, renamed and binary files, bounded lists, and unfinished Git operations', async () => {
+    const s = await scenarios.create();
+    await git(s.repositoryPath, ['branch', '-m', 'trunk']);
+    await s.service.refreshRepository(s.repositoryId);
+    const request = await importRequest(s);
+    await expect(s.service.previewImport({ ...request, baseRef: undefined })).resolves.toMatchObject({
+      baseRef: 'refs/heads/trunk', commitCount: 0, fileCount: 0
+    });
+    await fs.writeFile(path.join(s.repositoryPath, 'binary.dat'), Buffer.from([0, 1, 2]));
+    await git(s.repositoryPath, ['add', 'binary.dat']);
+    await git(s.repositoryPath, ['commit', '-m', 'Add binary fixture']);
+    await git(s.repositoryPath, ['mv', 'README.md', 'renamed with spaces.txt']);
+    await fs.writeFile(path.join(s.repositoryPath, 'binary.dat'), Buffer.from([0, 3, 4]));
+    for (let index = 0; index < 105; index += 1) {
+      await fs.writeFile(path.join(s.repositoryPath, `untracked-${index}.txt`), 'note\n');
+    }
+    const preview = await s.service.previewImport({ ...request, baseRef: 'HEAD' });
+    expect(preview.fileCount).toBe(107);
+    expect(preview.files).toHaveLength(100);
+    expect(preview.files.find((file) => file.path === 'renamed with spaces.txt')).toMatchObject({ status: 'R', additions: 0, deletions: 0 });
+    expect(preview.files.find((file) => file.path === 'binary.dat')).toEqual({ path: 'binary.dat', status: 'M' });
+    const gitDir = (await git(s.repositoryPath, ['rev-parse', '--absolute-git-dir'])).trim();
+    await fs.writeFile(path.join(gitDir, 'MERGE_HEAD'), preview.headSha);
+    await expect(s.service.previewImport({ ...request, baseRef: 'HEAD' })).resolves.toMatchObject({
+      unavailableReason: 'Finish the current Git operation and resolve conflicts before importing.'
+    });
   });
 
   it('lists unavailable checkouts and revalidates the selected branch before importing', async () => {

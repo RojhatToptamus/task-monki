@@ -1,4 +1,5 @@
 import type { AddressInfo } from 'node:net';
+import { ImportPreviewError } from '../core/git/ImportPreview';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppEventBus } from '../core/runner/AppEventBus';
@@ -89,12 +90,13 @@ describe('development HTTP server', () => {
   it('round-trips import and checkout actions through the authenticated browser API', async () => {
     const listExistingWorktrees = vi.fn(async () => [{ worktreePath: '/tmp/my work', branchName: 'feature' }]);
     const importTask = vi.fn(async (input: unknown) => ({ id: 'imported-task', ...input as object }));
+    const previewImport = vi.fn(async (input: unknown) => ({ baseSha: 'abc123', ...input as object }));
     const reconnectWorktree = vi.fn(async (input: unknown) => input);
     const updateWorktreeComparison = vi.fn(async (input: unknown) => input);
     const startRun = vi.fn(async (input: unknown) => input);
     const startReview = vi.fn(async (input: unknown) => input);
     const createPullRequest = vi.fn(async (input: unknown) => input);
-    const running = await startServer({ listExistingWorktrees, importTask, reconnectWorktree, updateWorktreeComparison, startRun, startReview, createPullRequest });
+    const running = await startServer({ listExistingWorktrees, importTask, previewImport, reconnectWorktree, updateWorktreeComparison, startRun, startReview, createPullRequest });
     const fetchHttp = globalThis.fetch;
     vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => fetchHttp(input, {
       ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...running.headers }
@@ -104,6 +106,13 @@ describe('development HTTP server', () => {
       expect(await api.listExistingWorktrees('repo & work')).toEqual([{ worktreePath: '/tmp/my work', branchName: 'feature' }]);
       expect(listExistingWorktrees).toHaveBeenCalledWith('repo & work');
       const request = { repositoryId: 'repo & work', worktreePath: '/tmp/my work', branchName: 'feature', baseRef: 'HEAD', title: 'Existing work', prompt: 'Keep this description.' };
+      const previewRequest = { repositoryId: request.repositoryId, worktreePath: request.worktreePath, branchName: request.branchName, baseRef: 'HEAD' };
+      expect(await api.previewImport(previewRequest)).toMatchObject({ baseSha: 'abc123', ...previewRequest });
+      expect(previewImport).toHaveBeenCalledWith(previewRequest);
+      previewImport.mockRejectedValueOnce(new ImportPreviewError('Enter a valid local branch or commit.'));
+      await expect(api.previewImport({ ...previewRequest, baseRef: 'invalid' })).rejects.toMatchObject({
+        status: 400, code: 'INVALID_IMPORT_COMPARISON', message: 'Enter a valid local branch or commit.'
+      });
       expect(await api.importTask(request)).toMatchObject({ id: 'imported-task', ...request });
       expect(importTask).toHaveBeenCalledWith(request);
       await api.reconnectWorktree({ taskId: 'imported-task', worktreePath: '/tmp/moved work' });

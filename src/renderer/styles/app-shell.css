@@ -1234,10 +1234,6 @@ button.tm-software-update:hover {
   background: var(--card-hover);
 }
 
-.tm-card:has(.tm-taskmenu__menu) {
-  z-index: var(--layer-menu);
-}
-
 .tm-card__body {
   position: relative;
   z-index: var(--layer-sticky);
@@ -1420,7 +1416,7 @@ button.tm-software-update:hover {
 
 .tm-card:hover .tm-card__actions,
 .tm-card:focus-within .tm-card__actions,
-.tm-card__actions:has(.tm-taskmenu__menu) {
+.tm-card__actions:has([aria-expanded='true']) {
   opacity: 1;
   visibility: visible;
 }
@@ -1471,12 +1467,14 @@ button.tm-software-update:hover {
   scrollbar-gutter: stable;
 }
 
-.tm-taskmenu__menu--top {
+.tm-taskmenu__menu--floating {
+  position: fixed;
   top: auto;
-  bottom: calc(100% + 6px);
+  right: auto;
+  min-width: 0;
 }
 
-.tm-taskmenu__menu:has(.tm-pathmenu__item) {
+.tm-taskmenu__menu:not(.tm-taskmenu__menu--floating):has(.tm-pathmenu__item) {
   min-width: 214px;
 }
 

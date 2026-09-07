@@ -87,7 +87,7 @@ export function focusMenuItem(
       : target === 'selected'
         ? items.find((candidate) => candidate.getAttribute('aria-checked') === 'true') ?? items[0]
         : items[0];
-  item?.focus({ preventScroll: true });
+  if (menu && item) focusVisibleMenuItem(menu, item);
 }
 
 export function focusOwningMenu(item: Element | null): HTMLElement | null {
@@ -130,7 +130,23 @@ export function handleMenuKeyDown(
 
   event.preventDefault();
   event.stopPropagation();
-  items[nextIndex]?.focus({ preventScroll: true });
+  const nextItem = items[nextIndex];
+  if (nextItem) focusVisibleMenuItem(event.currentTarget, nextItem);
+}
+
+export function focusVisibleMenuItem(menu: HTMLElement, item: HTMLElement): void {
+  item.focus({ preventScroll: true });
+  if (menu.scrollHeight <= menu.clientHeight) return;
+
+  const top = menu.getBoundingClientRect().top + menu.clientTop;
+  const bottom = top + menu.clientHeight;
+  const itemRect = item.getBoundingClientRect();
+  // Reveal keyboard focus within the menu without scrolling its page or column.
+  if (itemRect.top < top) {
+    menu.scrollTop += itemRect.top - top;
+  } else if (itemRect.bottom > bottom) {
+    menu.scrollTop += itemRect.bottom - bottom;
+  }
 }
 
 export function handleMenuBlur(

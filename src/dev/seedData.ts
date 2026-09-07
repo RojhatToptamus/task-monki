@@ -285,6 +285,18 @@ export async function seedTaskMonkiDevelopmentData(
     if (scenarioSet === 'all') {
       await seedDesignScenarios(ctx);
     }
+    if (scenarioSet === 'all' || scenarioSet === 'board') {
+      const checkout = path.join(ctx.rootDir, 'external-checkouts', 'import-preview');
+      await fs.mkdir(path.dirname(checkout), { recursive: true });
+      await git(ctx.repositoryPath, ['worktree', 'add', '-b', 'feature/import-preview', checkout, ctx.baseSha]);
+      await fs.writeFile(path.join(checkout, 'import-feature.txt'), 'Existing work ready to import.\n');
+      await git(checkout, ['add', 'import-feature.txt']);
+      await git(checkout, ['commit', '-m', 'Add existing import feature']);
+      await fs.writeFile(path.join(checkout, 'import-feature.txt'), 'Staged follow-up.\n');
+      await git(checkout, ['add', 'import-feature.txt']);
+      await fs.writeFile(path.join(checkout, 'import-feature.txt'), 'Unstaged follow-up.\n');
+      await fs.writeFile(path.join(checkout, 'import-notes.txt'), 'Untracked notes.\n');
+    }
     await store.createBoard({
       name: 'Secondary repository',
       color: 'VIOLET',

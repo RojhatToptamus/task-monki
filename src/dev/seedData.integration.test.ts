@@ -8,6 +8,7 @@ import {
   codexCapabilities
 } from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { inspectImportPreview } from '../core/git/ImportPreview';
 import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type { Task, TaskSnapshot } from '../shared/contracts';
@@ -134,6 +135,15 @@ describe('Task Monki development seed data', () => {
     } finally {
       await persistence.close();
     }
+  });
+
+  it('provides an unclaimed checkout with committed and dirty work for the import composer', async () => {
+    const checkout = path.join(manifest.rootDir, 'external-checkouts', 'import-preview');
+    expect(snapshot.worktrees.some((worktree) => worktree.worktreePath === checkout)).toBe(false);
+    await expect(inspectImportPreview({ worktreePath: checkout, branchName: 'feature/import-preview' }))
+      .resolves.toMatchObject({ commitCount: 1, fileCount: 2, files: [
+        { path: 'import-feature.txt', status: 'MM' }, { path: 'import-notes.txt', status: '??' }
+      ] });
   });
 
   it('materializes Design starting and recovery states', async () => {

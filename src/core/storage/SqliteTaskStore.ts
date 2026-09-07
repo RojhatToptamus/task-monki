@@ -3909,7 +3909,7 @@ export class SqliteTaskStore {
     if (!task.title) {
       throw new Error('Task title is required.');
     }
-    if (!task.prompt) {
+    if (!task.prompt && !imported) {
       throw new Error('Task prompt is required.');
     }
     const repository = this.state.repositories.find(

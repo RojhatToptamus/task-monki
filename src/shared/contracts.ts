@@ -1001,8 +1001,29 @@ export interface CreateTaskRequest {
 export interface ExistingWorktree {
   worktreePath: string;
   branchName?: string;
+  isPrimary?: boolean;
   unavailableReason?: string;
   existingTaskId?: string;
+  existingTask?: Pick<Task, 'title' | 'workflowPhase'>;
+}
+
+export interface PreviewImportRequest {
+  repositoryId: string;
+  worktreePath: string;
+  branchName: string;
+  /** Omit to compare with the repository's local default branch. */
+  baseRef?: string;
+}
+
+export interface ImportPreview {
+  baseRef: string;
+  baseSha: string;
+  headSha: string;
+  commitCount: number;
+  commits: Array<{ sha: string; subject: string }>;
+  fileCount: number;
+  files: Array<{ path: string; status: string; additions?: number; deletions?: number }>;
+  unavailableReason?: string;
 }
 
 export interface ImportTaskRequest {
@@ -1401,6 +1422,7 @@ export interface TaskManagerApi {
   getBoardSnapshot(): Promise<BoardSnapshot>;
   getTaskDetail(taskId: string): Promise<TaskDetailSnapshot>;
   listExistingWorktrees(repositoryId: string): Promise<ExistingWorktree[]>;
+  previewImport(input: PreviewImportRequest): Promise<ImportPreview>;
   importTask(input: ImportTaskRequest): Promise<Task>;
   reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord>;
   updateWorktreeComparison(input: UpdateWorktreeComparisonRequest): Promise<WorktreeRecord>;

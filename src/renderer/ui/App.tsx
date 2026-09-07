@@ -3282,6 +3282,7 @@ export function App() {
               refineDisabledReason={refineDisabledReason}
               onCreate={createTask}
               onImport={importTask}
+              onPreviewImport={taskManagerApi.previewImport}
               onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
               onOpenExistingTask={async (taskId) => { await openTaskDetail(taskId); }}
               onRefinePrompt={refinePrompt}

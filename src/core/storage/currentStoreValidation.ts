@@ -151,8 +151,10 @@ const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
  * has the required database and filesystem context.
  */
 export function validateCurrentStoreRecords(state: StoreState): void {
+  const externalTaskIds = new Set(state.worktrees.filter((worktree) => worktree?.ownership === 'EXTERNAL').map((worktree) => worktree.taskId));
   validateCollection(state.tasks, 'tasks', (task) => {
-    strings(task, 'tasks', ['runtimeId', 'title', 'prompt']);
+    strings(task, 'tasks', ['runtimeId', 'title']);
+    stringField(task, 'prompt', 'tasks', task.prompt === '' && externalTaskIds.has(task.id));
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');

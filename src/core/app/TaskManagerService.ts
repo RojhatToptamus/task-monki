@@ -13,6 +13,8 @@ import type {
   CreateBoardRequest,
   CreateTaskRequest,
   ExistingWorktree,
+  ImportPreview,
+  PreviewImportRequest,
   ImportTaskRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -165,6 +167,7 @@ import {
   buildSteerInstruction
 } from '../../shared/promptTemplates';
 import { inspectExistingWorktree, listGitWorktrees, WorktreeService } from '../worktree/WorktreeService';
+import { inspectImportPreview } from '../git/ImportPreview';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -1093,10 +1096,7 @@ export class TaskManagerService {
   }
 
   async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
-    this.appSettings = await this.appSettingsStore.get();
-    return this.openTargets.inspect(input, {
-      snapshot: await this.store.snapshot()
-    });
+    return this.openTargets.inspect(input, this.store);
   }
 
   async executeOpenTargetAction(
@@ -1108,10 +1108,7 @@ export class TaskManagerService {
   private async executeOpenTargetActionInternal(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
-    this.appSettings = await this.appSettingsStore.get();
-    return this.openTargets.execute(input, {
-      snapshot: await this.store.snapshot()
-    });
+    return this.openTargets.execute(input, this.store);
   }
 
   async addRepository(repositoryPath: string): Promise<Repository> {
@@ -1509,7 +1506,10 @@ export class TaskManagerService {
           if (entry.locked || entry.prunable) throw new Error('The checkout is locked or unavailable. Repair it in Git before importing it.');
           const worktreePath = await realpath(entry.path);
           const existing = await this.store.findTaskForExistingWork({ repositoryId, worktreePath, gitCommonDir, branchName: entry.branch });
-          result.push({ worktreePath, branchName: entry.branch, existingTaskId: existing?.id });
+          result.push({
+            worktreePath, branchName: entry.branch, isPrimary: entry === entries[0], existingTaskId: existing?.id,
+            existingTask: existing ? { title: existing.title, workflowPhase: existing.workflowPhase } : undefined
+          });
         } catch (error) {
           result.push({
             worktreePath: entry.path, branchName: entry.branch,
@@ -1518,6 +1518,16 @@ export class TaskManagerService {
         }
       }
       return result;
+    });
+  }
+
+  previewImport(input: PreviewImportRequest): Promise<ImportPreview> {
+    return this.withControlAction(async () => {
+      const repository = await this.requireAvailableRepository(input.repositoryId);
+      if (repository.kind !== 'USER_REGISTERED') throw new Error('Select a registered repository.');
+      if (!input.branchName?.trim()) throw new Error('A named branch is required.');
+      const observed = await inspectExistingWorktree(repository.path, input.worktreePath, input.branchName);
+      return inspectImportPreview({ ...observed, baseRef: input.baseRef, repositoryBranch: repository.branch });
     });
   }
 

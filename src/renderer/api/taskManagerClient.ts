@@ -15,6 +15,8 @@ import type {
   CreateTaskRequest,
   ExistingWorktree,
   ImportTaskRequest,
+  ImportPreview,
+  PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
   CreatePullRequestRequest,
@@ -348,6 +350,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
     importTask: (input: ImportTaskRequest) => post<Task>(baseUrl, '/api/tasks/import', input),
+    previewImport: (input: PreviewImportRequest) => post<ImportPreview>(baseUrl, '/api/tasks/import/preview', input),
     listExistingWorktrees: (repositoryId: string) =>
       get<ExistingWorktree[]>(baseUrl, `/api/worktrees?${new URLSearchParams({ repositoryId })}`),
     reconnectWorktree: (input: ReconnectWorktreeRequest) =>

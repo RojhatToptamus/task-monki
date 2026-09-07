@@ -194,6 +194,19 @@ external agent sessions unchanged. It creates an idle In Progress task without
 starting an agent. A duplicate checkout or repository-and-branch selection opens
 the existing task, including an archived task. Separate clones remain distinct.
 
+The composer filters checkouts by branch or folder and keeps the selected checkout
+visible. Import uses a branch-derived title without requiring a description.
+New work still requires a description. Each mode keeps its own text draft.
+
+The comparison preview reads Git without changing the checkout or creating a task.
+It shows commit and uncommitted-file counts, with up to 50 commits and 100 file
+paths in the change list. Local branch uses the local counterpart of
+`origin/HEAD`, then `main`, `master`, or the registered repository branch.
+Users can instead choose `HEAD` or enter a local branch or commit.
+Clean checkouts remain importable. Git conflicts and unfinished operations block import.
+Import resolves the comparison again and rechecks checkout identity and Git evidence
+before saving the task.
+
 The selected comparison includes committed, staged, unstaged, and untracked work.
 `HEAD` at import time gives a dirty-only starting comparison. Ordinary refresh
 keeps that resolved base. Change comparison in Evidence, beside the diff, to

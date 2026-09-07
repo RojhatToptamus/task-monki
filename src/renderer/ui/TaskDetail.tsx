@@ -1039,6 +1039,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 onArchive={props.onArchive}
                 onRequestDelete={props.onRequestDelete}
                 className="tm-detail__taskmenu"
+                align="start"
               />
             </div>
             <div className="tm-detail__context">
