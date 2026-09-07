@@ -79,6 +79,8 @@ behavior and architecture, not private roadmap sequencing.
    - User-facing install, platform trust, and automatic-update instructions.
 3. `docs/RELEASING.md`
    - Maintainer workflow for trusted cross-platform GitHub Releases.
+4. `docs/CUSTOM_AGENT_PROFILES.md`
+   - Profile library, assignment, saved instructions, runtime boundaries, and persistence.
 
 ### Interface Design
 

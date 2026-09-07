@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  resolveAgentProfile,
+  type SaveAgentProfileRequest,
+  type SetTaskAgentProfileRequest
+} from '../../shared/agentProfiles';
 import type {
   Board,
   BoardSnapshot,
@@ -817,6 +822,35 @@ export class TaskManagerService {
     return structuredClone(this.appSettings);
   }
 
+  saveAgentProfile(input: SaveAgentProfileRequest): Promise<TaskManagerAppSettings> {
+    return this.withControlAction(async () => {
+      this.appSettings = await this.appSettingsStore.saveAgentProfile(input);
+      return structuredClone(this.appSettings);
+    });
+  }
+
+  deleteAgentProfile(profileId: string): Promise<TaskManagerAppSettings> {
+    return this.withControlAction(async () => {
+      this.appSettings = await this.appSettingsStore.deleteAgentProfile(profileId);
+      return structuredClone(this.appSettings);
+    });
+  }
+
+  setTaskAgentProfile(input: SetTaskAgentProfileRequest): Promise<Task> {
+    return this.withTaskAction(input.taskId, 'Agent profile change', async () => {
+      await this.requireNormalTask(input.taskId, 'Agent profile change');
+      this.assertNoActiveTaskRun(await this.store.snapshot(), input.taskId, 'changing the agent profile');
+      if (input.profileId === undefined) throw new Error('Choose an agent profile or None.');
+      const settings = await this.appSettingsStore.get();
+      const task = await this.store.setTaskAgentProfile(
+        input.taskId,
+        resolveAgentProfile(settings.agentProfiles, input.profileId)
+      );
+      this.events.emit({ type: 'task.updated', taskId: task.id, payload: task, at: new Date().toISOString() });
+      return task;
+    });
+  }
+
   updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
@@ -1393,6 +1427,7 @@ export class TaskManagerService {
     if (acknowledgedTask) {
       return acknowledgedTask;
     }
+    const agentProfile = resolveAgentProfile((await this.appSettingsStore.get()).agentProfiles, input.agentProfileId);
     this.assertRuntimeEnabled(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
     if (!requestedInput.attachmentDraftId) {
@@ -1404,7 +1439,8 @@ export class TaskManagerService {
       return this.store.createTask({
         ...requestedInput,
         agentSettings: settings,
-        creationFingerprintInput: requestedInput
+        creationFingerprintInput: requestedInput,
+        agentProfile
       });
     }
     return this.withAttachmentDraft(requestedInput.attachmentDraftId, async () => {
@@ -1424,7 +1460,8 @@ export class TaskManagerService {
       return this.store.createTask({
         ...requestedInput,
         agentSettings: settings,
-        creationFingerprintInput: requestedInput
+        creationFingerprintInput: requestedInput,
+        agentProfile
       });
     });
   }
@@ -2534,6 +2571,7 @@ export class TaskManagerService {
           worktree,
           sourceRun: run,
           target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
+          agentProfile: resolveAgentProfile((await this.appSettingsStore.get()).agentProfiles, input.agentProfileId),
           settings,
           generationKey: gitSnapshot.dirtyFingerprint,
           beforeGitSnapshotId: gitSnapshot.id

@@ -450,7 +450,8 @@ export function discoursePendingSendFingerprint(input: {
       agentProfileId: selection.agentProfileId,
       runtimeId: selection.runtimeId ?? null,
       modelId: selection.modelId ?? null,
-      reasoningEffort: selection.reasoningEffort ?? null
+      reasoningEffort: selection.reasoningEffort ?? null,
+      ...(selection.customProfileId !== undefined ? { customProfileId: selection.customProfileId } : {})
     }))
   });
 }

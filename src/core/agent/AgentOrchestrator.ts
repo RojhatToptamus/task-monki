@@ -91,6 +91,7 @@ function assertSessionPostcondition(
 }
 
 export interface StartOrchestratedReview {
+  agentProfile?: import('../../shared/agentProfiles').CustomAgentProfile;
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
@@ -507,7 +508,8 @@ export class AgentOrchestrator {
     const prompt = buildAgentReviewPrompt({
       task: input.task,
       worktree: input.worktree,
-      target: input.target
+      target: input.target,
+      agentProfile: input.agentProfile
     });
     const run = await this.store.createRun({
       task: input.task,
@@ -553,7 +555,8 @@ export class AgentOrchestrator {
           sourceSession,
           reviewSession,
           input.target,
-          attachments
+          attachments,
+          prompt
         );
       } else {
         await adapter.startTurn({
@@ -591,7 +594,8 @@ export class AgentOrchestrator {
               recovered,
               reviewSession,
               input.target,
-              attachments
+              attachments,
+              prompt
             );
           } else {
             await adapter.startTurn({
@@ -826,7 +830,8 @@ export class AgentOrchestrator {
     sourceSession: AgentSessionRecord,
     reviewSession: AgentSessionRecord,
     target: AgentReviewTarget,
-    attachments: AgentTurnAttachment[]
+    attachments: AgentTurnAttachment[],
+    prompt: string
   ): Promise<void> {
     if (!adapter.startReview) {
       throw new Error('This provider does not support detached review.');
@@ -838,6 +843,7 @@ export class AgentOrchestrator {
         providerSessionId: sourceSession.providerSessionId
       },
       reviewSessionId: reviewSession.id,
+      prompt,
       target,
       attachments
     });

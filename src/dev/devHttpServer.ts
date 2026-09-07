@@ -291,6 +291,22 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/agent-profiles/save') {
+        const input = await readJson() as Parameters<TaskManagerService['saveAgentProfile']>[0];
+        sendJson(response, requestId, 200, await options.service.saveAgentProfile(input));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/agent-profiles/delete') {
+        const input = await readJson() as { profileId: string };
+        sendJson(response, requestId, 200, await options.service.deleteAgentProfile(input.profileId));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/tasks/agent-profile') {
+        const input = await readJson() as Parameters<TaskManagerService['setTaskAgentProfile']>[0];
+        sendJson(response, requestId, 200, await options.service.setTaskAgentProfile(input));
+        return;
+      }
+
       if (request.method === 'GET' && url.pathname === '/api/settings') {
         sendJson(response, requestId, 200, await options.service.getAppSettings());
         return;

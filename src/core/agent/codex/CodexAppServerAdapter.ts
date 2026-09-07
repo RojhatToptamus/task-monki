@@ -1675,7 +1675,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       assertModelSupportsAttachments(selectedModel, attachments);
     }
     const attachmentDelivery = prepareAgentAttachmentDelivery({
-      prompt: AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
+      prompt: input.prompt ?? AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
       attachments: await verifyAgentTurnAttachments(attachments),
       includeLocalImages: false
     });

@@ -1,3 +1,4 @@
+import { AgentProfilesSettings, type AgentProfilesSettingsActions } from './AgentProfilesSettings';
 import {
   useCallback,
   useEffect,
@@ -40,17 +41,18 @@ import { DisclosureChevron } from './DisclosureChevron';
 import { UiCheckIcon, UiChevronDownIcon } from './UiIcons';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
-type SettingsSection = 'agents' | 'models' | 'tools' | 'updates' | 'appearance';
+type SettingsSection = 'profiles' | 'agents' | 'models' | 'tools' | 'updates' | 'appearance';
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: 'agents', label: 'Agents' },
+  { id: 'profiles', label: 'Profiles' },
   { id: 'models', label: 'Models' },
   { id: 'tools', label: 'Tools' },
   { id: 'updates', label: 'Updates' },
   { id: 'appearance', label: 'Appearance' }
 ];
 
-export interface SettingsViewProps {
+export interface SettingsViewProps extends AgentProfilesSettingsActions {
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
   onPreviewThemePreset?(themePreset: ThemePreset | null): void;
@@ -96,6 +98,13 @@ export function SettingsView(props: SettingsViewProps) {
           ))}
         </nav>
 
+        {section === 'profiles' ? (
+          <AgentProfilesSettings
+            profiles={props.appSettings.agentProfiles}
+            onSaveAgentProfile={props.onSaveAgentProfile}
+            onDeleteAgentProfile={props.onDeleteAgentProfile}
+          />
+        ) : null}
         {section === 'agents' ? <AgentSettings {...props} /> : null}
         {section === 'models' ? <ModelSettings {...props} /> : null}
         {section === 'tools' ? <ToolSettings {...props} /> : null}

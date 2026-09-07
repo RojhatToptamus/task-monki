@@ -97,6 +97,8 @@ export const IPC_INVOKE_CHANNELS = [
   'preview:retrySetup',
   'preview:start',
   'preview:stop',
+  'profile:delete',
+  'profile:save',
   'prompt:refine',
   'prompt:refine:cancel',
   'repository:add',
@@ -117,6 +119,7 @@ export const IPC_INVOKE_CHANNELS = [
   'task:delete',
   'task:getBoardSnapshot',
   'task:getDetail',
+  'task:setAgentProfile',
   'task:transition',
   'worktree:prepare'
 ] as const;

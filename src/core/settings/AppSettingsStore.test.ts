@@ -88,6 +88,7 @@ describe('AppSettingsStore', () => {
     const settingsPath = path.join(dir, 'app-settings.json');
     const legacy = currentSettings() as Record<string, unknown>;
     legacy.schemaVersion = 10;
+    delete legacy.agentProfiles;
     delete legacy.autoInstallUpdatesOnQuit;
     await fs.writeFile(settingsPath, `${JSON.stringify(legacy)}\n`, 'utf8');
 
@@ -111,6 +112,39 @@ describe('AppSettingsStore', () => {
     expect(settings.selectedRepositoryId).toBe('repository-1');
   });
 
+  it('migrates schema 11 without changing preferences and preserves exact profile text across reloads', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-profiles-'));
+    try {
+      const settingsPath = path.join(dir, 'app-settings.json');
+      const legacy = currentSettings({ theme: 'dark', autoInstallUpdatesOnQuit: false }) as Record<string, unknown>;
+      legacy.schemaVersion = 11;
+      delete legacy.agentProfiles;
+      await fs.writeFile(settingsPath, JSON.stringify(legacy));
+      const store = new AppSettingsStore(settingsPath);
+      await expect(store.get()).resolves.toMatchObject({ agentProfiles: [], theme: 'dark', autoInstallUpdatesOnQuit: false });
+      const instructions = '  Inspect real inputs.\n\nUse café fixtures.\t\n';
+      const saved = await store.saveAgentProfile({ name: 'Testing', description: '', instructions });
+      const profile = saved.agentProfiles[0]!;
+      expect(profile.instructions).toBe(instructions);
+      const beforeFailure = await fs.readFile(settingsPath, 'utf8');
+      await expect(store.saveAgentProfile({ name: 'testing', description: '', instructions: 'Duplicate name' })).rejects.toThrow('already exists');
+      await expect(store.saveAgentProfile({ ...profile, tools: ['shell'] } as typeof profile)).rejects.toThrow('only a name');
+      expect(await fs.readFile(settingsPath, 'utf8')).toBe(beforeFailure);
+      await Promise.all([
+        store.saveAgentProfile({ ...profile, instructions: 'Updated guidance' }),
+        store.update({ showMascot: false })
+      ]);
+      expect(await new AppSettingsStore(settingsPath).get()).toMatchObject({
+        theme: 'dark', showMascot: false, autoInstallUpdatesOnQuit: false,
+        agentProfiles: [{ ...profile, instructions: 'Updated guidance' }]
+      });
+      await store.deleteAgentProfile(profile.id);
+      expect((await new AppSettingsStore(settingsPath).get()).agentProfiles).toEqual([]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it.each([3, 9])('rejects unsupported settings schema %s', (schemaVersion) => {
     expect(() => normalizeAppSettings({ schemaVersion })).toThrow(
       `Unsupported Task Monki app settings schema ${schemaVersion}`
@@ -132,6 +166,17 @@ describe('AppSettingsStore', () => {
     expect(() =>
       normalizeAppSettings({ schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION })
     ).toThrow(`Task Monki app settings schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION} is invalid`);
+  });
+
+  it('bounds UTF-8 profile instructions without replacing a valid saved entry', async () => {
+    const store = new MemoryAppSettingsStore();
+    const settings = await store.saveAgentProfile({
+      name: 'Protocol', description: '', instructions: 'é'.repeat(8 * 1024)
+    });
+    const profile = settings.agentProfiles[0]!;
+    await expect(async () => store.saveAgentProfile({ ...profile, instructions: `${profile.instructions}é` })).rejects.toThrow('16 KB');
+    await expect(async () => store.saveAgentProfile({ ...profile, instructions: ' \n\t' })).rejects.toThrow('required');
+    expect((await store.get()).agentProfiles).toEqual([profile]);
   });
 
   it('normalizes empty executable path updates as auto-detect', async () => {

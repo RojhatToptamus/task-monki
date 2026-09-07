@@ -1,3 +1,4 @@
+import type { SaveAgentProfileRequest, SetTaskAgentProfileRequest } from '../shared/agentProfiles';
 import {
   app,
   BrowserWindow,
@@ -442,6 +443,9 @@ function installIpcHandlers(): void {
       return service.updateAgentNativeSession(input);
     }
   );
+  handleTrustedIpc('profile:save', (_, input: SaveAgentProfileRequest) => service.saveAgentProfile(input));
+  handleTrustedIpc('profile:delete', (_, profileId: string) => service.deleteAgentProfile(profileId));
+  handleTrustedIpc('task:setAgentProfile', (_, input: SetTaskAgentProfileRequest) => service.setTaskAgentProfile(input));
   handleTrustedIpc('settings:get', () => service.getAppSettings());
   handleTrustedIpc('settings:update', async (_, input: UpdateAppSettingsRequest) => {
     const settings = await service.updateAppSettings(input);

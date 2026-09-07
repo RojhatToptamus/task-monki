@@ -2466,3 +2466,8 @@
     padding-inline: 8px;
   }
 }
+
+.tm-discourse-agent-config__agent > .tm-profile-select {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}

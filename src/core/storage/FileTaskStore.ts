@@ -1,3 +1,4 @@
+import { validateAgentProfile, type CustomAgentProfile } from '../../shared/agentProfiles';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants as fsConstants } from 'node:fs';
@@ -139,6 +140,7 @@ export interface CreateAgentSessionInput {
 }
 
 export interface CreateTaskStoreInput extends CreateTaskRequest {
+  agentProfile?: CustomAgentProfile;
   /**
    * Internal idempotency source retained when the service persists runtime-
    * resolved settings. It is never copied into the durable task record.
@@ -638,6 +640,7 @@ function taskCreationMetadata(
       ),
       runtimeId: requestedRuntimeId,
       agentSettings: { ...portableAgentSettings, runtimeId: requestedRuntimeId },
+      ...(fingerprintInput.agentProfileId !== undefined ? { agentProfileId: fingerprintInput.agentProfileId } : {}),
       attachmentDraftId: fingerprintInput.attachmentDraftId ?? null
     });
   } catch {
@@ -3751,6 +3754,25 @@ export class FileTaskStore {
     });
   }
 
+  setTaskAgentProfile(taskId: string, agentProfile: CustomAgentProfile | undefined): Promise<Task> {
+    if (agentProfile) validateAgentProfile(agentProfile);
+    return this.serializeMutation(async () => {
+      const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Normal task not found.');
+      const updated = {
+        ...task,
+        agentProfile: agentProfile ? clone(agentProfile) : undefined,
+        updatedAt: new Date().toISOString()
+      };
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((candidate) => candidate.id === taskId ? updated : candidate)
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
   async createTask(input: CreateTaskStoreInput): Promise<Task> {
     return this.serializeMutation(() => this.createTaskRecord(input, 'ui'));
   }
@@ -4066,9 +4088,12 @@ export class FileTaskStore {
     if (input.agentSettings?.runtimeId && input.agentSettings.runtimeId !== runtimeId) {
       throw new Error('Task runtime and execution settings runtime must match.');
     }
+    const agentProfile = input.agentProfile ?? sourceTask?.agentProfile;
+    if (agentProfile) validateAgentProfile(agentProfile);
     const task: Task = {
       id: randomUUID(),
       kind: 'NORMAL',
+      ...(agentProfile ? { agentProfile: clone(agentProfile) } : {}),
       runtimeId,
       title: input.title.trim(),
       prompt: input.prompt.trim(),

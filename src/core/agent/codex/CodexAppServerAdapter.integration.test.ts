@@ -4347,7 +4347,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       reasoningEffort: 'low',
       sandbox: 'READ_ONLY' as const
     };
+    const selectedProfile = { id: 'be380b13-c592-4c76-8d02-d59f9afdd371', name: 'Security', description: '', instructions: 'Trace every untrusted path to its consumer.' };
     const reviewRun = await orchestrator.startReview({
+      agentProfile: selectedProfile,
       task,
       iteration,
       worktree,
@@ -4469,6 +4471,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(readAttachmentManifestPaths(reviewInstructions)).toContain(
       canonicalReviewAttachmentPath
     );
+    expect(reviewInstructions).toContain(selectedProfile.instructions);
+    expect(reviewInstructions).toContain(await store.readArtifact(reviewRun.promptArtifactId));
     expect(reviewInstructions).not.toContain('Task Monki Design skills:');
     const reviewStart = messages.find((message) => message.method === 'review/start');
     expect(

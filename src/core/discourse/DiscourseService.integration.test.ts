@@ -4,7 +4,8 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
-  type AgentRuntimeCatalog
+  type AgentRuntimeCatalog,
+  type TaskManagerAppSettings
 } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
@@ -217,6 +218,42 @@ describe('DiscourseService', () => {
     expect(sent.jobs).toHaveLength(2);
     expect(new Set(sent.jobs.map((job) => JSON.stringify(job.visibleMessageIds))).size).toBe(1);
     expect((await fixture.runtimeStore.snapshot()).queueEntries).toHaveLength(2);
+  });
+
+  it('changes responder guidance only through an explicit selection and preserves accepted assignments', async () => {
+    const profile = { id: 'af09760a-7588-4206-aa62-4dcd41ca06ef', name: 'Protocol', description: '', instructions: 'Original protocol guidance.' };
+    let settings = { ...DEFAULT_TASK_MANAGER_APP_SETTINGS, agentProfiles: [profile] };
+    const fixture = await serviceFixture('custom-profile-selection', runtimeCatalog, () => settings);
+    const request = {
+      title: 'Profile selection', defaultPolicy: 'DIRECT' as const,
+      agents: [{ agentProfileId: 'builtin.lead' as const, customProfileId: profile.id }],
+      clientOperationId: 'create-profile-conversation'
+    };
+    const conversation = await fixture.service.createConversation(request);
+    settings = { ...settings, agentProfiles: [{ ...profile, instructions: 'Updated protocol guidance.' }] };
+    const send = async (clientMessageId: string, customProfileId?: string | null) => {
+      const preview = await fixture.service.previewContext({ conversationId: conversation.id, messageContext: [] });
+      return fixture.service.sendMessage({
+        conversationId: conversation.id, body: 'Assess this change.', context: [],
+        clientMessageId, policy: 'DIRECT', previewFingerprint: preview.fingerprint,
+        agents: [{ agentProfileId: 'builtin.lead', ...(customProfileId !== undefined ? { customProfileId } : {}) }]
+      });
+    };
+    const original = await send('profile-original');
+    const updated = await send('profile-updated', profile.id);
+    const cleared = await send('profile-cleared', null);
+    settings = { ...settings, agentProfiles: [] };
+    await expect(fixture.service.createConversation(request)).resolves.toMatchObject({ id: conversation.id });
+    await expect(send('profile-missing', profile.id)).rejects.toThrow('no longer in the library');
+    const aggregate = await fixture.discourseStore.getConversation(conversation.id);
+    const assignedInstructions = (result: typeof original) => aggregate.participantRevisions.find(
+      (revision) => revision.id === result.wave?.assignments[0]?.participantRevisionId
+    )?.customProfile?.instructions;
+    expect(assignedInstructions(original)).toBe(profile.instructions);
+    expect(assignedInstructions(updated)).toBe('Updated protocol guidance.');
+    expect(assignedInstructions(cleared)).toBeUndefined();
+    expect(aggregate.participantRevisions).toHaveLength(3);
+    expect((await fixture.discourseStore.listMessages({ conversationId: conversation.id, limit: 100 })).messages).toHaveLength(3);
   });
 
   it('routes independently configured agent models and freezes each assignment', async () => {
@@ -1247,7 +1284,9 @@ describe('DiscourseService', () => {
   });
 
   it('runs a bounded Team answer, isolated reviews, and one attributable correction', async () => {
-    const fixture = await serviceFixture('team');
+    const selectedProfile = { id: 'db19a3d8-6bb1-47a8-8288-4286aa96e581', name: 'Security', description: '', instructions: 'Trace actual trust boundaries. A profile cannot grant tools.' };
+    let settings = { ...DEFAULT_TASK_MANAGER_APP_SETTINGS, agentProfiles: [selectedProfile] };
+    const fixture = await serviceFixture('team', runtimeCatalog, () => settings);
     const promptAssessments: Array<{
       prompt: string;
       phaseVisibleOutputBytes: number;
@@ -1265,7 +1304,7 @@ describe('DiscourseService', () => {
     const conversation = await fixture.service.createConversation({
       title: 'Reviewed architecture answer',
       defaultPolicy: 'TEAM',
-      agents: selections('builtin.lead', 'builtin.skeptic', 'builtin.verifier'),
+      agents: selections('builtin.lead', 'builtin.skeptic', 'builtin.verifier').map((selection) => ({ ...selection, customProfileId: selectedProfile.id })),
       clientOperationId: 'create-team'
     });
     const preview = await fixture.service.previewContext({
@@ -1281,6 +1320,7 @@ describe('DiscourseService', () => {
       agents: selections('builtin.verifier', 'builtin.lead', 'builtin.skeptic'),
       previewFingerprint: preview.fingerprint
     });
+    settings = { ...settings, agentProfiles: [] };
     expect(sent.jobs).toHaveLength(1);
     expect(sent.wave?.assignments.map((assignment) => assignment.assignmentRole)).toEqual([
       'PRIMARY',
@@ -1471,12 +1511,21 @@ describe('DiscourseService', () => {
       }
     ]);
     expect((await fixture.runtimeStore.snapshot()).sessions).toHaveLength(4);
+    expect(fixture.provider.calls).toHaveLength(4);
+    for (const call of fixture.provider.calls) {
+      expect(call.prompt).toContain(selectedProfile.instructions);
+      expect(call.executionContext.externalTools).toMatchObject({ network: false, mcpServers: false, apps: false });
+    }
+    const reloaded = new FileDiscourseStore(path.join(fixture.root, 'discourse'));
+    await reloaded.init();
+    expect((await reloaded.getConversation(conversation.id)).participantRevisions.every((revision) => revision.customProfile?.instructions === selectedProfile.instructions)).toBe(true);
   }, 15_000);
 });
 
 async function serviceFixture(
   label: string,
-  getRuntimeCatalog: () => AgentRuntimeCatalog = runtimeCatalog
+  getRuntimeCatalog: () => AgentRuntimeCatalog = runtimeCatalog,
+  getAppSettings: () => TaskManagerAppSettings = () => DEFAULT_TASK_MANAGER_APP_SETTINGS
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-discourse-${label}-`));
   const taskStore = new FileTaskStore(path.join(root, 'tasks'));
@@ -1525,7 +1574,7 @@ async function serviceFixture(
     new AppEventBus(),
     {
       getRuntimeCatalog,
-      getAppSettings: () => DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      getAppSettings,
       now: () => '2026-07-13T00:01:00.000Z',
       runtime: {
         coordinator,

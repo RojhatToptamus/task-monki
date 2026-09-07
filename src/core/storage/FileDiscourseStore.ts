@@ -1,3 +1,4 @@
+import { validateAgentProfile } from '../../shared/agentProfiles';
 import crypto, { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -2250,6 +2251,9 @@ function validateLoaded(loaded: LoadedConversation): void {
   }
   assertUniqueRecordIds(loaded.aggregate.participants, 'participant');
   assertUniqueRecordIds(loaded.aggregate.participantRevisions, 'participant revision');
+  for (const revision of loaded.aggregate.participantRevisions) {
+    if (revision.customProfile !== undefined) validateAgentProfile(revision.customProfile);
+  }
   const participantIds = new Set(loaded.aggregate.participants.map((participant) => participant.id));
   if (
     participantIds.size !== conversation.participantIds.length ||
@@ -2590,6 +2594,9 @@ function normalizeDraftAgentSelections(
     ) {
       throw new Error('Discourse draft agent configuration is invalid.');
     }
+    if (selection.customProfileId !== undefined && selection.customProfileId !== null) {
+      requireSafeId(selection.customProfileId, 'custom profile id');
+    }
     seen.add(selection.agentProfileId);
     if (Boolean(selection.runtimeId) !== Boolean(selection.modelId)) {
       throw new Error('Discourse draft agent configuration is incomplete.');
@@ -2740,6 +2747,7 @@ function assertParticipantSeed(input: CreateDiscourseConversationInput): void {
 function assertParticipantRevisionRecord(
   revision: DiscourseParticipantRevisionRecord
 ): void {
+  if (revision.customProfile !== undefined) validateAgentProfile(revision.customProfile);
   requireSafeId(revision.id, 'participant revision id');
   requireSafeId(revision.stableParticipantId, 'participant id');
   if (

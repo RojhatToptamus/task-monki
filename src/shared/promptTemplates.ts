@@ -1,3 +1,4 @@
+import { buildAgentProfileGuidance, type CustomAgentProfile } from './agentProfiles';
 import type {
   AgentExecutionSettings,
   GitSnapshotRecord,
@@ -198,6 +199,8 @@ export function buildInitialRunPrompt(input: {
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
+    buildAgentProfileGuidance(input.task.agentProfile),
+    '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`
   ].join('\n');
 }
@@ -363,6 +366,8 @@ function buildExistingWorktreePrompt(
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
+    buildAgentProfileGuidance(input.task.agentProfile),
+    '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
     instruction ? '' : undefined,
     instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
@@ -414,6 +419,7 @@ export function buildSteerInstruction(input: {
 }
 
 export function buildAgentReviewPrompt(input: {
+  agentProfile?: CustomAgentProfile;
   task: Task;
   worktree: WorktreeRecord;
   target: import('./agent').AgentReviewTarget;
@@ -432,6 +438,8 @@ export function buildAgentReviewPrompt(input: {
   })();
   return [
     AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
+    '',
+    buildAgentProfileGuidance(input.agentProfile),
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
     '',

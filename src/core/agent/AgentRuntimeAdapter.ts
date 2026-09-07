@@ -75,6 +75,8 @@ export interface ForkAgentSession {
 }
 
 export interface StartAgentReview {
+  /** Exact Task Monki review instructions, including any selected profile. */
+  prompt?: string;
   localRunId: string;
   sourceSession: AgentSessionRef;
   reviewSessionId: string;

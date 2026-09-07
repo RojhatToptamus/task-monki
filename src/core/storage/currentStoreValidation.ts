@@ -1,3 +1,4 @@
+import { validateAgentProfile } from '../../shared/agentProfiles';
 import {
   ARTIFACT_KINDS,
   DOMAIN_EVENT_TYPES,
@@ -152,6 +153,10 @@ const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 export function validateCurrentStoreRecords(state: StoreState): void {
   validateCollection(state.tasks, 'tasks', (task) => {
     strings(task, 'tasks', ['runtimeId', 'title', 'prompt']);
+    if (task.agentProfile !== undefined) {
+      validateAgentProfile(task.agentProfile);
+      if (task.kind !== 'NORMAL') throw new Error('Design tasks cannot carry custom agent profiles.');
+    }
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');

@@ -1,3 +1,4 @@
+import type { AgentProfilesSettingsActions } from './AgentProfilesSettings';
 import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { CircleCheck, GitFork } from 'lucide-react';
 import type {
@@ -41,7 +42,7 @@ import {
   type TaskCardVM
 } from '../model/taskView';
 
-interface MainColumnProps {
+interface MainColumnProps extends AgentProfilesSettingsActions {
   view: NavView;
   board?: Board;
   tasks: TaskCardSource[];
@@ -144,6 +145,8 @@ export function MainColumn({
   onPreviewThemePreset,
   appSettings,
   onSetAppSettings,
+  onSaveAgentProfile,
+  onDeleteAgentProfile,
   softwareUpdateState,
   onCheckForSoftwareUpdates,
   onDownloadSoftwareUpdate,
@@ -255,6 +258,8 @@ export function MainColumn({
       ) : null}
       {!showRepositorySetup && view === 'settings' ? (
         <SettingsView
+          onSaveAgentProfile={onSaveAgentProfile}
+          onDeleteAgentProfile={onDeleteAgentProfile}
           theme={theme}
           onSetTheme={onSetTheme}
           onPreviewThemePreset={onPreviewThemePreset}
