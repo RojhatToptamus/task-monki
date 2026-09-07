@@ -662,6 +662,7 @@ function testWorktree(input: { repositoryPath?: string; worktreePath?: string } 
     taskId: 'task-1',
     iterationId: 'iteration-1',
     repositoryId: 'repository-1',
+    ownership: 'MANAGED' as const,
     worktreePath: input.worktreePath ?? '/worktree',
     branchName: 'codex/task',
     baseSha: 'abc123',

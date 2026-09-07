@@ -175,6 +175,24 @@ describe('Task Monki development seed data', () => {
     }
   });
 
+  it('keeps imported work idle, supports review before coding, and offers explicit reconnection for a moved checkout', () => {
+    const idle = taskForScenario(manifest, snapshot, 'external-idle');
+    expect(idle).toMatchObject({ workflowPhase: 'IN_PROGRESS', projection: { worktree: 'PRESENT', git: 'DIRTY' } });
+    expect(idle.currentRunId).toBeUndefined();
+    expect(idle.currentAgentSessionId).toBeUndefined();
+    const worktree = snapshot.worktrees.find((record) => record.id === idle.currentWorktreeId)!;
+    expect(worktree.ownership).toBe('EXTERNAL');
+    const pr = buildPrStatusViewModel({ task: idle, worktree, gitSnapshot: selectLatestGitSnapshot(snapshot, idle) });
+    expect(pr).toMatchObject({ canRefresh: true, overviewRelevant: true });
+    expect(pr.createDraftPrDisabledReason).toContain('Commit external changes');
+    const reviewed = taskForScenario(manifest, snapshot, 'external-review-needs-changes');
+    expect(reviewed).toMatchObject({ workflowPhase: 'REVIEW', projection: { agentReview: { status: 'NEEDS_CHANGES' } } });
+    expect(reviewed.currentRunId).toBeUndefined();
+    expect(snapshot.runs.filter((run) => run.taskId === reviewed.id).every((run) => run.mode === 'REVIEW')).toBe(true);
+    const missing = taskForScenario(manifest, snapshot, 'external-checkout-missing');
+    expect(missing.projection.worktree).toBe('MISSING');
+  });
+
   it('materializes discourse running, partial, review, correction, queue, stale, and recovery states', async () => {
     const persistence = await openSeedPersistence(manifest.profileRoot);
     const store = persistence.discourse;

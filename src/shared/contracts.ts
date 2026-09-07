@@ -81,7 +81,7 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 25 as const;
+export const TASK_STORE_SCHEMA_VERSION = 26 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -339,6 +339,7 @@ export const DOMAIN_EVENT_TYPES = [
   'TRANSITION_BLOCKED',
   'WORKTREE_CREATE_REQUESTED',
   'WORKTREE_CREATED',
+  'WORKTREE_ATTACHED',
   'WORKTREE_VERIFIED',
   'WORKTREE_FAILED',
   'GIT_SNAPSHOT_CAPTURED',
@@ -511,6 +512,7 @@ export interface WorktreeRecord {
   taskId: string;
   iterationId: string;
   repositoryId: string;
+  ownership: 'MANAGED' | 'EXTERNAL';
   worktreePath: string;
   branchName: string;
   baseRef?: string;
@@ -617,6 +619,8 @@ export interface BranchPublicationRecord {
   iterationId: string;
   worktreeId: string;
   remoteName: string;
+  /** Exact destination of an external-checkout push, retained for recovery. */
+  remoteUrl?: string;
   branchName: string;
   remoteRef: string;
   headSha?: string;
@@ -994,8 +998,38 @@ export interface CreateTaskRequest {
   attachmentDraftId?: string;
 }
 
+export interface ExistingWorktree {
+  worktreePath: string;
+  branchName?: string;
+  headSha?: string;
+  unavailableReason?: string;
+  existingTaskId?: string;
+}
+
+export interface ImportTaskRequest {
+  repositoryId: string;
+  worktreePath: string;
+  branchName: string;
+  baseRef: string;
+  title: string;
+  prompt: string;
+  runtimeId?: AgentRuntimeId;
+  agentSettings?: AgentExecutionSettings;
+}
+
+export interface ReconnectWorktreeRequest {
+  taskId: string;
+  worktreePath: string;
+}
+
+export interface UpdateWorktreeComparisonRequest {
+  taskId: string;
+  baseRef: string;
+}
+
 export interface StartRunRequest {
   taskId: string;
+  instruction?: string;
   mode?: Exclude<AgentRunMode, 'REVIEW'>;
   settings?: AgentExecutionSettings;
 }
@@ -1365,6 +1399,10 @@ export interface TaskManagerApi {
   ): Promise<UpdateAgentNativeSessionResult>;
   getBoardSnapshot(): Promise<BoardSnapshot>;
   getTaskDetail(taskId: string): Promise<TaskDetailSnapshot>;
+  listExistingWorktrees(repositoryId: string): Promise<ExistingWorktree[]>;
+  importTask(input: ImportTaskRequest): Promise<Task>;
+  reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord>;
+  updateWorktreeComparison(input: UpdateWorktreeComparisonRequest): Promise<WorktreeRecord>;
   listDesigns(): Promise<DesignListItem[]>;
   getDesign(designId: string): Promise<DesignDetailSnapshot>;
   listDesignConversation(

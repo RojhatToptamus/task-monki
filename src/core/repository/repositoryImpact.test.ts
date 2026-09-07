@@ -15,6 +15,7 @@ describe('selectRepositoryImpact', () => {
           taskId: task.id,
           iterationId: 'iteration-1',
           repositoryId: task.repositoryId,
+          ownership: 'MANAGED' as const,
           worktreePath: '/tmp/worktree',
           branchName: 'codex/task',
           baseSha: 'base',

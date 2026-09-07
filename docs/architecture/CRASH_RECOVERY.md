@@ -69,6 +69,13 @@ action revalidates the repository and creates the same Task Monki-owned
 worktree record, branch, and iteration. It refuses conflicting paths or branch
 ownership through the existing worktree checks.
 
+External checkout verification never creates directories, changes permissions,
+switches branches, or removes checkout files. A moved external checkout requires
+explicit reconnection to a registered path in the same repository and branch.
+Historical run and evidence paths stay unchanged. A later coding turn starts a
+fresh session when the recorded session still belongs to the old path.
+Task deletion stops only Task Monki-owned resources and cannot remove an external checkout.
+
 ## Provider Runs And Interactions
 
 Persisted ownership remains recoverable for `QUEUED`, `STARTING`, `RUNNING`,

@@ -20,6 +20,7 @@ import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type {
   AgentItemRecord,
+  CreateTaskRequest,
   AgentRunStatus,
   GitSnapshotRecord,
   RunRecord,
@@ -51,7 +52,7 @@ const TERMINAL_STATUSES = new Set<AgentRunStatus>([
   'LOST'
 ]);
 
-type ScenarioKind = 'complete' | 'fail' | 'cancel';
+type ScenarioKind = 'complete' | 'fail' | 'cancel' | 'import';
 
 export interface AgentTestScenarioReport {
   kind: ScenarioKind;
@@ -1449,7 +1450,7 @@ async function runStressUiWorkflow(options: StressOptions): Promise<void> {
 async function createAgentTestEnvironment(
   options: AgentTestEnvironmentOptions = {}
 ): Promise<AgentTestEnvironment> {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-test-'));
+  const rootDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-test-')));
   const storeDir = path.join(rootDir, 'store');
   const sourceRepositoryPath = path.join(rootDir, 'source');
   const localRemotePath = path.join(rootDir, 'remote.git');
@@ -1592,8 +1593,8 @@ async function exerciseRepresentativeScenarios(
   environment: AgentTestEnvironment
 ): Promise<AgentTestScenarioReport[]> {
   const reports: AgentTestScenarioReport[] = [];
-  for (const kind of ['complete', 'fail', 'cancel'] as const) {
-    const task = await environment.service.createTask({
+  for (const kind of ['complete', 'fail', 'cancel', 'import'] as const) {
+    const input: CreateTaskRequest = {
       title: scenarioTitle(kind),
       prompt: `[agent-test:${kind}] ${scenarioPrompt(kind)}`,
       repositoryId: environment.repositoryId,
@@ -1610,9 +1611,25 @@ async function exerciseRepresentativeScenarios(
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       }
+    };
+    let task: Task;
+    let worktree: WorktreeRecord;
+    if (kind === 'import') {
+      const checkout = path.join(environment.rootDir, 'external-checkout');
+      await git(environment.sourceRepositoryPath, ['worktree', 'add', '-b', 'feature/executed-import', checkout]);
+      task = await environment.service.importTask({ ...input, worktreePath: checkout, branchName: 'feature/executed-import', baseRef: 'HEAD' });
+      assert(!task.currentRunId && !task.currentAgentSessionId, 'Import started coding work.');
+      assert(task.workflowPhase === 'IN_PROGRESS', 'Import did not remain idle in progress.');
+      worktree = requireValue((await environment.store.snapshot()).worktrees.find((record) => record.id === task.currentWorktreeId), 'Imported checkout missing.');
+      assert(worktree.ownership === 'EXTERNAL', 'Import lost checkout ownership.');
+    } else {
+      task = await environment.service.createTask(input);
+      worktree = await environment.service.prepareWorktree({ taskId: task.id });
+    }
+    const started = await environment.service.startRun({
+      taskId: task.id,
+      instruction: kind === 'import' ? '[agent-test:complete] Create the known test output in the imported checkout.' : undefined
     });
-    const worktree = await environment.service.prepareWorktree({ taskId: task.id });
-    const started = await environment.service.startRun({ taskId: task.id });
     if (kind === 'cancel') {
       await waitForSnapshot(environment.store, (snapshot) => {
         const run = snapshot.runs.find((candidate) => candidate.id === started.id);
@@ -1665,7 +1682,7 @@ async function buildScenarioReport(
     .map((event) => event.type);
   const changedPaths = await observedGitPaths(worktree.worktreePath);
   const expectedChangeObserved =
-    kind === 'complete'
+    kind === 'complete' || kind === 'import'
       ? changedPaths.includes('agent-output.txt') && gitSnapshot.untrackedCount === 1
       : changedPaths.length === 0;
   const diagnostic =
@@ -1769,6 +1786,9 @@ function assertWorkflowProof(
   const complete = requireScenario(scenarios, 'complete');
   const failed = requireScenario(scenarios, 'fail');
   const canceled = requireScenario(scenarios, 'cancel');
+  const imported = requireScenario(scenarios, 'import');
+  assert(imported.runStatus === 'COMPLETED' && imported.workflowPhase === 'REVIEW', 'Imported implementation did not complete through the shared runtime.');
+  assert(imported.git.expectedChangeObserved, 'Imported implementation lacked independent Git evidence.');
   assert(complete.runStatus === 'COMPLETED', 'Completion scenario did not complete.');
   assert(complete.workflowPhase === 'REVIEW', 'Completion scenario did not advance to review.');
   assert(complete.git.expectedChangeObserved, 'Completion Git change was not independently observed.');
@@ -2475,7 +2495,8 @@ function scenarioTitle(kind: ScenarioKind): string {
   return {
     complete: '[agent-test:complete] Deterministic completion',
     fail: '[agent-test:fail] Deterministic failure',
-    cancel: '[agent-test:cancel] Deterministic cancellation'
+    cancel: '[agent-test:cancel] Deterministic cancellation',
+    import: '[agent-test:import] Imported checkout implementation'
   }[kind];
 }
 
@@ -2483,7 +2504,8 @@ function scenarioPrompt(kind: ScenarioKind): string {
   return {
     complete: 'Create the known test output and finish.',
     fail: 'Emit the known provider failure.',
-    cancel: 'Wait until Task Monki interrupts this turn.'
+    cancel: 'Wait until Task Monki interrupts this turn.',
+    import: 'Existing work before the first coding instruction.'
   }[kind];
 }
 
@@ -2562,7 +2584,7 @@ function cleanupSucceeded(result: AgentTestCleanupResult): boolean {
 
 async function removeOwnedRoot(rootDir: string): Promise<void> {
   const resolved = path.resolve(rootDir);
-  const temporaryRoot = path.resolve(os.tmpdir());
+  const temporaryRoot = await fs.realpath(os.tmpdir());
   const relative = path.relative(temporaryRoot, resolved);
   if (
     relative === '' ||

@@ -24,6 +24,7 @@ export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new S
 
 export interface TaskTransitionEvidence {
   hasWorktree: boolean;
+  worktreeOwnership?: 'MANAGED' | 'EXTERNAL';
   currentRun?: Pick<RunRecord, 'id' | 'mode' | 'status'>;
   hasGitSnapshot?: boolean;
   gitStatus?: Task['projection']['git'];
@@ -75,6 +76,10 @@ export function transitionBlocker(
   if (toPhase === 'REVIEW') {
     if (!evidence.hasWorktree) {
       return 'A task worktree is required before review.';
+    }
+    if (evidence.worktreeOwnership === 'EXTERNAL' && !task.currentRunId && !evidence.currentRun) {
+      return evidence.hasGitSnapshot && !['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(evidence.gitStatus ?? 'UNKNOWN')
+        ? undefined : 'Refresh the external checkout before moving to review.';
     }
     if (
       !evidence.currentRun ||

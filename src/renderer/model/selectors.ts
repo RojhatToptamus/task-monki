@@ -118,8 +118,9 @@ export function canPrepareWorktree(task: Task): boolean {
   return !['CREATING', 'PRESENT'].includes(task.projection.worktree);
 }
 
-export function canCreateDeliveryCommit(task: Task): boolean {
+export function canCreateDeliveryCommit(task: Task, worktree?: WorktreeRecord): boolean {
   return (
+    worktree?.ownership !== 'EXTERNAL' &&
     task.projection.worktree === 'PRESENT' &&
     task.projection.git === 'DIRTY' &&
     !getImplementationRetryReason(task)

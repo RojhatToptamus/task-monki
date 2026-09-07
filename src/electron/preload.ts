@@ -9,6 +9,9 @@ import type {
   CreateBlankDesignRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  ImportTaskRequest,
+  ReconnectWorktreeRequest,
+  UpdateWorktreeComparisonRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteDesignDraftRequest,
@@ -215,6 +218,10 @@ const api: TaskManagerApi = {
       invokeIpc('attachment:clipboard:readImage')
     ),
   createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
+  importTask: (input: ImportTaskRequest) => invokeIpc('task:import', input),
+  listExistingWorktrees: (repositoryId: string) => invokeIpc('worktree:list', repositoryId),
+  reconnectWorktree: (input: ReconnectWorktreeRequest) => invokeIpc('worktree:reconnect', input),
+  updateWorktreeComparison: (input: UpdateWorktreeComparisonRequest) => invokeIpc('worktree:comparison', input),
   listDesigns: () => invokeIpc('design:list'),
   getDesign: (designId: string) => invokeIpc('design:get', designId),
   listDesignConversation: (input: ListDesignConversationRequest) =>

@@ -12,6 +12,7 @@ import {
   TASK_STORE_SCHEMA_VERSION,
   getImplementationRetryReason,
   type CreateTaskRequest,
+  type ImportTaskRequest,
   type CreateBoardRequest,
   type Board,
   type BoardSnapshot,
@@ -110,6 +111,7 @@ import {
 } from './theme';
 import { computeNavCounts, type NavView } from '../model/taskView';
 import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
+import { useExternalCheckoutObservation } from './useExternalCheckoutObservation';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
@@ -241,6 +243,12 @@ export function App() {
   const [areSavedViewsExpanded, setAreSavedViewsExpanded] = useState(true);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isTaskDetailModalOpen, setIsTaskDetailModalOpen] = useState(false);
+  const pendingAppActions = useRef(0);
+  const withAppAction = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
+    pendingAppActions.current += 1;
+    try { return await action(); }
+    finally { pendingAppActions.current -= 1; }
+  }, []);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
   const [isNewTaskClosing, setIsNewTaskClosing] = useState(false);
@@ -1903,6 +1911,19 @@ export function App() {
     }
   };
 
+  const importTask = async (input: ImportTaskRequest) => {
+    try {
+      const imported = await taskManagerApi.importTask(input);
+      taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
+      setNewTaskTextDraft({ title: '', prompt: '' });
+      await taskDataCoordinator.refreshBoard();
+      await openTaskDetail(imported.id);
+    } catch (caught) {
+      reportActionError(caught, 'Could not import existing work.');
+      throw caught;
+    }
+  };
+
   const refinePrompt = async (input: RefinePromptRequest) => {
     try {
       const refinementModel = selectModel(
@@ -1948,21 +1969,41 @@ export function App() {
     });
   };
 
-  const startRun = async (taskId: string) => {
+  const startRun = async (taskId: string, instruction?: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.startRun({ taskId, mode: 'IMPLEMENTATION' });
+      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION' }));
       notify('Agent run started.', 'success');
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start run.');
+      if (instruction) throw caught;
     }
+  };
+
+  const refreshEvidence = async (taskId: string) => {
+    try {
+      await withAppAction(() => taskManagerApi.refreshEvidence({ taskId }));
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not refresh the checkout.');
+    }
+  };
+
+  const reconnectWorktree = async (taskId: string, worktreePath: string) => {
+    await withAppAction(() => taskManagerApi.reconnectWorktree({ taskId, worktreePath }));
+    await refresh();
+  };
+
+  const updateWorktreeComparison = async (taskId: string, baseRef: string) => {
+    await withAppAction(() => taskManagerApi.updateWorktreeComparison({ taskId, baseRef }));
+    await refresh();
   };
 
   const prepareWorktree = async (taskId: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.prepareWorktree({ taskId });
+      await withAppAction(() => taskManagerApi.prepareWorktree({ taskId }));
       notify('Worktree prepared.', 'success');
       await refresh();
     } catch (caught) {
@@ -1973,7 +2014,7 @@ export function App() {
   const createDeliveryCommit = async (taskId: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.createDeliveryCommit({ taskId });
+      await withAppAction(() => taskManagerApi.createDeliveryCommit({ taskId }));
       notify('Delivery commit created.', 'success');
       await refresh();
     } catch (caught) {
@@ -1984,7 +2025,7 @@ export function App() {
   const createPullRequest = async (taskId: string, title?: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.createPullRequest({ taskId, title });
+      await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title }));
       notify('Draft pull request created.', 'success');
       await refresh();
     } catch (caught) {
@@ -1995,7 +2036,7 @@ export function App() {
   const refreshGitHub = async (taskId: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.refreshGitHub({ taskId });
+      await withAppAction(() => taskManagerApi.refreshGitHub({ taskId }));
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to refresh GitHub.');
@@ -2005,7 +2046,7 @@ export function App() {
   const resolvePreview = async (taskId: string, scenarioId?: string) => {
     setError(undefined);
     try {
-      const result = await taskManagerApi.resolvePreview({ taskId, scenarioId });
+      const result = await withAppAction(() => taskManagerApi.resolvePreview({ taskId, scenarioId }));
       setPreviewResolutions((current) => ({ ...current, [taskId]: result }));
       if (result.status === 'UNAVAILABLE') return;
       if (result.status === 'CONFIGURATION_REQUIRED') {
@@ -2031,7 +2072,7 @@ export function App() {
   ) => {
     setError(undefined);
     try {
-      await taskManagerApi.setPreviewLocalAttachmentBinding({ taskId, attachmentId, target });
+      await withAppAction(() => taskManagerApi.setPreviewLocalAttachmentBinding({ taskId, attachmentId, target }));
     } catch (caught) {
       reportActionError(caught, 'Could not configure the Preview target.');
       throw caught;
@@ -2053,7 +2094,7 @@ export function App() {
 
   const generatePreviewRecipe = async (taskId: string) => {
     try {
-      const state = await taskManagerApi.generatePreviewRecipe({ taskId });
+      const state = await withAppAction(() => taskManagerApi.generatePreviewRecipe({ taskId }));
       setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
       return state;
     } catch (caught) {
@@ -2075,7 +2116,7 @@ export function App() {
     yaml: string
   ) => {
     try {
-      const result = await taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml });
+      const result = await withAppAction(() => taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }));
       setPreviewRecipeGenerations((current) => ({
         ...current,
         [taskId]: { taskId, status: 'EMPTY' }
@@ -2103,7 +2144,7 @@ export function App() {
   };
 
   const discardPreviewRecipeDraft = async (taskId: string) => {
-    const state = await taskManagerApi.discardPreviewRecipeDraft({ taskId });
+    const state = await withAppAction(() => taskManagerApi.discardPreviewRecipeDraft({ taskId }));
     setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
     return state;
   };
@@ -2125,7 +2166,7 @@ export function App() {
   const approvePreview = async (taskId: string, planId: string, executionDigest: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.approvePreviewPlan({ taskId, planId, executionDigest });
+      await withAppAction(() => taskManagerApi.approvePreviewPlan({ taskId, planId, executionDigest }));
       notify('Preview plan approved.', 'success');
       await refresh();
     } catch (caught) {
@@ -2137,7 +2178,7 @@ export function App() {
   const startPreview = async (taskId: string, scenarioId?: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.startPreview({ taskId, scenarioId });
+      await withAppAction(() => taskManagerApi.startPreview({ taskId, scenarioId }));
       notify('Preview is ready.', 'success');
       await refresh();
     } catch (caught) {
@@ -2150,7 +2191,7 @@ export function App() {
   const stopPreview = async (taskId: string, generationId: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.stopPreview({ taskId, generationId });
+      await withAppAction(() => taskManagerApi.stopPreview({ taskId, generationId }));
       notify('Preview stopped.', 'success');
       await refresh();
     } catch (caught) {
@@ -2168,7 +2209,7 @@ export function App() {
   ) => {
     setError(undefined);
     try {
-      await taskManagerApi.resetPreviewData({ taskId, generationId, resourceId, scenarioId });
+      await withAppAction(() => taskManagerApi.resetPreviewData({ taskId, generationId, resourceId, scenarioId }));
       notify('Preview data reset and scenario completed.', 'success');
       await refresh();
     } catch (caught) {
@@ -2185,7 +2226,7 @@ export function App() {
   ) => {
     setError(undefined);
     try {
-      await taskManagerApi.retryPreviewSetup({ taskId, generationId, scenarioId });
+      await withAppAction(() => taskManagerApi.retryPreviewSetup({ taskId, generationId, scenarioId }));
       notify('Preview setup completed.', 'success');
       await refresh();
     } catch (caught) {
@@ -2227,7 +2268,7 @@ export function App() {
   const transitionTask = async (taskId: string, toPhase: WorkflowPhase) => {
     setError(undefined);
     try {
-      await taskManagerApi.transitionTask({ taskId, toPhase });
+      await withAppAction(() => taskManagerApi.transitionTask({ taskId, toPhase }));
       notify(`Task moved to ${toPhase.toLowerCase().replace(/_/g, ' ')}.`, 'success');
       await refresh();
     } catch (caught) {
@@ -2261,7 +2302,7 @@ export function App() {
   ): Promise<DeleteTaskResult> => {
     setError(undefined);
     try {
-      const deleted = await taskManagerApi.deleteTask({ taskId, removeWorktree });
+      const deleted = await withAppAction(() => taskManagerApi.deleteTask({ taskId, removeWorktree }));
       setDeleteCandidateId(undefined);
       setDeleteCandidateDetail(undefined);
       if (selectedTaskId === taskId) {
@@ -2284,7 +2325,7 @@ export function App() {
   const cancelRun = async (runId: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.cancelRun({ runId });
+      await withAppAction(() => taskManagerApi.cancelRun({ runId }));
       notify('Run cancellation requested.', 'success');
       await refresh();
     } catch (caught) {
@@ -2299,7 +2340,7 @@ export function App() {
       if (!run) {
         throw new Error('Run not found.');
       }
-      await taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction });
+      await withAppAction(() => taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction }));
       notify('Instruction sent.', 'success');
       await refresh();
     } catch (caught) {
@@ -2318,7 +2359,7 @@ export function App() {
       const recoveryContinuation =
         run.status !== 'COMPLETED' ||
         Boolean(selectedTask && getImplementationRetryReason(selectedTask));
-      await taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction });
+      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction }));
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
         'success'
@@ -2341,12 +2382,12 @@ export function App() {
       if (!run) {
         throw new Error('Run not found.');
       }
-      const retry = await taskManagerApi.retryRun({
+      const retry = await withAppAction(() => taskManagerApi.retryRun({
         taskId: run.taskId,
         runId,
         strategy,
         instruction
-      });
+      }));
       if (strategy === 'FORK') {
         await taskDataCoordinator.refreshBoard();
         await openTaskDetail(retry.taskId);
@@ -2370,20 +2411,20 @@ export function App() {
     }
   };
 
-  const startReview = async (runId: string) => {
+  const startReview = async (runId?: string) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
-      if (!run) {
+      if ((!run && runId) || !selectedTask) {
         throw new Error('Run not found.');
       }
       notify(REVIEW_STARTED_NOTICE, 'info');
-      await taskManagerApi.startReview({
-        taskId: run.taskId,
+      await withAppAction(() => taskManagerApi.startReview({
+        taskId: run?.taskId ?? selectedTask.id,
         runId,
-        target: { type: 'UNCOMMITTED_CHANGES' },
+        target: selectedWorktree?.ownership === 'EXTERNAL' ? undefined : { type: 'UNCOMMITTED_CHANGES' },
         settings: reviewExecutionSettings
-      });
+      }));
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start review.');
@@ -2394,7 +2435,7 @@ export function App() {
   const syncAgentGoal = async (taskId: string, sessionId: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.syncAgentGoal({ taskId, sessionId });
+      await withAppAction(() => taskManagerApi.syncAgentGoal({ taskId, sessionId }));
       notify('Provider goal synced.', 'success');
       await refresh();
     } catch (caught) {
@@ -2408,7 +2449,7 @@ export function App() {
   ) => {
     setError(undefined);
     try {
-      await taskManagerApi.updateAgentNativeSession(input);
+      await withAppAction(() => taskManagerApi.updateAgentNativeSession(input));
       const [catalog] = await Promise.all([
         taskManagerApi.getAgentRuntimeCatalog(),
         refresh()
@@ -2473,7 +2514,7 @@ export function App() {
     setError(undefined);
     setIsAddingRepository(true);
     try {
-      const selectedPath = await taskManagerApi.chooseRepositoryFolder();
+      const selectedPath = await withAppAction(() => taskManagerApi.chooseRepositoryFolder());
       if (!selectedPath) {
         return false;
       }
@@ -2518,7 +2559,7 @@ export function App() {
     async (repositoryId: string) => {
       setError(undefined);
       try {
-        const selectedPath = await taskManagerApi.chooseRepositoryFolder();
+        const selectedPath = await withAppAction(() => taskManagerApi.chooseRepositoryFolder());
         if (!selectedPath) return;
         const repository = await taskManagerApi.reconnectRepository({
           repositoryId,
@@ -2720,6 +2761,16 @@ export function App() {
       designExternalLinkRequest
   );
   const appBackgroundModalOpen = appOwnedModalOpen || isTaskDetailModalOpen;
+
+  useExternalCheckoutObservation({
+    taskId: isDetailOpen && selectedWorktree?.ownership === 'EXTERNAL' ? selectedTask?.id : undefined,
+    paused: appBackgroundModalOpen || isNewTaskOpen || isAddingRepository || selectedRuns.some((run) =>
+      ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(run.status)),
+    isActionPending: () => pendingAppActions.current > 0,
+    observe: (taskId) => taskManagerApi.refreshEvidence({ taskId }),
+    refresh,
+    onError: (caught) => reportActionError(caught, 'Could not refresh the external checkout.')
+  });
 
   return (
     <div
@@ -3055,6 +3106,10 @@ export function App() {
             onCancel={cancelRun}
             onSteer={steerRun}
             onContinue={continueRun}
+            onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
+            onReconnectWorktree={reconnectWorktree}
+            onUpdateWorktreeComparison={updateWorktreeComparison}
+            onRefreshEvidence={refreshEvidence}
             onRetry={retryRun}
             onReview={startReview}
             onSyncAgentGoal={syncAgentGoal}
@@ -3224,6 +3279,9 @@ export function App() {
               disabled={!canCreateTask}
               refineDisabledReason={refineDisabledReason}
               onCreate={createTask}
+              onImport={importTask}
+              onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
+              onOpenExistingTask={async (taskId) => { await openTaskDetail(taskId); }}
               onRefinePrompt={refinePrompt}
               onCancelPromptRefinement={cancelPromptRefinement}
               onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}

@@ -222,6 +222,7 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
     return { label: 'Reviewing', tone: 'neutral' };
   }
   if (task.workflowPhase === 'IN_PROGRESS') {
+    if (run === 'IDLE') return { label: 'In progress', tone: 'neutral' };
     return { label: 'Implementing', tone: 'info' };
   }
 

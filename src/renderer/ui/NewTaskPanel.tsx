@@ -15,6 +15,8 @@ import type {
   AgentModel,
   AgentRuntimeState,
   CreateTaskRequest,
+  ExistingWorktree,
+  ImportTaskRequest,
   RefinePromptRequest,
   RefinePromptResponse,
   Repository
@@ -78,6 +80,9 @@ interface NewTaskPanelProps {
   refineDisabledReason?: string;
   attachmentsEnabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
+  onImport?(input: ImportTaskRequest): Promise<void>;
+  onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
+  onOpenExistingTask?(taskId: string): Promise<void>;
   onRefinePrompt(
     input: Pick<
       RefinePromptRequest,
@@ -216,6 +221,9 @@ export function NewTaskPanel({
   refineDisabledReason,
   attachmentsEnabled = true,
   onCreate,
+  onImport,
+  onListExistingWorktrees,
+  onOpenExistingTask,
   onRefinePrompt,
   onCancelPromptRefinement,
   onStageAttachmentBatch,
@@ -231,6 +239,14 @@ export function NewTaskPanel({
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState(initialTextDraft?.title ?? '');
   const [prompt, setPrompt] = useState(initialTextDraft?.prompt ?? '');
+  const [importing, setImporting] = useState(false);
+  const [checkoutPath, setCheckoutPath] = useState('');
+  const [baseRef, setBaseRef] = useState('');
+  const [checkouts, setCheckouts] = useState<{
+    repositoryId: string;
+    items: ExistingWorktree[];
+    error?: string;
+  }>();
   const [runtimeId, setRuntimeId] = useState(
     defaultAgentSettings?.runtimeId ??
       runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
@@ -355,7 +371,7 @@ export function NewTaskPanel({
     selectedRuntime &&
       selectedRuntime.preflight.capabilities.attachmentDelivery.maturity !== 'unsupported'
   );
-  const effectiveAttachmentsEnabled = attachmentsEnabled && runtimeSupportsAttachments;
+  const effectiveAttachmentsEnabled = !importing && attachmentsEnabled && runtimeSupportsAttachments;
   const runtimeModels = models.filter((candidate) => candidate.runtimeId === runtimeId);
   const selectedModel = runtimeModels.find((candidate) => candidate.id === modelId);
   const effectiveReasoningEffort =
@@ -376,6 +392,26 @@ export function NewTaskPanel({
   const selectedRepository = availableRepositories.find(
     (repository) => repository.id === selectedRepositoryId
   );
+  const checkoutOptions = checkouts?.repositoryId === selectedRepositoryId ? checkouts : undefined;
+  const selectedCheckout = checkoutOptions?.items.find((item) => item.worktreePath === checkoutPath);
+  useEffect(() => {
+    if (!importing || !selectedRepositoryId || !onListExistingWorktrees) return;
+    let canceled = false;
+    setCheckouts(undefined);
+    void onListExistingWorktrees(selectedRepositoryId).then(
+      (items) => {
+        if (!canceled) setCheckouts({ repositoryId: selectedRepositoryId, items });
+      },
+      (caught: unknown) => {
+        if (!canceled) setCheckouts({
+          repositoryId: selectedRepositoryId,
+          items: [],
+          error: caught instanceof Error ? caught.message : 'Could not list checkouts.'
+        });
+      }
+    );
+    return () => { canceled = true; };
+  }, [importing, selectedRepositoryId, onListExistingWorktrees]);
   const composerLocked =
     Boolean(disabled) || isSubmitting || isRefining || creationOutcomeUnknown;
 
@@ -494,6 +530,36 @@ export function NewTaskPanel({
     let creationNeedsUnchangedRetry = false;
     let created = false;
     try {
+      if (importing) {
+        if (!selectedCheckout || selectedCheckout.unavailableReason || !onImport) {
+          throw new Error('Select an available checkout.');
+        }
+        if (selectedCheckout.existingTaskId && onOpenExistingTask) {
+          await onOpenExistingTask(selectedCheckout.existingTaskId);
+        } else {
+          await onImport({
+            repositoryId: selectedRepositoryId,
+            worktreePath: selectedCheckout.worktreePath,
+            branchName: selectedCheckout.branchName!,
+            baseRef: baseRef.trim(),
+            title,
+            prompt,
+            runtimeId: runtimeId || undefined,
+            agentSettings: {
+              ...defaultAgentSettings,
+              runtimeId: runtimeId || undefined,
+              model: selectedModel?.model,
+              modelProvider: selectedModel?.modelProvider,
+              reasoningEffort: effectiveReasoningEffort || undefined,
+              ...(permissionPreset ? settingsForExecutionPolicyPreset(permissionPreset, {
+                networkAccess: effectiveNetworkAccess
+              }) : {})
+            }
+          });
+        }
+        created = true;
+        return;
+      }
       const attachmentDraftId = await attachments.prepareForCreate();
       if (!permissionPreset) {
         throw new Error('The selected runtime does not expose an execution policy.');
@@ -655,7 +721,11 @@ export function NewTaskPanel({
     setRestorable(undefined);
   };
 
-  const createDisabled =
+  const createDisabled = importing
+    ? Boolean(disabled) || isSubmitting || !selectedCheckout ||
+      Boolean(selectedCheckout.unavailableReason) ||
+      (!selectedCheckout.existingTaskId && (!title.trim() || !prompt.trim() || !baseRef.trim()))
+    :
     Boolean(disabled) ||
     isSubmitting ||
     isRefining ||
@@ -727,6 +797,19 @@ export function NewTaskPanel({
         </header>
 
         <div className="slideover__body">
+          {onImport ? (
+            <div className="segmented" aria-label="Task source">
+              {[false, true].map((value) => (
+                <button key={String(value)} type="button" className="segmented__btn"
+                  aria-pressed={importing === value}
+                  disabled={composerLocked || attachmentsBusy || activeAttachmentItems.length > 0}
+                  title={activeAttachmentItems.length > 0 ? 'Remove attachments before changing the task source.' : undefined}
+                  onClick={() => { setImporting(value); setError(undefined); }}>
+                  {value ? 'Import existing work' : 'New work'}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <section className="newtask-section" aria-label="Task essentials">
             <fieldset className="field tm-newtask-repository">
               <legend>Repository</legend>
@@ -738,6 +821,38 @@ export function NewTaskPanel({
                 onChange={setRequestedRepositoryId}
               />
             </fieldset>
+            {importing ? (
+              <>
+                <label className="field">
+                  <span>Checkout</span>
+                  <select value={selectedCheckout?.worktreePath ?? ''} disabled={composerLocked || !checkoutOptions}
+                    onChange={(event) => setCheckoutPath(event.target.value)}>
+                    <option value="">{!checkoutOptions ? 'Loading checkouts…' : 'Select a checkout'}</option>
+                    {checkoutOptions?.items.map((item) => (
+                      <option key={item.worktreePath} value={item.worktreePath} disabled={Boolean(item.unavailableReason)}>
+                        {item.branchName ?? 'Detached HEAD'} · {item.worktreePath}{item.unavailableReason ? ` — ${item.unavailableReason}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {checkoutOptions?.error ? <p className="form-error" role="alert">{checkoutOptions.error}</p> : null}
+                {checkoutOptions && !checkoutOptions.error && checkoutOptions.items.length === 0 ?
+                  <p className="form-warning">No registered checkouts are available.</p> : null}
+                {selectedCheckout ? <div className="field"><span>Branch</span><code>{selectedCheckout.branchName}</code></div> : null}
+                {selectedCheckout?.existingTaskId ? (
+                  <p className="form-warning">This checkout already belongs to a task.</p>
+                ) : (
+                  <label className="field">
+                    <span id="import-comparison-label">Compare against</span>
+                    <input aria-labelledby="import-comparison-label" aria-describedby="import-comparison-help"
+                      value={baseRef} disabled={composerLocked} placeholder="main, a commit, or HEAD"
+                      onChange={(event) => setBaseRef(event.target.value)} />
+                    <small id="import-comparison-help">HEAD includes only current uncommitted work. The comparison stays fixed until you change it.</small>
+                  </label>
+                )}
+              </>
+            ) : null}
+            {!(importing && selectedCheckout?.existingTaskId) ? <>
             <label className="field">
               <span>Title</span>
               <input
@@ -754,7 +869,7 @@ export function NewTaskPanel({
                 <span className="field__label">
                   <label htmlFor="task-description">Description</label>
                 </span>
-                <span className="field__header-actions">
+                {!importing ? <span className="field__header-actions">
                   {restorable !== undefined && !proposal ? (
                     <button
                       className="field__restore"
@@ -785,9 +900,13 @@ export function NewTaskPanel({
                       {isRefining ? 'Refining' : 'Refine'}
                     </span>
                   </button>
-                </span>
+                </span> : null}
               </span>
-              <AttachmentComposerShell
+              {importing ? (
+                <textarea id="task-description" value={prompt} disabled={composerLocked}
+                  placeholder="Describe the existing work and its purpose."
+                  onChange={(event) => updatePrompt(event.target.value)} />
+              ) : <AttachmentComposerShell
                 attachments={attachments}
                 attachmentLabel="Task attachments"
                 className={isRefining ? 'field__prompt-shell--running' : ''}
@@ -829,7 +948,7 @@ export function NewTaskPanel({
                   }
                   disabled={composerLocked || isRefining}
                 />
-              </AttachmentComposerShell>
+              </AttachmentComposerShell>}
               {attachmentOverflowError ? (
                 <p
                   className="task-attachment-message task-attachment-message--error"
@@ -862,9 +981,10 @@ export function NewTaskPanel({
                 />
               ) : null}
             </div>
+            </> : null}
           </section>
 
-          <details className="newtask-settings">
+          {!(importing && selectedCheckout?.existingTaskId) ? <details className="newtask-settings">
             <summary>
               <span className="newtask-settings__title">Run configuration</span>
               <span className="newtask-settings__summary">
@@ -943,7 +1063,7 @@ export function NewTaskPanel({
                 </button>
               </div>
             </div>
-          </details>
+          </details> : null}
 
           {error ? (
             <p className="form-error" role="alert">
@@ -953,7 +1073,7 @@ export function NewTaskPanel({
           {currentRefinementWarning ? (
             <p className="form-warning">{currentRefinementWarning}</p>
           ) : null}
-          {selectedRuntime && !selectedRuntimeReadiness.canStart ? (
+          {!importing && selectedRuntime && !selectedRuntimeReadiness.canStart ? (
             <p className="form-error">
               {selectedRuntimeReadiness.detail}
               {selectedRuntimeReadiness.nextAction
@@ -962,10 +1082,10 @@ export function NewTaskPanel({
               You can create the task now and start it after the runtime is available.
             </p>
           ) : null}
-          {selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
+          {!importing && selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
             <p className="form-warning">{selectedRuntimeReadiness.detail}</p>
           ) : null}
-          {selectedRuntimeReadiness.warnings.map((warning) => (
+          {!importing && selectedRuntimeReadiness.warnings.map((warning) => (
             <p className="form-warning" key={`${warning.code}:${warning.message}`}>
               {warning.message}
             </p>
@@ -989,12 +1109,12 @@ export function NewTaskPanel({
               aria-busy={isSubmitting}
               aria-keyshortcuts="Meta+Enter Control+Enter"
               aria-label={
-                selectedRepository
+                importing ? (selectedCheckout?.existingTaskId ? 'Open existing task' : 'Import existing work') : selectedRepository
                   ? `Create task in ${selectedRepository.name}`
                   : 'Create task'
               }
             >
-              {isSubmitting
+              {importing ? (isSubmitting ? 'Opening…' : selectedCheckout?.existingTaskId ? 'Open existing task' : 'Import existing work') : isSubmitting
                 ? 'Creating…'
                 : creationOutcomeUnknown
                   ? 'Retry creation'

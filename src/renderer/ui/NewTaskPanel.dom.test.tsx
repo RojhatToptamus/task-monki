@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentModel, Repository } from '../../shared/contracts';
+import type { AgentModel, ExistingWorktree, Repository } from '../../shared/contracts';
 import {
   CODEX_RUNTIME_DESCRIPTOR,
   codexCapabilities
@@ -96,13 +96,49 @@ describe('mounted NewTaskPanel prompt refinement', () => {
   });
 });
 
-function renderPanel(overrides: {
-  onRefinePrompt?: React.ComponentProps<typeof NewTaskPanel>['onRefinePrompt'];
-  onCancelPromptRefinement?: React.ComponentProps<
-    typeof NewTaskPanel
-  >['onCancelPromptRefinement'];
-  onClose?: () => void;
-} = {}) {
+describe('mounted existing-work import', () => {
+  it('imports the selected named checkout without requiring an available agent or starting new work', async () => {
+    const onImport = vi.fn(async () => undefined);
+    const onCreate = vi.fn();
+    renderPanel({
+      models: [], runtimes: [], onImport, onCreate,
+      onListExistingWorktrees: async () => [{ worktreePath: '/tmp/project', branchName: 'feature' }]
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    await screen.findByRole('option', { name: 'feature · /tmp/project' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Checkout' }), { target: { value: '/tmp/project' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Compare against' }), { target: { value: 'HEAD' } });
+    fireEvent.submit(screen.getByRole('form', { name: 'New task' }));
+    await waitFor(() => expect(onImport).toHaveBeenCalledOnce());
+    expect(onImport).toHaveBeenCalledWith(expect.objectContaining({
+      repositoryId: 'repository-1', worktreePath: '/tmp/project', branchName: 'feature', baseRef: 'HEAD',
+      title: 'Sync badge', prompt: 'add a sync badge'
+    }));
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('ignores an obsolete list and opens a duplicate task without importing again', async () => {
+    let resolveOld!: (items: ExistingWorktree[]) => void;
+    const onListExistingWorktrees = vi.fn()
+      .mockImplementationOnce(() => new Promise<ExistingWorktree[]>((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValue([{ worktreePath: '/tmp/current', branchName: 'feature', existingTaskId: 'archived-task' }]);
+    const onImport = vi.fn();
+    const onOpenExistingTask = vi.fn(async () => undefined);
+    renderPanel({ onImport, onOpenExistingTask, onListExistingWorktrees });
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'New work' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    await screen.findByRole('option', { name: 'feature · /tmp/current' });
+    await act(async () => resolveOld([{ worktreePath: '/tmp/old', branchName: 'wrong' }]));
+    expect(screen.queryByRole('option', { name: 'wrong · /tmp/old' })).toBeNull();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Checkout' }), { target: { value: '/tmp/current' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Open existing task' }));
+    await waitFor(() => expect(onOpenExistingTask).toHaveBeenCalledWith('archived-task'));
+    expect(onImport).not.toHaveBeenCalled();
+  });
+});
+
+function renderPanel(overrides: Partial<React.ComponentProps<typeof NewTaskPanel>> = {}) {
   const model: AgentModel = {
     id: 'codex:test-model',
     runtimeId: 'codex',
@@ -165,6 +201,7 @@ function renderPanel(overrides: {
       onDiscardAttachmentDraft={async () => undefined}
       fallbackReturnFocusRef={{ current: null }}
       onClose={overrides.onClose ?? (() => undefined)}
+      {...overrides}
     />
   );
 }

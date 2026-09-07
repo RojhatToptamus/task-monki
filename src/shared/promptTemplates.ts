@@ -182,6 +182,7 @@ export function buildInitialRunPrompt(input: {
   worktree: WorktreeRecord;
   settings: AgentExecutionSettings;
   readOnlyMode: boolean;
+  instruction?: string;
 }): string {
   return [
     TASK_MONKI_CONTEXT_LINE,
@@ -201,7 +202,9 @@ export function buildInitialRunPrompt(input: {
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
-    `Authoritative Task Monki goal:\n${input.task.prompt}`
+    input.worktree.ownership === 'EXTERNAL' && input.instruction?.trim()
+      ? `Task description:\n${input.task.prompt}\n\nCurrent requested work:\n${input.instruction.trim()}`
+      : `Authoritative Task Monki goal:\n${input.task.prompt}`
   ].join('\n');
 }
 
@@ -303,6 +306,7 @@ export function buildContinuationPrompt(input: {
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Continue unfinished work after run ${input.run.id}.`,
@@ -319,6 +323,7 @@ export function buildRetryPrompt(input: {
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
@@ -338,6 +343,7 @@ function buildExistingWorktreePrompt(
     run: RunRecord;
     gitSnapshot: GitSnapshotRecord;
     instruction?: string;
+    previousPrompt?: string;
   },
   intent: {
     previousRunIntroduction: string;
@@ -367,6 +373,7 @@ function buildExistingWorktreePrompt(
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    input.previousPrompt ? `Previous requested work:\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
   ]
@@ -379,6 +386,7 @@ export function buildForkAlternativeTaskPrompt(input: {
   run: RunRecord;
   worktree: WorktreeRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   const instruction = input.instruction?.trim();
   return [
@@ -392,6 +400,7 @@ export function buildForkAlternativeTaskPrompt(input: {
     'Do not assume files changed by the source attempt are present.',
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    input.previousPrompt ? `Previous requested work:\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `Alternative direction:\n${instruction}` : undefined
   ]

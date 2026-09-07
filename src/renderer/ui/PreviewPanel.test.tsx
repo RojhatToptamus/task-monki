@@ -567,6 +567,7 @@ function worktreeFixture(): WorktreeRecord {
     taskId: 'task-1',
     iterationId: 'iteration-1',
     repositoryId: 'repository-1',
+    ownership: 'MANAGED' as const,
     worktreePath: '/worktree',
     branchName: 'codex/preview',
     baseSha: 'base',

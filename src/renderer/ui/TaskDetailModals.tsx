@@ -1,8 +1,9 @@
-import { useRef, type FormEvent, type RefObject } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
 import { X } from 'lucide-react';
 import {
   PULL_REQUEST_TITLE_MAX_LENGTH,
   type AgentReviewFinding,
+  type ExistingWorktree,
   type Task,
   type WorktreeRecord
 } from '../../shared/contracts';
@@ -16,6 +17,92 @@ import { formatShortId } from '../model/selectors';
 import { FindingRow } from './Findings';
 import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
+
+export function ExistingWorkModal({
+  mode, worktree, onListCheckouts, onSubmit, onCancel, fallbackReturnFocusRef
+}: {
+  mode: 'instruction' | 'comparison' | 'reconnect';
+  worktree: WorktreeRecord;
+  onListCheckouts(repositoryId: string): Promise<ExistingWorktree[]>;
+  onSubmit(value: string): Promise<void>;
+  onCancel(): void;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+}) {
+  const [value, setValue] = useState(mode === 'comparison' ? worktree.baseRef ?? '' : '');
+  const [checkouts, setCheckouts] = useState<ExistingWorktree[]>();
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const panelRef = useRef<HTMLFormElement>(null);
+  const submitting = useRef(false);
+  useDialogFocusBoundary({ dialogRef: panelRef, fallbackReturnFocusRef, busy, onClose: onCancel });
+  useEffect(() => {
+    if (mode !== 'reconnect') return;
+    let canceled = false;
+    void onListCheckouts(worktree.repositoryId).then(
+      (items) => { if (!canceled) setCheckouts(items); },
+      (caught: unknown) => {
+        if (!canceled) setError(caught instanceof Error ? caught.message : 'Could not list checkouts.');
+      }
+    );
+    return () => { canceled = true; };
+  }, [mode, onListCheckouts, worktree.repositoryId]);
+  const label = mode === 'instruction' ? 'Start implementation' : mode === 'comparison' ? 'Change comparison' : 'Reconnect checkout';
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!value.trim() || submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await onSubmit(value.trim());
+      onCancel();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not update this task.');
+    } finally {
+      submitting.current = false;
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="existing-work-title">
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <form ref={panelRef} className="tm-modal__panel" tabIndex={-1} onSubmit={(event) => void submit(event)}>
+        <h3 id="existing-work-title">{label}</h3>
+        <div>
+          {mode === 'instruction' ? (
+            <label className="field"><span>What should the agent do?</span>
+              <textarea value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
+            </label>
+          ) : mode === 'comparison' ? (
+            <label className="field"><span id="checkout-comparison-label">Compare against</span>
+              <input aria-labelledby="checkout-comparison-label" aria-describedby="checkout-comparison-help"
+                value={value} disabled={busy} placeholder="Branch, commit, or HEAD" onChange={(event) => setValue(event.target.value)} />
+              <small id="checkout-comparison-help">A new comparison refreshes the diff and makes the previous review stale.</small>
+            </label>
+          ) : (
+            <label className="field"><span id="checkout-reconnect-label">Checkout for {worktree.branchName}</span>
+              <select aria-labelledby="checkout-reconnect-label" aria-describedby="checkout-reconnect-help"
+                value={value} disabled={busy || !checkouts} onChange={(event) => setValue(event.target.value)}>
+                <option value="">{checkouts ? 'Select a checkout' : 'Loading checkouts…'}</option>
+                {checkouts?.filter((item) => item.branchName === worktree.branchName).map((item) => (
+                  <option key={item.worktreePath} value={item.worktreePath} disabled={Boolean(item.unavailableReason)}>
+                    {item.worktreePath}{item.unavailableReason ? ` — ${item.unavailableReason}` : ''}
+                  </option>
+                ))}
+              </select>
+              <small id="checkout-reconnect-help">Only a registered checkout in the same repository and branch can reconnect.</small>
+            </label>
+          )}
+        </div>
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>Cancel</button>
+          <button type="submit" className="primary-button" disabled={busy || !value.trim()}>{busy ? 'Working…' : label}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 export function CreateDraftPrModal({
   title,

@@ -72,6 +72,8 @@ The catalog in `src/dev/seedData.ts` covers the important UI and workflow
 states:
 
 - board setup: backlog, ready, clean/missing/error worktrees
+- imported work: idle with committed and dirty changes, review findings before
+  the first coding run, and a moved checkout that needs explicit reconnection
 - agent lifecycle: running, approval, user input with provider choices, a
   custom choice, and free text, interrupted, runtime lost, ambiguous mutation,
   stale interaction

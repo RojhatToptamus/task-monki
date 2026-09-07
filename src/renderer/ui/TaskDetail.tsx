@@ -19,6 +19,7 @@ import type {
   CiRollupRecord,
   ClientTextExcerpt,
   DomainEvent,
+  ExistingWorktree,
   Finding,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
@@ -142,7 +143,8 @@ import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { PreviewTaskRouteOption } from '../../shared/preview';
 import {
   isReviewPhase,
-  shouldShowMoveToReviewHeaderAction
+  shouldShowMoveToReviewHeaderAction,
+  canReviewExistingWork
 } from '../model/taskReviewActions';
 import {
   TaskMascotVideo,
@@ -150,6 +152,7 @@ import {
 } from './TaskMascotVideo';
 import {
   CreateDraftPrModal,
+  ExistingWorkModal,
   MarkDoneModal,
   ReviewRequestDrawer
 } from './TaskDetailModals';
@@ -201,12 +204,16 @@ interface TaskDetailProps {
   reviewDisabledReason?: string;
   previewRecipeGenerationDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
-  onStart(taskId: string): Promise<void>;
+  onStart(taskId: string, instruction?: string): Promise<void>;
+  onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
+  onReconnectWorktree?(taskId: string, worktreePath: string): Promise<void>;
+  onUpdateWorktreeComparison?(taskId: string, baseRef: string): Promise<void>;
+  onRefreshEvidence?(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
   onSteer(runId: string, instruction: string): Promise<void>;
   onContinue(runId: string, instruction?: string): Promise<void>;
   onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string): Promise<void>;
-  onReview(runId: string): Promise<void>;
+  onReview(runId?: string): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
   onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
   onRespondToInteraction(
@@ -298,6 +305,7 @@ export function TaskDetail(props: TaskDetailProps) {
     mergeSnapshot
   } = props;
   const [tab, setTab] = useState<DetailTab>('overview');
+  const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
@@ -324,7 +332,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const focusActivityHistoryRef = useRef(false);
   const repositoryContextId = useId();
   const taskDetailModalOpen = Boolean(
-    markDoneModal || draftPrModalOpen || requestDrawerOpen || previewModalOpen
+    markDoneModal || draftPrModalOpen || requestDrawerOpen || previewModalOpen || existingWorkModal
   );
   const prefersReducedMotion = usePrefersReducedMotion();
   const reviewGate = task ? taskReviewGate(task) : undefined;
@@ -352,6 +360,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const prStatus = task
     ? buildPrStatusViewModel({
         task,
+        worktree,
         gitSnapshot,
         branchPublication,
         pullRequest,
@@ -390,6 +399,7 @@ export function TaskDetail(props: TaskDetailProps) {
   }, [tab]);
 
   useEffect(() => {
+    setExistingWorkModal(undefined);
     setReviewStartPending(false);
     setReviewMascotHoldGeneration(0);
     setRequestDrawerOpen(false);
@@ -471,16 +481,22 @@ export function TaskDetail(props: TaskDetailProps) {
   });
   // The review run and projection remain historical display context. Starting
   // another review or review-derived follow-up always targets the exact current
-  // completed implementation run, never the source of an older review.
+  // completed implementation run, never the source of an older review. Imported
+  // work in Review can also be reviewed before its first coding run.
   const actionableReviewSourceRun = findCompletedCurrentImplementationRun(
     task,
     props.runs
   );
+  const externalWork = worktree?.ownership === 'EXTERNAL';
+  const importedBeforeFirstRun = externalWork && !task.currentRunId;
+  const externalReviewReady = canReviewExistingWork(task, worktree);
+  const hasActionableReviewSource = Boolean(actionableReviewSourceRun) ||
+    (externalReviewReady && task.workflowPhase === 'REVIEW');
   const hasHistoricalReviewContext =
     reviewRun?.mode === 'REVIEW' || reviewGate.status !== 'NOT_RUN';
   const reviewPhaseVisible =
     hasHistoricalReviewContext ||
-    (isReviewPhase(task.workflowPhase) && Boolean(actionableReviewSourceRun));
+    (isReviewPhase(task.workflowPhase) && hasActionableReviewSource);
   const activeImplementationRun = run && isActiveNonReviewRun(run) ? run : undefined;
   const reviewPauseReason: ReviewActionPauseReason | undefined = reviewIsRunning
     ? 'review-running'
@@ -509,7 +525,7 @@ export function TaskDetail(props: TaskDetailProps) {
     deliveryBusy: deliveryActionBusy,
     pauseReason: reviewPauseReason,
     implementationRetryReason: getImplementationRetryReason(task),
-    hasInvestigationSource: Boolean(deliverySourceRun)
+    hasInvestigationSource: Boolean(deliverySourceRun) || importedBeforeFirstRun
   });
   const taskActivityLedger = useMemo(
     () =>
@@ -578,7 +594,7 @@ export function TaskDetail(props: TaskDetailProps) {
     }
   };
 
-  const runReview = async (sourceRunId: string) => {
+  const runReview = async (sourceRunId?: string) => {
     if (reviewActionInFlightRef.current) {
       return;
     }
@@ -626,7 +642,7 @@ export function TaskDetail(props: TaskDetailProps) {
         (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
       );
     if (
-      !actionableReviewSourceRun ||
+      !hasActionableReviewSource ||
       reviewActionsPaused ||
       !canRequestReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
     ) {
@@ -653,12 +669,16 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const submitRequestChanges = async () => {
-    if (!actionableReviewSourceRun || !requestInstruction.trim() || reviewActionsPaused) {
+    if (!hasActionableReviewSource || !requestInstruction.trim() || reviewActionsPaused) {
       return;
     }
     await runReviewAction(async () => {
       try {
-        await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim());
+        if (actionableReviewSourceRun) {
+          await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim());
+        } else {
+          await props.onStart(task.id, requestInstruction.trim());
+        }
         setRequestDrawerOpen(false);
       } catch {
         // The app shell reports the error. Keep the drawer open so the user can retry.
@@ -713,14 +733,13 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const investigateFailingChecks = async () => {
-    if (!deliverySourceRun || !prStatus.canInvestigateFailure || prActionState.investigateDisabled) {
+    if ((!deliverySourceRun && !importedBeforeFirstRun) || !prStatus.canInvestigateFailure || prActionState.investigateDisabled) {
       return;
     }
     await runDeliveryAction(async () => {
-      await props.onContinue(
-        deliverySourceRun.id,
-        buildFailingChecksInvestigationPrompt(prStatus)
-      );
+      const instruction = buildFailingChecksInvestigationPrompt(prStatus);
+      if (deliverySourceRun) await props.onContinue(deliverySourceRun.id, instruction);
+      else await props.onStart(task.id, instruction);
     });
   };
 
@@ -753,8 +772,8 @@ export function TaskDetail(props: TaskDetailProps) {
     switch (id) {
       case 'run-review':
       case 'run-review-again':
-        if (actionableReviewSourceRun) {
-          void runReview(actionableReviewSourceRun.id);
+        if (hasActionableReviewSource) {
+          void runReview(actionableReviewSourceRun?.id);
         }
         return;
       case 'request-changes':
@@ -802,7 +821,7 @@ export function TaskDetail(props: TaskDetailProps) {
       case 'run-review':
       case 'run-review-again': {
         const title = props.reviewDisabledReason ??
-          (!actionableReviewSourceRun
+          (!hasActionableReviewSource
             ? 'Complete an implementation run before starting review.'
             : reviewActionPauseTitle ?? (busy ? taskActionBusyTitle : undefined));
         return {
@@ -817,7 +836,7 @@ export function TaskDetail(props: TaskDetailProps) {
         return { disabled: Boolean(title), title };
       }
       case 'commit': {
-        const title = !canCreateDeliveryCommit(task)
+        const title = !canCreateDeliveryCommit(task, worktree)
           ? 'A delivery commit is not available for the current tree.'
           : reviewActionPauseTitle ?? (busy ? taskActionBusyTitle : undefined);
         return { disabled: Boolean(title), title };
@@ -840,15 +859,18 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const primaryAction = getPrimaryAction({
     task,
+    worktree,
     onPrepareWorktree: props.onPrepareWorktree,
-    onStart: props.onStart
+    onStart: externalWork ? async () => setExistingWorkModal('instruction') : props.onStart
   });
   const implementationRetryRequired = isImplementationRetryRequired(task, run);
 
   const headActions: HeadAction[] = [];
-  if (shouldShowMoveToReviewHeaderAction(task, run)) {
+  const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run) ||
+    (externalReviewReady && task.workflowPhase === 'IN_PROGRESS');
+  if (awaitingMoveToReview) {
     headActions.push({
-      label: 'Move to review',
+      label: externalWork ? 'Ready for review' : 'Move to review',
       kind: 'soft',
       onClick: () => void props.onTransition(task.id, 'REVIEW')
     });
@@ -917,7 +939,6 @@ export function TaskDetail(props: TaskDetailProps) {
 
   // The single "what next" model for the rail. Kept in one place so the header,
   // run surface, and rail all agree instead of each inventing an action.
-  const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run);
   const reviewHasOutput =
     Boolean(reviewGate.result) ||
     Boolean(
@@ -925,16 +946,16 @@ export function TaskDetail(props: TaskDetailProps) {
       (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
     );
   const reviewHasActionableFindings =
-    Boolean(actionableReviewSourceRun) &&
+    hasActionableReviewSource &&
     canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
   const nextAction = selectNextAction({
     task,
     reviewStatus: reviewPending ? 'RUNNING' : reviewGate.status,
     finishEvidence,
     requirements: finishRequirements,
-    hasReviewSource: Boolean(actionableReviewSourceRun),
+    hasReviewSource: hasActionableReviewSource,
     reviewHasActionableFindings,
-    canCommit: canCreateDeliveryCommit(task),
+    canCommit: canCreateDeliveryCommit(task, worktree),
     awaitingMoveToReview,
     runInFlight: Boolean(activeImplementationRun) || reviewPending,
     implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status,
@@ -1059,7 +1080,7 @@ export function TaskDetail(props: TaskDetailProps) {
             prefersReducedMotion={prefersReducedMotion}
           />
         ) : null}
-        {awaitingMoveToReview ? (
+        {awaitingMoveToReview && !importedBeforeFirstRun ? (
           <NextActionPanel
             model={nextAction}
             requirements={[]}
@@ -1241,6 +1262,23 @@ export function TaskDetail(props: TaskDetailProps) {
                     />
                     <ConfigRow k="Network" v={formatAgentNetworkAccess(displayedAgentSettings)} />
                     <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
+                    {externalWork && worktree ? <>
+                      <ConfigRow k="Checkout" v={worktree.worktreePath} />
+                      <ConfigRow k="Comparison" v={`${worktree.baseRef} · ${worktree.baseSha?.slice(0, 8)}`} />
+                      <div className="tm-config__actions">
+                        <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                          title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                          onClick={() => void runReviewAction(async () => { await props.onRefreshEvidence?.(task.id); })}>Refresh checkout</button>
+                        <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                          title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                          onClick={() => setExistingWorkModal('comparison')}>Change comparison</button>
+                        {['MISSING', 'ERROR'].includes(worktree.status) ? (
+                          <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                            title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                            onClick={() => setExistingWorkModal('reconnect')}>Reconnect checkout</button>
+                        ) : null}
+                      </div>
+                    </> : null}
                   </>
                 }
               />
@@ -1352,6 +1390,17 @@ export function TaskDetail(props: TaskDetailProps) {
       </div>
 
       <div ref={previewModalRootRef} />
+
+      {existingWorkModal && worktree && props.onListExistingWorktrees ? (
+        <ExistingWorkModal key={`${task.id}:${existingWorkModal}`} mode={existingWorkModal} worktree={worktree}
+          onListCheckouts={props.onListExistingWorktrees}
+          onCancel={() => setExistingWorkModal(undefined)} fallbackReturnFocusRef={detailRootRef}
+          onSubmit={async (value) => {
+            if (existingWorkModal === 'instruction') await props.onStart(task.id, value);
+            else if (existingWorkModal === 'comparison') await props.onUpdateWorktreeComparison?.(task.id, value);
+            else await props.onReconnectWorktree?.(task.id, value);
+          }} />
+      ) : null}
 
       {markDoneModal ? (
         <MarkDoneModal
@@ -1894,6 +1943,7 @@ function healthFindingTone(severity: Finding['severity']): Tone {
 
 function getPrimaryAction(input: {
   task: Task;
+  worktree?: WorktreeRecord;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
 }): { label: string; disabled?: boolean; onClick(): void } | undefined {
@@ -1902,6 +1952,7 @@ function getPrimaryAction(input: {
   }
 
   if (canPrepareWorktree(input.task)) {
+    if (input.worktree?.ownership === 'EXTERNAL') return undefined;
     return {
       label: 'Prepare worktree',
       onClick: () => void input.onPrepareWorktree(input.task.id)

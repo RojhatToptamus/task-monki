@@ -1239,6 +1239,7 @@ describe('mounted Design workspace', () => {
               taskId: 'design-1',
               iterationId: 'iteration-1',
               repositoryId: 'repository-1',
+              ownership: 'MANAGED' as const,
               worktreePath: '/tmp/design-worktree',
               branchName: 'task-monki/design-1',
               baseSha: 'a'.repeat(40),

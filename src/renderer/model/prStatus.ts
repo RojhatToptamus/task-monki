@@ -7,6 +7,7 @@ import type {
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   ReviewRollupRecord,
+  WorktreeRecord,
   Task
 } from '../../shared/contracts';
 import { getImplementationRetryReason } from '../../shared/contracts';
@@ -154,6 +155,7 @@ function prStatusPauseText(reason: PrStatusActionPauseReason | undefined): strin
 
 export function buildPrStatusViewModel(input: {
   task: Task;
+  worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -171,18 +173,26 @@ export function buildPrStatusViewModel(input: {
     mergeSnapshot
   } = input;
   const hasPullRequest = Boolean(pullRequest?.number || pullRequest?.url);
+  const external = input.worktree?.ownership === 'EXTERNAL';
+  const externalPublishReason = external
+    ? task.projection.worktree !== 'PRESENT' || !gitSnapshot || ['UNKNOWN', 'UNAVAILABLE', 'CONFLICTED'].includes(gitSnapshot.status)
+      ? 'Refresh or reconnect the checkout before publishing.'
+      : gitSnapshot.stagedCount + gitSnapshot.unstagedCount + gitSnapshot.untrackedCount > 0
+        ? 'Commit external changes in your editor or terminal before publishing.'
+        : undefined
+    : undefined;
 
   if (!hasPullRequest || !pullRequest) {
-    const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication);
+    const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason);
     return {
       kind: 'NO_PR',
       headline: 'No PR',
       tone: 'neutral',
-      overviewRelevant: createDraftPr.overviewRelevant,
+      overviewRelevant: external || createDraftPr.overviewRelevant,
       hasPullRequest: false,
       leadLine: createDraftPr.line,
       canCreateDraftPr: createDraftPr.showAction,
-      canRefresh: false,
+      canRefresh: external,
       canInvestigateFailure: false,
       canPushUpdate: false,
       createDraftPrDisabledReason: createDraftPr.disabledReason,
@@ -204,7 +214,7 @@ export function buildPrStatusViewModel(input: {
 
   if (terminal) {
     if (terminal.kind === 'CLOSED_UNMERGED') {
-      const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication);
+      const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason);
       return {
         ...baseStatus(pullRequest),
         ...terminal,
@@ -228,7 +238,7 @@ export function buildPrStatusViewModel(input: {
       canPushUpdate:
         freshness.kind === 'LOCAL_NOT_PUSHED' ||
         branchPublication?.status === 'AMBIGUOUS',
-      pushUpdateDisabledReason: freshness.pushUpdateDisabledReason
+      pushUpdateDisabledReason: externalPublishReason ?? freshness.pushUpdateDisabledReason
     };
   }
 
@@ -335,13 +345,17 @@ function hasCheckCounts(ciRollup: CiRollupRecord): boolean {
 function createDraftPrAvailability(
   task: Task,
   gitSnapshot?: GitSnapshotRecord,
-  branchPublication?: BranchPublicationRecord
+  branchPublication?: BranchPublicationRecord,
+  externalPublishReason?: string
 ): {
   showAction: boolean;
   overviewRelevant: boolean;
   line?: string;
   disabledReason?: string;
 } {
+  if (externalPublishReason) {
+    return { showAction: true, overviewRelevant: true, line: externalPublishReason, disabledReason: externalPublishReason };
+  }
   const retryReason = getImplementationRetryReason(task);
   if (retryReason) {
     return {

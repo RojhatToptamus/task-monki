@@ -83,6 +83,8 @@ Expected UI:
 2. `TaskManagerService.startReview` rejects active implementation-side runs.
 3. The current source run must be the latest successfully completed
    implementation-side run. Failed and superseded runs are rejected.
+   External work explicitly placed in Review can omit the source run before
+   its first implementation. Review still creates no primary coding session.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
    agent session.
 5. Task Monki sends the provider-neutral review prompt as a normal read-only turn.
@@ -93,6 +95,13 @@ Expected UI:
 10. Task Monki leaves detected changes in place as evidence.
 11. Reducer keeps the task workflow phase in Review.
 12. `projection.agentReview.status` becomes `RUNNING`.
+
+Imported-work review includes committed and dirty changes against the selected
+comparison. A comparison change or external edit makes the review stale.
+The read-only integrity check still rejects changed or unreadable input, but
+Task Monki does not attribute another editor's changes to the review provider.
+Address findings starts the first implementation when no source coding run
+exists. Otherwise it continues the current eligible implementation run.
 
 Before a Codex review turn starts, the adapter resolves the selected repository
 and task worktree through Git. It canonicalizes

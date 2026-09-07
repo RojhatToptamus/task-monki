@@ -212,7 +212,8 @@ Backend flow:
    with its recorded local HEAD. Adopt the matching ref, allow an explicit
    retry only when the ref is absent, and block an ambiguous mismatch.
 5. Refresh Git evidence.
-6. If the worktree is dirty, create a delivery commit.
+6. If a managed worktree is dirty, create a delivery commit. Reject a dirty
+   external checkout; its owner must commit outside Task Monki.
 7. Check the latest branch publication.
 8. If no pushed publication exists for current `HEAD`, record `PUSHING` with
    the exact remote, branch, and HEAD before publishing the branch.
@@ -239,11 +240,23 @@ observed PR and does not rename it.
 - `commitsAheadOfBase > 0`
 - `committedDiffFileCount > 0`
 
-Dirty worktrees are allowed at the user action level because the backend first
+Dirty managed worktrees are allowed at the user action level because the backend first
 creates a delivery commit. Conflicted, diverged, unavailable, unknown, or
 no-diff states are blocked.
 
 ## Refresh Flow
+
+For an unlinked external checkout, Refresh performs read-only PR discovery.
+The match must identify the exact repository and branch. Forks, ambiguous
+results, incomplete identity, and lookup failures cannot prove that no PR exists.
+Creating a PR checks for an existing match before publication.
+
+External publication requires clean, current Git evidence and one verified push
+destination in the selected GitHub repository. It pushes the verified commit to
+the exact branch ref without changing upstream configuration or publishing tags.
+The publication record retains the destination URL for uncertain-push reconciliation.
+An explicit commit comparison remains valid for review, but creating a new PR
+requires a branch comparison. Existing PR discovery does not require that change.
 
 `Refresh` calls:
 
