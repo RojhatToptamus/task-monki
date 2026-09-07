@@ -154,6 +154,15 @@ restore or quarantine data automatically.
 
 ## Schema Upgrades
 
+`WorktreeRecord.ownership` distinguishes Task Monki-managed worktrees from
+external checkouts. SQLite migration 2 assigns `MANAGED` to existing records;
+new imports store `EXTERNAL` in the same payload. No separate import table exists.
+Import commits the task, iteration, worktree, initial Git evidence, and events
+through one existing Task-store transaction. Failed admission leaves no partial
+task graph. Serialized admission resolves duplicate imports, including archived tasks.
+Comparison and reconnect changes use the same transaction boundary for current
+worktree, iteration, and evidence updates. Historical observation and run paths remain unchanged.
+
 SQLite `PRAGMA application_id` identifies a Task Monki database and
 `PRAGMA user_version` identifies its schema. `DatabaseMigrations.ts` contains a
 contiguous, forward-only migration sequence starting at version 1. Each pending
@@ -163,8 +172,8 @@ application id, or unidentified application tables.
 
 A file-backed upgrade from an existing SQLite schema must first create and
 verify a `PRE_UPGRADE` backup. A migration error rolls back the transaction.
-The backup remains available for explicit recovery. New profiles start at
-SQLite schema version 1. Future changes add new SQLite migrations.
+The backup remains available for explicit recovery. New profiles apply the full
+migration sequence. Future changes add new SQLite migrations.
 
 ## Backup And Restore
 

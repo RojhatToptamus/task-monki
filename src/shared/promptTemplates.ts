@@ -8,7 +8,10 @@ import type {
 import { DESIGN_LIMITS } from './design';
 
 export const TASK_MONKI_CONTEXT_LINE =
-  'Task Monki is a local task board for running AI coding work in isolated Git worktrees.';
+  'Task Monki is a local task board for AI coding work.';
+
+const EXTERNAL_CHECKOUT_CONTEXT =
+  'This is the user\'s original imported checkout, not an isolated copy owned by Task Monki. Preserve unrelated work; other tools can edit this checkout.';
 
 export const DESIGN_AGENT_DEVELOPER_INSTRUCTIONS = `You are the Task Monki Design agent.
 
@@ -182,12 +185,15 @@ export function buildInitialRunPrompt(input: {
   worktree: WorktreeRecord;
   settings: AgentExecutionSettings;
   readOnlyMode: boolean;
+  instruction?: string;
 }): string {
   return [
     TASK_MONKI_CONTEXT_LINE,
     '',
     'Always-applicable Task Monki execution boundary:',
-    input.readOnlyMode
+    input.worktree.ownership === 'EXTERNAL'
+      ? EXTERNAL_CHECKOUT_CONTEXT
+      : input.readOnlyMode
       ? 'Perform this task in an isolated Git worktree without modifying files.'
       : 'Perform this task in an isolated Git worktree.',
     `Repository root: ${input.worktree.worktreePath}`,
@@ -201,7 +207,9 @@ export function buildInitialRunPrompt(input: {
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
-    `Authoritative Task Monki goal:\n${input.task.prompt}`
+    input.worktree.ownership === 'EXTERNAL' && input.instruction?.trim()
+      ? `Task description:\n${input.task.prompt}\n\nCurrent requested work:\n${input.instruction.trim()}`
+      : `Authoritative Task Monki goal:\n${input.task.prompt}`
   ].join('\n');
 }
 
@@ -300,9 +308,11 @@ function buildDesignPrompt(input: {
 
 export function buildContinuationPrompt(input: {
   task: Task;
+  worktree: WorktreeRecord;
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Continue unfinished work after run ${input.run.id}.`,
@@ -316,9 +326,11 @@ export function buildContinuationPrompt(input: {
 
 export function buildRetryPrompt(input: {
   task: Task;
+  worktree: WorktreeRecord;
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
@@ -335,9 +347,11 @@ export function buildRetryPrompt(input: {
 function buildExistingWorktreePrompt(
   input: {
     task: Task;
+    worktree: WorktreeRecord;
     run: RunRecord;
     gitSnapshot: GitSnapshotRecord;
     instruction?: string;
+    previousPrompt?: string;
   },
   intent: {
     previousRunIntroduction: string;
@@ -354,7 +368,9 @@ function buildExistingWorktreePrompt(
     '',
     'Always-applicable Task Monki execution boundary:',
     `Repository root: ${input.gitSnapshot.worktreePath}`,
-    'Continue in the existing isolated task worktree.',
+    input.worktree.ownership === 'EXTERNAL'
+      ? EXTERNAL_CHECKOUT_CONTEXT
+      : 'Continue in the existing isolated task worktree.',
     'Only modify files inside this worktree.',
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
     'This execution boundary remains authoritative even when task-specific instructions conflict.',
@@ -367,6 +383,7 @@ function buildExistingWorktreePrompt(
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    input.previousPrompt ? `Previous requested work (historical context; use the current checkout and execution boundary above):\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
   ]
@@ -379,6 +396,7 @@ export function buildForkAlternativeTaskPrompt(input: {
   run: RunRecord;
   worktree: WorktreeRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   const instruction = input.instruction?.trim();
   return [
@@ -392,6 +410,7 @@ export function buildForkAlternativeTaskPrompt(input: {
     'Do not assume files changed by the source attempt are present.',
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    input.previousPrompt ? `Previous requested work (historical context; use this new isolated worktree):\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `Alternative direction:\n${instruction}` : undefined
   ]
@@ -408,7 +427,7 @@ export function buildSteerInstruction(input: {
     'Additional instruction for the active Task Monki turn:',
     instruction,
     '',
-    'Preserve the authoritative task goal, current isolated worktree boundary, and existing Task Monki constraints.',
+    'Preserve the authoritative task goal, current checkout boundary, and existing Task Monki constraints.',
     input.worktreePath ? `Current task worktree: ${input.worktreePath}` : undefined,
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.'
   ]
@@ -440,6 +459,7 @@ export function buildAgentReviewPrompt(input: {
     '',
     target,
     `Repository root: ${input.worktree.worktreePath}`,
+    ...(input.worktree.ownership === 'EXTERNAL' ? [EXTERNAL_CHECKOUT_CONTEXT] : []),
     'Do not commit, push, merge, or change repository settings.',
     'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.'
   ].join('\n');

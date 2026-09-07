@@ -12,6 +12,7 @@ import {
   isOwnedByCurrentUser
 } from '../filesystem/secureFilesystem';
 import { git, gitSucceeds } from '../git/gitCli';
+import { resolveAgentGitMetadata } from '../git/AgentGitMetadata';
 
 export interface WorktreeSpec {
   branchName: string;
@@ -66,6 +67,7 @@ export class WorktreeService {
   }
 
   async create(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    this.assertManaged(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
 
@@ -95,6 +97,33 @@ export class WorktreeService {
   }
 
   async verify(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    if (record.ownership === 'EXTERNAL') {
+      const now = new Date().toISOString();
+      try {
+        const observed = await inspectExistingWorktree(
+          repositoryPath,
+          record.worktreePath,
+          record.branchName
+        );
+        return {
+          ...record,
+          headSha: observed.headSha,
+          status: 'PRESENT',
+          error: undefined,
+          updatedAt: now,
+          lastVerifiedAt: now
+        };
+      } catch (error) {
+        return {
+          ...record,
+          status: (await pathExists(record.worktreePath)) ? 'ERROR' : 'MISSING',
+          error: error instanceof Error ? error.message : String(error),
+          updatedAt: now,
+          lastVerifiedAt: now
+        };
+      }
+    }
+    this.assertManaged(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
     const parsed = await listGitWorktrees(repositoryPath);
@@ -127,6 +156,7 @@ export class WorktreeService {
   }
 
   async remove(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    this.assertManaged(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
     repositoryPath = await canonicalPath(repositoryPath);
@@ -172,6 +202,7 @@ export class WorktreeService {
     record: WorktreeRecord,
     repository: Pick<Repository, 'kind' | 'path'>
   ): Promise<WorktreeRecord> {
+    this.assertManaged(record);
     if (repository.kind !== 'DESIGN_MANAGED') {
       throw new Error('Forced worktree removal is limited to managed Design repositories.');
     }
@@ -245,6 +276,12 @@ export class WorktreeService {
     await git(repositoryPath, ['branch', '-D', '--', record.branchName]);
   }
 
+  private assertManaged(record: WorktreeRecord): void {
+    if (record.ownership !== 'MANAGED') {
+      throw new Error('Task Monki cannot create or remove an external checkout.');
+    }
+  }
+
   private async ensureOwnedRoot(): Promise<void> {
     await fs.mkdir(this.rootDir, { recursive: true, mode: 0o700 });
     const stat = await fs.lstat(this.rootDir);
@@ -275,6 +312,33 @@ export class WorktreeService {
       throw new Error('Task worktree path failed its ownership check.');
     }
   }
+}
+
+export async function inspectExistingWorktree(
+  repositoryPath: string,
+  worktreePath: string,
+  expectedBranch?: string
+): Promise<{ worktreePath: string; branchName: string; headSha: string; gitCommonDir: string }> {
+  const metadata = await resolveAgentGitMetadata({ repositoryPath, worktreePath });
+  const registered = await listGitWorktrees(metadata.repositoryRoot);
+  const match = registered.find((entry) => samePath(entry.path, metadata.worktreeRoot));
+  if (!match || match.bare || match.detached || !match.branch) {
+    throw new Error('Select a registered checkout on a named branch.');
+  }
+  if (match.locked || match.prunable) {
+    throw new Error('The checkout is locked or unavailable. Repair it in Git before importing it.');
+  }
+  const branchName = (await git(metadata.worktreeRoot, ['branch', '--show-current'])).trim();
+  if (!branchName || branchName !== match.branch || (expectedBranch && branchName !== expectedBranch)) {
+    throw new Error(`The checkout must remain on branch ${expectedBranch ?? match.branch}.`);
+  }
+  const headSha = (await git(metadata.worktreeRoot, [
+    'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'
+  ])).trim();
+  if (headSha !== match.headSha) {
+    throw new Error('The checkout changed during inspection. Refresh and try again.');
+  }
+  return { worktreePath: metadata.worktreeRoot, branchName, headSha, gitCommonDir: metadata.gitCommonDir };
 }
 
 export async function listGitWorktrees(repositoryPath: string): Promise<ParsedGitWorktree[]> {

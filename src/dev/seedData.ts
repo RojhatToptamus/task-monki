@@ -24,7 +24,7 @@ import type {
   PreviewGenerationState
 } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
-import { buildDiffEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotService';
+import { buildDiffEvidence, captureExistingWorkEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotService';
 import { git } from '../core/git/gitCli';
 import type { TaskAgentRuntimeAccess } from '../core/agent/AgentRuntimeStore';
 import { SqliteAgentRuntimeStore } from '../core/storage/SqliteAgentRuntimeStore';
@@ -33,7 +33,7 @@ import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersis
 import { SqliteDiscourseStore } from '../core/storage/sqlite/SqliteDiscourseStore';
 import { DesignSourceService } from '../core/design/DesignSourceService';
 import { createDomainEvent } from '../core/storage/domainEvent';
-import { WorktreeService } from '../core/worktree/WorktreeService';
+import { inspectExistingWorktree, WorktreeService } from '../core/worktree/WorktreeService';
 import { validateRepositoryPath } from '../core/repository/RepositoryPreflight';
 import { previewRouteHostname } from '../core/preview/PreviewRouteHostname';
 import { DETERMINISTIC_DEV_SEED_ENV_VAR } from './devSeedEnvironment';
@@ -284,6 +284,18 @@ export async function seedTaskMonkiDevelopmentData(
     }
     if (scenarioSet === 'all') {
       await seedDesignScenarios(ctx);
+    }
+    if (scenarioSet === 'all' || scenarioSet === 'board') {
+      const checkout = path.join(ctx.rootDir, 'external-checkouts', 'import-preview');
+      await fs.mkdir(path.dirname(checkout), { recursive: true });
+      await git(ctx.repositoryPath, ['worktree', 'add', '-b', 'feature/import-preview', checkout, ctx.baseSha]);
+      await fs.writeFile(path.join(checkout, 'import-feature.txt'), 'Existing work ready to import.\n');
+      await git(checkout, ['add', 'import-feature.txt']);
+      await git(checkout, ['commit', '-m', 'Add existing import feature']);
+      await fs.writeFile(path.join(checkout, 'import-feature.txt'), 'Staged follow-up.\n');
+      await git(checkout, ['add', 'import-feature.txt']);
+      await fs.writeFile(path.join(checkout, 'import-feature.txt'), 'Unstaged follow-up.\n');
+      await fs.writeFile(path.join(checkout, 'import-notes.txt'), 'Untracked notes.\n');
     }
     await store.createBoard({
       name: 'Secondary repository',
@@ -1450,6 +1462,10 @@ async function seedScenario(
   definition: DevSeedScenarioDefinition
 ): Promise<SeededScenarioResult> {
   switch (definition.slug) {
+    case 'external-idle':
+    case 'external-review-needs-changes':
+    case 'external-checkout-missing':
+      return { task: (await createExternalWorkScenario(ctx, definition)).task };
     case 'board-backlog': {
       const task = await createSeedTask(ctx, definition);
       return { task: await ctx.store.transitionTask(task.id, 'BACKLOG', 'Seed backlog state') };
@@ -1576,6 +1592,49 @@ async function createSeedTask(
     completionPolicy,
     agentSettings: DEFAULT_AGENT_SETTINGS
   });
+}
+
+async function createExternalWorkScenario(
+  ctx: SeedContext,
+  definition: DevSeedScenarioDefinition
+): Promise<SeededTaskState> {
+  const branchName = `feature/${definition.slug}`;
+  const checkout = path.join(ctx.rootDir, 'external-checkouts', definition.slug);
+  await fs.mkdir(path.dirname(checkout), { recursive: true });
+  await git(ctx.repositoryPath, ['worktree', 'add', '-b', branchName, checkout, ctx.baseSha]);
+  await fs.writeFile(path.join(checkout, 'external-feature.txt'), 'A committed change from an editor.\n');
+  await git(checkout, ['add', 'external-feature.txt']);
+  await git(checkout, ['commit', '-m', 'Existing external feature']);
+  await fs.writeFile(path.join(checkout, 'external-notes.txt'), 'Uncommitted follow-up work.\n');
+  const inspected = await inspectExistingWorktree(ctx.repositoryPath, checkout, branchName);
+  const evidence = await captureExistingWorkEvidence({
+    ...inspected, baseRef: 'main', baseSha: ctx.baseSha
+  });
+  let task = await ctx.store.importTask({
+    repositoryId: ctx.repositoryId,
+    worktreePath: inspected.worktreePath,
+    branchName,
+    baseRef: 'main',
+    title: `[seed:${definition.slug}] ${definition.title}`,
+    prompt: definition.description,
+    agentSettings: DEFAULT_AGENT_SETTINGS
+  }, evidence);
+  const snapshot = await ctx.store.snapshot();
+  const state: SeededTaskState = {
+    task,
+    worktree: snapshot.worktrees.find((record) => record.id === task.currentWorktreeId)!,
+    iteration: snapshot.iterations.find((record) => record.id === task.currentIterationId)!,
+    gitSnapshot: snapshot.gitSnapshots.find((record) => record.taskId === task.id)
+  };
+  if (definition.slug === 'external-review-needs-changes') {
+    task = await ctx.store.transitionTask(task.id, 'REVIEW', 'Review imported work.');
+    return createReviewScenario(ctx, { ...definition, slug: 'review-needs-changes' }, { ...state, task });
+  }
+  if (definition.slug === 'external-checkout-missing') {
+    await git(ctx.repositoryPath, ['worktree', 'move', checkout, `${checkout}-moved`]);
+    state.worktree = await ctx.store.updateWorktree(await ctx.worktrees.verify(state.worktree, ctx.repositoryPath), 'WORKTREE_VERIFIED');
+  }
+  return { ...state, task: await requireTask(ctx, task.id) };
 }
 
 async function createWorktreeState(
@@ -2313,9 +2372,10 @@ async function seedAgentMessage(
 
 async function createReviewScenario(
   ctx: SeedContext,
-  definition: DevSeedScenarioDefinition
+  definition: DevSeedScenarioDefinition,
+  importedState?: SeededTaskState
 ): Promise<SeededTaskState> {
-  const state = await createImplementedTask(ctx, definition);
+  const state = importedState ?? await createImplementedTask(ctx, definition);
   if (definition.slug === 'review-not-run') {
     return { ...state, task: await requireTask(ctx, state.task.id) };
   }

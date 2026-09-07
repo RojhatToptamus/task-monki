@@ -407,6 +407,16 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
+    case 'WORKTREE_ATTACHED':
+      return {
+        ...base,
+        requestedAction: 'NONE',
+        worktree: 'PRESENT',
+        health: 'INFO',
+        summary: 'Existing work is attached.',
+        findings,
+        updatedAt: event.receivedAt
+      };
     case 'WORKTREE_CREATE_REQUESTED':
       return {
         ...base,
@@ -1121,6 +1131,7 @@ function snapshotDiffersFromReview(
   review: NonNullable<StatusProjection['agentReview']>,
   payload: unknown
 ): boolean {
+  if (getBoolean(payload, 'comparisonChanged') === true) return true;
   const headSha = getString(payload, 'headSha');
   const dirtyFingerprint = getString(payload, 'dirtyFingerprint');
   if (review.reviewedHeadSha || review.reviewedDirtyFingerprint) {

@@ -47,7 +47,9 @@ async function executeGit(
       cwd,
       timeout: options.timeout,
       maxBuffer: 20 * 1024 * 1024,
-      env: options.env ? { ...process.env, ...options.env } : process.env
+      // Observation must not refresh the user's index. Required mutation locks
+      // remain enabled for explicit Git writes.
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', ...options.env }
     },
     options.stdin
   );

@@ -226,7 +226,7 @@ export interface StartOrchestratedReview {
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
-  sourceRun: RunRecord;
+  sourceRun?: RunRecord;
   target: AgentReviewTarget;
   settings: AgentExecutionSettings;
   generationKey?: string;
@@ -1717,6 +1717,17 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           .at(-1);
       }
     }
+    if (session && (session.taskId !== input.task.id || session.iterationId !== input.iteration.id ||
+        session.worktreeId !== input.worktree.id || session.runtimeId !== input.task.runtimeId)) {
+      throw new Error('Selected agent session does not belong to this task iteration.');
+    }
+    if (session && session.worktreePath !== input.worktree.worktreePath) {
+      if (input.worktree.ownership !== 'EXTERNAL') {
+        throw new Error('Selected session checkout does not match this task.');
+      }
+      // A reconnect changes future execution, never a historical session's cwd.
+      session = undefined;
+    }
     const runtimeId = session?.runtimeId ?? input.task.runtimeId;
     if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
       throw new Error(
@@ -1737,7 +1748,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
 
     if (!session) {
       const sessionId = randomUUID();
-      const operationId = `task-session:${input.task.id}:${input.iteration.id}:${runtimeId}`;
+      const operationId = `task-session:${input.task.id}:${input.iteration.id}:${runtimeId}${input.worktree.ownership === 'EXTERNAL' ? `:${sessionId}` : ''}`;
       session = await this.taskRuntime.createTaskSession({
         id: sessionId,
         taskId: input.task.id,
@@ -1875,11 +1886,11 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     input: StartOrchestratedReview
   ): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
-    const sourceSession = await this.requireSession(input.sourceRun.sessionId);
-    if (input.sourceRun.runtimeId !== sourceSession.runtimeId) {
+    const sourceSession = input.sourceRun ? await this.requireSession(input.sourceRun.sessionId) : undefined;
+    if (input.sourceRun && input.sourceRun.runtimeId !== sourceSession?.runtimeId) {
       throw new Error('Review source runtime ownership is inconsistent.');
     }
-    const reviewRuntimeId = input.settings.runtimeId ?? sourceSession.runtimeId;
+    const reviewRuntimeId = input.settings.runtimeId ?? sourceSession?.runtimeId ?? input.task.runtimeId;
     const adapter = this.runtimes.require(reviewRuntimeId);
     const reviewSupport = projectAgentExecutionSupport(
       await adapter.capabilities(),
@@ -1898,7 +1909,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     );
     const reviewSessionId = randomUUID();
     const reviewSessionOperationId =
-      `review-session:${input.task.id}:${input.sourceRun.id}:${input.generationKey ?? 'current'}:${reviewRuntimeId}`;
+      `review-session:${input.task.id}:${input.sourceRun?.id ?? input.iteration.id}:${input.worktree.ownership === 'EXTERNAL' ? reviewSessionId : input.generationKey ?? 'current'}:${reviewRuntimeId}`;
     const prompt = buildAgentReviewPrompt({
       task: input.task,
       worktree: input.worktree,
@@ -1936,17 +1947,17 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       executionContext,
       prompt,
       priority: 'TASK_FOREGROUND',
-      clientOperationId: `review-run:${input.task.id}:${input.sourceRun.id}:${input.generationKey ?? runId}:${reviewRuntimeId}`,
+      clientOperationId: `review-run:${input.task.id}:${input.sourceRun?.id ?? input.iteration.id}:${input.worktree.ownership === 'EXTERNAL' ? runId : input.generationKey ?? runId}:${reviewRuntimeId}`,
       createdAt: new Date().toISOString(),
       role: 'REVIEW',
-      parentSessionId: sourceSession.id,
+      parentSessionId: sourceSession?.id,
       taskContext: {
         iterationId: input.iteration.id,
         worktreeId: input.worktree.id,
         worktreePath: input.worktree.worktreePath
       },
       taskDetails: {
-        continuedFromRunId: input.sourceRun.id,
+        continuedFromRunId: input.sourceRun?.id,
         beforeGitSnapshotId: input.beforeGitSnapshotId,
         eventCount: 0
       },

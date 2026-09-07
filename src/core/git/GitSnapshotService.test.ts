@@ -191,6 +191,7 @@ function createWorktreeRecord(dir: string, baseSha: string): WorktreeRecord {
     taskId: 'task-1',
     iterationId: 'iteration-1',
     repositoryId: dir,
+    ownership: 'MANAGED' as const,
     worktreePath: dir,
     branchName: 'main',
     baseSha,

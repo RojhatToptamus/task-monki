@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentModel, Repository } from '../../shared/contracts';
+import type { AgentModel, ExistingWorktree, ImportPreview, Repository } from '../../shared/contracts';
 import {
   CODEX_RUNTIME_DESCRIPTOR,
   codexCapabilities
@@ -96,13 +96,106 @@ describe('mounted NewTaskPanel prompt refinement', () => {
   });
 });
 
-function renderPanel(overrides: {
-  onRefinePrompt?: React.ComponentProps<typeof NewTaskPanel>['onRefinePrompt'];
-  onCancelPromptRefinement?: React.ComponentProps<
-    typeof NewTaskPanel
-  >['onCancelPromptRefinement'];
-  onClose?: () => void;
-} = {}) {
+describe('mounted existing-work import', () => {
+  it('imports the selected named checkout without requiring an available agent or starting new work', async () => {
+    const onImport = vi.fn(async () => undefined);
+    const onCreate = vi.fn();
+    renderPanel({
+      models: [], runtimes: [], onImport, onCreate,
+      onListExistingWorktrees: async () => [{ worktreePath: '/tmp/project', branchName: 'feature' }]
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    await screen.findByRole('radio', { name: 'feature · /tmp/project', checked: true });
+    fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'feature · /tmp/project', checked: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: true }));
+    expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.submit(screen.getByRole('form', { name: 'New task' }));
+    await waitFor(() => expect(onImport).toHaveBeenCalledOnce());
+    expect(onImport).toHaveBeenCalledWith(expect.objectContaining({
+      repositoryId: 'repository-1', worktreePath: '/tmp/project', branchName: 'feature', baseRef: 'HEAD',
+      title: 'feature', prompt: ''
+    }));
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('ignores an obsolete list and opens a duplicate task without importing again', async () => {
+    let resolveOld!: (items: ExistingWorktree[]) => void;
+    const onListExistingWorktrees = vi.fn()
+      .mockImplementationOnce(() => new Promise<ExistingWorktree[]>((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValue([{ worktreePath: '/tmp/current', branchName: 'feature', existingTaskId: 'archived-task' }]);
+    const onImport = vi.fn();
+    const onOpenExistingTask = vi.fn(async () => undefined);
+    renderPanel({ onImport, onOpenExistingTask, onListExistingWorktrees });
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'New work' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    await screen.findByRole('button', { name: 'Open existing task' });
+    await act(async () => resolveOld([{ worktreePath: '/tmp/old', branchName: 'wrong' }]));
+    expect(screen.queryByRole('radio', { name: 'wrong · /tmp/old' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open existing task' }));
+    await waitFor(() => expect(onOpenExistingTask).toHaveBeenCalledWith('archived-task'));
+    expect(onImport).not.toHaveBeenCalled();
+  });
+
+  it('keeps the selected checkout visible, clears the filter before closing, and preserves both text drafts', async () => {
+    const onClose = vi.fn();
+    renderPanel({ onImport: vi.fn(), onClose, onListExistingWorktrees: async () => [
+      { worktreePath: '/tmp/one', branchName: 'feat/add-search' },
+      { worktreePath: '/tmp/two', branchName: 'fix/slow-list' }
+    ] });
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'feat/add-search · /tmp/one' }));
+    expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('add search');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), { target: { value: 'Keep my title' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Filter checkouts' }), { target: { value: 'slow' } });
+    expect(screen.getByRole('radio', { name: 'feat/add-search · /tmp/one', checked: true })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Filter checkouts' }), { key: 'Enter' });
+    expect(screen.getByRole('radio', { name: 'fix/slow-list · /tmp/two', checked: true })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Title' }), { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByRole('textbox', { name: 'Filter checkouts' }) as HTMLInputElement).value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'New work' }));
+    expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('Sync badge');
+    expect((screen.getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement).value).toBe('add a sync badge');
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    await screen.findByRole('radio', { name: 'fix/slow-list · /tmp/two', checked: true });
+    expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('Keep my title');
+    expect(screen.queryByRole('textbox', { name: 'Description' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Use branch' }));
+    expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('slow list');
+  });
+
+  it('ignores obsolete comparisons and prevents import while a new comparison is invalid or pending', async () => {
+    let resolveOld!: (preview: ImportPreview) => void;
+    const onPreviewImport = vi.fn()
+      .mockImplementationOnce(() => new Promise<ImportPreview>((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ ...emptyPreview, baseRef: 'HEAD', fileCount: 1, files: [{ path: 'file.txt', status: 'M' }] })
+      .mockRejectedValueOnce(new Error('Enter a valid local branch or commit.'));
+    const onImport = vi.fn();
+    renderPanel({ onImport, onPreviewImport, onListExistingWorktrees: async () => [{ worktreePath: '/tmp/one', branchName: 'feat/title' }] });
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    await waitFor(() => expect(onPreviewImport).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
+    await screen.findByText('0 commits and 1 uncommitted file');
+    await act(async () => resolveOld({ ...emptyPreview, commitCount: 9 }));
+    expect(screen.queryByText('9 commits and 0 uncommitted files')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show changes' }));
+    expect(screen.getByText('file.txt')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'A commit' }));
+    expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Branch or commit' }), { target: { value: 'invalid' } });
+    await screen.findByRole('alert');
+    fireEvent.submit(screen.getByRole('form', { name: 'New task' }));
+    expect(onImport).not.toHaveBeenCalled();
+  });
+});
+
+const emptyPreview: ImportPreview = { baseRef: 'refs/heads/main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), commitCount: 0, fileCount: 0, commits: [], files: [] };
+
+function renderPanel(overrides: Partial<React.ComponentProps<typeof NewTaskPanel>> = {}) {
   const model: AgentModel = {
     id: 'codex:test-model',
     runtimeId: 'codex',
@@ -144,6 +237,7 @@ function renderPanel(overrides: {
       defaultAgentSettings={{ runtimeId: 'codex', model: 'test-model' }}
       initialTextDraft={{ title: 'Sync badge', prompt: 'add a sync badge' }}
       onCreate={async () => undefined}
+      onPreviewImport={async (input) => ({ ...emptyPreview, baseRef: input.baseRef ?? 'refs/heads/main' })}
       onRefinePrompt={
         overrides.onRefinePrompt ??
         (async () => ({
@@ -165,6 +259,7 @@ function renderPanel(overrides: {
       onDiscardAttachmentDraft={async () => undefined}
       fallbackReturnFocusRef={{ current: null }}
       onClose={overrides.onClose ?? (() => undefined)}
+      {...overrides}
     />
   );
 }

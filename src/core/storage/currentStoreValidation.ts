@@ -151,8 +151,10 @@ const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
  * has the required database and filesystem context.
  */
 export function validateCurrentStoreRecords(state: StoreState): void {
+  const externalTaskIds = new Set(state.worktrees.filter((worktree) => worktree?.ownership === 'EXTERNAL').map((worktree) => worktree.taskId));
   validateCollection(state.tasks, 'tasks', (task) => {
-    strings(task, 'tasks', ['runtimeId', 'title', 'prompt']);
+    strings(task, 'tasks', ['runtimeId', 'title']);
+    stringField(task, 'prompt', 'tasks', task.prompt === '' && externalTaskIds.has(task.id));
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');
@@ -196,6 +198,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     optionalStrings(worktree, 'worktrees', ['baseRef', 'headSha', 'error']);
     uuidFields(worktree, 'worktrees', ['id', 'taskId', 'iterationId', 'repositoryId']);
     enumField(worktree, 'status', WORKTREE_STATUSES, 'worktrees');
+    enumField(worktree, 'ownership', ['MANAGED', 'EXTERNAL'] as const, 'worktrees');
     timestamp(worktree, 'createdAt', 'worktrees');
     timestamp(worktree, 'updatedAt', 'worktrees');
     optionalTimestamp(worktree, 'lastVerifiedAt', 'worktrees');
@@ -1142,7 +1145,7 @@ function validateGitHubRecords(state: StoreState): void {
   }
   for (const record of state.branchPublications) {
     strings(record, 'branchPublications', ['remoteName', 'branchName', 'remoteRef']);
-    optionalStrings(record, 'branchPublications', ['headSha', 'error']);
+    optionalStrings(record, 'branchPublications', ['remoteUrl', 'headSha', 'error']);
     enumField(record, 'status', BRANCH_PUBLICATION_STATUSES, 'branchPublications');
     timestamp(record, 'requestedAt', 'branchPublications');
     timestamp(record, 'updatedAt', 'branchPublications');

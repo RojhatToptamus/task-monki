@@ -78,11 +78,6 @@
   flex: 0 0 auto;
 }
 
-.tm-detail__taskmenu .tm-taskmenu__menu {
-  right: auto;
-  left: 0;
-}
-
 .tm-detail__mascot {
   position: absolute;
   top: 14px;
@@ -4047,6 +4042,17 @@
   margin-top: 14px;
 }
 
+.tm-config__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tm-config__actions > button {
+  flex: 0 0 auto;
+}
+
 .tm-config__row {
   display: flex;
   justify-content: space-between;
@@ -4146,6 +4152,25 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.tm-evtab__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tm-evtab__comparison {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--t-help);
+}
+
+.tm-evtab__toolbar > .tm-actiontitle {
+  flex: 0 0 auto;
 }
 
 .tm-evidence-summary {
@@ -4462,8 +4487,12 @@
 .tm-filefilter__search input {
   flex: 1;
   min-width: 0;
+  height: 100%;
+  padding: 0;
   border: 0;
+  border-radius: 0;
   background: transparent;
+  box-shadow: none;
   color: var(--text);
   font: 12.5px/1 var(--font-ui);
   outline: none;
@@ -4475,7 +4504,8 @@
 }
 
 .tm-filefilter__search input:focus,
-.tm-filefilter__search input:focus-visible {
+.tm-filefilter__search input:focus-visible,
+.app-shell[data-input-modality='keyboard'] .tm-filefilter__search input:focus {
   background: transparent;
   box-shadow: none;
 }

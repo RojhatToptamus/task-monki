@@ -1343,6 +1343,14 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
     version: 1,
     name: 'initial-normalized-storage',
     sql: INITIAL_SCHEMA_SQL
+  },
+  {
+    version: 2,
+    name: 'worktree-cleanup-ownership',
+    // Every worktree created by schema 1 used the managed WorktreeService path.
+    sql: `UPDATE worktrees
+      SET payload_json = json_set(payload_json, '$.ownership', 'MANAGED'),
+          record_revision = record_revision + 1;`
   }
 ] as const;
 

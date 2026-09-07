@@ -12,6 +12,12 @@ import type {
   CreateDeliveryCommitRequest,
   CreateBoardRequest,
   CreateTaskRequest,
+  ExistingWorktree,
+  ImportPreview,
+  PreviewImportRequest,
+  ImportTaskRequest,
+  ReconnectWorktreeRequest,
+  UpdateWorktreeComparisonRequest,
   CreateBlankDesignRequest,
   AddDesignReferencesRequest,
   RemoveDesignReferenceRequest,
@@ -122,6 +128,7 @@ import type {
   AgentRunScope,
   AgentRuntimePurpose
 } from '../../shared/agentRuntime';
+import { AGENT_RUNTIME_LIMITS } from '../../shared/agentRuntime';
 import {
   PromptRefinementTerminationUnconfirmedError,
   PromptRefinementService,
@@ -146,11 +153,12 @@ import type {
   StopDiscourseWaveRequest,
   TombstoneDiscourseMessageRequest
 } from '../../shared/discourse';
+import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
-import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
-import { GitHubService } from '../github/GitHubService';
+import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot } from '../git/GitSnapshotService';
+import { GitHubService, parseGitHubRemoteUrl } from '../github/GitHubService';
 import {
   buildContinuationPrompt,
   buildForkAlternativeTaskPrompt,
@@ -158,7 +166,8 @@ import {
   buildRetryPrompt,
   buildSteerInstruction
 } from '../../shared/promptTemplates';
-import { WorktreeService } from '../worktree/WorktreeService';
+import { inspectExistingWorktree, listGitWorktrees, WorktreeService } from '../worktree/WorktreeService';
+import { inspectImportPreview } from '../git/ImportPreview';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -848,6 +857,7 @@ export class TaskManagerService {
         latestRepository?.remoteName ??
         'origin',
       expectedHeadSha: latestPublication?.headSha,
+      remoteUrl: latestPublication?.remoteUrl,
       failureDetail:
         originalBranchPublishFailure(latestPublication) ??
         (!latestPublication
@@ -1086,10 +1096,7 @@ export class TaskManagerService {
   }
 
   async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
-    this.appSettings = await this.appSettingsStore.get();
-    return this.openTargets.inspect(input, {
-      snapshot: await this.store.snapshot()
-    });
+    return this.openTargets.inspect(input, this.store);
   }
 
   async executeOpenTargetAction(
@@ -1101,10 +1108,7 @@ export class TaskManagerService {
   private async executeOpenTargetActionInternal(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
-    this.appSettings = await this.appSettingsStore.get();
-    return this.openTargets.execute(input, {
-      snapshot: await this.store.snapshot()
-    });
+    return this.openTargets.execute(input, this.store);
   }
 
   async addRepository(repositoryPath: string): Promise<Repository> {
@@ -1486,6 +1490,80 @@ export class TaskManagerService {
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
     return this.withRuntimeOperation(() => this.createTaskLocked(input));
+  }
+
+  listExistingWorktrees(repositoryId: string): Promise<ExistingWorktree[]> {
+    return this.withControlAction(async () => {
+      const repository = await this.requireAvailableRepository(repositoryId);
+      if (repository.kind !== 'USER_REGISTERED') throw new Error('Select a registered repository.');
+      const entries = await listGitWorktrees(repository.path);
+      const gitCommonDir = await realpath(path.resolve(repository.path,
+        (await git(repository.path, ['rev-parse', '--git-common-dir'])).trim()));
+      const result: ExistingWorktree[] = [];
+      for (const entry of entries) {
+        try {
+          if (entry.bare || entry.detached || !entry.branch) throw new Error('Select a checkout on a named branch.');
+          if (entry.locked || entry.prunable) throw new Error('The checkout is locked or unavailable. Repair it in Git before importing it.');
+          const worktreePath = await realpath(entry.path);
+          const existing = await this.store.findTaskForExistingWork({ repositoryId, worktreePath, gitCommonDir, branchName: entry.branch });
+          result.push({
+            worktreePath, branchName: entry.branch, isPrimary: entry === entries[0], existingTaskId: existing?.id,
+            existingTask: existing ? { title: existing.title, workflowPhase: existing.workflowPhase } : undefined
+          });
+        } catch (error) {
+          result.push({
+            worktreePath: entry.path, branchName: entry.branch,
+            unavailableReason: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+      return result;
+    });
+  }
+
+  previewImport(input: PreviewImportRequest): Promise<ImportPreview> {
+    return this.withControlAction(async () => {
+      const repository = await this.requireAvailableRepository(input.repositoryId);
+      if (repository.kind !== 'USER_REGISTERED') throw new Error('Select a registered repository.');
+      if (!input.branchName?.trim()) throw new Error('A named branch is required.');
+      const observed = await inspectExistingWorktree(repository.path, input.worktreePath, input.branchName);
+      return inspectImportPreview({ ...observed, baseRef: input.baseRef, repositoryBranch: repository.branch });
+    });
+  }
+
+  importTask(input: ImportTaskRequest): Promise<Task> {
+    return this.withControlAction(async () => {
+      const repository = await this.requireAvailableRepository(input.repositoryId);
+      if (repository.kind !== 'USER_REGISTERED') throw new Error('Select a registered repository.');
+      if (!input.branchName?.trim()) throw new Error('A named branch is required.');
+      const observed = await inspectExistingWorktree(repository.path, input.worktreePath, input.branchName);
+      const existing = await this.store.findTaskForExistingWork({ repositoryId: repository.id, ...observed });
+      if (existing) return existing;
+      const baseRef = input.baseRef?.trim();
+      if (!baseRef) throw new Error('Choose a comparison branch or commit.');
+      const baseSha = (await git(observed.worktreePath, [
+        'rev-parse', '--verify', '--end-of-options', `${baseRef}^{commit}`
+      ])).trim();
+      const evidence = await captureExistingWorkEvidence({ ...observed, baseRef, baseSha });
+      if (evidence.snapshot.conflictedCount || evidence.snapshot.operationInProgress) {
+        throw new Error('Finish the current Git operation and resolve conflicts before importing.');
+      }
+      const current = await inspectExistingWorktree(repository.path, observed.worktreePath, observed.branchName);
+      if (current.headSha !== evidence.snapshot.headSha || current.gitCommonDir !== observed.gitCommonDir) {
+        throw new Error('The checkout changed during import. Refresh and try again.');
+      }
+      const runtimeId = input.runtimeId ?? input.agentSettings?.runtimeId ?? this.appSettings.defaultRuntimeId;
+      this.runtimeRegistry.require(runtimeId);
+      if (input.agentSettings?.runtimeId && input.agentSettings.runtimeId !== runtimeId) {
+        throw new Error('Task runtime and execution settings runtime must match.');
+      }
+      const task = await this.store.importTask({
+        ...input, worktreePath: observed.worktreePath, baseRef, runtimeId,
+        agentSettings: { ...input.agentSettings, runtimeId }
+      }, evidence);
+      this.events.emit({ type: 'task.updated', taskId: task.id, payload: task, at: new Date().toISOString() });
+      return task;
+    });
   }
 
   private async createTaskLocked(input: CreateTaskRequest): Promise<Task> {
@@ -2308,6 +2386,14 @@ export class TaskManagerService {
     const task = await this.requireTask(input.taskId);
     const repository = await this.requireAvailableRepository(task.repositoryId);
     const existing = await this.store.getCurrentWorktree(task.id);
+    if (existing?.ownership === 'EXTERNAL') {
+      const verified = await this.worktrees.verify(existing, repository.path);
+      const stored = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+      if (stored.status !== 'PRESENT') {
+        throw new Error(stored.error ?? 'Reconnect the existing checkout before starting work.');
+      }
+      return stored;
+    }
     if (existing && !['REMOVED', 'REMOVING'].includes(existing.status)) {
       const verified = await this.worktrees.verify(existing, repository.path);
       const stored = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
@@ -2427,7 +2513,8 @@ export class TaskManagerService {
           task,
           worktree,
           mode,
-          settings: input.settings
+          settings: input.settings,
+          instruction: input.instruction
         });
       })
     );
@@ -2438,6 +2525,7 @@ export class TaskManagerService {
     worktree: WorktreeRecord;
     mode?: Exclude<AgentRunMode, 'REVIEW'>;
     settings?: AgentExecutionSettings;
+    instruction?: string;
   }): Promise<RunRecord> {
     await this.assertAgentRuntimeAvailable();
     const { task, worktree } = input;
@@ -2456,7 +2544,11 @@ export class TaskManagerService {
       readOnly: readOnlyMode,
       settings: [task.agentSettings, input.settings]
     });
-    const prompt = buildInitialRunPrompt({ task, worktree, settings, readOnlyMode });
+    if (worktree.ownership === 'EXTERNAL' && !readOnlyMode && !input.instruction?.trim()) {
+      throw new Error('Enter an instruction before starting coding work in this checkout.');
+    }
+    const prompt = buildInitialRunPrompt({ task, worktree, settings, readOnlyMode, instruction: input.instruction });
+    assertCompleteRunPrompt(prompt);
 
     return this.agents.startTurn({
       task,
@@ -2533,10 +2625,14 @@ export class TaskManagerService {
         const settings = followUpSettings(task, run, input.settings, false);
         const prompt = buildContinuationPrompt({
           task,
+          worktree,
           run,
           gitSnapshot,
-          instruction: input.instruction
+          instruction: input.instruction,
+          previousPrompt: worktree.ownership === 'EXTERNAL'
+            ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
         });
+        assertCompleteRunPrompt(prompt);
         await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.agents.startTurn({
           task,
@@ -2585,10 +2681,14 @@ export class TaskManagerService {
         const settings = followUpSettings(task, run, input.settings, false);
         const prompt = buildRetryPrompt({
           task,
+          worktree,
           run,
           gitSnapshot,
-          instruction: input.instruction
+          instruction: input.instruction,
+          previousPrompt: worktree.ownership === 'EXTERNAL'
+            ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
         });
+        assertCompleteRunPrompt(prompt);
         await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.agents.startTurn({
           task,
@@ -2630,14 +2730,18 @@ export class TaskManagerService {
       alternativeSettings,
       sourceAttachments
     );
+    const alternativePrompt = buildForkAlternativeTaskPrompt({
+      task: sourceTask,
+      run: input.sourceRun,
+      worktree: input.sourceWorktree,
+      instruction: input.instruction,
+      previousPrompt: input.sourceWorktree.ownership === 'EXTERNAL'
+        ? await this.agentRuntimeStore.readArtifact(input.sourceRun.promptArtifactId) : undefined
+    });
+    assertCompleteRunPrompt(alternativePrompt);
     const alternativeTask = await this.store.createForkedAlternativeTask({
       title: `Alternative #${alternativeNumber}: ${sourceTask.title}`,
-      prompt: buildForkAlternativeTaskPrompt({
-        task: sourceTask,
-        run: input.sourceRun,
-        worktree: input.sourceWorktree,
-        instruction: input.instruction
-      }),
+      prompt: alternativePrompt,
       repositoryId: sourceTask.repositoryId,
       runtimeId,
       agentSettings: resolvedAlternativeSettings,
@@ -2845,10 +2949,7 @@ export class TaskManagerService {
         let task = await this.requireTask(input.taskId);
         this.assertNormalTask(task, 'Agent review');
         const runId = input.runId ?? task.currentRunId;
-        if (!runId) {
-          throw new Error('Complete an agent turn before starting a detached review.');
-        }
-        await this.ensurePostRunEvidence(runId);
+        if (runId) await this.ensurePostRunEvidence(runId);
         task = await this.requireTask(input.taskId);
         const implementationRetryReason = getImplementationRetryReason(task);
         if (implementationRetryReason) {
@@ -2856,39 +2957,37 @@ export class TaskManagerService {
         }
         const snapshot = await this.store.snapshot();
         this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
-        const run = await this.requireRunForTask(runId, task.id);
-        if (
-          [
-            'QUEUED',
-            'STARTING',
-            'RUNNING',
-            'AWAITING_APPROVAL',
-            'AWAITING_USER_INPUT',
-            'INTERRUPTING'
-          ].includes(run.status)
-        ) {
-          throw new Error('Wait for the active turn to finish before starting a review.');
+        const run = runId ? await this.requireRunForTask(runId, task.id) : undefined;
+        const iteration = snapshot.iterations.find(
+          (candidate) => candidate.id === (run?.iterationId ?? task.currentIterationId)
+        );
+        const worktree = snapshot.worktrees.find(
+          (candidate) => candidate.id === (run?.worktreeId ?? task.currentWorktreeId)
+        );
+        if (!iteration || !worktree) {
+          throw new Error('The source run no longer has a valid task iteration.');
         }
+        if (!run && (worktree.ownership !== 'EXTERNAL' || task.currentRunId)) {
+          throw new Error('Complete an agent turn before starting a detached review.');
+        }
+        const importedBeforeFirstRun = worktree.ownership === 'EXTERNAL' && !task.currentRunId && !run;
         if (
-          run.id !== task.currentRunId ||
-          !isImplementationRunMode(run.mode) ||
-          run.status !== 'COMPLETED' ||
-          task.workflowPhase !== 'REVIEW'
+          (run && (run.id !== task.currentRunId || !isImplementationRunMode(run.mode) || run.status !== 'COMPLETED')) ||
+          (task.workflowPhase !== 'REVIEW' && !(importedBeforeFirstRun && task.workflowPhase === 'IN_PROGRESS'))
         ) {
           throw new Error(
             'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
           );
         }
-        const iteration = snapshot.iterations.find(
-          (candidate) => candidate.id === run.iterationId
-        );
-        const worktree = snapshot.worktrees.find(
-          (candidate) => candidate.id === run.worktreeId
-        );
-        if (!iteration || !worktree) {
-          throw new Error('The source run no longer has a valid task iteration.');
-        }
         const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
+        if (importedBeforeFirstRun) {
+          const blockedReason = transitionBlocker(task, 'REVIEW', {
+            hasWorktree: true, worktreeOwnership: worktree.ownership,
+            hasGitSnapshot: true, gitStatus: gitSnapshot.status
+          });
+          if (blockedReason) throw new Error(blockedReason);
+          if (gitSnapshot.operationInProgress) throw new Error('Finish the current Git operation before starting review.');
+        }
         const configuredReviewRuntimeId =
           this.appSettings.reviewRuntimeId ?? task.runtimeId;
         const reviewRuntimeId = input.settings?.runtimeId ?? configuredReviewRuntimeId;
@@ -2914,12 +3013,13 @@ export class TaskManagerService {
           runtimeId: reviewRuntimeId
         };
         const settings =
-          reviewRuntimeId === run.runtimeId
+          run && reviewRuntimeId === run.runtimeId
             ? followUpSettings(task, run, configuredReviewSettings, true)
             : mergeRunSettings({
                 readOnly: true,
                 settings: [
-                  portableSecuritySettings(run.requestedSettings),
+                  ...(run ? [portableSecuritySettings(run.requestedSettings)] :
+                    [reviewRuntimeId === task.runtimeId ? task.agentSettings : portableSecuritySettings(task.agentSettings)]),
                   configuredReviewSettings
                 ]
               });
@@ -2928,7 +3028,10 @@ export class TaskManagerService {
           iteration,
           worktree,
           sourceRun: run,
-          target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
+          target: input.target ?? (worktree.ownership === 'EXTERNAL' ? {
+            type: 'CUSTOM',
+            instructions: `Review all committed changes from ${worktree.baseSha} to HEAD. Also review staged, unstaged, and untracked changes.`
+          } : { type: 'UNCOMMITTED_CHANGES' }),
           settings,
           generationKey: gitSnapshot.dirtyFingerprint,
           beforeGitSnapshotId: gitSnapshot.id
@@ -3407,8 +3510,57 @@ export class TaskManagerService {
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
-    this.assertAcceptingWork();
-    return this.refreshEvidenceInternal(input);
+    const pending = this.taskActionLocks.get(input.taskId);
+    if (pending?.label === 'Git observation') return pending.work as Promise<GitSnapshotRecord>;
+    return this.withTaskAction(input.taskId, 'Git observation', () => this.refreshEvidenceInternal(input));
+  }
+
+  reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord> {
+    return this.withTaskAction(input.taskId, 'Checkout reconnect', () =>
+      this.updateExistingCheckout(input.taskId, { worktreePath: input.worktreePath }));
+  }
+
+  updateWorktreeComparison(input: UpdateWorktreeComparisonRequest): Promise<WorktreeRecord> {
+    return this.withTaskAction(input.taskId, 'Comparison update', () =>
+      this.updateExistingCheckout(input.taskId, { baseRef: input.baseRef }));
+  }
+
+  private async updateExistingCheckout(
+    taskId: string,
+    update: { worktreePath?: string; baseRef?: string }
+  ): Promise<WorktreeRecord> {
+    const task = await this.requireTaskWithPostRunEvidence(taskId);
+    this.assertNormalTask(task, 'External checkout update');
+    const state = await this.store.snapshot();
+    this.assertNoActiveTaskRun(state, taskId, 'updating this checkout');
+    for (const run of state.runs.filter((candidate) => candidate.taskId === taskId)) {
+      await this.awaitPostRunEvidence(run.id);
+    }
+    const worktree = await this.requireWorktree(task);
+    if (worktree.ownership !== 'EXTERNAL') throw new Error('Only imported checkouts can be reconnected or change comparison.');
+    const repository = await this.requireAvailableRepository(task.repositoryId);
+    const observed = await inspectExistingWorktree(repository.path, update.worktreePath ?? worktree.worktreePath, worktree.branchName);
+    const baseRef = update.baseRef === undefined ? worktree.baseRef : update.baseRef.trim();
+    if (!baseRef) throw new Error('Choose a comparison branch or commit.');
+    const baseSha = update.baseRef === undefined ? worktree.baseSha : (await git(observed.worktreePath, [
+      'rev-parse', '--verify', '--end-of-options', `${baseRef}^{commit}`
+    ])).trim();
+    const evidence = await captureExistingWorkEvidence({ ...observed, baseRef, baseSha });
+    if (evidence.snapshot.conflictedCount || evidence.snapshot.operationInProgress) {
+      throw new Error('Finish the current Git operation and resolve conflicts before updating this checkout.');
+    }
+    const current = await inspectExistingWorktree(repository.path, observed.worktreePath, worktree.branchName);
+    if (current.headSha !== evidence.snapshot.headSha || current.gitCommonDir !== evidence.snapshot.gitCommonDir) {
+      throw new Error('The checkout changed during inspection. Refresh and try again.');
+    }
+    const stored = await this.store.updateExistingWorktree({
+      ...worktree, worktreePath: observed.worktreePath, headSha: current.headSha,
+      baseRef, baseSha, status: 'PRESENT', error: undefined
+    }, evidence);
+    const detail = await this.store.getTaskDetail(taskId);
+    if (detail.gitSnapshots[0]) await this.previews.observeGitSnapshot(detail.gitSnapshots[0]);
+    this.events.emit({ type: 'task.updated', taskId, payload: await this.requireTask(taskId), at: new Date().toISOString() });
+    return stored;
   }
 
   private async refreshEvidenceInternal(
@@ -3423,6 +3575,7 @@ export class TaskManagerService {
     if (!storedWorktree) {
       const repository = await this.requireAvailableRepository(task.repositoryId);
       const worktree = await this.requireWorktree(task);
+      if (worktree.ownership === 'EXTERNAL') options = { ...options, persistOnlyIfChanged: true };
       const owner =
         task.kind === 'DESIGN' ? this.requireDesignWorktrees() : this.worktrees;
       const verified = await owner.verify(worktree, repository.path);
@@ -3436,7 +3589,11 @@ export class TaskManagerService {
       throw new Error(`Worktree is not ready: ${storedWorktree.status}`);
     }
 
-    const snapshot = await inspectGitSnapshot(storedWorktree);
+    const external = storedWorktree.ownership === 'EXTERNAL';
+    const snapshot = external ? {
+      ...await inspectExistingWorkSnapshot(storedWorktree),
+      taskId: task.id, iterationId: storedWorktree.iterationId, worktreeId: storedWorktree.id
+    } : await inspectGitSnapshot(storedWorktree);
     if (options.persistOnlyIfChanged) {
       const state = await this.store.snapshot();
       const latest = latestForIteration(
@@ -3448,7 +3605,9 @@ export class TaskManagerService {
         return latest;
       }
     }
-    const diffEvidence = await buildDiffEvidence(storedWorktree);
+    const diffEvidence = external
+      ? (await captureExistingWorkEvidence(storedWorktree, snapshot)).diffEvidence
+      : await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
     await this.previews.observeGitSnapshot(storedSnapshot);
     this.events.emit({
@@ -3477,6 +3636,9 @@ export class TaskManagerService {
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'creating a delivery commit');
     const worktree = await this.requireWorktree(task);
+    if (worktree.ownership === 'EXTERNAL') {
+      throw new Error('Commit the external checkout changes in your editor or Git client before publishing.');
+    }
     const latestGit = await this.refreshEvidenceInternal({ taskId: task.id });
     if (
       latestGit.status === 'CONFLICTED' ||
@@ -3539,7 +3701,7 @@ export class TaskManagerService {
     );
 
     const latestGit = await this.ensureCommittedPublishableGit(task);
-    assertPublishReady(latestGit);
+    assertPublishReady(latestGit, worktree.ownership);
     if (!latestGit.headSha) {
       throw new Error('Cannot publish a branch without a verified local HEAD.');
     }
@@ -3556,16 +3718,35 @@ export class TaskManagerService {
       throw new Error(githubReady.error ?? `GitHub preflight is ${githubReady.status}.`);
     }
 
+    let remoteUrl: string | undefined;
+    if (worktree.ownership === 'EXTERNAL') {
+      const destinations = (await git(worktree.worktreePath, [
+        'remote', 'get-url', '--push', '--all', githubReady.remoteName ?? 'origin'
+      ])).trim().split('\n').filter(Boolean);
+      if (destinations.length !== 1) throw new Error('Select one push destination for this external checkout.');
+      remoteUrl = destinations[0]!;
+      const destination = parseGitHubRemoteUrl(remoteUrl);
+      if (!destination || destination.host !== githubReady.host ||
+          destination.owner.toLowerCase() !== githubReady.owner?.toLowerCase() ||
+          destination.repo.toLowerCase() !== githubReady.repo?.toLowerCase()) {
+        throw new Error('The push destination differs from the selected GitHub repository. Inspect the remote settings before publishing.');
+      }
+    }
+
     await this.store.recordBranchPublishRequested(
       task,
       worktree,
       githubReady.remoteName ?? 'origin',
-      latestGit.headSha
+      latestGit.headSha,
+      remoteUrl
     );
     const publication = await this.github.publishBranch({
       task,
       worktree,
-      remoteName: githubReady.remoteName
+      remoteName: githubReady.remoteName,
+      remoteUrl,
+      expectedHeadSha: latestGit.headSha,
+      expectedGitCommonDir: latestGit.gitCommonDir
     });
     const stored = await this.store.recordBranchPublication(publication);
     this.emitGitHubUpdate(task.id, worktree, stored);
@@ -3591,6 +3772,19 @@ export class TaskManagerService {
     const activeSnapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(activeSnapshot, task.id, 'opening a pull request');
     const worktree = await this.requireWorktree(task);
+    let baseRef = worktree.baseRef;
+    if (worktree.ownership === 'EXTERNAL') {
+      const observed = await this.refreshEvidenceInternal({ taskId: task.id });
+      const existing = await this.github.findOpenPullRequest(worktree);
+      if (existing) {
+        const stored = await this.store.recordPullRequestSync(existing);
+        this.emitGitHubUpdate(task.id, worktree, stored);
+        if (stored.headRefOid === observed.headSha) return stored;
+        baseRef = existing.pullRequest.baseRefName;
+      } else {
+        baseRef = await this.github.pullRequestBase(worktree, input.baseBranch);
+      }
+    }
     await this.reconcilePendingBranchPublicationBeforeMutation(task, worktree);
     let latestGit: GitSnapshotRecord | undefined =
       await this.ensureCommittedPublishableGit(task);
@@ -3606,7 +3800,7 @@ export class TaskManagerService {
       snapshot = await this.store.snapshot();
       latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
     }
-    assertPublishReady(latestGit);
+    assertPublishReady(latestGit, worktree.ownership);
     const title = normalizePullRequestTitle(input.title, task.title);
 
     const prBodyContent = this.github.buildPullRequestBody({
@@ -3619,7 +3813,7 @@ export class TaskManagerService {
     await this.store.recordPullRequestCreateRequested(task, worktree);
     const sync = await this.github.createOrFindDraftPullRequest({
       worktree,
-      baseRef: worktree.baseRef,
+      baseRef,
       body: prBodyContent,
       title
     });
@@ -3640,11 +3834,15 @@ export class TaskManagerService {
       this.assertNormalTask(task, 'GitHub refresh');
       const worktree = await this.requireWorktree(task);
       const latest = await this.store.getLatestPullRequest(task.id);
-      if (!latest?.number && !latest?.url) {
+      if (!latest?.number && !latest?.url && worktree.ownership !== 'EXTERNAL') {
         return undefined;
       }
       try {
-        const sync = await this.github.viewPullRequest(worktree, latest.number ?? latest.url ?? worktree.branchName);
+        if (worktree.ownership === 'EXTERNAL') await this.refreshEvidenceInternal({ taskId: task.id });
+        const sync = latest?.number || latest?.url
+          ? await this.github.viewPullRequest(worktree, latest.number ?? latest.url ?? worktree.branchName)
+          : await this.github.findOpenPullRequest(worktree);
+        if (!sync) return undefined;
         const currentTask = await this.requireTask(task.id);
         if (currentTask.currentRunId) {
           await this.ensurePostRunEvidence(currentTask.currentRunId);
@@ -3674,6 +3872,10 @@ export class TaskManagerService {
         ? await this.requireTaskWithPostRunEvidence(input.taskId)
         : await this.requireTask(input.taskId);
       this.assertNormalTask(task, 'Workflow transition');
+      const currentWorktree = task.currentWorktreeId ? await this.store.getWorktree(task.currentWorktreeId) : undefined;
+      if (input.toPhase === 'REVIEW' && currentWorktree?.ownership === 'EXTERNAL') {
+        await this.refreshEvidenceInternal({ taskId: task.id });
+      }
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'changing this task');
       const latestGit = snapshot.gitSnapshots
@@ -3694,6 +3896,7 @@ export class TaskManagerService {
 
       const blockedReason = transitionBlocker(task, input.toPhase, {
         hasWorktree: Boolean(task.currentWorktreeId),
+        worktreeOwnership: currentWorktree?.ownership,
         currentRun,
         hasGitSnapshot: Boolean(latestGit),
         gitStatus: latestGit?.status ?? task.projection.git,
@@ -3735,6 +3938,12 @@ export class TaskManagerService {
         const snapshot = await this.store.snapshot();
         const blockedReason = taskDeletionBlocker(task, snapshot);
         if (blockedReason) throw new Error(blockedReason);
+
+        if (input.removeWorktree && snapshot.worktrees.some(
+          (worktree) => worktree.taskId === task.id && worktree.ownership === 'EXTERNAL'
+        )) {
+          throw new Error('An external checkout cannot be removed. Delete only the Task Monki task.');
+        }
 
         // Preview cleanup is part of deletion authority. The store keeps its
         // resource ledger intact if any process or workspace identity is ambiguous.
@@ -3900,7 +4109,10 @@ export class TaskManagerService {
       const before = state.gitSnapshots.find(
         (candidate) => candidate.id === run.beforeGitSnapshotId
       );
-      if (before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
+      const worktree = state.worktrees.find((candidate) => candidate.id === run.worktreeId);
+      // Another editor can change an external checkout during a read-only review.
+      // Git evidence stales that review without attributing the edit to the provider.
+      if (worktree?.ownership !== 'EXTERNAL' && before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
         await this.store.appendEvent(
           createDomainEvent({
             type: 'AGENT_REVIEW_POLICY_VIOLATION',
@@ -4516,6 +4728,11 @@ export class TaskManagerService {
 
   private async ensureCommittedPublishableGit(task: Task): Promise<GitSnapshotRecord> {
     const latestGit = await this.refreshEvidenceInternal({ taskId: task.id });
+    const worktree = await this.requireWorktree(task);
+    if (worktree.ownership === 'EXTERNAL' && (latestGit.operationInProgress || latestGit.stagedCount ||
+        latestGit.unstagedCount || latestGit.untrackedCount || latestGit.conflictedCount)) {
+      throw new Error('Commit or resolve the external checkout changes before publishing.');
+    }
     if (latestGit.status === 'DIRTY') {
       return this.createDeliveryCommitUnlocked({ taskId: task.id });
     }
@@ -4528,6 +4745,13 @@ export class TaskManagerService {
     action: () => Promise<T>
   ): Promise<T> {
     this.assertAcceptingWork();
+    const observation = this.taskActionLocks.get(taskId);
+    if (observation?.label === 'Git observation' && label !== 'Git observation') {
+      // A task-open refresh must not reject the user's next action. That action
+      // revalidates its own inputs, including recovery after a failed observation.
+      await observation.work.catch(() => undefined);
+      this.assertAcceptingWork();
+    }
     const current = this.taskActionLocks.get(taskId);
     if (current) {
       throw new Error(`${current.label} is already running for this task.`);
@@ -4908,6 +5132,12 @@ function latestForIteration<T extends { iterationId: string }>(
   return rows
     .filter((row) => row.iterationId === iterationId)
     .sort((a, b) => String(b[dateKey]).localeCompare(String(a[dateKey])))[0];
+}
+
+function assertCompleteRunPrompt(prompt: string): void {
+  if (Buffer.byteLength(prompt, 'utf8') > AGENT_RUNTIME_LIMITS.maxArtifactBytes) {
+    throw new Error('The complete instruction exceeds the runtime prompt limit. Shorten the instruction before starting work.');
+  }
 }
 
 function sameWorktreeObservation(

@@ -328,9 +328,13 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
   }, 30_000);
 
-  it('runs resolve → approve → dirty capture → job → ready → stale → stop without touching the worktree', async () => {
+  it.each(['MANAGED', 'EXTERNAL'] as const)('runs Preview capture, stale detection, and cleanup without touching the %s checkout', async (ownership) => {
     const scenario = await previewScenario('task-monki-preview-service');
-    const task = await scenario.createTask({ title: 'Preview vertical slice' });
+    const task = ownership === 'EXTERNAL' ? await scenario.service.importTask({
+      repositoryId: scenario.repositoryId, worktreePath: scenario.repositoryPath,
+      branchName: (await git(scenario.repositoryPath, ['branch', '--show-current'])).trim(),
+      baseRef: 'HEAD', title: 'Imported Preview', prompt: 'Inspect existing work.'
+    }) : await scenario.createTask({ title: 'Preview vertical slice' });
     const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
     await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'captured-untracked');
     const statusBefore = await git(worktree.worktreePath, ['status', '--porcelain=v1', '-uall']);
@@ -368,7 +372,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     const capturedEvidence = (await scenario.store.snapshot()).gitSnapshots
       .filter((snapshot) => snapshot.taskId === task.id)
       .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
-    expect(capturedEvidence[0]?.dirtyFingerprint).toBe(capturedEvidence[1]?.dirtyFingerprint);
+    const source = ready.source;
+    expect(source.type === 'WORKTREE_SNAPSHOT' && capturedEvidence.some((snapshot) =>
+      snapshot.id === source.gitSnapshotId && snapshot.dirtyFingerprint === source.dirtyFingerprint)).toBe(true);
 
     await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'changed-after-capture');
     await scenario.service.refreshEvidence({ taskId: task.id });

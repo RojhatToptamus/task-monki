@@ -24,6 +24,7 @@ import type {
   CreateBoardRequest,
   CreateBlankDesignRequest,
   CreateTaskRequest,
+  ImportTaskRequest,
   DuplicateDesignRequest,
   DesignConversationEntry,
   DesignDetailSnapshot,
@@ -127,6 +128,11 @@ export interface CreateTaskStoreInput extends CreateTaskRequest {
    * resolved settings. It is never copied into the durable task record.
    */
   creationFingerprintInput?: CreateTaskRequest;
+}
+
+export interface ImportedTaskEvidence {
+  snapshot: Omit<GitSnapshotRecord, 'id' | 'taskId' | 'iterationId' | 'worktreeId' | 'capturedAt' | 'diffArtifactId'>;
+  diffEvidence: string;
 }
 
 export interface ManagedDesignRepositoryInput {
@@ -3534,6 +3540,43 @@ export class SqliteTaskStore {
     return this.serializeMutation(() => this.createTaskRecord(input, 'ui'));
   }
 
+  async findTaskForExistingWork(input: {
+    repositoryId: string; worktreePath: string; gitCommonDir: string; branchName: string;
+  }): Promise<Task | undefined> {
+    await this.init();
+    return clone(this.findTaskForExistingWorkFromState(input));
+  }
+
+  private findTaskForExistingWorkFromState(input: {
+    repositoryId: string; worktreePath: string; gitCommonDir: string; branchName: string;
+  }): Task | undefined {
+    const worktree = this.state.worktrees.find((candidate) => {
+      if (candidate.status === 'REMOVED') return false;
+      if (sameAbsolutePath(candidate.worktreePath, input.worktreePath)) return true;
+      const gitSnapshot = this.state.gitSnapshots.find((snapshot) => snapshot.worktreeId === candidate.id);
+      return candidate.branchName === input.branchName && (
+        candidate.repositoryId === input.repositoryId ||
+        (gitSnapshot && sameAbsolutePath(gitSnapshot.gitCommonDir, input.gitCommonDir))
+      );
+    });
+    return worktree ? this.state.tasks.find((task) => task.id === worktree.taskId) : undefined;
+  }
+
+  importTask(input: ImportTaskRequest, evidence: ImportedTaskEvidence): Promise<Task> {
+    return this.serializeMutation(async () => {
+      if (!evidence.snapshot.headSha || !evidence.snapshot.baseSha ||
+          evidence.snapshot.branch !== input.branchName ||
+          !sameAbsolutePath(evidence.snapshot.worktreePath, input.worktreePath)) {
+        throw new Error('Import evidence does not match the selected checkout.');
+      }
+      const existing = this.findTaskForExistingWorkFromState({
+        ...input, gitCommonDir: evidence.snapshot.gitCommonDir
+      });
+      if (existing) return clone(existing);
+      return this.createTaskRecord(input, 'ui', undefined, evidence);
+    });
+  }
+
   async createForkedAlternativeTask(input: CreateForkedAlternativeTaskInput): Promise<Task> {
     return this.serializeMutation(() =>
       this.createTaskRecord(input, 'ui', {
@@ -3810,7 +3853,8 @@ export class SqliteTaskStore {
   private async createTaskRecord(
     input: CreateTaskStoreInput,
     source: DomainEvent['source'],
-    fork?: { sourceTaskId: string; sourceRunId: string }
+    fork?: { sourceTaskId: string; sourceRunId: string },
+    imported?: ImportedTaskEvidence
   ): Promise<Task> {
     await this.init();
 
@@ -3849,7 +3893,7 @@ export class SqliteTaskStore {
       repositoryId: input.repositoryId.trim(),
       creationToken: creationMetadata?.token,
       creationRequestFingerprint: creationMetadata?.fingerprint,
-      workflowPhase: 'READY',
+      workflowPhase: imported ? 'IN_PROGRESS' : 'READY',
       resolution: 'NONE',
       completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
       phaseVersion: 1,
@@ -3865,7 +3909,7 @@ export class SqliteTaskStore {
     if (!task.title) {
       throw new Error('Task title is required.');
     }
-    if (!task.prompt) {
+    if (!task.prompt && !imported) {
       throw new Error('Task prompt is required.');
     }
     const repository = this.state.repositories.find(
@@ -3955,9 +3999,26 @@ export class SqliteTaskStore {
         );
       }
 
+      if (imported) {
+        const { snapshot, diffEvidence } = imported;
+        const { iteration, worktree } = await this.createIterationAndWorktreeInternal({
+          task,
+          worktreePath: snapshot.worktreePath,
+          branchName: snapshot.branch!,
+          baseRef: snapshot.baseRef,
+          baseSha: snapshot.baseSha!,
+          ownership: 'EXTERNAL',
+          headSha: snapshot.headSha
+        }, false);
+        await this.recordGitSnapshotInternal({
+          ...snapshot, taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id
+        }, diffEvidence, false);
+      }
       await this.persistSnapshot();
     } catch (error) {
+      const unpublishedArtifacts = this.state.artifacts.filter((artifact) => artifact.taskId === task.id);
       this.state = previousState;
+      await this.cleanupUnpublishedArtifacts(unpublishedArtifacts);
       if (preparedDraft) {
         try {
           await this.attachmentFiles.rollbackDraftForTask(preparedDraft);
@@ -3980,7 +4041,7 @@ export class SqliteTaskStore {
         () => undefined
       );
     }
-    return clone(task);
+    return clone(this.state.tasks.find((candidate) => candidate.id === task.id)!);
   }
 
   private requireDesign(designId: string): Task {
@@ -4516,6 +4577,11 @@ export class SqliteTaskStore {
       );
       if (alreadyPublished) return clone(stored);
 
+      if (run.mode === 'REVIEW' && task.workflowPhase === 'IN_PROGRESS' && !task.currentRunId &&
+          this.state.worktrees.some((worktree) => worktree.id === task.currentWorktreeId &&
+            worktree.id === run.worktreeId && worktree.ownership === 'EXTERNAL')) {
+        await this.transitionTaskInternal(task.id, 'REVIEW', 'Agent review requested for imported work.', false);
+      }
       const bindsCurrentTask = run.mode !== 'REVIEW';
       const advancesWorkflow = bindsCurrentTask && run.mode !== 'DESIGN';
       const now = new Date().toISOString();
@@ -4611,7 +4677,9 @@ export class SqliteTaskStore {
     worktreePath: string;
     baseRef?: string;
     baseSha: string;
-  }): Promise<{ iteration: TaskIteration; worktree: WorktreeRecord }> {
+    ownership?: WorktreeRecord['ownership'];
+    headSha?: string;
+  }, persist = true): Promise<{ iteration: TaskIteration; worktree: WorktreeRecord }> {
     await this.init();
 
     const now = new Date().toISOString();
@@ -4632,11 +4700,13 @@ export class SqliteTaskStore {
       taskId: input.task.id,
       iterationId: iteration.id,
       repositoryId: input.task.repositoryId,
+      ownership: input.ownership ?? 'MANAGED',
       worktreePath: input.worktreePath,
       branchName: input.branchName,
       baseRef: input.baseRef,
       baseSha: input.baseSha,
-      status: 'CREATING',
+      headSha: input.headSha,
+      status: input.ownership === 'EXTERNAL' ? 'PRESENT' : 'CREATING',
       createdAt: now,
       updatedAt: now
     };
@@ -4658,39 +4728,46 @@ export class SqliteTaskStore {
       )
     };
 
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'TASK_ITERATION_CREATED',
-        taskId: input.task.id,
-        iterationId: storedIteration.id,
-        worktreeId: worktree.id,
-        source: 'ui',
-        payload: {
-          branchName: input.branchName,
-          worktreePath: input.worktreePath,
-          baseSha: input.baseSha
-        }
-      }),
-      false
-    );
+    if (worktree.ownership === 'EXTERNAL') {
+      await this.appendEventInternal(createDomainEvent({
+        type: 'WORKTREE_ATTACHED', taskId: input.task.id,
+        iterationId: storedIteration.id, worktreeId: worktree.id, source: 'ui',
+        payload: { branchName: worktree.branchName, worktreePath: worktree.worktreePath }
+      }), false);
+    } else {
+      await this.appendEvent(
+        createDomainEvent({
+          type: 'TASK_ITERATION_CREATED',
+          taskId: input.task.id,
+          iterationId: storedIteration.id,
+          worktreeId: worktree.id,
+          source: 'ui',
+          payload: {
+            branchName: input.branchName,
+            worktreePath: input.worktreePath,
+            baseSha: input.baseSha
+          }
+        }),
+        false
+      );
 
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'WORKTREE_CREATE_REQUESTED',
-        taskId: input.task.id,
-        iterationId: storedIteration.id,
-        worktreeId: worktree.id,
-        source: 'git',
-        payload: {
-          branchName: input.branchName,
-          worktreePath: input.worktreePath,
-          baseSha: input.baseSha
-        }
-      }),
-      false
-    );
-
-    await this.persistSnapshot();
+      await this.appendEvent(
+        createDomainEvent({
+          type: 'WORKTREE_CREATE_REQUESTED',
+          taskId: input.task.id,
+          iterationId: storedIteration.id,
+          worktreeId: worktree.id,
+          source: 'git',
+          payload: {
+            branchName: input.branchName,
+            worktreePath: input.worktreePath,
+            baseSha: input.baseSha
+          }
+        }),
+        false
+      );
+    }
+    if (persist) await this.persistSnapshot();
     return { iteration: clone(storedIteration), worktree: clone(worktree) };
   }
 
@@ -4702,7 +4779,8 @@ export class SqliteTaskStore {
 
   private async updateWorktreeInternal(
     worktree: WorktreeRecord,
-    eventType: 'WORKTREE_CREATED' | 'WORKTREE_VERIFIED' | 'WORKTREE_FAILED'
+    eventType: 'WORKTREE_CREATED' | 'WORKTREE_VERIFIED' | 'WORKTREE_FAILED',
+    persist = true
   ): Promise<WorktreeRecord> {
     await this.init();
     const now = new Date().toISOString();
@@ -4736,8 +4814,57 @@ export class SqliteTaskStore {
       }),
       false
     );
-    await this.persistSnapshot();
+    if (persist) await this.persistSnapshot();
     return clone(stored);
+  }
+
+  async updateExistingWorktree(
+    worktree: WorktreeRecord,
+    evidence: ImportedTaskEvidence
+  ): Promise<WorktreeRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const current = this.state.worktrees.find((candidate) => candidate.id === worktree.id);
+      const previous = this.state.gitSnapshots.find((candidate) => candidate.worktreeId === worktree.id);
+      if (!current || current.ownership !== 'EXTERNAL' || worktree.ownership !== 'EXTERNAL' ||
+          current.taskId !== worktree.taskId || current.iterationId !== worktree.iterationId ||
+          current.repositoryId !== worktree.repositoryId || current.branchName !== worktree.branchName ||
+          !previous?.gitCommonDir || previous.gitCommonDir !== evidence.snapshot.gitCommonDir ||
+          evidence.snapshot.branch !== worktree.branchName || evidence.snapshot.worktreePath !== worktree.worktreePath ||
+          evidence.snapshot.baseSha !== worktree.baseSha || evidence.snapshot.baseRef !== worktree.baseRef ||
+          evidence.snapshot.headSha !== worktree.headSha) {
+        throw new Error('External checkout identity or comparison is inconsistent.');
+      }
+      const duplicate = this.findTaskForExistingWorkFromState({
+        repositoryId: worktree.repositoryId, worktreePath: worktree.worktreePath,
+        branchName: worktree.branchName, gitCommonDir: previous.gitCommonDir
+      });
+      if (duplicate && duplicate.id !== worktree.taskId) {
+        throw new Error('This checkout is already attached to another task.');
+      }
+      const previousState = this.state;
+      try {
+        const stored = await this.updateWorktreeInternal(worktree, 'WORKTREE_VERIFIED', false);
+        this.state = {
+          ...this.state,
+          iterations: this.state.iterations.map((iteration) => iteration.id === worktree.iterationId
+            ? { ...iteration, baseRef: worktree.baseRef, baseSha: worktree.baseSha }
+            : iteration)
+        };
+        await this.recordGitSnapshotInternal({
+          ...evidence.snapshot, taskId: worktree.taskId,
+          iterationId: worktree.iterationId, worktreeId: worktree.id
+        }, evidence.diffEvidence, false);
+        await this.persistSnapshot();
+        return stored;
+      } catch (error) {
+        const unpublished = this.state.artifacts.filter((artifact) =>
+          !previousState.artifacts.some((previousArtifact) => previousArtifact.id === artifact.id));
+        this.state = previousState;
+        await this.cleanupUnpublishedArtifacts(unpublished);
+        throw error;
+      }
+    });
   }
 
   async recordGitSnapshot(snapshot: Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>, diffEvidence: string): Promise<GitSnapshotRecord> {
@@ -4748,10 +4875,14 @@ export class SqliteTaskStore {
 
   private async recordGitSnapshotInternal(
     snapshot: Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>,
-    diffEvidence: string
+    diffEvidence: string,
+    persist = true
   ): Promise<GitSnapshotRecord> {
     await this.init();
 
+    const previous = this.state.gitSnapshots.find((candidate) => candidate.worktreeId === snapshot.worktreeId);
+    const comparisonChanged = Boolean(previous &&
+      (previous.baseSha !== snapshot.baseSha || previous.baseRef !== snapshot.baseRef));
     const diffArtifact = await this.createTextArtifact(snapshot.taskId, 'diff', diffEvidence);
     const stored: GitSnapshotRecord = {
       id: randomUUID(),
@@ -4784,13 +4915,13 @@ export class SqliteTaskStore {
         iterationId: stored.iterationId,
         worktreeId: stored.worktreeId,
         source: 'git',
-        payload: stored
+        payload: { ...stored, comparisonChanged }
       }),
       false
     );
 
     try {
-      await this.persistSnapshot();
+      if (persist) await this.persistSnapshot();
     } catch (error) {
       await this.cleanupUnpublishedArtifacts([diffArtifact]);
       throw error;
@@ -4807,7 +4938,8 @@ export class SqliteTaskStore {
   private async transitionTaskInternal(
     taskId: string,
     toPhase: Task['workflowPhase'],
-    reason: string
+    reason: string,
+    persist = true
   ): Promise<Task> {
     await this.init();
 
@@ -4843,7 +4975,7 @@ export class SqliteTaskStore {
       }),
       false
     );
-    await this.persistSnapshot();
+    if (persist) await this.persistSnapshot();
 
     const updated = this.state.tasks.find((candidate) => candidate.id === taskId);
     if (!updated) {
@@ -4903,13 +5035,15 @@ export class SqliteTaskStore {
     task: Task,
     worktree: WorktreeRecord,
     remoteName: string,
-    headSha: string
+    headSha: string,
+    remoteUrl?: string
   ): Promise<BranchPublicationRecord> {
     return this.recordBranchPublication({
       taskId: task.id,
       iterationId: worktree.iterationId,
       worktreeId: worktree.id,
       remoteName,
+      ...(remoteUrl ? { remoteUrl } : {}),
       branchName: worktree.branchName,
       remoteRef: `${remoteName}/${worktree.branchName}`,
       headSha,
@@ -5892,7 +6026,7 @@ function validatePersistedRelationships(state: StoreState): void {
       !worktree ||
       worktree.taskId !== session.taskId ||
       worktree.iterationId !== session.iterationId ||
-      worktree.worktreePath !== session.worktreePath
+      (worktree.ownership !== 'EXTERNAL' && worktree.worktreePath !== session.worktreePath)
     ) {
       invalidPersistedRelationship('agent session ownership');
     }
@@ -5967,7 +6101,7 @@ function validatePersistedRelationships(state: StoreState): void {
       snapshot,
       'git snapshot ownership'
     );
-    if (snapshot.worktreePath !== worktree.worktreePath) {
+    if (worktree.ownership !== 'EXTERNAL' && snapshot.worktreePath !== worktree.worktreePath) {
       invalidPersistedRelationship('git snapshot ownership');
     }
     if (snapshot.diffArtifactId) {

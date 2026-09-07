@@ -26,6 +26,9 @@ function scenario(
   return { slug, group, title, description, tags };
 }
 export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
+  scenario('external-idle', 'board', 'Imported work', 'An external checkout with committed and uncommitted work, before any agent run.', ['ownership:EXTERNAL', 'phase:IN_PROGRESS']),
+  scenario('external-review-needs-changes', 'review', 'Imported work needs changes', 'A detached review found issues before the first implementation run.', ['ownership:EXTERNAL', 'agent-review:NEEDS_CHANGES']),
+  scenario('external-checkout-missing', 'board', 'Imported checkout moved', 'An external checkout moved and needs explicit reconnection.', ['ownership:EXTERNAL', 'worktree:MISSING']),
   scenario('board-backlog', 'board', 'Backlog task', 'Task waiting before work is accepted.', [
     'phase:BACKLOG'
   ]),

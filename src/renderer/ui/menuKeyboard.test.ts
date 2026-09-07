@@ -142,6 +142,8 @@ function fakeMenu(items: HTMLElement[]) {
   const focus = vi.fn();
   const item = {
     focus,
+    scrollHeight: 0,
+    clientHeight: 0,
     querySelectorAll() {
       return items;
     }

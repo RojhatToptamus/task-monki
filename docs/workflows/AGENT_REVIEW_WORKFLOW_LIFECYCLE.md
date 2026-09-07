@@ -79,12 +79,18 @@ Expected UI:
 
 ### Starting agent review
 
-1. User clicks Run agent review from a task in Review.
+1. User starts agent review from Review, or directly from an idle imported task
+   in In Progress before its first coding run.
 2. `TaskManagerService.startReview` rejects active implementation-side runs.
 3. The current source run must be the latest successfully completed
    implementation-side run. Failed and superseded runs are rejected.
+   Imported work can omit the source run before its first implementation.
+   Git and runtime admission checks must pass. Review still creates no primary
+   coding session.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
-   agent session.
+   agent session. For a direct imported review, the existing SQLite transaction
+   publishes the Review transition and run-start event together. A failed write
+   publishes neither. An admitted review stays in Review if it fails or is canceled.
 5. Task Monki sends the provider-neutral review prompt as a normal read-only turn.
 6. The prompt tells the selected runtime not to modify files.
 7. `AgentOrchestrator` records repository state before provider delivery.
@@ -93,6 +99,13 @@ Expected UI:
 10. Task Monki leaves detected changes in place as evidence.
 11. Reducer keeps the task workflow phase in Review.
 12. `projection.agentReview.status` becomes `RUNNING`.
+
+Imported-work review includes committed and dirty changes against the selected
+comparison. A comparison change or external edit makes the review stale.
+The read-only integrity check still rejects changed or unreadable input, but
+Task Monki does not attribute another editor's changes to the review provider.
+Address findings starts the first implementation when no source coding run
+exists. Otherwise it continues the current eligible implementation run.
 
 Before a Codex review turn starts, the adapter resolves the selected repository
 and task worktree through Git. It canonicalizes

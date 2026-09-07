@@ -186,6 +186,54 @@ Screens should prioritize:
 Provider telemetry is useful, but it should not visually dominate pending user
 decisions or verified local evidence.
 
+## Import existing work
+
+The task composer can attach an existing primary checkout or registered linked
+worktree. Import keeps its named branch, files, index, Git configuration, and
+external agent sessions unchanged. It creates an idle In Progress task without
+starting an agent. A duplicate checkout or repository-and-branch selection opens
+the existing task, including an archived task. Separate clones remain distinct.
+
+The composer filters checkouts by branch or folder and keeps the selected checkout
+visible. Import uses a branch-derived title without requiring a description.
+New work still requires a description. Each mode keeps its own text draft.
+
+The comparison preview reads Git without changing the checkout or creating a task.
+It shows commit and uncommitted-file counts, with up to 50 commits and 100 file
+paths in the change list. Local branch uses the local counterpart of
+`origin/HEAD`, then `main`, `master`, or the registered repository branch.
+Users can instead choose `HEAD` or enter a local branch or commit.
+Clean checkouts remain importable. Git conflicts and unfinished operations block import.
+Import resolves the comparison again and rechecks checkout identity and Git evidence
+before saving the task.
+
+The selected comparison includes committed, staged, unstaged, and untracked work.
+`HEAD` at import time gives a dirty-only starting comparison. Ordinary refresh
+keeps that resolved base. Change comparison in Evidence, beside the diff, to
+rebuild evidence and make the previous review stale. Older evidence keeps its
+original comparison.
+
+Run agent review starts detached review directly before the first coding run.
+Task Monki checks Git and runtime readiness before entering Review.
+Start implementation requires an explicit instruction and warns that coding
+changes the original imported checkout. Address findings and
+Investigate checks supply that instruction through the same first-run path.
+Later unsuccessful runs still require retry or continuation before review.
+Retry retains the original instruction from the runtime prompt artifact; it does
+not rewrite the source task description or provider-native goal.
+
+A new PR requires a separate target branch. A `HEAD` or commit comparison can
+remain unchanged. An existing PR keeps its target branch.
+
+Task Monki observes external work on task open, app focus, and manual refresh.
+It does not watch files or poll Git. Focus observation pauses during actions,
+dialogs, and native pickers. Other editors can change files after observation;
+Task Monki rechecks identity and evidence at action boundaries.
+
+Reconnect checkout selects the same repository and branch at a new registered
+path. It never creates a missing checkout. Old runs retain their historical
+paths, and subsequent coding uses a fresh session after a move.
+
 ## Local preview
 
 Preview is independent of task workflow phase and provider-run state. The
@@ -360,6 +408,7 @@ Review:
 - Allow Run agent review when no implementation-side run is active.
 - Require the current implementation-side run to have completed successfully;
   unsuccessful or older superseded runs are not valid review sources.
+- Imported work in Review can start review before its first coding run.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.
@@ -440,7 +489,8 @@ left untouched, while symbolic links and special entries fail closed.
 
 Local worktree removal is explicit and separate from task deletion. It is never
 enabled by default, and Task Monki blocks removal when the worktree has
-uncommitted, untracked, or conflicted files. Deleting a task never deletes the
+uncommitted, untracked, or conflicted files. External checkouts cannot be removed
+through task deletion, even when clean. Deleting a task never deletes the
 original repository, remote branch, pull request, commits, Git history, merge
 history, or provider remote thread data.
 

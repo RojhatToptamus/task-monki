@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { MoreHorizontal } from 'lucide-react';
 import type { OpenTargetRef } from '../../shared/contracts';
 import { OpenTargetMenuItems } from './OpenTargetMenu';
@@ -18,6 +19,7 @@ interface TaskActionsMenuProps {
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
   className?: string;
+  align?: 'start' | 'end';
 }
 
 export function TaskActionsMenu({
@@ -27,7 +29,8 @@ export function TaskActionsMenu({
   openTarget,
   onArchive,
   onRequestDelete,
-  className
+  className,
+  align = 'end'
 }: TaskActionsMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -40,32 +43,47 @@ export function TaskActionsMenu({
   const prepareMenu = () => {
     const trigger = triggerRef.current;
     if (!trigger) return;
-    setGeometry(taskMenuGeometry(trigger.getBoundingClientRect(), window.innerHeight));
+    setGeometry(taskMenuGeometry(
+      trigger.getBoundingClientRect(),
+      { width: window.innerWidth, height: window.innerHeight },
+      hasOpenTarget ? 214 : 152,
+      align
+    ));
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) {
       return;
     }
 
-    const frame = window.requestAnimationFrame(() => {
-      if (hasOpenTarget && initialFocusRef.current === 'first') {
-        menuRef.current?.focus();
-      } else {
-        focusMenuItem(menuRef.current, initialFocusRef.current);
-      }
-    });
+    if (hasOpenTarget && initialFocusRef.current === 'first') {
+      menuRef.current?.focus({ preventScroll: true });
+    } else {
+      focusMenuItem(menuRef.current, initialFocusRef.current);
+    }
 
     const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
+      if (
+        !rootRef.current?.contains(event.target as Node) &&
+        !menuRef.current?.contains(event.target as Node)
+      ) {
         setOpen(false);
       }
     };
+    const onScroll = (event: Event) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onResize = () => setOpen(false);
 
     window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
     return () => {
-      window.cancelAnimationFrame(frame);
       window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
     };
   }, [hasOpenTarget, open]);
 
@@ -102,13 +120,11 @@ export function TaskActionsMenu({
       >
         <KebabIcon />
       </button>
-      {open ? (
+      {open && geometry ? createPortal(
         <div
           ref={menuRef}
-          className={`tm-taskmenu__menu ${
-            geometry?.placement === 'top' ? 'tm-taskmenu__menu--top' : ''
-          }`}
-          style={{ maxHeight: geometry ? `${geometry.maxHeight}px` : undefined }}
+          className="tm-taskmenu__menu tm-taskmenu__menu--floating"
+          style={geometry}
           role="menu"
           tabIndex={-1}
           aria-label={`Task options for ${title}`}
@@ -118,7 +134,11 @@ export function TaskActionsMenu({
               returnFocus: triggerRef.current
             })
           }
-          onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
+          onBlur={(event) => {
+            if (event.relatedTarget !== triggerRef.current) {
+              handleMenuBlur(event, () => setOpen(false));
+            }
+          }}
         >
           {openTarget ? (
             <>
@@ -150,36 +170,51 @@ export function TaskActionsMenu({
             className="tm-taskmenu__item tm-taskmenu__item--danger"
             onClick={() => {
               setOpen(false);
-              triggerRef.current?.focus();
+              triggerRef.current?.focus({ preventScroll: true });
               onRequestDelete(taskId);
             }}
           >
             Delete...
           </button>
-        </div>
+        </div>,
+        rootRef.current?.closest('.app-shell') ?? document.body
       ) : null}
     </div>
   );
 }
 
 export interface TaskMenuGeometry {
+  left: number;
+  top?: number;
+  bottom?: number;
+  width: number;
   maxHeight: number;
-  placement: 'bottom' | 'top';
 }
 
 export function taskMenuGeometry(
-  trigger: Pick<DOMRect, 'top' | 'bottom'>,
-  viewportHeight: number
+  trigger: Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right'>,
+  viewport: { width: number; height: number },
+  menuWidth = 214,
+  align: 'start' | 'end' = 'end'
 ): TaskMenuGeometry {
   const edgeGap = 12;
+  const anchorGap = 6;
   const maxMenuHeight = 420;
-  const spaceAbove = Math.max(0, trigger.top - edgeGap);
-  const spaceBelow = Math.max(0, viewportHeight - trigger.bottom - edgeGap);
+  const width = Math.min(menuWidth, Math.max(0, viewport.width - edgeGap * 2));
+  const spaceAbove = Math.max(0, trigger.top - anchorGap - edgeGap);
+  const spaceBelow = Math.max(0, viewport.height - trigger.bottom - anchorGap - edgeGap);
   const placement = spaceBelow >= Math.min(360, spaceAbove) ? 'bottom' : 'top';
   const available = placement === 'bottom' ? spaceBelow : spaceAbove;
   return {
-    placement,
-    maxHeight: Math.max(120, Math.min(maxMenuHeight, available))
+    left: Math.max(edgeGap, Math.min(
+      align === 'start' ? trigger.left : trigger.right - width,
+      viewport.width - width - edgeGap
+    )),
+    ...(placement === 'bottom'
+      ? { top: trigger.bottom + anchorGap }
+      : { bottom: viewport.height - trigger.top + anchorGap }),
+    width,
+    maxHeight: Math.min(maxMenuHeight, available)
   };
 }
 
