@@ -1052,7 +1052,7 @@ async function transitionScriptedRun(
 }
 
 async function initRepository(repositoryPath: string): Promise<void> {
-  await git(repositoryPath, ['init']);
+  await git(repositoryPath, ['init', '-b', 'main']);
   await git(repositoryPath, ['config', 'user.email', 'task-monki@example.invalid']);
   await git(repositoryPath, ['config', 'user.name', 'Task Monki']);
   await fs.writeFile(path.join(repositoryPath, 'README.md'), '# Scenario\n', 'utf8');

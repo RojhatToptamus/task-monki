@@ -32,6 +32,8 @@ jobs:
           node-version: '22.23.2'
           cache: npm
       - run: npm ci
+      - name: Prepare Electron runtime
+        run: npm run prepare:electron-runtime
       - run: npm run check:themes
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
@@ -62,8 +64,6 @@ jobs:
       - name: Prepare Design browser runtime
         if: runner.os == 'macOS'
         run: npm run prepare:design-browser-runtime
-      - name: Prepare Electron legal resources
-        run: npm run prepare:electron-runtime
       - name: Build unpacked native package
         run: npm exec electron-builder -- --dir --publish never
         env:
