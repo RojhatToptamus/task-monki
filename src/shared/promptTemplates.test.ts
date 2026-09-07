@@ -243,6 +243,7 @@ describe('prompt templates', () => {
   it('anchors continuation turns to unfinished work and the same progress contract', () => {
     const prompt = buildContinuationPrompt({
       task: taskFixture(),
+      worktree: worktreeFixture(),
       run: runFixture(),
       gitSnapshot: gitSnapshotFixture(),
       instruction: 'Add regression coverage.'
@@ -270,6 +271,7 @@ describe('prompt templates', () => {
   it('gives retries a distinct original-goal and external-side-effect safety prompt', () => {
     const prompt = buildRetryPrompt({
       task: taskFixture(),
+      worktree: worktreeFixture(),
       run: runFixture(),
       gitSnapshot: gitSnapshotFixture(),
       instruction: 'Use the smaller correction.'

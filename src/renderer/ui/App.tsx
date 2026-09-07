@@ -2022,13 +2022,15 @@ export function App() {
     }
   };
 
-  const createPullRequest = async (taskId: string, title?: string) => {
+  const createPullRequest = async (taskId: string, title?: string, baseBranch?: string) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title }));
+      await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title, baseBranch }));
       notify('Draft pull request created.', 'success');
       await refresh();
     } catch (caught) {
+      // The creation dialog keeps its inputs and displays the failure for retry.
+      if (title !== undefined) throw caught;
       reportActionError(caught, 'Failed to create pull request.');
     }
   };

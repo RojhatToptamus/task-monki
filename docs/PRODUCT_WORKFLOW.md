@@ -196,15 +196,21 @@ the existing task, including an archived task. Separate clones remain distinct.
 
 The selected comparison includes committed, staged, unstaged, and untracked work.
 `HEAD` at import time gives a dirty-only starting comparison. Ordinary refresh
-keeps that resolved base. Change comparison explicitly to rebuild evidence and
-make the previous review stale.
+keeps that resolved base. Change comparison in Evidence, beside the diff, to
+rebuild evidence and make the previous review stale. Older evidence keeps its
+original comparison.
 
-Ready for review moves imported work into Review before its first coding run.
-Start implementation requires an explicit instruction. Address findings and
+Run agent review starts detached review directly before the first coding run.
+Task Monki checks Git and runtime readiness before entering Review.
+Start implementation requires an explicit instruction and warns that coding
+changes the original imported checkout. Address findings and
 Investigate checks supply that instruction through the same first-run path.
 Later unsuccessful runs still require retry or continuation before review.
 Retry retains the original instruction from the runtime prompt artifact; it does
 not rewrite the source task description or provider-native goal.
+
+A new PR requires a separate target branch. A `HEAD` or commit comparison can
+remain unchanged. An existing PR keeps its target branch.
 
 Task Monki observes external work on task open, app focus, and manual refresh.
 It does not watch files or poll Git. Focus observation pauses during actions,

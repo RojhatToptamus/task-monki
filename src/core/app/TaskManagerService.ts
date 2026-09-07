@@ -2613,6 +2613,7 @@ export class TaskManagerService {
         const settings = followUpSettings(task, run, input.settings, false);
         const prompt = buildContinuationPrompt({
           task,
+          worktree,
           run,
           gitSnapshot,
           instruction: input.instruction,
@@ -2668,6 +2669,7 @@ export class TaskManagerService {
         const settings = followUpSettings(task, run, input.settings, false);
         const prompt = buildRetryPrompt({
           task,
+          worktree,
           run,
           gitSnapshot,
           instruction: input.instruction,
@@ -2944,28 +2946,6 @@ export class TaskManagerService {
         const snapshot = await this.store.snapshot();
         this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
         const run = runId ? await this.requireRunForTask(runId, task.id) : undefined;
-        if (
-          [
-            'QUEUED',
-            'STARTING',
-            'RUNNING',
-            'AWAITING_APPROVAL',
-            'AWAITING_USER_INPUT',
-            'INTERRUPTING'
-          ].includes(run?.status ?? '')
-        ) {
-          throw new Error('Wait for the active turn to finish before starting a review.');
-        }
-        if (
-          (run && (run.id !== task.currentRunId ||
-          !isImplementationRunMode(run.mode) ||
-          run.status !== 'COMPLETED')) ||
-          task.workflowPhase !== 'REVIEW'
-        ) {
-          throw new Error(
-            'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
-          );
-        }
         const iteration = snapshot.iterations.find(
           (candidate) => candidate.id === (run?.iterationId ?? task.currentIterationId)
         );
@@ -2978,7 +2958,24 @@ export class TaskManagerService {
         if (!run && (worktree.ownership !== 'EXTERNAL' || task.currentRunId)) {
           throw new Error('Complete an agent turn before starting a detached review.');
         }
+        const importedBeforeFirstRun = worktree.ownership === 'EXTERNAL' && !task.currentRunId && !run;
+        if (
+          (run && (run.id !== task.currentRunId || !isImplementationRunMode(run.mode) || run.status !== 'COMPLETED')) ||
+          (task.workflowPhase !== 'REVIEW' && !(importedBeforeFirstRun && task.workflowPhase === 'IN_PROGRESS'))
+        ) {
+          throw new Error(
+            'A review requires a successfully completed implementation run. Retry the implementation or continue unfinished work first.'
+          );
+        }
         const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
+        if (importedBeforeFirstRun) {
+          const blockedReason = transitionBlocker(task, 'REVIEW', {
+            hasWorktree: true, worktreeOwnership: worktree.ownership,
+            hasGitSnapshot: true, gitStatus: gitSnapshot.status
+          });
+          if (blockedReason) throw new Error(blockedReason);
+          if (gitSnapshot.operationInProgress) throw new Error('Finish the current Git operation before starting review.');
+        }
         const configuredReviewRuntimeId =
           this.appSettings.reviewRuntimeId ?? task.runtimeId;
         const reviewRuntimeId = input.settings?.runtimeId ?? configuredReviewRuntimeId;
@@ -3690,7 +3687,7 @@ export class TaskManagerService {
     );
 
     const latestGit = await this.ensureCommittedPublishableGit(task);
-    assertPublishReady(latestGit);
+    assertPublishReady(latestGit, worktree.ownership);
     if (!latestGit.headSha) {
       throw new Error('Cannot publish a branch without a verified local HEAD.');
     }
@@ -3761,15 +3758,18 @@ export class TaskManagerService {
     const activeSnapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(activeSnapshot, task.id, 'opening a pull request');
     const worktree = await this.requireWorktree(task);
+    let baseRef = worktree.baseRef;
     if (worktree.ownership === 'EXTERNAL') {
-      await this.refreshEvidenceInternal({ taskId: task.id });
+      const observed = await this.refreshEvidenceInternal({ taskId: task.id });
       const existing = await this.github.findOpenPullRequest(worktree);
       if (existing) {
         const stored = await this.store.recordPullRequestSync(existing);
         this.emitGitHubUpdate(task.id, worktree, stored);
-        return stored;
+        if (stored.headRefOid === observed.headSha) return stored;
+        baseRef = existing.pullRequest.baseRefName;
+      } else {
+        baseRef = await this.github.pullRequestBase(worktree, input.baseBranch);
       }
-      await this.github.pullRequestBase(worktree);
     }
     await this.reconcilePendingBranchPublicationBeforeMutation(task, worktree);
     let latestGit: GitSnapshotRecord | undefined =
@@ -3786,7 +3786,7 @@ export class TaskManagerService {
       snapshot = await this.store.snapshot();
       latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
     }
-    assertPublishReady(latestGit);
+    assertPublishReady(latestGit, worktree.ownership);
     const title = normalizePullRequestTitle(input.title, task.title);
 
     const prBodyContent = this.github.buildPullRequestBody({
@@ -3799,7 +3799,7 @@ export class TaskManagerService {
     await this.store.recordPullRequestCreateRequested(task, worktree);
     const sync = await this.github.createOrFindDraftPullRequest({
       worktree,
-      baseRef: worktree.baseRef,
+      baseRef,
       body: prBodyContent,
       title
     });

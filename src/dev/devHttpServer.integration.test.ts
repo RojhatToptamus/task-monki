@@ -92,7 +92,9 @@ describe('development HTTP server', () => {
     const reconnectWorktree = vi.fn(async (input: unknown) => input);
     const updateWorktreeComparison = vi.fn(async (input: unknown) => input);
     const startRun = vi.fn(async (input: unknown) => input);
-    const running = await startServer({ listExistingWorktrees, importTask, reconnectWorktree, updateWorktreeComparison, startRun });
+    const startReview = vi.fn(async (input: unknown) => input);
+    const createPullRequest = vi.fn(async (input: unknown) => input);
+    const running = await startServer({ listExistingWorktrees, importTask, reconnectWorktree, updateWorktreeComparison, startRun, startReview, createPullRequest });
     const fetchHttp = globalThis.fetch;
     vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => fetchHttp(input, {
       ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...running.headers }
@@ -110,6 +112,10 @@ describe('development HTTP server', () => {
       expect(updateWorktreeComparison).toHaveBeenCalledWith({ taskId: 'imported-task', baseRef: 'main' });
       await api.startRun({ taskId: 'imported-task', instruction: 'Fix the current regression.' });
       expect(startRun).toHaveBeenCalledWith({ taskId: 'imported-task', instruction: 'Fix the current regression.' });
+      await api.startReview({ taskId: 'imported-task' });
+      expect(startReview).toHaveBeenCalledWith({ taskId: 'imported-task' });
+      await api.createPullRequest({ taskId: 'imported-task', title: 'Imported work', baseBranch: 'release/next' });
+      expect(createPullRequest).toHaveBeenCalledWith({ taskId: 'imported-task', title: 'Imported work', baseBranch: 'release/next' });
     } finally { vi.unstubAllGlobals(); }
   });
 

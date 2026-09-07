@@ -4577,6 +4577,11 @@ export class SqliteTaskStore {
       );
       if (alreadyPublished) return clone(stored);
 
+      if (run.mode === 'REVIEW' && task.workflowPhase === 'IN_PROGRESS' && !task.currentRunId &&
+          this.state.worktrees.some((worktree) => worktree.id === task.currentWorktreeId &&
+            worktree.id === run.worktreeId && worktree.ownership === 'EXTERNAL')) {
+        await this.transitionTaskInternal(task.id, 'REVIEW', 'Agent review requested for imported work.', false);
+      }
       const bindsCurrentTask = run.mode !== 'REVIEW';
       const advancesWorkflow = bindsCurrentTask && run.mode !== 'DESIGN';
       const now = new Date().toISOString();
@@ -4933,7 +4938,8 @@ export class SqliteTaskStore {
   private async transitionTaskInternal(
     taskId: string,
     toPhase: Task['workflowPhase'],
-    reason: string
+    reason: string,
+    persist = true
   ): Promise<Task> {
     await this.init();
 
@@ -4969,7 +4975,7 @@ export class SqliteTaskStore {
       }),
       false
     );
-    await this.persistSnapshot();
+    if (persist) await this.persistSnapshot();
 
     const updated = this.state.tasks.find((candidate) => candidate.id === taskId);
     if (!updated) {

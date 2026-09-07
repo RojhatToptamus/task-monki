@@ -22,6 +22,54 @@ async function importRequest(scenario: TaskMonkiScenario, checkout = scenario.re
 }
 
 describe('Import existing work', () => {
+  it('rejects invalid review admission without moving the task and keeps failed or canceled reviews detached', async () => {
+    const s = await scenarios.create();
+    const task = await s.service.importTask(await importRequest(s));
+    const gitDir = (await git(s.repositoryPath, ['rev-parse', '--absolute-git-dir'])).trim();
+    await fs.writeFile(path.join(gitDir, 'MERGE_HEAD'), '1'.repeat(40));
+    await expect(s.service.startReview({ taskId: task.id })).rejects.toThrow('Git operation');
+    await fs.unlink(path.join(gitDir, 'MERGE_HEAD'));
+    const capabilities = vi.spyOn(s.agent, 'capabilities').mockRejectedValueOnce(new Error('Review runtime unavailable'));
+    await expect(s.service.startReview({ taskId: task.id })).rejects.toThrow('runtime unavailable');
+    capabilities.mockRestore();
+    expect(await s.store.getTask(task.id)).toMatchObject({ workflowPhase: 'IN_PROGRESS', phaseVersion: task.phaseVersion });
+    expect((await s.store.snapshot()).runs).toEqual([]);
+
+    s.agent.nextRuntimeTurnResult = { output: '', status: 'failed', error: 'Review provider failed' };
+    const failed = await s.service.startReview({ taskId: task.id });
+    await s.waitForSnapshot((state) => state.tasks[0]?.projection.agentReview?.status === 'FAILED' &&
+      Boolean(state.runs.find((run) => run.id === failed.id)?.afterGitSnapshotId));
+    const retry = await s.service.startReview({ taskId: task.id });
+    await expect(s.service.startReview({ taskId: task.id })).rejects.toThrow('review to finish');
+    await s.service.cancelRun({ runId: retry.id });
+    await s.waitForSnapshot((state) => state.tasks[0]?.projection.agentReview?.status === 'CANCELED');
+    const canceledTask = await s.store.getTask(task.id);
+    expect(canceledTask?.workflowPhase).toBe('REVIEW');
+    expect(canceledTask?.currentRunId).toBeUndefined();
+    expect(canceledTask?.currentAgentSessionId).toBeUndefined();
+    expect(s.agent.startedTurns).toEqual([]);
+  });
+
+  it('publishes the direct-review transition with its run-start event or neither on SQLite failure', async () => {
+    const s = await scenarios.create();
+    const task = await s.service.importTask(await importRequest(s));
+    await s.persistence.database.write((transaction) => {
+      transaction.run(`CREATE TRIGGER reject_review BEFORE INSERT ON task_domain_events
+        WHEN NEW.type = 'AGENT_RUN_STARTED' BEGIN SELECT RAISE(ABORT, 'review admission failure'); END`);
+    });
+    await expect(s.service.startReview({ taskId: task.id })).rejects.toThrow('review admission failure');
+    expect(await s.store.getTask(task.id)).toMatchObject({ workflowPhase: 'IN_PROGRESS', phaseVersion: task.phaseVersion });
+    expect(s.persistence.database.get<{ count: number }>(
+      "SELECT count(*) AS count FROM task_domain_events WHERE type IN ('TRANSITION_COMPLETED', 'AGENT_RUN_STARTED')"
+    )?.count).toBe(0);
+    expect(s.agent.startedRuntimeTurns).toEqual([]);
+    await s.persistence.database.write((transaction) => { transaction.run('DROP TRIGGER reject_review'); });
+    const prepared = (await s.store.snapshot()).runs[0]!;
+    await s.store.recordAgentRunStarted(prepared);
+    expect(await s.store.getTask(task.id)).toMatchObject({ workflowPhase: 'REVIEW', phaseVersion: task.phaseVersion + 1 });
+    await s.transitionRun(prepared.id, { status: 'FAILED', terminalReason: 'Admission test finished without provider delivery.' });
+  });
+
   it('imports committed and dirty work once, resolves aliases and archived duplicates, and starts no provider work', async () => {
     const s = await scenarios.create();
     const checkout = path.join(s.rootDir, 'external');
@@ -193,18 +241,16 @@ describe('Import existing work', () => {
     await s.commitFile('committed.txt', 'existing feature\n');
     await fs.writeFile(path.join(s.repositoryPath, 'dirty.txt'), 'untracked feature\n');
     const task = await s.service.importTask(request);
-    await expect(s.service.startReview({ taskId: task.id })).rejects.toThrow('successfully completed');
-    // Clicking immediately after opening the task must wait for its observation.
-    await Promise.all([
-      s.service.refreshEvidence({ taskId: task.id }),
-      s.service.transitionTask({ taskId: task.id, toPhase: 'REVIEW' })
-    ]);
     s.agent.nextRuntimeTurnResult = {
       output: 'No regressions found.\n```json\n' + JSON.stringify({
         schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'No regressions found.', findings: []
       }) + '\n```'
     };
-    const review = await s.service.startReview({ taskId: task.id });
+    // Starting review immediately after task open waits for the same observation.
+    const [, review] = await Promise.all([
+      s.service.refreshEvidence({ taskId: task.id }),
+      s.service.startReview({ taskId: task.id })
+    ]);
     const reviewed = await s.waitForSnapshot((state) =>
       state.tasks[0]?.projection.agentReview?.status === 'PASSED' && Boolean(state.runs[0]?.afterGitSnapshotId));
     expect(reviewed.tasks[0]).toMatchObject({ workflowPhase: 'REVIEW', projection: { agentReview: { status: 'PASSED' } } });
@@ -250,7 +296,10 @@ describe('Import existing work', () => {
     expect((await s.store.snapshot()).agentSessions).toEqual([]);
     const instruction = 'Fix only the imported null-handling regression. Preserve the existing public behavior.';
     const run = await s.service.startRun({ taskId: task.id, instruction });
-    expect(await s.runtimeStore.readArtifact(run.promptArtifactId)).toContain(instruction);
+    const initialPrompt = await s.runtimeStore.readArtifact(run.promptArtifactId);
+    expect(initialPrompt).toContain(instruction);
+    expect(initialPrompt).toContain("user's original imported checkout");
+    expect(initialPrompt).not.toContain('Perform this task in an isolated Git worktree.');
     await s.transitionRun(run.id, { status: 'FAILED', terminalReason: 'Provider stopped.' });
     await expect(s.service.startReview({ taskId: task.id })).rejects.toThrow('successfully completed');
     const retry = await s.service.retryRun({
@@ -259,6 +308,8 @@ describe('Import existing work', () => {
     const retryPrompt = await s.runtimeStore.readArtifact(retry.promptArtifactId);
     expect(retryPrompt).toContain(instruction);
     expect(retryPrompt).toContain('Add the missing boundary test.');
+    expect(retryPrompt).toContain("user's original imported checkout");
+    expect(retryPrompt).not.toContain('Continue in the existing isolated task worktree.');
     expect(retry.sessionId).toBe(run.sessionId);
     await s.completeRun(retry.id);
     await s.waitForSnapshot((state) => Boolean(state.runs.find((candidate) => candidate.id === retry.id)?.afterGitSnapshotId));

@@ -193,7 +193,7 @@ export function EvidencePanel({
   const filterActive = fileFilter.trim().length > 0 || statusFilter !== 'all';
   const selectedFile =
     filteredDiffFiles.find((file) => file.id === selectedFileId) ?? filteredDiffFiles[0];
-  const diffContext = getDiffScopeContext(diffScope, worktree);
+  const diffContext = getDiffScopeContext(diffScope, gitSnapshot ?? worktree);
   const visibleTotals = getDiffTotals(filteredDiffFiles);
   const fileTree = useMemo(() => buildDiffFileTree(filteredDiffFiles), [filteredDiffFiles]);
   const diffBrowserClassName = `tm-diffbrowser ${
@@ -991,8 +991,8 @@ interface DiffScopeContext {
   comparison: string;
 }
 
-function getDiffScopeContext(scope: DiffEvidenceScope, worktree?: WorktreeRecord): DiffScopeContext {
-  const baseLabel = worktree?.baseRef ?? worktree?.baseSha.slice(0, 7) ?? 'base';
+function getDiffScopeContext(scope: DiffEvidenceScope, comparison?: Pick<GitSnapshotRecord, 'baseRef' | 'baseSha'>): DiffScopeContext {
+  const baseLabel = comparison?.baseRef ?? comparison?.baseSha?.slice(0, 7) ?? 'base';
   switch (scope) {
     case 'committed':
       return {

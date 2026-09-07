@@ -1312,6 +1312,8 @@ export interface PublishBranchRequest {
 export interface CreatePullRequestRequest {
   taskId: string;
   title?: string;
+  /** Target for a new imported-work PR. An existing PR keeps its own target. */
+  baseBranch?: string;
 }
 
 export interface RefreshGitHubRequest {

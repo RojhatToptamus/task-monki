@@ -19,7 +19,7 @@ function detailProps(): ComponentProps<typeof TaskDetail> {
 }
 
 describe('imported task actions', () => {
-  it('requires a first instruction, restores focus after cancellation, and offers explicit review readiness', async () => {
+  it('requires a first coding instruction but starts review directly without a separate phase action', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     const props = detailProps();
     render(<TaskDetail {...props} />);
@@ -28,6 +28,7 @@ describe('imported task actions', () => {
     fireEvent.click(start);
     const dialog = screen.getByRole('dialog', { name: 'Start implementation' });
     const instruction = within(dialog).getByRole('textbox', { name: 'What should the agent do?' });
+    expect(within(dialog).getByText('The agent will edit your original imported checkout.')).toBeDefined();
     expect(instruction).toBe(document.activeElement);
     expect((within(dialog).getByRole('button', { name: 'Start implementation' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.keyDown(window, { key: 'Escape' });
@@ -36,9 +37,60 @@ describe('imported task actions', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), { target: { value: 'Fix the imported validation bug.' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Start implementation' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', 'Fix the imported validation bug.'));
-    fireEvent.click(screen.getByRole('button', { name: 'Ready for review' }));
-    expect(props.onTransition).toHaveBeenCalledWith('task-1', 'REVIEW');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Run agent review' }));
+    await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined));
+    expect(props.onTransition).not.toHaveBeenCalled();
     expect(props.onPrepareWorktree).not.toHaveBeenCalled();
+  });
+
+  it('changes the comparison beside the diff, retains failed input, and restores focus on cancellation', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = detailProps();
+    props.onUpdateWorktreeComparison = vi.fn().mockRejectedValueOnce(new Error('Comparison was not found.')).mockResolvedValue(undefined);
+    render(<TaskDetail {...props} />);
+    expect(screen.queryByRole('button', { name: 'Change comparison' })).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'Evidence' }));
+    const change = screen.getByRole('button', { name: 'Change comparison' });
+    change.focus();
+    fireEvent.click(change);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(change).toBe(document.activeElement));
+    fireEvent.click(change);
+    const input = screen.getByRole('textbox', { name: 'Compare against' });
+    fireEvent.change(input, { target: { value: 'missing' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Change comparison' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Comparison was not found.');
+    expect(input).toHaveProperty('value', 'missing');
+    fireEvent.change(input, { target: { value: 'HEAD' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Change comparison' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(props.onUpdateWorktreeComparison).toHaveBeenLastCalledWith('task-1', 'HEAD');
+  });
+
+  it('requires a new PR target independently of a clean HEAD comparison and keeps failed input for retry', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, baseRef: 'HEAD' };
+    props.task = makeTaskRecord({ ...props.task, projection: { worktree: 'PRESENT', git: 'CLEAN' } });
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'CLEAN', baseRef: 'HEAD', commitsAheadOfBase: 0, committedDiffFileCount: 0 });
+    props.onCreatePullRequest = vi.fn().mockRejectedValueOnce(new Error('Target branch was not found.')).mockResolvedValue(undefined);
+    render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Create draft PR' }));
+    const dialog = screen.getByRole('dialog', { name: 'Create draft PR' });
+    const target = within(dialog).getByRole('textbox', { name: 'Target branch' });
+    const submit = within(dialog).getByRole('button', { name: 'Create draft PR' });
+    expect(target).toHaveProperty('value', '');
+    expect(submit).toHaveProperty('disabled', true);
+    fireEvent.change(target, { target: { value: 'missing' } });
+    fireEvent.click(submit);
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Target branch was not found.');
+    expect(target).toHaveProperty('value', 'missing');
+    fireEvent.change(target, { target: { value: 'release/next' } });
+    fireEvent.click(submit);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(props.onCreatePullRequest).toHaveBeenLastCalledWith('task-1', props.task!.title, 'release/next');
+    expect(props.onUpdateWorktreeComparison).not.toHaveBeenCalled();
   });
 
   it('starts a detached review without a source run and routes findings to the first coding instruction', async () => {

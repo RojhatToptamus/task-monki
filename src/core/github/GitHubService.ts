@@ -239,7 +239,7 @@ export class GitHubService {
 
     const remote = input.worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(input.worktree.worktreePath) : undefined;
     if (input.worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
-    const baseRef = await this.pullRequestBase({ ...input.worktree, baseRef: input.baseRef ?? input.worktree.baseRef });
+    const baseRef = input.baseRef ?? await this.pullRequestBase(input.worktree);
     const createResult = await this.exec(
       [
         'pr',
@@ -299,17 +299,24 @@ export class GitHubService {
       : match;
   }
 
-  async pullRequestBase(worktree: WorktreeRecord): Promise<string> {
-    let baseRef = worktree.baseRef ?? 'main';
-    if (worktree.ownership !== 'EXTERNAL') return baseRef;
+  async pullRequestBase(worktree: WorktreeRecord, requestedBranch?: string): Promise<string> {
+    if (worktree.ownership !== 'EXTERNAL') return requestedBranch ?? worktree.baseRef ?? 'main';
+    let baseRef = requestedBranch?.trim();
+    if (!baseRef) throw new Error('Choose a target branch for the new pull request.');
     const remote = await detectGitHubRemote(worktree.worktreePath);
     if (!remote) throw new Error('No GitHub remote was found.');
     if (baseRef.startsWith('refs/heads/')) baseRef = baseRef.slice('refs/heads/'.length);
     if (baseRef.startsWith(`${remote.remoteName}/`)) baseRef = baseRef.slice(remote.remoteName.length + 1);
-    if (baseRef === 'HEAD' || /^[0-9a-f]{7,64}$/i.test(baseRef) || baseRef === worktree.branchName) {
-      throw new Error('Choose a different comparison branch before opening a pull request.');
+    if (baseRef === 'HEAD' || baseRef === worktree.branchName) {
+      throw new Error('Choose a named target branch other than this checkout branch.');
     }
     await git(worktree.worktreePath, ['check-ref-format', '--branch', baseRef]);
+    const result = await this.exec([
+      'api', '--hostname', remote.host,
+      `repos/${remote.owner}/${remote.repo}/branches/${encodeURIComponent(baseRef)}`
+    ], worktree.worktreePath);
+    const branch = JSON.parse(result.stdout) as { name?: string } | null;
+    if (branch?.name !== baseRef) throw new Error('GitHub did not confirm the selected target branch.');
     return baseRef;
   }
 

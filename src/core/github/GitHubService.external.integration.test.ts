@@ -1,15 +1,91 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskMonkiScenarioRegistry } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { git } from '../git/gitCli';
 import { GitHubService } from './GitHubService';
 
 const scenarios = new TaskMonkiScenarioRegistry();
-afterEach(async () => { await scenarios.dispose(); });
+afterEach(async () => { await scenarios.dispose(); vi.restoreAllMocks(); });
 
 describe('External checkout delivery', () => {
+  it.each(['HEAD', 'commit'])('creates and updates a PR independently of a %s comparison and retries after creation failure', async (comparison) => {
+    const s = await scenarios.create();
+    const remote = path.join(s.rootDir, 'delivery.git');
+    const statePath = path.join(s.rootDir, 'delivery-state.json');
+    const logPath = path.join(s.rootDir, 'delivery-commands.jsonl');
+    await git(s.rootDir, ['init', '--bare', remote]);
+    await git(s.repositoryPath, ['switch', '-c', 'feature/imported']);
+    await s.commitFile('feature.txt', 'existing feature\n');
+    const head = (await git(s.repositoryPath, ['rev-parse', 'HEAD'])).trim();
+    const baseRef = comparison === 'HEAD' ? 'HEAD' : head;
+    await git(s.repositoryPath, ['remote', 'add', 'origin', 'https://github.com/example/project.git']);
+    await fs.writeFile(statePath, JSON.stringify({ failCreate: true }));
+    const gh = await writeNodeExecutable(s.rootDir, 'delivery-gh', `
+const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');
+const statePath = ${JSON.stringify(statePath)};
+const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+const output = value => process.stdout.write(JSON.stringify(value));
+const pr = () => ({ ...state.pr, headRefOid: execFileSync('git', ['--git-dir', ${JSON.stringify(remote)}, 'rev-parse', 'refs/heads/feature/imported'], { encoding: 'utf8' }).trim() });
+if (args[0] === '--version') process.stdout.write('gh version 2.0.0');
+else if (args[0] === 'auth') process.stdout.write('Authenticated fixture');
+else if (args[0] === 'api') {
+  if (!args.at(-1).endsWith('/branches/release%2Fnext')) { process.stderr.write('Target branch not found'); process.exit(1); }
+  output({ name: 'release/next' });
+} else if (args[0] === 'pr' && args[1] === 'list') output(state.pr ? [pr()] : []);
+else if (args[0] === 'pr' && args[1] === 'checks') output([]);
+else if (args[0] === 'pr' && args[1] === 'view') output(pr());
+else if (args[0] === 'pr' && args[1] === 'create') {
+  if (state.failCreate) { process.stderr.write('Fixture creation failed after push'); process.exit(1); }
+  state.pr = { number: 71, url: 'https://github.com/example/project/pull/71', state: 'OPEN', isDraft: true,
+    title: args[args.indexOf('--title') + 1], headRefName: 'feature/imported', baseRefName: args[args.indexOf('--base') + 1],
+    isCrossRepository: false, headRepository: { name: 'project' }, headRepositoryOwner: { login: 'example' }, statusCheckRollup: [] };
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  process.stdout.write(state.pr.url);
+} else { process.stderr.write('Unexpected gh operation'); process.exit(1); }
+`);
+    await s.service.updateAppSettings({ externalExecutables: { ghExecutablePath: gh } });
+    const task = await s.service.importTask({ repositoryId: s.repositoryId, worktreePath: s.repositoryPath,
+      branchName: 'feature/imported', baseRef, title: 'Imported PR', prompt: 'Existing work.' });
+    const worktree = (await s.store.getCurrentWorktree(task.id))!;
+    const evidence = (await s.store.getLatestGitSnapshot(task.id))!;
+    expect(evidence).toMatchObject({ commitsAheadOfBase: 0, committedDiffFileCount: 0 });
+    const configBefore = await git(s.repositoryPath, ['config', '--local', '--list']);
+    // Replace only the network destination. Publication still executes real Git
+    // against a disposable bare repository and persists through the real service.
+    const publish = GitHubService.prototype.publishBranch;
+    const publishing = vi.spyOn(GitHubService.prototype, 'publishBranch').mockImplementation(function (this: GitHubService, input) {
+      expect(input.remoteUrl).toBe('https://github.com/example/project.git');
+      return publish.call(this, { ...input, remoteUrl: remote });
+    });
+    await expect(s.service.createPullRequest({ taskId: task.id })).rejects.toThrow('target branch');
+    await expect(s.service.createPullRequest({ taskId: task.id, baseBranch: 'missing' })).rejects.toThrow();
+    expect(publishing).not.toHaveBeenCalled();
+    expect((await s.store.snapshot()).branchPublications).toEqual([]);
+    await expect(s.service.createPullRequest({ taskId: task.id, baseBranch: 'release/next' })).rejects.toThrow();
+    expect((await s.store.snapshot()).branchPublications[0]).toMatchObject({ status: 'PUSHED', headSha: head });
+    expect((await git(s.rootDir, ['--git-dir', remote, 'rev-parse', 'refs/heads/feature/imported'])).trim()).toBe(head);
+    await fs.writeFile(statePath, JSON.stringify({ failCreate: false }));
+    const pr = await s.service.createPullRequest({ taskId: task.id, title: 'Independent target', baseBranch: 'release/next' });
+    expect(pr).toMatchObject({ number: 71, baseRefName: 'release/next', headRefOid: head });
+    expect(publishing).toHaveBeenCalledOnce();
+    expect(await s.store.getCurrentWorktree(task.id)).toMatchObject({ baseRef: worktree.baseRef, baseSha: worktree.baseSha });
+    expect((await s.store.getLatestGitSnapshot(task.id))?.id).toBe(evidence.id);
+    await s.commitFile('update.txt', 'new local work\n');
+    const newerHead = (await git(s.repositoryPath, ['rev-parse', 'HEAD'])).trim();
+    const updated = await s.service.createPullRequest({ taskId: task.id, baseBranch: 'must-not-retarget' });
+    expect(updated).toMatchObject({ number: 71, baseRefName: 'release/next', headRefOid: newerHead });
+    expect(publishing).toHaveBeenCalledTimes(2);
+    expect(await git(s.repositoryPath, ['config', '--local', '--list'])).toBe(configBefore);
+    const commands = (await fs.readFile(logPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[]);
+    expect(commands.filter(args => args[0] === 'pr' && args[1] === 'create').every(args => args[args.indexOf('--base') + 1] === 'release/next')).toBe(true);
+    expect(commands.some(args => args.includes('edit') || args.some(arg => arg.includes('must-not-retarget')))).toBe(false);
+  }, 30_000);
+
   it('pushes only the verified commit without changing upstream settings, and recovers against the recorded destination', async () => {
     const s = await scenarios.create();
     const remote = path.join(s.rootDir, 'remote.git');

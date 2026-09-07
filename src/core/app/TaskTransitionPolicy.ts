@@ -2,7 +2,8 @@ import type {
   GitSnapshotRecord,
   RunRecord,
   Task,
-  TaskSnapshot
+  TaskSnapshot,
+  WorktreeRecord
 } from '../../shared/contracts';
 import {
   completionPolicyRequiresMerge,
@@ -139,7 +140,8 @@ export function transitionBlocker(
 }
 
 export function assertPublishReady(
-  latestGit: GitSnapshotRecord | undefined
+  latestGit: GitSnapshotRecord | undefined,
+  ownership: WorktreeRecord['ownership'] = 'MANAGED'
 ): asserts latestGit is GitSnapshotRecord {
   if (!latestGit) {
     throw new Error('Refresh Git evidence before opening a draft PR.');
@@ -158,7 +160,9 @@ export function assertPublishReady(
   if (latestGit.status === 'UNKNOWN') {
     throw new Error('Git status must be available before opening a draft PR.');
   }
-  if (latestGit.commitsAheadOfBase <= 0 || latestGit.committedDiffFileCount <= 0) {
+  // An external checkout's review comparison is not its PR target.
+  // GitHub checks the new PR's diff against the explicitly selected target.
+  if (ownership === 'MANAGED' && (latestGit.commitsAheadOfBase <= 0 || latestGit.committedDiffFileCount <= 0)) {
     throw new Error(
       'The task branch has no committed changes to open a draft PR for.'
     );

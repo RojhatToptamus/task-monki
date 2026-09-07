@@ -177,13 +177,15 @@ export function buildPrStatusViewModel(input: {
   const externalPublishReason = external
     ? task.projection.worktree !== 'PRESENT' || !gitSnapshot || ['UNKNOWN', 'UNAVAILABLE', 'CONFLICTED'].includes(gitSnapshot.status)
       ? 'Refresh or reconnect the checkout before publishing.'
+      : gitSnapshot.operationInProgress
+        ? 'Finish the current Git operation before publishing.'
       : gitSnapshot.stagedCount + gitSnapshot.unstagedCount + gitSnapshot.untrackedCount > 0
         ? 'Commit external changes in your editor or terminal before publishing.'
         : undefined
     : undefined;
 
   if (!hasPullRequest || !pullRequest) {
-    const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason);
+    const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason, input.worktree?.ownership);
     return {
       kind: 'NO_PR',
       headline: 'No PR',
@@ -214,7 +216,7 @@ export function buildPrStatusViewModel(input: {
 
   if (terminal) {
     if (terminal.kind === 'CLOSED_UNMERGED') {
-      const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason);
+      const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason, input.worktree?.ownership);
       return {
         ...baseStatus(pullRequest),
         ...terminal,
@@ -346,7 +348,8 @@ function createDraftPrAvailability(
   task: Task,
   gitSnapshot?: GitSnapshotRecord,
   branchPublication?: BranchPublicationRecord,
-  externalPublishReason?: string
+  externalPublishReason?: string,
+  ownership?: WorktreeRecord['ownership']
 ): {
   showAction: boolean;
   overviewRelevant: boolean;
@@ -487,7 +490,7 @@ function createDraftPrAvailability(
     gitSnapshot.workingDiffFileCount;
   const hasCommittedTaskDiff =
     gitSnapshot.commitsAheadOfBase > 0 && gitSnapshot.committedDiffFileCount > 0;
-  if (workingChangeCount > 0 || hasCommittedTaskDiff) {
+  if (ownership === 'EXTERNAL' || workingChangeCount > 0 || hasCommittedTaskDiff) {
     return { showAction: true, overviewRelevant: true };
   }
 

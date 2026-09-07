@@ -70,8 +70,10 @@ export function ExistingWorkModal({
         <h3 id="existing-work-title">{label}</h3>
         <div>
           {mode === 'instruction' ? (
-            <label className="field"><span>What should the agent do?</span>
-              <textarea value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
+            <label className="field"><span id="checkout-instruction-label">What should the agent do?</span>
+              <textarea aria-labelledby="checkout-instruction-label" aria-describedby="checkout-instruction-help"
+                value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
+              <small id="checkout-instruction-help">The agent will edit your original imported checkout.</small>
             </label>
           ) : mode === 'comparison' ? (
             <label className="field"><span id="checkout-comparison-label">Compare against</span>
@@ -122,11 +124,14 @@ export function CreateDraftPrModal({
   disabledReason?: string;
   onTitleChange(value: string): void;
   onCancel(): void;
-  onSubmit(): void;
+  onSubmit(baseBranch?: string): Promise<void>;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const cleanTitle = title.replace(/\s+/g, ' ').trim();
-  const confirmDisabled = busy || disabled || !cleanTitle;
+  const [baseBranch, setBaseBranch] = useState('');
+  const [error, setError] = useState<string>();
+  const external = worktree?.ownership === 'EXTERNAL';
+  const confirmDisabled = busy || disabled || !cleanTitle || (external && !baseBranch.trim());
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   useDialogFocusBoundary({
@@ -136,10 +141,15 @@ export function CreateDraftPrModal({
     busy,
     onClose: onCancel
   });
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!confirmDisabled) {
-      onSubmit();
+      setError(undefined);
+      try {
+        await onSubmit(external ? baseBranch.trim() : undefined);
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : 'Could not create the pull request.');
+      }
     }
   };
 
@@ -150,7 +160,7 @@ export function CreateDraftPrModal({
         ref={panelRef}
         className="tm-modal__panel tm-draftpr-modal"
         tabIndex={-1}
-        onSubmit={submit}
+        onSubmit={(event) => void submit(event)}
       >
         <h3 id="draft-pr-title">Create draft PR</h3>
         <p>Review the title before Task Monki opens the draft pull request.</p>
@@ -168,20 +178,31 @@ export function CreateDraftPrModal({
           <small>{cleanTitle.length} / {PULL_REQUEST_TITLE_MAX_LENGTH}</small>
         </label>
 
+        {external ? (
+          <label className="field tm-draftpr-modal__field">
+            <span className="field__label" id="pr-target-label">Target branch</span>
+            <input aria-labelledby="pr-target-label" aria-describedby="pr-target-help"
+              value={baseBranch} disabled={busy} placeholder="main"
+              onChange={(event) => setBaseBranch(event.target.value)} />
+            <small id="pr-target-help">Branch to merge into.</small>
+          </label>
+        ) : null}
+
         {worktree ? (
           <div className="tm-draftpr-modal__context">
             <div>
               <span>Head</span>
               <strong>{worktree.branchName}</strong>
             </div>
-            <div>
+            {!external ? <div>
               <span>Base</span>
               <strong>{worktree.baseRef ?? 'main'}</strong>
-            </div>
+            </div> : null}
           </div>
         ) : null}
 
         {disabled && disabledReason ? <p className="form-warning">{disabledReason}</p> : null}
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
 
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
