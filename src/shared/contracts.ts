@@ -1001,7 +1001,6 @@ export interface CreateTaskRequest {
 export interface ExistingWorktree {
   worktreePath: string;
   branchName?: string;
-  headSha?: string;
   unavailableReason?: string;
   existingTaskId?: string;
 }

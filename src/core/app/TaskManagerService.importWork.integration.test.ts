@@ -5,11 +5,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskMonkiScenarioRegistry, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { git } from '../git/gitCli';
+import * as gitCli from '../git/gitCli';
 import { APP_DATABASE_SCHEMA_VERSION } from '../storage/sqlite/DatabaseMigrations';
 import { AGENT_RUNTIME_LIMITS } from '../../shared/agentRuntime';
 
 const scenarios = new TaskMonkiScenarioRegistry();
-afterEach(async () => { await scenarios.dispose(); });
+afterEach(async () => { vi.restoreAllMocks(); await scenarios.dispose(); });
 
 async function importRequest(scenario: TaskMonkiScenario, checkout = scenario.repositoryPath) {
   return {
@@ -144,6 +145,33 @@ describe('Import existing work', () => {
     expect((await s.store.snapshot()).tasks).toHaveLength(1);
   });
 
+  it('lists unavailable checkouts and revalidates the selected branch before importing', async () => {
+    const s = await scenarios.create();
+    const locked = path.join(s.rootDir, 'locked');
+    const detached = path.join(s.rootDir, 'detached');
+    const missing = path.join(s.rootDir, 'missing');
+    await git(s.repositoryPath, ['worktree', 'add', '-b', 'locked', locked]);
+    await git(s.repositoryPath, ['worktree', 'lock', locked]);
+    await git(s.repositoryPath, ['worktree', 'add', '--detach', detached]);
+    await git(s.repositoryPath, ['worktree', 'add', '-b', 'missing', missing]);
+    await fs.rename(missing, path.join(s.rootDir, 'moved-outside-git'));
+
+    const inventoryReads = vi.spyOn(gitCli, 'git');
+    const candidates = await s.service.listExistingWorktrees(s.repositoryId);
+    expect(inventoryReads.mock.calls.filter(([, args]) => args[0] === 'worktree' && args[1] === 'list')).toHaveLength(1);
+    inventoryReads.mockRestore();
+    expect(candidates).toHaveLength(4);
+    for (const unavailable of [locked, detached, missing]) {
+      expect(candidates.find((entry) => path.basename(entry.worktreePath) === path.basename(unavailable))?.unavailableReason).toBeTruthy();
+    }
+    const selected = candidates.find((entry) => entry.branchName === 'main')!;
+    expect(selected.unavailableReason).toBeUndefined();
+    const request = await importRequest(s, selected.worktreePath);
+    await git(selected.worktreePath, ['switch', '-c', 'changed-after-selection']);
+    await expect(s.service.importTask(request)).rejects.toThrow('main');
+    expect((await s.store.snapshot()).tasks).toEqual([]);
+  });
+
   it('protects an external checkout through prepare, failed removal, and task-only deletion', async () => {
     const s = await scenarios.create();
     const task = await s.service.importTask({ ...await importRequest(s), baseRef: 'HEAD' });
@@ -186,9 +214,19 @@ describe('Import existing work', () => {
     await git(s.repositoryPath, ['worktree', 'add', '-b', 'feature', checkout]);
     const task = await s.service.importTask({ ...await importRequest(s, checkout), baseRef: 'HEAD' });
     const initial = await s.store.snapshot();
+    const executeGit = gitCli.git;
+    // A previously captured patch need not be exported again (and may exceed
+    // the process output limit) just to observe an unchanged checkout.
+    const unavailablePatch = vi.spyOn(gitCli, 'git').mockImplementation((cwd, args, options) => {
+      if (args.length === 2 && args[0] === 'diff' && args[1] === `${initial.gitSnapshots[0]!.baseSha}..HEAD`) {
+        return Promise.reject(new Error('Patch export exceeds the output limit'));
+      }
+      return executeGit(cwd, args, options);
+    });
     const [one, two] = await Promise.all([
       s.service.refreshEvidence({ taskId: task.id }), s.service.refreshEvidence({ taskId: task.id })
     ]);
+    unavailablePatch.mockRestore();
     expect(one.id).toBe(initial.gitSnapshots[0]!.id);
     expect(two.id).toBe(one.id);
     expect((await s.store.snapshot()).events).toHaveLength(initial.events.length);
@@ -233,6 +271,30 @@ describe('Import existing work', () => {
     const reopened = await openTestPersistence(path.join(s.rootDir, 'profile'));
     try { expect((await reopened.tasks.snapshot()).gitSnapshots).toHaveLength(updated.gitSnapshots.length); }
     finally { await reopened.close(); }
+  });
+
+  it('rejects an external edit during diff capture without replacing the previous evidence', async () => {
+    const s = await scenarios.create();
+    const task = await s.service.importTask(await importRequest(s));
+    const initial = await s.store.snapshot();
+    const changedFile = path.join(s.repositoryPath, 'external.txt');
+    await fs.writeFile(changedFile, 'before capture\n');
+    const executeGit = gitCli.git;
+    const externalEdit = vi.spyOn(gitCli, 'git').mockImplementation(async (cwd, args, options) => {
+      const result = await executeGit(cwd, args, options);
+      if (args.length === 2 && args[0] === 'diff' && args[1] === `${initial.gitSnapshots[0]!.baseSha}..HEAD`) {
+        await fs.writeFile(changedFile, 'changed during capture\n');
+      }
+      return result;
+    });
+    await expect(s.service.refreshEvidence({ taskId: task.id })).rejects.toThrow('checkout changed');
+    externalEdit.mockRestore();
+    const rejected = await s.store.snapshot();
+    expect(rejected.gitSnapshots).toEqual(initial.gitSnapshots);
+    expect(rejected.artifacts).toEqual(initial.artifacts);
+    const refreshed = await s.service.refreshEvidence({ taskId: task.id });
+    expect(refreshed.untrackedCount).toBe(1);
+    expect(await s.store.readArtifact(refreshed.diffArtifactId!)).toContain('changed during capture');
   });
 
   it('reviews imported work without a coding session and invalidates review when only the comparison changes', async () => {

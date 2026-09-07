@@ -151,10 +151,11 @@ import type {
   StopDiscourseWaveRequest,
   TombstoneDiscourseMessageRequest
 } from '../../shared/discourse';
+import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
-import { buildDiffEvidence, captureExistingWorkEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
+import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService, parseGitHubRemoteUrl } from '../github/GitHubService';
 import {
   buildContinuationPrompt,
@@ -1499,18 +1500,19 @@ export class TaskManagerService {
       const repository = await this.requireAvailableRepository(repositoryId);
       if (repository.kind !== 'USER_REGISTERED') throw new Error('Select a registered repository.');
       const entries = await listGitWorktrees(repository.path);
+      const gitCommonDir = await realpath(path.resolve(repository.path,
+        (await git(repository.path, ['rev-parse', '--git-common-dir'])).trim()));
       const result: ExistingWorktree[] = [];
       for (const entry of entries) {
         try {
-          const observed = await inspectExistingWorktree(repository.path, entry.path);
-          const existing = await this.store.findTaskForExistingWork({ repositoryId, ...observed });
-          result.push({
-            worktreePath: observed.worktreePath, branchName: observed.branchName,
-            headSha: observed.headSha, existingTaskId: existing?.id
-          });
+          if (entry.bare || entry.detached || !entry.branch) throw new Error('Select a checkout on a named branch.');
+          if (entry.locked || entry.prunable) throw new Error('The checkout is locked or unavailable. Repair it in Git before importing it.');
+          const worktreePath = await realpath(entry.path);
+          const existing = await this.store.findTaskForExistingWork({ repositoryId, worktreePath, gitCommonDir, branchName: entry.branch });
+          result.push({ worktreePath, branchName: entry.branch, existingTaskId: existing?.id });
         } catch (error) {
           result.push({
-            worktreePath: entry.path, branchName: entry.branch, headSha: entry.headSha,
+            worktreePath: entry.path, branchName: entry.branch,
             unavailableReason: error instanceof Error ? error.message : String(error)
           });
         }
@@ -3577,10 +3579,10 @@ export class TaskManagerService {
       throw new Error(`Worktree is not ready: ${storedWorktree.status}`);
     }
 
-    const captured = storedWorktree.ownership === 'EXTERNAL'
-      ? await captureExistingWorkEvidence(storedWorktree) : undefined;
-    const snapshot = captured ? {
-      ...captured.snapshot, taskId: task.id, iterationId: storedWorktree.iterationId, worktreeId: storedWorktree.id
+    const external = storedWorktree.ownership === 'EXTERNAL';
+    const snapshot = external ? {
+      ...await inspectExistingWorkSnapshot(storedWorktree),
+      taskId: task.id, iterationId: storedWorktree.iterationId, worktreeId: storedWorktree.id
     } : await inspectGitSnapshot(storedWorktree);
     if (options.persistOnlyIfChanged) {
       const state = await this.store.snapshot();
@@ -3593,7 +3595,9 @@ export class TaskManagerService {
         return latest;
       }
     }
-    const diffEvidence = captured?.diffEvidence ?? await buildDiffEvidence(storedWorktree);
+    const diffEvidence = external
+      ? (await captureExistingWorkEvidence(storedWorktree, snapshot)).diffEvidence
+      : await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
     await this.previews.observeGitSnapshot(storedSnapshot);
     this.events.emit({

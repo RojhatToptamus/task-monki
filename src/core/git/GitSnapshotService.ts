@@ -104,12 +104,23 @@ async function inspectWorkingCopy(worktree: GitComparison): Promise<GitObservati
   };
 }
 
-export async function captureExistingWorkEvidence(worktree: GitComparison): Promise<{ snapshot: GitObservation; diffEvidence: string }> {
+export async function inspectExistingWorkSnapshot(worktree: GitComparison): Promise<GitObservation> {
   const before = await inspectGitWorkingTreeFingerprint(worktree.worktreePath);
   const snapshot = await inspectWorkingCopy(worktree);
-  const diffEvidence = await buildDiffEvidence(worktree, true);
   const after = await inspectGitWorkingTreeFingerprint(worktree.worktreePath);
   if (before !== after || snapshot.dirtyFingerprint !== before || snapshot.branch !== worktree.branchName) {
+    throw new Error('The checkout changed during inspection. Refresh and try again.');
+  }
+  return snapshot;
+}
+
+export async function captureExistingWorkEvidence(
+  worktree: GitComparison,
+  snapshot?: GitObservation
+): Promise<{ snapshot: GitObservation; diffEvidence: string }> {
+  snapshot ??= await inspectExistingWorkSnapshot(worktree);
+  const diffEvidence = await buildDiffEvidence(worktree, true);
+  if (snapshot.dirtyFingerprint !== await inspectGitWorkingTreeFingerprint(worktree.worktreePath)) {
     throw new Error('The checkout changed during inspection. Refresh and try again.');
   }
   return { snapshot, diffEvidence };

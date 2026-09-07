@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskMonkiScenarioRegistry } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { git } from '../git/gitCli';
+import * as gitCli from '../git/gitCli';
 import { GitHubService } from './GitHubService';
 
 const scenarios = new TaskMonkiScenarioRegistry();
@@ -107,10 +108,20 @@ else if (args[0] === 'pr' && args[1] === 'create') {
       task, worktree, remoteName: 'origin', remoteUrl: remote,
       expectedHeadSha: observed.headSha!, expectedGitCommonDir: observed.gitCommonDir
     };
+    const executeGit = gitCli.git;
+    const unavailablePatch = vi.spyOn(gitCli, 'git').mockImplementation((cwd, args, options) => {
+      if (args.length === 2 && args[0] === 'diff' && args[1] === `${worktree.baseSha}..HEAD`) {
+        return Promise.reject(new Error('Patch export exceeds the output limit'));
+      }
+      return executeGit(cwd, args, options);
+    });
     expect(await service.publishBranch(input)).toMatchObject({ status: 'PUSHED', headSha: observed.headSha, remoteUrl: remote });
+    unavailablePatch.mockRestore();
     expect(await git(s.repositoryPath, ['config', '--local', '--list'])).toBe(configBefore);
     expect((await git(s.repositoryPath, ['ls-remote', '--refs', remote])).trim()).toBe(`${observed.headSha}\trefs/heads/main`);
 
+    await fs.writeFile(path.join(s.repositoryPath, 'newer.txt'), 'not yet committed\n');
+    expect(await service.publishBranch(input)).toMatchObject({ status: 'FAILED' });
     await s.commitFile('newer.txt', 'not the approved commit\n');
     expect(await service.publishBranch(input)).toMatchObject({ status: 'FAILED' });
     await git(s.repositoryPath, ['remote', 'set-url', 'origin', other]);

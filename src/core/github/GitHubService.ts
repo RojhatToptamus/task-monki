@@ -12,7 +12,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { git } from '../git/gitCli';
-import { captureExistingWorkEvidence } from '../git/GitSnapshotService';
+import { inspectExistingWorkSnapshot } from '../git/GitSnapshotService';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 
 export interface GitHubRemote {
@@ -124,7 +124,7 @@ export class GitHubService {
         throw new Error('External publication requires a verified commit and an explicit destination.');
       }
       try {
-        const { snapshot } = await captureExistingWorkEvidence(input.worktree);
+        const snapshot = await inspectExistingWorkSnapshot(input.worktree);
         if (snapshot.headSha !== headSha || snapshot.gitCommonDir !== input.expectedGitCommonDir ||
             snapshot.stagedCount || snapshot.unstagedCount || snapshot.untrackedCount ||
             snapshot.conflictedCount || snapshot.operationInProgress) {
