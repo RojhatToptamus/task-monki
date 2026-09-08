@@ -224,6 +224,10 @@ provider identity, execution context, settings, generation, and access epoch.
 It also includes lifecycle and recovery state.
 
 Task-only projection details stay in the optional Task context.
+Read-only sessions can retain different path spellings for the same filesystem
+location in their Task context and execution context. Validation resolves
+existing parent directories when a historical worktree is missing. It preserves
+the stored paths and access epoch. Write sessions require exact path matching.
 
 ### Run record
 
