@@ -11,8 +11,12 @@ import type {
   PreviewOciEngineIdentity
 } from '../../../shared/contracts';
 import { execFilePortable } from '../../process/portableChildProcess';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import {
+  closeTestTaskStore,
+  openTestTaskStore
+} from '../../../testSupport/persistenceFixture';
 import { OciEngineAdapter } from '../runtime/OciEngineAdapter';
 import { PreviewComposeCliAdapter } from './PreviewComposeCliAdapter';
 import { previewComposeProjectName } from './PreviewComposeIdentity';
@@ -25,8 +29,10 @@ import {
 
 const describeReal = process.env.TASK_MONKI_REAL_COMPOSE === '1' ? describe : describe.skip;
 const roots: string[] = [];
+const stores: SqliteTaskStore[] = [];
 
 afterEach(async () => {
+  await Promise.all(stores.splice(0).map(closeTestTaskStore));
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
@@ -34,7 +40,8 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
   it('covers update, restart, reset, failure, cancellation, exact cleanup, and external protection', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-compose-real-'));
     roots.push(root);
-    const store = new FileTaskStore(path.join(root, 'store'));
+    const store = await openTestTaskStore(path.join(root, 'store'));
+    stores.push(store);
     const repository = path.join(root, 'repository');
     await fs.mkdir(repository);
     const task = await store.createTask({ title: 'Real Compose matrix', prompt: 'Verify', repositoryId: (await addTestRepository(store, repository)).id });
@@ -479,7 +486,7 @@ function requiredVolume(project: PreviewComposeProjectRecord, logicalName: strin
   return volume;
 }
 
-async function requiredProject(store: FileTaskStore, taskId: string): Promise<PreviewComposeProjectRecord> {
+async function requiredProject(store: SqliteTaskStore, taskId: string): Promise<PreviewComposeProjectRecord> {
   const project = await store.getPreviewComposeProject(taskId);
   if (!project) throw new Error('Real Compose project record is missing.');
   return project;

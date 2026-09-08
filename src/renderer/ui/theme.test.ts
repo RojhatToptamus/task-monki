@@ -31,6 +31,9 @@ describe('theme runtime behavior', () => {
 
   it('starts the document on the generated default preset', async () => {
     const html = await readFile(new URL('../../../index.html', import.meta.url), 'utf8');
-    expect(html).toContain(`<html lang="en" data-theme="${DEFAULT_THEME_PRESET}">`);
+    expect(DEFAULT_THEME_PRESET).toBe('graphite');
+    expect(html).toContain(
+      `<html lang="en" data-theme="${DEFAULT_THEME_PRESET}" data-mode="dark">`
+    );
   });
 });

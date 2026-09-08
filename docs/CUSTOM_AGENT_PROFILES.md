@@ -24,10 +24,11 @@ Task Monki preserves instruction whitespace.
 | --- | --- |
 | New task | The Agent profile selector assigns a copy of the selected instructions. The default is None. |
 | Task details | The selector shows the saved copy and its instructions. A new selection replaces that copy for future runs. |
+| Imported work | Import starts without a profile. Task details can assign one before implementation or choose independent review guidance. |
 | Implementation | Initial runs, retries, and follow-ups receive the assigned instructions. This includes follow-ups from review findings and failed checks. |
 | Active run | The task profile cannot change during active agent work. Steering supplies additional direction within the current run. |
 | Forked alternative | The new task inherits the source task's saved profile, even after library edits or deletion. |
-| Agent review | The Review profile selector chooses guidance independently. The default is None. Review permissions remain read-only. |
+| Agent review | The Review profile selector chooses guidance independently. The default is None. Review retains its existing read-only execution policy and repository integrity checks. |
 | Discourse | Each Lead, Skeptic, or Verifier responder has an independent profile selector beside its runtime settings. |
 
 A library edit affects future selections. It does not change assigned copies.
@@ -64,8 +65,8 @@ Native agent definitions can contain runtime-specific settings and capabilities.
 Task Monki does not import those definitions or translate their tool lists into grants.
 
 Implementation uses the existing provider prompt path, including ACP text prompts.
-Native Codex reviews receive the assembled review prompt through the detached review thread's developer instructions.
-Other supported review paths receive that prompt through their existing turn interface.
+All reviews receive the assembled review prompt through the shared read-only turn interface.
+Each adapter applies its existing native policy, and Task Monki checks repository integrity after the turn.
 Runtime and model support remain subject to the existing capability checks.
 
 ## Ownership and persistence
@@ -77,11 +78,11 @@ Discourse jobs reference existing participant revisions and retain their dispatc
 Library edits never rewrite these historical records.
 No profile revision graph, hash, manifest, or separate lifecycle exists.
 
-App settings schema 12 adds the profile library.
-The settings store migrates schemas 10 and 11 with an empty library and preserves existing preferences.
+SQLite migration 3 adds the empty profile library to settings schema 12 and advances it to schema 13.
+It preserves existing preferences and uses the application persistence owner's verified pre-upgrade backup.
 Task and Discourse records use optional profile fields, so existing records remain valid without rewriting them.
 Their loaders validate profile fields when present.
-Settings writes and task assignment use the existing serialized, atomic storage operations.
+Settings writes and task assignment use the existing SQLite transactions.
 
 The shared API exposes `saveAgentProfile`, `deleteAgentProfile`, and `setTaskAgentProfile` through Electron and the authenticated development server.
 Task creation and review requests accept `agentProfileId`.

@@ -356,11 +356,7 @@ export function discourseExecutionSettings(
 ): AgentExecutionSettings {
   return {
     model: assignment.model,
-    // Runtime catalogs use the runtime id as the durable identity when a
-    // model does not expose a provider dimension. Passing that fallback back
-    // to the runtime would incorrectly turn `codex` into an explicit App
-    // Server provider name.
-    ...(assignment.modelProvider !== assignment.runtimeId
+    ...(assignment.modelProvider
       ? { modelProvider: assignment.modelProvider }
       : {}),
     ...(assignment.reasoningEffort

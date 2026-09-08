@@ -206,7 +206,7 @@ describe('TaskManagerService workflow policies', () => {
     });
   });
 
-  it('enforces read-only sandbox for analysis and review runs', () => {
+  it('enforces the provider-neutral read-only profile for analysis and review runs', () => {
     expect(
       mergeRunSettings({
         readOnly: true,
@@ -221,8 +221,8 @@ describe('TaskManagerService workflow policies', () => {
       })
     ).toEqual({
       sandbox: 'READ_ONLY',
-      networkAccess: true,
-      approvalPolicy: 'on-request',
+      networkAccess: false,
+      approvalPolicy: 'never',
       approvalsReviewer: 'user'
     });
   });

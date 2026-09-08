@@ -5,11 +5,15 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  createScriptedAgentRuntimeFixture,
+  openScriptedTaskManagerPersistence,
+  type TaskMonkiScenario,
   TaskMonkiScenarioRegistry
 } from '../../testSupport/taskMonkiScenario';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
+import type { Task } from '../../shared/contracts';
+import type { PreviewSecretProtector } from '../preview/private/PreviewPrivateVault';
 import { TaskManagerService } from './TaskManagerService';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 const exec = promisify(execFile);
@@ -104,11 +108,108 @@ describe('TaskManagerService task deletion', () => {
     expect(closeStore).toHaveBeenCalledOnce();
   });
 
+  it('keeps canonical runtime records when domain deletion does not commit', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-manager-delete-domain-failure'
+    });
+    const task = await scenario.createTask({
+      title: 'Failed domain deletion',
+      prompt: 'Keep the provider history until the Task is gone.'
+    });
+    const session = await createDeletionSession(
+      scenario,
+      task,
+      'delete-domain-failure-session'
+    );
+    vi.spyOn(scenario.store, 'deleteTask').mockRejectedValueOnce(
+      new Error('domain write failed')
+    );
+
+    await expect(scenario.service.deleteTask({ taskId: task.id })).rejects.toThrow(
+      'domain write failed'
+    );
+    await expect(scenario.store.getTask(task.id)).resolves.toBeDefined();
+    expect((await scenario.runtimeStore.snapshot()).sessions).toContainEqual(
+      expect.objectContaining({ id: session.id })
+    );
+  });
+
+  it('retires Preview-private rows and ciphertext in the task deletion transaction', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-private-'));
+    const profileRoot = path.join(root, 'profile');
+    const protector: PreviewSecretProtector = {
+      isAvailable: () => true,
+      encrypt: async (value) => Buffer.from(value.map((byte) => byte ^ 0xaa)),
+      decrypt: async (value) => Buffer.from(value.map((byte) => byte ^ 0xaa))
+    };
+    const persistence = await openTestPersistence(profileRoot, {
+      previewSecretProtector: protector
+    });
+    const scripted = createScriptedAgentRuntimeFixture(persistence);
+    const service = new TaskManagerService(persistence.tasks, root, undefined, {
+      ...scripted.serviceOptions,
+      previewPrivateVault: persistence.previewPrivateVault
+    });
+    const task = await persistence.tasks.createTask({
+      title: 'Delete private input',
+      prompt: 'Remove encrypted Task-owned state atomically.',
+      repositoryId: (await addTestRepository(persistence.tasks, root)).id
+    });
+    const vault = persistence.previewPrivateVault!;
+    await expect(vault.set(task.id, 'api-token', 'secret-value')).resolves.toBe('STORED');
+    const storageKey = await persistence.database.read((reader) =>
+      reader.get<{ storage_key: string }>(
+        `SELECT storage_key FROM managed_files
+         WHERE domain = 'PREVIEW' AND owner_id = ? AND state = 'LIVE'`,
+        [task.id]
+      )?.storage_key
+    );
+    expect(storageKey).toBeDefined();
+
+    const deleteFailure = vi
+      .spyOn(persistence.tasks, 'deleteTask')
+      .mockRejectedValueOnce(new Error('simulated task deletion failure'));
+    await expect(service.deleteTask({ taskId: task.id })).rejects.toThrow(
+      'simulated task deletion failure'
+    );
+    const retained = await vault.acquire(task.id, ['api-token']);
+    if (Array.isArray(retained)) throw new Error('Private input was lost after rollback.');
+    expect(retained.values['api-token']).toBe('secret-value');
+    await retained.release();
+    deleteFailure.mockRestore();
+
+    await expect(service.deleteTask({ taskId: task.id })).resolves.toEqual({
+      taskId: task.id,
+      removedWorktree: false
+    });
+    await vault.shutdown();
+
+    await expect(
+      persistence.database.read((reader) =>
+        reader.get('SELECT id FROM managed_files WHERE owner_id = ?', [task.id])
+      )
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(persistence.paths.managedFilesRoot, ...storageKey!.split('/')))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await service.shutdown();
+    await persistence.close();
+    const reopened = await openTestPersistence(profileRoot);
+    await expect(
+      reopened.database.read((reader) =>
+        reader.get('SELECT id FROM managed_files WHERE owner_id = ?', [task.id])
+      )
+    ).resolves.toBeUndefined();
+  });
+
   it('blocks deletion while an agent run is active', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-active-'));
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } =
+      await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      codexPath: 'codex-not-used'
+      codexPath: 'codex-not-used',
+      ...scriptedRuntime.serviceOptions
     });
 
     const task = await store.createTask({
@@ -122,13 +223,13 @@ describe('TaskManagerService task deletion', () => {
       worktreePath: path.join(dir, 'worktree'),
       baseSha: 'base'
     });
-    const session = await store.createAgentSession({
+    const session = await scriptedRuntime.createSession({
       task,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    await store.createRun({
+    await scriptedRuntime.createRun({
       task,
       session,
       mode: 'IMPLEMENTATION',
@@ -148,10 +249,11 @@ describe('TaskManagerService task deletion', () => {
     await fs.mkdir(repositoryPath, { recursive: true });
     await initRepository(repositoryPath);
 
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } =
+      await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+      ...scriptedRuntime.serviceOptions
     });
     const repository = await service.addRepository(repositoryPath);
     const task = await service.createTask({
@@ -176,10 +278,11 @@ describe('TaskManagerService task deletion', () => {
     await fs.mkdir(repositoryPath, { recursive: true });
     await initRepository(repositoryPath);
 
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } =
+      await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+      ...scriptedRuntime.serviceOptions
     });
     const repository = await service.addRepository(repositoryPath);
     const task = await service.createTask({
@@ -197,6 +300,57 @@ describe('TaskManagerService task deletion', () => {
     await expect(fs.access(path.join(repositoryPath, 'README.md'))).resolves.toBeUndefined();
   });
 });
+
+async function createDeletionSession(
+  scenario: TaskMonkiScenario,
+  task: Task,
+  sessionId: string
+) {
+  const { iteration, worktree } = await scenario.store.createIterationAndWorktree({
+    task,
+    branchName: `codex/${sessionId}`,
+    worktreePath: path.join(scenario.rootDir, `${sessionId}-worktree`),
+    baseSha: 'base'
+  });
+  const settings = { runtimeId: 'codex', model: 'scenario-model' };
+  const session = await scenario.runtimeStore
+    .taskAgentRuntimeAccess()
+    .createTaskSession({
+      id: sessionId,
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      worktreePath: worktree.worktreePath,
+      runtimeId: 'codex',
+      requestedSettings: settings,
+      executionContext: {
+        attestation: { status: 'ATTESTED' },
+        repositoryAccess: 'WRITE',
+        primaryCwd: worktree.worktreePath,
+        readRoots: [
+          {
+            canonicalPath: worktree.worktreePath,
+            kind: 'WORKTREE',
+            entityId: worktree.id
+          }
+        ],
+        managedAttachments: [],
+        permissionProfileHash: 'a'.repeat(64),
+        modelSettings: settings,
+        externalTools: {
+          network: false,
+          webSearch: 'disabled',
+          mcpServers: false,
+          apps: false,
+          dynamicTools: false
+        },
+        clientOperationId: sessionId
+      },
+      operationId: sessionId
+    });
+  await scenario.store.recordAgentSessionCreated(session);
+  return session;
+}
 
 async function initRepository(repositoryPath: string): Promise<string> {
   await exec('git', ['init'], { cwd: repositoryPath });

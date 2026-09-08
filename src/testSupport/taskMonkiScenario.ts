@@ -1,9 +1,13 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
+  AgentExecutionSettings,
   AgentModel,
   AgentPreflight,
+  AgentReviewTarget,
+  AgentRunMode,
   AgentRuntimeCapabilities,
   AgentSessionRecord,
   AgentSessionSnapshot,
@@ -11,9 +15,14 @@ import type {
   DomainEvent,
   RunRecord,
   Task,
-  TaskSnapshot
+  TaskIteration,
+  TaskSnapshot,
+  WorktreeRecord
 } from '../shared/contracts';
-import { AgentMutationAmbiguousError } from '../core/agent/AgentRuntimeAdapter';
+import {
+  AgentMutationAmbiguousError,
+  AgentRuntimeDeliveryError
+} from '../core/agent/AgentRuntimeAdapter';
 import { createRuntimeReadiness } from '../core/agent/AgentRuntimeReadiness';
 import type {
   AgentRuntimeAdapter,
@@ -22,7 +31,6 @@ import type {
   AgentTurn,
   CreateAgentSession,
   InterruptAgentTurn,
-  StartAgentReview,
   StartAgentTurn,
   SteerAgentTurn,
   ResolveAgentExecution,
@@ -35,10 +43,19 @@ import {
 import { git } from '../core/git/gitCli';
 import { AppEventBus } from '../core/runner/AppEventBus';
 import { createDomainEvent } from '../core/storage/domainEvent';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import type { TaskAgentRuntimeAccess } from '../core/agent/AgentRuntimeStore';
+import { SqliteAgentRuntimeStore } from '../core/storage/SqliteAgentRuntimeStore';
+import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import { TaskManagerService } from '../core/app/TaskManagerService';
-import { assertModelSupportsAttachments } from '../core/agent/AgentAttachmentDelivery';
+import {
+  assertModelSupportsAttachments,
+  completeAttachmentSubmissions
+} from '../core/agent/AgentAttachmentDelivery';
 import type { PreviewRecipeGenerationService } from '../core/preview/generation/PreviewRecipeGenerationService';
+import type { AgentRuntimeTurnEvent } from '../core/agent/AgentRuntimeCoordinator';
+import type { AgentExecutionContext } from '../shared/agentRuntime';
+import { openTestPersistence } from './persistenceFixture';
 
 export interface ScenarioOptions {
   name?: string;
@@ -49,6 +66,7 @@ export interface ScenarioOptions {
   previewOciEnv?: NodeJS.ProcessEnv;
   previewRecipeGenerator?: PreviewRecipeGenerationService;
   designMode?: boolean;
+  allowCandidateDesignModels?: boolean;
 }
 
 interface CreateScenarioTaskInput {
@@ -63,7 +81,10 @@ export interface TaskMonkiScenario {
   repositoryId: string;
   worktreeRoot: string;
   previewRoot: string;
-  store: FileTaskStore;
+  persistence: ApplicationPersistence;
+  store: SqliteTaskStore;
+  runtimeStore: SqliteAgentRuntimeStore;
+  taskRuntime: TaskAgentRuntimeAccess;
   events: AppEventBus;
   agent: ScriptedAgentRuntimeAdapter;
   service: TaskManagerService;
@@ -71,6 +92,11 @@ export interface TaskMonkiScenario {
   createTask(input?: CreateScenarioTaskInput): Promise<Task>;
   commitFile(relativePath: string, content: string, message?: string): Promise<string>;
   completeRun(runId: string, finalMessage?: string): Promise<RunRecord>;
+  transitionRun(
+    runId: string,
+    update: Partial<RunRecord> & { status: RunRecord['status'] },
+    operationId?: string
+  ): Promise<RunRecord>;
   waitForEvent(
     predicate: (event: AppUpdateEvent) => boolean,
     timeoutMs?: number
@@ -79,6 +105,167 @@ export interface TaskMonkiScenario {
     predicate: (snapshot: TaskSnapshot) => boolean,
     timeoutMs?: number
   ): Promise<TaskSnapshot>;
+}
+
+export interface ScriptedAgentRuntimeFixture {
+  adapter: ScriptedAgentRuntimeAdapter;
+  runtimeStore: SqliteAgentRuntimeStore;
+  taskRuntime: TaskAgentRuntimeAccess;
+  serviceOptions: {
+    agentRuntimeAdapters: readonly AgentRuntimeAdapter[];
+    agentRuntimeStore: SqliteAgentRuntimeStore;
+    taskRuntimeAccess: TaskAgentRuntimeAccess;
+    appSettingsStore: ApplicationPersistence['settings'];
+  };
+  createSession(input: {
+    task: Task;
+    iteration: TaskIteration;
+    worktree: WorktreeRecord;
+    runtimeId?: string;
+    role?: AgentSessionRecord['role'];
+    settings?: AgentExecutionSettings;
+  }): Promise<AgentSessionRecord>;
+  createRun(input: {
+    task: Task;
+    session: AgentSessionRecord;
+    mode: AgentRunMode;
+    prompt: string;
+    generationKey?: string;
+    settings?: AgentExecutionSettings;
+    beforeGitSnapshotId?: string;
+    reviewTarget?: AgentReviewTarget;
+  }): Promise<RunRecord>;
+  transitionRun(
+    runId: string,
+    update: Partial<RunRecord> & { status: RunRecord['status'] },
+    operationId?: string
+  ): Promise<RunRecord>;
+}
+
+export interface ScriptedTaskManagerPersistence
+  extends ScriptedAgentRuntimeFixture {
+  persistence: ApplicationPersistence;
+  store: SqliteTaskStore;
+}
+
+/** Opens one profile with its shared Task and runtime stores. */
+export async function openScriptedTaskManagerPersistence(
+  profileRoot: string
+): Promise<ScriptedTaskManagerPersistence> {
+  const persistence = await openTestPersistence(profileRoot);
+  return {
+    persistence,
+    store: persistence.tasks,
+    ...createScriptedAgentRuntimeFixture(persistence)
+  };
+}
+
+/** Uses one profile's Task and runtime stores with the scripted provider. */
+export function createScriptedAgentRuntimeFixture(
+  persistence: ApplicationPersistence
+): ScriptedAgentRuntimeFixture {
+  const store = persistence.tasks;
+  const runtimeStore = persistence.agentRuntime;
+  const taskRuntime = persistence.taskRuntime;
+  const adapter = new ScriptedAgentRuntimeAdapter(taskRuntime, runtimeStore);
+  return {
+    adapter,
+    runtimeStore,
+    taskRuntime,
+    serviceOptions: {
+      agentRuntimeAdapters: [adapter],
+      agentRuntimeStore: runtimeStore,
+      taskRuntimeAccess: taskRuntime,
+      appSettingsStore: persistence.settings
+    },
+    async createSession(input) {
+      const id = randomUUID();
+      const runtimeId = input.runtimeId ?? input.task.runtimeId;
+      const settings = {
+        model: 'scenario-model',
+        reasoningEffort: 'low' as const,
+        ...input.task.agentSettings,
+        ...input.settings,
+        runtimeId
+      };
+      const operationId = `scenario-fixture-session:${id}`;
+      const executionContext = {
+        attestation: { status: 'ATTESTED' as const },
+        repositoryAccess: 'WRITE' as const,
+        primaryCwd: input.worktree.worktreePath,
+        readRoots: [
+          {
+            canonicalPath: input.worktree.worktreePath,
+            kind: 'WORKTREE' as const,
+            entityId: input.worktree.id
+          }
+        ],
+        managedAttachments: [],
+        permissionProfileHash: createHash('sha256')
+          .update(
+            JSON.stringify({
+              id,
+              runtimeId,
+              worktreePath: input.worktree.worktreePath,
+              settings
+            })
+          )
+          .digest('hex'),
+        modelSettings: settings,
+        externalTools: {
+          network: settings.networkAccess === true,
+          webSearch: 'disabled' as const,
+          mcpServers: false,
+          apps: false,
+          dynamicTools: false
+        },
+        clientOperationId: operationId
+      };
+      const session = await taskRuntime.createTaskSession({
+        id,
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        worktreePath: input.worktree.worktreePath,
+        runtimeId,
+        role: input.role,
+        requestedSettings: settings,
+        executionContext,
+        operationId
+      });
+      await store.recordAgentSessionCreated(session);
+      return session;
+    },
+    async createRun(input) {
+      const run = await taskRuntime.createTaskRun({
+        id: randomUUID(),
+        taskId: input.task.id,
+        iterationId: input.session.iterationId,
+        worktreeId: input.session.worktreeId,
+        sessionId: input.session.id,
+        mode: input.mode,
+        prompt: input.prompt,
+        generationKey: input.generationKey,
+        requestedSettings: input.settings,
+        beforeGitSnapshotId: input.beforeGitSnapshotId,
+        reviewTarget:
+          input.mode === 'REVIEW'
+            ? input.reviewTarget ?? { type: 'UNCOMMITTED_CHANGES' }
+            : undefined,
+        operationId: `scenario-fixture-run:${randomUUID()}`
+      });
+      await store.recordAgentRunStarted(run);
+      return run;
+    },
+    transitionRun(runId, update, operationId) {
+      return transitionScriptedRun(
+        taskRuntime,
+        runId,
+        update,
+        operationId ?? `scenario-fixture-run-transition:${runId}:${randomUUID()}`
+      );
+    }
+  };
 }
 
 export class TaskMonkiScenarioRegistry {
@@ -115,25 +302,30 @@ export async function createTaskMonkiScenario(
   const repositoryPath = path.join(rootDir, 'repo');
   const worktreeRoot = path.join(rootDir, 'worktrees');
   const previewRoot = path.join(rootDir, 'preview-runtime');
-  const designRepositoryRoot = path.join(rootDir, 'design-repositories');
-  const designWorktreeRoot = path.join(rootDir, 'design-worktrees');
   try {
     await fs.mkdir(repositoryPath, { recursive: true });
     await initRepository(repositoryPath);
   } catch (error) {
-    return cleanupFailedScenarioCreation(undefined, rootDir, error);
+    return cleanupFailedScenarioCreation(undefined, undefined, rootDir, error);
   }
 
-  const store = new FileTaskStore(path.join(rootDir, 'store'));
+  let persistence: ApplicationPersistence | undefined;
+  try {
+    persistence = await openTestPersistence(path.join(rootDir, 'profile'));
+  } catch (error) {
+    return cleanupFailedScenarioCreation(undefined, undefined, rootDir, error);
+  }
+  const store = persistence.tasks;
+  const scriptedRuntime = createScriptedAgentRuntimeFixture(persistence);
+  const { adapter: agent, taskRuntime } = scriptedRuntime;
   const events = new AppEventBus();
-  const agent = new ScriptedAgentRuntimeAdapter(store);
   let service: TaskManagerService | undefined;
   let repository: Awaited<ReturnType<TaskManagerService['addRepository']>> | undefined;
   try {
     service = new TaskManagerService(store, repositoryPath, events, {
       worktreeRoot,
       ghPath: options.ghPath,
-      agentRuntimeAdapters: [agent],
+      ...scriptedRuntime.serviceOptions,
       previewRecipeGenerator: options.previewRecipeGenerator,
       previewEnabled: options.previewEnabled,
       previewRoot,
@@ -148,10 +340,12 @@ export async function createTaskMonkiScenario(
       previewOciExecutablePath: options.previewOciExecutablePath,
       previewOciContextName: options.previewOciContextName,
       previewOciEnv: options.previewOciEnv,
+      allowCandidateDesignModels: options.allowCandidateDesignModels,
       ...(options.designMode
         ? {
-            designRepositoryRoot,
-            designWorktreeRoot,
+            designRepositoryRoot: persistence.paths.designRepositoryRoot,
+            designWorktreeRoot: persistence.paths.designWorktreeRoot,
+            designDraftStore: persistence.designDrafts,
             designBrowserRuntime: {
               async attest() {},
               async recover() {},
@@ -183,11 +377,12 @@ export async function createTaskMonkiScenario(
     await service.init();
     repository = await service.addRepository(repositoryPath);
   } catch (error) {
-    return cleanupFailedScenarioCreation(service, rootDir, error);
+    return cleanupFailedScenarioCreation(service, persistence, rootDir, error);
   }
   if (!service || !repository) {
     return cleanupFailedScenarioCreation(
       service,
+      persistence,
       rootDir,
       new Error('Scenario initialization did not produce a service and repository.')
     );
@@ -200,12 +395,15 @@ export async function createTaskMonkiScenario(
     repositoryId: repository.id,
     worktreeRoot,
     previewRoot,
+    persistence,
     store,
+    runtimeStore: scriptedRuntime.runtimeStore,
+    taskRuntime,
     events,
     agent,
     service,
     dispose() {
-      disposeWork ??= disposeScenario(service, rootDir);
+      disposeWork ??= disposeScenario(service, persistence, rootDir);
       return disposeWork;
     },
     createTask(input = {}) {
@@ -228,7 +426,7 @@ export async function createTaskMonkiScenario(
       return (await git(repositoryPath, ['rev-parse', 'HEAD'])).trim();
     },
     async completeRun(runId, finalMessage = 'Scenario run completed.') {
-      const run = await requireRun(store, runId);
+      const run = await requireRun(taskRuntime, runId);
       if (run.mode === 'DESIGN') {
         const detail = await store.getDesignDetail(run.taskId);
         const worktree = await store.getWorktree(run.worktreeId);
@@ -243,8 +441,13 @@ export async function createTaskMonkiScenario(
           await inspectDesignCandidateForScriptedRun(service, runId).catch(() => undefined);
         }
       }
-      const artifact = await store.writeFinalArtifact(run.taskId, run.id, finalMessage);
-      await appendRunEvent(store, run, 'AGENT_RUN_COMPLETED', {
+      const artifact = await taskRuntime.writeFinalArtifact(
+        run.taskId,
+        run.id,
+        finalMessage,
+        `scenario-final-artifact:${run.id}`
+      );
+      await appendRunEvent(taskRuntime, run, 'AGENT_RUN_COMPLETED', {
         terminalStatus: 'completed',
         finalArtifactId: artifact.id
       });
@@ -257,7 +460,10 @@ export async function createTaskMonkiScenario(
         payload: { status: 'COMPLETED' },
         at: new Date().toISOString()
       });
-      return requireRun(store, runId);
+      return requireRun(taskRuntime, runId);
+    },
+    transitionRun(runId, update, operationId) {
+      return scriptedRuntime.transitionRun(runId, update, operationId);
     },
     waitForEvent(predicate, timeoutMs = 3_000) {
       return waitForEvent(events, predicate, timeoutMs);
@@ -268,37 +474,53 @@ export async function createTaskMonkiScenario(
   };
 }
 
-async function disposeScenario(service: TaskManagerService, rootDir: string): Promise<void> {
-  let shutdownError: unknown;
+async function disposeScenario(
+  service: TaskManagerService,
+  persistence: ApplicationPersistence,
+  rootDir: string
+): Promise<void> {
+  const shutdownErrors: unknown[] = [];
   try {
     await service.shutdown();
   } catch (error) {
-    shutdownError = error;
+    shutdownErrors.push(error);
+  }
+  try {
+    await persistence.close();
+  } catch (error) {
+    shutdownErrors.push(error);
   }
 
   try {
     await removeScenarioRoot(rootDir);
   } catch (cleanupError) {
-    if (shutdownError) {
+    if (shutdownErrors.length > 0) {
       throw new AggregateError(
-        [shutdownError, cleanupError],
+        [...shutdownErrors, cleanupError],
         `Scenario shutdown and cleanup failed for ${rootDir}.`
       );
     }
     throw cleanupError;
   }
 
-  if (shutdownError) throw shutdownError;
+  if (shutdownErrors.length === 1) throw shutdownErrors[0];
+  if (shutdownErrors.length > 1) {
+    throw new AggregateError(shutdownErrors, `Scenario shutdown failed for ${rootDir}.`);
+  }
 }
 
 async function cleanupFailedScenarioCreation(
   service: TaskManagerService | undefined,
+  persistence: ApplicationPersistence | undefined,
   rootDir: string,
   creationError: unknown
 ): Promise<never> {
   try {
-    if (service) await disposeScenario(service, rootDir);
-    else await removeScenarioRoot(rootDir);
+    if (service && persistence) await disposeScenario(service, persistence, rootDir);
+    else {
+      await persistence?.close();
+      await removeScenarioRoot(rootDir);
+    }
   } catch (cleanupError) {
     throw new AggregateError(
       [creationError, cleanupError],
@@ -339,14 +561,31 @@ export function commandLine(...argv: string[]): string {
 export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   readonly startedTurns: StartAgentTurn[] = [];
-  readonly startedReviews: StartAgentReview[] = [];
+  readonly startedReviews: unknown[] = [];
+  readonly startedRuntimeTurns: Array<
+    Parameters<NonNullable<AgentRuntimeAdapter['startRuntimeTurn']>>[0]
+  > = [];
   readonly steeredTurns: SteerAgentTurn[] = [];
   ambiguousStart = false;
   ambiguousInterrupt = false;
+  ambiguousRuntimeInterrupt = false;
+  nextRuntimeTurnResult?: {
+    output: string;
+    status?: 'completed' | 'failed';
+    error?: string;
+  };
+  beforeNextRuntimeTurnTerminal?: () => Promise<void>;
+  private runtimeServer?: Promise<string>;
   private threadCounter = 0;
   private turnCounter = 0;
+  private readonly runtimeTurnListeners = new Set<
+    (event: AgentRuntimeTurnEvent) => void
+  >();
 
-  constructor(private readonly store: FileTaskStore) {}
+  constructor(
+    private readonly runtime: TaskAgentRuntimeAccess,
+    private readonly rawRuntime?: SqliteAgentRuntimeStore
+  ) {}
 
   initialize(): Promise<void> {
     return Promise.resolve();
@@ -377,6 +616,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         defaultReasoningEffort: 'low',
         serviceTiers: [],
         inputModalities: ['text', 'image'],
+        designSupport: { maturity: 'stable' },
         isDefault: true
       }
     ]);
@@ -397,19 +637,62 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     };
   }
 
-  async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
-    this.threadCounter += 1;
-    return this.store.updateAgentSession(input.localSessionId, {
-      providerSessionId: `scenario-thread-${this.threadCounter}`,
-      providerSessionTreeId: `scenario-thread-${this.threadCounter}`,
-      status: 'IDLE',
-      materialized: true,
-      requestedSettings: input.settings
+  buildExecutionContext(
+    input: Parameters<NonNullable<AgentRuntimeAdapter['buildExecutionContext']>>[0]
+  ): Promise<AgentExecutionContext> {
+    const managedAttachments = (input.attachments ?? []).map((attachment) => ({
+      attachmentId: attachment.attachmentId,
+      contentSha256: attachment.sha256,
+      byteCount: attachment.byteCount
+    }));
+    return Promise.resolve({
+      attestation: { status: 'ATTESTED' as const },
+      repositoryAccess: 'READ_ONLY' as const,
+      primaryCwd: input.primaryCwd,
+      readRoots: input.readRoots,
+      managedAttachments,
+      permissionProfileHash: createHash('sha256')
+        .update(JSON.stringify({
+          sessionId: input.sessionId,
+          readRoots: input.readRoots,
+          managedAttachments
+        }))
+        .digest('hex'),
+      modelSettings: {
+        ...input.modelSettings,
+        runtimeId: this.descriptor.id,
+        sandbox: 'READ_ONLY' as const,
+        approvalPolicy: 'NEVER' as const,
+        networkAccess: false
+      },
+      externalTools: {
+        network: false,
+        webSearch: 'disabled' as const,
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: input.clientOperationId
     });
   }
 
+  async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
+    this.threadCounter += 1;
+    return this.runtime.updateAgentSession(
+      input.localSessionId,
+      {
+        providerSessionId: `scenario-thread-${this.threadCounter}`,
+        providerSessionTreeId: `scenario-thread-${this.threadCounter}`,
+        status: 'IDLE',
+        materialized: true,
+        requestedSettings: input.settings
+      },
+      `scenario-session-materialized:${input.localSessionId}`
+    );
+  }
+
   async attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord> {
-    const session = await this.store.getAgentSession(ref.localSessionId);
+    const session = await this.runtime.getAgentSession(ref.localSessionId);
     if (!session) {
       throw new Error(`Agent session not found: ${ref.localSessionId}`);
     }
@@ -418,7 +701,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   async readSession(ref: AgentSessionRef): Promise<AgentSessionSnapshot> {
     const session = await this.attachSession(ref);
-    const snapshot = await this.store.snapshot();
+    const snapshot = await this.runtime.snapshot();
     return {
       session,
       runs: snapshot.runs
@@ -454,34 +737,143 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
         'Scenario provider lost the interrupt response.'
       );
     }
-    const run = await this.store.getRunByProviderTurnId(
+    const run = await this.runtime.getRunByProviderTurnId(
       this.descriptor.id,
       input.providerTurnId
     );
     if (run) {
-      await appendRunEvent(this.store, run, 'AGENT_RUN_INTERRUPTED', {
+      await appendRunEvent(this.runtime, run, 'AGENT_RUN_INTERRUPTED', {
         terminalReason: 'interrupted'
       });
     }
   }
 
-  async startReview(input: StartAgentReview): Promise<AgentTurn> {
-    this.startedReviews.push(input);
+  async startRuntimeTurn(
+    input: Parameters<NonNullable<AgentRuntimeAdapter['startRuntimeTurn']>>[0]
+  ) {
+    this.startedRuntimeTurns.push(input);
+    if (input.run.purpose === 'TASK_REVIEW') this.startedReviews.push(input);
     this.threadCounter += 1;
-    await this.store.updateAgentSession(input.reviewSessionId, {
-      providerSessionId: `scenario-review-thread-${this.threadCounter}`,
-      providerSessionTreeId: `scenario-review-thread-${this.threadCounter}`,
-      status: 'ACTIVE',
-      materialized: true
+    this.turnCounter += 1;
+    const serverInstanceId = this.rawRuntime
+      ? await (this.runtimeServer ??= this.createRuntimeServer())
+      : 'scenario-server';
+    const started = {
+      serverInstanceId,
+      providerSessionId: `scenario-thread-${this.threadCounter}`,
+      providerTurnId: `scenario-runtime-turn-${this.turnCounter}`,
+      startedAt: new Date().toISOString()
+    };
+    const attachmentSubmissions = completeAttachmentSubmissions(
+      input.attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        ordinal: attachment.ordinal,
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        byteCount: attachment.byteCount,
+        sha256: attachment.sha256,
+        transport: attachment.kind === 'image' ? 'native-image' : 'managed-path',
+        verifiedAt: attachment.verifiedAt
+      })),
+      { kind: 'provider-turn', id: started.providerTurnId },
+      started.startedAt
+    );
+    if (this.rawRuntime) {
+      const session = await this.rawRuntime.getSession(input.session.id);
+      if (session && !session.providerSessionId) {
+        await this.rawRuntime.updateSession(
+          session.id,
+          session.recordRevision,
+          {
+            providerSessionId: started.providerSessionId,
+            status: 'ACTIVE',
+            materialized: true,
+            lastAttachedAt: started.startedAt
+          },
+          `scenario-runtime-session:${input.run.id}`
+        );
+      }
+      const run = await this.rawRuntime.getRun(input.run.id);
+      if (run?.status === 'STARTING') {
+        await this.rawRuntime.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            serverInstanceId: started.serverInstanceId,
+            providerTurnId: started.providerTurnId,
+            status: 'RUNNING',
+            delivery: 'ACKNOWLEDGED',
+            ...(attachmentSubmissions.length > 0 ? { attachmentSubmissions } : {}),
+            lastEventAt: started.startedAt
+          },
+          `scenario-runtime-started:${input.run.id}`
+        );
+      }
+    }
+    const result = this.nextRuntimeTurnResult;
+    const beforeTerminal = this.beforeNextRuntimeTurnTerminal;
+    this.nextRuntimeTurnResult = undefined;
+    this.beforeNextRuntimeTurnTerminal = undefined;
+    if (result && this.rawRuntime) {
+      setImmediate(() => {
+        void this.completeRuntimeTurn(
+          input.run.id,
+          started.providerTurnId,
+          result,
+          undefined,
+          beforeTerminal
+        );
+      });
+    }
+    return {
+      ...started,
+      ...(attachmentSubmissions.length > 0 ? { attachmentSubmissions } : {})
+    };
+  }
+
+  private async createRuntimeServer(): Promise<string> {
+    const server = await this.rawRuntime!.createAgentServer({
+      runtimeId: this.descriptor.id,
+      runtimeKind: this.descriptor.kind,
+      transport: this.descriptor.transport,
+      executable: 'scenario-runtime',
+      argv: ['scenario-runtime']
     });
-    return this.startRun(input.localRunId, input.reviewSessionId, 'scenario-review');
+    await this.rawRuntime!.updateAgentServer(server.id, {
+      status: 'READY',
+      initializedAt: new Date().toISOString(),
+      lastHealthAt: new Date().toISOString()
+    });
+    return server.id;
+  }
+
+  onRuntimeTurnEvent(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
+    this.runtimeTurnListeners.add(listener);
+    return () => this.runtimeTurnListeners.delete(listener);
+  }
+
+  emitRuntimeTurnEvent(event: AgentRuntimeTurnEvent): void {
+    for (const listener of this.runtimeTurnListeners) listener(event);
+  }
+
+  async interruptRuntimeTurn(
+    input: Parameters<NonNullable<AgentRuntimeAdapter['interruptRuntimeTurn']>>[0]
+  ): Promise<void> {
+    if (this.ambiguousRuntimeInterrupt) {
+      throw new AgentRuntimeDeliveryError(
+        'AMBIGUOUS',
+        'The scripted runtime could not confirm interruption.'
+      );
+    }
+    if (!this.rawRuntime || !input.run.providerTurnId) return;
+    await this.completeRuntimeTurn(input.run.id, input.run.providerTurnId, {
+      output: '',
+      status: 'failed',
+      error: 'interrupted'
+    }, 'interrupted');
   }
 
   respondToInteraction(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  deleteTaskProviderHistory(): Promise<void> {
     return Promise.resolve();
   }
 
@@ -496,6 +888,71 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     return Promise.resolve();
   }
 
+  private async completeRuntimeTurn(
+    runId: string,
+    providerTurnId: string,
+    result: { output: string; status?: 'completed' | 'failed'; error?: string },
+    forcedStatus?: 'interrupted',
+    beforeTerminal?: () => Promise<void>
+  ): Promise<void> {
+    if (!this.rawRuntime) return;
+    await beforeTerminal?.();
+    let run = await this.rawRuntime.getRun(runId);
+    if (!run || ['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) {
+      return;
+    }
+    if (result.output) {
+      const artifact = await this.rawRuntime.getArtifact(run.outputArtifactId);
+      if (artifact) {
+        await this.rawRuntime.updateArtifact({
+          artifactId: artifact.id,
+          expectedRevision: artifact.recordRevision,
+          clientOperationId: `scenario-runtime-output:${run.id}`,
+          content: result.output
+        });
+      }
+    }
+    const status = forcedStatus ?? result.status ?? 'completed';
+    const completedAt = new Date().toISOString();
+    run = await this.rawRuntime.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status:
+          status === 'completed'
+            ? 'COMPLETED'
+            : status === 'interrupted'
+              ? 'INTERRUPTED'
+              : 'FAILED',
+        delivery: 'TERMINAL',
+        recoveryState: 'NONE',
+        providerTerminalSource: 'SCRIPTED_RUNTIME',
+        terminalReason: result.error,
+        lastEventAt: completedAt,
+        endedAt: completedAt
+      },
+      `scenario-runtime-terminal:${run.id}`
+    );
+    const session = await this.rawRuntime.getSession(run.sessionId);
+    if (session && session.status !== 'IDLE') {
+      await this.rawRuntime.updateSession(
+        session.id,
+        session.recordRevision,
+        { status: 'IDLE' },
+        `scenario-runtime-session-idle:${run.id}`
+      );
+    }
+    const event: AgentRuntimeTurnEvent = {
+      type: 'TERMINAL',
+      runId: run.id,
+      providerTurnId,
+      status,
+      ...(result.error ? { error: result.error } : {}),
+      completedAt
+    };
+    this.emitRuntimeTurnEvent(event);
+  }
+
   private async startRun(
     localRunId: string,
     localSessionId: string,
@@ -503,22 +960,99 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<AgentTurn> {
     this.turnCounter += 1;
     const providerTurnId = `${prefix}-${this.turnCounter}`;
-    const run = await requireRun(this.store, localRunId);
-    await this.store.updateAgentSession(localSessionId, { status: 'ACTIVE' });
-    await this.store.updateRun(localRunId, {
-      providerTurnId,
-      status: 'RUNNING',
-      lastEventAt: new Date().toISOString()
-    });
-    await appendRunEvent(this.store, run, 'PROCESS_STARTED', {
+    const run = await requireRun(this.runtime, localRunId);
+    await this.runtime.updateAgentSession(
+      localSessionId,
+      { status: 'ACTIVE' },
+      `scenario-session-active:${localSessionId}:${localRunId}`
+    );
+    await this.runtime.updateRun(
+      localRunId,
+      {
+        providerTurnId,
+        status: 'STARTING',
+        lastEventAt: new Date().toISOString()
+      },
+      `scenario-run-starting:${localRunId}`
+    );
+    await appendRunEvent(this.runtime, run, 'PROCESS_STARTED', {
       pid: 10_000 + this.turnCounter
     });
     return { localRunId, providerTurnId };
   }
 }
 
+async function transitionScriptedRun(
+  runtime: TaskAgentRuntimeAccess,
+  runId: string,
+  update: Partial<RunRecord> & { status: RunRecord['status'] },
+  operationId: string
+): Promise<RunRecord> {
+  const { status, endedAt: _endedAt, recoveryState: _recoveryState, ...fields } =
+    update;
+  let run = await requireRun(runtime, runId);
+  if (status === 'COMPLETED' && !run.providerTurnId && !fields.providerTurnId) {
+    fields.providerTurnId = `scenario-turn-${runId}`;
+  }
+  if (Object.keys(fields).length > 0) {
+    run = await runtime.updateRun(runId, fields, `${operationId}:fields`);
+  }
+  if (status === 'STARTING') {
+    return runtime.updateRun(runId, { status }, `${operationId}:starting`);
+  }
+  if (
+    run.status === 'QUEUED' &&
+    (status === 'RUNNING' || status === 'COMPLETED')
+  ) {
+    run = await runtime.updateRun(
+      runId,
+      { status: 'STARTING' },
+      `${operationId}:starting`
+    );
+  }
+
+  const type =
+    status === 'RUNNING'
+      ? 'PROCESS_STARTED'
+      : status === 'COMPLETED'
+        ? 'AGENT_RUN_COMPLETED'
+        : status === 'FAILED'
+          ? 'AGENT_RUN_FAILED'
+          : status === 'INTERRUPTED'
+            ? 'AGENT_RUN_INTERRUPTED'
+            : status === 'RECOVERY_REQUIRED'
+              ? update.recoveryState === 'REQUIRES_USER_ACTION'
+                ? 'AGENT_MUTATION_AMBIGUOUS'
+                : 'AGENT_RUNTIME_LOST'
+              : undefined;
+  if (!type) {
+    return runtime.updateRun(runId, { status }, `${operationId}:status`);
+  }
+  const event = createDomainEvent({
+    type,
+    taskId: run.taskId,
+    iterationId: run.iterationId,
+    runId: run.id,
+    worktreeId: run.worktreeId,
+    agentSessionId: run.sessionId,
+    serverInstanceId: run.serverInstanceId,
+    source: type === 'PROCESS_STARTED' ? 'process' : 'provider',
+    payload: {
+      ...(type === 'PROCESS_STARTED' ? { pid: 10_000 } : {}),
+      ...(update.finalArtifactId ? { finalArtifactId: update.finalArtifactId } : {}),
+      ...(update.terminalReason
+        ? type === 'AGENT_RUN_FAILED'
+          ? { error: update.terminalReason }
+          : { terminalReason: update.terminalReason, reason: update.terminalReason }
+        : {})
+    }
+  });
+  await runtime.applyTaskRuntimeEvent(event, `${operationId}:event`);
+  return requireRun(runtime, runId);
+}
+
 async function initRepository(repositoryPath: string): Promise<void> {
-  await git(repositoryPath, ['init']);
+  await git(repositoryPath, ['init', '-b', 'main']);
   await git(repositoryPath, ['config', 'user.email', 'task-monki@example.invalid']);
   await git(repositoryPath, ['config', 'user.name', 'Task Monki']);
   await fs.writeFile(path.join(repositoryPath, 'README.md'), '# Scenario\n', 'utf8');
@@ -526,8 +1060,11 @@ async function initRepository(repositoryPath: string): Promise<void> {
   await git(repositoryPath, ['commit', '-m', 'Initial scenario commit']);
 }
 
-async function requireRun(store: FileTaskStore, runId: string): Promise<RunRecord> {
-  const run = await store.getRun(runId);
+async function requireRun(
+  runtime: TaskAgentRuntimeAccess,
+  runId: string
+): Promise<RunRecord> {
+  const run = await runtime.getRun(runId);
   if (!run) {
     throw new Error(`Run not found: ${runId}`);
   }
@@ -535,7 +1072,7 @@ async function requireRun(store: FileTaskStore, runId: string): Promise<RunRecor
 }
 
 async function appendRunEvent(
-  store: FileTaskStore,
+  runtime: TaskAgentRuntimeAccess,
   run: RunRecord,
   type: Extract<
     DomainEvent['type'],
@@ -543,18 +1080,20 @@ async function appendRunEvent(
   >,
   payload: Record<string, unknown>
 ): Promise<void> {
-  await store.appendEvent(
-    createDomainEvent({
-      type,
-      taskId: run.taskId,
-      iterationId: run.iterationId,
-      runId: run.id,
-      worktreeId: run.worktreeId,
-      agentSessionId: run.sessionId,
-      serverInstanceId: run.serverInstanceId,
-      source: type === 'PROCESS_STARTED' ? 'process' : 'provider',
-      payload
-    })
+  const event = createDomainEvent({
+    type,
+    taskId: run.taskId,
+    iterationId: run.iterationId,
+    runId: run.id,
+    worktreeId: run.worktreeId,
+    agentSessionId: run.sessionId,
+    serverInstanceId: run.serverInstanceId,
+    source: type === 'PROCESS_STARTED' ? 'process' : 'provider',
+    payload
+  });
+  await runtime.applyTaskRuntimeEvent(
+    event,
+    `scenario-run-event:${run.id}:${type}:${event.id}`
   );
 }
 
@@ -582,23 +1121,27 @@ function waitForEvent(
 }
 
 function waitForSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   predicate: (snapshot: TaskSnapshot) => boolean,
   timeoutMs: number
 ): Promise<TaskSnapshot> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const check = async () => {
-      const snapshot = await store.snapshot();
-      if (predicate(snapshot)) {
-        resolve(snapshot);
-        return;
+      try {
+        const snapshot = await store.snapshot();
+        if (predicate(snapshot)) {
+          resolve(snapshot);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          reject(new Error(`Timed out waiting ${timeoutMs}ms for store state.`));
+          return;
+        }
+        setTimeout(() => void check(), 10);
+      } catch (error) {
+        reject(error);
       }
-      if (Date.now() >= deadline) {
-        reject(new Error(`Timed out waiting ${timeoutMs}ms for store state.`));
-        return;
-      }
-      setTimeout(() => void check(), 10);
     };
     void check();
   });

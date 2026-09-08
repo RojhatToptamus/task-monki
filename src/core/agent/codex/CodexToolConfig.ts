@@ -5,6 +5,7 @@ import {
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import { execFileOwnedPortable } from '../../process/ownedProcess';
 import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
+import type { JsonValue } from './protocol/generated/serde_json/JsonValue';
 const CODEX_MCP_LIST_TIMEOUT_MS = 5_000;
 
 interface CodexMcpServerListEntry {
@@ -99,6 +100,34 @@ export async function listDisabledCodexMcpServerConfigOverrides(
   environment?: NodeJS.ProcessEnv,
   options: { requireCompleteDiscovery?: boolean } = {}
 ): Promise<string[]> {
+  const stdout = await listCodexMcpServers(executable, cwd, environment);
+  return parseDisabledCodexMcpServerConfigOverrides(stdout, options);
+}
+
+export async function listDisabledCodexMcpServerThreadConfig(
+  executable: string,
+  cwd: string,
+  environment?: NodeJS.ProcessEnv
+): Promise<Record<string, JsonValue>> {
+  const stdout = await listCodexMcpServers(executable, cwd, environment);
+  return parseDisabledCodexMcpServerThreadConfig(stdout);
+}
+
+export function parseDisabledCodexMcpServerThreadConfig(
+  stdout: string
+): Record<string, JsonValue> {
+  return Object.fromEntries(
+    parseDisabledCodexMcpServers(stdout, { requireCompleteDiscovery: true }).map(
+      (server) => [`mcp_servers.${server.name}`, server.threadConfig]
+    )
+  );
+}
+
+async function listCodexMcpServers(
+  executable: string,
+  cwd: string,
+  environment?: NodeJS.ProcessEnv
+): Promise<string> {
   const { stdout } = await execFileOwnedPortable(executable, ['mcp', 'list', '--json'], {
     cwd,
     env: sanitizeEnvironment(
@@ -108,7 +137,7 @@ export async function listDisabledCodexMcpServerConfigOverrides(
     timeout: CODEX_MCP_LIST_TIMEOUT_MS,
     maxBuffer: 1024 * 1024
   });
-  return parseDisabledCodexMcpServerConfigOverrides(stdout, options);
+  return stdout;
 }
 
 export function parseEnabledCodexMcpServerNames(stdout: string): string[] {
@@ -121,13 +150,33 @@ export function parseDisabledCodexMcpServerConfigOverrides(
   stdout: string,
   options: { requireCompleteDiscovery?: boolean } = {}
 ): string[] {
+  return parseDisabledCodexMcpServers(stdout, options).map(
+    (server) => server.configOverride
+  );
+}
+
+function parseDisabledCodexMcpServers(
+  stdout: string,
+  options: { requireCompleteDiscovery?: boolean }
+): Array<{
+  name: string;
+  configOverride: string;
+  threadConfig: Record<string, JsonValue>;
+}> {
   const payload = JSON.parse(stdout) as unknown;
   if (!Array.isArray(payload)) {
     if (options.requireCompleteDiscovery) throw incompleteMcpDiscovery();
     return [];
   }
 
-  const overrides = new Map<string, string>();
+  const overrides = new Map<
+    string,
+    {
+      name: string;
+      configOverride: string;
+      threadConfig: Record<string, JsonValue>;
+    }
+  >();
   for (const item of payload) {
     if (!item || typeof item !== 'object') {
       if (options.requireCompleteDiscovery) throw incompleteMcpDiscovery();
@@ -142,7 +191,7 @@ export function parseDisabledCodexMcpServerConfigOverrides(
     }
     const override = mcpDisableConfigOverride(entry);
     if (override) {
-      overrides.set(override.name, override.config);
+      overrides.set(override.name, override);
     } else if (options.requireCompleteDiscovery) {
       throw incompleteMcpDiscovery();
     }
@@ -156,7 +205,11 @@ function incompleteMcpDiscovery(): Error {
 
 function mcpDisableConfigOverride(
   entry: CodexMcpServerListEntry
-): { name: string; config: string } | undefined {
+): {
+  name: string;
+  configOverride: string;
+  threadConfig: Record<string, JsonValue>;
+} | undefined {
   if (
     entry.enabled !== true ||
     typeof entry.name !== 'string' ||
@@ -169,21 +222,26 @@ function mcpDisableConfigOverride(
 
   const transport = entry.transport as CodexMcpTransport;
   const fields = ['enabled=false'];
+  const threadConfig: Record<string, JsonValue> = { enabled: false };
   if (transport.type === 'stdio') {
     if (typeof transport.command !== 'string') {
       return undefined;
     }
+    threadConfig.command = transport.command;
     fields.push(`command=${tomlString(transport.command)}`);
     if (Array.isArray(transport.args) && transport.args.every((arg) => typeof arg === 'string')) {
+      threadConfig.args = transport.args;
       fields.push(`args=${tomlStringArray(transport.args)}`);
     }
     if (typeof transport.cwd === 'string') {
+      threadConfig.cwd = transport.cwd;
       fields.push(`cwd=${tomlString(transport.cwd)}`);
     }
   } else if (transport.type === 'streamable_http') {
     if (typeof transport.url !== 'string') {
       return undefined;
     }
+    threadConfig.url = transport.url;
     fields.push(`url=${tomlString(transport.url)}`);
   } else {
     return undefined;
@@ -191,7 +249,8 @@ function mcpDisableConfigOverride(
 
   return {
     name: entry.name,
-    config: `mcp_servers.${entry.name}={${fields.join(', ')}}`
+    configOverride: `mcp_servers.${entry.name}={${fields.join(', ')}}`,
+    threadConfig
   };
 }
 

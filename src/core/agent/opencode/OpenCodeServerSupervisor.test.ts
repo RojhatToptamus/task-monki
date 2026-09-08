@@ -3,15 +3,33 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
 import {
   ProcessSupervisor,
   type ProcessSpec,
   type SupervisedProcess
 } from '../../process/ProcessSupervisor';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import { OpenCodeServerSupervisor } from './OpenCodeServerSupervisor';
 
 const temporaryDirectories: string[] = [];
+const persistenceByStore = new WeakMap<
+  SqliteAgentRuntimeStore,
+  ApplicationPersistence
+>();
+
+async function openRuntimeStore(profileRoot: string): Promise<SqliteAgentRuntimeStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  persistenceByStore.set(persistence.agentRuntime, persistence);
+  return persistence.agentRuntime;
+}
+
+async function closeRuntimeStore(store: SqliteAgentRuntimeStore): Promise<void> {
+  const persistence = persistenceByStore.get(store);
+  if (!persistence) throw new Error('OpenCode test store has no persistence owner.');
+  await persistence.close();
+}
 
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -30,7 +48,7 @@ describe('OpenCodeServerSupervisor', () => {
     temporaryDirectories.push(directory);
     const providerSecret = 'openai-provider-secret-value';
     const processSupervisor = new DiagnosticProcessSupervisor(providerSecret);
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: {
         executable: '/fake/opencode',
@@ -61,7 +79,7 @@ describe('OpenCodeServerSupervisor', () => {
 
     try {
       await expect(supervisor.start()).rejects.toThrow();
-      const server = (await store.snapshot()).agentServers[0];
+      const server = (await store.snapshot()).servers[0];
       const exitReason = server?.exitReason ?? '';
 
       expect(server?.status).toBe('FAILED');
@@ -85,7 +103,7 @@ describe('OpenCodeServerSupervisor', () => {
       expect(Buffer.byteLength(persistedTail, 'utf8')).toBeLessThanOrEqual(64 * 1024);
     } finally {
       await supervisor.shutdown();
-      await store.close();
+      await closeRuntimeStore(store);
     }
   });
 
@@ -94,7 +112,7 @@ describe('OpenCodeServerSupervisor', () => {
       path.join(os.tmpdir(), 'task-monki-opencode-supervisor-')
     );
     temporaryDirectories.push(directory);
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: resolvedRuntime(),
       cwd: directory,
@@ -106,7 +124,7 @@ describe('OpenCodeServerSupervisor', () => {
 
     try {
       await expect(supervisor.start()).rejects.toThrow();
-      const exitReason = (await store.snapshot()).agentServers[0]?.exitReason ?? '';
+      const exitReason = (await store.snapshot()).servers[0]?.exitReason ?? '';
       const separator = ' OpenCode diagnostics: ';
       const separatorAt = exitReason.indexOf(separator);
       expect(separatorAt).toBeGreaterThan(0);
@@ -124,7 +142,7 @@ describe('OpenCodeServerSupervisor', () => {
       expect(exitReason).not.toContain('\uFFFD');
     } finally {
       await supervisor.shutdown();
-      await store.close();
+      await closeRuntimeStore(store);
     }
   });
 
@@ -176,7 +194,7 @@ describe('OpenCodeServerSupervisor', () => {
     vi.stubGlobal('fetch', fetchMock);
     const port = 45201;
     const processSupervisor = new ListeningProcessSupervisor();
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: resolvedRuntime(),
       cwd: directory,
@@ -206,7 +224,7 @@ describe('OpenCodeServerSupervisor', () => {
       expect(eventConnections).toBe(1);
     } finally {
       await supervisor.shutdown();
-      await store.close();
+      await closeRuntimeStore(store);
     }
   });
 
@@ -217,7 +235,7 @@ describe('OpenCodeServerSupervisor', () => {
     temporaryDirectories.push(directory);
     vi.stubGlobal('fetch', compatibleOpenCodeFetch);
     const processSupervisor = new ListeningProcessSupervisor();
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: resolvedRuntime(),
       cwd: directory,
@@ -231,7 +249,7 @@ describe('OpenCodeServerSupervisor', () => {
 
     try {
       await supervisor.start();
-      const exited = new Promise<{ server: Awaited<ReturnType<FileTaskStore['getAgentServer']>>; unexpected: boolean }>(
+      const exited = new Promise<{ server: Awaited<ReturnType<SqliteAgentRuntimeStore['getAgentServer']>>; unexpected: boolean }>(
         (resolve) => {
           supervisor.events.once('exit', (server, unexpected) => resolve({ server, unexpected }));
         }
@@ -259,7 +277,7 @@ describe('OpenCodeServerSupervisor', () => {
       expect(processSupervisor.startCount).toBe(1);
     } finally {
       await supervisor.shutdown().catch(() => undefined);
-      await store.close();
+      await closeRuntimeStore(store);
     }
   });
 
@@ -270,7 +288,7 @@ describe('OpenCodeServerSupervisor', () => {
     temporaryDirectories.push(directory);
     const processSupervisor = new EarlyExitProcessSupervisor();
     const ports = [45101, 45102, 45103];
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: resolvedRuntime(),
       cwd: directory,
@@ -291,7 +309,7 @@ describe('OpenCodeServerSupervisor', () => {
       } catch (cause) {
         failure = cause as Error;
       }
-      const servers = (await store.snapshot()).agentServers;
+      const servers = (await store.snapshot()).servers;
 
       expect(failure?.message).toContain('[REDACTED]');
       expect(failure?.message).not.toContain(processSupervisor.generatedPassword);
@@ -315,7 +333,7 @@ describe('OpenCodeServerSupervisor', () => {
       }
     } finally {
       await supervisor.shutdown();
-      await store.close();
+      await closeRuntimeStore(store);
     }
   });
 
@@ -325,7 +343,7 @@ describe('OpenCodeServerSupervisor', () => {
     );
     temporaryDirectories.push(directory);
     const processSupervisor = new GatedStartupProcessSupervisor();
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: resolvedRuntime(),
       cwd: directory,
@@ -343,11 +361,11 @@ describe('OpenCodeServerSupervisor', () => {
     await stopping;
     expect(processSupervisor.cancelCount).toBe(1);
     expect(supervisor.currentClient).toBeUndefined();
-    expect((await store.snapshot()).agentServers).toEqual([
+    expect((await store.snapshot()).servers).toEqual([
       expect.objectContaining({ status: 'EXITED' })
     ]);
     await expect(supervisor.start()).rejects.toThrow('shut down');
-    await store.close();
+    await closeRuntimeStore(store);
   });
 
   it('retains startup process ownership when cancellation fails and prevents replacement', async () => {
@@ -356,7 +374,7 @@ describe('OpenCodeServerSupervisor', () => {
     );
     temporaryDirectories.push(directory);
     const processSupervisor = new FailOnceCancelStartupProcessSupervisor();
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: resolvedRuntime(),
       cwd: directory,
@@ -371,7 +389,7 @@ describe('OpenCodeServerSupervisor', () => {
     await expect(starting).rejects.toThrow('cleanup was incomplete');
     expect(processSupervisor.startCount).toBe(1);
     expect(processSupervisor.cancelCount).toBe(1);
-    expect((await store.snapshot()).agentServers).toEqual([
+    expect((await store.snapshot()).servers).toEqual([
       expect.objectContaining({ status: 'LOST' })
     ]);
 
@@ -383,7 +401,7 @@ describe('OpenCodeServerSupervisor', () => {
     await supervisor.shutdown();
     expect(processSupervisor.cancelCount).toBe(2);
     await expect(supervisor.start()).rejects.toThrow('shut down');
-    await store.close();
+    await closeRuntimeStore(store);
   });
 
   it('terminalizes a server created concurrently with shutdown before any child is spawned', async () => {
@@ -392,7 +410,7 @@ describe('OpenCodeServerSupervisor', () => {
     );
     temporaryDirectories.push(directory);
     const processSupervisor = new GatedStartupProcessSupervisor();
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const originalCreate = store.createAgentServer.bind(store);
     let releaseCreate!: () => void;
     const createGate = new Promise<void>((resolve) => {
@@ -425,11 +443,11 @@ describe('OpenCodeServerSupervisor', () => {
     await expect(starting).rejects.toThrow('canceled');
     await stopping;
     expect(processSupervisor.cancelCount).toBe(0);
-    expect((await store.snapshot()).agentServers).toEqual([
+    expect((await store.snapshot()).servers).toEqual([
       expect.objectContaining({ status: 'EXITED' })
     ]);
     store.createAgentServer = originalCreate;
-    await store.close();
+    await closeRuntimeStore(store);
   });
 
   it('still terminates the child when persisting STOPPING fails', async () => {
@@ -465,7 +483,7 @@ describe('OpenCodeServerSupervisor', () => {
     };
     vi.stubGlobal('fetch', fetchMock);
     const processSupervisor = new ListeningProcessSupervisor();
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = await openRuntimeStore(path.join(directory, 'store'));
     const supervisor = new OpenCodeServerSupervisor(store, {
       runtime: resolvedRuntime(),
       cwd: directory,
@@ -488,11 +506,11 @@ describe('OpenCodeServerSupervisor', () => {
 
     await expect(supervisor.shutdown()).rejects.toThrow('shutdown was incomplete');
     expect(processSupervisor.cancelCount).toBe(1);
-    expect((await store.snapshot()).agentServers[0]).toEqual(
+    expect((await store.snapshot()).servers[0]).toEqual(
       expect.objectContaining({ status: 'EXITED' })
     );
     store.updateAgentServer = originalUpdate;
-    await store.close();
+    await closeRuntimeStore(store);
   });
 });
 

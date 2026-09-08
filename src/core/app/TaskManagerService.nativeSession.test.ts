@@ -6,26 +6,32 @@ import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
-import { FileTaskStore } from '../storage/FileTaskStore';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
-const temporaryDirectories: string[] = [];
+const temporaryProfiles: Array<{
+  directory: string;
+  close(): Promise<void>;
+}> = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      fs.rm(directory, { recursive: true, force: true })
-    )
+    temporaryProfiles.splice(0).map(async ({ directory, close }) => {
+      await close();
+      await fs.rm(directory, { recursive: true, force: true });
+    })
   );
 });
 
 describe('TaskManagerService provider-native session configuration', () => {
   it('routes revisioned provider controls only after validating task, runtime, and idle ownership', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-native-session-'));
-    temporaryDirectories.push(directory);
-    const store = new FileTaskStore(path.join(directory, 'store'));
-    const scripted = new ScriptedAgentRuntimeAdapter(store);
+    const opened = await openScriptedTaskManagerPersistence(
+      path.join(directory, 'store')
+    );
+    temporaryProfiles.push({ directory, close: () => opened.persistence.close() });
+    const { store, ...scriptedRuntime } = opened;
+    const scripted = scriptedRuntime.adapter;
     Object.defineProperty(scripted, 'descriptor', {
       value: TEST_ACP_PROFILE.descriptor
     });
@@ -49,6 +55,7 @@ describe('TaskManagerService provider-native session configuration', () => {
     }));
     adapter.applySessionControl = applySessionControl;
     const service = new TaskManagerService(store, directory, undefined, {
+      ...scriptedRuntime.serviceOptions,
       agentRuntimeAdapters: [adapter]
     });
     const settings = {
@@ -73,17 +80,22 @@ describe('TaskManagerService provider-native session configuration', () => {
       worktreePath: directory,
       baseSha: 'base'
     });
-    const createdSession = await store.createAgentSession({
+    const createdSession = await scriptedRuntime.createSession({
       task,
       iteration,
       worktree,
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
-      requestedSettings: settings
+      settings
     });
-    const session = await store.updateAgentSession(createdSession.id, {
-      providerSessionId: 'provider-session-1',
-      status: 'IDLE'
-    });
+    const session = await scriptedRuntime.taskRuntime.updateAgentSession(
+      createdSession.id,
+      {
+        providerSessionId: 'provider-session-1',
+        status: 'IDLE',
+        materialized: true
+      },
+      `native-session-materialized:${createdSession.id}`
+    );
 
     await expect(
       service.updateAgentNativeSession({
@@ -173,12 +185,11 @@ describe('TaskManagerService provider-native session configuration', () => {
       })
     ).rejects.toThrow('belongs to');
 
-    const run = await store.createRun({
+    const run = await scriptedRuntime.createRun({
       task,
       session,
       mode: 'FOLLOW_UP',
-      prompt: 'Active work',
-      requestedSettings: settings
+      prompt: 'Active work'
     });
     await expect(
       service.updateAgentNativeSession({
@@ -188,7 +199,11 @@ describe('TaskManagerService provider-native session configuration', () => {
         controlId: 'mode', value: 'plan', revision: 'revision-1'
       })
     ).rejects.toThrow('active or recovery-required');
-    await store.updateRun(run.id, { status: 'COMPLETED' });
+    await scriptedRuntime.transitionRun(
+      run.id,
+      { status: 'COMPLETED' },
+      `native-run-completed:${run.id}`
+    );
 
     let releaseModelUpdate!: () => void;
     const modelUpdateReleased = new Promise<void>((resolve) => {
@@ -231,6 +246,7 @@ describe('TaskManagerService provider-native session configuration', () => {
       acpCapabilities(TEST_ACP_PROFILE)
     );
     const browserService = new TaskManagerService(store, directory, undefined, {
+      ...scriptedRuntime.serviceOptions,
       agentRuntimeAdapters: [adapter],
       allowAgentNetworkAccess: false
     });

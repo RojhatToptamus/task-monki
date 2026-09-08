@@ -18,6 +18,7 @@ import { DisclosureChevron } from './DisclosureChevron';
 interface InteractionPanelProps {
   interactions: InteractionRequestRecord[];
   sessions: AgentSessionRecord[];
+  offerAgentDecision?: boolean;
   onRespond(
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -27,6 +28,7 @@ interface InteractionPanelProps {
 export function InteractionPanel({
   interactions,
   sessions,
+  offerAgentDecision = false,
   onRespond
 }: InteractionPanelProps) {
   const activeInteractions = useMemo(
@@ -83,6 +85,7 @@ export function InteractionPanel({
         key={active.id}
         interaction={active}
         sourceSession={sourceSession}
+        offerAgentDecision={offerAgentDecision}
         onRespond={onRespond}
       />
     </section>
@@ -92,10 +95,12 @@ export function InteractionPanel({
 function InteractionBody({
   interaction,
   sourceSession,
+  offerAgentDecision,
   onRespond
 }: {
   interaction: InteractionRequestRecord;
   sourceSession?: AgentSessionRecord;
+  offerAgentDecision: boolean;
   onRespond: InteractionPanelProps['onRespond'];
 }) {
   const [error, setError] = useState<string>();
@@ -163,6 +168,7 @@ function InteractionBody({
           disabled={disabled}
           formValues={formValues}
           setFormValues={setFormValues}
+          offerAgentDecision={offerAgentDecision}
           onRespond={respond}
         />
       ) : (
@@ -616,8 +622,9 @@ function UserInputRequest({
   disabled,
   formValues,
   setFormValues,
+  offerAgentDecision,
   onRespond
-}: InteractionSectionProps & FormStateProps) {
+}: InteractionSectionProps & FormStateProps & { offerAgentDecision: boolean }) {
   const request = interaction.request as AgentUserInputRequest;
   const answers = Object.fromEntries(
     request.questions.map((question) => [
@@ -628,6 +635,11 @@ function UserInputRequest({
   const canSubmit = Object.values(answers).every(
     (values) => values.length > 0 && values.every((value) => value.trim())
   );
+  const canDelegate =
+    offerAgentDecision &&
+    request.questions.every(
+      (question) => question.isOther && Boolean(question.options?.length)
+    );
   return (
     <>
       <div className="interaction-form">
@@ -659,6 +671,25 @@ function UserInputRequest({
               })
             }
           />
+          {canDelegate ? (
+            <ActionButton
+              label="Decide for me"
+              variant="secondary"
+              disabled={disabled}
+              onClick={() =>
+                onRespond({
+                  interactionType: 'USER_INPUT',
+                  action: 'ANSWER',
+                  answers: Object.fromEntries(
+                    request.questions.map((question) => [
+                      question.id,
+                      ['Decide for me']
+                    ])
+                  )
+                })
+              }
+            />
+          ) : null}
         </div>
       ) : null}
     </>

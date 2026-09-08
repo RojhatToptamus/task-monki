@@ -2,12 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import {
-  createInitialProjection,
-  TASK_STORE_SCHEMA_VERSION,
-  type TaskSnapshot,
-  type WorktreeRecord
-} from '../../shared/contracts';
+import type { Repository, WorktreeRecord } from '../../shared/contracts';
 import {
   createNodeOpenTargetHost,
   OpenTargetService,
@@ -172,6 +167,29 @@ describe('OpenTargetService', () => {
         testContext()
       )
     ).rejects.toThrow(/escapes/);
+  });
+
+  it('rechecks repository availability and worktree ownership when an action executes', async () => {
+    const host = new FakeOpenTargetHost({ '/repo': directory(), '/worktree': directory() });
+    const service = new OpenTargetService(host);
+    const context = testContext();
+    const repositoryTarget = { type: 'repository' as const, repositoryId: 'repository-1' };
+    await service.inspect({ target: repositoryTarget }, context);
+    const repository = (await context.getRepository('repository-1'))!;
+    repository.status = 'DISCONNECTED';
+    await expect(service.execute({ action: 'open', target: repositoryTarget }, context))
+      .resolves.toMatchObject({ ok: false, message: 'Repository is disconnected.' });
+    expect(host.defaults).toEqual([]);
+
+    const worktreeTarget = { type: 'worktree' as const, worktreeId: 'worktree-1', taskId: 'task-1' };
+    await service.inspect({ target: worktreeTarget }, context);
+    const worktree = (await context.getWorktree('worktree-1'))!;
+    worktree.worktreePath = '/moved-worktree';
+    await expect(service.execute({ action: 'copyPath', target: worktreeTarget }, context))
+      .resolves.toMatchObject({ ok: true, clipboardText: '/moved-worktree' });
+    worktree.taskId = 'another-task';
+    await expect(service.execute({ action: 'copyPath', target: worktreeTarget }, context))
+      .resolves.toMatchObject({ ok: false, message: 'Worktree is not recorded by Task Monki.' });
   });
 
   it('keeps missing files usable for copy path and reveal parent fallbacks', async () => {
@@ -573,86 +591,24 @@ class FakeOpenTargetHost implements OpenTargetHost {
 function testContext(input: { repositoryPath?: string; worktreePath?: string } = {}) {
   const repositoryPath = input.repositoryPath ?? '/repo';
   const worktreePath = input.worktreePath ?? '/worktree';
-  return {
-    snapshot: testSnapshot({ repositoryPath, worktreePath })
-  };
-}
-
-function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } = {}): TaskSnapshot {
-  const repositoryPath = input.repositoryPath ?? '/repo';
-  const worktreePath = input.worktreePath ?? '/worktree';
   const worktree = testWorktree({ repositoryPath, worktreePath });
+  const repository: Repository = {
+    id: 'repository-1',
+    kind: 'USER_REGISTERED',
+    name: 'repo',
+    path: repositoryPath,
+    status: 'AVAILABLE',
+    remotes: [],
+    createdAt: '2026-07-05T00:00:00.000Z',
+    updatedAt: '2026-07-05T00:00:00.000Z'
+  };
   return {
-    schemaVersion: TASK_STORE_SCHEMA_VERSION,
-    repositories: [
-      {
-        id: 'repository-1',
-        kind: 'USER_REGISTERED',
-        name: 'repo',
-        path: repositoryPath,
-        status: 'AVAILABLE',
-        remotes: [],
-        createdAt: '2026-07-05T00:00:00.000Z',
-        updatedAt: '2026-07-05T00:00:00.000Z'
-      }
-    ],
-    boards: [],
-    designTurns: [],
-    designReferences: [],
-    designRevisions: [],
-    designSourceActions: [],
-    tasks: [
-      {
-        id: 'task-1',
-        kind: 'NORMAL',
-        runtimeId: 'codex',
-        title: 'Task',
-        prompt: 'Do it',
-        repositoryId: 'repository-1',
-        workflowPhase: 'REVIEW',
-        resolution: 'NONE',
-        completionPolicy: 'LOCAL_ACCEPTANCE',
-        phaseVersion: 1,
-        currentWorktreeId: worktree.id,
-        forkedAlternativeTaskIds: [],
-        agentSettings: {},
-        createdAt: '2026-07-05T00:00:00.000Z',
-        updatedAt: '2026-07-05T00:00:00.000Z',
-        projection: createInitialProjection('2026-07-05T00:00:00.000Z')
-      }
-    ],
-    iterations: [],
-    worktrees: [worktree],
-    gitSnapshots: [],
-    githubRepositories: [],
-    branchPublications: [],
-    pullRequests: [],
-    ciRollups: [],
-    reviewRollups: [],
-    mergeSnapshots: [],
-    runs: [],
-    agentServers: [],
-    agentSessions: [],
-    agentItems: [],
-    agentGoalSnapshots: [],
-    agentPlanRevisions: [],
-    agentUsageSnapshots: [],
-    agentSettingsObservations: [],
-    agentSubagentObservations: [],
-    interactionRequests: [],
-    previewPlans: [],
-    previewLocalBindings: [],
-    previewApprovals: [],
-    previewComposeProjects: [],
-    previewGenerations: [],
-    previewManagedEnvironments: [],
-    previewManagedResources: [],
-    previewGenerationAttachments: [],
-    previewNodeAttempts: [],
-    previewResources: [],
-    events: [],
-    artifacts: [],
-    attachments: []
+    async getRepository(id: string) {
+      return repository.id === id ? repository : undefined;
+    },
+    async getWorktree(id: string) {
+      return worktree.id === id ? worktree : undefined;
+    }
   };
 }
 
@@ -662,6 +618,7 @@ function testWorktree(input: { repositoryPath?: string; worktreePath?: string } 
     taskId: 'task-1',
     iterationId: 'iteration-1',
     repositoryId: 'repository-1',
+    ownership: 'MANAGED' as const,
     worktreePath: input.worktreePath ?? '/worktree',
     branchName: 'codex/task',
     baseSha: 'abc123',

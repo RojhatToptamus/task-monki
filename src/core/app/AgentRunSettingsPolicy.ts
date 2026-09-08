@@ -44,13 +44,17 @@ export function mergeRunSettings(input: {
     } satisfies AgentExecutionSettings,
     ...input.settings.filter(Boolean)
   );
-  const approvalPolicy = requestedSettings.approvalPolicy ?? 'on-request';
+  const approvalPolicy = input.readOnly
+    ? 'never'
+    : (requestedSettings.approvalPolicy ?? 'on-request');
   return {
     ...requestedSettings,
     sandbox: input.readOnly
       ? 'READ_ONLY'
       : (requestedSettings.sandbox ?? defaultSandbox),
-    networkAccess: requestedSettings.networkAccess ?? false,
+    networkAccess: input.readOnly
+      ? false
+      : (requestedSettings.networkAccess ?? false),
     approvalPolicy,
     approvalsReviewer:
       input.readOnly || approvalPolicy === 'never'

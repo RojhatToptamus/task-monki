@@ -54,7 +54,16 @@ const result = await execFileOwnedPortable(
   ['packaged-owner-ok'],
   { timeout: 10_000 }
 );
-if (result.stdout !== 'packaged-owner-ok' || result.stderr !== '') {
+const stderrLines = result.stderr.split(/\r?\n/u).filter(Boolean);
+const electronHostDiagnostics = stderrLines.filter((line) =>
+  /^\[\d+\/\d+\.\d+:ERROR:electron\/shell\/common\/mac\/codesign_util\.cc:\d+\] task_name_for_pid: \(os\/kern\) failure \(5\)$/u.test(
+    line
+  )
+);
+const unexpectedStderr = stderrLines.filter(
+  (line) => !electronHostDiagnostics.includes(line)
+);
+if (result.stdout !== 'packaged-owner-ok' || unexpectedStderr.length > 0) {
   throw new Error(
     `Packaged owner-process output mismatch: ${JSON.stringify(result)}`
   );
@@ -68,7 +77,8 @@ console.log(
       executable: executablePath,
       launcher: launcherPath,
       electronRunAsNode: true,
-      targetOutput: result.stdout
+      targetOutput: result.stdout,
+      electronHostDiagnostics
     },
     null,
     2

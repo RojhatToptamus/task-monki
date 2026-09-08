@@ -34,7 +34,7 @@ describe('PreviewRecipeEvidenceBundle', () => {
       'utf8'
     );
 
-    const bundle = await preparePreviewRecipeEvidenceBundle(root);
+    const bundle = await prepareEvidence(root, 'bounded');
     const evidence = JSON.parse(
       await fs.readFile(path.join(bundle.directoryPath, bundle.fileName), 'utf8')
     ) as {
@@ -73,7 +73,7 @@ describe('PreviewRecipeEvidenceBundle', () => {
     );
     await writePackageLock(root, '^16.1.6', '16.2.3', 'lockfile-content-canary');
 
-    const bundle = await preparePreviewRecipeEvidenceBundle(root);
+    const bundle = await prepareEvidence(root, 'framework');
     const evidence = JSON.parse(
       await fs.readFile(path.join(bundle.directoryPath, bundle.fileName), 'utf8')
     ) as {
@@ -118,7 +118,7 @@ describe('PreviewRecipeEvidenceBundle', () => {
       path.join(root, 'package-lock.json')
     );
 
-    const bundle = await preparePreviewRecipeEvidenceBundle(root);
+    const bundle = await prepareEvidence(root, 'symlink');
     const evidenceText = await fs.readFile(
       path.join(bundle.directoryPath, bundle.fileName),
       'utf8'
@@ -136,7 +136,52 @@ describe('PreviewRecipeEvidenceBundle', () => {
 
     await bundle.dispose();
   });
+
+  it('keeps nested application evidence for a monorepo layout', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-monorepo-evidence-test-'));
+    roots.push(root);
+    await fs.mkdir(path.join(root, 'apps', 'web'), { recursive: true });
+    await fs.mkdir(path.join(root, 'services', 'api'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({ private: true, workspaces: ['apps/*'] }),
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(root, 'apps', 'web', 'package.json'),
+      JSON.stringify({ scripts: { dev: 'vite' } }),
+      'utf8'
+    );
+    await fs.writeFile(
+      path.join(root, 'services', 'api', 'server.py'),
+      'from http.server import HTTPServer\n',
+      'utf8'
+    );
+
+    const bundle = await prepareEvidence(root, 'monorepo');
+    const evidence = JSON.parse(
+      await fs.readFile(path.join(bundle.directoryPath, bundle.fileName), 'utf8')
+    ) as { files: Array<{ path: string }> };
+
+    expect(evidence.files.map((file) => file.path)).toEqual([
+      'apps/web/package.json',
+      'package.json',
+      'services/api/server.py'
+    ]);
+    await bundle.dispose();
+  });
 });
+
+async function prepareEvidence(root: string, generationId: string) {
+  const evidenceRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'preview-evidence-owner-test-')
+  );
+  roots.push(evidenceRoot);
+  return preparePreviewRecipeEvidenceBundle(root, {
+    rootDirectory: evidenceRoot,
+    generationId
+  });
+}
 
 async function writePackageLock(
   root: string,

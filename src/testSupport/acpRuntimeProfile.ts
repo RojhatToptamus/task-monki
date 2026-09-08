@@ -37,11 +37,5 @@ export const TEST_ACP_PROFILE: AcpRuntimeProfile = {
       ...NETWORK_ENVIRONMENT_KEYS
     ],
     sensitiveKeys: ['TEST_ACP_API_KEY', ...NETWORK_SENSITIVE_ENVIRONMENT_KEYS]
-  },
-  extensions: {
-    testProtocol: {
-      maturity: 'stable',
-      detail: 'Test-only ACP protocol fixture.'
-    }
   }
 };

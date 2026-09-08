@@ -16,6 +16,7 @@ const REQUIRED_APPLICATION_ENTRIES = [
   ['package.json', 'package manifest']
 ];
 const REQUIRED_DESIGN_RESOURCE_FILES = [
+  'design-tool-mcp-server.mjs',
   'design-skills/accessibility-review/SKILL.md',
   'design-skills/aesthetic-direction/SKILL.md',
   'design-skills/browser-verification/SKILL.md',
@@ -34,10 +35,15 @@ const REQUIRED_DESIGN_RESOURCE_FILES = [
   'legal/electron/LICENSES.chromium.html'
 ];
 const PROBE_SOURCE = [
+  "const sqlite = require('node:sqlite');",
+  "const database = new sqlite.DatabaseSync(':memory:', { defensive: true });",
+  "database.exec('CREATE TABLE persistence_probe (value TEXT) STRICT;');",
+  'database.close();',
   'process.stdout.write(JSON.stringify({',
   'electron: process.versions.electron,',
   'platform: process.platform,',
-  'arch: process.arch',
+  'arch: process.arch,',
+  "sqlite: typeof sqlite.backup === 'function' ? 'ready' : 'missing'",
   '}))'
 ].join('');
 
@@ -102,6 +108,9 @@ export async function verifyPackagedRuntime({
     throw new Error(
       `Packaged runtime reports ${result.platform}/${result.arch}; expected ${platform}/${arch}.`
     );
+  }
+  if (result.sqlite !== 'ready') {
+    throw new Error('Packaged runtime does not provide the required node:sqlite API.');
   }
   return result;
 }
@@ -279,7 +288,8 @@ function parseProbeResult(stdout, executable) {
     !result ||
     typeof result.electron !== 'string' ||
     typeof result.platform !== 'string' ||
-    typeof result.arch !== 'string'
+    typeof result.arch !== 'string' ||
+    typeof result.sqlite !== 'string'
   ) {
     throw new Error(`${path.basename(executable)} returned an incomplete runtime probe.`);
   }

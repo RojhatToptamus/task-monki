@@ -9,6 +9,32 @@ import {
 } from './CodexEventMapper';
 
 describe('Codex event mapping', () => {
+  it('uses live Codex model image capabilities for Design availability', () => {
+    const model = {
+      id: 'gpt-5.6-luna',
+      model: 'gpt-5.6-luna',
+      displayName: 'GPT-5.6 Luna',
+      description: 'Test model',
+      hidden: false,
+      supportedReasoningEfforts: [],
+      defaultReasoningEffort: 'low',
+      inputModalities: ['text', 'image'],
+      serviceTiers: [],
+      defaultServiceTier: null,
+      isDefault: true
+    };
+    expect(mapModel(model as never).designSupport).toMatchObject({
+      maturity: 'stable',
+      detail: expect.stringContaining('model catalog reports image input')
+    });
+    expect(
+      mapModel({ ...model, inputModalities: ['text'] } as never).designSupport
+    ).toMatchObject({
+      maturity: 'unsupported',
+      detail: expect.stringContaining('reports no image input support')
+    });
+  });
+
   it('does not invent a provider that model/list did not report', () => {
     expect(
       mapModel({

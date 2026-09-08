@@ -8,7 +8,7 @@ import {
   type ProcessTerminationUnconfirmed,
   type SupervisedProcess
 } from '../../process/ProcessSupervisor';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AgentProviderRuntimeStore } from '../AgentRuntimeStore';
 import { OpenCodeHttpClient, type OpenCodeClientTransport } from './OpenCodeHttpClient';
 import {
   normalizeOpenCodeEvent,
@@ -18,7 +18,7 @@ import {
   parseOpenCodeQuestions
 } from './OpenCodeProtocol';
 import type { ResolvedOpenCodeRuntime } from './OpenCodeRuntimeResolver';
-import { isCompatibleOpenCodeVersion, OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
+import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
 import {
   openCodeEnvironmentKeys,
   openCodeSensitiveEnvironmentValues
@@ -41,8 +41,8 @@ export interface OpenCodeServerSupervisorOptions {
   requestTimeoutMs?: number;
   startupTimeoutMs?: number;
   eventProbeTimeoutMs?: number;
-  minimumVersion?: string;
-  maximumMajor?: number;
+  /** Starts OpenCode without external plugins for provider-native read-only turns. */
+  pure?: boolean;
   processSupervisor?: ProcessSupervisor;
   portAllocator?: () => Promise<number>;
 }
@@ -79,7 +79,7 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
   private readonly startingProcesses = new WeakSet<SupervisedProcess>();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProviderRuntimeStore,
     private readonly options: OpenCodeServerSupervisorOptions
   ) {}
 
@@ -239,7 +239,14 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
     runtimeEnvironment: NodeJS.ProcessEnv
   ): Promise<RunningOpenCodeServer> {
     this.rawDiagnosticTail = '';
-    const argv = ['serve', '--hostname', '127.0.0.1', '--port', String(port)];
+    const argv = [
+      'serve',
+      ...(this.options.pure ? ['--pure'] : []),
+      '--hostname',
+      '127.0.0.1',
+      '--port',
+      String(port)
+    ];
     const server = await this.store.createAgentServer({
       runtimeId: OPENCODE_RUNTIME_ID,
       runtimeKind: 'HTTP_AGENT',
@@ -401,16 +408,9 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
 
   private async probeProtocol(client: OpenCodeHttpClient): Promise<void> {
     const health = parseOpenCodeHealth((await client.get<unknown>('/global/health')).data);
-    if (
-      health.version !== this.options.runtime.version ||
-      !isCompatibleOpenCodeVersion(
-        health.version,
-        this.options.minimumVersion,
-        this.options.maximumMajor
-      )
-    ) {
+    if (health.version !== this.options.runtime.version) {
       throw new Error(
-        `OpenCode server version ${health.version} does not match the compatible executable ${this.options.runtime.version}.`
+        `OpenCode server version ${health.version} does not match the discovered executable ${this.options.runtime.version}.`
       );
     }
     parseOpenCodeProviderCatalog((await client.get<unknown>('/provider')).data);
@@ -619,7 +619,7 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
 
   private async updateServerById(
     serverId: string,
-    update: Parameters<FileTaskStore['updateAgentServer']>[1]
+    update: Parameters<AgentProviderRuntimeStore['updateAgentServer']>[1]
   ): Promise<void> {
     const updated = await this.store.updateAgentServer(serverId, update);
     if (this.server?.id === serverId) this.server = updated;

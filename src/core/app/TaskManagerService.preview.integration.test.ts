@@ -6,11 +6,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord, PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import { previewRouteHostname } from '../preview/PreviewRouteHostname';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import {
   TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 
 const scenarioRegistry = new TaskMonkiScenarioRegistry();
 const createTaskMonkiScenario = scenarioRegistry.create.bind(scenarioRegistry);
@@ -327,9 +328,13 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
   }, 30_000);
 
-  it('runs resolve → approve → dirty capture → job → ready → stale → stop without touching the worktree', async () => {
+  it.each(['MANAGED', 'EXTERNAL'] as const)('runs Preview capture, stale detection, and cleanup without touching the %s checkout', async (ownership) => {
     const scenario = await previewScenario('task-monki-preview-service');
-    const task = await scenario.createTask({ title: 'Preview vertical slice' });
+    const task = ownership === 'EXTERNAL' ? await scenario.service.importTask({
+      repositoryId: scenario.repositoryId, worktreePath: scenario.repositoryPath,
+      branchName: (await git(scenario.repositoryPath, ['branch', '--show-current'])).trim(),
+      baseRef: 'HEAD', title: 'Imported Preview', prompt: 'Inspect existing work.'
+    }) : await scenario.createTask({ title: 'Preview vertical slice' });
     const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
     await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'captured-untracked');
     const statusBefore = await git(worktree.worktreePath, ['status', '--porcelain=v1', '-uall']);
@@ -367,7 +372,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     const capturedEvidence = (await scenario.store.snapshot()).gitSnapshots
       .filter((snapshot) => snapshot.taskId === task.id)
       .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
-    expect(capturedEvidence[0]?.dirtyFingerprint).toBe(capturedEvidence[1]?.dirtyFingerprint);
+    const source = ready.source;
+    expect(source.type === 'WORKTREE_SNAPSHOT' && capturedEvidence.some((snapshot) =>
+      snapshot.id === source.gitSnapshotId && snapshot.dirtyFingerprint === source.dirtyFingerprint)).toBe(true);
 
     await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'changed-after-capture');
     await scenario.service.refreshEvidence({ taskId: task.id });
@@ -790,8 +797,8 @@ routes:
     await scenario.service.approvePreviewPlan({
       taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
     });
-    const mutableStore = scenario.store as FileTaskStore & {
-      cutoverPreviewGenerations: FileTaskStore['cutoverPreviewGenerations'];
+    const mutableStore = scenario.store as SqliteTaskStore & {
+      cutoverPreviewGenerations: SqliteTaskStore['cutoverPreviewGenerations'];
     };
     const cutover = mutableStore.cutoverPreviewGenerations.bind(scenario.store);
     mutableStore.cutoverPreviewGenerations = async () => {
@@ -1069,9 +1076,12 @@ routes:
     );
     expect(new Set(resources.map((resource) => resource.native?.launcher.pid)).size).toBe(3);
     await scenario.service.shutdown();
-    const reopenedStore = new FileTaskStore(path.join(scenario.rootDir, 'store'));
-    const stopped = await reopenedStore.getPreviewGenerations();
-    await reopenedStore.close();
+    await scenario.persistence.close();
+    const reopenedPersistence = await openTestPersistence(
+      scenario.persistence.paths.profileRoot
+    );
+    const stopped = await reopenedPersistence.tasks.getPreviewGenerations();
+    await reopenedPersistence.close();
     expect(stopped.every((generation) => generation.state === 'STOPPED')).toBe(true);
     for (const generation of generations) {
       await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });

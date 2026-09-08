@@ -17,12 +17,9 @@ import {
 import { autoUpdater } from 'electron-updater';
 import fs from 'node:fs';
 import path from 'node:path';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
-import { AppSettingsStore } from '../core/settings/AppSettingsStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
@@ -34,6 +31,10 @@ import type {
   CreateBoardRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  ImportTaskRequest,
+  PreviewImportRequest,
+  ReconnectWorktreeRequest,
+  UpdateWorktreeComparisonRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteDesignDraftRequest,
@@ -123,7 +124,9 @@ import {
   assertAttachmentIpcBatch
 } from './attachmentIpcSecurity';
 import { createElectronOpenTargetHost } from './openTargetHost';
+import { buildDesktopCliPath } from './desktopCliPath';
 import { getMacDockIconPath } from './dockIcon';
+import { resolveProviderRuntimeCwd } from './providerRuntimeCwd';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
 import { SoftwareUpdateController } from './SoftwareUpdateController';
@@ -137,6 +140,7 @@ import {
 } from '../core/process/ownedProcess';
 import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
 import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
+import { resolveDesignToolMcpServerPath } from '../core/design/DesignClientToolBridge';
 import {
   resolveDesignBrowserRuntimePaths,
   resolveDesignBrowserSocketRoot
@@ -170,6 +174,7 @@ const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
+let persistence: ApplicationPersistence | undefined;
 let designCanvasHost: DesignCanvasHost | undefined;
 let softwareUpdateController: SoftwareUpdateController | undefined;
 let serviceCreated = false;
@@ -401,10 +406,9 @@ function configureMacDockIcon(): void {
 
   const iconPath = getMacDockIconPath({
     appPath: app.getAppPath(),
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath
+    isPackaged: app.isPackaged
   });
-  if (fs.existsSync(iconPath)) {
+  if (iconPath !== undefined && fs.existsSync(iconPath)) {
     app.dock?.setIcon(iconPath);
   }
 }
@@ -742,6 +746,11 @@ function installIpcHandlers(): void {
     });
     return task;
   });
+  handleTrustedIpc('task:import', (_, input: ImportTaskRequest) => service.importTask(input));
+  handleTrustedIpc('task:importPreview', (_, input: PreviewImportRequest) => service.previewImport(input));
+  handleTrustedIpc('worktree:list', (_, repositoryId: string) => service.listExistingWorktrees(repositoryId));
+  handleTrustedIpc('worktree:reconnect', (_, input: ReconnectWorktreeRequest) => service.reconnectWorktree(input));
+  handleTrustedIpc('worktree:comparison', (_, input: UpdateWorktreeComparisonRequest) => service.updateWorktreeComparison(input));
 
   handleTrustedIpc('prompt:refine', async (_, input: RefinePromptRequest) => {
     return service.refinePrompt(input);
@@ -1098,6 +1107,10 @@ function beginApplicationShutdown(): Promise<void> {
     .catch((error: unknown) => {
       console.error('Failed to shut down the Design canvas cleanly.', error);
     })
+    .then(() => persistence?.close())
+    .catch((error: unknown) => {
+      console.error('Failed to close application persistence cleanly.', error);
+    })
     .then(() => {
       quitAfterShutdown = true;
       softwareUpdateController?.dispose();
@@ -1119,27 +1132,12 @@ function beginApplicationShutdown(): Promise<void> {
 }
 
 function configureDesktopCliPath(): void {
-  const existingPath = process.env.PATH ?? '';
-  const existingEntries = existingPath.split(path.delimiter).filter(Boolean);
-  const windowsLocalGitPath = process.env.LOCALAPPDATA
-    ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'cmd')
-    : undefined;
-  const commonEntries =
-    process.platform === 'darwin'
-      ? ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
-      : process.platform === 'linux'
-        ? ['/usr/local/bin', '/usr/bin', '/bin']
-        : [
-            'C:\\Program Files\\Git\\cmd',
-            'C:\\Program Files\\GitHub CLI',
-            windowsLocalGitPath
-          ];
-
-  const entries = [
-    ...commonEntries.filter((entry): entry is string => Boolean(entry)),
-    ...existingEntries
-  ];
-  process.env.PATH = [...new Set(entries)].join(path.delimiter);
+  process.env.PATH = buildDesktopCliPath({
+    platform: process.platform,
+    existingPath: process.env.PATH,
+    homeDir: app.getPath('home'),
+    localAppData: process.env.LOCALAPPDATA
+  });
 }
 
 function resolveDefaultRepositoryPath(): string {
@@ -1158,7 +1156,10 @@ void app.whenReady().then(async () => {
   configureMacDockIcon();
   const defaultRepositoryPath = resolveDefaultRepositoryPath();
   const userDataDir = app.getPath('userData');
-  const taskStoreDir = path.join(userDataDir, 'task-store');
+  const providerRuntimeCwd = resolveProviderRuntimeCwd({
+    defaultRepositoryPath,
+    userDataDir
+  });
   configureOwnedProcessLauncher({
     launcherPath: resolveOwnedProcessLauncherPath({
       isPackaged: app.isPackaged,
@@ -1182,15 +1183,24 @@ void app.whenReady().then(async () => {
         appPath: app.getAppPath()
       })
     : undefined;
+  persistence = await ApplicationPersistence.open({
+    profileRoot: userDataDir,
+    appVersion: app.getVersion(),
+    previewSecretProtector: {
+      isAvailable: () =>
+        process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
+      encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
+      decrypt: async (value) =>
+        Buffer.from(safeStorage.decryptString(value), 'utf8')
+    }
+  });
   service = new TaskManagerService(
-    new FileTaskStore(taskStoreDir),
+    persistence.tasks,
     defaultRepositoryPath,
     undefined,
     {
-      agentCwd: defaultRepositoryPath || app.getPath('home'),
-      appSettingsStore: new AppSettingsStore(
-        path.join(userDataDir, 'app-settings.json')
-      ),
+      agentCwd: providerRuntimeCwd,
+      appSettingsStore: persistence.settings,
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,
       previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),
@@ -1211,22 +1221,17 @@ void app.whenReady().then(async () => {
         resourcesPath: process.resourcesPath,
         appPath: app.getAppPath()
       }),
-      previewSecretProtector: {
-        isAvailable: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
-        encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
-        decrypt: async (value) => Buffer.from(safeStorage.decryptString(value), 'utf8')
-      },
+      previewPrivateVault: persistence.previewPrivateVault,
       previewOpenHost: createElectronPreviewUrlHost(),
-      agentRuntimeStore: new FileAgentRuntimeStore(
-        path.join(userDataDir, 'agent-runtime-store')
-      ),
-      discourseStore: new FileDiscourseStore(path.join(userDataDir, 'discourse-store')),
+      agentRuntimeStore: persistence.agentRuntime,
+      taskRuntimeAccess: persistence.taskRuntime,
+      discourseStore: persistence.discourse,
       discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces'),
       ...(designCanvasHost
         ? {
-            designRepositoryRoot: path.join(userDataDir, 'design-repositories'),
-            designWorktreeRoot: path.join(userDataDir, 'design-worktrees'),
-            designDraftRoot: path.join(userDataDir, 'design-drafts'),
+            designRepositoryRoot: persistence.paths.designRepositoryRoot,
+            designWorktreeRoot: persistence.paths.designWorktreeRoot,
+            designDraftStore: persistence.designDrafts,
             designBrowserExecutablePath: designBrowserPaths!.executablePath,
             designBrowserChromeExecutablePath:
               designBrowserPaths!.browserExecutablePath,
@@ -1236,6 +1241,16 @@ void app.whenReady().then(async () => {
             ),
             designBrowserSocketRoot: resolveDesignBrowserSocketRoot(userDataDir),
             designBrowserRequireCodeSignature: app.isPackaged,
+            designToolMcpExecutablePath: process.execPath,
+            designToolMcpServerPath: resolveDesignToolMcpServerPath({
+              isPackaged: app.isPackaged,
+              resourcesPath: process.resourcesPath,
+              appPath: app.getAppPath()
+            }),
+            designToolCredentialRoot: path.join(
+              userDataDir,
+              'design-tool-credentials'
+            ),
             designCanvasFence: designCanvasHost
           }
         : {})
@@ -1272,8 +1287,20 @@ void app.whenReady().then(async () => {
   installIpcHandlers();
   createWindow();
   softwareUpdateController.start();
-}).catch((error: unknown) => {
+}).catch(async (error: unknown) => {
   console.error('Task Monki failed to initialize its trusted local services.', error);
+  if (serviceCreated) {
+    await service.shutdown().catch((shutdownError: unknown) => {
+      console.error('Failed to shut down after application startup failed.', shutdownError);
+    });
+  }
+  await designCanvasHost?.shutdown().catch((shutdownError: unknown) => {
+    console.error('Failed to close the Design canvas after startup failed.', shutdownError);
+  });
+  await persistence?.close().catch((shutdownError: unknown) => {
+    console.error('Failed to close persistence after startup failed.', shutdownError);
+  });
+  quitAfterShutdown = true;
   app.quit();
 });
 

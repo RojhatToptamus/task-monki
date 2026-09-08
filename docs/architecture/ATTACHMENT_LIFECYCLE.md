@@ -1,9 +1,13 @@
 # Task Attachment and Design Reference Lifecycle
 
-Date: 2026-07-11
+Date: 2026-08-29
 
 Attachments are immutable task inputs or Design references. They are neither
 provider artifacts nor repository files. They never live in a Git worktree.
+
+This document describes current implemented behavior.
+Task Monki owns the files and the selected file set.
+Each provider adapter owns its wire format.
 
 ## Supported input
 
@@ -58,12 +62,13 @@ fails.
 ```mermaid
 flowchart LR
   Input["Pick, paste, or drop"] --> Local["Renderer-local files"]
-  Local -->|"Refine or Create"| Stage["Private staging directory"]
-  Stage --> Validate["Core admission and hashes"]
-  Validate -->|"Refine"| Inspect["Bounded read-only refinement"]
-  Validate -->|"Create"| Rename["Atomic rename to task directory"]
-  Rename --> Store["Atomic task-store snapshot"]
+  Local -->|"Refine or Create"| Validate["Core admission and hashes"]
+  Validate --> Stage["SQLite draft + immutable managed files"]
+  Stage -->|"Refine"| Inspect["Bounded read-only refinement"]
+  Stage -->|"Create"| Copy["Verified immutable task copies"]
+  Copy --> Store["One SQLite task transaction"]
   Store --> Task["Immutable task-owned inputs"]
+  Store --> Cleanup["Post-commit draft cleanup"]
 ```
 
 The renderer uses one task-creation token for retries. A response lost after a
@@ -76,12 +81,12 @@ publication adopts the files and creates the Design, active references, and
 seeded first turn. That first turn selects all initial references.
 
 Prompt refinement re-verifies the staged manifest and immutable files before
-provider submission. Text-like files are made available by exact managed path.
-Relevant images are supplied as native image inputs only when the selected
-refinement model reports image input support; otherwise the refiner receives
-metadata and must not claim to understand their visual contents. The attachment
-draft remains composer-owned and is still adopted only by successful task
-creation.
+provider submission. Its runtime run stores the exact ordered file selection.
+The workflow prompt contains safe metadata, not managed paths or transport
+choices. The provider adapter selects the wire format. The refinement result
+can claim inspection only when the runtime stored matching submission evidence.
+The attachment draft remains composer-owned. Only successful task creation
+adopts it.
 
 ## Design messages and drafts
 
@@ -113,26 +118,28 @@ the private staging data and does not publish partial message state.
 
 ## Storage
 
-Managed files live under the Task Monki data root:
+SQLite owns attachment drafts, task attachment records, and managed-file
+reachability. Immutable bytes live below the shared Task Monki managed-file
+root:
 
 ```text
-attachments/
-  staging/<draft-id>/
+storage/files/task/attachments/
+  staging/<draft-id>/<attachment-id>.<safe-extension>
   tasks/<task-id>/<attachment-id>.<safe-extension>
 ```
 
-Directories are `0700`, staging manifests and task state are `0600`, and
-immutable attachment files are `0400` on POSIX. Node does not provide equivalent
-owner/group/other mode enforcement on Windows, and Task Monki does not treat
-Windows `chmod` as an ACL boundary. Packaged Windows storage instead lives under
-the app's per-user data directory and inherits that managed root's Windows ACLs.
-This protects the normal per-user installation boundary but does not protect
-against another process running as the same OS user or against a user who has
-weakened the inherited ACLs. Names use opaque ids; original absolute paths are
-never stored. Durable records contain task id, attachment id, ordinal, display
-name, kind, media type, byte count, SHA-256, and creation time. The storage path
-is derived internally and is absent from snapshots, events, API responses, and
-submission evidence.
+Directories are private and immutable attachment files are `0400` on POSIX.
+Attachment metadata is stored only in SQLite. Node does not provide
+equivalent owner/group/other mode enforcement on Windows, and Task Monki does
+not treat Windows `chmod` as an ACL boundary. Packaged Windows storage instead
+lives under the app's per-user data directory and inherits that managed root's
+Windows ACLs. This protects the normal per-user installation boundary but does
+not protect against another process that runs as the same OS user. It also does
+not protect against a user who weakens the inherited ACLs. Names use opaque ids.
+Original absolute paths are never stored. Durable records contain task id,
+attachment id, ordinal, display name, kind, media type, byte count, SHA-256, and
+creation time. The storage key is internal and absent from snapshots, events,
+API responses, and submission evidence.
 
 File data is flushed before publication on every platform. Directory metadata
 is also synchronized on POSIX filesystems that support directory `fsync`.
@@ -142,21 +149,21 @@ claiming the additional POSIX directory-flush guarantee.
 
 Store shutdown stops admitting attachment operations synchronously, drains
 every operation already admitted, closes the attachment store, and only then
-releases the application-wide store lease. A caller cannot begin attachment I/O
-against a closing or closed store.
+releases the application-wide profile lease. A caller cannot begin attachment
+I/O against a closing or closed store.
 
-Task and blank Design creation verify the staging directory. They atomically
-rename it to the task id, then synchronize both parent directories before
-publishing `store.json`. A synchronization or store-publication failure renames
-the directory back. It synchronizes that rollback before reporting a retry-safe
-failure. If rollback cannot be proven, adoption fails explicitly as ambiguous.
-It must not be retried automatically. If final manifest cleanup is interrupted,
-startup verifies the task-owned files and removes the stale manifest. Startup
-also removes an adopted directory that has no durable task record.
+Task and blank Design creation verify each staged database reference and its
+immutable bytes, then publish verified immutable copies under task-owned keys.
+One SQLite transaction publishes the task, attachments, Design references or
+turn, and domain events. A transaction failure removes the unpublished task
+copies and leaves the draft retryable. After commit, draft rows and staged
+managed-file references are removed. Physical byte deletion happens only after
+that reference deletion commits. Startup reconciles interrupted or failed
+physical cleanup.
 
-The attachment store contains only task-owned records and one blob authority.
-Its complete current durable shape is validated before records are published
-to the task store.
+The attachment store validates the complete draft or task selection against
+SQLite size, digest, ownership, order, and storage-key metadata before exposing
+verified paths or bytes.
 
 Fork alternatives receive independent task-owned copies. This intentionally
 avoids shared-reference accounting and garbage collection at the small bounded
@@ -170,13 +177,11 @@ Normal task runs reuse all immutable task-owned files. Each Design turn uses
 only its stored reference selection. The first turn selects the references
 adopted during Design creation.
 
-A Codex thread cannot replace its active permission-profile identity during
-resume. If a Design turn changes the exact reference selection, Task Monki
-forks the existing provider thread with a new attested profile. The provider
-history continues, but the new thread can read only the current turn's selected
-managed files. The same Task Monki primary session owns the new provider thread.
-Task Monki unsubscribes the replaced thread so the App Server can unload it.
-An unchanged selection resumes the current thread without a fork.
+A restricted Codex session binds its first exact file grant before its first
+provider prompt. At that point, the local session has no provider history.
+After materialization, the access identity is immutable. A changed grant uses
+the existing replacement or fork path. An unchanged grant reuses the session.
+This rule does not apply to turn-local OpenCode or ACP content.
 
 Core reopens files with no-follow semantics immediately before provider
 delivery. It verifies managed-root containment, regular-file and non-symlink
@@ -188,39 +193,46 @@ described above. No run cache or second physical representation exists.
 
 Delivery is selected by the owning runtime:
 
-- Codex sends supported images as `localImage` and lists text-like files by
-  exact managed read-only path in an untrusted-data prompt manifest.
-- Other runtimes must advertise and negotiate the required content type before
-  the composer enables attachments.
+- Codex uses `localImage` for images and exact managed paths for text.
+  Runtime discovery rejects App Servers that cannot apply the required
+  permission profile.
+- OpenCode uses bounded native file parts with verified `data:` URLs. It uses
+  `text/plain` for admitted text and the admitted media type for images.
+- Grok ACP uses an embedded text resource. Its provider profile also permits
+  PNG and JPEG image blocks because Grok Build accepts them while its ACP
+  handshake reports no image support. This rule does not list versions or models.
+- Cursor ACP uses a bounded text block. It sends admitted images as native ACP
+  image blocks when the connected agent advertises image input.
+- Claude Agent ACP uses an embedded text resource. It sends admitted images as
+  native ACP image blocks when the connected agent advertises image input.
 
-OpenCode native file parts are intentionally not a Task Monki managed delivery
-mode. Its provider, plugin, MCP, and tool execution share a credential-bearing
-process without an attested network or filesystem confinement boundary.
-Task Monki therefore reports attachment delivery as unsupported for OpenCode
-and rejects attachments before starting or mutating provider state.
+The selected model and runtime must have effective image support. Codex and
+OpenCode report this per model. ACP v1 reports it for the agent, so catalog
+models use that negotiated fact. A narrow provider-local row can override a
+false flag after a real packaged test. The adapter reports the mismatch as
+capability drift.
 
-The selected model must report image support whenever images are present.
+Before submission, the run stores the exact ordered path-free selection.
+After admission, it stores matching path-free submission evidence. The evidence
+contains transport, verification time, correlation, and submission time. It
+proves Task Monki's transport action. It does not prove model use.
 
-After the owning runtime acknowledges a turn, Task Monki records path-free submission
-evidence: attachment id, ordinal, kind, media type, size, hash, submission mode,
-verification time, provider turn id, and submission time. This proves what Task
-Monki submitted, not that the model read or used it. Raw protocol journals can
-still contain provider-visible paths and belong only in Debug.
-
-Submission modes are truthful transport evidence: `localImage` for a native
-image input, `prompt-file-reference` for a managed path described in text, and
-`nativeFile` only for a future runtime whose native file-part boundary is
-explicitly supported and attested. OpenCode does not produce `nativeFile`
-submission evidence.
+The transport values are `native-image`, `native-file`, `embedded-resource`,
+`text-block`, and `managed-path`. Protocol journals remove attachment bytes,
+data URLs, marked inline text, and managed paths before durable storage.
 
 ## Confidentiality boundary
 
-An attached task or Design requires a runtime-supported restricted execution
-mode. Full access remains available for attachment-free tasks. Task Monki
-rejects full access when attachments are present. Network is forced off. Codex
-also attests a complete permission profile. It contains only the runtime
-minimum, exact worktree, and exact verified files. Other runtimes must enforce
-and document their native tool and permission boundaries.
+Attachment selection authorizes Task Monki to send those files to the selected
+provider. It does not claim to confine that provider process.
+
+Codex restricted profiles grant exact selected files, not their parent
+directory. Codex full access keeps its normal meaning. The user's network and
+external-tool choices also keep their normal meaning.
+
+OpenCode and ACP receive verified bytes through their native prompt protocols.
+Their processes run as the current OS user and use provider network access.
+Task Monki does not describe their native tool policies as OS sandboxes.
 
 For Codex submission in packaged Electron, web search, external MCP servers,
 and apps follow the user's app settings and do not make attachments ineligible.
@@ -246,15 +258,15 @@ different malicious process already running as the same OS user.
 
 ## Portability and retention
 
-Managed copies make tasks independent of their selected source files. A backup
-or export must keep `store.json` and `attachments/tasks` together while Task
-Monki is closed. It must also keep Design draft files and their owned staging
-together. Other staging is disposable and is removed on restart. Task
-attachments last for the task lifetime.
+Managed copies make tasks independent of their selected source files. Use the
+complete backup service. A copy of only the SQLite file or attachment directory
+is not a valid backup. A verified backup takes one SQLite snapshot and includes
+every live managed attachment that snapshot references. It also preserves
+Design draft rows and their retained staged files. Other staging is disposable
+and is removed on restart. Task attachments last for the task lifetime.
 
-Runtime conversation history and Task Monki protocol journals may retain image
-bytes, managed paths, hashes, or derived discussion after local task deletion.
-Journal data remains only until its bounded per-server segment retention prunes
-it; a pruned raw-message reference fails closed. Task Monki must not claim that
-deleting its task directory erases provider history. Task deletion unsubscribes
-the current live Codex thread but does not delete its stored provider history.
+Provider conversation history can retain files, paths, or derived discussion
+after local task deletion. Task Monki cannot erase that provider history.
+Task Monki protocol journals keep only bounded, redacted protocol evidence.
+A pruned raw-message reference fails closed. Task deletion unsubscribes the
+current live Codex thread but does not delete its stored provider history.

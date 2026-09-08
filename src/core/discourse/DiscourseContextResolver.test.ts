@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ContextSnapshotRecord } from '../../shared/discourse';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { git } from '../git/gitCli';
 import { DiscourseContextResolver } from './DiscourseContextResolver';
 import { DiscourseContextSnapshotService } from './DiscourseContextSnapshotService';
@@ -212,7 +212,8 @@ async function contextFixture() {
     '-m',
     'Initial fixture'
   ]);
-  const tasks = new FileTaskStore(path.join(root, 'tasks'));
+  const persistence = await openTestPersistence(path.join(root, 'profile'));
+  const tasks = persistence.tasks;
   const repository = await tasks.addRepository({
     path: repositoryPath,
     root: repositoryPath,

@@ -14,7 +14,7 @@ import type {
   OpenTargetDetectedApp,
   OpenTargetInspection,
   OpenTargetRef,
-  TaskSnapshot,
+  Repository,
   WorktreeRecord
 } from '../../shared/contracts';
 
@@ -42,7 +42,8 @@ interface DetectedOpenApp {
 }
 
 interface OpenTargetContext {
-  snapshot: TaskSnapshot;
+  getRepository(repositoryId: string): Promise<Repository | undefined>;
+  getWorktree(worktreeId: string): Promise<WorktreeRecord | undefined>;
 }
 
 interface ResolvedOpenTarget {
@@ -159,9 +160,7 @@ export class OpenTargetService {
     ref: OpenTargetRef,
     context: OpenTargetContext
   ): Promise<ResolvedOpenTarget> {
-    const repository = context.snapshot.repositories.find(
-      (candidate) => candidate.id === repositoryId
-    );
+    const repository = await context.getRepository(repositoryId);
     if (!repository) {
       throw new Error('Repository is not recorded by Task Monki.');
     }
@@ -176,7 +175,7 @@ export class OpenTargetService {
     ref: Extract<OpenTargetRef, { type: 'worktree' }>,
     context: OpenTargetContext
   ): Promise<ResolvedOpenTarget> {
-    const worktree = requireWorktree(context.snapshot, ref.worktreeId, ref.taskId);
+    const worktree = await requireWorktree(context, ref.worktreeId, ref.taskId);
     return await this.classifyPath(ref, worktree.worktreePath, worktree.worktreePath);
   }
 
@@ -184,7 +183,7 @@ export class OpenTargetService {
     ref: Extract<OpenTargetRef, { type: 'worktreeFile' }>,
     context: OpenTargetContext
   ): Promise<ResolvedOpenTarget> {
-    const worktree = requireWorktree(context.snapshot, ref.worktreeId, ref.taskId);
+    const worktree = await requireWorktree(context, ref.worktreeId, ref.taskId);
     const relativePath = this.normalizeRelativePath(ref.relativePath);
     const resolvedPath = this.pathApi.resolve(worktree.worktreePath, relativePath);
     this.assertPathWithinRoot(resolvedPath, worktree.worktreePath);
@@ -1039,16 +1038,13 @@ function appLabel(appId: OpenTargetAppId): string {
     : requireAppDefinition(appId).label;
 }
 
-function requireWorktree(
-  snapshot: TaskSnapshot,
+async function requireWorktree(
+  context: OpenTargetContext,
   worktreeId: string,
   taskId?: string
-): WorktreeRecord {
-  const worktree = snapshot.worktrees.find(
-    (candidate) =>
-      candidate.id === worktreeId && (!taskId || candidate.taskId === taskId)
-  );
-  if (!worktree) {
+): Promise<WorktreeRecord> {
+  const worktree = await context.getWorktree(worktreeId);
+  if (!worktree || (taskId && worktree.taskId !== taskId)) {
     throw new Error('Worktree is not recorded by Task Monki.');
   }
   return worktree;

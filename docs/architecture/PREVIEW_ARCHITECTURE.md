@@ -75,7 +75,7 @@ flowchart LR
   Graph --> Managed["Managed PostgreSQL / Redis runtime"]
   Graph --> Attached["One-shot attached checks"]
   Manager --> Gateway["Loopback preview gateway"]
-  Manager --> Store["FileTaskStore evidence"]
+  Manager --> Store["SqliteTaskStore evidence"]
   Compose --> Engine["Selected Docker context"]
   Managed --> Engine
   Attached -. "observe only" .-> External["External endpoints / producer routes"]
@@ -127,8 +127,10 @@ prepare a transient agent draft from sanitized bounded evidence. The complete
 YAML and structured generation report stay reviewable until explicit
 acceptance. Acceptance exclusively creates only the recipe and then returns to
 this same loader/resolver path; it cannot approve or start Preview. Agent
-generation has no durable task-store record and no parallel parser or runtime
-lifecycle. See [Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
+generation has no durable task-store record, second Preview parser, or second
+Preview execution lifecycle. It uses the shared agent runtime only for its
+transient read-only turn. See
+[Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
 
 For the bounded Next.js/npm profile, trusted authoring facts include a safely
 reduced root lockfile record. A compatible draft must declare one exact generic
@@ -178,6 +180,10 @@ the live worktree. An approved generic installation job may create them inside
 the captured generation workspace. The job runs once for that generation,
 before explicit consumers, and the generated files share the generation's
 exact cleanup boundary.
+
+Cleanup removes the exact owned generation first. It removes the per-task
+parent directory only when that directory is empty. A sibling generation keeps
+the shared parent in place.
 
 A `PreviewGenerationRecord` is immutable execution evidence plus a state
 machine. It binds:
@@ -307,7 +313,7 @@ Resource credentials are volatile main-process credentials:
   loopback endpoints and the in-memory credential;
 - values and generated connection URLs are delivered only to declared native
   recipients and are redacted from managed output;
-- values are not stored in `FileTaskStore`, plans, approvals, renderer state,
+- values are not stored in `SqliteTaskStore`, plans, approvals, renderer state,
   events, general IPC, host files, Docker argv/configured environment, bind
   mounts, logs, or inspection data.
 
@@ -636,7 +642,8 @@ in `preview.yaml`.
 
 ## Durable records and schema
 
-`FileTaskStore` contains these Preview collections alongside
+`SqliteTaskStore` persists these Preview collections in the shared application
+database alongside
 repository identities and saved views:
 
 - `previewPlans` and `previewApprovals`;
@@ -646,13 +653,15 @@ repository identities and saved views:
 - `previewLocalBindings`;
 - `previewComposeProjects`.
 
-Logs and source manifests are bounded artifacts, not embedded snapshot text.
-Private ciphertext and revision reachability live in a separate main-only vault
-format, never in the task-store schema.
+Logs and source manifests are bounded managed artifacts, not embedded record
+text. Private ciphertext is an immutable managed file. Dedicated SQLite vault
+tables own its current and retained revision reachability. Plaintext is never
+persisted.
 
 Preview ownership loads as one complete current-schema unit. The required
 collections, discriminators, and cross-record ownership are validated before
-the state is published; load-time schema conversion is outside this path.
+the state is published. Any required SQLite schema migration completes before
+these records load. Reconciliation does not reinterpret old payloads.
 
 ## Renderer model and user experience
 
@@ -692,7 +701,7 @@ is separate from destructive stop and keeps the current active preview.
 | Native/managed/attached runtimes | [`src/core/preview/runtime`](../../src/core/preview/runtime) |
 | Private inputs | [`src/core/preview/private`](../../src/core/preview/private) |
 | Compose adapter | [`src/core/preview/compose`](../../src/core/preview/compose) |
-| Storage and current-schema validation | [`FileTaskStore.ts`](../../src/core/storage/FileTaskStore.ts) |
+| Storage and current-schema validation | [`SqliteTaskStore.ts`](../../src/core/storage/SqliteTaskStore.ts), [`DatabaseMigrations.ts`](../../src/core/storage/sqlite/DatabaseMigrations.ts) |
 | Service/Electron boundary | [`TaskManagerService.ts`](../../src/core/app/TaskManagerService.ts), [`main.ts`](../../src/electron/main.ts), [`preload.ts`](../../src/electron/preload.ts) |
 | Renderer projection and UI | [`preview.ts`](../../src/renderer/model/preview.ts), [`PreviewPanel.tsx`](../../src/renderer/ui/PreviewPanel.tsx) |
 

@@ -78,6 +78,9 @@ export default defineConfig(() => {
     },
     test: {
       environment: 'node',
+      // Durable SQLite and managed-file operations are slower on Windows,
+      // especially on shared CI filesystems. Deadlocks still fail within 15 seconds.
+      testTimeout: process.platform === 'win32' ? 15_000 : 5_000,
       // Process, filesystem, and local-Git integration tests intentionally run
       // real subprocesses. Bound file-level concurrency so the suite tests
       // lifecycle behavior instead of saturating the host process table.

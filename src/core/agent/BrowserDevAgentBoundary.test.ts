@@ -48,32 +48,18 @@ function unsupportedCapabilities(): AgentRuntimeCapabilities {
           label: 'Read only',
           detail: 'Test read-only policy.',
           sandbox: 'READ_ONLY',
+          repositoryMutation: 'DENY',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
           networkAccess: 'DISABLED'
         }
       ]
     },
-    promptRefinement: unsupported,
+    readOnlyTurns: unsupported,
     modelCatalog: unsupported,
-    reasoningEffort: unsupported,
-    persistentSessions: unsupported,
-    sessionResume: unsupported,
-    sessionFork: unsupported,
     activeTurnSteering: unsupported,
     turnInterruption: unsupported,
-    truePause: unsupported,
-    interactiveApprovals: unsupported,
-    userInputRequests: unsupported,
-    goals: unsupported,
-    plans: unsupported,
-    detachedReview: unsupported,
-    review: unsupported,
-    subagents: unsupported,
-    backgroundTerminals: unsupported,
-    dynamicTools: unsupported,
     attachmentDelivery: unsupported,
-    runtimeRecovery: unsupported,
     extensions: {}
   };
 }

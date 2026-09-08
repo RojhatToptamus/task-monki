@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { TaskMonkiScenarioRegistry } from '../../testSupport/taskMonkiScenario';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import path from 'node:path';
 
 const scenarios = new TaskMonkiScenarioRegistry();
@@ -30,7 +30,7 @@ describe('Task agent profiles', () => {
       instructions: 'Updated library instructions.'
     });
     const run = await scenario.service.startRun({ taskId: task.id });
-    const prompt = await scenario.store.readArtifact(run.promptArtifactId);
+    const prompt = await scenario.runtimeStore.readArtifact(run.promptArtifactId);
     expect(prompt).toContain(original.instructions);
     expect(prompt).not.toContain('Updated library instructions.');
     expect(prompt).not.toContain('Caller-supplied false instructions.');
@@ -41,9 +41,9 @@ describe('Task agent profiles', () => {
     await scenario.completeRun(run.id, 'Profile claims tests passed.');
 
     const review = await scenario.service.startReview({ taskId: task.id, runId: run.id });
-    const reviewPrompt = await scenario.store.readArtifact(review.promptArtifactId);
+    const reviewPrompt = await scenario.runtimeStore.readArtifact(review.promptArtifactId);
     expect(reviewPrompt).not.toContain(original.instructions);
-    expect(scenario.agent.startedReviews[0]?.prompt).toBe(reviewPrompt);
+    expect(scenario.agent.startedRuntimeTurns.find((turn) => turn.run.id === review.id)?.prompt).toBe(reviewPrompt);
     expect(
       (await scenario.store.snapshot()).agentSessions.find(
         (session) => session.id === review.sessionId
@@ -51,15 +51,20 @@ describe('Task agent profiles', () => {
     ).toBe('READ_ONLY');
     await scenario.completeRun(review.id);
 
+    const repeatedReview = await scenario.service.startReview({ taskId: task.id, runId: run.id });
+    expect(repeatedReview.sessionId).not.toBe(review.sessionId);
+    expect(await scenario.runtimeStore.readArtifact(repeatedReview.promptArtifactId)).toBe(reviewPrompt);
+    await scenario.completeRun(repeatedReview.id);
+
     const selectedReview = await scenario.service.startReview({
       taskId: task.id,
       runId: run.id,
       agentProfileId: original.id
     });
-    const selectedReviewPrompt = await scenario.store.readArtifact(selectedReview.promptArtifactId);
+    const selectedReviewPrompt = await scenario.runtimeStore.readArtifact(selectedReview.promptArtifactId);
     expect(selectedReviewPrompt).toContain('Updated library instructions.');
     expect(selectedReviewPrompt).not.toContain(original.instructions);
-    expect(scenario.agent.startedReviews[1]?.prompt).toBe(selectedReviewPrompt);
+    expect(scenario.agent.startedRuntimeTurns.find((turn) => turn.run.id === selectedReview.id)?.prompt).toBe(selectedReviewPrompt);
     await scenario.completeRun(selectedReview.id);
 
     await scenario.service.deleteAgentProfile(original.id);
@@ -78,7 +83,7 @@ describe('Task agent profiles', () => {
       runId: run.id,
       instruction: 'Check cancellation too.'
     });
-    const followUpPrompt = await scenario.store.readArtifact(followUp.promptArtifactId);
+    const followUpPrompt = await scenario.runtimeStore.readArtifact(followUp.promptArtifactId);
     expect(followUpPrompt).toContain(original.instructions);
     expect(followUpPrompt).toContain('Check cancellation too.');
     await scenario.completeRun(followUp.id);
@@ -92,6 +97,12 @@ describe('Task agent profiles', () => {
     });
     expect(fork.agentProfile).toEqual(original);
 
+    await expect(scenario.persistence.database.write(async () => {
+      await scenario.store.setTaskAgentProfile(task.id, undefined);
+      throw new Error('abort profile assignment');
+    })).rejects.toThrow('abort profile assignment');
+    expect((await scenario.store.getTask(task.id))?.agentProfile).toEqual(original);
+
     const cleared = await scenario.service.setTaskAgentProfile({
       taskId: task.id,
       profileId: null
@@ -102,18 +113,19 @@ describe('Task agent profiles', () => {
       runId: followUp.id,
       instruction: 'Continue without a profile.'
     });
-    expect(await scenario.store.readArtifact(next.promptArtifactId)).toContain(
+    expect(await scenario.runtimeStore.readArtifact(next.promptArtifactId)).toContain(
       'Current custom agent profile: None.'
     );
-    expect(await scenario.store.readArtifact(run.promptArtifactId)).toBe(prompt);
+    expect(await scenario.runtimeStore.readArtifact(run.promptArtifactId)).toBe(prompt);
     await scenario.completeRun(next.id);
     await scenario.service.shutdown();
-    const reloaded = new FileTaskStore(path.join(scenario.rootDir, 'store'));
+    await scenario.persistence.close();
+    const reloaded = await openTestPersistence(path.join(scenario.rootDir, 'profile'));
     try {
-      await reloaded.init();
-      expect((await reloaded.getTask(fork.id))?.agentProfile).toEqual(original);
-      expect((await reloaded.getTask(task.id))?.agentProfile).toBeUndefined();
-      expect(await reloaded.readArtifact(run.promptArtifactId)).toBe(prompt);
+      await reloaded.tasks.init();
+      expect((await reloaded.tasks.getTask(fork.id))?.agentProfile).toEqual(original);
+      expect((await reloaded.tasks.getTask(task.id))?.agentProfile).toBeUndefined();
+      expect(await reloaded.agentRuntime.readArtifact(run.promptArtifactId)).toBe(prompt);
     } finally {
       await reloaded.close();
     }

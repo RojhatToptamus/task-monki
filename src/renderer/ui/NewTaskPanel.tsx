@@ -17,6 +17,10 @@ import type {
   AgentModel,
   AgentRuntimeState,
   CreateTaskRequest,
+  ExistingWorktree,
+  ImportTaskRequest,
+  ImportPreview,
+  PreviewImportRequest,
   RefinePromptRequest,
   RefinePromptResponse,
   Repository
@@ -64,6 +68,7 @@ import { useTaskAttachments } from './useTaskAttachments';
 import { PanelResizeHandle } from './PanelResizeHandle';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
+import { ImportWorkFields, branchTaskTitle } from './ImportWorkFields';
 
 export interface NewTaskTextDraft {
   agentProfileId?: string;
@@ -82,6 +87,10 @@ interface NewTaskPanelProps {
   refineDisabledReason?: string;
   attachmentsEnabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
+  onImport?(input: ImportTaskRequest): Promise<void>;
+  onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
+  onPreviewImport?(input: PreviewImportRequest): Promise<ImportPreview>;
+  onOpenExistingTask?(taskId: string): Promise<void>;
   onRefinePrompt(
     input: Pick<
       RefinePromptRequest,
@@ -111,13 +120,11 @@ interface NewTaskPanelProps {
 export function ExecutionPolicySelect({
   presets,
   selectedPreset,
-  attachmentsIncluded,
   disabled,
   onChange
 }: {
   presets: readonly AgentExecutionPolicyPreset[];
   selectedPreset?: AgentExecutionPolicyPreset;
-  attachmentsIncluded: boolean;
   disabled: boolean;
   onChange(presetId: string): void;
 }) {
@@ -182,17 +189,14 @@ export function ExecutionPolicySelect({
         <div className="tm-access-select__menu" id={popupId} role="menu" aria-label="Execution policy">
           {presets.map((preset) => {
             const selected = preset.id === selectedPreset?.id;
-            const blockedByAttachments =
-              preset.sandbox === 'DANGER_FULL_ACCESS' && attachmentsIncluded;
             return (
               <button
                 type="button"
                 role="menuitemradio"
                 className={`tm-access-select__option ${selected ? 'is-selected' : ''}`}
                 aria-checked={selected}
-                disabled={disabled || blockedByAttachments}
+                disabled={disabled}
                 key={preset.id}
-                title={blockedByAttachments ? 'Remove attachments to use full access.' : undefined}
                 onClick={() => {
                   onChange(preset.id);
                   close();
@@ -226,6 +230,10 @@ export function NewTaskPanel({
   refineDisabledReason,
   attachmentsEnabled = true,
   onCreate,
+  onImport,
+  onListExistingWorktrees,
+  onPreviewImport,
+  onOpenExistingTask,
   onRefinePrompt,
   onCancelPromptRefinement,
   onStageAttachmentBatch,
@@ -242,6 +250,26 @@ export function NewTaskPanel({
   const [agentProfileId, setAgentProfileId] = useState(initialTextDraft?.agentProfileId);
   const [title, setTitle] = useState(initialTextDraft?.title ?? '');
   const [prompt, setPrompt] = useState(initialTextDraft?.prompt ?? '');
+  const [importing, setImporting] = useState(false);
+  const [checkoutPath, setCheckoutPath] = useState('');
+  const [checkoutQuery, setCheckoutQuery] = useState('');
+  const [checkoutRefresh, setCheckoutRefresh] = useState(0);
+  const [comparison, setComparison] = useState<'local' | 'head' | 'commit'>('local');
+  const [commitRef, setCommitRef] = useState('');
+  const [importTitle, setImportTitle] = useState<string>();
+  const [previewResult, setPreviewResult] = useState<{
+    repositoryId: string;
+    worktreePath: string;
+    branchName: string;
+    baseRef?: string;
+    data?: ImportPreview;
+    error?: string;
+  }>();
+  const [checkouts, setCheckouts] = useState<{
+    repositoryId: string;
+    items: ExistingWorktree[];
+    error?: string;
+  }>();
   const [runtimeId, setRuntimeId] = useState(
     defaultAgentSettings?.runtimeId ??
       runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
@@ -366,14 +394,13 @@ export function NewTaskPanel({
     selectedRuntime &&
       selectedRuntime.preflight.capabilities.attachmentDelivery.maturity !== 'unsupported'
   );
-  const effectiveAttachmentsEnabled = attachmentsEnabled && runtimeSupportsAttachments;
+  const effectiveAttachmentsEnabled = !importing && attachmentsEnabled && runtimeSupportsAttachments;
   const runtimeModels = models.filter((candidate) => candidate.runtimeId === runtimeId);
   const selectedModel = runtimeModels.find((candidate) => candidate.id === modelId);
   const effectiveReasoningEffort =
     resolveReasoningEffort(selectedModel, reasoningEffort) ?? '';
   const networkDisabledByPreset = permissionPreset?.networkAccess === 'DISABLED';
   const networkRequiredByPreset = permissionPreset?.networkAccess === 'REQUIRED';
-  const fullAccessSelected = permissionPreset?.sandbox === 'DANGER_FULL_ACCESS';
   const availableRepositories = repositories.filter(
     (repository) => repository.status === 'AVAILABLE'
   );
@@ -388,6 +415,56 @@ export function NewTaskPanel({
   const selectedRepository = availableRepositories.find(
     (repository) => repository.id === selectedRepositoryId
   );
+  const checkoutOptions = checkouts?.repositoryId === selectedRepositoryId ? checkouts : undefined;
+  const selectedCheckout = checkoutOptions?.items.find((item) => item.worktreePath === checkoutPath);
+  const effectiveImportTitle = importTitle ?? branchTaskTitle(selectedCheckout?.branchName);
+  const requestedBaseRef = comparison === 'head' ? 'HEAD' : comparison === 'commit' ? commitRef.trim() : undefined;
+  const currentPreview = importing && previewResult?.repositoryId === selectedRepositoryId &&
+    previewResult.worktreePath === selectedCheckout?.worktreePath && previewResult.branchName === selectedCheckout?.branchName && previewResult.baseRef === requestedBaseRef
+      ? previewResult : undefined;
+  const importDisabledReason = !selectedCheckout ? 'Select a checkout.'
+    : selectedCheckout.unavailableReason
+    ?? (selectedCheckout.existingTaskId ? undefined
+      : comparison === 'commit' && !commitRef.trim() ? 'Enter a branch or commit.'
+      : currentPreview?.error ?? currentPreview?.data?.unavailableReason
+      ?? (!currentPreview?.data ? 'Checking changes…' : !effectiveImportTitle.trim() ? 'Enter a title.' : undefined));
+  useEffect(() => {
+    if (!importing || !selectedCheckout?.branchName || selectedCheckout.unavailableReason ||
+        selectedCheckout.existingTaskId || !onPreviewImport || (comparison === 'commit' && !requestedBaseRef)) return;
+    let canceled = false;
+    const request = { repositoryId: selectedRepositoryId, worktreePath: selectedCheckout.worktreePath,
+      branchName: selectedCheckout.branchName, baseRef: requestedBaseRef };
+    const timer = window.setTimeout(() => {
+      void onPreviewImport(request).then(
+        (data) => { if (!canceled) setPreviewResult({ ...request, data }); },
+        (caught: unknown) => { if (!canceled) setPreviewResult({ ...request,
+          error: caught instanceof Error ? caught.message : 'Could not inspect this checkout.' }); }
+      );
+    }, comparison === 'commit' ? 250 : 0);
+    return () => { canceled = true; window.clearTimeout(timer); };
+  }, [importing, selectedRepositoryId, selectedCheckout, comparison, requestedBaseRef, onPreviewImport]);
+  useEffect(() => {
+    if (!importing || !selectedRepositoryId || !onListExistingWorktrees) return;
+    let canceled = false;
+    setCheckouts(undefined);
+    void onListExistingWorktrees(selectedRepositoryId).then(
+      (items) => {
+        if (!canceled) {
+          setCheckouts({ repositoryId: selectedRepositoryId, items });
+          const available = items.filter((item) => !item.unavailableReason);
+          if (available.length === 1) setCheckoutPath(available[0]!.worktreePath);
+        }
+      },
+      (caught: unknown) => {
+        if (!canceled) setCheckouts({
+          repositoryId: selectedRepositoryId,
+          items: [],
+          error: caught instanceof Error ? caught.message : 'Could not list checkouts.'
+        });
+      }
+    );
+    return () => { canceled = true; };
+  }, [importing, selectedRepositoryId, onListExistingWorktrees, checkoutRefresh]);
   const composerLocked =
     Boolean(disabled) || isSubmitting || isRefining || creationOutcomeUnknown;
 
@@ -402,7 +479,7 @@ export function NewTaskPanel({
   };
   const attachments = useTaskAttachments({
     enabled: effectiveAttachmentsEnabled,
-    blocked: composerLocked || fullAccessSelected,
+    blocked: composerLocked,
     model: selectedModel,
     onStageBatch: onStageAttachmentBatch,
     onDiscard: (draftId) => onDiscardAttachmentDraft({ draftId }),
@@ -424,11 +501,9 @@ export function NewTaskPanel({
     drop: dropAttachments,
     close: closeAttachments
   } = attachments;
-  const attachmentsRestrictNetwork = activeAttachmentItems.length > 0;
   const effectiveNetworkAccess =
-    !attachmentsRestrictNetwork &&
-    (networkRequiredByPreset ||
-      (permissionPreset?.networkAccess === 'OPTIONAL' && networkAccess));
+    networkRequiredByPreset ||
+    (permissionPreset?.networkAccess === 'OPTIONAL' && networkAccess);
   const selectedModelRejectsImages = Boolean(attachmentModelError);
   const selectedRuntimeRejectsAttachments =
     activeAttachmentItems.length > 0 && !effectiveAttachmentsEnabled;
@@ -508,6 +583,37 @@ export function NewTaskPanel({
     let creationNeedsUnchangedRetry = false;
     let created = false;
     try {
+      if (importing) {
+        if (!selectedCheckout || selectedCheckout.unavailableReason || !onImport) {
+          throw new Error('Select an available checkout.');
+        }
+        if (selectedCheckout.existingTaskId && onOpenExistingTask) {
+          await onOpenExistingTask(selectedCheckout.existingTaskId);
+        } else {
+          if (importDisabledReason || !currentPreview?.data) throw new Error(importDisabledReason ?? 'Check the comparison before importing.');
+          await onImport({
+            repositoryId: selectedRepositoryId,
+            worktreePath: selectedCheckout.worktreePath,
+            branchName: selectedCheckout.branchName!,
+            baseRef: currentPreview.data.baseRef,
+            title: effectiveImportTitle,
+            prompt: '',
+            runtimeId: runtimeId || undefined,
+            agentSettings: {
+              ...defaultAgentSettings,
+              runtimeId: runtimeId || undefined,
+              model: selectedModel?.model,
+              modelProvider: selectedModel?.modelProvider,
+              reasoningEffort: effectiveReasoningEffort || undefined,
+              ...(permissionPreset ? settingsForExecutionPolicyPreset(permissionPreset, {
+                networkAccess: effectiveNetworkAccess
+              }) : {})
+            }
+          });
+        }
+        created = true;
+        return;
+      }
       const attachmentDraftId = await attachments.prepareForCreate();
       if (!permissionPreset) {
         throw new Error('The selected runtime does not expose an execution policy.');
@@ -670,7 +776,9 @@ export function NewTaskPanel({
     setRestorable(undefined);
   };
 
-  const createDisabled =
+  const createDisabled = importing
+    ? Boolean(disabled) || isSubmitting || Boolean(importDisabledReason)
+    :
     Boolean(disabled) ||
     isSubmitting ||
     isRefining ||
@@ -700,6 +808,13 @@ export function NewTaskPanel({
         className="slideover__panel"
         onSubmit={submit}
         onKeyDown={(event) => {
+          if (event.key === 'Escape' && importing && checkoutQuery) {
+            event.preventDefault();
+            event.stopPropagation();
+            setCheckoutQuery('');
+            event.currentTarget.querySelector<HTMLInputElement>('input[aria-label="Filter checkouts"]')?.focus();
+            return;
+          }
           if (
             event.key !== 'Enter' ||
             (!event.metaKey && !event.ctrlKey) ||
@@ -727,9 +842,29 @@ export function NewTaskPanel({
           onChange={resizePanel}
         />
         <header className="slideover__header">
-          <div className="slideover__heading">
+          {onImport ? (
+            <div className="segmented" role="group" aria-label="Task source" onKeyDown={(event) => {
+              if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+              event.preventDefault();
+              const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
+              next?.focus(); next?.click();
+            }}>
+              {[false, true].map((value) => (
+                <button key={String(value)} type="button" className="segmented__btn"
+                  aria-pressed={importing === value}
+                  disabled={composerLocked || attachmentsBusy || activeAttachmentItems.length > 0}
+                  title={activeAttachmentItems.length > 0 ? 'Remove attachments before changing the task source.' : undefined}
+                  onClick={() => {
+                    if (value === importing) return;
+                    setImporting(value); setPreviewResult(undefined); setError(undefined);
+                  }}>
+                  {value ? 'Import existing work' : 'New work'}
+                </button>
+              ))}
+            </div>
+          ) : <div className="slideover__heading">
             <strong>New task</strong>
-          </div>
+          </div>}
           <button
             type="button"
             className="slideover__close"
@@ -743,16 +878,45 @@ export function NewTaskPanel({
 
         <div className="slideover__body">
           <section className="newtask-section" aria-label="Task essentials">
-            <fieldset className="field tm-newtask-repository">
+            {!(importing && selectedCheckout?.existingTaskId) ? <fieldset className="field tm-newtask-repository">
               <legend>Repository</legend>
               <RepositorySelect
                 options={repositoryOptions}
                 selectedId={selectedRepositoryId}
                 disabled={composerLocked || repositoryOptions.length === 0}
                 ariaLabel="Task repository"
-                onChange={setRequestedRepositoryId}
+                onChange={(id) => {
+                  if (id === selectedRepositoryId) return;
+                  setRequestedRepositoryId(id);
+                  setCheckoutPath('');
+                  setCheckoutQuery('');
+                  setComparison('local');
+                  setCommitRef('');
+                  setPreviewResult(undefined);
+                }}
               />
-            </fieldset>
+            </fieldset> : null}
+            {importing ? (
+              <ImportWorkFields key={selectedRepositoryId} checkouts={checkoutOptions} selected={selectedCheckout} locked={composerLocked}
+                query={checkoutQuery} onQuery={setCheckoutQuery}
+                onSelect={(value) => {
+                  if (value === checkoutPath) return;
+                  setCheckoutPath(value); setPreviewResult(undefined); setError(undefined);
+                }}
+                comparison={comparison} onComparison={(value) => {
+                  if (value === comparison) return;
+                  setComparison(value); setPreviewResult(undefined); setError(undefined);
+                }}
+                commitRef={commitRef} onCommitRef={(value) => {
+                  if (value === commitRef) return;
+                  setCommitRef(value); setPreviewResult(undefined); setError(undefined);
+                }}
+                preview={currentPreview?.data} previewError={currentPreview?.error}
+                title={effectiveImportTitle} onTitle={setImportTitle} repositoryName={selectedRepository?.name}
+                onRetry={() => { setCheckouts(undefined); setPreviewResult(undefined); setCheckoutRefresh((value) => value + 1); }}
+              />
+            ) : null}
+            {!importing ? <>
             <AgentProfileSelect
               profiles={agentProfiles}
               value={agentProfileId}
@@ -778,7 +942,7 @@ export function NewTaskPanel({
                 <span className="field__label">
                   <label htmlFor="task-description">Description</label>
                 </span>
-                <span className="field__header-actions">
+                {!importing ? <span className="field__header-actions">
                   {restorable !== undefined && !proposal ? (
                     <button
                       className="field__restore"
@@ -809,7 +973,7 @@ export function NewTaskPanel({
                       {isRefining ? 'Refining' : 'Refine'}
                     </span>
                   </button>
-                </span>
+                </span> : null}
               </span>
               <AttachmentComposerShell
                 attachments={attachments}
@@ -818,9 +982,7 @@ export function NewTaskPanel({
                 bindDropTarget={false}
                 removeDisabled={composerLocked}
                 addButtonTitle={
-                  fullAccessSelected
-                    ? 'Choose a runtime policy with managed attachment isolation.'
-                    : effectiveAttachmentsEnabled
+                  effectiveAttachmentsEnabled
                     ? `Stored locally and shared read-only with ${
                         selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent'
                       } for this task.`
@@ -832,19 +994,17 @@ export function NewTaskPanel({
                         : 'Attachments require file-read isolation between tasks.'
                 }
                 hint={
-                  fullAccessSelected
-                    ? `Unavailable with ${permissionPreset?.label ?? 'this policy'}`
-                    : !effectiveAttachmentsEnabled
-                      ? runtimeSupportsAttachments
-                        ? 'Unavailable in this build'
-                        : 'Unavailable for this runtime'
-                      : isReadingClipboardImage
-                        ? 'Reading clipboard image…'
-                        : activeAttachmentItems.length > 0
-                          ? `${activeAttachmentItems.length} ${
-                              activeAttachmentItems.length === 1 ? 'file' : 'files'
-                            } · ${formatAttachmentBytes(attachmentByteCount)}`
-                          : 'Paste or drop files'
+                  !effectiveAttachmentsEnabled
+                    ? runtimeSupportsAttachments
+                      ? 'Unavailable in this build'
+                      : 'Unavailable for this runtime'
+                    : isReadingClipboardImage
+                      ? 'Reading clipboard image…'
+                      : activeAttachmentItems.length > 0
+                        ? `${activeAttachmentItems.length} ${
+                            activeAttachmentItems.length === 1 ? 'file' : 'files'
+                          } · ${formatAttachmentBytes(attachmentByteCount)}`
+                        : 'Paste or drop files'
                 }
               >
                 <textarea
@@ -890,11 +1050,12 @@ export function NewTaskPanel({
                 />
               ) : null}
             </div>
+            </> : null}
           </section>
 
-          <details className="newtask-settings">
+          {!(importing && selectedCheckout?.existingTaskId) ? <details className="newtask-settings">
             <summary>
-              <span className="newtask-settings__title">Run configuration</span>
+              <span className="newtask-settings__title">Run configuration{importing ? <small>Applies when you start an agent</small> : null}</span>
               <span className="newtask-settings__summary">
                 {selectedRuntime?.preflight.runtime.displayName ?? 'Default runtime'}
                 {selectedModel ? ` · ${selectedModel.displayName}` : ''}
@@ -933,7 +1094,6 @@ export function NewTaskPanel({
                       <ExecutionPolicySelect
                         presets={permissionPresets}
                         selectedPreset={permissionPreset}
-                        attachmentsIncluded={activeAttachmentItems.length > 0}
                         disabled={composerLocked}
                         onChange={setPermissionPresetId}
                       />
@@ -948,15 +1108,13 @@ export function NewTaskPanel({
                     Network access
                   </span>
                   <span className="network-toggle__state">
-                    {attachmentsRestrictNetwork
-                      ? 'Disabled while attachments are included.'
-                      : networkDisabledByPreset
-                        ? `Disabled by ${permissionPreset?.label ?? 'this mode'}.`
-                        : networkRequiredByPreset
-                          ? 'Required by this execution policy.'
-                          : effectiveNetworkAccess
-                            ? 'Enabled - commands may use the network during this task.'
-                            : 'Disabled - network use stays outside the task boundary.'}
+                    {networkDisabledByPreset
+                      ? `Disabled by ${permissionPreset?.label ?? 'this mode'}.`
+                      : networkRequiredByPreset
+                        ? 'Required by this execution policy.'
+                        : effectiveNetworkAccess
+                          ? 'Enabled - commands may use the network during this task.'
+                          : 'Disabled - network use stays outside the task boundary.'}
                   </span>
                 </div>
                 <button
@@ -967,19 +1125,14 @@ export function NewTaskPanel({
                   role="switch"
                   aria-labelledby="task-network-access-label"
                   aria-checked={effectiveNetworkAccess}
-                  disabled={
-                    composerLocked ||
-                    networkDisabledByPreset ||
-                    networkRequiredByPreset ||
-                    attachmentsRestrictNetwork
-                  }
+                  disabled={composerLocked || networkDisabledByPreset || networkRequiredByPreset}
                   onClick={() => setNetworkAccess((current) => !current)}
                 >
                   <span />
                 </button>
               </div>
             </div>
-          </details>
+          </details> : null}
 
           {error ? (
             <p className="form-error" role="alert">
@@ -989,7 +1142,7 @@ export function NewTaskPanel({
           {currentRefinementWarning ? (
             <p className="form-warning">{currentRefinementWarning}</p>
           ) : null}
-          {selectedRuntime && !selectedRuntimeReadiness.canStart ? (
+          {!importing && selectedRuntime && !selectedRuntimeReadiness.canStart ? (
             <p className="form-error">
               {selectedRuntimeReadiness.detail}
               {selectedRuntimeReadiness.nextAction
@@ -998,10 +1151,10 @@ export function NewTaskPanel({
               You can create the task now and start it after the runtime is available.
             </p>
           ) : null}
-          {selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
+          {!importing && selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
             <p className="form-warning">{selectedRuntimeReadiness.detail}</p>
           ) : null}
-          {selectedRuntimeReadiness.warnings.map((warning) => (
+          {!importing && selectedRuntimeReadiness.warnings.map((warning) => (
             <p className="form-warning" key={`${warning.code}:${warning.message}`}>
               {warning.message}
             </p>
@@ -1009,33 +1162,36 @@ export function NewTaskPanel({
         </div>
 
         <footer className="slideover__footer">
+          {importing ? <p className="import-work__footer-note" role="status">
+            {importDisabledReason ?? (selectedCheckout?.existingTaskId ? 'This checkout is already tracked.' : 'In progress · No files move. No agent starts.')}
+          </p> : null}
           <div className="slideover__footer-actions">
             <button
               type="button"
-              className="outline-button"
+              className={importing ? 'ghost-button' : 'outline-button'}
               disabled={isSubmitting}
               onClick={closePanel}
             >
               {creationOutcomeUnknown ? 'Close' : 'Cancel'}
             </button>
-            <button
+            {!(importing && selectedCheckout?.existingTaskId) ? <button
               className="primary-button"
               type="submit"
               disabled={createDisabled}
               aria-busy={isSubmitting}
               aria-keyshortcuts="Meta+Enter Control+Enter"
               aria-label={
-                selectedRepository
+                importing ? 'Import' : selectedRepository
                   ? `Create task in ${selectedRepository.name}`
                   : 'Create task'
               }
             >
-              {isSubmitting
+              {importing ? (isSubmitting ? 'Importing…' : 'Import') : isSubmitting
                 ? 'Creating…'
                 : creationOutcomeUnknown
                   ? 'Retry creation'
                   : 'Create task'}
-            </button>
+            </button> : null}
           </div>
         </footer>
       </form>

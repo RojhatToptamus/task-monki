@@ -7,8 +7,12 @@ import type {
   PreviewComposePlan,
   PreviewOciEngineIdentity
 } from '../../../shared/contracts';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import {
+  closeTestTaskStore,
+  openTestTaskStore
+} from '../../../testSupport/persistenceFixture';
 import {
   PreviewComposeActivationError,
   PreviewComposeResetRequiredError,
@@ -16,7 +20,9 @@ import {
 } from './PreviewComposeRuntime';
 
 const roots: string[] = [];
+const stores: SqliteTaskStore[] = [];
 afterEach(async () => {
+  await Promise.all(stores.splice(0).map(closeTestTaskStore));
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
@@ -134,6 +140,7 @@ describe('PreviewComposeRuntime', () => {
     fixture.inspection = next;
     const generationRoot = path.join(path.dirname(fixture.input().generationRoot), 'generation-2');
     await fs.mkdir(generationRoot);
+    await fixture.addGeneration('generation-2', generationRoot);
     const updated = await fixture.runtime.apply(fixture.input({
       generationId: 'generation-2',
       generationRoot,
@@ -162,6 +169,7 @@ describe('PreviewComposeRuntime', () => {
 
     const generationRoot = path.join(path.dirname(fixture.input().generationRoot), 'generation-reset');
     await fs.mkdir(generationRoot);
+    await fixture.addGeneration('generation-reset', generationRoot);
     const reset = await fixture.runtime.apply(fixture.input({
       generationId: 'generation-reset',
       generationRoot
@@ -182,6 +190,7 @@ describe('PreviewComposeRuntime', () => {
     controller.abort();
     const generationRoot = path.join(path.dirname(fixture.input().generationRoot), 'generation-canceled');
     await fs.mkdir(generationRoot);
+    await fixture.addGeneration('generation-canceled', generationRoot);
 
     await expect(fixture.runtime.apply(fixture.input({
       generationId: 'generation-canceled',
@@ -272,9 +281,98 @@ async function runtimeFixture(failUp: boolean, data = false, failContainerRemova
   await fs.mkdir(sourcePath);
   await fs.mkdir(generationRoot);
   await fs.writeFile(path.join(sourcePath, 'compose.yaml'), 'services: {}\n');
-  const store = new FileTaskStore(path.join(root, 'store'));
+  const store = await openTestTaskStore(path.join(root, 'store'));
+  stores.push(store);
   const task = await store.createTask({ title: 'Compose', prompt: 'Test', repositoryId: (await addTestRepository(store, sourcePath)).id });
   const taskId = task.id;
+  const { iteration, worktree } = await store.createIterationAndWorktree({
+    task,
+    branchName: 'codex/compose-preview',
+    worktreePath: sourcePath,
+    baseSha: 'base'
+  });
+  const createdAt = new Date().toISOString();
+  const previewPlan = await store.savePreviewPlan({
+    id: 'plan-1',
+    taskId,
+    iterationId: iteration.id,
+    worktreeId: worktree.id,
+    planSource: {
+      type: 'REPOSITORY_RECIPE',
+      recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1,
+      recipeDigest: 'recipe'
+    },
+    executionDigest: 'execution',
+    executionPlan: {
+      version: 1,
+      jobs: [],
+      resources: [],
+      services: [],
+      workers: [],
+      routes: [],
+      scenarios: [{ id: 'default', jobs: [], resources: [] }],
+      selectedScenarioId: 'default'
+    },
+    warnings: [],
+    createdAt
+  });
+  const approval = await store.savePreviewApproval({
+    id: 'approval-1',
+    taskId,
+    planId: previewPlan.id,
+    executionDigest: previewPlan.executionDigest,
+    scope: 'TASK',
+    approvedAt: createdAt
+  });
+  const snapshot = await store.recordGitSnapshot({
+    taskId,
+    iterationId: iteration.id,
+    worktreeId: worktree.id,
+    worktreePath: sourcePath,
+    repoRoot: sourcePath,
+    gitCommonDir: path.join(sourcePath, '.git'),
+    headSha: 'head',
+    branch: worktree.branchName,
+    aheadCount: 0,
+    behindCount: 0,
+    stagedCount: 0,
+    unstagedCount: 0,
+    untrackedCount: 0,
+    conflictedCount: 0,
+    commitsAheadOfBase: 0,
+    committedDiffFileCount: 0,
+    workingDiffFileCount: 0,
+    diffStat: '',
+    dirtyFingerprint: 'dirty',
+    status: 'DIRTY'
+  }, '');
+  await store.savePreviewGeneration({
+    id: 'generation-1',
+    previewKey: 'task-preview',
+    taskId,
+    iterationId: iteration.id,
+    worktreeId: worktree.id,
+    planId: previewPlan.id,
+    executionAuthority: {
+      type: 'USER_APPROVAL',
+      approvalId: approval.id,
+      executionDigest: previewPlan.executionDigest
+    },
+    source: {
+      type: 'WORKTREE_SNAPSHOT',
+      gitSnapshotId: snapshot.id,
+      headSha: snapshot.headSha!,
+      dirtyFingerprint: snapshot.dirtyFingerprint
+    },
+    workspacePath: generationRoot,
+    state: 'CREATED',
+    routingState: 'CANDIDATE',
+    freshness: 'CURRENT',
+    routes: [],
+    createdAt,
+    updatedAt: createdAt
+  });
   let currentInspection = inspection(data);
   const objects = new Map<string, Record<string, unknown>>();
   const removed: string[] = [];
@@ -399,6 +497,18 @@ async function runtimeFixture(failUp: boolean, data = false, failContainerRemova
         async beforeActivation() {},
         ...overrides
       };
+    },
+    async addGeneration(id: string, workspacePath: string) {
+      const original = await store.getPreviewGeneration('generation-1');
+      if (!original) throw new Error('Missing fixture preview generation.');
+      await store.savePreviewGeneration({
+        ...original,
+        id,
+        workspacePath,
+        replacesGenerationId: original.id,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
     },
     blockNextContainerInspection() {
       let markStarted!: () => void;

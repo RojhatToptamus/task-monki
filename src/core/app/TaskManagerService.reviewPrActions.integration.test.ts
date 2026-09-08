@@ -2,13 +2,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { RunRecord } from '../../shared/contracts';
+import type { RunRecord, StartRunRequest } from '../../shared/contracts';
 import {
   TaskMonkiScenarioRegistry,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
-import { createDomainEvent } from '../storage/domainEvent';
 
 const scenarios = new TaskMonkiScenarioRegistry();
 const createTaskMonkiScenario = scenarios.create.bind(scenarios);
@@ -18,6 +17,25 @@ afterEach(async () => {
 });
 
 describe('TaskManagerService review and PR action coordination', () => {
+  it('rejects review mode on the generic run entry point', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-generic-review-guard'
+    });
+    const task = await scenario.createTask({
+      title: 'Review entry point guard',
+      prompt: 'Keep review work on the shared read-only path.'
+    });
+
+    await expect(
+      scenario.service.startRun({
+        taskId: task.id,
+        mode: 'REVIEW'
+      } as unknown as StartRunRequest)
+    ).rejects.toThrow('Start a code review with the review action.');
+    expect(scenario.agent.startedTurns).toHaveLength(0);
+    expect(scenario.agent.startedReviews).toHaveLength(0);
+  });
+
   it('rejects review for a failed implementation and keeps retry recovery in progress', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-failed-run-review-guard'
@@ -28,18 +46,10 @@ describe('TaskManagerService review and PR action coordination', () => {
     });
     const run = await scenario.service.startRun({ taskId: task.id });
 
-    await scenario.store.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_RUN_FAILED',
-        taskId: task.id,
-        iterationId: run.iterationId,
-        runId: run.id,
-        worktreeId: run.worktreeId,
-        agentSessionId: run.sessionId,
-        source: 'provider',
-        payload: { error: 'Provider rejected the turn.' }
-      })
-    );
+    await scenario.transitionRun(run.id, {
+      status: 'FAILED',
+      terminalReason: 'Provider rejected the turn.'
+    });
 
     await expect(
       scenario.service.startReview({ taskId: task.id, runId: run.id })
@@ -60,18 +70,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     });
     const run = await scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' });
 
-    await scenario.store.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_RUN_COMPLETED',
-        taskId: task.id,
-        iterationId: run.iterationId,
-        runId: run.id,
-        worktreeId: run.worktreeId,
-        agentSessionId: run.sessionId,
-        source: 'provider',
-        payload: { terminalStatus: 'completed' }
-      })
-    );
+    await scenario.completeRun(run.id, 'Analysis completed.');
 
     await expect(
       scenario.service.startReview({ taskId: task.id, runId: run.id })

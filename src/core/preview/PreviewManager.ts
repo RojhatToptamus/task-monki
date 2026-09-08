@@ -19,9 +19,9 @@ import type {
 } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
 import {
-  FileTaskStore,
+  SqliteTaskStore,
   type DesignPreviewSettlementInput
-} from '../storage/FileTaskStore';
+} from '../storage/SqliteTaskStore';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { boundedPreviewFailure } from './PreviewFailure';
 import {
@@ -128,7 +128,7 @@ export class PreviewManager {
   private shutdownWork?: Promise<void>;
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly events: AppEventBus,
     private readonly recipeLoader: PreviewRecipeLoader,
     private readonly planResolver: PreviewPlanResolver,
@@ -247,8 +247,13 @@ export class PreviewManager {
     return { status: await this.sweepPrivateVault() };
   }
 
-  async retireDeletedTaskPrivateInputs(taskId: string): Promise<void> {
-    await this.privateVault?.retireTask(taskId);
+  retireDeletedTaskPrivateInputs<T>(
+    taskId: string,
+    deleteTask: () => Promise<T>
+  ): Promise<T> {
+    return this.privateVault
+      ? this.privateVault.retireTaskWith(taskId, deleteTask)
+      : deleteTask();
   }
 
   approve(input: { taskId: string; planId: string; executionDigest: string }): Promise<PreviewApprovalRecord> {
@@ -984,7 +989,7 @@ export class PreviewManager {
           Object.fromEntries(routes.map((route) => [route.hostname, { host: route.targetHost, port: route.targetPort }])),
           replaced?.id
         );
-        let cutover: Awaited<ReturnType<FileTaskStore['cutoverPreviewGenerations']>>;
+        let cutover: Awaited<ReturnType<SqliteTaskStore['cutoverPreviewGenerations']>>;
         try {
           cutover = await this.store.cutoverPreviewGenerations({
             candidate,
@@ -1136,7 +1141,7 @@ export class PreviewManager {
           }])),
           replaced?.id
         );
-        let cutover: Awaited<ReturnType<FileTaskStore['cutoverPreviewGenerations']>>;
+        let cutover: Awaited<ReturnType<SqliteTaskStore['cutoverPreviewGenerations']>>;
         try {
           cutover = await this.store.cutoverPreviewGenerations({
             candidate,

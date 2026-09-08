@@ -1,6 +1,10 @@
-import type { RunRecord, TaskSnapshot } from '../../shared/contracts';
+import type {
+  AgentRunStatus,
+  AgentServerInstance,
+  InteractionRequestStatus
+} from '../../shared/agent';
 
-const ACTIVE_OWNERSHIP_STATUSES: readonly RunRecord['status'][] = [
+const ACTIVE_OWNERSHIP_STATUSES: readonly AgentRunStatus[] = [
   'QUEUED',
   'STARTING',
   'RUNNING',
@@ -19,7 +23,7 @@ const NONTERMINAL_SERVER_STATUSES = [
 ] as const;
 
 export function agentServersOwnedByPreviousApplication(
-  snapshot: TaskSnapshot,
+  snapshot: { agentServers: AgentServerInstance[] },
   runtimeId?: string
 ) {
   return snapshot.agentServers.filter(
@@ -32,7 +36,14 @@ export function agentServersOwnedByPreviousApplication(
 }
 
 export function agentServersRequiringLossRecovery(
-  snapshot: TaskSnapshot,
+  snapshot: {
+    agentServers: AgentServerInstance[];
+    runs: Array<{ status: AgentRunStatus; serverInstanceId?: string }>;
+    interactionRequests: Array<{
+      status: InteractionRequestStatus;
+      serverInstanceId: string;
+    }>;
+  },
   runtimeId: string
 ) {
   const serversWithActiveOwnership = new Set([

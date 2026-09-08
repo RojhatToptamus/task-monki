@@ -7,10 +7,9 @@ import {
 } from './DiscourseContextSnapshotService';
 
 describe('discourseExecutionSettings', () => {
-  it('does not reinterpret a runtime identity fallback as an explicit model provider', () => {
+  it('does not invent a model provider for a providerless runtime model', () => {
     expect(discourseExecutionSettings(assignment({
-      runtimeId: 'codex',
-      modelProvider: 'codex'
+      runtimeId: 'codex'
     }))).toEqual({
       model: 'gpt-5.6-sol',
       reasoningEffort: 'low',
@@ -18,6 +17,18 @@ describe('discourseExecutionSettings', () => {
       networkAccess: false,
       approvalPolicy: 'NEVER',
       approvalsReviewer: 'user'
+    });
+  });
+
+  it('preserves an explicit model provider that equals the runtime id', () => {
+    expect(discourseExecutionSettings(assignment({
+      runtimeId: 'opencode',
+      modelProvider: 'opencode'
+    }))).toMatchObject({
+      modelProvider: 'opencode',
+      sandbox: 'READ_ONLY',
+      networkAccess: false,
+      approvalPolicy: 'NEVER'
     });
   });
 

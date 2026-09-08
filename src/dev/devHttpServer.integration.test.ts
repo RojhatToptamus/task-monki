@@ -1,9 +1,11 @@
 import type { AddressInfo } from 'node:net';
+import { ImportPreviewError } from '../core/git/ImportPreview';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppEventBus } from '../core/runner/AppEventBus';
-import { AttachmentStoreError } from '../core/storage/AttachmentFileStore';
-import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
+import { AttachmentStoreError } from '../core/storage/AttachmentErrors';
+import { TaskCreationRequestError } from '../core/storage/SqliteTaskStore';
+import { createBrowserTaskManagerApi } from '../renderer/api/taskManagerClient';
 import {
   DEV_API_TOKEN_HEADER,
   devRendererOrigin,
@@ -105,6 +107,47 @@ describe('development HTTP server', () => {
       runs: [{ id: 'run-1' }]
     });
     expect(getTaskDetail).toHaveBeenCalledWith('task-1');
+  });
+
+  it('round-trips import and checkout actions through the authenticated browser API', async () => {
+    const listExistingWorktrees = vi.fn(async () => [{ worktreePath: '/tmp/my work', branchName: 'feature' }]);
+    const importTask = vi.fn(async (input: unknown) => ({ id: 'imported-task', ...input as object }));
+    const previewImport = vi.fn(async (input: unknown) => ({ baseSha: 'abc123', ...input as object }));
+    const reconnectWorktree = vi.fn(async (input: unknown) => input);
+    const updateWorktreeComparison = vi.fn(async (input: unknown) => input);
+    const startRun = vi.fn(async (input: unknown) => input);
+    const startReview = vi.fn(async (input: unknown) => input);
+    const createPullRequest = vi.fn(async (input: unknown) => input);
+    const running = await startServer({ listExistingWorktrees, importTask, previewImport, reconnectWorktree, updateWorktreeComparison, startRun, startReview, createPullRequest });
+    const fetchHttp = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => fetchHttp(input, {
+      ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...running.headers }
+    }));
+    try {
+      const api = createBrowserTaskManagerApi(running.baseUrl);
+      expect(await api.listExistingWorktrees('repo & work')).toEqual([{ worktreePath: '/tmp/my work', branchName: 'feature' }]);
+      expect(listExistingWorktrees).toHaveBeenCalledWith('repo & work');
+      const request = { repositoryId: 'repo & work', worktreePath: '/tmp/my work', branchName: 'feature', baseRef: 'HEAD', title: 'Existing work', prompt: 'Keep this description.' };
+      const previewRequest = { repositoryId: request.repositoryId, worktreePath: request.worktreePath, branchName: request.branchName, baseRef: 'HEAD' };
+      expect(await api.previewImport(previewRequest)).toMatchObject({ baseSha: 'abc123', ...previewRequest });
+      expect(previewImport).toHaveBeenCalledWith(previewRequest);
+      previewImport.mockRejectedValueOnce(new ImportPreviewError('Enter a valid local branch or commit.'));
+      await expect(api.previewImport({ ...previewRequest, baseRef: 'invalid' })).rejects.toMatchObject({
+        status: 400, code: 'INVALID_IMPORT_COMPARISON', message: 'Enter a valid local branch or commit.'
+      });
+      expect(await api.importTask(request)).toMatchObject({ id: 'imported-task', ...request });
+      expect(importTask).toHaveBeenCalledWith(request);
+      await api.reconnectWorktree({ taskId: 'imported-task', worktreePath: '/tmp/moved work' });
+      expect(reconnectWorktree).toHaveBeenCalledWith({ taskId: 'imported-task', worktreePath: '/tmp/moved work' });
+      await api.updateWorktreeComparison({ taskId: 'imported-task', baseRef: 'main' });
+      expect(updateWorktreeComparison).toHaveBeenCalledWith({ taskId: 'imported-task', baseRef: 'main' });
+      await api.startRun({ taskId: 'imported-task', instruction: 'Fix the current regression.' });
+      expect(startRun).toHaveBeenCalledWith({ taskId: 'imported-task', instruction: 'Fix the current regression.' });
+      await api.startReview({ taskId: 'imported-task' });
+      expect(startReview).toHaveBeenCalledWith({ taskId: 'imported-task' });
+      await api.createPullRequest({ taskId: 'imported-task', title: 'Imported work', baseBranch: 'release/next' });
+      expect(createPullRequest).toHaveBeenCalledWith({ taskId: 'imported-task', title: 'Imported work', baseBranch: 'release/next' });
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it('routes Design conversation and project actions with path-owned ids', async () => {

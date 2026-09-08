@@ -588,6 +588,9 @@ function describeWorktreeRemoval(
       detail: 'No local worktree is recorded for this task.'
     };
   }
+  if (worktree.ownership === 'EXTERNAL') {
+    return { status: 'unavailable', detail: 'The external checkout and its files will remain on disk.' };
+  }
   if (worktree.status === 'MISSING' || worktree.status === 'REMOVED') {
     return {
       status: 'none',

@@ -7,10 +7,14 @@ import type {
   AgentTokenUsageBreakdown
 } from '../../../shared/agent';
 import { redactCredentialText } from '../AgentCredentialRedaction';
+import { INSPECT_DESIGN_TOOL_NAME } from '../../design/DesignClientToolContract';
 import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
 
 const MAX_ERROR_DIAGNOSTIC_BYTES = 4 * 1024;
 const ERROR_DIAGNOSTIC_TRUNCATION_SUFFIX = '… [OpenCode diagnostic truncated]';
+export const OPENCODE_DESIGN_MCP_SERVER_NAME = 'task_monki_design';
+export const OPENCODE_DESIGN_TOOL_NAME =
+  `${OPENCODE_DESIGN_MCP_SERVER_NAME}_${INSPECT_DESIGN_TOOL_NAME}`;
 
 export interface OpenCodeHealth {
   healthy: true;
@@ -89,6 +93,15 @@ export interface OpenCodeMessage {
   parts: OpenCodePart[];
 }
 
+export type OpenCodePromptPart =
+  | { type: 'text'; text: string }
+  | {
+      type: 'file';
+      mime: string;
+      filename: string;
+      url: string;
+    };
+
 export interface OpenCodePermissionRequest {
   id: string;
   sessionID: string;
@@ -138,6 +151,7 @@ export interface OpenCodeProviderModel {
   capabilities?: {
     reasoning?: boolean;
     attachment?: boolean;
+    toolcall?: boolean;
     input?: Record<string, boolean>;
   };
   variants?: Record<string, unknown>;
@@ -334,8 +348,12 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
       Object.values(provider.models).map((model): AgentModel => {
         const modelId = model.id;
         const modalities = Object.entries(model.capabilities?.input ?? { text: true })
-          .filter(([, supported]) => supported)
+          .filter(([, supported]) => supported === true)
           .map(([modality]) => modality);
+        const acceptsImages = modalities.some(
+          (modality) => modality.toLowerCase() === 'image'
+        );
+        const supportsTools = model.capabilities?.toolcall === true;
         const variants = Object.keys(model.variants ?? {});
         return {
           id: `${OPENCODE_RUNTIME_ID}:${provider.id}/${modelId}`,
@@ -349,6 +367,22 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
           defaultReasoningEffort: undefined,
           serviceTiers: [],
           inputModalities: modalities.length > 0 ? modalities : ['text'],
+          designSupport:
+            acceptsImages && supportsTools
+              ? {
+                  maturity: 'stable',
+                  detail:
+                    'The connected OpenCode model catalog reports the image input and tool calls required by Design Mode.'
+                }
+              : {
+                  maturity: 'unsupported',
+                  detail: openCodeDesignUnavailableReason({
+                    modelProvider: provider.id,
+                    model: modelId,
+                    acceptsImages,
+                    supportsTools
+                  })
+                },
           isDefault: catalog.defaults[provider.id] === modelId,
           native: jsonValue({
             providerName: provider.name ?? provider.id,
@@ -367,6 +401,19 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
       if (left.isDefault !== right.isDefault) return left.isDefault ? -1 : 1;
       return left.displayName.localeCompare(right.displayName);
     });
+}
+
+function openCodeDesignUnavailableReason(input: {
+  modelProvider: string;
+  model: string;
+  acceptsImages: boolean;
+  supportsTools: boolean;
+}): string {
+  const missing = [
+    ...(!input.acceptsImages ? ['image input'] : []),
+    ...(!input.supportsTools ? ['tool calls'] : [])
+  ];
+  return `The connected OpenCode model catalog reports no ${missing.join(' or ')} for ${input.modelProvider}/${input.model}. Design Mode requires both.`;
 }
 
 export function mapOpenCodeSessionStatus(value: unknown): AgentSessionStatus {
@@ -392,6 +439,7 @@ export function mapOpenCodePartType(part: OpenCodePart): AgentItemType {
       return 'FILE_CHANGE';
     case 'tool': {
       const tool = part.tool?.toLowerCase() ?? '';
+      if (tool === OPENCODE_DESIGN_TOOL_NAME) return 'MCP_TOOL_CALL';
       if (['bash', 'shell', 'terminal'].some((name) => tool.includes(name))) return 'COMMAND_EXECUTION';
       if (['edit', 'write', 'patch', 'apply'].some((name) => tool.includes(name))) return 'FILE_CHANGE';
       if (tool.includes('web')) return 'WEB_SEARCH';

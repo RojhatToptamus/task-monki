@@ -47,6 +47,11 @@ describe('DesignSkillPack', () => {
       'For each skill that matches the current request, read its exact SKILL.md path before you apply it.'
     );
     expect(pack.catalog).not.toContain('Bad designs often come from missing context');
+    await expect(
+      fs.readFile(path.join(root, 'browser-verification', 'SKILL.md'), 'utf8')
+    ).resolves.toContain(
+      '{"operation":"set_media","colorScheme":"light","reducedMotion":true}'
+    );
   });
 
   it('loads a valid minimal pack', async () => {

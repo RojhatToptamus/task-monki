@@ -667,7 +667,8 @@ function run(
     diagnosticArtifactId: 'diagnostic',
     startedAt: baseAt,
     eventCount: 0,
-    ...overrides
+    ...overrides,
+    attachmentSelection: overrides.attachmentSelection ?? []
   };
 }
 

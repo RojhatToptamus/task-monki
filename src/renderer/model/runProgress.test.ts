@@ -6,9 +6,27 @@ import {
   makeRawMessage,
   makeRunRecord as runFixture
 } from '../../testSupport/rendererRecords';
-import { buildRunProgressViewModel } from './runProgress';
+import { buildRunProgressViewModel, canStopTaskRun } from './runProgress';
 
 describe('run progress model', () => {
+  it('offers Stop only before submission or after provider acknowledgement', () => {
+    expect(canStopTaskRun(runFixture({ status: 'QUEUED', providerTurnId: undefined }))).toBe(
+      true
+    );
+    expect(canStopTaskRun(runFixture({ status: 'STARTING', providerTurnId: undefined }))).toBe(
+      false
+    );
+    expect(canStopTaskRun(runFixture({ status: 'STARTING', providerTurnId: 'turn-sending' }))).toBe(
+      false
+    );
+    expect(canStopTaskRun(runFixture({ status: 'RUNNING', providerTurnId: 'turn-1' }))).toBe(
+      true
+    );
+    expect(canStopTaskRun(runFixture({ status: 'INTERRUPTING', providerTurnId: 'turn-1' }))).toBe(
+      false
+    );
+  });
+
   it('shows a running plan with a compact activity tail', () => {
     const implementationRun = runFixture({ id: 'run-impl', mode: 'IMPLEMENTATION' });
     const reviewRun = runFixture({ id: 'run-review', mode: 'REVIEW', startedAt: '2026-07-07T10:05:00.000Z' });

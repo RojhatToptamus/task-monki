@@ -2,7 +2,8 @@ import type {
   GitSnapshotRecord,
   RunRecord,
   Task,
-  TaskSnapshot
+  TaskSnapshot,
+  WorktreeRecord
 } from '../../shared/contracts';
 import {
   completionPolicyRequiresMerge,
@@ -24,6 +25,7 @@ export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new S
 
 export interface TaskTransitionEvidence {
   hasWorktree: boolean;
+  worktreeOwnership?: 'MANAGED' | 'EXTERNAL';
   currentRun?: Pick<RunRecord, 'id' | 'mode' | 'status'>;
   hasGitSnapshot?: boolean;
   gitStatus?: Task['projection']['git'];
@@ -75,6 +77,10 @@ export function transitionBlocker(
   if (toPhase === 'REVIEW') {
     if (!evidence.hasWorktree) {
       return 'A task worktree is required before review.';
+    }
+    if (evidence.worktreeOwnership === 'EXTERNAL' && !task.currentRunId && !evidence.currentRun) {
+      return evidence.hasGitSnapshot && !['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(evidence.gitStatus ?? 'UNKNOWN')
+        ? undefined : 'Refresh the external checkout before moving to review.';
     }
     if (
       !evidence.currentRun ||
@@ -134,7 +140,8 @@ export function transitionBlocker(
 }
 
 export function assertPublishReady(
-  latestGit: GitSnapshotRecord | undefined
+  latestGit: GitSnapshotRecord | undefined,
+  ownership: WorktreeRecord['ownership'] = 'MANAGED'
 ): asserts latestGit is GitSnapshotRecord {
   if (!latestGit) {
     throw new Error('Refresh Git evidence before opening a draft PR.');
@@ -153,7 +160,9 @@ export function assertPublishReady(
   if (latestGit.status === 'UNKNOWN') {
     throw new Error('Git status must be available before opening a draft PR.');
   }
-  if (latestGit.commitsAheadOfBase <= 0 || latestGit.committedDiffFileCount <= 0) {
+  // An external checkout's review comparison is not its PR target.
+  // GitHub checks the new PR's diff against the explicitly selected target.
+  if (ownership === 'MANAGED' && (latestGit.commitsAheadOfBase <= 0 || latestGit.committedDiffFileCount <= 0)) {
     throw new Error(
       'The task branch has no committed changes to open a draft PR for.'
     );

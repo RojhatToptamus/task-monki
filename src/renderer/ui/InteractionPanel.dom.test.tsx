@@ -41,6 +41,90 @@ describe('mounted agent user-input interaction', () => {
       }
     );
   });
+
+  it('lets a Design user return every choice to the agent exactly once', async () => {
+    const onRespond = vi.fn(async () => undefined);
+    const interaction = userInputInteraction();
+    interaction.request = {
+      questions: [
+        {
+          id: 'audience',
+          header: 'Audience',
+          question: 'Who is this page for?',
+          isOther: true,
+          isSecret: false,
+          options: [
+            { label: 'New customers', description: 'Explain the service first.' },
+            { label: 'Existing customers', description: 'Focus on repeat actions.' }
+          ]
+        },
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'What is the main flow?',
+          isOther: true,
+          isSecret: false,
+          options: [
+            { label: 'Browse', description: 'Show information only.' },
+            { label: 'Order', description: 'Include a purchase flow.' }
+          ]
+        }
+      ]
+    };
+
+    render(
+      <InteractionPanel
+        interactions={[interaction]}
+        sessions={[]}
+        offerAgentDecision
+        onRespond={onRespond}
+      />
+    );
+
+    const decide = screen.getByRole('button', { name: 'Decide for me' });
+    fireEvent.click(decide);
+    fireEvent.click(decide);
+
+    expect(onRespond).toHaveBeenCalledOnce();
+    expect(onRespond).toHaveBeenCalledWith(interaction, {
+      interactionType: 'USER_INPUT',
+      action: 'ANSWER',
+      answers: {
+        audience: ['Decide for me'],
+        scope: ['Decide for me']
+      }
+    });
+  });
+
+  it('hides agent delegation when the provider does not accept custom input', () => {
+    const interaction = userInputInteraction();
+    interaction.request = {
+      questions: [
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'Which scope should the agent use?',
+          isOther: false,
+          isSecret: false,
+          options: [
+            { label: 'Small', description: 'Use the focused scope.' },
+            { label: 'Large', description: 'Use the expanded scope.' }
+          ]
+        }
+      ]
+    };
+
+    render(
+      <InteractionPanel
+        interactions={[interaction]}
+        sessions={[]}
+        offerAgentDecision
+        onRespond={vi.fn(async () => undefined)}
+      />
+    );
+
+    expect(screen.queryByRole('button', { name: 'Decide for me' })).toBeNull();
+  });
 });
 
 function userInputInteraction(): InteractionRequestRecord {

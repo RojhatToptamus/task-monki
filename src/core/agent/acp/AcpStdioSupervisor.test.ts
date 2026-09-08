@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { openTestPersistence } from '../../../testSupport/persistenceFixture';
+import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import {
   AcpStdioSupervisor,
   clientCapabilitiesForAcpProfile,
@@ -21,17 +23,17 @@ import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 import { spawnPortable } from '../../process/portableChildProcess';
 
 const temporaryDirectories: string[] = [];
-const testStores = new Set<FileTaskStore>();
+const testPersistence = new Set<ApplicationPersistence>();
 
-function createTestStore(root: string): FileTaskStore {
-  const store = new FileTaskStore(root);
-  testStores.add(store);
-  return store;
+async function createTestStore(profileRoot: string): Promise<SqliteAgentRuntimeStore> {
+  const persistence = await openTestPersistence(profileRoot);
+  testPersistence.add(persistence);
+  return persistence.agentRuntime;
 }
 
 afterEach(async () => {
-  await Promise.all([...testStores].map((store) => store.close()));
-  testStores.clear();
+  await Promise.all([...testPersistence].map((persistence) => persistence.close()));
+  testPersistence.clear();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       fs.rm(directory, { recursive: true, force: true })
@@ -44,6 +46,7 @@ describe('AcpStdioSupervisor', () => {
     expect(clientCapabilitiesForAcpProfile(CURSOR_ACP_PROFILE)).toEqual({
       fs: { readTextFile: false, writeTextFile: false },
       terminal: false,
+      elicitation: { form: {} },
       session: { configOptions: { boolean: {} } },
       _meta: { parameterizedModelPicker: true }
     });
@@ -102,7 +105,7 @@ describe('AcpStdioSupervisor', () => {
         sensitiveKeys: ['GEMINI_API_KEY']
       }
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const supervisor = new AcpStdioSupervisor(store, {
       profile,
       runtime: {
@@ -157,13 +160,113 @@ describe('AcpStdioSupervisor', () => {
       expect(initialize.params.clientCapabilities).toEqual({
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
+        elicitation: { form: {} },
         session: { configOptions: { boolean: {} } }
       });
     } finally {
       await supervisor.shutdown();
     }
-    const server = (await store.snapshot()).agentServers[0];
+    const server = (await store.snapshot()).servers[0];
     expect(server?.status).toBe('EXITED');
+  });
+
+  it('uses exact lane argv and latches an evicted process-policy failure', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-supervisor-policy-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'agent.cjs');
+    await fs.writeFile(
+      agentScript,
+      [
+        "const readline = require('node:readline');",
+        "if (process.argv[2] !== 'read-only-lane') process.exit(14);",
+        "process.stderr.write('sandbox unavailable\\n' + 'x'.repeat(70 * 1024));",
+        'const input = readline.createInterface({ input: process.stdin });',
+        "input.on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method !== 'initialize') return;",
+        "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {",
+        '    protocolVersion: 1,',
+        '    agentCapabilities: { promptCapabilities: {} },',
+        "    agentInfo: { name: 'fake-acp', version: '1.0.0' }",
+        "  } }) + '\\n');",
+        '});'
+      ].join('\n'),
+      { mode: 0o600 }
+    );
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-policy' },
+      executableCandidates: [process.execPath],
+      argv: [agentScript, 'writable-lane']
+    };
+    const store = await createTestStore(path.join(directory, 'store'));
+    const supervisor = new AcpStdioSupervisor(store, {
+      profile,
+      runtime: {
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [...profile.argv],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      },
+      cwd: directory,
+      launchArgv: [agentScript, 'read-only-lane'],
+      startupFailurePattern: /sandbox unavailable/iu,
+      requestTimeoutMs: 1_000
+    });
+
+    await expect(supervisor.start()).rejects.toThrow(
+      'required process policy could not be applied'
+    );
+    const server = (await store.snapshot()).servers[0];
+    expect(server).toMatchObject({
+      argv: [agentScript, 'read-only-lane'],
+      runtimeResolution: {
+        selectedLaunchArgv: [agentScript, 'read-only-lane']
+      }
+    });
+    expect(['FAILED', 'LOST']).toContain(server?.status);
+    expect(server?.exitReason).not.toContain('sandbox unavailable');
+  });
+
+  it('invalidates a ready generation when the process-policy failure arrives late', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-supervisor-late-policy-')
+    );
+    temporaryDirectories.push(directory);
+    const store = await createTestStore(path.join(directory, 'store'));
+    const child = fakeAcpChild({ closeOnKill: true });
+    const supervisor = new AcpStdioSupervisor(store, {
+      profile: testProfile('test-acp-late-policy'),
+      runtime: testRuntime(),
+      cwd: directory,
+      spawnProcess: fakeSpawn(child),
+      startupFailurePattern: /sandbox unavailable/iu,
+      requestTimeoutMs: 500,
+      closeHandlingTimeoutMs: 500
+    });
+    const exit = vi.fn();
+    supervisor.events.on('exit', exit);
+
+    const running = await supervisor.start();
+    expect(running.server.status).toBe('READY');
+    (child.stderr as PassThrough).write('sandbox unavailable\n');
+
+    await waitForCondition(() => supervisor.currentServer?.status === 'LOST');
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(supervisor.currentClient).toBeUndefined();
+    expect(supervisor.safetyFenceReason).toContain(
+      'required process policy was not applied'
+    );
+    expect(exit).toHaveBeenCalledWith(expect.objectContaining({ status: 'LOST' }), true);
+    await expect(supervisor.start()).rejects.toThrow('safety-fenced until app restart');
   });
 
   it('redacts provider credentials from persisted stderr diagnostics', async () => {
@@ -193,7 +296,7 @@ describe('AcpStdioSupervisor', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const supervisor = new AcpStdioSupervisor(store, {
       profile,
       runtime: {
@@ -211,7 +314,7 @@ describe('AcpStdioSupervisor', () => {
       requestTimeoutMs: 2_000
     });
     await expect(supervisor.start()).rejects.toThrow('supports stable protocol 1');
-    const server = (await store.snapshot()).agentServers[0];
+    const server = (await store.snapshot()).servers[0];
     expect(server?.exitReason).toContain('[REDACTED]');
     expect(server?.exitReason).not.toContain('TOPSECRET123');
     expect(server?.exitReason).not.toContain('OLD_DIAGNOSTIC_MARKER');
@@ -222,7 +325,7 @@ describe('AcpStdioSupervisor', () => {
   it('drains an accepted terminal response before publishing process loss', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-close-drain-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-close-drain'),
@@ -288,7 +391,7 @@ describe('AcpStdioSupervisor', () => {
   it('safety-fences the runtime when accepted inbound dispatch cannot drain', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-drain-failure-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-drain-failure'),
@@ -426,7 +529,7 @@ describe('AcpStdioSupervisor', () => {
         if (spawnCount === 1) firstChild = child;
         return child;
       };
-      const store = createTestStore(path.join(directory, 'store'));
+      const store = await createTestStore(path.join(directory, 'store'));
       const supervisor = new AcpStdioSupervisor(store, {
         profile: {
           ...testProfile('test-acp-leader-exit'),
@@ -474,7 +577,7 @@ describe('AcpStdioSupervisor', () => {
   it('does not spawn or leave STARTING state when shutdown wins server creation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-supervisor-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const originalCreate = store.createAgentServer.bind(store);
     let releaseCreate!: () => void;
     const createGate = new Promise<void>((resolve) => {
@@ -517,7 +620,7 @@ describe('AcpStdioSupervisor', () => {
     await expect(starting).rejects.toThrow('canceled');
     await stopping;
     expect(spawnProcess).not.toHaveBeenCalled();
-    expect((await store.snapshot()).agentServers).toEqual([
+    expect((await store.snapshot()).servers).toEqual([
       expect.objectContaining({ status: 'EXITED' })
     ]);
     await expect(supervisor.start()).rejects.toThrow('shut down');
@@ -527,7 +630,7 @@ describe('AcpStdioSupervisor', () => {
   it('fails promptly and permanently fences a child that ignores TERM and KILL', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-stubborn-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: false });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-stubborn'),
@@ -561,7 +664,7 @@ describe('AcpStdioSupervisor', () => {
     expect(supervisor.currentServer).toEqual(
       expect.objectContaining({ status: 'LOST', disconnectedAt: expect.any(String) })
     );
-    expect((await store.snapshot()).agentServers[0]).toEqual(
+    expect((await store.snapshot()).servers[0]).toEqual(
       expect.objectContaining({ status: 'LOST', disconnectedAt: expect.any(String) })
     );
     expect(exit).toHaveBeenCalledOnce();
@@ -575,7 +678,7 @@ describe('AcpStdioSupervisor', () => {
   it('retains a hard fence when startup cleanup cannot confirm process exit', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-start-fence-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: false, protocolVersion: 2 });
     const spawnProcess = vi.fn(fakeSpawn(child)) as unknown as NonNullable<
       AcpStdioSupervisorOptions['spawnProcess']
@@ -609,7 +712,7 @@ describe('AcpStdioSupervisor', () => {
   it('permanently fences a process after a protocol violation even when termination is unconfirmed', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-protocol-fence-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: false });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-protocol-fence'),
@@ -638,7 +741,7 @@ describe('AcpStdioSupervisor', () => {
   it('keeps the protocol-violation fence after process exit is confirmed', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-protocol-exit-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-protocol-exit'),
@@ -663,7 +766,7 @@ describe('AcpStdioSupervisor', () => {
   it('completes close cleanup and surfaces a terminal persistence failure', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-close-'));
     temporaryDirectories.push(directory);
-    const store = createTestStore(path.join(directory, 'store'));
+    const store = await createTestStore(path.join(directory, 'store'));
     const child = fakeAcpChild({ closeOnKill: true });
     const supervisor = new AcpStdioSupervisor(store, {
       profile: testProfile('test-acp-close-failure'),
@@ -701,7 +804,7 @@ describe('AcpStdioSupervisor', () => {
     expect(child.listenerCount('close')).toBe(0);
     expect(child.stdout.listenerCount('data')).toBe(0);
     expect(child.stderr.listenerCount('data')).toBe(0);
-    expect((await store.snapshot()).agentServers[0]).toEqual(
+    expect((await store.snapshot()).servers[0]).toEqual(
       expect.objectContaining({ status: 'STOPPING' })
     );
     store.updateAgentServer = originalUpdate;

@@ -3,6 +3,7 @@ import type { AgentProtocolMessageReference } from '../../../shared/agent';
 import {
   OpenCodeAmbiguousMutationError,
   OpenCodeHttpClient,
+  OPENCODE_MAX_WIRE_BYTES,
   OpenCodeSseParser
 } from './OpenCodeHttpClient';
 
@@ -23,6 +24,291 @@ describe('OpenCodeHttpClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(journalRows.join('\n')).not.toContain('top-secret');
     expect(journalRows[0]).toContain('GET');
+  });
+
+  it('delivers native file data while omitting it from HTTP journals and echoed history', async () => {
+    const dataUrl = `data:text/plain;base64,${Buffer.from('MONKI-42').toString('base64')}`;
+    const rows: string[] = [];
+    let outboundBody = '';
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async (_url, init) => {
+        outboundBody = String(init?.body ?? '');
+        return new Response(JSON.stringify({
+          info: { id: 'msg_1', sessionID: 'ses_1', role: 'user' },
+          parts: [{
+            id: 'prt_1',
+            sessionID: 'ses_1',
+            messageID: 'msg_1',
+            type: 'file',
+            mime: 'text/plain',
+            filename: 'brief.txt',
+            url: dataUrl
+          }]
+        }), { status: 200 });
+      }),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+
+    const result = await client.post<{
+      parts: Array<{ filename: string; url: string }>;
+    }>('/session/ses_1/prompt_async', {
+      parts: [{ type: 'file', mime: 'text/plain', filename: 'brief.txt', url: dataUrl }]
+    });
+
+    expect(outboundBody).toContain(dataUrl);
+    expect(result.data.parts[0]).toEqual({
+      id: 'prt_1',
+      sessionID: 'ses_1',
+      messageID: 'msg_1',
+      type: 'file',
+      mime: 'text/plain',
+      filename: 'brief.txt',
+      url: '[Task Monki attachment content omitted]'
+    });
+    expect(rows.join('\n')).not.toContain(dataUrl);
+    expect(rows.join('\n')).not.toContain('TU9OS0ktNDI=');
+  });
+
+  it('sanitizes echoed SSE file parts before journaling and event delivery', async () => {
+    const dataUrl = `data:image/png;base64,${Buffer.from('image-bytes').toString('base64')}`;
+    const rows: string[] = [];
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async () =>
+        new Response(`data: ${JSON.stringify({
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'prt_1',
+              sessionID: 'ses_1',
+              messageID: 'msg_1',
+              type: 'file',
+              mime: 'image/png',
+              filename: 'reference.png',
+              url: dataUrl
+            }
+          }
+        })}\n\n`, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' }
+        })
+      ),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+    let stream: ReturnType<OpenCodeHttpClient['startEventStream']>;
+    let delivered: unknown;
+    stream = client.startEventStream({
+      onEvent: async (value) => {
+        delivered = value;
+        stream.stop();
+      },
+      onDisconnect: async () => undefined,
+      onReconnect: async () => undefined
+    });
+
+    await stream.settled;
+
+    expect(JSON.stringify(delivered)).toContain('[Task Monki attachment content omitted]');
+    expect(JSON.stringify(delivered)).not.toContain(dataUrl);
+    expect(rows.join('\n')).not.toContain(dataUrl);
+    expect(rows.join('\n')).not.toContain('aW1hZ2UtYnl0ZXM=');
+  });
+
+  it('omits MCP image-result bytes from SSE delivery and the protocol journal', async () => {
+    const encoded = Buffer.from('inspect-design-image-bytes').toString('base64');
+    const nativeOutput = JSON.stringify({
+      content: [
+        { type: 'text', text: 'The card is visible.' },
+        { type: 'image', data: encoded, mimeType: 'image/png' }
+      ]
+    });
+    const rows: string[] = [];
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async () =>
+        new Response(`data: ${JSON.stringify({
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'prt_mcp',
+              sessionID: 'ses_1',
+              messageID: 'msg_1',
+              type: 'tool',
+              tool: 'task_monki_design_inspect_design',
+              state: {
+                status: 'completed',
+                input: { operation: 'screenshot' },
+                output: nativeOutput,
+                metadata: {
+                  content: [
+                    { type: 'text', text: 'The card is visible.' },
+                    { type: 'image', data: encoded, mimeType: 'image/png' }
+                  ]
+                }
+              }
+            }
+          }
+        })}\n\n`, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' }
+        })
+      ),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+    let stream: ReturnType<OpenCodeHttpClient['startEventStream']>;
+    let delivered: unknown;
+    stream = client.startEventStream({
+      onEvent: async (value) => {
+        delivered = value;
+        stream.stop();
+      },
+      onDisconnect: async () => undefined,
+      onReconnect: async () => undefined
+    });
+
+    await stream.settled;
+
+    expect(JSON.stringify(delivered)).toContain('[Task Monki provider bytes omitted]');
+    expect(JSON.stringify(delivered)).not.toContain(encoded);
+    expect(rows.join('\n')).not.toContain(encoded);
+  });
+
+  it('omits native MCP image-result bytes from recovered message history', async () => {
+    const encoded = Buffer.from('recovered-inspect-design-image').toString('base64');
+    const rows: string[] = [];
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async () =>
+        new Response(JSON.stringify([{
+          info: { id: 'msg_1', sessionID: 'ses_1', role: 'assistant' },
+          parts: [{
+            id: 'prt_mcp',
+            sessionID: 'ses_1',
+            messageID: 'msg_1',
+            type: 'tool',
+            tool: 'task_monki_design_inspect_design',
+            state: {
+              status: 'completed',
+              output: JSON.stringify({
+                content: [
+                  { type: 'text', text: 'The card is visible.' },
+                  { type: 'image', data: encoded, mimeType: 'image/png' }
+                ]
+              })
+            }
+          }]
+        }]), { status: 200 })
+      ),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+
+    const result = await client.get<unknown[]>('/session/ses_1/message');
+
+    expect(JSON.stringify(result.data)).toContain('[Task Monki provider bytes omitted]');
+    expect(JSON.stringify(result.data)).not.toContain(encoded);
+    expect(rows.join('\n')).not.toContain(encoded);
+  });
+
+  it('redacts request-scoped MCP credentials from registration journals', async () => {
+    const credential = 'temporary-design-session-credential';
+    const endpoint = 'http://127.0.0.1:43123/design-tool';
+    const grantFile = '/managed/design-tool-credentials/grant/turn-grant';
+    const rows: string[] = [];
+    let outboundBody = '';
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async (_url, init) => {
+        outboundBody = String(init?.body ?? '');
+        return new Response(JSON.stringify({ status: 'connected' }), { status: 200 });
+      }),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+
+    await client.post('/mcp', {
+      name: 'task_monki_design',
+      config: {
+        environment: {
+          TASK_MONKI_DESIGN_TOOL_ENDPOINT: endpoint,
+          TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: credential,
+          TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: grantFile
+        }
+      }
+    }, { sensitiveValues: [endpoint, credential, grantFile] });
+
+    expect(outboundBody).toContain(credential);
+    expect(rows.join('\n')).not.toContain(credential);
+    expect(rows.join('\n')).not.toContain(endpoint);
+    expect(rows.join('\n')).not.toContain(grantFile);
+    expect(rows.join('\n')).toContain('[REDACTED]');
+  });
+
+  it('omits echoed file data from HTTP failure diagnostics', async () => {
+    const encoded = Buffer.from('private attachment bytes').toString('base64');
+    const dataUrl = `data:text/plain;base64,${encoded}`;
+    const client = createClient(
+      vi.fn<typeof fetch>(async () =>
+        new Response(JSON.stringify({
+          error: 'invalid file part',
+          part: { type: 'file', filename: 'brief.txt', url: dataUrl }
+        }), { status: 400 })
+      ),
+      []
+    );
+
+    let failure: Error | undefined;
+    try {
+      await client.get('/session/ses_1/message');
+    } catch (cause) {
+      failure = cause as Error;
+    }
+    expect(failure?.message).toContain('[Task Monki attachment content omitted]');
+    expect(failure?.message).not.toContain(dataUrl);
+    expect(failure?.message).not.toContain(encoded);
+  });
+
+  it('rejects an oversized outbound request before journaling or fetch', async () => {
+    const rows: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = createClient(fetchMock, rows);
+
+    await expect(
+      client.post('/session/ses_1/prompt_async', {
+        value: 'x'.repeat(OPENCODE_MAX_WIRE_BYTES)
+      })
+    ).rejects.toThrow('bounded OpenCode request limit');
+    expect(rows).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('redacts provider credentials from HTTP failure diagnostics', async () => {
@@ -395,6 +681,25 @@ describe('OpenCodeHttpClient', () => {
     await parser.finish();
 
     expect(events).toEqual(['{"type":"session.status",\n"properties":{}}']);
+  });
+
+  it('rejects a raw SSE line above the shared wire limit', async () => {
+    const parser = new OpenCodeSseParser(async () => undefined);
+
+    await expect(
+      parser.push(new Uint8Array(OPENCODE_MAX_WIRE_BYTES + 1).fill(0x78))
+    ).rejects.toThrow('SSE line exceeded the bounded parser limit');
+  });
+
+  it('rejects a multiline SSE event above the shared wire limit', async () => {
+    const parser = new OpenCodeSseParser(async () => undefined);
+    const halfLimit = 'x'.repeat(OPENCODE_MAX_WIRE_BYTES / 2);
+
+    await expect(
+      parser.push(new TextEncoder().encode(
+        `data: ${halfLimit}\ndata: ${halfLimit}\n`
+      ))
+    ).rejects.toThrow('SSE event exceeded the bounded parser limit');
   });
 
   it('keeps reconnecting when a disconnect callback fails', async () => {

@@ -101,17 +101,24 @@
   border: 0;
   border-radius: 9px;
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   font: 12.5px/1.5 var(--font-ui);
   resize: vertical;
+}
+
+.agent-controls__composer textarea:focus {
+  outline: 0;
+  background: var(--field-focus);
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
 
 .app-shell[data-input-modality='keyboard'] .agent-controls__composer textarea:focus {
   outline: 0;
   background: var(--field-focus);
   box-shadow:
-    inset 0 0 0 1px var(--accent),
-    0 0 0 3px var(--field-focus-ring);
+    inset 0 0 0 1px var(--field-edge-focus),
+    0 0 0 3px var(--focus-ring);
 }
 
 .agent-controls__composer-actions {

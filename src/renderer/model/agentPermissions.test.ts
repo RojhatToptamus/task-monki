@@ -151,7 +151,14 @@ describe('agent permission settings', () => {
 });
 
 function preset(
-  input: Omit<AgentExecutionPolicyPreset, 'label' | 'detail'>
+  input: Omit<AgentExecutionPolicyPreset, 'label' | 'detail' | 'repositoryMutation'> & {
+    repositoryMutation?: AgentExecutionPolicyPreset['repositoryMutation'];
+  }
 ): AgentExecutionPolicyPreset {
-  return { ...input, label: input.id, detail: `${input.id} policy` };
+  return {
+    repositoryMutation: input.repositoryMutation ?? 'ALLOW',
+    ...input,
+    label: input.id,
+    detail: `${input.id} policy`
+  };
 }

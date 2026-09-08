@@ -429,11 +429,7 @@ async function validateAdapterContract(adapter: AgentRuntimeAdapter): Promise<vo
     method: keyof AgentRuntimeAdapter;
   }> = [
     { capability: 'activeTurnSteering', method: 'steerTurn' },
-    { capability: 'turnInterruption', method: 'interruptTurn' },
-    { capability: 'sessionFork', method: 'forkSession' },
-    { capability: 'review', method: 'startReview' },
-    { capability: 'goals', method: 'syncGoal' },
-    { capability: 'promptRefinement', method: 'refinePrompt' }
+    { capability: 'turnInterruption', method: 'interruptTurn' }
   ];
   for (const entry of requiredMethods) {
     const capability = capabilities[entry.capability];
@@ -450,12 +446,21 @@ async function validateAdapterContract(adapter: AgentRuntimeAdapter): Promise<vo
     }
   }
   if (
-    capabilities.sessionControls?.maturity === 'stable' &&
-    (typeof adapter.listSessionControls !== 'function' ||
-      typeof adapter.applySessionControl !== 'function')
+    capabilities.readOnlyTurns.maturity === 'stable' &&
+    (!adapter.buildExecutionContext ||
+      !adapter.startRuntimeTurn ||
+      !adapter.interruptRuntimeTurn ||
+      !adapter.onRuntimeTurnEvent)
   ) {
     throw new Error(
-      `Runtime ${adapter.descriptor.id} declares sessionControls but does not implement typed control discovery and mutation.`
+      `Runtime ${adapter.descriptor.id} declares shared read-only turns but does not implement the shared read-only turn lifecycle.`
+    );
+  }
+  if (
+    Boolean(adapter.listSessionControls) !== Boolean(adapter.applySessionControl)
+  ) {
+    throw new Error(
+      `Runtime ${adapter.descriptor.id} must implement typed session-control discovery and mutation together.`
     );
   }
 }
@@ -488,31 +493,17 @@ async function safeCapabilities(
           sandbox: 'READ_ONLY',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
+          repositoryMutation: 'ALLOW',
           networkAccess: 'DISABLED'
         }
       ],
       detail
     },
-    promptRefinement: unavailable(detail),
+    readOnlyTurns: unavailable(detail),
     modelCatalog: unavailable(detail),
-    reasoningEffort: unavailable(detail),
-    persistentSessions: unavailable(detail),
-    sessionResume: unavailable(detail),
-    sessionFork: unavailable(detail),
     activeTurnSteering: unavailable(detail),
     turnInterruption: unavailable(detail),
-    truePause: unavailable(detail),
-    interactiveApprovals: unavailable(detail),
-    userInputRequests: unavailable(detail),
-    goals: unavailable(detail),
-    plans: unavailable(detail),
-    detachedReview: unavailable(detail),
-    review: unavailable(detail),
-    subagents: unavailable(detail),
-    backgroundTerminals: unavailable(detail),
-    dynamicTools: unavailable(detail),
     attachmentDelivery: unavailable(detail),
-    runtimeRecovery: unavailable(detail),
     extensions: {}
   };
 }

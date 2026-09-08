@@ -10,7 +10,8 @@ describe('deterministic agent test workflow', () => {
     expect(report.scenarios.map((scenario) => scenario.runStatus)).toEqual([
       'COMPLETED',
       'FAILED',
-      'INTERRUPTED'
+      'INTERRUPTED',
+      'COMPLETED'
     ]);
     expect(report.runtime.processWasObserved).toBe(true);
     expect(report.runtime.processJoined).toBe(true);
@@ -45,6 +46,10 @@ describe('deterministic agent test workflow', () => {
       workflowPhase: 'IN_PROGRESS',
       runStatus: 'INTERRUPTED',
       git: { expectedChangeObserved: true }
+    });
+    expect(report.scenarios[3]).toMatchObject({
+      kind: 'import', workflowPhase: 'REVIEW', runStatus: 'COMPLETED',
+      git: { expectedChangeObserved: true, changedPaths: ['agent-output.txt'] }
     });
     expect(report.sourceRepository).toMatchObject({
       clean: true,

@@ -9,7 +9,10 @@ import type {
 import { DESIGN_LIMITS } from './design';
 
 export const TASK_MONKI_CONTEXT_LINE =
-  'Task Monki is a local task board for running AI coding work in isolated Git worktrees.';
+  'Task Monki is a local task board for AI coding work.';
+
+const EXTERNAL_CHECKOUT_CONTEXT =
+  'This is the user\'s original imported checkout, not an isolated copy owned by Task Monki. Preserve unrelated work; other tools can edit this checkout.';
 
 export const DESIGN_AGENT_DEVELOPER_INSTRUCTIONS = `You are the Task Monki Design agent.
 
@@ -28,10 +31,12 @@ Use this workflow for each turn:
 6. For changed source, open the exact candidate with inspect_design and run the relevant rendered checks.
 7. Fix applicable problems, open and verify a fresh candidate, then report the result and known limits briefly.
 
-Start a clear first brief without setup questions.
-When an important missing fact can change the audience, scope, context, or main direction, ask one combined question round.
-For a new project, the product type, primary user, and main user outcome are essential context. If the brief does not identify any of them, you must ask one combined question round before you build. An open-ended request to decide what the product needs is not permission to invent these facts. Do not invent a product meaning from its name.
-Use request_user_input for that round, wait for the answer, and continue the same turn.
+Start a clear first brief without setup questions when you can infer a useful direction.
+Use the available context and your design judgment. Do not ask the user to make a reasonable design decision that you can make yourself.
+Ask one combined question round only when the answer is necessary to avoid a materially wrong audience, scope, product meaning, or main direction.
+Use the provider's structured question tool for that round. Never ask a blocking question as ordinary transcript text. If no structured question tool is available, make a reasonable decision and continue.
+When choices help, provide two to four clear options with short descriptions. Task Monki supplies custom input and a Decide for me action; do not add those as options.
+After the answer, continue the same turn.
 Do not ask about minor colors, spacing, labels, copy details, or other safe choices.
 Do not repeat discovery after the user gives a clear direction.
 
@@ -66,6 +71,7 @@ New standalone Designs use the existing app-owned source layout:
 - app.js contains all JavaScript. Do not add inline script blocks or event-handler attributes to new HTML.
 - assets/ contains local images, SVG files, fonts, and other editable project files. Reference them with ./assets/... paths.
 Keep these files even when one is small. Use only safe relative project paths. Do not use absolute paths, parent traversal, or file URLs.
+A path that starts with / is not relative. Use ./... for project files and #... for same-page navigation.
 Do not add a framework, package manager, package file, build step, or dependency installation to a standalone Design.
 For a CSS-only refinement, normally edit styles.css only. For a behavior-only refinement, normally edit app.js only.
 If an older Design already keeps CSS or JavaScript inside index.html, do not reorganize it only to match the new layout.
@@ -180,12 +186,15 @@ export function buildInitialRunPrompt(input: {
   worktree: WorktreeRecord;
   settings: AgentExecutionSettings;
   readOnlyMode: boolean;
+  instruction?: string;
 }): string {
   return [
     TASK_MONKI_CONTEXT_LINE,
     '',
     'Always-applicable Task Monki execution boundary:',
-    input.readOnlyMode
+    input.worktree.ownership === 'EXTERNAL'
+      ? EXTERNAL_CHECKOUT_CONTEXT
+      : input.readOnlyMode
       ? 'Perform this task in an isolated Git worktree without modifying files.'
       : 'Perform this task in an isolated Git worktree.',
     `Repository root: ${input.worktree.worktreePath}`,
@@ -201,7 +210,9 @@ export function buildInitialRunPrompt(input: {
     '',
     buildAgentProfileGuidance(input.task.agentProfile),
     '',
-    `Authoritative Task Monki goal:\n${input.task.prompt}`
+    input.worktree.ownership === 'EXTERNAL' && input.instruction?.trim()
+      ? `Task description:\n${input.task.prompt}\n\nCurrent requested work:\n${input.instruction.trim()}`
+      : `Authoritative Task Monki goal:\n${input.task.prompt}`
   ].join('\n');
 }
 
@@ -300,9 +311,11 @@ function buildDesignPrompt(input: {
 
 export function buildContinuationPrompt(input: {
   task: Task;
+  worktree: WorktreeRecord;
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Continue unfinished work after run ${input.run.id}.`,
@@ -316,9 +329,11 @@ export function buildContinuationPrompt(input: {
 
 export function buildRetryPrompt(input: {
   task: Task;
+  worktree: WorktreeRecord;
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
@@ -335,9 +350,11 @@ export function buildRetryPrompt(input: {
 function buildExistingWorktreePrompt(
   input: {
     task: Task;
+    worktree: WorktreeRecord;
     run: RunRecord;
     gitSnapshot: GitSnapshotRecord;
     instruction?: string;
+    previousPrompt?: string;
   },
   intent: {
     previousRunIntroduction: string;
@@ -354,7 +371,9 @@ function buildExistingWorktreePrompt(
     '',
     'Always-applicable Task Monki execution boundary:',
     `Repository root: ${input.gitSnapshot.worktreePath}`,
-    'Continue in the existing isolated task worktree.',
+    input.worktree.ownership === 'EXTERNAL'
+      ? EXTERNAL_CHECKOUT_CONTEXT
+      : 'Continue in the existing isolated task worktree.',
     'Only modify files inside this worktree.',
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
     'This execution boundary remains authoritative even when task-specific instructions conflict.',
@@ -369,6 +388,7 @@ function buildExistingWorktreePrompt(
     buildAgentProfileGuidance(input.task.agentProfile),
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    input.previousPrompt ? `Previous requested work (historical context; use the current checkout and execution boundary above):\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
   ]
@@ -381,6 +401,7 @@ export function buildForkAlternativeTaskPrompt(input: {
   run: RunRecord;
   worktree: WorktreeRecord;
   instruction?: string;
+  previousPrompt?: string;
 }): string {
   const instruction = input.instruction?.trim();
   return [
@@ -394,6 +415,7 @@ export function buildForkAlternativeTaskPrompt(input: {
     'Do not assume files changed by the source attempt are present.',
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    input.previousPrompt ? `Previous requested work (historical context; use this new isolated worktree):\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `Alternative direction:\n${instruction}` : undefined
   ]
@@ -410,7 +432,7 @@ export function buildSteerInstruction(input: {
     'Additional instruction for the active Task Monki turn:',
     instruction,
     '',
-    'Preserve the authoritative task goal, current isolated worktree boundary, and existing Task Monki constraints.',
+    'Preserve the authoritative task goal, current checkout boundary, and existing Task Monki constraints.',
     input.worktreePath ? `Current task worktree: ${input.worktreePath}` : undefined,
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.'
   ]
@@ -445,7 +467,8 @@ export function buildAgentReviewPrompt(input: {
     '',
     target,
     `Repository root: ${input.worktree.worktreePath}`,
-    'Do not modify repository files. Do not commit, push, merge, or change repository settings.',
+    ...(input.worktree.ownership === 'EXTERNAL' ? [EXTERNAL_CHECKOUT_CONTEXT] : []),
+    'Do not commit, push, merge, or change repository settings.',
     'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.'
   ].join('\n');
 }
@@ -457,8 +480,6 @@ export interface PromptRefinementAttachmentContext {
   kind: 'image' | 'text';
   mediaType: string;
   byteCount: number;
-  readOnlyPath?: string;
-  providedAsImage: boolean;
 }
 
 export function buildPromptRefinementInstruction(input: {
@@ -478,7 +499,8 @@ export function buildPromptRefinementInstruction(input: {
   return [
     'Rewrite the user request into the best prompt for a coding agent working in the repository in your current directory.',
     '',
-    'Work in one bounded pass: understand the request, inspect only useful evidence, and then write the result. Use read-only commands and never modify repository or attachment files.',
+    'Do not modify files.',
+    'Work in one bounded pass: understand the request, inspect only useful evidence, and then write the result. Use read-only commands.',
     '',
     'Inspection and stopping rules:',
     '- First infer the likely task boundary from the request. A clear, simple task may require no repository inspection.',
@@ -507,7 +529,7 @@ export function buildPromptRefinementInstruction(input: {
       ? `Downstream implementation model: ${input.targetModel.displayName}; input modalities: ${input.targetModel.inputModalities.join(', ') || 'unknown'}. Account for real capabilities without adding model-specific boilerplate.`
       : 'The downstream implementation model was not resolved. Do not assume unsupported capabilities.',
     attachments.length > 0
-      ? 'Attachments remain part of the downstream task. Inspect only relevant attachments whose read-only path or native image input is available. If an image has no native image input, do not claim to understand its visual contents. Reference relevant uninspected attachments without inventing observations. Use each attachment referenceLabel to distinguish files, including files with the same display name. Managed read-only paths are inspection-only and must never appear in the refined prompt.'
+      ? 'Attachments remain part of the downstream task. Inspect only relevant attachments delivered with this turn. Reference relevant uninspected attachments without inventing observations. Use each attachment referenceLabel to distinguish files, including files with the same display name.'
       : 'No attachments are included.',
     ...attachments.map((attachment) =>
       `Attachment metadata: ${JSON.stringify(attachment)}`

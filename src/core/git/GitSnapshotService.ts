@@ -16,6 +16,9 @@ interface ParsedStatus {
   conflictedCount: number;
 }
 
+type GitComparison = Pick<WorktreeRecord, 'worktreePath' | 'branchName' | 'baseRef' | 'baseSha'>;
+export type GitObservation = Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId' | 'taskId' | 'iterationId' | 'worktreeId'>;
+
 const GIT_STATUS_ARGS = [
   'status',
   '--porcelain=v2',
@@ -25,6 +28,15 @@ const GIT_STATUS_ARGS = [
 ] as const;
 
 export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>> {
+  return {
+    ...await inspectWorkingCopy(worktree),
+    taskId: worktree.taskId,
+    iterationId: worktree.iterationId,
+    worktreeId: worktree.id
+  };
+}
+
+async function inspectWorkingCopy(worktree: GitComparison): Promise<GitObservation> {
   const [
     repoRoot,
     gitCommonDir,
@@ -63,9 +75,6 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
   ]).size;
 
   return {
-    taskId: worktree.taskId,
-    iterationId: worktree.iterationId,
-    worktreeId: worktree.id,
     worktreePath: worktree.worktreePath,
     repoRoot: repoRoot.trim(),
     gitCommonDir: path.resolve(worktree.worktreePath, gitCommonDir.trim()),
@@ -95,16 +104,42 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
   };
 }
 
-export async function buildDiffEvidence(worktree: WorktreeRecord): Promise<string> {
+export async function inspectExistingWorkSnapshot(worktree: GitComparison): Promise<GitObservation> {
+  const before = await inspectGitWorkingTreeFingerprint(worktree.worktreePath);
+  const snapshot = await inspectWorkingCopy(worktree);
+  const after = await inspectGitWorkingTreeFingerprint(worktree.worktreePath);
+  if (before !== after || snapshot.dirtyFingerprint !== before || snapshot.branch !== worktree.branchName) {
+    throw new Error('The checkout changed during inspection. Refresh and try again.');
+  }
+  return snapshot;
+}
+
+export async function captureExistingWorkEvidence(
+  worktree: GitComparison,
+  snapshot?: GitObservation
+): Promise<{ snapshot: GitObservation; diffEvidence: string }> {
+  snapshot ??= await inspectExistingWorkSnapshot(worktree);
+  const diffEvidence = await buildDiffEvidence(worktree, true);
+  if (snapshot.dirtyFingerprint !== await inspectGitWorkingTreeFingerprint(worktree.worktreePath)) {
+    throw new Error('The checkout changed during inspection. Refresh and try again.');
+  }
+  return { snapshot, diffEvidence };
+}
+
+export async function buildDiffEvidence(worktree: GitComparison, strict = false): Promise<string> {
+  const reportError = (label: string, error: unknown): string => {
+    if (strict) throw error;
+    return formatGitError(label, error);
+  };
   const [committed, staged, unstaged, untracked, stat] = await Promise.all([
     git(worktree.worktreePath, ['diff', `${worktree.baseSha}..HEAD`]).catch((error) =>
-      formatGitError('Committed diff', error)
+      reportError('Committed diff', error)
     ),
     git(worktree.worktreePath, ['diff', '--cached']).catch((error) =>
-      formatGitError('Staged diff', error)
+      reportError('Staged diff', error)
     ),
-    git(worktree.worktreePath, ['diff']).catch((error) => formatGitError('Unstaged diff', error)),
-    buildUntrackedDiff(worktree.worktreePath),
+    git(worktree.worktreePath, ['diff']).catch((error) => reportError('Unstaged diff', error)),
+    buildUntrackedDiff(worktree.worktreePath, strict),
     buildDiffStat(worktree)
   ]);
   const unstagedAndUntracked = [unstaged.trim(), untracked.trim()].filter(Boolean).join('\n');
@@ -193,7 +228,7 @@ export function parseGitStatusPorcelain(output: string): ParsedStatus {
   return parsed;
 }
 
-async function buildDiffStat(worktree: WorktreeRecord): Promise<string> {
+async function buildDiffStat(worktree: GitComparison): Promise<string> {
   const [committed, working, untracked] = await Promise.all([
     git(worktree.worktreePath, ['diff', '--stat', `${worktree.baseSha}..HEAD`]).catch(() => ''),
     git(worktree.worktreePath, ['diff', '--stat']).catch(() => ''),
@@ -202,7 +237,7 @@ async function buildDiffStat(worktree: WorktreeRecord): Promise<string> {
   return [committed.trim(), working.trim(), untracked.trim()].filter(Boolean).join('\n');
 }
 
-async function buildUntrackedDiff(worktreePath: string): Promise<string> {
+async function buildUntrackedDiff(worktreePath: string, strict = false): Promise<string> {
   const paths = await getUntrackedPaths(worktreePath);
   const chunks: string[] = [];
 
@@ -220,6 +255,7 @@ async function buildUntrackedDiff(worktreePath: string): Promise<string> {
         : syntheticAddedFileDiff(relativePath);
       chunks.push(normalizedDiff);
     } catch (error) {
+      if (strict) throw error;
       chunks.push(formatGitError(`Untracked diff for ${relativePath}`, error));
     }
   }

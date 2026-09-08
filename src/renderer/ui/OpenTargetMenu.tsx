@@ -14,6 +14,7 @@ import {
 import {
   focusMenuItem,
   focusOwningMenu,
+  focusVisibleMenuItem,
   handleMenuBlur,
   handleMenuKeyDown
 } from './menuKeyboard';
@@ -122,18 +123,19 @@ export function OpenTargetMenuItems({
     };
   }, [targetKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!autoFocusFirst || !inspection) {
       return;
     }
-    const frame = window.requestAnimationFrame(() => {
-      const firstItem = firstItemRef.current;
-      const menu = firstItem?.closest<HTMLElement>('[role="menu"]');
-      if (firstItem && menu && document.activeElement === menu) {
-        firstItem.focus();
-      }
-    });
-    return () => window.cancelAnimationFrame(frame);
+    const firstItem = firstItemRef.current;
+    const menu = firstItem?.closest<HTMLElement>('[role="menu"]');
+    if (!firstItem || !menu) return;
+    const focused = document.activeElement;
+    if (focused === menu) {
+      focusVisibleMenuItem(menu, firstItem);
+    } else if (focused instanceof HTMLElement && menu.contains(focused)) {
+      focusVisibleMenuItem(menu, focused);
+    }
   }, [autoFocusFirst, inspection]);
 
   const runAction = async (item: OpenTargetMenuItem) => {

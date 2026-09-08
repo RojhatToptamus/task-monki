@@ -1,5 +1,6 @@
 import { execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import http from 'node:http';
 import net, { type AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -15,12 +16,11 @@ import {
   waitForPortableProcessTreeExit
 } from '../core/process/portableChildProcess';
 import { AppEventBus } from '../core/runner/AppEventBus';
-import { MemoryAppSettingsStore } from '../core/settings/AppSettingsStore';
-import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type {
   AgentItemRecord,
+  CreateTaskRequest,
   AgentRunStatus,
   GitSnapshotRecord,
   RunRecord,
@@ -52,7 +52,7 @@ const TERMINAL_STATUSES = new Set<AgentRunStatus>([
   'LOST'
 ]);
 
-type ScenarioKind = 'complete' | 'fail' | 'cancel';
+type ScenarioKind = 'complete' | 'fail' | 'cancel' | 'import';
 
 export interface AgentTestScenarioReport {
   kind: ScenarioKind;
@@ -245,7 +245,8 @@ interface AgentTestEnvironment {
   previewRoot: string;
   providerLogPath: string;
   initialHead: string;
-  store: FileTaskStore;
+  store: SqliteTaskStore;
+  persistence: ApplicationPersistence;
   service: TaskManagerService;
   events: AppEventBus;
   repositoryId: string;
@@ -586,27 +587,39 @@ export async function runAgentResourceStressWorkflow(
     );
     const beforeShutdown = await measureResources(environment, measurementStartedAt);
     beforeShutdown.providers.forEach((entry) => observedProcessIds.add(entry.pid));
-    const finalBytes = await storeByteCount(environment.storeDir);
+    const finalBytes = await storeByteCount(environment.persistence.paths.storageRoot);
     const recordCounts = snapshotRecordCounts(beforeShutdownSnapshot);
 
     const shutdownStartedAt = performance.now();
     await environment.service.shutdown();
     serviceStopped = true;
+    await environment.persistence.close();
     const shutdownMs = elapsed(shutdownStartedAt);
 
-    const coldStore = new FileTaskStore(environment.storeDir);
-    const coldStartedAt = performance.now();
-    await coldStore.init();
-    const coldInitializationMs = elapsed(coldStartedAt);
-    const postRestartStartedAt = performance.now();
-    const postRestartSnapshot = await coldStore.snapshot();
-    const postRestartSnapshotMs = elapsed(postRestartStartedAt);
-    assert(
-      postRestartSnapshot.tasks.length === beforeShutdownSnapshot.tasks.length &&
-        postRestartSnapshot.runs.length === beforeShutdownSnapshot.runs.length,
-      'Cold store restart did not preserve accumulated task and run history.'
-    );
-    await coldStore.close();
+    const coldPersistence = await ApplicationPersistence.open({
+      profileRoot: environment.storeDir,
+      appVersion: REPORT_SCHEMA_VERSION
+    });
+    let coldInitializationMs: number;
+    let postRestartSnapshotMs: number;
+    try {
+      const coldStore = coldPersistence.tasks;
+      const coldStartedAt = performance.now();
+      await coldStore.init();
+      coldInitializationMs = elapsed(coldStartedAt);
+      const postRestartStartedAt = performance.now();
+      const postRestartSnapshot = await coldStore.snapshot();
+      postRestartSnapshotMs = elapsed(postRestartStartedAt);
+       assert(
+         postRestartSnapshot.tasks.length === beforeShutdownSnapshot.tasks.length &&
+           postRestartSnapshot.runs.length === beforeShutdownSnapshot.runs.length,
+        `Cold store restart did not preserve accumulated task and run history: ` +
+          `tasks ${beforeShutdownSnapshot.tasks.length} -> ${postRestartSnapshot.tasks.length}, ` +
+          `runs ${beforeShutdownSnapshot.runs.length} -> ${postRestartSnapshot.runs.length}.`
+       );
+    } finally {
+     await coldPersistence.close();
+   }
 
     await waitForProcessesToExit([...observedProcessIds, ...observedPreviewProcessIds], 5_000);
     const providerProcessesJoined = [...observedProcessIds].every(
@@ -705,6 +718,7 @@ export async function runAgentResourceStressWorkflow(
     if (!serviceStopped) {
       await attemptCleanup(() => environment.service.shutdown(), cleanupErrors);
     }
+    await attemptCleanup(() => environment.persistence.close(), cleanupErrors);
     await attemptCleanup(() => removeOwnedRoot(environment.rootDir), cleanupErrors);
     rootRemoved = !(await pathExists(environment.rootDir));
     throw new Error(
@@ -1051,7 +1065,7 @@ async function measureResources(
       updateListeners: appUpdateListenerCount(environment.events)
     },
     providers: await Promise.all(providerPids.map(measureProcessResources)),
-    storeBytes: await storeByteCount(environment.storeDir)
+    storeBytes: await storeByteCount(environment.persistence.paths.storageRoot)
   };
 }
 
@@ -1124,11 +1138,28 @@ function countValues(values: readonly string[]): Record<string, number> {
   }, {});
 }
 
-async function storeByteCount(storeDir: string): Promise<number> {
-  return fs.stat(path.join(storeDir, 'store.json')).then(
-    (stat) => stat.size,
-    () => 0
-  );
+async function storeByteCount(storageRoot: string): Promise<number> {
+  const visit = async (directory: string): Promise<number> => {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+      throw error;
+    }
+    let total = 0;
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        total += await visit(entryPath);
+      } else if (entry.isFile()) {
+        total += (await fs.stat(entryPath)).size;
+      }
+    }
+    return total;
+  };
+  return visit(storageRoot);
 }
 
 function snapshotRecordCounts(snapshot: TaskSnapshot): Record<string, number> {
@@ -1419,7 +1450,7 @@ async function runStressUiWorkflow(options: StressOptions): Promise<void> {
 async function createAgentTestEnvironment(
   options: AgentTestEnvironmentOptions = {}
 ): Promise<AgentTestEnvironment> {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-test-'));
+  const rootDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-test-')));
   const storeDir = path.join(rootDir, 'store');
   const sourceRepositoryPath = path.join(rootDir, 'source');
   const localRemotePath = path.join(rootDir, 'remote.git');
@@ -1431,6 +1462,7 @@ async function createAgentTestEnvironment(
   const providerScriptPath = path.join(runtimeRoot, 'deterministic-acp.cjs');
   const providerLogPath = path.join(runtimeRoot, 'provider.log');
   let service: TaskManagerService | undefined;
+  let persistence: ApplicationPersistence | undefined;
 
   try {
     await Promise.all([
@@ -1450,8 +1482,12 @@ async function createAgentTestEnvironment(
       { encoding: 'utf8', mode: 0o600 }
     );
 
-    const store = new FileTaskStore(storeDir);
-    const appSettingsStore = new MemoryAppSettingsStore({
+    persistence = await ApplicationPersistence.open({
+      profileRoot: storeDir,
+      appVersion: REPORT_SCHEMA_VERSION
+    });
+    const store = persistence.tasks;
+    await persistence.settings.update({
       firstLaunchSetupCompleted: true,
       defaultRuntimeId: RUNTIME_ID,
       defaultModel: 'deterministic',
@@ -1459,7 +1495,9 @@ async function createAgentTestEnvironment(
     });
     const events = new AppEventBus();
     const profile = deterministicAcpProfile(providerScriptPath);
-    const adapter = new AcpRuntimeAdapter(store, events, profile, {
+    const runtimeStore = persistence.agentRuntime;
+    const taskRuntime = persistence.taskRuntime;
+    const adapter = new AcpRuntimeAdapter(taskRuntime, runtimeStore, events, profile, {
       cwd: rootDir,
       environment: {
         PATH: process.env.PATH,
@@ -1487,10 +1525,11 @@ async function createAgentTestEnvironment(
     });
     service = new TaskManagerService(store, sourceRepositoryPath, events, {
       worktreeRoot,
-      appSettingsStore,
+      appSettingsStore: persistence.settings,
       agentRuntimeAdapters: [adapter],
-      agentRuntimeStore: new FileAgentRuntimeStore(path.join(rootDir, 'agent-runtime')),
-      discourseStore: new FileDiscourseStore(path.join(rootDir, 'discourse')),
+      agentRuntimeStore: runtimeStore,
+      taskRuntimeAccess: taskRuntime,
+      discourseStore: persistence.discourse,
       discourseWorkspaceRoot: path.join(rootDir, 'discourse-workspaces'),
       defaultAgentRuntimeId: RUNTIME_ID,
       previewRoot,
@@ -1509,7 +1548,7 @@ async function createAgentTestEnvironment(
 
     await service.init();
     const repository = await service.addRepository(sourceRepositoryPath);
-    await appSettingsStore.update({ selectedRepositoryId: repository.id });
+    await persistence.settings.update({ selectedRepositoryId: repository.id });
     return {
       rootDir,
       storeDir,
@@ -1520,6 +1559,7 @@ async function createAgentTestEnvironment(
       providerLogPath,
       initialHead: (await git(sourceRepositoryPath, ['rev-parse', 'HEAD'])).trim(),
       store,
+      persistence,
       service,
       events,
       repositoryId: repository.id
@@ -1529,6 +1569,10 @@ async function createAgentTestEnvironment(
     if (service) {
       const initializedService = service;
       await attemptCleanup(() => initializedService.shutdown(), cleanupErrors);
+    }
+    if (persistence) {
+      const openedPersistence = persistence;
+      await attemptCleanup(() => openedPersistence.close(), cleanupErrors);
     }
     await attemptCleanup(() => removeOwnedRoot(rootDir), cleanupErrors);
     const rootRemoved = !(await pathExists(rootDir));
@@ -1554,8 +1598,8 @@ async function exerciseRepresentativeScenarios(
     instructions: 'TASK_MONKI_PROFILE_GUIDANCE: Check the local result and report only observed evidence.'
   });
   const profile = profileSettings.agentProfiles[0]!;
-  for (const kind of ['complete', 'fail', 'cancel'] as const) {
-    const task = await environment.service.createTask({
+  for (const kind of ['complete', 'fail', 'cancel', 'import'] as const) {
+    const input: CreateTaskRequest = {
       title: scenarioTitle(kind),
       prompt: `[agent-test:${kind}] ${scenarioPrompt(kind)}`,
       repositoryId: environment.repositoryId,
@@ -1573,9 +1617,27 @@ async function exerciseRepresentativeScenarios(
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       }
+    };
+    let task: Task;
+    let worktree: WorktreeRecord;
+    if (kind === 'import') {
+      const checkout = path.join(environment.rootDir, 'external-checkout');
+      await git(environment.sourceRepositoryPath, ['worktree', 'add', '-b', 'feature/executed-import', checkout]);
+      task = await environment.service.importTask({ ...input, worktreePath: checkout, branchName: 'feature/executed-import', baseRef: 'HEAD' });
+      assert(!task.currentRunId && !task.currentAgentSessionId, 'Import started coding work.');
+      assert(task.workflowPhase === 'IN_PROGRESS', 'Import did not remain idle in progress.');
+      assert(!task.agentProfile, 'Import unexpectedly assigned a profile.');
+      task = await environment.service.setTaskAgentProfile({ taskId: task.id, profileId: profile.id });
+      worktree = requireValue((await environment.store.snapshot()).worktrees.find((record) => record.id === task.currentWorktreeId), 'Imported checkout missing.');
+      assert(worktree.ownership === 'EXTERNAL', 'Import lost checkout ownership.');
+    } else {
+      task = await environment.service.createTask(input);
+      worktree = await environment.service.prepareWorktree({ taskId: task.id });
+    }
+    const started = await environment.service.startRun({
+      taskId: task.id,
+      instruction: kind === 'import' ? '[agent-test:complete] Create the known test output in the imported checkout.' : undefined
     });
-    const worktree = await environment.service.prepareWorktree({ taskId: task.id });
-    const started = await environment.service.startRun({ taskId: task.id });
     if (kind === 'cancel') {
       await waitForSnapshot(environment.store, (snapshot) => {
         const run = snapshot.runs.find((candidate) => candidate.id === started.id);
@@ -1596,7 +1658,7 @@ async function exerciseRepresentativeScenarios(
     reports.push(
       await buildScenarioReport(kind, task.id, worktree, started.id, snapshot)
     );
-    assert((await environment.store.readArtifact(started.promptArtifactId)).includes(profile.instructions), 'Run prompt lost its assigned profile.');
+    assert((await environment.service.readArtifact({ artifactId: started.promptArtifactId })).includes(profile.instructions), 'Run prompt lost its assigned profile.');
   }
   assert((await fs.readFile(environment.providerLogPath, 'utf8')).includes('"event":"profile-guidance-received"'), 'The ACP process did not receive custom profile guidance.');
   return reports;
@@ -1630,7 +1692,7 @@ async function buildScenarioReport(
     .map((event) => event.type);
   const changedPaths = await observedGitPaths(worktree.worktreePath);
   const expectedChangeObserved =
-    kind === 'complete'
+    kind === 'complete' || kind === 'import'
       ? changedPaths.includes('agent-output.txt') && gitSnapshot.untrackedCount === 1
       : changedPaths.length === 0;
   const diagnostic =
@@ -1734,6 +1796,9 @@ function assertWorkflowProof(
   const complete = requireScenario(scenarios, 'complete');
   const failed = requireScenario(scenarios, 'fail');
   const canceled = requireScenario(scenarios, 'cancel');
+  const imported = requireScenario(scenarios, 'import');
+  assert(imported.runStatus === 'COMPLETED' && imported.workflowPhase === 'REVIEW', 'Imported implementation did not complete through the shared runtime.');
+  assert(imported.git.expectedChangeObserved, 'Imported implementation lacked independent Git evidence.');
   assert(complete.runStatus === 'COMPLETED', 'Completion scenario did not complete.');
   assert(complete.workflowPhase === 'REVIEW', 'Completion scenario did not advance to review.');
   assert(complete.git.expectedChangeObserved, 'Completion Git change was not independently observed.');
@@ -1869,13 +1934,7 @@ function deterministicAcpProfile(providerScriptPath: string): AcpRuntimeProfile 
       allowedKeys: [],
       sensitiveKeys: []
     },
-    approvalPolicies: ['never'],
-    extensions: {
-      deterministicTestRuntime: {
-        maturity: 'stable',
-        detail: 'Local developer-only ACP subprocess with fixed scenario behavior.'
-      }
-    }
+    approvalPolicies: ['never']
   };
 }
 
@@ -2398,7 +2457,7 @@ function waitForTerminationSignal(): Promise<void> {
 }
 
 async function waitForSnapshot(
-  store: FileTaskStore,
+  store: SqliteTaskStore,
   predicate: (snapshot: TaskSnapshot) => boolean,
   timeoutMs = TIMEOUT_MS
 ): Promise<TaskSnapshot> {
@@ -2447,7 +2506,8 @@ function scenarioTitle(kind: ScenarioKind): string {
   return {
     complete: '[agent-test:complete] Deterministic completion',
     fail: '[agent-test:fail] Deterministic failure',
-    cancel: '[agent-test:cancel] Deterministic cancellation'
+    cancel: '[agent-test:cancel] Deterministic cancellation',
+    import: '[agent-test:import] Imported checkout implementation'
   }[kind];
 }
 
@@ -2455,7 +2515,8 @@ function scenarioPrompt(kind: ScenarioKind): string {
   return {
     complete: 'Create the known test output and finish.',
     fail: 'Emit the known provider failure.',
-    cancel: 'Wait until Task Monki interrupts this turn.'
+    cancel: 'Wait until Task Monki interrupts this turn.',
+    import: 'Existing work before the first coding instruction.'
   }[kind];
 }
 
@@ -2502,6 +2563,7 @@ async function cleanupAgentTestEnvironment(
     await environment.service.shutdown();
     serviceStopped = true;
   }, errors);
+  await attemptCleanup(() => environment.persistence.close(), errors);
   await attemptCleanup(async () => {
     const providerLog = await fs
       .readFile(environment.providerLogPath, 'utf8')
@@ -2533,7 +2595,7 @@ function cleanupSucceeded(result: AgentTestCleanupResult): boolean {
 
 async function removeOwnedRoot(rootDir: string): Promise<void> {
   const resolved = path.resolve(rootDir);
-  const temporaryRoot = path.resolve(os.tmpdir());
+  const temporaryRoot = await fs.realpath(os.tmpdir());
   const relative = path.relative(temporaryRoot, resolved);
   if (
     relative === '' ||

@@ -13,7 +13,8 @@ Install these before using Task Monki:
 - Git
 - at least one supported coding-agent runtime, installed and authenticated:
   - Codex CLI with a compatible App Server;
-  - OpenCode `>=1.4.0` and `<2.0.0` with one or more configured model providers;
+  - OpenCode with the native `opencode serve` API and one or more configured
+    model providers;
   - an ACP profile: Grok Build, Cursor Agent, or `claude-agent-acp`;
 - Optional: GitHub CLI, installed and authenticated, for branch publishing and
   draft pull-request features
@@ -34,6 +35,8 @@ configuration remain owned by the selected runtime.
 Settings provides custom executable paths for Git, GitHub CLI, Codex CLI,
 OpenCode, and every registered ACP runtime. Use Auto-detect to
 return a saved path to environment-override and then PATH-based discovery.
+On macOS, the packaged app also checks common user CLI locations because apps
+opened from Finder do not receive the interactive shell PATH.
 
 Environment variables are supported as debug overrides and take precedence over
 saved Settings values:
@@ -223,14 +226,19 @@ You can always install a newer release manually from GitHub Releases.
 The stable package identity preserves the same app data directory during a
 normal upgrade on one platform.
 
-Task Monki stores durable app preferences, including runtime/model defaults,
-repository selection, Codex tool modes, configured executable paths, and the
-update-on-quit choice, in `app-settings.json` under the platform application
-data directory. Task and evidence records are stored separately.
+Task Monki stores its structured durable data in one versioned SQLite database.
+This data includes settings, tasks, evidence, runtime records, Discourse, and
+Preview control state. The database is under the platform application data
+directory. Large immutable attachments, artifacts, encrypted Preview-private
+values, and managed Design Git repositories remain files. Database records own
+their reachability and integrity metadata.
 
-Task Monki loads each durable file only when it matches the current task-store,
-agent-runtime, Discourse, attachment, or app-settings schema. If startup reports
-an unsupported schema, delete the named local data and start with fresh state.
+Startup rejects an unidentified, newer, or corrupt database and any invalid
+managed file required during initialization. Other managed bytes are verified
+before use and fail closed. Do not delete individual persistence files. The
+core recovery API can restore a verified backup or quarantine a closed
+`storage` root. The desktop UI does not expose these operations. Startup does
+not run them automatically.
 
 ## First Launch
 

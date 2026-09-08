@@ -21,6 +21,7 @@ import type {
   CiRollupRecord,
   ClientTextExcerpt,
   DomainEvent,
+  ExistingWorktree,
   Finding,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
@@ -60,6 +61,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import type { TaskAttachmentRecord } from '../../shared/attachments';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import {
   canCreateDeliveryCommit,
   canPrepareWorktree,
@@ -121,7 +123,7 @@ import {
   projectDebugTaskActivity,
   projectOverviewTaskActivity
 } from '../model/taskActivity';
-import { buildRunProgressViewModel } from '../model/runProgress';
+import { buildRunProgressViewModel, canStopTaskRun } from '../model/runProgress';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { buildReviewActivityViewModel } from '../model/reviewActivity';
 import {
@@ -143,7 +145,8 @@ import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { PreviewTaskRouteOption } from '../../shared/preview';
 import {
   isReviewPhase,
-  shouldShowMoveToReviewHeaderAction
+  shouldShowMoveToReviewHeaderAction,
+  canReviewExistingWork
 } from '../model/taskReviewActions';
 import {
   TaskMascotVideo,
@@ -151,6 +154,7 @@ import {
 } from './TaskMascotVideo';
 import {
   CreateDraftPrModal,
+  ExistingWorkModal,
   MarkDoneModal,
   ReviewRequestDrawer
 } from './TaskDetailModals';
@@ -200,15 +204,20 @@ interface TaskDetailProps {
   previewRecipeGeneration?: PreviewRecipeGenerationSnapshot;
   showMascot: boolean;
   reviewDisabledReason?: string;
+  previewRecipeGenerationDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
-  onStart(taskId: string): Promise<void>;
+  onStart(taskId: string, instruction?: string): Promise<void>;
+  onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
+  onReconnectWorktree?(taskId: string, worktreePath: string): Promise<void>;
+  onUpdateWorktreeComparison?(taskId: string, baseRef: string): Promise<void>;
+  onRefreshEvidence?(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
   onSteer(runId: string, instruction: string): Promise<void>;
   onContinue(runId: string, instruction?: string): Promise<void>;
   onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string): Promise<void>;
   agentProfiles?: readonly CustomAgentProfile[];
   onSetAgentProfile?(profileId: string | null): Promise<void>;
-  onReview(runId: string, agentProfileId?: string): Promise<void>;
+  onReview(runId?: string, agentProfileId?: string): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
   onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
   onRespondToInteraction(
@@ -216,7 +225,7 @@ interface TaskDetailProps {
     decision: AgentInteractionDecision
   ): Promise<void>;
   onCreateDeliveryCommit(taskId: string): Promise<void>;
-  onCreatePullRequest(taskId: string, title?: string): Promise<void>;
+  onCreatePullRequest(taskId: string, title?: string, baseBranch?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onResolvePreview(taskId: string, scenarioId?: string): Promise<void>;
   onSetPreviewLocalBinding(
@@ -300,6 +309,7 @@ export function TaskDetail(props: TaskDetailProps) {
     mergeSnapshot
   } = props;
   const [tab, setTab] = useState<DetailTab>('overview');
+  const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
@@ -327,7 +337,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const focusActivityHistoryRef = useRef(false);
   const repositoryContextId = useId();
   const taskDetailModalOpen = Boolean(
-    markDoneModal || draftPrModalOpen || requestDrawerOpen || previewModalOpen
+    markDoneModal || draftPrModalOpen || requestDrawerOpen || previewModalOpen || existingWorkModal
   );
   const prefersReducedMotion = usePrefersReducedMotion();
   const reviewGate = task ? taskReviewGate(task) : undefined;
@@ -355,6 +365,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const prStatus = task
     ? buildPrStatusViewModel({
         task,
+        worktree,
         gitSnapshot,
         branchPublication,
         pullRequest,
@@ -393,6 +404,7 @@ export function TaskDetail(props: TaskDetailProps) {
   }, [tab]);
 
   useEffect(() => {
+    setExistingWorkModal(undefined);
     setReviewStartPending(false);
     setReviewProfileId(null);
     setReviewMascotHoldGeneration(0);
@@ -458,6 +470,13 @@ export function TaskDetail(props: TaskDetailProps) {
   }
 
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
+  const activeTurnSteeringSupported = Boolean(
+    props.runtimeState &&
+    projectAgentExecutionSupport(
+      props.runtimeState.preflight.capabilities,
+      'ACTIVE_TURN_STEERING'
+    ).supported
+  );
   const promptLineCount = task.prompt.split(/\r?\n/).length;
   const reviewFindings = reviewGate.result?.findings ?? [];
   const reviewActivity = buildReviewActivityViewModel({
@@ -468,16 +487,22 @@ export function TaskDetail(props: TaskDetailProps) {
   });
   // The review run and projection remain historical display context. Starting
   // another review or review-derived follow-up always targets the exact current
-  // completed implementation run, never the source of an older review.
+  // completed implementation run, never the source of an older review. Imported
+  // work in Review can also be reviewed before its first coding run.
   const actionableReviewSourceRun = findCompletedCurrentImplementationRun(
     task,
     props.runs
   );
+  const externalWork = worktree?.ownership === 'EXTERNAL';
+  const importedBeforeFirstRun = externalWork && !task.currentRunId;
+  const externalReviewReady = canReviewExistingWork(task, worktree) && !gitSnapshot?.operationInProgress;
+  const hasActionableReviewSource = Boolean(actionableReviewSourceRun) ||
+    (externalReviewReady && ['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase));
   const hasHistoricalReviewContext =
     reviewRun?.mode === 'REVIEW' || reviewGate.status !== 'NOT_RUN';
   const reviewPhaseVisible =
     hasHistoricalReviewContext ||
-    (isReviewPhase(task.workflowPhase) && Boolean(actionableReviewSourceRun));
+    (isReviewPhase(task.workflowPhase) && hasActionableReviewSource);
   const activeImplementationRun = run && isActiveNonReviewRun(run) ? run : undefined;
   const reviewPauseReason: ReviewActionPauseReason | undefined = reviewIsRunning
     ? 'review-running'
@@ -506,7 +531,7 @@ export function TaskDetail(props: TaskDetailProps) {
     deliveryBusy: deliveryActionBusy,
     pauseReason: reviewPauseReason,
     implementationRetryReason: getImplementationRetryReason(task),
-    hasInvestigationSource: Boolean(deliverySourceRun)
+    hasInvestigationSource: Boolean(deliverySourceRun) || importedBeforeFirstRun
   });
   const taskActivityLedger = useMemo(
     () =>
@@ -575,7 +600,7 @@ export function TaskDetail(props: TaskDetailProps) {
     }
   };
 
-  const runReview = async (sourceRunId: string) => {
+  const runReview = async (sourceRunId?: string) => {
     if (reviewActionInFlightRef.current) {
       return;
     }
@@ -623,7 +648,7 @@ export function TaskDetail(props: TaskDetailProps) {
         (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
       );
     if (
-      !actionableReviewSourceRun ||
+      !hasActionableReviewSource ||
       reviewActionsPaused ||
       !canRequestReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
     ) {
@@ -650,12 +675,16 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const submitRequestChanges = async () => {
-    if (!actionableReviewSourceRun || !requestInstruction.trim() || reviewActionsPaused) {
+    if (!hasActionableReviewSource || !requestInstruction.trim() || reviewActionsPaused) {
       return;
     }
     await runReviewAction(async () => {
       try {
-        await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim());
+        if (actionableReviewSourceRun) {
+          await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim());
+        } else {
+          await props.onStart(task.id, requestInstruction.trim());
+        }
         setRequestDrawerOpen(false);
       } catch {
         // The app shell reports the error. Keep the drawer open so the user can retry.
@@ -710,14 +739,13 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const investigateFailingChecks = async () => {
-    if (!deliverySourceRun || !prStatus.canInvestigateFailure || prActionState.investigateDisabled) {
+    if ((!deliverySourceRun && !importedBeforeFirstRun) || !prStatus.canInvestigateFailure || prActionState.investigateDisabled) {
       return;
     }
     await runDeliveryAction(async () => {
-      await props.onContinue(
-        deliverySourceRun.id,
-        buildFailingChecksInvestigationPrompt(prStatus)
-      );
+      const instruction = buildFailingChecksInvestigationPrompt(prStatus);
+      if (deliverySourceRun) await props.onContinue(deliverySourceRun.id, instruction);
+      else await props.onStart(task.id, instruction);
     });
   };
 
@@ -726,13 +754,13 @@ export function TaskDetail(props: TaskDetailProps) {
     setDraftPrModalOpen(true);
   };
 
-  const submitDraftPr = async () => {
+  const submitDraftPr = async (baseBranch?: string) => {
     const title = draftPrTitle.replace(/\s+/g, ' ').trim();
     if (!title || prActionState.createOrPushDisabled) {
       return;
     }
     await runDeliveryAction(async () => {
-      await props.onCreatePullRequest(task.id, normalizePullRequestTitle(title, task.title));
+      await props.onCreatePullRequest(task.id, normalizePullRequestTitle(title, task.title), baseBranch);
       setDraftPrModalOpen(false);
     });
   };
@@ -750,8 +778,8 @@ export function TaskDetail(props: TaskDetailProps) {
     switch (id) {
       case 'run-review':
       case 'run-review-again':
-        if (actionableReviewSourceRun) {
-          void runReview(actionableReviewSourceRun.id);
+        if (hasActionableReviewSource) {
+          void runReview(actionableReviewSourceRun?.id);
         }
         return;
       case 'request-changes':
@@ -799,8 +827,12 @@ export function TaskDetail(props: TaskDetailProps) {
       case 'run-review':
       case 'run-review-again': {
         const title = props.reviewDisabledReason ??
-          (!actionableReviewSourceRun
-            ? 'Complete an implementation run before starting review.'
+          (!hasActionableReviewSource
+            ? importedBeforeFirstRun
+              ? gitSnapshot?.operationInProgress
+                ? 'Finish the current Git operation before starting review.'
+                : 'Refresh or reconnect the checkout before starting review.'
+              : 'Complete an implementation run before starting review.'
             : reviewActionPauseTitle ?? (busy ? taskActionBusyTitle : undefined));
         return {
           disabled: Boolean(title),
@@ -814,7 +846,7 @@ export function TaskDetail(props: TaskDetailProps) {
         return { disabled: Boolean(title), title };
       }
       case 'commit': {
-        const title = !canCreateDeliveryCommit(task)
+        const title = !canCreateDeliveryCommit(task, worktree)
           ? 'A delivery commit is not available for the current tree.'
           : reviewActionPauseTitle ?? (busy ? taskActionBusyTitle : undefined);
         return { disabled: Boolean(title), title };
@@ -837,13 +869,24 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const primaryAction = getPrimaryAction({
     task,
+    worktree,
     onPrepareWorktree: props.onPrepareWorktree,
-    onStart: props.onStart
+    onStart: externalWork ? async () => setExistingWorkModal('instruction') : props.onStart
   });
   const implementationRetryRequired = isImplementationRetryRequired(task, run);
 
   const headActions: HeadAction[] = [];
-  if (shouldShowMoveToReviewHeaderAction(task, run)) {
+  const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run);
+  const directImportReview = importedBeforeFirstRun && task.workflowPhase === 'IN_PROGRESS';
+  if (directImportReview) {
+    headActions.push({
+      label: reviewPending ? 'Starting review…' : 'Run agent review',
+      kind: 'primary',
+      ...nextActionState('run-review'),
+      onClick: () => void runReview()
+    });
+  }
+  if (awaitingMoveToReview) {
     headActions.push({
       label: 'Move to review',
       kind: 'soft',
@@ -853,7 +896,7 @@ export function TaskDetail(props: TaskDetailProps) {
   if (primaryAction) {
     headActions.push({
       label: primaryAction.label,
-      kind: 'primary',
+      kind: directImportReview ? 'soft' : 'primary',
       disabled:
         primaryAction.disabled ||
         reviewActionsPaused ||
@@ -914,7 +957,6 @@ export function TaskDetail(props: TaskDetailProps) {
 
   // The single "what next" model for the rail. Kept in one place so the header,
   // run surface, and rail all agree instead of each inventing an action.
-  const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run);
   const reviewHasOutput =
     Boolean(reviewGate.result) ||
     Boolean(
@@ -922,16 +964,16 @@ export function TaskDetail(props: TaskDetailProps) {
       (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
     );
   const reviewHasActionableFindings =
-    Boolean(actionableReviewSourceRun) &&
+    hasActionableReviewSource &&
     canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
   const nextAction = selectNextAction({
     task,
     reviewStatus: reviewPending ? 'RUNNING' : reviewGate.status,
     finishEvidence,
     requirements: finishRequirements,
-    hasReviewSource: Boolean(actionableReviewSourceRun),
+    hasReviewSource: hasActionableReviewSource,
     reviewHasActionableFindings,
-    canCommit: canCreateDeliveryCommit(task),
+    canCommit: canCreateDeliveryCommit(task, worktree),
     awaitingMoveToReview,
     runInFlight: Boolean(activeImplementationRun) || reviewPending,
     implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status,
@@ -958,6 +1000,7 @@ export function TaskDetail(props: TaskDetailProps) {
     executionReadiness: props.previewExecutionReadiness,
     resolution: props.previewResolution,
     recipeGeneration: props.previewRecipeGeneration,
+    recipeGenerationDisabledReason: props.previewRecipeGenerationDisabledReason,
     onResolve: props.onResolvePreview,
     onSetLocalBinding: props.onSetPreviewLocalBinding,
     onGetRecipeGeneration: props.onGetPreviewRecipeGeneration,
@@ -1002,6 +1045,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 onArchive={props.onArchive}
                 onRequestDelete={props.onRequestDelete}
                 className="tm-detail__taskmenu"
+                align="start"
               />
             </div>
             <div className="tm-detail__context">
@@ -1165,7 +1209,7 @@ export function TaskDetail(props: TaskDetailProps) {
                     }
                     onShowDebug={() => setTab('debug')}
                     onStop={
-                      runProgress.state === 'RUNNING' && progressRun
+                      canStopTaskRun(progressRun)
                         ? () => void props.onCancel(runProgress.runId)
                         : undefined
                     }
@@ -1212,6 +1256,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 <AgentControlPanel
                   run={run}
                   requiresRecovery={implementationRetryRequired}
+                  activeTurnSteeringSupported={activeTurnSteeringSupported}
                   interactions={interactions}
                   onSteer={props.onSteer}
                   onInterrupt={props.onCancel}
@@ -1250,6 +1295,19 @@ export function TaskDetail(props: TaskDetailProps) {
                     />
                     <ConfigRow k="Network" v={formatAgentNetworkAccess(displayedAgentSettings)} />
                     <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
+                    {externalWork && worktree ? <>
+                      <ConfigRow k="Checkout" v={worktree.worktreePath} />
+                      <div className="tm-config__actions">
+                        <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                          title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                          onClick={() => void runReviewAction(async () => { await props.onRefreshEvidence?.(task.id); })}>Refresh checkout</button>
+                        {['MISSING', 'ERROR'].includes(worktree.status) ? (
+                          <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                            title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                            onClick={() => setExistingWorkModal('reconnect')}>Reconnect checkout</button>
+                        ) : null}
+                      </div>
+                    </> : null}
                   </>
                 }
               />
@@ -1301,6 +1359,17 @@ export function TaskDetail(props: TaskDetailProps) {
 
         {tab === 'evidence' ? (
           <div className="tm-evtab">
+            {externalWork && worktree ? (
+              <div className="tm-evtab__toolbar">
+                <span className="tm-evtab__comparison" title={`${worktree.baseRef} · ${worktree.baseSha}`}>
+                  Compare against <code>{worktree.baseRef} · {worktree.baseSha.slice(0, 8)}</code>
+                </span>
+                <span className="tm-actiontitle" title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}>
+                  <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                    onClick={() => setExistingWorkModal('comparison')}>Change comparison</button>
+                </span>
+              </div>
+            ) : null}
             <EvidencePanel
               run={run}
               worktree={worktree}
@@ -1362,6 +1431,17 @@ export function TaskDetail(props: TaskDetailProps) {
 
       <div ref={previewModalRootRef} />
 
+      {existingWorkModal && worktree && props.onListExistingWorktrees ? (
+        <ExistingWorkModal key={`${task.id}:${existingWorkModal}`} mode={existingWorkModal} worktree={worktree}
+          onListCheckouts={props.onListExistingWorktrees}
+          onCancel={() => setExistingWorkModal(undefined)} fallbackReturnFocusRef={detailRootRef}
+          onSubmit={async (value) => {
+            if (existingWorkModal === 'instruction') await props.onStart(task.id, value);
+            else if (existingWorkModal === 'comparison') await props.onUpdateWorktreeComparison?.(task.id, value);
+            else await props.onReconnectWorktree?.(task.id, value);
+          }} />
+      ) : null}
+
       {markDoneModal ? (
         <MarkDoneModal
           withIssues={markDoneModal === 'issues'}
@@ -1388,7 +1468,7 @@ export function TaskDetail(props: TaskDetailProps) {
           disabledReason={prActionState.createOrPushReason}
           onTitleChange={setDraftPrTitle}
           onCancel={() => setDraftPrModalOpen(false)}
-          onSubmit={() => void submitDraftPr()}
+          onSubmit={submitDraftPr}
           fallbackReturnFocusRef={detailRootRef}
         />
       ) : null}
@@ -1903,6 +1983,7 @@ function healthFindingTone(severity: Finding['severity']): Tone {
 
 function getPrimaryAction(input: {
   task: Task;
+  worktree?: WorktreeRecord;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
 }): { label: string; disabled?: boolean; onClick(): void } | undefined {
@@ -1911,6 +1992,7 @@ function getPrimaryAction(input: {
   }
 
   if (canPrepareWorktree(input.task)) {
+    if (input.worktree?.ownership === 'EXTERNAL') return undefined;
     return {
       label: 'Prepare worktree',
       onClick: () => void input.onPrepareWorktree(input.task.id)

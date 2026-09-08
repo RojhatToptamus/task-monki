@@ -1,4 +1,5 @@
 import type { AttachmentDraftSnapshot } from './attachments';
+import type { AgentModelProviderId, AgentRuntimeId } from './agent';
 
 export type DesignTurnMessageSource = 'TASK_PROMPT' | 'INLINE_MESSAGE';
 
@@ -169,7 +170,9 @@ export type DesignSourceAction = DesignSourceActionBase &
 export interface CreateBlankDesignRequest {
   brief: string;
   creationToken: string;
+  runtimeId: AgentRuntimeId;
   model?: string;
+  modelProvider?: AgentModelProviderId;
   reasoningEffort?: string;
   attachmentDraftId?: string;
 }

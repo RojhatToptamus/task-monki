@@ -2,35 +2,26 @@ import { describe, expect, it } from 'vitest';
 import { opencodeCapabilities } from './opencodeCapabilities';
 
 describe('opencodeCapabilities', () => {
-  it('truthfully reports provider-controlled network and no managed attachment boundary', () => {
+  it('reports native attachment delivery without claiming process confinement', () => {
     const capabilities = opencodeCapabilities();
 
     expect(
       capabilities.executionPolicy.presets.map((preset) => preset.networkAccess)
-    ).toEqual(['REQUIRED', 'REQUIRED']);
+    ).toEqual(['REQUIRED', 'REQUIRED', 'REQUIRED']);
     expect(
       capabilities.executionPolicy.presets.map((preset) => ({
         sandbox: preset.sandbox,
         approvalPolicy: preset.approvalPolicy
       }))
     ).toEqual([
+      { sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'never' },
       { sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'on-request' },
       { sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'never' }
     ]);
-    expect(capabilities.attachmentDelivery.maturity).toBe('unsupported');
-    expect(capabilities.promptRefinement.maturity).toBe('unsupported');
-    expect(capabilities.sessionFork).toEqual({
+    expect(capabilities.attachmentDelivery).toEqual({
       maturity: 'stable',
-      detail: expect.stringContaining('target worktree runtime')
+      detail: expect.stringContaining('not an OS confinement boundary')
     });
-    expect(capabilities.extensions.nativeFileParts?.maturity).toBe('stable');
-    expect(capabilities.detachedReview.maturity).toBe('inferred');
-    expect(capabilities.review).toEqual({
-      maturity: 'unsupported',
-      detail: expect.stringContaining('cannot attest the read-only isolation')
-    });
-    expect(capabilities.detachedReview.detail).toContain(
-      'cannot attest an isolated read-only workspace'
-    );
+    expect(capabilities.readOnlyTurns.maturity).toBe('stable');
   });
 });

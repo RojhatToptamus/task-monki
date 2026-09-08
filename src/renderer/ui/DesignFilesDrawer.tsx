@@ -369,7 +369,7 @@ function DesignReferenceRow({
           <button
             type="button"
             disabled={busy}
-            title="Copy into the project so Codex can edit it."
+            title="Copy into the project so the Design agent can edit it."
             onClick={onImport}
           >
             Import

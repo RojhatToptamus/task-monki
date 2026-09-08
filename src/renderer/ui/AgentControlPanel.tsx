@@ -14,6 +14,7 @@ import { humanizeEnum } from './display';
 interface AgentControlPanelProps {
   run?: RunRecord;
   requiresRecovery?: boolean;
+  activeTurnSteeringSupported: boolean;
   interactions: InteractionRequestRecord[];
   onSteer(runId: string, instruction: string): Promise<void>;
   onInterrupt(runId: string): Promise<void>;
@@ -28,6 +29,7 @@ interface AgentControlPanelProps {
 export function AgentControlPanel({
   run,
   requiresRecovery = false,
+  activeTurnSteeringSupported,
   interactions,
   onSteer,
   onInterrupt,
@@ -72,7 +74,7 @@ export function AgentControlPanel({
       ? 'Retry the original implementation or continue unfinished work from the current state.'
       : 'Continue unfinished work, retry the original implementation, or fork an alternative.';
   const hasAvailableControls =
-    isRunning ||
+    (isRunning && activeTurnSteeringSupported) ||
     canFollowUp ||
     canContinue ||
     canRetry ||
@@ -163,7 +165,7 @@ export function AgentControlPanel({
             </button>
           </div>
         ) : null}
-        {isRunning ? (
+        {isRunning && activeTurnSteeringSupported ? (
           <div className="agent-controls__button-row">
             <button
               type="button"

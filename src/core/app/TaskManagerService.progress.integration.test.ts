@@ -40,8 +40,8 @@ describe('TaskManagerService progress harness', () => {
       ).toBe(true);
       expect(providerPrompt).not.toContain('When finished, summarize');
 
-      const startedRun = await requireRun(scenario.store.getRun(run.id));
-      await scenario.store.upsertAgentItem({
+      const startedRun = await requireRun(scenario.taskRuntime.getRun(run.id));
+      await scenario.taskRuntime.upsertAgentItem({
         taskId: task.id,
         iterationId: startedRun.iterationId,
         runId: startedRun.id,
@@ -55,8 +55,8 @@ describe('TaskManagerService progress harness', () => {
           text: 'Progress: Finished discovery and will add hello.txt next.'
         },
         providerCompletedAt: '2026-07-07T10:01:00.000Z'
-      });
-      await scenario.store.upsertAgentItem({
+      }, `progress-message:${run.id}`);
+      await scenario.taskRuntime.upsertAgentItem({
         taskId: task.id,
         iterationId: startedRun.iterationId,
         runId: startedRun.id,
@@ -82,8 +82,8 @@ describe('TaskManagerService progress harness', () => {
           durationMs: 25
         },
         providerCompletedAt: '2026-07-07T10:02:00.000Z'
-      });
-      await scenario.store.upsertAgentItem({
+      }, `progress-command:${run.id}`);
+      await scenario.taskRuntime.upsertAgentItem({
         taskId: task.id,
         iterationId: startedRun.iterationId,
         runId: startedRun.id,
@@ -103,7 +103,7 @@ describe('TaskManagerService progress harness', () => {
           ]
         },
         providerCompletedAt: '2026-07-07T10:03:00.000Z'
-      });
+      }, `progress-file-change:${run.id}`);
 
       let snapshot = await scenario.store.snapshot();
       let view = buildRunProgressViewModel({
@@ -145,35 +145,40 @@ describe('TaskManagerService progress harness', () => {
         activityOutputSummary: 'show output · 1 line'
       });
 
-      const server = await scenario.store.createAgentServer({
+      const server = await scenario.runtimeStore.createAgentServer({
         runtimeId: 'codex',
         runtimeKind: 'APP_SERVER',
         transport: 'STDIO',
         executable: 'scenario-agent',
         argv: ['serve']
       });
-      await scenario.store.updateRun(startedRun.id, {
-        serverInstanceId: server.id
-      });
-      const planMessage = await scenario.store.appendProtocolMessage(
+      await scenario.taskRuntime.updateRun(
+        startedRun.id,
+        { serverInstanceId: server.id },
+        `progress-run-server:${startedRun.id}`
+      );
+      const planMessage = await scenario.runtimeStore.appendProtocolMessage(
         server.id,
         'INBOUND',
         '{"method":"turn/plan/updated"}'
       );
-      await scenario.store.recordAgentPlanRevision({
-        taskId: task.id,
-        iterationId: startedRun.iterationId,
-        runId: startedRun.id,
-        sessionId: startedRun.sessionId,
-        runtimeId: 'codex',
-        explanation: 'Implementation in progress',
-        steps: [
-          { step: 'Inspect repository state', status: 'COMPLETED' },
-          { step: 'Add hello file', status: 'IN_PROGRESS' },
-          { step: 'Verify repository status', status: 'PENDING' }
-        ],
-        rawMessage: planMessage
-      });
+      await scenario.taskRuntime.recordAgentPlanRevision(
+        {
+          taskId: task.id,
+          iterationId: startedRun.iterationId,
+          runId: startedRun.id,
+          sessionId: startedRun.sessionId,
+          runtimeId: 'codex',
+          explanation: 'Implementation in progress',
+          steps: [
+            { step: 'Inspect repository state', status: 'COMPLETED' },
+            { step: 'Add hello file', status: 'IN_PROGRESS' },
+            { step: 'Verify repository status', status: 'PENDING' }
+          ],
+          rawMessage: planMessage
+        },
+        `progress-plan:${startedRun.id}`
+      );
 
       snapshot = await scenario.store.snapshot();
       view = buildRunProgressViewModel({

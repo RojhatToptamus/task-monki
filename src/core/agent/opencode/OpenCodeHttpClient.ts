@@ -4,11 +4,15 @@ import {
   redactCredentialText
 } from '../AgentCredentialRedaction';
 import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
+import { OPENCODE_DESIGN_TOOL_NAME } from './OpenCodeProtocol';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const MAX_HTTP_BODY_BYTES = 16 * 1024 * 1024;
-const MAX_SSE_LINE_BYTES = 1024 * 1024;
-const MAX_SSE_EVENT_BYTES = 4 * 1024 * 1024;
+export const OPENCODE_MAX_WIRE_BYTES = 32 * 1024 * 1024;
+const MAX_HTTP_BODY_BYTES = OPENCODE_MAX_WIRE_BYTES;
+const MAX_SSE_LINE_BYTES = OPENCODE_MAX_WIRE_BYTES;
+const MAX_SSE_EVENT_BYTES = OPENCODE_MAX_WIRE_BYTES;
+const REDACTED_ATTACHMENT_CONTENT = '[Task Monki attachment content omitted]';
+const REDACTED_PROVIDER_BYTES = '[Task Monki provider bytes omitted]';
 
 export interface OpenCodeJournalWriter {
   (
@@ -37,6 +41,8 @@ export interface OpenCodeHttpResult<T> {
 export interface OpenCodeRequestOptions {
   /** Absolute wall-clock deadline shared by a bounded multi-request control flow. */
   deadlineAt?: number;
+  /** Request-scoped credentials that must not reach the durable protocol journal. */
+  sensitiveValues?: readonly string[];
 }
 
 export class OpenCodeHttpError extends Error {
@@ -146,6 +152,12 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     const operation = `${method} ${path}`;
     const requestBody = body === undefined ? undefined : JSON.stringify(body);
     if (
+      requestBody !== undefined &&
+      Buffer.byteLength(requestBody) > OPENCODE_MAX_WIRE_BYTES
+    ) {
+      throw new Error(`${operation} exceeded the bounded OpenCode request limit.`);
+    }
+    if (
       options?.deadlineAt !== undefined &&
       (!Number.isFinite(options.deadlineAt) || options.deadlineAt <= Date.now())
     ) {
@@ -165,8 +177,13 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
       await waitForAbortable(
         this.appendJournal(
           'OUTBOUND',
-          JSON.stringify({ method, path, body: body ?? null }),
-          { transport: 'HTTP', operation }
+          JSON.stringify({
+            method,
+            path,
+            body: sanitizeOpenCodeInlineAttachmentContent(body ?? null)
+          }),
+          { transport: 'HTTP', operation },
+          options?.sensitiveValues
         ),
         controller.signal,
         `${operation} timed out before its outbound journal entry was persisted.`
@@ -209,14 +226,30 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
             )
           : cause;
       }
+      let parsed: unknown;
+      let validJson = false;
+      if (text) {
+        try {
+          parsed = sanitizeOpenCodeInlineAttachmentContent(JSON.parse(text));
+          validJson = true;
+        } catch {
+          parsed = undefined;
+        }
+      }
       let raw: AgentProtocolMessageReference;
       try {
+        const journalBody = text
+          ? validJson
+            ? JSON.stringify(parsed)
+            : JSON.stringify({ type: 'opencode.http.non-json', status: response.status })
+          : JSON.stringify({ status: response.status });
         raw = await waitForAbortable(
-          this.appendJournal('INBOUND', text || JSON.stringify({ status: response.status }), {
+          this.appendJournal('INBOUND', journalBody, {
             transport: 'HTTP',
             operation,
-            status: response.status
-          }),
+            status: response.status,
+            ...(text && !validJson ? { malformed: true } : {})
+          }, options?.sensitiveValues),
           controller.signal,
           `${operation} timed out while journaling its acknowledgement.`
         );
@@ -236,7 +269,7 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
           operation,
           `OpenCode rejected ${operation} with HTTP ${response.status}: ${safeErrorBody(
             text,
-            this.options.sensitiveValues
+            [...(this.options.sensitiveValues ?? []), ...(options?.sensitiveValues ?? [])]
           )}`
         );
       }
@@ -253,11 +286,11 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
         return { data: undefined as T, raw };
       }
       try {
-        const data = JSON.parse(text) as T;
+        if (!validJson) throw new SyntaxError('Invalid OpenCode JSON response.');
         if (controller.signal.aborted || Date.now() >= deadlineAt) {
           throw new Error(`${operation} timed out before its acknowledgement was processed.`);
         }
-        return { data, raw };
+        return { data: parsed as T, raw };
       } catch (cause) {
         if (mutation) {
           throw new OpenCodeAmbiguousMutationError(
@@ -331,7 +364,7 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
       if (data === '[DONE]') return;
       let parsed: unknown;
       try {
-        parsed = JSON.parse(data);
+        parsed = sanitizeOpenCodeInlineAttachmentContent(JSON.parse(data));
       } catch {
         await this.appendJournal('INBOUND', JSON.stringify({
           type: 'opencode.sse.malformed'
@@ -374,12 +407,13 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
   private appendJournal(
     direction: AgentProtocolMessageReference['direction'],
     raw: string,
-    metadata: Record<string, unknown>
+    metadata: Record<string, unknown>,
+    requestSensitiveValues: readonly string[] = []
   ): Promise<AgentProtocolMessageReference> {
     const safe = redactProtocolJournalRecord(
       raw,
       metadata,
-      this.options.sensitiveValues
+      [...(this.options.sensitiveValues ?? []), ...requestSensitiveValues]
     );
     return this.options.journal(direction, safe.raw, safe.metadata);
   }
@@ -451,24 +485,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export class OpenCodeSseParser {
   private readonly decoder = new TextDecoder();
   private buffer = '';
+  private bufferBytes = 0;
   private dataLines: string[] = [];
   private eventBytes = 0;
 
   constructor(private readonly onData: (data: string) => Promise<void>) {}
 
   async push(chunk: Uint8Array): Promise<void> {
-    this.buffer += this.decoder.decode(chunk, { stream: true });
+    const decoded = this.decoder.decode(chunk, { stream: true });
+    this.buffer += decoded;
+    this.bufferBytes += Buffer.byteLength(decoded);
     await this.drainLines();
-    if (Buffer.byteLength(this.buffer) > MAX_SSE_LINE_BYTES) {
+    if (this.bufferBytes > MAX_SSE_LINE_BYTES) {
       throw new Error('OpenCode SSE line exceeded the bounded parser limit.');
     }
   }
 
   async finish(): Promise<void> {
-    this.buffer += this.decoder.decode();
+    const decoded = this.decoder.decode();
+    this.buffer += decoded;
+    this.bufferBytes += Buffer.byteLength(decoded);
+    if (this.bufferBytes > MAX_SSE_LINE_BYTES) {
+      throw new Error('OpenCode SSE line exceeded the bounded parser limit.');
+    }
     if (this.buffer) {
       await this.processLine(this.buffer.replace(/\r$/u, ''));
       this.buffer = '';
+      this.bufferBytes = 0;
     }
     await this.dispatch();
   }
@@ -476,8 +519,10 @@ export class OpenCodeSseParser {
   private async drainLines(): Promise<void> {
     let newline = this.buffer.indexOf('\n');
     while (newline >= 0) {
-      const line = this.buffer.slice(0, newline).replace(/\r$/u, '');
+      const rawLine = this.buffer.slice(0, newline);
+      const line = rawLine.replace(/\r$/u, '');
       this.buffer = this.buffer.slice(newline + 1);
+      this.bufferBytes -= Buffer.byteLength(rawLine) + 1;
       await this.processLine(line);
       newline = this.buffer.indexOf('\n');
     }
@@ -494,7 +539,7 @@ export class OpenCodeSseParser {
     if (line.startsWith(':')) return;
     if (!line.startsWith('data:')) return;
     const value = line.slice(5).replace(/^ /u, '');
-    this.eventBytes += Buffer.byteLength(value);
+    this.eventBytes += Buffer.byteLength(line);
     if (this.eventBytes > MAX_SSE_EVENT_BYTES) {
       throw new Error('OpenCode SSE event exceeded the bounded parser limit.');
     }
@@ -508,6 +553,74 @@ export class OpenCodeSseParser {
     this.eventBytes = 0;
     await this.onData(data);
   }
+}
+
+/**
+ * Removes native file bytes from values that can reach journals, events, or
+ * recovered message history. Routing ids and safe file metadata stay intact.
+ */
+export function sanitizeOpenCodeInlineAttachmentContent(
+  value: unknown,
+  depth = 0
+): unknown {
+  if (typeof value === 'string') {
+    return value.startsWith('data:') ? REDACTED_ATTACHMENT_CONTENT : value;
+  }
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= 64) return '[OpenCode nested content omitted]';
+  if (Array.isArray(value)) {
+    return value.map((entry) =>
+      sanitizeOpenCodeInlineAttachmentContent(entry, depth + 1)
+    );
+  }
+
+  const record = value as Record<string, unknown>;
+  const filePart = record.type === 'file';
+  const binaryContent = record.type === 'image' || record.type === 'audio';
+  const designToolState =
+    record.type === 'tool' &&
+    record.tool === OPENCODE_DESIGN_TOOL_NAME &&
+    isRecord(record.state)
+      ? record.state
+      : undefined;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [
+      key,
+      filePart && ['url', 'data', 'content', 'source'].includes(key)
+        ? REDACTED_ATTACHMENT_CONTENT
+        : binaryContent && key === 'data'
+          ? REDACTED_PROVIDER_BYTES
+        : designToolState && key === 'state'
+          ? sanitizeOpenCodeDesignToolState(designToolState, depth + 1)
+        : sanitizeOpenCodeInlineAttachmentContent(entry, depth + 1)
+    ])
+  );
+}
+
+function sanitizeOpenCodeDesignToolState(
+  state: Record<string, unknown>,
+  depth: number
+): Record<string, unknown> {
+  const output = state.output;
+  if (typeof output !== 'string') {
+    return sanitizeOpenCodeInlineAttachmentContent(state, depth) as Record<string, unknown>;
+  }
+  let safeOutput = REDACTED_PROVIDER_BYTES;
+  try {
+    safeOutput = JSON.stringify(
+      sanitizeOpenCodeInlineAttachmentContent(JSON.parse(output), depth + 1)
+    );
+  } catch {
+    // OpenCode persists native MCP results as JSON strings. An unexpected
+    // shape must not make screenshot bytes durable.
+  }
+  return {
+    ...(sanitizeOpenCodeInlineAttachmentContent(
+      { ...state, output: undefined },
+      depth
+    ) as Record<string, unknown>),
+    output: safeOutput
+  };
 }
 
 async function readBoundedResponse(
@@ -579,7 +692,15 @@ function safeErrorBody(
   body: string,
   sensitiveValues: readonly string[] = []
 ): string {
-  const normalized = redactCredentialText(body, sensitiveValues)
+  let safeBody = body;
+  try {
+    safeBody = JSON.stringify(
+      sanitizeOpenCodeInlineAttachmentContent(JSON.parse(body))
+    );
+  } catch {
+    // Non-JSON diagnostics still use the existing bounded credential redaction.
+  }
+  const normalized = redactCredentialText(safeBody, sensitiveValues)
     .replace(/[\r\n\t]+/gu, ' ')
     .trim();
   return normalized.slice(0, 1_000) || 'no response body';

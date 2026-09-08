@@ -23,6 +23,9 @@ import type { Turn } from './protocol/generated/v2/Turn';
 import { CODEX_RUNTIME_ID } from '../../../shared/agent';
 
 export function mapModel(model: Model): AgentModel {
+  const supportsImages = model.inputModalities.some(
+    (modality) => modality.toLowerCase() === 'image'
+  );
   return {
     id: `${CODEX_RUNTIME_ID}:${model.id}`,
     runtimeId: CODEX_RUNTIME_ID,
@@ -37,6 +40,15 @@ export function mapModel(model: Model): AgentModel {
     serviceTiers: model.serviceTiers.map((tier) => tier.id),
     defaultServiceTier: model.defaultServiceTier ?? undefined,
     inputModalities: model.inputModalities,
+    designSupport: supportsImages
+      ? {
+          maturity: 'stable',
+          detail: 'The connected Codex model catalog reports image input support required by Design Mode.'
+        }
+      : {
+          maturity: 'unsupported',
+          detail: `The connected Codex model catalog reports no image input support for ${model.model}. Design Mode requires image input.`
+        },
     isDefault: model.isDefault
   };
 }

@@ -4,7 +4,8 @@ Date: 2026-07-25
 
 This document describes Task Monki's application-level recovery boundary. The
 provider-, Preview-, review-, and delivery-specific documents remain
-authoritative for their own protocols.
+authoritative for their own protocols. Store opening, integrity checks,
+quarantine, backup, and restore are defined in `PERSISTENCE_ARCHITECTURE.md`.
 
 ## Central Rule
 
@@ -68,6 +69,13 @@ action revalidates the repository and creates the same Task Monki-owned
 worktree record, branch, and iteration. It refuses conflicting paths or branch
 ownership through the existing worktree checks.
 
+External checkout verification never creates directories, changes permissions,
+switches branches, or removes checkout files. A moved external checkout requires
+explicit reconnection to a registered path in the same repository and branch.
+Historical run and evidence paths stay unchanged. A later coding turn starts a
+fresh session when the recorded session still belongs to the old path.
+Task deletion stops only Task Monki-owned resources and cannot remove an external checkout.
+
 ## Provider Runs And Interactions
 
 Persisted ownership remains recoverable for `QUEUED`, `STARTING`, `RUNNING`,
@@ -76,6 +84,14 @@ Persisted ownership remains recoverable for `QUEUED`, `STARTING`, `RUNNING`,
 terminal. Each adapter reconciles the provider it owns and applies its existing
 no-resend rules. A prompt, approval, answer, interrupt, review request, or other
 ambiguous mutation is never replayed automatically.
+
+Graceful runtime shutdown first removes adapter event producers. It then drains
+events that Task Monki already accepted before it stops the adapters. Store
+shutdown cannot race a previously accepted provider terminal event.
+
+Discourse deletion releases each loaded provider session before it writes the
+conversation tombstone or purges runtime evidence. If release is not confirmed,
+deletion stops and keeps the records for an explicit retry.
 
 Long-lived provider processes, external-tool and provider probes, mutating or
 remote-inspection Git commands, GitHub commands, and Docker/Compose CLI

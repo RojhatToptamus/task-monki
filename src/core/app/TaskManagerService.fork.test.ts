@@ -4,8 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { FileTaskStore } from '../storage/FileTaskStore';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
@@ -18,11 +17,11 @@ describe('TaskManagerService fork alternatives', () => {
     await fs.mkdir(repositoryPath, { recursive: true });
     const baseSha = await initRepository(repositoryPath);
 
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const agent = new ScriptedAgentRuntimeAdapter(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
+    const agent = scriptedRuntime.adapter;
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentRuntimeAdapters: [agent]
+      ...scriptedRuntime.serviceOptions
     });
     const repository = await service.addRepository(repositoryPath);
 
@@ -37,22 +36,23 @@ describe('TaskManagerService fork alternatives', () => {
       worktreePath: path.join(worktreeRoot, 'source'),
       baseSha
     });
-    const sourceSession = await store.createAgentSession({
+    const sourceSession = await scriptedRuntime.createSession({
       task: sourceTask,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    const sourceRun = await store.createRun({
+    const sourceRun = await scriptedRuntime.createRun({
       task: sourceTask,
       session: sourceSession,
       mode: 'IMPLEMENTATION',
       prompt: sourceTask.prompt
     });
-    await store.updateRun(sourceRun.id, {
-      status: 'COMPLETED',
-      endedAt: new Date().toISOString()
-    });
+    await scriptedRuntime.transitionRun(
+      sourceRun.id,
+      { status: 'COMPLETED', endedAt: new Date().toISOString() },
+      `fork-source-completed:${sourceRun.id}`
+    );
 
     const forkedRun = await service.retryRun({
       taskId: sourceTask.id,
@@ -81,7 +81,7 @@ describe('TaskManagerService fork alternatives', () => {
     expect(agent.startedTurns).toHaveLength(1);
     expect(agent.startedTurns[0]?.session.providerSessionId).toBeTruthy();
 
-    const prompt = await store.readArtifact(forkedRun.promptArtifactId);
+    const prompt = await service.readArtifact({ artifactId: forkedRun.promptArtifactId });
     expect(prompt).toContain('Alternative attempt for this Task Monki goal');
     expect(prompt.match(/Task Monki progress contract/g)).toHaveLength(1);
     expect(prompt.endsWith('Alternative direction:\nTry a smaller state-machine approach.')).toBe(
@@ -112,10 +112,10 @@ describe('TaskManagerService fork alternatives', () => {
     await fs.writeFile(worktreeRoot, 'not a directory');
     const baseSha = await initRepository(repositoryPath);
 
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
+      ...scriptedRuntime.serviceOptions
     });
     const repository = await service.addRepository(repositoryPath);
 
@@ -130,22 +130,23 @@ describe('TaskManagerService fork alternatives', () => {
       worktreePath: path.join(dir, 'source'),
       baseSha
     });
-    const sourceSession = await store.createAgentSession({
+    const sourceSession = await scriptedRuntime.createSession({
       task: sourceTask,
       iteration,
       worktree,
       runtimeId: 'codex'
     });
-    const sourceRun = await store.createRun({
+    const sourceRun = await scriptedRuntime.createRun({
       task: sourceTask,
       session: sourceSession,
       mode: 'IMPLEMENTATION',
       prompt: sourceTask.prompt
     });
-    await store.updateRun(sourceRun.id, {
-      status: 'COMPLETED',
-      endedAt: new Date().toISOString()
-    });
+    await scriptedRuntime.transitionRun(
+      sourceRun.id,
+      { status: 'COMPLETED', endedAt: new Date().toISOString() },
+      `fork-source-completed:${sourceRun.id}`
+    );
 
     await expect(
       service.retryRun({

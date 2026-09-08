@@ -680,6 +680,7 @@ function runFixture(): RunRecord {
     promptArtifactId: 'prompt',
     outputArtifactId: 'output',
     diagnosticArtifactId: 'diagnostic',
+    attachmentSelection: [],
     startedAt: '2026-06-22T00:00:00.000Z',
     eventCount: 0
   };

@@ -6,7 +6,7 @@ import type {
   PreviewServicePlan,
   PreviewWorkerPlan
 } from '../../../shared/contracts';
-import { FileTaskStore } from '../../storage/FileTaskStore';
+import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { buildPreviewEnvironment } from '../PreviewEnvironment';
 import { boundedPreviewFailure as boundedError } from '../PreviewFailure';
 import {
@@ -37,7 +37,7 @@ export class NativeServiceRuntime {
   private readonly stopping = new Set<string>();
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly launcherHost: NativeLauncherHost
   ) {}
 

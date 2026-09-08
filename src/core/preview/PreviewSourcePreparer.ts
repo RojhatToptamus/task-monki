@@ -229,6 +229,10 @@ export class PreviewSourcePreparer {
       throw new Error('Preview workspace ownership marker does not match; cleanup refused.');
     }
     await fs.rm(generationRoot, { recursive: true, force: false });
+    // The generation is the owned resource. Its empty parent is cosmetic and
+    // has no durable cleanup state, so a parent removal failure must not turn a
+    // completed generation cleanup into an unretryable failure.
+    await fs.rmdir(path.dirname(generationRoot)).catch(() => undefined);
     return true;
   }
 
@@ -250,14 +254,20 @@ export class PreviewSourcePreparer {
       throw new Error('Preview generation must be a distinct path outside the task worktree.');
     }
 
-    await fs.mkdir(path.dirname(generationRoot), { recursive: true });
-    try {
-      await fs.mkdir(generationRoot, { recursive: false, mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new Error(`Preview generation workspace already exists: ${generationRoot}`);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await fs.mkdir(path.dirname(generationRoot), { recursive: true });
+      try {
+        await fs.mkdir(generationRoot, { recursive: false, mode: 0o700 });
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EEXIST') {
+          throw new Error(`Preview generation workspace already exists: ${generationRoot}`);
+        }
+        // Final-generation cleanup can remove an empty task directory between
+        // the parent and generation mkdir calls. Recreate it once.
+        if (code !== 'ENOENT' || attempt > 0) throw error;
       }
-      throw error;
     }
 
     const marker: PreviewWorkspaceMarker = {

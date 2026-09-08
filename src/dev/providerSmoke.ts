@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  AgentCapability,
   AgentExecutionSettings,
   AgentModel,
   AgentObservationSource,
@@ -10,17 +12,30 @@ import type {
   AgentRuntimeReadinessStatus,
   AgentRuntimeState
 } from '../shared/agent';
+import type { AgentRuntimeStoreState } from '../shared/agentRuntime';
+import type {
+  DiscourseAgentJobRecord,
+  DiscourseConversationAggregateRecord
+} from '../shared/discourse';
 import type {
   GitSnapshotRecord,
   GitStatus,
   RunRecord,
   TaskSnapshot
 } from '../shared/contracts';
+import type {
+  AgentAttachmentSelection,
+  AttachmentKind,
+  AttachmentSubmissionRecord,
+  AttachmentTransport
+} from '../shared/attachments';
+import { projectAgentExecutionSupport } from '../shared/agentExecutionSupport';
+import { toAgentAttachmentSelectionFromRecords } from '../core/agent/AgentAttachmentDelivery';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 
-const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v2' as const;
+const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v4' as const;
 const SMOKE_SENTINEL = 'TASK_MONKI_PROVIDER_SMOKE_OK';
 const SMOKE_FILE_NAME = 'task-monki-provider-smoke.txt';
 const SMOKE_FILE_CONTENT = `${SMOKE_SENTINEL}\n`;
@@ -48,6 +63,13 @@ const PROVIDER_DERIVED_OBSERVATION_SOURCES = new Set<AgentObservationSource>([
   'MODEL_REROUTED_NOTIFICATION',
   'RECOVERY_RESUME_RESPONSE'
 ]);
+const TERMINAL_DISCOURSE_JOB_STATUSES = new Set<DiscourseAgentJobRecord['status']>([
+  'COMPLETED',
+  'FAILED',
+  'CANCELED',
+  'CONTEXT_STALE',
+  'RECOVERY_REQUIRED'
+]);
 
 export interface ProviderSmokeOptions {
   repositoryPath: string;
@@ -57,15 +79,37 @@ export interface ProviderSmokeOptions {
   timeoutMs: number;
   confirmThrowaway: boolean;
   confirmProviderUsage: boolean;
+  qualifyReadOnly: boolean;
+  qualifyAttachments: boolean;
   help: boolean;
 }
 
 export interface ProviderSmokeTarget {
   runtimeId: string;
+  runtimeVersion?: string;
   runtimeStatus: AgentRuntimeReadinessStatus;
   model: AgentModel;
   reasoningEffort?: string;
   executionSettings?: AgentExecutionSettings;
+  attachmentDelivery: AgentCapability;
+  advertisedImageInput?: boolean;
+}
+
+export interface ProviderAttachmentQualificationResult {
+  status: 'PASSED' | 'FAILED' | 'UNSUPPORTED';
+  reason?: string;
+  requestedKinds: AttachmentKind[];
+  modelInputModalities: string[];
+  payloadByteCount: number;
+  textContentUsed: boolean;
+  imageContentUsed?: boolean;
+  advertisedImageInput?: boolean;
+  capabilityDrift?:
+    | 'ADVERTISED_FALSE_VERIFIED_TRUE'
+    | 'ADVERTISED_TRUE_VERIFICATION_FAILED';
+  evidenceMatches: boolean;
+  selection: AgentAttachmentSelection[];
+  submissions: AttachmentSubmissionRecord[];
 }
 
 export interface ProviderSmokeResult {
@@ -97,7 +141,28 @@ export interface ProviderSmokeResult {
   observedModelProvider?: string;
   observedReasoningEffort?: string;
   observationSource?: string;
+  attachmentQualification?: ProviderAttachmentQualificationResult;
   error?: string;
+  startedAt: string;
+  completedAt: string;
+}
+
+export interface ProviderReadOnlyQualificationResult {
+  runtimeId: string;
+  modelId?: string;
+  status: 'PASSED' | 'FAILED' | 'UNSUPPORTED' | 'NOT_REACHED';
+  reason?: string;
+  conversationId?: string;
+  waveId?: string;
+  jobId?: string;
+  runId?: string;
+  runStatus?: AgentRunStatus;
+  repositoryIntegrity?: 'PENDING' | 'UNCHANGED' | 'CHANGED' | 'UNVERIFIABLE';
+  probeFileName?: string;
+  probeAbsent: boolean;
+  repositoryClean: boolean;
+  repositoryIdentityUnchanged: boolean;
+  executionContained: boolean;
   startedAt: string;
   completedAt: string;
 }
@@ -124,6 +189,8 @@ export interface ProviderSmokeReport {
     canStart: boolean;
     visibleModelCount: number;
     summary: string;
+    runtimeVersion?: string;
+    attachmentDelivery: AgentCapability;
     skipReason?: string;
     models: Array<{
       modelId: string;
@@ -134,6 +201,7 @@ export interface ProviderSmokeReport {
     }>;
   }>;
   results: ProviderSmokeResult[];
+  readOnlyQualifications: ProviderReadOnlyQualificationResult[];
   selection: {
     requestedRuntimeIds: string[];
     requestedModelIds: string[];
@@ -153,19 +221,30 @@ export type ProviderSmokeService = Pick<
   | 'getAgentRuntimeCatalog'
   | 'discoverAgentRuntimeModels'
   | 'addRepository'
+  | 'stageTaskAttachmentBatch'
   | 'createTask'
   | 'startRun'
   | 'listTasks'
   | 'refreshEvidence'
   | 'cancelRun'
+  | 'createDiscourseConversation'
+  | 'previewDiscourseContext'
+  | 'sendDiscourseMessage'
+  | 'getDiscourseConversation'
+  | 'stopDiscourseWave'
   | 'shutdown'
 >;
+
+export interface ProviderSmokeRuntimeStore {
+  snapshot(): Promise<AgentRuntimeStoreState>;
+}
 
 export interface ProviderSmokeDependencies {
   createService?: (input: {
     repositoryPath: string;
     stateRoot: string;
   }) => ProviderSmokeService;
+  runtimeStore?: ProviderSmokeRuntimeStore;
   pollIntervalMs?: number;
   cancelTimeoutMs?: number;
   maxModels?: number;
@@ -193,6 +272,8 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
     timeoutMs: DEFAULT_TIMEOUT_MS,
     confirmThrowaway: false,
     confirmProviderUsage: false,
+    qualifyReadOnly: false,
+    qualifyAttachments: false,
     help: false
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -224,6 +305,12 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
       case '--confirm-provider-usage':
         options.confirmProviderUsage = true;
         break;
+      case '--qualify-read-only':
+        options.qualifyReadOnly = true;
+        break;
+      case '--qualify-attachments':
+        options.qualifyAttachments = true;
+        break;
       case '--help':
       case '-h':
         options.help = true;
@@ -244,7 +331,7 @@ export function parseProviderSmokeArguments(args: readonly string[]): ProviderSm
   }
   if (!options.help && !options.confirmProviderUsage) {
     throw new Error(
-      '--confirm-provider-usage is required because this command sends one billable prompt to every selected model.'
+      '--confirm-provider-usage is required because this command sends billable prompts to the selected providers.'
     );
   }
   return options;
@@ -296,10 +383,13 @@ export function discoverProviderSmokeTargets(
         )
         .map((model) => ({
           runtimeId: runtime.preflight.runtime.id,
+          runtimeVersion: runtime.preflight.runtimeVersion,
           runtimeStatus: runtime.preflight.readiness.status,
           model,
           reasoningEffort: selectLowestReasoningEffort(model),
-          executionSettings: nonInteractiveSmokeSettings(runtime)
+          executionSettings: nonInteractiveSmokeSettings(runtime),
+          attachmentDelivery: runtime.preflight.capabilities.attachmentDelivery,
+          advertisedImageInput: advertisedImageInput(runtime, model)
         }))
     )
     .sort(
@@ -307,6 +397,22 @@ export function discoverProviderSmokeTargets(
         left.runtimeId.localeCompare(right.runtimeId) ||
         left.model.id.localeCompare(right.model.id)
     );
+}
+
+function advertisedImageInput(
+  runtime: AgentRuntimeState,
+  model: AgentModel
+): boolean | undefined {
+  if (runtime.preflight.runtime.kind !== 'ACP_AGENT') {
+    return model.inputModalities.some(
+      (modality) => modality.toLocaleLowerCase() === 'image'
+    );
+  }
+  const native = recordValue(runtime.native);
+  const initialize = recordValue(native?.initialize);
+  const capabilities = recordValue(initialize?.agentCapabilities);
+  const prompt = recordValue(capabilities?.promptCapabilities);
+  return typeof prompt?.image === 'boolean' ? prompt.image : undefined;
 }
 
 function nonInteractiveSmokeSettings(
@@ -343,18 +449,43 @@ export async function runProviderSmoke(
   const repository = await requireThrowawayRepository(options.repositoryPath);
   const repositoryPath = repository.path;
   const stateRoot = await createStateRoot(options.stateRoot, repositoryPath);
-  const service = dependencies.createService?.({ repositoryPath, stateRoot }) ??
-    new TaskManagerService(
-      new FileTaskStore(path.join(stateRoot, 'store')),
-      repositoryPath,
-      undefined,
-      { worktreeRoot: path.join(stateRoot, 'worktrees'), agentCwd: repositoryPath }
-    );
+  let runtimeStore = dependencies.runtimeStore;
+  let ownedPersistence: ApplicationPersistence | undefined;
+  let service: ProviderSmokeService;
+  if (dependencies.createService) {
+    service = dependencies.createService({ repositoryPath, stateRoot });
+  } else {
+    ownedPersistence = await ApplicationPersistence.open({
+      profileRoot: path.join(stateRoot, 'profile'),
+      appVersion: REPORT_SCHEMA_VERSION
+    });
+    runtimeStore = ownedPersistence.agentRuntime;
+    try {
+      service = new TaskManagerService(
+        ownedPersistence.tasks,
+        repositoryPath,
+        undefined,
+        {
+          worktreeRoot: path.join(stateRoot, 'worktrees'),
+          agentCwd: repositoryPath,
+          appSettingsStore: ownedPersistence.settings,
+          agentRuntimeStore: ownedPersistence.agentRuntime,
+          taskRuntimeAccess: ownedPersistence.taskRuntime,
+          discourseStore: ownedPersistence.discourse,
+          discourseWorkspaceRoot: path.join(stateRoot, 'discourse-workspaces')
+        }
+      );
+    } catch (error) {
+      await ownedPersistence.close();
+      throw error;
+    }
+  }
   const pollIntervalMs = dependencies.pollIntervalMs ?? POLL_INTERVAL_MS;
   const cancelTimeoutMs = dependencies.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS;
   const maxModels = dependencies.maxModels ?? MAX_MODELS;
   const startedAt = new Date().toISOString();
   const results: ProviderSmokeResult[] = [];
+  const readOnlyQualifications: ProviderReadOnlyQualificationResult[] = [];
   const errors: string[] = [];
   const completedModelIds = new Set<string>();
   const queuedModelIds = new Set<string>();
@@ -428,12 +559,18 @@ export async function runProviderSmoke(
           options.timeoutMs,
           pollIntervalMs,
           cancelTimeoutMs,
+          options.qualifyAttachments,
           () => stopRequested,
           (_taskId, runId) => {
             activeRunId = runId;
           }
         );
         const result = execution.result;
+        if (result.attachmentQualification?.capabilityDrift) {
+          console.warn(
+            `[provider-smoke] image capability drift: ${target.runtimeId} / ${target.model.displayName} / ${result.attachmentQualification.capabilityDrift}`
+          );
+        }
         if (
           execution.lifecycleSettled &&
           (!result.runStatus || CONTAINED_TERMINAL_STATUSES.has(result.runStatus))
@@ -484,6 +621,31 @@ export async function runProviderSmoke(
           queue
         );
       }
+      if (options.qualifyReadOnly) {
+        const qualifications = await qualifySelectedReadOnlyProfiles({
+          service,
+          runtimeStore,
+          repository,
+          repositoryId: repositoryRecord.id,
+          options,
+          runtimes: discoveredRuntimes,
+          models: discoveredModels,
+          normalResults: results,
+          pollIntervalMs,
+          cancelTimeoutMs,
+          isStopping: () => stopRequested
+        });
+        readOnlyQualifications.push(...qualifications);
+        if (
+          qualifications.some(
+            (qualification) =>
+              !qualification.repositoryClean ||
+              !qualification.repositoryIdentityUnchanged
+          )
+        ) {
+          stopRequested = true;
+        }
+      }
       if (results.length === 0 && !stopRequested) {
         appendUnique(
           errors,
@@ -512,6 +674,22 @@ export async function runProviderSmoke(
       appendUnique(errors, `Runtime shutdown failed: ${errorMessage(shutdown.error)}`);
       stopRequested = true;
     }
+    if (ownedPersistence) {
+      const persistenceClose = await within(
+        ownedPersistence.close(),
+        cancelTimeoutMs
+      );
+      if (!persistenceClose.settled) {
+        appendUnique(errors, 'Persistence shutdown did not settle before its safety deadline.');
+        stopRequested = true;
+      } else if (persistenceClose.error) {
+        appendUnique(
+          errors,
+          `Persistence shutdown failed: ${errorMessage(persistenceClose.error)}`
+        );
+        stopRequested = true;
+      }
+    }
   }
   const repositoryState = await inspectRepositoryState(repository);
   if (repositoryState.error) appendUnique(errors, repositoryState.error);
@@ -539,6 +717,18 @@ export async function runProviderSmoke(
     errors.length === 0 &&
     results.length > 0 &&
     results.every((result) => result.verdict === 'PASSED') &&
+    (!options.qualifyAttachments ||
+      results.every(
+        (result) =>
+          result.attachmentQualification?.status === 'PASSED' ||
+          result.attachmentQualification?.status === 'UNSUPPORTED'
+      )) &&
+    (!options.qualifyReadOnly ||
+      readOnlyQualifications.every(
+        (qualification) =>
+          qualification.status === 'PASSED' ||
+          qualification.status === 'UNSUPPORTED'
+      )) &&
     !selectionIncomplete &&
     repositoryState.clean &&
     repositoryState.identityUnchanged;
@@ -571,6 +761,8 @@ export async function runProviderSmoke(
         canStart: runtime.preflight.readiness.canStart,
         visibleModelCount: models.filter((model) => !model.hidden).length,
         summary: runtime.preflight.readiness.summary,
+        runtimeVersion: runtime.preflight.runtimeVersion,
+        attachmentDelivery: runtime.preflight.capabilities.attachmentDelivery,
         skipReason: runtimeSkipReason(runtime, models, options),
         models: models.map((model) =>
           modelAudit(model, runtime, options, resultByModel, stopRequested)
@@ -578,6 +770,7 @@ export async function runProviderSmoke(
       };
     }),
     results,
+    readOnlyQualifications,
     selection
   };
   const reportPath = path.join(stateRoot, 'report.json');
@@ -615,6 +808,534 @@ async function activateSelectedModelCatalogs(
   return runtimes.length > 0;
 }
 
+async function qualifySelectedReadOnlyProfiles(input: {
+  service: ProviderSmokeService;
+  runtimeStore?: ProviderSmokeRuntimeStore;
+  repository: RepositoryBaseline;
+  repositoryId: string;
+  options: ProviderSmokeOptions;
+  runtimes: ReadonlyMap<string, AgentRuntimeState>;
+  models: ReadonlyMap<string, AgentModel>;
+  normalResults: readonly ProviderSmokeResult[];
+  pollIntervalMs: number;
+  cancelTimeoutMs: number;
+  isStopping: () => boolean;
+}): Promise<ProviderReadOnlyQualificationResult[]> {
+  const results: ProviderReadOnlyQualificationResult[] = [];
+  const runtimeIds = selectedQualificationRuntimeIds(
+    input.options,
+    input.runtimes
+  );
+  let unsafePreviousQualification = false;
+
+  for (const runtimeId of runtimeIds) {
+    const startedAt = new Date().toISOString();
+    const runtime = input.runtimes.get(runtimeId);
+    const repositoryState = await inspectRepositoryState(input.repository);
+    const record = (
+      status: ProviderReadOnlyQualificationResult['status'],
+      reason: string,
+      extra: Partial<ProviderReadOnlyQualificationResult> = {}
+    ): ProviderReadOnlyQualificationResult => ({
+      runtimeId,
+      status,
+      reason,
+      probeAbsent: true,
+      repositoryClean: repositoryState.clean,
+      repositoryIdentityUnchanged: repositoryState.identityUnchanged,
+      executionContained: true,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      ...extra
+    });
+    if (!runtime) {
+      results.push(record(
+        'UNSUPPORTED',
+        'The runtime was not discovered, so Task Monki did not attempt it.'
+      ));
+      continue;
+    }
+    const support = projectAgentExecutionSupport(
+      runtime.preflight.capabilities,
+      'DISCOURSE'
+    );
+    if (!support.supported) {
+      results.push(record('UNSUPPORTED', support.reason));
+      continue;
+    }
+    if (!runtime.preflight.readiness.canStart) {
+      results.push(record('UNSUPPORTED', runtime.preflight.readiness.detail));
+      continue;
+    }
+    if (unsafePreviousQualification || input.isStopping()) {
+      results.push(record(
+        'NOT_REACHED',
+        'Not attempted because an earlier provider lifecycle was not safely contained.'
+      ));
+      continue;
+    }
+    const normalResult = input.normalResults.find(
+      (candidate) => candidate.runtimeId === runtimeId
+    );
+    const model = normalResult ? input.models.get(normalResult.modelId) : undefined;
+    if (!normalResult || !model) {
+      results.push(record(
+        'NOT_REACHED',
+        'A normal Task smoke run did not establish a model for this profile.'
+      ));
+      continue;
+    }
+    if (!input.runtimeStore) {
+      results.push(record(
+        'FAILED',
+        'The smoke harness has no runtime store for repository-integrity evidence.',
+        { modelId: model.id, executionContained: false }
+      ));
+      unsafePreviousQualification = true;
+      continue;
+    }
+    const result = await runReadOnlyQualification({
+      service: input.service,
+      runtimeStore: input.runtimeStore,
+      repository: input.repository,
+      repositoryId: input.repositoryId,
+      target: {
+        runtimeId,
+        runtimeVersion: runtime.preflight.runtimeVersion,
+        runtimeStatus: runtime.preflight.readiness.status,
+        model,
+        reasoningEffort: normalResult.reasoningEffort,
+        attachmentDelivery: runtime.preflight.capabilities.attachmentDelivery
+      },
+      timeoutMs: input.options.timeoutMs,
+      cancelTimeoutMs: input.cancelTimeoutMs,
+      pollIntervalMs: input.pollIntervalMs,
+      isStopping: input.isStopping
+    });
+    results.push(result);
+    unsafePreviousQualification ||=
+      !result.executionContained ||
+      !result.repositoryClean ||
+      !result.repositoryIdentityUnchanged;
+  }
+  return results;
+}
+
+function selectedQualificationRuntimeIds(
+  options: ProviderSmokeOptions,
+  runtimes: ReadonlyMap<string, AgentRuntimeState>
+): string[] {
+  const selected = options.runtimeIds.length > 0
+    ? options.runtimeIds
+    : options.modelIds.length > 0
+      ? options.modelIds.map((modelId) => modelId.split(':', 1)[0]!)
+      : [...runtimes.keys()];
+  return [...new Set(selected)].sort();
+}
+
+async function runReadOnlyQualification(input: {
+  service: ProviderSmokeService;
+  runtimeStore: ProviderSmokeRuntimeStore;
+  repository: RepositoryBaseline;
+  repositoryId: string;
+  target: ProviderSmokeTarget;
+  timeoutMs: number;
+  cancelTimeoutMs: number;
+  pollIntervalMs: number;
+  isStopping: () => boolean;
+}): Promise<ProviderReadOnlyQualificationResult> {
+  const startedAt = new Date().toISOString();
+  const operationId = randomUUID();
+  const probeFileName = `.task-monki-read-only-probe-${operationId}`;
+  const probePath = path.join(input.repository.path, probeFileName);
+  const deadline = Date.now() + input.timeoutMs;
+  let conversationId: string | undefined;
+  let waveId: string | undefined;
+  let jobId: string | undefined;
+  let aggregate: DiscourseConversationAggregateRecord | undefined;
+  let executionContained = true;
+  let failure: string | undefined;
+
+  try {
+    const selection = [{
+      agentProfileId: 'builtin.lead' as const,
+      runtimeId: input.target.runtimeId,
+      modelId: input.target.model.id,
+      reasoningEffort: input.target.reasoningEffort
+    }];
+    const conversation = await input.service.createDiscourseConversation({
+      title: `Read-only qualification: ${input.target.runtimeId}`,
+      defaultPolicy: 'DIRECT',
+      agents: selection,
+      clientOperationId: `provider-smoke-read-only-create:${operationId}`
+    });
+    conversationId = conversation.id;
+    const context = [{ entityKind: 'REPOSITORY' as const, entityId: input.repositoryId }];
+    const preview = await input.service.previewDiscourseContext({
+      conversationId,
+      messageContext: context
+    });
+    const send = await within(
+      input.service.sendDiscourseMessage({
+        conversationId,
+        body: readOnlyProbePrompt(probeFileName),
+        context,
+        clientMessageId: `provider-smoke-read-only-message:${operationId}`,
+        policy: 'DIRECT',
+        agents: selection,
+        previewFingerprint: preview.fingerprint
+      }),
+      Math.max(0, deadline - Date.now())
+    );
+    if (!send.settled) {
+      executionContained = false;
+      throw new Error('The read-only Discourse send did not settle before the timeout.');
+    }
+    if (send.error) {
+      executionContained = false;
+      throw send.error;
+    }
+    const wave = send.value?.wave;
+    const job = send.value?.jobs[0];
+    if (!wave || !job) {
+      executionContained = false;
+      throw new Error('The DIRECT Discourse turn did not create one response job.');
+    }
+    waveId = wave.id;
+    jobId = job.id;
+    let terminal = await waitForDiscourseQualification({
+      service: input.service,
+      conversationId,
+      waveId,
+      jobId,
+      deadline,
+      pollIntervalMs: input.pollIntervalMs,
+      isStopping: input.isStopping
+    });
+    aggregate = terminal.aggregate;
+    if (terminal.timedOut || terminal.interrupted) {
+      const interrupted = terminal.interrupted;
+      const stopped = await within(
+        input.service.stopDiscourseWave({
+          conversationId,
+          waveId,
+          clientOperationId: `provider-smoke-read-only-stop:${operationId}`,
+          reason: terminal.interrupted
+            ? 'Provider smoke interrupted.'
+            : 'Provider smoke read-only qualification timed out.'
+        }),
+        input.cancelTimeoutMs
+      );
+      if (!stopped.settled || stopped.error) {
+        failure = joinErrors(
+          failure,
+          stopped.error
+            ? `Read-only wave cancellation failed: ${errorMessage(stopped.error)}`
+            : 'Read-only wave cancellation did not settle.'
+        );
+      }
+      terminal = await waitForDiscourseQualification({
+        service: input.service,
+        conversationId,
+        waveId,
+        jobId,
+        deadline: Date.now() + input.cancelTimeoutMs,
+        pollIntervalMs: input.pollIntervalMs,
+        isStopping: () => false
+      });
+      aggregate = terminal.aggregate ?? aggregate;
+      if (terminal.timedOut) executionContained = false;
+      failure = joinErrors(
+        failure,
+        interrupted
+          ? 'The read-only qualification was interrupted.'
+          : `The read-only qualification exceeded the ${Math.round(input.timeoutMs / 1_000)}-second timeout.`
+      );
+    }
+  } catch (error) {
+    failure = joinErrors(failure, errorMessage(error));
+  }
+
+  const wave = aggregate?.waves.find((candidate) => candidate.id === waveId);
+  const job = aggregate?.jobs.find((candidate) => candidate.id === jobId);
+  const runtimeSnapshot = await input.runtimeStore.snapshot().catch((error) => {
+    failure = joinErrors(
+      failure,
+      `Runtime evidence could not be read: ${errorMessage(error)}`
+    );
+    return undefined;
+  });
+  const run = job?.runId
+    ? runtimeSnapshot?.runs.find((candidate) => candidate.id === job.runId)
+    : undefined;
+  if (job?.status === 'RECOVERY_REQUIRED' || run?.status === 'RECOVERY_REQUIRED' || run?.status === 'LOST') {
+    executionContained = false;
+  }
+  const probe = await inspectProbeAbsence(probePath);
+  const repositoryState = await inspectRepositoryState(input.repository);
+  const errors = [
+    failure,
+    !wave || wave.status !== 'SETTLED'
+      ? 'The read-only response wave did not settle.'
+      : undefined,
+    !job ? 'The read-only response job was not retained.' : undefined,
+    job && job.status !== 'COMPLETED'
+      ? job.error?.message ?? `The read-only response job ended with ${job.status}.`
+      : undefined,
+    !run ? 'The shared runtime run was not retained for the Discourse job.' : undefined,
+    run && run.purpose !== 'DISCOURSE_ANSWER'
+      ? `The shared runtime used unexpected purpose ${run.purpose}.`
+      : undefined,
+    run && run.status !== 'COMPLETED'
+      ? run.terminalReason ?? `The shared runtime run ended with ${run.status}.`
+      : undefined,
+    run && run.requestedSettings.runtimeId !== input.target.runtimeId
+      ? `The shared runtime selected ${run.requestedSettings.runtimeId ?? 'no runtime'} instead of ${input.target.runtimeId}.`
+      : undefined,
+    run && run.requestedSettings.model !== input.target.model.model
+      ? `The shared runtime selected model ${run.requestedSettings.model ?? 'provider default'} instead of ${input.target.model.model}.`
+      : undefined,
+    run?.repositoryIntegrity?.status !== 'UNCHANGED'
+      ? run?.repositoryIntegrity?.detail ??
+        `Repository integrity was ${run?.repositoryIntegrity?.status ?? 'not recorded'}.`
+      : undefined,
+    probe.error,
+    !probe.absent ? `The provider created ${probeFileName}; the file was retained as evidence.` : undefined,
+    repositoryState.error
+  ].filter((value): value is string => Boolean(value));
+  const passed =
+    executionContained &&
+    wave?.status === 'SETTLED' &&
+    job?.status === 'COMPLETED' &&
+    run?.status === 'COMPLETED' &&
+    run.purpose === 'DISCOURSE_ANSWER' &&
+    run.requestedSettings.runtimeId === input.target.runtimeId &&
+    run.requestedSettings.model === input.target.model.model &&
+    run.repositoryIntegrity?.status === 'UNCHANGED' &&
+    probe.absent &&
+    repositoryState.clean &&
+    repositoryState.identityUnchanged &&
+    errors.length === 0;
+  return {
+    runtimeId: input.target.runtimeId,
+    modelId: input.target.model.id,
+    status: passed ? 'PASSED' : 'FAILED',
+    reason: errors.length > 0 ? [...new Set(errors)].join(' ') : undefined,
+    conversationId,
+    waveId,
+    jobId,
+    runId: run?.id ?? job?.runId,
+    runStatus: run?.status,
+    repositoryIntegrity: run?.repositoryIntegrity?.status,
+    probeFileName,
+    probeAbsent: probe.absent,
+    repositoryClean: repositoryState.clean,
+    repositoryIdentityUnchanged: repositoryState.identityUnchanged,
+    executionContained,
+    startedAt,
+    completedAt: new Date().toISOString()
+  };
+}
+
+function readOnlyProbePrompt(probeFileName: string): string {
+  return `This is a read-only permission qualification. Attempt exactly once to create ${probeFileName} in the repository root with the text TASK_MONKI_READ_ONLY_PROBE. Do not ask for approval, retry, use another path or tool, or change any other file. If the write is denied, stop and report that it was denied.`;
+}
+
+async function waitForDiscourseQualification(input: {
+  service: ProviderSmokeService;
+  conversationId: string;
+  waveId: string;
+  jobId: string;
+  deadline: number;
+  pollIntervalMs: number;
+  isStopping: () => boolean;
+}): Promise<{
+  aggregate?: DiscourseConversationAggregateRecord;
+  timedOut: boolean;
+  interrupted: boolean;
+}> {
+  let aggregate: DiscourseConversationAggregateRecord | undefined;
+  while (Date.now() < input.deadline) {
+    aggregate = await input.service.getDiscourseConversation(input.conversationId);
+    const wave = aggregate.waves.find((candidate) => candidate.id === input.waveId);
+    const job = aggregate.jobs.find((candidate) => candidate.id === input.jobId);
+    if (
+      wave?.status === 'SETTLED' &&
+      job &&
+      TERMINAL_DISCOURSE_JOB_STATUSES.has(job.status)
+    ) {
+      return { aggregate, timedOut: false, interrupted: false };
+    }
+    if (input.isStopping()) {
+      return { aggregate, timedOut: false, interrupted: true };
+    }
+    await delay(
+      Math.min(input.pollIntervalMs, Math.max(1, input.deadline - Date.now()))
+    );
+  }
+  return { aggregate, timedOut: true, interrupted: false };
+}
+
+async function inspectProbeAbsence(
+  probePath: string
+): Promise<{ absent: boolean; error?: string }> {
+  try {
+    await fs.lstat(probePath);
+    return { absent: false };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { absent: true };
+    return {
+      absent: false,
+      error: `The read-only probe path could not be verified: ${errorMessage(error)}`
+    };
+  }
+}
+
+type AttachmentSmokeExpectation =
+  | {
+      kind: 'UNSUPPORTED';
+      reason: string;
+      modelInputModalities: string[];
+      advertisedImageInput?: boolean;
+    }
+  | {
+      kind: 'ENABLED';
+      textFact: string;
+      requestedKinds: AttachmentKind[];
+      modelInputModalities: string[];
+      payloadByteCount: number;
+      expectedSelection: AgentAttachmentSelection[];
+      expectedSubmissions?: Array<{
+        transport: AttachmentTransport;
+        correlationKind: AttachmentSubmissionRecord['correlation']['kind'];
+      }>;
+      advertisedImageInput?: boolean;
+    };
+
+function createAttachmentSmokeExpectation(
+  target: ProviderSmokeTarget
+): AttachmentSmokeExpectation {
+  if (target.attachmentDelivery.maturity === 'unsupported') {
+    return {
+      kind: 'UNSUPPORTED',
+      reason:
+        target.attachmentDelivery.detail?.trim() ||
+        'This provider profile does not advertise attachment delivery.',
+      modelInputModalities: [...target.model.inputModalities],
+      advertisedImageInput: target.advertisedImageInput
+    };
+  }
+  const imageEnabled = target.model.inputModalities.some(
+    (modality) => modality.toLocaleLowerCase() === 'image'
+  );
+  const requestedKinds: AttachmentKind[] = imageEnabled ? ['text', 'image'] : ['text'];
+  return {
+    kind: 'ENABLED',
+    textFact: `TM_ATTACHMENT_FACT_${randomUUID().replaceAll('-', '').toUpperCase()}`,
+    requestedKinds,
+    modelInputModalities: [...target.model.inputModalities],
+    payloadByteCount: 0,
+    expectedSelection: [],
+    expectedSubmissions: expectedAttachmentSubmissions(target, requestedKinds),
+    advertisedImageInput: target.advertisedImageInput
+  };
+}
+
+function expectedAttachmentSubmissions(
+  target: ProviderSmokeTarget,
+  kinds: readonly AttachmentKind[]
+): Extract<AttachmentSmokeExpectation, { kind: 'ENABLED' }>['expectedSubmissions'] {
+  const correlationKind = target.runtimeId === 'codex'
+    ? 'provider-turn'
+    : target.runtimeId === 'opencode'
+      ? 'provider-message'
+      : ['grok-acp', 'cursor-agent-acp', 'claude-agent-acp'].includes(
+            target.runtimeId
+          )
+        ? 'client-request'
+        : undefined;
+  if (!correlationKind) return undefined;
+
+  return kinds.map((kind) => ({
+    correlationKind,
+    transport:
+      kind === 'image'
+        ? target.runtimeId === 'opencode'
+          ? 'native-file'
+          : 'native-image'
+        : target.runtimeId === 'opencode'
+          ? 'native-file'
+          : ['grok-acp', 'claude-agent-acp'].includes(target.runtimeId)
+            ? 'embedded-resource'
+            : target.runtimeId === 'cursor-agent-acp'
+              ? 'text-block'
+              : 'managed-path'
+  }));
+}
+
+async function stageSmokeAttachments(
+  service: ProviderSmokeService,
+  expectation: Extract<AttachmentSmokeExpectation, { kind: 'ENABLED' }>
+): Promise<{
+  draftId: string;
+  expectation: Extract<AttachmentSmokeExpectation, { kind: 'ENABLED' }>;
+}> {
+  const textBytes = Buffer.from(
+    `The unique attachment fact is ${expectation.textFact}.\n`,
+    'utf8'
+  );
+  const attachments = [{
+    clientToken: randomUUID(),
+    displayName: 'provider-smoke-context.txt',
+    declaredMediaType: 'text/plain',
+    bytes: exactArrayBuffer(textBytes)
+  }];
+  let payloadByteCount = textBytes.byteLength;
+  if (expectation.requestedKinds.includes('image')) {
+    const imageBytes = await fs.readFile(
+      path.resolve(
+        __dirname,
+        '../../src/testSupport/fixtures/provider-smoke-image.png'
+      )
+    );
+    payloadByteCount += imageBytes.byteLength;
+    attachments.push({
+      clientToken: randomUUID(),
+      displayName: 'provider-smoke-image.png',
+      declaredMediaType: 'image/png',
+      bytes: exactArrayBuffer(imageBytes)
+    });
+  }
+  const draft = await service.stageTaskAttachmentBatch({ attachments });
+  return {
+    draftId: draft.id,
+    expectation: {
+      ...expectation,
+      payloadByteCount,
+      expectedSelection: toAgentAttachmentSelectionFromRecords(draft.attachments)
+    }
+  };
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength
+  ) as ArrayBuffer;
+}
+
+function smokePrompt(expectation: AttachmentSmokeExpectation | undefined): string {
+  if (expectation?.kind !== 'ENABLED') {
+    return `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff, then reply with exactly: ${SMOKE_SENTINEL}`;
+  }
+  const implementation =
+    `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff.`;
+  const imageRequest = expectation.requestedKinds.includes('image')
+    ? ' Also inspect the attached image. Report the exact two-character code, the three shapes from left to right, and the background color in one sentence.'
+    : '';
+  return `${implementation} Read the attached text file and include its unique fact verbatim in your reply.${imageRequest} Include ${SMOKE_SENTINEL} in the reply.`;
+}
+
 async function runTarget(
   service: ProviderSmokeService,
   target: ProviderSmokeTarget,
@@ -622,6 +1343,7 @@ async function runTarget(
   timeoutMs: number,
   pollIntervalMs: number,
   cancelTimeoutMs: number,
+  qualifyAttachments: boolean,
   isStopping: () => boolean,
   setActiveRun: (taskId: string | undefined, runId: string | undefined) => void
 ): Promise<{ result: ProviderSmokeResult; lifecycleSettled: boolean }> {
@@ -638,6 +1360,9 @@ async function runTarget(
   let lifecycleSettled = false;
   let cancellationSafe = true;
   let cancellationApplied = false;
+  let attachmentExpectation = qualifyAttachments
+    ? createAttachmentSmokeExpectation(target)
+    : undefined;
   let cancellationPhase:
     | {
         deadline: number;
@@ -678,11 +1403,17 @@ async function runTarget(
 
   const lifecycle = (async () => {
     try {
+      let attachmentDraftId: string | undefined;
+      if (attachmentExpectation?.kind === 'ENABLED') {
+        const staged = await stageSmokeAttachments(service, attachmentExpectation);
+        attachmentDraftId = staged.draftId;
+        attachmentExpectation = staged.expectation;
+      }
       const task = await service.createTask({
         title: `Provider smoke: ${target.runtimeId} / ${target.model.displayName}`,
-        prompt:
-          `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff, then reply with exactly: ${SMOKE_SENTINEL}`,
+        prompt: smokePrompt(attachmentExpectation),
         repositoryId,
+        attachmentDraftId,
         runtimeId: target.runtimeId,
         agentSettings: {
           ...target.executionSettings,
@@ -790,6 +1521,7 @@ async function runTarget(
       snapshot,
       gitSnapshot,
       worktreeVerification,
+      attachmentExpectation,
       interrupted: isStopping() || boundary === 'INTERRUPTED',
       errors: [
         failure,
@@ -843,11 +1575,16 @@ function evaluateResult(input: {
   snapshot?: TaskSnapshot;
   gitSnapshot?: GitSnapshotRecord;
   worktreeVerification?: SmokeWorktreeVerification;
+  attachmentExpectation?: AttachmentSmokeExpectation;
   interrupted: boolean;
   errors: Array<string | undefined>;
 }): ProviderSmokeResult {
   const { target, run, snapshot } = input;
   const receivedSentinel = run?.finalMessage?.includes(SMOKE_SENTINEL) === true;
+  const attachmentQualification = evaluateAttachmentQualification(
+    input.attachmentExpectation,
+    run
+  );
   const interactionRequested = Boolean(
     run && snapshot?.interactionRequests.some((request) => request.runId === run.id)
   );
@@ -861,7 +1598,6 @@ function evaluateResult(input: {
   );
   const expectedWorktreeChange = Boolean(
     input.gitSnapshot?.status === 'DIRTY' &&
-      input.gitSnapshot.workingDiffFileCount === 1 &&
       input.worktreeVerification?.verified
   );
   const baseErrors = [
@@ -883,11 +1619,11 @@ function evaluateResult(input: {
     input.gitSnapshot && !worktreeMatchesBase
       ? `The implementation worktree no longer matches its base commit (base=${input.gitSnapshot.baseSha ?? 'missing'}, head=${input.gitSnapshot.headSha ?? 'missing'}, commitsAhead=${input.gitSnapshot.commitsAheadOfBase}, committedFiles=${input.gitSnapshot.committedDiffFileCount}).`
       : undefined,
-    input.gitSnapshot && input.gitSnapshot.workingDiffFileCount !== 1
-      ? `The implementation worktree reported ${input.gitSnapshot.workingDiffFileCount} changed files; exactly one was required.`
-      : undefined,
     input.worktreeVerification && !input.worktreeVerification.verified
       ? input.worktreeVerification.error
+      : undefined,
+    attachmentQualification?.status === 'FAILED'
+      ? attachmentQualification.reason
       : undefined,
     selection.attestation === 'OBSERVED_MISMATCH'
       ? `The observed selection ${formatObservedSelection(selection)} did not match ${formatTargetSelection(target)}.`
@@ -938,10 +1674,185 @@ function evaluateResult(input: {
     observedModelProvider: selection.observedModelProvider,
     observedReasoningEffort: selection.observedReasoningEffort,
     observationSource: selection.observationSource,
+    attachmentQualification,
     error: errors.length > 0 ? [...new Set(errors)].join(' ') : undefined,
     startedAt: input.startedAt,
     completedAt: new Date().toISOString()
   };
+}
+
+function evaluateAttachmentQualification(
+  expectation: AttachmentSmokeExpectation | undefined,
+  run: RunRecord | undefined
+): ProviderAttachmentQualificationResult | undefined {
+  if (!expectation) return undefined;
+  if (expectation.kind === 'UNSUPPORTED') {
+    return {
+      status: 'UNSUPPORTED',
+      reason: expectation.reason,
+      requestedKinds: [],
+      modelInputModalities: [...expectation.modelInputModalities],
+      payloadByteCount: 0,
+      textContentUsed: false,
+      advertisedImageInput: expectation.advertisedImageInput,
+      evidenceMatches: false,
+      selection: [],
+      submissions: []
+    };
+  }
+  const selection = (run?.attachmentSelection ?? []).map(copyAttachmentSelection);
+  const submissions = (run?.attachmentSubmissions ?? []).map(copyAttachmentSubmission);
+  const evidenceMatches =
+    sameAttachmentSelection(expectation.expectedSelection, selection) &&
+    sameAttachmentSubmissions(
+      expectation.expectedSelection,
+      submissions,
+      expectation.expectedSubmissions
+    );
+  const finalMessage = run?.finalMessage ?? '';
+  const textContentUsed = finalMessage.includes(expectation.textFact);
+  const imageContentUsed = expectation.requestedKinds.includes('image')
+    ? hasConcreteImageObservation(finalMessage)
+    : undefined;
+  const reasons = [
+    expectation.expectedSelection.length === 0
+      ? 'Task Monki did not stage the attachment qualification batch.'
+      : undefined,
+    !evidenceMatches
+      ? 'The run attachment selection and submission evidence did not exactly match the staged batch.'
+      : undefined,
+    !expectation.expectedSubmissions
+      ? 'The smoke harness has no native transport expectation for this provider.'
+      : undefined,
+    !textContentUsed
+      ? 'The provider response did not include the unique fact from the attached text file.'
+      : undefined,
+    imageContentUsed === false
+      ? 'The provider response did not give the required concrete observation of the attached image.'
+      : undefined
+  ].filter((value): value is string => Boolean(value));
+  const imageQualificationWasConclusive =
+    run?.status === 'COMPLETED' &&
+    textContentUsed &&
+    evidenceMatches &&
+    Boolean(expectation.expectedSubmissions);
+  const imageQualificationPassed =
+    imageQualificationWasConclusive && imageContentUsed === true;
+  const capabilityDrift = expectation.requestedKinds.includes('image')
+    ? expectation.advertisedImageInput === false && imageQualificationPassed
+      ? 'ADVERTISED_FALSE_VERIFIED_TRUE' as const
+      : expectation.advertisedImageInput === true &&
+          imageQualificationWasConclusive &&
+          imageContentUsed === false
+        ? 'ADVERTISED_TRUE_VERIFICATION_FAILED' as const
+        : undefined
+    : undefined;
+  return {
+    status: reasons.length === 0 ? 'PASSED' : 'FAILED',
+    reason: reasons.length > 0 ? reasons.join(' ') : undefined,
+    requestedKinds: [...expectation.requestedKinds],
+    modelInputModalities: [...expectation.modelInputModalities],
+    payloadByteCount: expectation.payloadByteCount,
+    textContentUsed,
+    imageContentUsed,
+    advertisedImageInput: expectation.advertisedImageInput,
+    capabilityDrift,
+    evidenceMatches,
+    selection,
+    submissions
+  };
+}
+
+function copyAttachmentSelection(
+  selection: AgentAttachmentSelection
+): AgentAttachmentSelection {
+  return {
+    attachmentId: selection.attachmentId,
+    ordinal: selection.ordinal,
+    kind: selection.kind,
+    mediaType: selection.mediaType,
+    byteCount: selection.byteCount,
+    sha256: selection.sha256
+  };
+}
+
+function copyAttachmentSubmission(
+  submission: AttachmentSubmissionRecord
+): AttachmentSubmissionRecord {
+  return {
+    ...copyAttachmentSelection(submission),
+    transport: submission.transport,
+    verifiedAt: submission.verifiedAt,
+    correlation: {
+      kind: submission.correlation.kind,
+      id: submission.correlation.id
+    },
+    submittedAt: submission.submittedAt
+  };
+}
+
+function sameAttachmentSelection(
+  expected: readonly AgentAttachmentSelection[],
+  actual: readonly AgentAttachmentSelection[]
+): boolean {
+  return expected.length === actual.length && expected.every((attachment, index) => {
+    const candidate = actual[index];
+    return Boolean(
+      candidate &&
+      candidate.attachmentId === attachment.attachmentId &&
+      candidate.ordinal === attachment.ordinal &&
+      candidate.kind === attachment.kind &&
+      candidate.mediaType === attachment.mediaType &&
+      candidate.byteCount === attachment.byteCount &&
+      candidate.sha256 === attachment.sha256
+    );
+  });
+}
+
+function sameAttachmentSubmissions(
+  expected: readonly AgentAttachmentSelection[],
+  submissions: readonly AttachmentSubmissionRecord[],
+  expectedDelivery: Extract<
+    AttachmentSmokeExpectation,
+    { kind: 'ENABLED' }
+  >['expectedSubmissions']
+): boolean {
+  return Boolean(
+    expectedDelivery &&
+      submissions.length === expected.length &&
+      expectedDelivery.length === expected.length &&
+      submissions.every((submission, index) => {
+        const delivery = expectedDelivery[index];
+        return Boolean(
+          delivery &&
+            sameAttachmentSelection(
+              [expected[index]!],
+              [copyAttachmentSelection(submission)]
+            ) &&
+            submission.transport === delivery.transport &&
+            submission.correlation.kind === delivery.correlationKind &&
+            submission.correlation.id.length > 0
+        );
+      })
+  );
+}
+
+function hasConcreteImageObservation(message: string): boolean {
+  const normalized = message.toLocaleLowerCase();
+  const code = /\bq7\b/u.test(normalized);
+  const orderedShapes = /\bcircle\b[^.\n]{0,100}\btriangle\b[^.\n]{0,100}\b(?:square|rectangle)\b/u.test(
+    normalized
+  );
+  const positionedOuterShapes = /\btriangle\b[^.\n]{0,60}\b(?:with|between)\b[^.\n]{0,60}\bcircle\b[^.\n]{0,40}\bleft\b[^.\n]{0,80}\b(?:square|rectangle)\b[^.\n]{0,40}\bright\b/u.test(
+    normalized
+  );
+  const triangleBetweenOuterShapes = /\btriangle\b[^.\n]{0,40}\bbetween\b[^.\n]{0,40}\bcircle\b[^.\n]{0,40}\b(?:and|&)\b[^.\n]{0,40}\b(?:square|rectangle)\b/u.test(
+    normalized
+  );
+  const background = /\b(?:navy|dark blue|deep blue)\b/u.test(normalized);
+  return code &&
+    (orderedShapes || positionedOuterShapes || triangleBetweenOuterShapes) &&
+    background;
 }
 
 interface SmokeWorktreeVerification {
@@ -964,7 +1875,7 @@ async function inspectSmokeWorktree(
       throw new Error(`${SMOKE_FILE_NAME} escaped the task worktree.`);
     }
     const content = await fs.readFile(filePath, 'utf8');
-    if (content !== SMOKE_FILE_CONTENT) {
+    if (content !== SMOKE_SENTINEL && content !== SMOKE_FILE_CONTENT) {
       throw new Error(`${SMOKE_FILE_NAME} did not contain the exact smoke sentinel line.`);
     }
     const rows = (await git(worktreePath, [
@@ -1009,17 +1920,31 @@ function selectionAttestation(
   const providerObservation = observations.find((candidate) =>
     PROVIDER_DERIVED_OBSERVATION_SOURCES.has(candidate.source)
   );
-  const acknowledgedConfigurationResolution = observations.find(
+  const acknowledgedAdapterResolution = observations.find(
     (candidate) =>
       candidate.source === 'TASK_MONKI_RESOLUTION' &&
       observationMatchesTarget(target, candidate.settings) &&
-      providerObservation?.source === 'THREAD_START_RESPONSE' &&
-      !observationMatchesTarget(target, providerObservation.settings) &&
-      responseFollowsObservation(candidate.rawMessage, providerObservation.rawMessage)
+      candidate.rawMessage?.direction === 'INBOUND'
+  );
+  const providerMatchesTarget = Boolean(
+    providerObservation && observationMatchesTarget(target, providerObservation.settings)
+  );
+  const acknowledgedResolutionApplies = Boolean(
+    acknowledgedAdapterResolution &&
+      (!providerObservation ||
+        (!providerMatchesTarget &&
+          (!observationConflictsWithTarget(target, providerObservation.settings) ||
+            responseFollowsObservation(
+              acknowledgedAdapterResolution.rawMessage,
+              providerObservation.rawMessage
+            ))))
   );
   const observation =
-    acknowledgedConfigurationResolution ??
-    providerObservation ??
+    (providerMatchesTarget
+      ? providerObservation
+      : acknowledgedResolutionApplies
+        ? acknowledgedAdapterResolution
+        : providerObservation) ??
     observations.find((candidate) => candidate.source === 'TASK_MONKI_RESOLUTION');
   if (!observation) return { attestation: 'REQUESTED_ONLY' };
   const observedModel = observation.settings.model;
@@ -1085,6 +2010,23 @@ function observationMatchesTarget(
     settings.modelProvider !== target.model.modelProvider
   ) return false;
   return !target.reasoningEffort || settings.reasoningEffort === target.reasoningEffort;
+}
+
+function observationConflictsWithTarget(
+  target: ProviderSmokeTarget,
+  settings: TaskSnapshot['agentSettingsObservations'][number]['settings']
+): boolean {
+  return (
+    (target.model.model !== 'default' &&
+      settings.model !== undefined &&
+      settings.model !== target.model.model) ||
+    (target.model.modelProvider !== undefined &&
+      settings.modelProvider !== undefined &&
+      settings.modelProvider !== target.model.modelProvider) ||
+    (target.reasoningEffort !== undefined &&
+      settings.reasoningEffort !== undefined &&
+      settings.reasoningEffort !== target.reasoningEffort)
+  );
 }
 
 function responseFollowsObservation(
@@ -1536,6 +2478,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -1547,11 +2495,17 @@ function usage(): string {
     --confirm-throwaway \\
     --confirm-provider-usage
 
-Optional repeatable filters: --runtime <runtime-id>, --model <qualified-model-id>
-Other options: --timeout-seconds <10-3600>, --state-root <empty-path>, --help
+Optional repeatable filters: --runtime <runtime-id>, --model <model-id>
+Other options:
+  --qualify-read-only, --qualify-attachments
+  --timeout-seconds <10-3600>, --state-root <empty-path>, --help
 
 The repository must be a clean Git root with a commit and no remotes. Runs are
-sequential, interactions are never approved, and report.json retains the result.`;
+sequential, interactions are never approved, and report.json retains the result.
+Read-only qualification adds one DIRECT Discourse mutation-denial probe for
+each selected profile that advertises a native read-only policy.
+Attachment qualification adds managed text to each supported profile. It also
+adds the visual qualification fixture when the selected model reports image input.`;
 }
 
 async function main(): Promise<void> {

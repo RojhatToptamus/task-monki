@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
 import { PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION } from '../preview/generation/PreviewRecipeGenerationSupport';
 import {
@@ -100,5 +100,200 @@ routes:
       'EMPTY'
     ]);
     unsubscribe();
+  });
+
+  it('uses the configured capable runtime and exact model without a Codex fallback', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-configured-runtime',
+      previewEnabled: true
+    });
+    await scenario.commitFile(
+      'package.json',
+      JSON.stringify({ scripts: { dev: 'node server.mjs' } })
+    );
+    await scenario.commitFile(
+      'server.mjs',
+      'import http from "node:http"; http.createServer().listen(Number(process.env.PORT));\n'
+    );
+    const task = await scenario.createTask({ title: 'Generate Preview recipe' });
+    await scenario.service.prepareWorktree({ taskId: task.id });
+    const [baseModel] = await scenario.agent.listModels();
+    const resolveExecution = vi
+      .spyOn(scenario.agent, 'resolveExecution')
+      .mockImplementation(async ({ settings }) => ({
+        model: {
+          ...baseModel!,
+          id: `${scenario.agent.descriptor.id}:chosen-provider/chosen-preview-model`,
+          model: 'chosen-preview-model',
+          modelProvider: 'chosen-provider'
+        },
+        settings: {
+          ...settings,
+          runtimeId: scenario.agent.descriptor.id,
+          model: 'chosen-preview-model',
+          modelProvider: 'chosen-provider'
+        }
+      }));
+    await scenario.service.updateAppSettings({
+      previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+      previewRecipeGenerationModel: 'chosen-preview-model',
+      previewRecipeGenerationModelProvider: 'chosen-provider'
+    });
+    scenario.agent.nextRuntimeTurnResult = {
+      status: 'completed',
+      output: JSON.stringify({
+        schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
+        status: 'insufficient-evidence',
+        yaml: null,
+        summary: 'The selected model inspected the bounded repository evidence.',
+        evidence: [],
+        assumptions: [],
+        omissions: [],
+        unresolvedDecisions: ['This fixture does not return a complete recipe.'],
+        publicEnvironmentDecisions: []
+      })
+    };
+
+    await expect(
+      scenario.service.generatePreviewRecipe({ taskId: task.id })
+    ).resolves.toMatchObject({ status: 'NEEDS_INPUT' });
+    expect(resolveExecution).toHaveBeenCalledWith({
+      settings: expect.objectContaining({
+        runtimeId: scenario.agent.descriptor.id,
+        model: 'chosen-preview-model',
+        modelProvider: 'chosen-provider'
+      }),
+      attachments: []
+    });
+    expect(scenario.agent.startedRuntimeTurns).toHaveLength(1);
+    expect(scenario.agent.startedRuntimeTurns[0]?.run.purpose).toBe(
+      'PREVIEW_RECIPE_GENERATION'
+    );
+    expect(scenario.agent.startedRuntimeTurns[0]?.attachments).toEqual([]);
+  });
+
+  it('resolves a cold runtime before checking version-derived Preview support', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-cold-runtime',
+      previewEnabled: true
+    });
+    const originalCapabilities = scenario.agent.capabilities.bind(scenario.agent);
+    const originalResolveExecution = scenario.agent.resolveExecution.bind(scenario.agent);
+    let runtimeResolved = false;
+    vi.spyOn(scenario.agent, 'capabilities').mockImplementation(async () => {
+      const capabilities = await originalCapabilities();
+      return runtimeResolved
+        ? capabilities
+        : {
+            ...capabilities,
+            readOnlyTurns: {
+              maturity: 'unsupported',
+              detail: 'The runtime version has not been resolved yet.'
+            }
+          };
+    });
+    const resolveExecution = vi
+      .spyOn(scenario.agent, 'resolveExecution')
+      .mockImplementation(async (input) => {
+        runtimeResolved = true;
+        return originalResolveExecution(input);
+      });
+
+    await expect(
+      scenario.service.updateAppSettings({
+        previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+        previewRecipeGenerationModel: 'scenario-model',
+        previewRecipeGenerationModelProvider: 'openai'
+      })
+    ).resolves.toMatchObject({
+      previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+      previewRecipeGenerationModel: 'scenario-model',
+      previewRecipeGenerationModelProvider: 'openai'
+    });
+    expect(resolveExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not save or start Preview generation when the provider resolves another model', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-model-fallback',
+      previewEnabled: true
+    });
+    const task = await scenario.createTask({ title: 'Reject Preview fallback' });
+    await scenario.service.prepareWorktree({ taskId: task.id });
+    await expect(
+      scenario.service.updateAppSettings({
+        previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+        previewRecipeGenerationModel: 'selected-model',
+        previewRecipeGenerationModelProvider: 'selected-provider'
+      })
+    ).rejects.toThrow('did not resolve the selected Preview model');
+    expect(scenario.agent.startedRuntimeTurns).toHaveLength(0);
+  });
+
+  it('shows the configured runtime error without starting another provider', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-disabled-runtime',
+      previewEnabled: true
+    });
+    const task = await scenario.createTask({ title: 'Generate Preview recipe' });
+    await scenario.service.prepareWorktree({ taskId: task.id });
+    const internals = scenario.service as unknown as {
+      appSettings: Record<string, unknown>;
+    };
+    internals.appSettings = {
+      ...internals.appSettings,
+      previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
+      disabledRuntimeIds: [scenario.agent.descriptor.id]
+    };
+
+    await expect(
+      scenario.service.generatePreviewRecipe({ taskId: task.id })
+    ).resolves.toMatchObject({
+      status: 'FAILED',
+      failureCode: 'AGENT_UNAVAILABLE',
+      message: expect.stringContaining('disabled')
+    });
+    expect(scenario.agent.startedRuntimeTurns).toHaveLength(0);
+  });
+
+  it('blocks retry and deletion while an earlier Preview generation stop is uncertain', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'preview-recipe-generation-uncertain-recovery',
+      previewEnabled: true
+    });
+    const task = await scenario.createTask({ title: 'Recover Preview generation' });
+    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    scenario.agent.ambiguousRuntimeInterrupt = true;
+    const internals = scenario.service as unknown as {
+      startPreviewRecipeGenerationRuntimeTurn(input: {
+        taskId: string;
+        generationId: string;
+        cwd: string;
+        instruction: string;
+      }): Promise<{ result: Promise<string>; cancel(): Promise<void> }>;
+    };
+    const abandoned = await internals.startPreviewRecipeGenerationRuntimeTurn({
+      taskId: task.id,
+      generationId: 'uncertain-generation',
+      cwd: worktree.worktreePath,
+      instruction: 'Return one Preview recipe envelope.'
+    });
+    void abandoned.result.catch(() => undefined);
+
+    await expect(abandoned.cancel()).rejects.toThrow(
+      'could not confirm that Preview recipe generation stopped'
+    );
+    await expect(
+      scenario.service.generatePreviewRecipe({ taskId: task.id })
+    ).rejects.toThrow('still recovering');
+    await expect(
+      scenario.service.deleteTask({ taskId: task.id })
+    ).rejects.toThrow('still recovering');
+
+    expect(
+      (await scenario.runtimeStore.snapshot()).runs.some(
+        (candidate) => candidate.owner.kind === 'PREVIEW_RECIPE_GENERATION'
+      )
+    ).toBe(true);
   });
 });

@@ -189,7 +189,9 @@ exit code and still parses JSON.
 
 `Create draft PR` opens a small confirmation dialog before calling
 `TaskManagerService.createPullRequest(...)`. The dialog defaults the PR title
-to the task title and lets the user edit it for the new PR. `Push update`
+to the task title and lets the user edit it for the new PR. Imported work also
+requires a target branch, separate from its review comparison. A failed request
+keeps the dialog inputs for retry. `Push update`
 continues to call the same service path directly. The service path means "make
 GitHub delivery current for this task branch."
 
@@ -197,7 +199,7 @@ GitHub delivery current for this task branch."
 TaskDetail.onCreateDraftPr
   -> CreateDraftPrModal
   -> runDeliveryAction(...)
-  -> taskManagerApi.createPullRequest({ taskId, title })
+  -> taskManagerApi.createPullRequest({ taskId, title, baseBranch })
   -> TaskManagerService.createPullRequest(...)
   -> createPullRequestUnlocked(...)
 ```
@@ -212,7 +214,8 @@ Backend flow:
    with its recorded local HEAD. Adopt the matching ref, allow an explicit
    retry only when the ref is absent, and block an ambiguous mismatch.
 5. Refresh Git evidence.
-6. If the worktree is dirty, create a delivery commit.
+6. If a managed worktree is dirty, create a delivery commit. Reject a dirty
+   external checkout; its owner must commit outside Task Monki.
 7. Check the latest branch publication.
 8. If no pushed publication exists for current `HEAD`, record `PUSHING` with
    the exact remote, branch, and HEAD before publishing the branch.
@@ -224,7 +227,7 @@ Backend flow:
     opens a new draft PR with the normalized title.
 14. `gh pr view` and `gh pr checks` normalize PR, CI, review, and merge
     evidence.
-15. `FileTaskStore.recordPullRequestSync(...)` stores all evidence records.
+15. `SqliteTaskStore.recordPullRequestSync(...)` stores all evidence records.
 16. If GitHub reports an open PR, Task Monki transitions the task to
     `IN_REVIEW`.
 
@@ -236,14 +239,35 @@ observed PR and does not rename it.
 
 - a Git snapshot exists
 - status is not `DIRTY`, `CONFLICTED`, `DIVERGED`, `UNAVAILABLE`, or `UNKNOWN`
-- `commitsAheadOfBase > 0`
-- `committedDiffFileCount > 0`
+- for managed worktrees, `commitsAheadOfBase > 0`
+- for managed worktrees, `committedDiffFileCount > 0`
 
-Dirty worktrees are allowed at the user action level because the backend first
-creates a delivery commit. Conflicted, diverged, unavailable, unknown, or
-no-diff states are blocked.
+Dirty managed worktrees are allowed at the user action level because the backend first
+creates a delivery commit. Conflicted, diverged, unavailable, and unknown states
+are blocked. Managed tasks also require a committed diff.
 
 ## Refresh Flow
+
+For an unlinked external checkout, Refresh performs read-only PR discovery.
+The match must identify the exact repository and branch. Forks, ambiguous
+results, incomplete identity, and lookup failures cannot prove that no PR exists.
+Creating a PR checks for an existing match before publication. A match retains
+its target branch. If the local HEAD is newer, the same action publishes the
+update; discovery alone does not complete that action.
+
+External publication requires clean, current Git evidence and one verified push
+destination in the selected GitHub repository. It pushes the verified commit to
+the exact branch ref without changing upstream configuration or publishing tags.
+The publication record retains the destination URL for uncertain-push reconciliation.
+A new imported-work PR requires an explicit target branch. Task Monki verifies
+that branch in the selected GitHub repository before publication. The request
+does not change the checkout's stored comparison or existing review evidence.
+`HEAD` and commit comparisons remain valid, including comparisons with no diff.
+GitHub checks the new PR's diff against its target. Managed tasks retain their
+existing committed-diff requirement.
+
+If creation fails after a successful push, the publication remains recorded.
+An explicit retry can create the PR without repeating that push.
 
 `Refresh` calls:
 
@@ -952,7 +976,7 @@ neutral:
 
 ## Evidence Updates And Projection
 
-`FileTaskStore.recordPullRequestSync(...)` writes four records and four events:
+`SqliteTaskStore.recordPullRequestSync(...)` writes four records and four events:
 
 ```text
 PR_SNAPSHOT_CAPTURED
@@ -973,7 +997,7 @@ Core and renderer coverage lives in:
 
 - `src/renderer/model/prStatus.test.ts`
 - `src/renderer/model/taskView.test.ts`
-- `src/core/storage/FileTaskStore.integration.test.ts`
+- `src/core/storage/SqliteTaskStore.integration.test.ts`
 - `src/core/projection/reducer.test.ts`
 - `src/core/app/TaskManagerService.workflowPolicies.test.ts`
 - `src/core/app/TaskManagerService.reviewPrActions.integration.test.ts`

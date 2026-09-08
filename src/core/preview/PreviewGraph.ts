@@ -9,7 +9,7 @@ import type {
   PreviewServicePlan,
   PreviewWorkerPlan
 } from '../../shared/contracts';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { boundedPreviewFailure as boundedError } from './PreviewFailure';
 import { PreviewReadinessService, type PreviewReadinessResult } from './PreviewReadinessService';
 import { NativeJobRunner } from './runtime/NativeJobRunner';
@@ -46,7 +46,7 @@ export interface RunningPreviewGraph {
 
 export class PreviewGraph {
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: SqliteTaskStore,
     private readonly jobs: NativeJobRunner,
     private readonly services: NativeServiceRuntime,
     private readonly readiness: PreviewReadinessService,

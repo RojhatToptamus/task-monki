@@ -97,7 +97,7 @@ describe('Codex permission profile', () => {
     ).toThrow('must be absolute');
   });
 
-  it('rejects Full access only for attachments and validates managed paths', () => {
+  it('keeps attachment grants out of Full access and validates restricted managed paths', () => {
     const worktree = nativeAbsolute('worktrees', 'task-1');
     const attachment = nativeAbsolute('attachments', 'file.txt');
     const fullAccess = codexPermissionProfileConfig({
@@ -109,14 +109,14 @@ describe('Codex permission profile', () => {
       default_permissions: ':danger-full-access'
     });
     expect(fullAccess).not.toHaveProperty('permissions');
-    expect(() =>
+    expect(
       codexPermissionProfileConfig({
         sessionId: 'session-1',
         settings: { sandbox: 'DANGER_FULL_ACCESS' },
         worktreePath: worktree,
         attachmentPaths: [attachment]
       })
-    ).toThrow('Attachments require');
+    ).toEqual(fullAccess);
     expect(() =>
       codexPermissionProfileConfig({
         sessionId: 'session-1',
@@ -145,7 +145,7 @@ describe('Codex permission profile', () => {
     );
   });
 
-  it('disables network access whenever managed attachments are present', () => {
+  it('preserves explicit network access when managed attachments are present', () => {
     const config = codexPermissionProfileConfig({
       sessionId: 'session-3',
       settings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
@@ -157,7 +157,7 @@ describe('Codex permission profile', () => {
     };
 
     const profileId = config.default_permissions;
-    expect(config.permissions[profileId]?.network.enabled).toBe(false);
+    expect(config.permissions[profileId]?.network.enabled).toBe(true);
   });
 
   it('uses a stable, exact profile id for each attachment scope', () => {
@@ -295,17 +295,25 @@ describe('Codex Discourse read-only permission scope', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-scope-'));
     const firstPath = path.join(root, 'first');
     const secondPath = path.join(root, 'second');
-    await Promise.all([fs.mkdir(firstPath), fs.mkdir(secondPath)]);
+    const attachmentPath = path.join(root, 'attachment.txt');
+    await Promise.all([
+      fs.mkdir(firstPath),
+      fs.mkdir(secondPath),
+      fs.writeFile(attachmentPath, 'reference')
+    ]);
     const [first, second] = await Promise.all([fs.realpath(firstPath), fs.realpath(secondPath)]);
+    const attachment = await fs.realpath(attachmentPath);
 
     const profile = await codexReadOnlyScopeProfile({
       sessionId: 'session-discourse',
       scope: { primaryCwd: first, readOnlyRoots: [second, first] },
+      attachmentPaths: [attachment],
       reasoningEffort: 'high'
     });
     const reordered = await codexReadOnlyScopeProfile({
       sessionId: 'session-discourse',
       scope: { primaryCwd: first, readOnlyRoots: [first, second] },
+      attachmentPaths: [attachment],
       reasoningEffort: 'high'
     });
 
@@ -315,7 +323,12 @@ describe('Codex Discourse read-only permission scope', () => {
       default_permissions: profile.profileId,
       permissions: {
         [profile.profileId]: {
-          filesystem: { ':minimal': 'read', [first]: 'read', [second]: 'read' },
+          filesystem: {
+            ':minimal': 'read',
+            [first]: 'read',
+            [second]: 'read',
+            [attachment]: 'read'
+          },
           network: { enabled: false }
         }
       },

@@ -29,6 +29,21 @@ export interface CodexReadOnlyScopeProfile {
   config: Record<string, JsonValue>;
 }
 
+export function codexReadOnlyScopeProfileId(
+  sessionId: string,
+  scopeHash: string
+): string {
+  if (!SAFE_SESSION_ID.test(sessionId) || !/^[a-f0-9]{64}$/u.test(scopeHash)) {
+    throw new Error('Cannot create a Codex read-only permission profile id.');
+  }
+  const sessionHash = crypto
+    .createHash('sha256')
+    .update(sessionId)
+    .digest('hex')
+    .slice(0, 12);
+  return `${PROFILE_PREFIX}${sessionHash}_${scopeHash.slice(0, 24)}`;
+}
+
 export function codexPermissionProfileId(
   sessionId: string,
   sandbox: AgentExecutionSettings['sandbox'],
@@ -55,6 +70,7 @@ export function codexPermissionProfileId(
 export async function codexReadOnlyScopeProfile(input: {
   sessionId: string;
   scope: CodexReadOnlyExecutionScope;
+  attachmentPaths?: readonly string[];
   reasoningEffort?: string;
 }): Promise<CodexReadOnlyScopeProfile> {
   if (!SAFE_SESSION_ID.test(input.sessionId)) {
@@ -73,9 +89,17 @@ export async function codexReadOnlyScopeProfile(input: {
     throw new Error('Codex read-only scope exceeds the filesystem-root safety limit.');
   }
   assertNonOverlappingRoots(roots);
+  const attachmentPaths = uniqueSorted(
+    await Promise.all(
+      (input.attachmentPaths ?? []).map((candidate) =>
+        requireCanonicalFile(candidate, 'managed attachment')
+      )
+    )
+  );
   const filesystemEntries = [
     { path: ':minimal', access: 'read' as const },
-    ...roots.map((candidate) => ({ path: candidate, access: 'read' as const }))
+    ...roots.map((candidate) => ({ path: candidate, access: 'read' as const })),
+    ...attachmentPaths.map((candidate) => ({ path: candidate, access: 'read' as const }))
   ];
   const encodedPathBytes = filesystemEntries.reduce(
     (total, entry) => total + Buffer.byteLength(entry.path, 'utf8'),
@@ -104,10 +128,10 @@ export async function codexReadOnlyScopeProfile(input: {
     .createHash('sha256')
     .update(JSON.stringify(scopeDescriptor))
     .digest('hex');
-  const sessionHash = crypto.createHash('sha256').update(input.sessionId).digest('hex').slice(0, 12);
-  const profileId = `${PROFILE_PREFIX}${sessionHash}_${scopeHash.slice(0, 24)}`;
+  const profileId = codexReadOnlyScopeProfileId(input.sessionId, scopeHash);
   const filesystem: Record<string, 'read'> = { ':minimal': 'read' };
   for (const candidate of roots) filesystem[candidate] = 'read';
+  for (const candidate of attachmentPaths) filesystem[candidate] = 'read';
   return {
     profileId,
     scopeHash,
@@ -141,12 +165,6 @@ export function codexPermissionProfileConfig(input: {
 }): Record<string, JsonValue> {
   const attachmentPaths = input.attachmentPaths ?? [];
   const additionalReadOnlyPaths = input.additionalReadOnlyPaths ?? [];
-  if (attachmentPaths.length > 0 && input.settings.sandbox === 'DANGER_FULL_ACCESS') {
-    throw new Error(
-      'Attachments require Ask for approval, Approve for me, or read-only access. Full access cannot protect managed attachment files.'
-    );
-  }
-
   const worktreePath = requireAbsolute(input.worktreePath, 'worktree');
   const filesystem: Record<string, 'read' | 'write'> = {
     ':minimal': 'read',
@@ -158,15 +176,17 @@ export function codexPermissionProfileConfig(input: {
       filesystem[readOnlyPath] = 'read';
     }
   }
-  for (const candidate of attachmentPaths) {
-    const attachmentPath = requireAbsolute(candidate, 'attachment');
-    if (
-      isSamePath(attachmentPath, worktreePath) ||
-      isInside(attachmentPath, worktreePath)
-    ) {
-      throw new Error('Managed attachment paths must stay outside the task worktree.');
+  if (input.settings.sandbox !== 'DANGER_FULL_ACCESS') {
+    for (const candidate of attachmentPaths) {
+      const attachmentPath = requireAbsolute(candidate, 'attachment');
+      if (
+        isSamePath(attachmentPath, worktreePath) ||
+        isInside(attachmentPath, worktreePath)
+      ) {
+        throw new Error('Managed attachment paths must stay outside the task worktree.');
+      }
+      filesystem[attachmentPath] = 'read';
     }
-    filesystem[attachmentPath] = 'read';
   }
 
   const profileId = codexPermissionProfileId(
@@ -186,8 +206,7 @@ export function codexPermissionProfileConfig(input: {
             [profileId]: {
               filesystem,
               network: {
-                enabled:
-                  attachmentPaths.length === 0 && input.settings.networkAccess === true
+                enabled: input.settings.networkAccess === true
               }
             }
           }
@@ -323,6 +342,18 @@ async function requireCanonicalDirectory(candidate: string, label: string): Prom
   const stat = await fs.lstat(resolved);
   if (stat.isSymbolicLink() || !stat.isDirectory() || !isSamePath(resolved, canonical)) {
     throw new Error(`Codex ${label} must be an existing canonical directory.`);
+  }
+  return canonical;
+}
+
+async function requireCanonicalFile(candidate: string, label: string): Promise<string> {
+  const resolved = requireNarrowAbsolute(candidate, label);
+  const canonical = await fs.realpath(resolved).catch(() => {
+    throw new Error(`Codex ${label} must be an existing canonical file.`);
+  });
+  const stat = await fs.lstat(resolved);
+  if (stat.isSymbolicLink() || !stat.isFile() || !isSamePath(resolved, canonical)) {
+    throw new Error(`Codex ${label} must be an existing canonical file.`);
   }
   return canonical;
 }

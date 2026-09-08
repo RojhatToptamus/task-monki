@@ -1,12 +1,12 @@
 import type { PreviewGenerationRecord } from '../../shared/contracts';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import type { RunningPreviewGraph } from './PreviewGraph';
 import type { PreviewSourcePreparer } from './PreviewSourcePreparer';
 import type { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 
 export async function cleanupPreviewGenerationRuntime(input: {
   generation: PreviewGenerationRecord;
-  store: FileTaskStore;
+  store: SqliteTaskStore;
   nativeRuntime: NativeServiceRuntime;
   sourcePreparer: PreviewSourcePreparer;
   liveGraph?: RunningPreviewGraph;

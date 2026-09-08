@@ -56,6 +56,7 @@ function renderPanel(run: ReturnType<typeof makeRunRecord>, requiresRecovery = f
     <AgentControlPanel
       run={run}
       requiresRecovery={requiresRecovery}
+      activeTurnSteeringSupported
       interactions={[]}
       onSteer={async () => {}}
       onInterrupt={async () => {}}

@@ -4,17 +4,16 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentModel } from '../../shared/agent';
 import { ATTACHMENT_MAX_IMAGE_BYTES } from '../../shared/attachments';
-import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('TaskManagerService attachments', () => {
   it('stages one bounded batch atomically through the public boundary', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
+      ...scriptedRuntime.serviceOptions
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-service-0001', 'notes.txt', 'same bytes'),
@@ -29,11 +28,11 @@ describe('TaskManagerService attachments', () => {
 
   it('keeps the draft when an image is incompatible with the selected model', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
+    const adapter = scriptedRuntime.adapter;
     vi.spyOn(adapter, 'listModels').mockResolvedValue([textModel()]);
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [adapter],
+      ...scriptedRuntime.serviceOptions
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [{
       clientToken: 'client-token-image-0001',
@@ -59,11 +58,11 @@ describe('TaskManagerService attachments', () => {
 
   it('adopts an image only after the provider reports image input support', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentRuntimeAdapter(store);
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
+    const adapter = scriptedRuntime.adapter;
     vi.spyOn(adapter, 'listModels').mockResolvedValue([imageModel()]);
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [adapter],
+      ...scriptedRuntime.serviceOptions
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [{
       clientToken: 'client-token-image-0002',
@@ -90,9 +89,9 @@ describe('TaskManagerService attachments', () => {
 
   it('returns the acknowledged task when a lost response is retried after draft commit', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
+      ...scriptedRuntime.serviceOptions
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-create-retry-0001', 'context.json', '{"safe":true}')
@@ -122,9 +121,9 @@ describe('TaskManagerService attachments', () => {
 
   it('rejects malformed task creation retry tokens at the service boundary', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
+      ...scriptedRuntime.serviceOptions
     });
 
     await expect(
@@ -141,47 +140,50 @@ describe('TaskManagerService attachments', () => {
     expect((await store.snapshot()).tasks).toEqual([]);
   });
 
-  it('keeps the draft and task store unchanged when full access is selected', async () => {
+  it('allows attachments with network access and full access', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
+      ...scriptedRuntime.serviceOptions
     });
-    const draft = await service.stageTaskAttachmentBatch({ attachments: [
+    const networkDraft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-full-access-0001', 'notes.txt', 'private context')
     ] });
+    const fullAccessDraft = await service.stageTaskAttachmentBatch({ attachments: [
+      batchFile('client-token-full-access-0002', 'more-notes.txt', 'more private context')
+    ] });
+    const repository = await addTestRepository(store, dir);
 
-    await expect(
-      service.createTask({
-        title: 'Network attachment boundary',
-        prompt: 'Use the attachment.',
-        repositoryId: (await addTestRepository(store, dir)).id,
-        agentSettings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
-        attachmentDraftId: draft.id
-      })
-    ).rejects.toThrow('Network access must be disabled');
-
-    await expect(
-      service.createTask({
-        title: 'Unsafe attachment boundary',
-        prompt: 'Use the attachment.',
-        repositoryId: (await addTestRepository(store, dir)).id,
-        agentSettings: { sandbox: 'DANGER_FULL_ACCESS' },
-        attachmentDraftId: draft.id
-      })
-    ).rejects.toThrow('Full access cannot safely protect attachment copies');
-
-    await expect(store.listAttachmentDraft(draft.id)).resolves.toMatchObject({
-      attachments: [expect.objectContaining({ displayName: 'notes.txt' })]
+    const networkTask = await service.createTask({
+      title: 'Network attachment delivery',
+      prompt: 'Use the attachment.',
+      repositoryId: repository.id,
+      agentSettings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
+      attachmentDraftId: networkDraft.id
     });
-    expect((await store.snapshot()).tasks).toEqual([]);
+    const fullAccessTask = await service.createTask({
+      title: 'Full access attachment delivery',
+      prompt: 'Use the attachment.',
+      repositoryId: repository.id,
+      agentSettings: { sandbox: 'DANGER_FULL_ACCESS' },
+      attachmentDraftId: fullAccessDraft.id
+    });
+
+    expect(networkTask.agentSettings.networkAccess).toBe(true);
+    expect(fullAccessTask.agentSettings.sandbox).toBe('DANGER_FULL_ACCESS');
+    expect(await store.getTaskAttachments(networkTask.id)).toEqual([
+      expect.objectContaining({ displayName: 'notes.txt' })
+    ]);
+    expect(await store.getTaskAttachments(fullAccessTask.id)).toEqual([
+      expect.objectContaining({ displayName: 'more-notes.txt' })
+    ]);
   });
 
   it('rejects malformed and over-limit batch payloads before storage', async () => {
     const dir = await temporaryDirectory();
-    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
+      ...scriptedRuntime.serviceOptions
     });
     await expect(
       service.stageTaskAttachmentBatch({ attachments: [{

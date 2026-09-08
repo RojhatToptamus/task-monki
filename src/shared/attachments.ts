@@ -156,28 +156,35 @@ export interface AttachmentDraftSnapshot {
   updatedAt: string;
 }
 
-/**
- * Exact provider delivery mechanism retained as evidence.
- *
- * `nativeFile` means the runtime received a structured file input (for
- * example an OpenCode file part), not merely a path mentioned in prompt text.
- */
-export type AttachmentSubmissionMode =
-  | 'localImage'
-  | 'nativeFile'
-  | 'prompt-file-reference';
-
-/** Durable evidence recorded after the provider accepted a turn or review start. */
-export interface AttachmentSubmissionRecord {
+/** Exact path-free attachment selection stored before provider submission. */
+export interface AgentAttachmentSelection {
   attachmentId: string;
   ordinal: number;
   kind: AttachmentKind;
   mediaType: string;
   byteCount: number;
   sha256: string;
-  submittedAs: AttachmentSubmissionMode;
+}
+
+/** Provider-native delivery mechanism retained as evidence. */
+export type AttachmentTransport =
+  | 'native-image'
+  | 'native-file'
+  | 'embedded-resource'
+  | 'text-block'
+  | 'managed-path';
+
+/** Small provider admission identity. ACP has no provider turn acknowledgement. */
+export interface AttachmentDeliveryCorrelation {
+  kind: 'provider-turn' | 'provider-message' | 'client-request';
+  id: string;
+}
+
+/** Durable evidence recorded after the provider accepted a turn or review start. */
+export interface AttachmentSubmissionRecord extends AgentAttachmentSelection {
+  transport: AttachmentTransport;
   verifiedAt: string;
-  providerTurnId: string;
+  correlation: AttachmentDeliveryCorrelation;
   submittedAt: string;
 }
 

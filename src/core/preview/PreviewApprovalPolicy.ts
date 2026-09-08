@@ -4,10 +4,10 @@ import type {
   PreviewApprovalRecord,
   PreviewPlanRecord
 } from '../../shared/contracts';
-import { FileTaskStore } from '../storage/FileTaskStore';
+import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 
 export class PreviewApprovalPolicy {
-  constructor(private readonly store: FileTaskStore) {}
+  constructor(private readonly store: SqliteTaskStore) {}
 
   async approve(input: ApprovePreviewPlanRequest): Promise<PreviewApprovalRecord> {
     const plan = await this.store.getPreviewPlan(input.planId);
