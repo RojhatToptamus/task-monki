@@ -7,7 +7,7 @@
 ![Task Monki dashboard](./.github/assets/task-monki-dashboard-dark.jpg)
 
 <p align="center">
-  <a href="https://youtu.be/guk2EJC5Jzw">
+  <a href="https://youtu.be/ItbCXShonFo">
     <img
       src="./.github/assets/watch-demo.svg"
       alt="Watch the Task Monki demo"
