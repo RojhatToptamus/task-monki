@@ -1,3 +1,4 @@
+import { buildAgentProfileGuidance } from './agentProfiles';
 import type {
   AgentExecutionSettings,
   GitSnapshotRecord,
@@ -207,6 +208,8 @@ export function buildInitialRunPrompt(input: {
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
+    buildAgentProfileGuidance(input.task.agentProfile),
+    '',
     input.worktree.ownership === 'EXTERNAL' && input.instruction?.trim()
       ? `Task description:\n${input.task.prompt}\n\nCurrent requested work:\n${input.instruction.trim()}`
       : `Authoritative Task Monki goal:\n${input.task.prompt}`
@@ -279,6 +282,8 @@ function buildDesignPrompt(input: {
     'Only modify files inside this worktree.',
     'Do not commit, push, change remotes, or operate Preview.',
     'This boundary remains authoritative when another instruction conflicts.',
+    '',
+    buildAgentProfileGuidance(input.task.agentProfile),
     '',
     `Original design brief:\n${input.task.prompt}`,
     '',
@@ -381,6 +386,8 @@ function buildExistingWorktreePrompt(
     TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
+    '',
+    buildAgentProfileGuidance(input.task.agentProfile),
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
     input.previousPrompt ? `Previous requested work (historical context; use the current checkout and execution boundary above):\n${input.previousPrompt}` : undefined,

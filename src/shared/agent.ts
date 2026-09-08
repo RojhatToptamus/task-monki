@@ -233,7 +233,7 @@ export interface PreviewGatewaySettings {
   port: number | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 12 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 13 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -245,6 +245,7 @@ export interface TaskManagerAppSettings {
   firstLaunchSetupCompleted: boolean;
   disabledRuntimeIds: AgentRuntimeId[];
   defaultRuntimeId: AgentRuntimeId;
+  agentProfiles: import('./agentProfiles').CustomAgentProfile[];
   defaultModel?: string;
   defaultModelProvider?: AgentModelProviderId;
   defaultReasoningEffort?: string;
@@ -287,6 +288,7 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   autoInstallUpdatesOnQuit: true,
   firstLaunchSetupCompleted: false,
   disabledRuntimeIds: [],
+  agentProfiles: [],
   defaultRuntimeId: CODEX_RUNTIME_ID,
   codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,

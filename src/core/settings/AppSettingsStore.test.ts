@@ -40,16 +40,13 @@ describe('AppSettingsStore', () => {
         ghExecutablePath: null
       }
     });
-    await expect(
-      database.read((reader) =>
-        reader.get<{ record_revision: number; settings_json: string }>(
-          'SELECT record_revision, settings_json FROM app_settings WHERE singleton_id = 1'
-        )
+    const stored = await database.read((reader) =>
+      reader.get<{ record_revision: number; settings_json: string }>(
+        'SELECT record_revision, settings_json FROM app_settings WHERE singleton_id = 1'
       )
-    ).resolves.toEqual({
-      record_revision: 0,
-      settings_json: JSON.stringify(DEFAULT_TASK_MANAGER_APP_SETTINGS)
-    });
+    );
+    expect(stored?.record_revision).toBe(0);
+    expect(JSON.parse(stored!.settings_json)).toEqual(DEFAULT_TASK_MANAGER_APP_SETTINGS);
   });
 
   it('persists settings across database reopen', async () => {
@@ -65,6 +62,37 @@ describe('AppSettingsStore', () => {
       theme: 'dark',
       selectedRepositoryId: 'repository-1'
     });
+  });
+
+  it('preserves exact profile text and rolls back failed edits and deletions', async () => {
+    const { database, databasePath } = await createDatabase();
+    const store = new AppSettingsStore(database);
+    const instructions = '  Inspect real inputs.\n\nUse café fixtures.\t\n';
+    const saved = await store.saveAgentProfile({ name: 'Testing', description: '', instructions });
+    const profile = saved.agentProfiles[0]!;
+    expect(profile.instructions).toBe(instructions);
+    await expect(store.saveAgentProfile({ name: 'testing', description: '', instructions: 'Duplicate name' })).rejects.toThrow('already exists');
+    await expect(store.saveAgentProfile({ ...profile, tools: ['shell'] } as typeof profile)).rejects.toThrow('only a name');
+    expect((await store.get()).agentProfiles).toEqual([profile]);
+    await Promise.all([
+      store.saveAgentProfile({ ...profile, description: 'Inspect producer and consumer.' }),
+      store.update({ showMascot: false })
+    ]);
+    const updated = await store.get();
+    await expect(database.write(async () => {
+      await store.deleteAgentProfile(profile.id);
+      expect((await store.get()).agentProfiles).toEqual([]);
+      throw new Error('abort profile deletion');
+    })).rejects.toThrow('abort profile deletion');
+    expect(await store.get()).toEqual(updated);
+    await closeDatabase(database);
+    const reopened = await AppDatabase.open(databasePath);
+    databases.push(reopened);
+    const reloaded = new AppSettingsStore(reopened);
+    expect(await reloaded.get()).toEqual(updated);
+    expect((await reloaded.get()).agentProfiles[0]?.instructions).toBe(instructions);
+    await reloaded.deleteAgentProfile(profile.id);
+    expect((await new AppSettingsStore(reopened).get()).agentProfiles).toEqual([]);
   });
 
   it('does not publish settings from a rolled-back outer transaction', async () => {
@@ -212,6 +240,17 @@ describe('AppSettingsStore', () => {
     expect(() =>
       normalizeAppSettings({ schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION })
     ).toThrow(`Task Monki app settings schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION} is invalid`);
+  });
+
+  it('bounds UTF-8 profile instructions without replacing a valid saved entry', async () => {
+    const store = new MemoryAppSettingsStore();
+    const settings = await store.saveAgentProfile({
+      name: 'Protocol', description: '', instructions: 'é'.repeat(8 * 1024)
+    });
+    const profile = settings.agentProfiles[0]!;
+    await expect(async () => store.saveAgentProfile({ ...profile, instructions: `${profile.instructions}é` })).rejects.toThrow('16 KB');
+    await expect(async () => store.saveAgentProfile({ ...profile, instructions: ' \n\t' })).rejects.toThrow('required');
+    expect((await store.get()).agentProfiles).toEqual([profile]);
   });
 
   it('normalizes empty executable path updates as auto-detect', async () => {

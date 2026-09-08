@@ -1,3 +1,5 @@
+import type { CustomAgentProfile } from '../../shared/agentProfiles';
+import { AgentProfileSelect } from './AgentProfileSelect';
 import {
   useCallback,
   useEffect,
@@ -69,11 +71,13 @@ import { DisclosureChevron } from './DisclosureChevron';
 import { ImportWorkFields, branchTaskTitle } from './ImportWorkFields';
 
 export interface NewTaskTextDraft {
+  agentProfileId?: string;
   title: string;
   prompt: string;
 }
 
 interface NewTaskPanelProps {
+  agentProfiles?: readonly CustomAgentProfile[];
   repositoryId: string;
   repositories: Repository[];
   models: AgentModel[];
@@ -216,6 +220,7 @@ export function ExecutionPolicySelect({
 }
 
 export function NewTaskPanel({
+  agentProfiles = [],
   repositoryId,
   repositories,
   models,
@@ -242,6 +247,7 @@ export function NewTaskPanel({
   onResize,
   onClose
 }: NewTaskPanelProps) {
+  const [agentProfileId, setAgentProfileId] = useState(initialTextDraft?.agentProfileId);
   const [title, setTitle] = useState(initialTextDraft?.title ?? '');
   const [prompt, setPrompt] = useState(initialTextDraft?.prompt ?? '');
   const [importing, setImporting] = useState(false);
@@ -464,12 +470,12 @@ export function NewTaskPanel({
 
   const updateTitle = (value: string) => {
     setTitle(value);
-    onTextDraftChange?.({ title: value, prompt });
+    onTextDraftChange?.({ agentProfileId, title: value, prompt });
   };
 
   const updatePrompt = (value: string) => {
     setPrompt(value);
-    onTextDraftChange?.({ title, prompt: value });
+    onTextDraftChange?.({ agentProfileId, title, prompt: value });
   };
   const attachments = useTaskAttachments({
     enabled: effectiveAttachmentsEnabled,
@@ -619,6 +625,7 @@ export function NewTaskPanel({
         await onCreate({
           title,
           prompt,
+          agentProfileId,
           repositoryId: selectedRepositoryId,
           creationToken: getOrCreateTaskCreationToken(taskCreationTokenRef),
           attachmentDraftId,
@@ -755,7 +762,7 @@ export function NewTaskPanel({
     const nextTitle = title || currentProposal.titleSuggestion;
     setPrompt(currentProposal.prompt);
     setTitle(nextTitle);
-    onTextDraftChange?.({ title: nextTitle, prompt: currentProposal.prompt });
+    onTextDraftChange?.({ agentProfileId, title: nextTitle, prompt: currentProposal.prompt });
     setProposal(undefined);
   };
 
@@ -962,6 +969,17 @@ export function NewTaskPanel({
               <AttachmentComposerShell
                 attachments={attachments}
                 attachmentLabel="Task attachments"
+                toolbarAction={
+                  <AgentProfileSelect
+                    profiles={agentProfiles}
+                    value={agentProfileId}
+                    disabled={composerLocked}
+                    onChange={(profileId) => {
+                      setAgentProfileId(profileId);
+                      onTextDraftChange?.({ title, prompt, agentProfileId: profileId });
+                    }}
+                  />
+                }
                 className={isRefining ? 'field__prompt-shell--running' : ''}
                 bindDropTarget={false}
                 removeDisabled={composerLocked}

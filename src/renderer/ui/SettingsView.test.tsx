@@ -81,6 +81,8 @@ describe('SettingsView', () => {
     const discoverAgentRuntimeModels = vi.fn(async () => undefined);
     const html = renderToStaticMarkup(
       <SettingsView
+        onSaveAgentProfile={async () => undefined}
+        onDeleteAgentProfile={async () => undefined}
         {...softwareUpdateProps}
         theme="device"
         onSetTheme={() => undefined}
@@ -522,6 +524,8 @@ describe('SettingsView', () => {
     const renderCatalogState = (agentRuntimesLoading: boolean) =>
       renderToStaticMarkup(
         <SettingsView
+          onSaveAgentProfile={async () => undefined}
+          onDeleteAgentProfile={async () => undefined}
           {...softwareUpdateProps}
           theme="device"
           onSetTheme={() => undefined}

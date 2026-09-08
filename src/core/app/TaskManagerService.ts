@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  resolveAgentProfile,
+  type SaveAgentProfileRequest
+} from '../../shared/agentProfiles';
 import type {
   Board,
   BoardSnapshot,
@@ -934,6 +938,20 @@ export class TaskManagerService {
     return structuredClone(this.appSettings);
   }
 
+  saveAgentProfile(input: SaveAgentProfileRequest): Promise<TaskManagerAppSettings> {
+    return this.withControlAction(async () => {
+      this.appSettings = await this.appSettingsStore.saveAgentProfile(input);
+      return structuredClone(this.appSettings);
+    });
+  }
+
+  deleteAgentProfile(profileId: string): Promise<TaskManagerAppSettings> {
+    return this.withControlAction(async () => {
+      this.appSettings = await this.appSettingsStore.deleteAgentProfile(profileId);
+      return structuredClone(this.appSettings);
+    });
+  }
+
   updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
@@ -1591,6 +1609,7 @@ export class TaskManagerService {
     if (acknowledgedTask) {
       return acknowledgedTask;
     }
+    const agentProfile = resolveAgentProfile((await this.appSettingsStore.get()).agentProfiles, input.agentProfileId);
     this.assertRuntimeEnabled(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
     if (!requestedInput.attachmentDraftId) {
@@ -1602,7 +1621,8 @@ export class TaskManagerService {
       return this.store.createTask({
         ...requestedInput,
         agentSettings: settings,
-        creationFingerprintInput: requestedInput
+        creationFingerprintInput: requestedInput,
+        agentProfile
       });
     }
     return this.withAttachmentDraft(requestedInput.attachmentDraftId, async () => {
@@ -1622,7 +1642,8 @@ export class TaskManagerService {
       return this.store.createTask({
         ...requestedInput,
         agentSettings: settings,
-        creationFingerprintInput: requestedInput
+        creationFingerprintInput: requestedInput,
+        agentProfile
       });
     });
   }
@@ -1742,6 +1763,7 @@ export class TaskManagerService {
       return this.getDesign(acknowledged.task.id);
     }
 
+    const agentProfile = resolveAgentProfile((await this.appSettingsStore.get()).agentProfiles, input.agentProfileId);
     const designUpdates = await this.requireDesignUpdates();
     const adapter = this.runtimeRegistry.require(input.runtimeId);
     this.assertRuntimeEnabled(input.runtimeId);
@@ -1770,6 +1792,7 @@ export class TaskManagerService {
       try {
         return await this.store.createDesignBundle({
           request: input,
+          agentProfile,
           agentSettings: execution.settings,
           repository: repositoryInput
         });

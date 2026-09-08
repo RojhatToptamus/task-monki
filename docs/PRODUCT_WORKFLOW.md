@@ -54,7 +54,9 @@ model input types before it adopts the draft.
 The New Task composer is a parallel workspace panel rather than a modal
 decision. Closing it preserves title and description text for the current app
 session, while unsubmitted attachment batches are still discarded. A
-successful Create clears the preserved text draft.
+successful Create clears the preserved text draft. The Profile dropdown inside
+the task and Design composers selects reusable instructions at creation. Existing
+tasks and Designs keep their saved instructions when the library changes.
 
 Refine is a reversible proposal, not an automatic append or overwrite. One
 short-lived read-only agent run receives the current title and description.

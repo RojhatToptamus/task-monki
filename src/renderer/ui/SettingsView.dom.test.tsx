@@ -48,6 +48,8 @@ function renderSettings({
 } = {}) {
   render(
     <SettingsView
+      onSaveAgentProfile={async () => undefined}
+      onDeleteAgentProfile={async () => undefined}
       theme={appSettings.theme}
       onSetTheme={onSetTheme}
       onPreviewThemePreset={onPreviewThemePreset}

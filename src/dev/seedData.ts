@@ -142,6 +142,7 @@ interface SeedPaths {
 }
 
 interface SeedContext extends SeedPaths {
+  agentProfile: import('../shared/agentProfiles').CustomAgentProfile;
   scenarioSet: DevSeedScenarioSet;
   store: SqliteTaskStore;
   runtimeStore: SqliteAgentRuntimeStore;
@@ -229,6 +230,12 @@ export async function seedTaskMonkiDevelopmentData(
       selectedRepositoryId: repository.id
     });
 
+    const profileSettings = await persistence.settings.saveAgentProfile({
+      name: 'Protocol specialist',
+      description: 'Trace requests, ownership, and recovery.',
+      instructions: 'Inspect the protocol contract and both consumers. Verify actual requests and persisted results. Keep provider claims separate from application evidence.'
+    });
+
     const server = await runtimeStore.createAgentServer({
       runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -245,6 +252,7 @@ export async function seedTaskMonkiDevelopmentData(
     });
 
     const ctx: SeedContext = {
+      agentProfile: profileSettings.agentProfiles[0]!,
       ...paths,
       scenarioSet,
       store,
@@ -1580,6 +1588,8 @@ async function createSeedTask(
   completionPolicy: CompletionPolicy = 'LOCAL_ACCEPTANCE'
 ): Promise<Task> {
   return ctx.store.createTask({
+    ...(['board-ready', 'agent-running', 'review-not-run'].includes(definition.slug)
+      ? { agentProfile: ctx.agentProfile } : {}),
     title: `[seed:${definition.slug}] ${definition.title}`,
     prompt: [
       `Seed scenario: ${definition.slug}`,

@@ -1,3 +1,9 @@
+import { randomUUID } from 'node:crypto';
+import {
+  validateAgentProfile,
+  validateAgentProfileLibrary,
+  type SaveAgentProfileRequest
+} from '../../shared/agentProfiles';
 import type {
   CodexExternalToolSettings,
   ExternalExecutablePathSettings,
@@ -19,6 +25,8 @@ import {
 
 export interface AppSettingsStorage {
   get(): Promise<TaskManagerAppSettings>;
+  saveAgentProfile(input: SaveAgentProfileRequest): Promise<TaskManagerAppSettings>;
+  deleteAgentProfile(profileId: string): Promise<TaskManagerAppSettings>;
   update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings>;
 }
 
@@ -45,6 +53,20 @@ export class AppSettingsStore implements AppSettingsStorage {
   }
 
   async update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
+    return this.mutate((current) => mergeAppSettings(current, input));
+  }
+
+  saveAgentProfile(input: SaveAgentProfileRequest): Promise<TaskManagerAppSettings> {
+    return this.mutate((current) => saveProfile(current, input));
+  }
+
+  deleteAgentProfile(profileId: string): Promise<TaskManagerAppSettings> {
+    return this.mutate((current) => deleteProfile(current, profileId));
+  }
+
+  private async mutate(
+    change: (current: TaskManagerAppSettings) => TaskManagerAppSettings
+  ): Promise<TaskManagerAppSettings> {
     await this.init();
     return this.database.write((transaction) => {
       const local = transaction.getOrCreateLocal<SettingsTransactionState>(this, () => {
@@ -62,7 +84,7 @@ export class AppSettingsStore implements AppSettingsStorage {
           this.recordRevision = local.recordRevision;
         });
       }
-      const candidate = mergeAppSettings(local.settings, input);
+      const candidate = change(local.settings);
       const nextRevision = local.recordRevision + 1;
       const result = transaction.run(
         `UPDATE app_settings
@@ -167,6 +189,16 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
     return Promise.resolve(cloneSettings(this.settings));
   }
 
+  saveAgentProfile(input: SaveAgentProfileRequest): Promise<TaskManagerAppSettings> {
+    this.settings = saveProfile(this.settings, input);
+    return this.get();
+  }
+
+  deleteAgentProfile(profileId: string): Promise<TaskManagerAppSettings> {
+    this.settings = deleteProfile(this.settings, profileId);
+    return this.get();
+  }
+
   async update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
     this.settings = mergeAppSettings(this.settings, input);
     return cloneSettings(this.settings);
@@ -188,6 +220,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
         'Reset the local application settings or restore a backup; fallback values are intentionally not applied.'
     );
   }
+  validateAgentProfileLibrary(record.agentProfiles);
   return {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: record.theme,
@@ -198,6 +231,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     firstLaunchSetupCompleted: record.firstLaunchSetupCompleted,
     disabledRuntimeIds: [...record.disabledRuntimeIds],
     defaultRuntimeId: record.defaultRuntimeId,
+    agentProfiles: structuredClone(record.agentProfiles),
     defaultModel: record.defaultModel,
     defaultModelProvider: record.defaultModelProvider,
     defaultReasoningEffort: record.defaultReasoningEffort,
@@ -450,6 +484,7 @@ function isCurrentAppSettingsRecord(
 ): record is Record<string, unknown> & TaskManagerAppSettings {
   const allowedKeys = new Set([
     'schemaVersion',
+    'agentProfiles',
     'theme',
     'themePreset',
     'sidebarCollapsed',
@@ -504,6 +539,7 @@ function isCurrentAppSettingsRecord(
     typeof record.showMascot === 'boolean' &&
     typeof record.autoInstallUpdatesOnQuit === 'boolean' &&
     typeof record.firstLaunchSetupCompleted === 'boolean' &&
+    Array.isArray(record.agentProfiles) &&
     Array.isArray(record.disabledRuntimeIds) &&
     record.disabledRuntimeIds.every(isCanonicalRequiredString) &&
     new Set(record.disabledRuntimeIds).size === record.disabledRuntimeIds.length &&
@@ -552,4 +588,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function cloneSettings(settings: TaskManagerAppSettings): TaskManagerAppSettings {
   return structuredClone(settings);
+}
+
+function saveProfile(current: TaskManagerAppSettings, input: SaveAgentProfileRequest): TaskManagerAppSettings {
+  const profile = { ...input, id: input.id ?? randomUUID() };
+  validateAgentProfile(profile);
+  if (input.id && !current.agentProfiles.some((candidate) => candidate.id === input.id)) {
+    throw new Error('Agent profile is no longer in the library.');
+  }
+  const agentProfiles = input.id
+    ? current.agentProfiles.map((candidate) => candidate.id === input.id ? profile : candidate)
+    : [...current.agentProfiles, profile];
+  return normalizeAppSettings({ ...current, agentProfiles });
+}
+
+function deleteProfile(current: TaskManagerAppSettings, profileId: string): TaskManagerAppSettings {
+  if (typeof profileId !== 'string' || !current.agentProfiles.some((profile) => profile.id === profileId)) {
+    throw new Error('Agent profile is no longer in the library.');
+  }
+  return normalizeAppSettings({
+    ...current,
+    agentProfiles: current.agentProfiles.filter((profile) => profile.id !== profileId)
+  });
 }

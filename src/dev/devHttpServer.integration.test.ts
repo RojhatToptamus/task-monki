@@ -62,6 +62,26 @@ describe('development HTTP server', () => {
     });
   });
 
+  it('authenticates profile mutations and forwards only the selected operation to core', async () => {
+    const saveAgentProfile = vi.fn(async () => ({}));
+    const deleteAgentProfile = vi.fn(async () => ({}));
+    const running = await startServer({ saveAgentProfile, deleteAgentProfile });
+    const profile = { name: 'Testing', description: '', instructions: 'Inspect the actual result.\n' };
+    const cases = [
+      { route: '/api/agent-profiles/save', body: profile, handler: saveAgentProfile, argument: profile },
+      { route: '/api/agent-profiles/delete', body: { profileId: 'profile-id' }, handler: deleteAgentProfile, argument: 'profile-id' },
+    ];
+    for (const entry of cases) {
+      const request = { method: 'POST', body: JSON.stringify(entry.body) };
+      expect((await fetch(`${running.baseUrl}${entry.route}`, request)).status).toBe(401);
+      expect(entry.handler).not.toHaveBeenCalled();
+      expect((await fetch(`${running.baseUrl}${entry.route}`, {
+        ...request, headers: { ...running.headers, 'content-type': 'application/json' }
+      })).status).toBe(200);
+      expect(entry.handler).toHaveBeenCalledExactlyOnceWith(entry.argument);
+    }
+  });
+
   it('serves separate board and task-detail read models', async () => {
     const getBoardSnapshot = vi.fn(async () => ({ tasks: [{ id: 'task-1' }] }));
     const getTaskDetail = vi.fn(async (taskId: string) => ({

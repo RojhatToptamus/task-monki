@@ -1593,12 +1593,18 @@ async function exerciseRepresentativeScenarios(
   environment: AgentTestEnvironment
 ): Promise<AgentTestScenarioReport[]> {
   const reports: AgentTestScenarioReport[] = [];
+  const profileSettings = await environment.service.saveAgentProfile({
+    name: 'Workflow verification', description: 'Exercise profile delivery through ACP.',
+    instructions: 'TASK_MONKI_PROFILE_GUIDANCE: Check the local result and report only observed evidence.'
+  });
+  const profile = profileSettings.agentProfiles[0]!;
   for (const kind of ['complete', 'fail', 'cancel', 'import'] as const) {
     const input: CreateTaskRequest = {
       title: scenarioTitle(kind),
       prompt: `[agent-test:${kind}] ${scenarioPrompt(kind)}`,
       repositoryId: environment.repositoryId,
       runtimeId: RUNTIME_ID,
+      agentProfileId: profile.id,
       agentSettings: {
         runtimeId: RUNTIME_ID,
         modelProvider: 'task-monki-test',
@@ -1620,6 +1626,7 @@ async function exerciseRepresentativeScenarios(
       task = await environment.service.importTask({ ...input, worktreePath: checkout, branchName: 'feature/executed-import', baseRef: 'HEAD' });
       assert(!task.currentRunId && !task.currentAgentSessionId, 'Import started coding work.');
       assert(task.workflowPhase === 'IN_PROGRESS', 'Import did not remain idle in progress.');
+      assert(!task.agentProfile, 'Import unexpectedly assigned a profile.');
       worktree = requireValue((await environment.store.snapshot()).worktrees.find((record) => record.id === task.currentWorktreeId), 'Imported checkout missing.');
       assert(worktree.ownership === 'EXTERNAL', 'Import lost checkout ownership.');
     } else {
@@ -1650,7 +1657,10 @@ async function exerciseRepresentativeScenarios(
     reports.push(
       await buildScenarioReport(kind, task.id, worktree, started.id, snapshot)
     );
+    const prompt = await environment.service.readArtifact({ artifactId: started.promptArtifactId });
+    assert(prompt.includes(profile.instructions) === (kind !== 'import'), 'Run prompt did not preserve its creation profile.');
   }
+  assert((await fs.readFile(environment.providerLogPath, 'utf8')).includes('"event":"profile-guidance-received"'), 'The ACP process did not receive custom profile guidance.');
   return reports;
 }
 
@@ -2152,6 +2162,7 @@ input.on('line', (line) => {
       return;
     }
     const prompt = promptText(message);
+    if (prompt.includes('TASK_MONKI_PROFILE_GUIDANCE:')) log('profile-guidance-received');
     if (prompt.includes('[agent-stress:stream')) {
       const match = /chunks=(\\d+)/u.exec(prompt);
       const delayMatch = /delay=(\\d+)/u.exec(prompt);

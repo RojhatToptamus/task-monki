@@ -226,6 +226,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<Board>(baseUrl, `/api/boards/${encodeURIComponent(input.boardId)}`, input),
     deleteBoard: (boardId) =>
       post<void>(baseUrl, `/api/boards/${encodeURIComponent(boardId)}/delete`, {}),
+    saveAgentProfile: (input) => post(baseUrl, '/api/agent-profiles/save', input),
+    deleteAgentProfile: (profileId) => post(baseUrl, '/api/agent-profiles/delete', { profileId }),
     getAppSettings: () => get(baseUrl, '/api/settings'),
     updateAppSettings: (input: UpdateAppSettingsRequest) =>
       post(baseUrl, '/api/settings', input),

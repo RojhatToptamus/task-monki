@@ -66,6 +66,8 @@ describe('Task Monki development seed data', () => {
       expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
       expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
       expect(settings.firstLaunchSetupCompleted).toBe(true);
+      expect(settings.agentProfiles).toHaveLength(1);
+      expect(snapshot.tasks.find((task) => task.title.startsWith('[seed:board-ready]'))?.agentProfile).toEqual(settings.agentProfiles[0]);
       expect(snapshot.repositories).toHaveLength(4);
       expect(
         snapshot.repositories.filter((repository) => repository.kind === 'DESIGN_MANAGED')

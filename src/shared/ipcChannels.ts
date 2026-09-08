@@ -97,6 +97,8 @@ export const IPC_INVOKE_CHANNELS = [
   'preview:retrySetup',
   'preview:start',
   'preview:stop',
+  'profile:delete',
+  'profile:save',
   'prompt:refine',
   'prompt:refine:cancel',
   'repository:add',

@@ -3624,3 +3624,43 @@ button.tm-software-update:hover {
   letter-spacing: 0.03em;
   font-family: var(--font-mono);
 }
+
+/* Reusable profile instructions share the settings and form controls. */
+.tm-profile-editor {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tm-profile-editor > p,
+.tm-profile-row__description p {
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tm-profile-row__description {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tm-profile-row__actions,
+.tm-profile-editor__actions,
+.tm-profile-editor__delete {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tm-profile-editor__actions {
+  justify-content: flex-end;
+}
+
+.tm-profile-editor__delete p {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+}

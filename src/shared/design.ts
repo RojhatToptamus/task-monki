@@ -168,6 +168,7 @@ export type DesignSourceAction = DesignSourceActionBase &
   );
 
 export interface CreateBlankDesignRequest {
+  agentProfileId?: string;
   brief: string;
   creationToken: string;
   runtimeId: AgentRuntimeId;

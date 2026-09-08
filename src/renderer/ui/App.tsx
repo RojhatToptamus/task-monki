@@ -3159,6 +3159,7 @@ export function App() {
           </main>
         ) : view === 'designs' ? (
           <DesignsWorkspace
+            agentProfiles={appSettings.agentProfiles}
             historyCollapsed={designHistoryCollapsed}
             onHistoryCollapsedChange={(collapsed) => {
               setDesignHistoryCollapsed(collapsed);
@@ -3242,6 +3243,12 @@ export function App() {
             onPreviewThemePreset={setPreviewThemePreset}
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
+            onSaveAgentProfile={async (input) => {
+              setAppSettings(await taskManagerApi.saveAgentProfile(input));
+            }}
+            onDeleteAgentProfile={async (profileId) => {
+              setAppSettings(await taskManagerApi.deleteAgentProfile(profileId));
+            }}
             softwareUpdateState={softwareUpdateState}
             onCheckForSoftwareUpdates={checkForSoftwareUpdates}
             onDownloadSoftwareUpdate={downloadSoftwareUpdate}
@@ -3273,6 +3280,7 @@ export function App() {
 
           {isNewTaskOpen ? (
             <NewTaskPanel
+              agentProfiles={appSettings.agentProfiles}
               repositoryId={activeRepositoryId}
               repositories={snapshot.repositories}
               models={enabledRuntimeModels}

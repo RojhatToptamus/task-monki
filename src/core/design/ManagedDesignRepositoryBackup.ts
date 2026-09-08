@@ -96,9 +96,10 @@ export async function captureManagedDesignRepository(input: {
   await copyVerifiedPrivateFile(markerPath, input.markerBackupPath, markerIntegrity);
 
   await ensurePrivateDirectory(path.dirname(input.bundlePath));
+  // Linked worktree HEADs are transient; --all still includes their shared branches.
   await managedGit(
     input.repositoryPath,
-    ['bundle', 'create', input.bundlePath, '--all', '--stdin'],
+    ['bundle', 'create', input.bundlePath, '--single-worktree', '--all', '--stdin'],
     { stdin: requiredObjects.length > 0 ? `${requiredObjects.join('\n')}\n` : '' }
   );
   await sealPrivateFile(input.bundlePath, 0o400);

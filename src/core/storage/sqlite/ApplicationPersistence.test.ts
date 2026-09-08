@@ -1,7 +1,10 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../../shared/agent';
+import { APP_DATABASE_APPLICATION_ID, DATABASE_MIGRATIONS } from './DatabaseMigrations';
 import { DesignSourceService, DESIGN_REPOSITORY_MARKER } from '../../design/DesignSourceService';
 import { git } from '../../git/gitCli';
 import { createDomainEvent } from '../domainEvent';
@@ -51,6 +54,48 @@ function designAgentSettings() {
 }
 
 describe('ApplicationPersistence', () => {
+  it('upgrades schema 2 settings with an empty profile library after preserving a verified backup', async () => {
+    const profileRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-profile-upgrade-'));
+    const paths = resolveApplicationPersistencePaths(profileRoot);
+    await fs.mkdir(paths.storageRoot, { mode: 0o700 });
+    const { agentProfiles: _profiles, ...settings } = structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS);
+    const legacy = { ...settings, schemaVersion: 12, theme: 'light', showMascot: false };
+    const oldDatabase = new DatabaseSync(paths.databasePath);
+    try {
+      for (const migration of DATABASE_MIGRATIONS.filter((entry) => entry.version <= 2)) {
+        oldDatabase.exec(migration.sql);
+      }
+      oldDatabase.exec(`PRAGMA application_id = ${APP_DATABASE_APPLICATION_ID}; PRAGMA user_version = 2;`);
+      oldDatabase.prepare('INSERT INTO app_settings (singleton_id, record_revision, settings_json) VALUES (1, 7, ?)')
+        .run(JSON.stringify(legacy));
+    } finally {
+      oldDatabase.close();
+    }
+    await fs.chmod(paths.databasePath, 0o600);
+    let persistence = await open(profileRoot);
+    try {
+      expect(await persistence.settings.get()).toEqual({ ...legacy, schemaVersion: 13, agentProfiles: [] });
+      const backups = await fs.readdir(paths.backupsRoot);
+      expect(backups).toHaveLength(1);
+      const backup = await persistence.backups.verifyBackup(backups[0]!);
+      expect(backup.manifest).toMatchObject({ purpose: 'PRE_UPGRADE', database: { schemaVersion: 2 } });
+      const saved = new DatabaseSync(path.join(backup.backupDirectory, backup.manifest.database.relativePath), { readOnly: true });
+      try {
+        const row = saved.prepare('SELECT settings_json FROM app_settings').get()!;
+        expect(JSON.parse(String(row.settings_json))).toEqual(legacy);
+      } finally {
+        saved.close();
+      }
+      await close(persistence);
+      persistence = await open(profileRoot);
+      expect((await persistence.settings.get()).agentProfiles).toEqual([]);
+      expect(await fs.readdir(paths.backupsRoot)).toEqual(backups);
+    } finally {
+      await close(persistence);
+      await fs.rm(profileRoot, { recursive: true, force: true });
+    }
+  });
+
   it('owns one database and one profile lease for every persistence store', async () => {
     const profileRoot = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-application-persistence-')

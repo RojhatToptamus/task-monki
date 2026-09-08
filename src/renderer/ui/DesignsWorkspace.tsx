@@ -1,3 +1,5 @@
+import type { CustomAgentProfile } from '../../shared/agentProfiles';
+import { AgentProfileSelect } from './AgentProfileSelect';
 import {
   useEffect,
   useLayoutEffect,
@@ -75,6 +77,7 @@ import {
 export type CreateBlankDesignInput = Pick<
   CreateBlankDesignRequest,
   | 'brief'
+  | 'agentProfileId'
   | 'creationToken'
   | 'runtimeId'
   | 'model'
@@ -84,6 +87,7 @@ export type CreateBlankDesignInput = Pick<
 >;
 
 export interface DesignsWorkspaceProps {
+  agentProfiles?: readonly CustomAgentProfile[];
   historyCollapsed?: boolean;
   onHistoryCollapsedChange?(collapsed: boolean): void;
   designs: readonly DesignProjectSummary[];
@@ -146,6 +150,7 @@ export interface DesignsWorkspaceProps {
 }
 
 export function DesignsWorkspace({
+  agentProfiles = [],
   historyCollapsed = false,
   onHistoryCollapsedChange,
   designs,
@@ -472,6 +477,7 @@ export function DesignsWorkspace({
       <section className="tm-designs-main" inert={historyModalOpen ? true : undefined}>
         {showCreate ? (
           <BlankDesignForm
+            agentProfiles={agentProfiles}
             historyCollapsed={historyCollapsed}
             canCancel={designs.length > 0}
             models={models}
@@ -782,6 +788,7 @@ function DesignHeader({
 }
 
 function BlankDesignForm({
+  agentProfiles,
   historyCollapsed,
   canCancel,
   models,
@@ -795,6 +802,7 @@ function BlankDesignForm({
   onCancel,
   onCreate
 }: {
+  agentProfiles: readonly CustomAgentProfile[];
   historyCollapsed: boolean;
   canCancel: boolean;
   models: AgentModel[];
@@ -809,6 +817,7 @@ function BlankDesignForm({
   onCreate(input: CreateBlankDesignInput): Promise<void>;
 }) {
   const [brief, setBrief] = useState('');
+  const [agentProfileId, setAgentProfileId] = useState<string>();
   const [creationToken] = useState(() => crypto.randomUUID());
   const selectableModels = supportedDesignModels(runtimes, models);
   const preferredRuntimeId = defaultAgentSettings?.runtimeId;
@@ -905,6 +914,7 @@ function BlankDesignForm({
       try {
         await onCreate({
           brief: nextBrief,
+          ...(agentProfileId ? { agentProfileId } : {}),
           creationToken,
           runtimeId: selectedRuntimeId,
           model: selectedModel.model,
@@ -977,6 +987,14 @@ function BlankDesignForm({
               attachments={attachments}
               className="tm-design-create__composer"
               attachmentLabel="Design references"
+              toolbarAction={
+                <AgentProfileSelect
+                  profiles={agentProfiles}
+                  value={agentProfileId}
+                  disabled={composerLocked}
+                  onChange={setAgentProfileId}
+                />
+              }
               removeDisabled={composerLocked}
               addButtonTitle={
                 attachmentsEnabled

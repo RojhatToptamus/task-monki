@@ -12,6 +12,7 @@ export function AttachmentComposerShell({
   addButtonLabel = 'Add files',
   onAddButtonClick,
   hint,
+  toolbarAction,
   className = '',
   removeDisabled = false,
   bindDropTarget = true
@@ -23,6 +24,7 @@ export function AttachmentComposerShell({
   addButtonLabel?: string;
   onAddButtonClick?(): void;
   hint: ReactNode;
+  toolbarAction?: ReactNode;
   className?: string;
   removeDisabled?: boolean;
   bindDropTarget?: boolean;
@@ -76,6 +78,7 @@ export function AttachmentComposerShell({
           <span>{addButtonLabel}</span>
         </button>
         <span className="task-attachment-hint">{hint}</span>
+        {toolbarAction}
       </div>
       {attachments.isDragging ? (
         <div className="task-attachment-drop" aria-hidden="true">

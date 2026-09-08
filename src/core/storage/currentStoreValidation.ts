@@ -1,3 +1,4 @@
+import { validateAgentProfile } from '../../shared/agentProfiles';
 import {
   ARTIFACT_KINDS,
   ATTACHMENT_MAX_COUNT,
@@ -155,6 +156,9 @@ export function validateCurrentStoreRecords(state: StoreState): void {
   validateCollection(state.tasks, 'tasks', (task) => {
     strings(task, 'tasks', ['runtimeId', 'title']);
     stringField(task, 'prompt', 'tasks', task.prompt === '' && externalTaskIds.has(task.id));
+    if (task.agentProfile !== undefined) {
+      validateAgentProfile(task.agentProfile);
+    }
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');

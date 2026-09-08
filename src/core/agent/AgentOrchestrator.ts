@@ -1909,7 +1909,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     );
     const reviewSessionId = randomUUID();
     const reviewSessionOperationId =
-      `review-session:${input.task.id}:${input.sourceRun?.id ?? input.iteration.id}:${input.worktree.ownership === 'EXTERNAL' ? reviewSessionId : input.generationKey ?? 'current'}:${reviewRuntimeId}`;
+      `review-session:${input.task.id}:${reviewSessionId}`;
     const prompt = buildAgentReviewPrompt({
       task: input.task,
       worktree: input.worktree,
@@ -1947,7 +1947,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       executionContext,
       prompt,
       priority: 'TASK_FOREGROUND',
-      clientOperationId: `review-run:${input.task.id}:${input.sourceRun?.id ?? input.iteration.id}:${input.worktree.ownership === 'EXTERNAL' ? runId : input.generationKey ?? runId}:${reviewRuntimeId}`,
+      clientOperationId: `review-run:${input.task.id}:${runId}`,
       createdAt: new Date().toISOString(),
       role: 'REVIEW',
       parentSessionId: sourceSession?.id,

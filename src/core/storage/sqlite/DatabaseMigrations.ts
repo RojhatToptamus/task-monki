@@ -1351,6 +1351,15 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
     sql: `UPDATE worktrees
       SET payload_json = json_set(payload_json, '$.ownership', 'MANAGED'),
           record_revision = record_revision + 1;`
+  },
+  {
+    version: 3,
+    name: 'custom-agent-profiles',
+    sql: `UPDATE app_settings
+      SET settings_json = json_set(settings_json, '$.schemaVersion', 13, '$.agentProfiles', json('[]')),
+          record_revision = record_revision + 1
+      WHERE json_extract(settings_json, '$.schemaVersion') = 12
+        AND json_type(settings_json, '$.agentProfiles') IS NULL;`
   }
 ] as const;
 

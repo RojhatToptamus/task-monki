@@ -1,3 +1,4 @@
+import { validateAgentProfile, type CustomAgentProfile } from '../../shared/agentProfiles';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants as fsConstants } from 'node:fs';
@@ -123,6 +124,7 @@ import type {
 } from '../agent/AgentRuntimeStore';
 
 export interface CreateTaskStoreInput extends CreateTaskRequest {
+  agentProfile?: CustomAgentProfile;
   /**
    * Internal idempotency source retained when the service persists runtime-
    * resolved settings. It is never copied into the durable task record.
@@ -145,6 +147,7 @@ export interface ManagedDesignRepositoryInput {
 }
 
 export interface CreateDesignBundleInput {
+  agentProfile?: CustomAgentProfile;
   request: CreateBlankDesignRequest;
   agentSettings: AgentExecutionSettings;
   repository: ManagedDesignRepositoryInput;
@@ -394,6 +397,7 @@ function designCreationMetadata(
   }
   const canonicalRequest = stableJsonStringify({
     kind: 'DESIGN_BLANK',
+    ...(input.agentProfileId !== undefined ? { agentProfileId: input.agentProfileId } : {}),
     brief,
     runtimeId,
     model: model ?? null,
@@ -489,6 +493,7 @@ function taskCreationMetadata(
       ),
       runtimeId: requestedRuntimeId,
       agentSettings: { ...portableAgentSettings, runtimeId: requestedRuntimeId },
+      ...(fingerprintInput.agentProfileId !== undefined ? { agentProfileId: fingerprintInput.agentProfileId } : {}),
       attachmentDraftId: fingerprintInput.attachmentDraftId ?? null
     });
   } catch {
@@ -2474,6 +2479,7 @@ export class SqliteTaskStore {
         throw new Error('Design runtime and execution settings runtime must match.');
       }
       if (!brief) throw new Error('Design brief is required.');
+      if (input.agentProfile) validateAgentProfile(input.agentProfile);
       const repositoryPath = path.resolve(input.repository.path);
       if (
         !UUID_FILE_SEGMENT_PATTERN.test(input.repository.id) ||
@@ -2511,6 +2517,7 @@ export class SqliteTaskStore {
       const task: Task = {
         id: randomUUID(),
         kind: 'DESIGN',
+        ...(input.agentProfile ? { agentProfile: clone(input.agentProfile) } : {}),
         runtimeId,
         title: deriveDesignTitle(brief),
         prompt: brief,
@@ -3425,7 +3432,8 @@ export class SqliteTaskStore {
             'STARTING',
             'RUNNING',
             'AWAITING_APPROVAL',
-            'AWAITING_USER_INPUT'
+            'AWAITING_USER_INPUT',
+            'COMPLETED'
           ].includes(candidate.status)
       );
       const source = input.candidate.source;
@@ -3450,6 +3458,8 @@ export class SqliteTaskStore {
       );
       if (
         !run ||
+        (run.status === 'COMPLETED' &&
+          !sameJsonValue(turn.finalOpenedCandidate?.source, source)) ||
         !worktree ||
         source.repositoryId !== design.repositoryId ||
         !isGitObjectId(source.expectedParentCommit) ||
@@ -3884,9 +3894,12 @@ export class SqliteTaskStore {
     if (input.agentSettings?.runtimeId && input.agentSettings.runtimeId !== runtimeId) {
       throw new Error('Task runtime and execution settings runtime must match.');
     }
+    const agentProfile = input.agentProfile ?? sourceTask?.agentProfile;
+    if (agentProfile) validateAgentProfile(agentProfile);
     const task: Task = {
       id: randomUUID(),
       kind: 'NORMAL',
+      ...(agentProfile ? { agentProfile: clone(agentProfile) } : {}),
       runtimeId,
       title: input.title.trim(),
       prompt: input.prompt.trim(),

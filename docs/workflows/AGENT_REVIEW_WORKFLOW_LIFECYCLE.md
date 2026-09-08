@@ -319,6 +319,7 @@ Agent review:
 - Uses a local review session with `role: "REVIEW"`.
 - May use a different registered runtime from the source implementation.
 - Creates a fresh provider session for one normal read-only review turn.
+- Each explicit rerun uses its own session and run operation identities, even when the reviewed diff is unchanged.
 - Tells the selected runtime not to modify files and applies its native restriction when available.
 - Uses the same `AgentOrchestrator` and `SqliteAgentRuntimeStore` lifecycle as other turns.
 - The review run id is tracked through `projection.agentReview.runId`.

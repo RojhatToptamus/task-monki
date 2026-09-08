@@ -461,6 +461,8 @@ export interface StatusProjection {
 export interface Task {
   id: string;
   kind: 'NORMAL' | 'DESIGN';
+  /** Selected instructions, independent of later library edits. Historical turns retain their prompt artifacts. */
+  agentProfile?: import('./agentProfiles').CustomAgentProfile;
   /** Immutable agent-runtime binding for this task. */
   runtimeId: AgentRuntimeId;
   title: string;
@@ -987,6 +989,7 @@ export interface TaskDetailSnapshot {
 }
 
 export interface CreateTaskRequest {
+  agentProfileId?: string;
   title: string;
   prompt: string;
   repositoryId: string;
@@ -1535,6 +1538,8 @@ export interface TaskManagerApi {
   discardTaskAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent>;
   readClipboardImage(): Promise<ClipboardAttachmentImage | undefined>;
+  saveAgentProfile(input: import('./agentProfiles').SaveAgentProfileRequest): Promise<import('./agent').TaskManagerAppSettings>;
+  deleteAgentProfile(profileId: string): Promise<import('./agent').TaskManagerAppSettings>;
   createTask(input: CreateTaskRequest): Promise<Task>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   cancelPromptRefinement(input: CancelPromptRefinementRequest): Promise<void>;
