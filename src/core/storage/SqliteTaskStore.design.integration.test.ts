@@ -195,7 +195,9 @@ describe('SqliteTaskStore Design ownership', () => {
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user'
     };
+    const profile = { id: '83bf4f11-9ef5-40b1-b0a5-bfbfef05fed8', name: 'Frontend', description: '', instructions: '  Keep existing design patterns.\n' };
     const created = await store.createDesignBundle({
+      agentProfile: profile,
       request: {
         brief: 'Create a compact product page.',
         creationToken: 'design-provider-settings',
@@ -209,12 +211,13 @@ describe('SqliteTaskStore Design ownership', () => {
 
     expect(created.task).toMatchObject({
       runtimeId: 'opencode',
-      agentSettings
+      agentSettings,
+      agentProfile: profile
     });
     await closeStore(store);
     const reopened = await createStore(dir);
     await expect(reopened.getDesignDetail(created.task.id)).resolves.toMatchObject({
-      task: { runtimeId: 'opencode', agentSettings }
+      task: { runtimeId: 'opencode', agentSettings, agentProfile: profile }
     });
     await closeStore(reopened);
   });

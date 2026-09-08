@@ -116,8 +116,6 @@ export interface DiscourseParticipantRecord {
 }
 
 export interface DiscourseParticipantRevisionRecord {
-  /** Selected guidance; jobs use their exact participant revision, never the live library. */
-  customProfile?: import('./agentProfiles').CustomAgentProfile;
   id: string;
   conversationId: string;
   stableParticipantId: string;
@@ -624,7 +622,6 @@ export interface DiscourseMentionRepositoryEntry {
 
 /** Bounded, renderer-safe discovery catalog. Paths are display-only, never authority. */
 export interface DiscourseMentionCatalogSnapshot {
-  customAgentProfiles?: import('./agentProfiles').CustomAgentProfile[];
   agents: AgentProfileCatalogEntry[];
   runtimeCatalog: import('./agent').AgentRuntimeCatalog;
   tasks: DiscourseMentionTaskEntry[];
@@ -634,8 +631,6 @@ export interface DiscourseMentionCatalogSnapshot {
 
 /** Renderer-selected identity; core resolves provider/service details from the live catalog. */
 export interface DiscourseAgentSelectionInput {
-  /** Omit to retain the saved selection, null to clear, id to explicitly apply the library entry. */
-  customProfileId?: string | null;
   agentProfileId: BuiltInAgentProfileId;
   runtimeId?: import('./agent').AgentRuntimeId;
   modelId?: string;

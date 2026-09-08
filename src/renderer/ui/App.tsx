@@ -2413,7 +2413,7 @@ export function App() {
     }
   };
 
-  const startReview = async (runId?: string, agentProfileId?: string) => {
+  const startReview = async (runId?: string) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
@@ -2424,7 +2424,6 @@ export function App() {
       await withAppAction(() => taskManagerApi.startReview({
         taskId: run?.taskId ?? selectedTask.id,
         runId,
-        agentProfileId,
         target: selectedWorktree?.ownership === 'EXTERNAL' ? undefined : { type: 'UNCOMMITTED_CHANGES' },
         settings: reviewExecutionSettings
       }));
@@ -3054,11 +3053,6 @@ export function App() {
             headingRef={taskDetailHeadingRef}
             error={error}
             task={selectedTask}
-            agentProfiles={appSettings.agentProfiles}
-            onSetAgentProfile={async (profileId) => {
-              await taskManagerApi.setTaskAgentProfile({ taskId: selectedTask.id, profileId });
-              await refresh();
-            }}
             repository={taskDetail.repository}
             run={selectedRun}
             worktree={selectedWorktree}
@@ -3165,6 +3159,7 @@ export function App() {
           </main>
         ) : view === 'designs' ? (
           <DesignsWorkspace
+            agentProfiles={appSettings.agentProfiles}
             historyCollapsed={designHistoryCollapsed}
             onHistoryCollapsedChange={(collapsed) => {
               setDesignHistoryCollapsed(collapsed);

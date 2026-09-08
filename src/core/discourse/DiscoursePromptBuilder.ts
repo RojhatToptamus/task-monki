@@ -1,4 +1,3 @@
-import { buildAgentProfileGuidance } from '../../shared/agentProfiles';
 import type {
   ContextSnapshotRecord,
   DiscourseAgentJobRecord,
@@ -71,9 +70,6 @@ export function assembleDiscoursePrompt(
     input.job.assignment.agentProfileId,
     input.job.assignment.roleContractVersion
   );
-  const customProfile = input.aggregate.participantRevisions.find(
-    (revision) => revision.id === input.job.assignment.participantRevisionId
-  )?.customProfile;
   const wave = input.aggregate.waves.find((candidate) => candidate.id === input.job.waveId);
   const targetIds = new Set(input.job.targetMessageIds);
   const targets = input.job.targetMessageIds.length > 0
@@ -95,8 +91,7 @@ export function assembleDiscoursePrompt(
     `Conversation: ${input.aggregate.conversation.title}`,
     `Agent: ${input.job.assignment.displayNameSnapshot}`,
     `Functional role: ${input.job.assignment.configuredRole}`,
-    buildAgentProfileGuidance(customProfile),
-    `Role contract (authoritative): ${roleContract}`,
+    `Role contract: ${roleContract}`,
     `Target message ids: ${targets}`,
     '',
     'Frozen context manifest:',

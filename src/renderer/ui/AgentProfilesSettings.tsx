@@ -65,7 +65,7 @@ export function AgentProfilesSettings({
       <header className="tm-settings__pane-head">
         <div>
           <h2>Agent profiles</h2>
-          <p>Save working instructions for tasks, reviews, and Discourse.</p>
+          <p>Save working instructions for tasks and Designs.</p>
         </div>
         {!draft ? (
           <button
@@ -138,14 +138,6 @@ export function AgentProfilesSettings({
           <small id={instructionHelpId}>
             Describe working methods, checks, and useful outputs. Up to 16 KB.
           </small>
-          <p className="tm-settings__empty">
-            Repository rules, task requirements, and permissions still apply. Referencing a skill
-            does not install it or grant access.
-          </p>
-          <p className="tm-settings__empty">
-            Edits update the library. Existing tasks and Discourse responders keep their saved
-            instructions.
-          </p>
           {error ? (
             <p role="alert" className="form-warning">
               {error}
@@ -158,7 +150,7 @@ export function AgentProfilesSettings({
               aria-label="Confirm profile deletion"
             >
               <p>
-                Delete {draft.name} from the library? Existing tasks and conversations keep their
+                Delete {draft.name} from the library? Existing tasks and Designs keep their
                 saved instructions.
               </p>
               <button

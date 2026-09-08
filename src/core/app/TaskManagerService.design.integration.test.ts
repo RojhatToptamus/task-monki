@@ -838,13 +838,26 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designMode: true
     });
 
-    let detail = await scenario.service.createBlankDesign({
+    const saved = await scenario.service.saveAgentProfile({
+      name: 'Frontend', description: '', instructions: '  Preserve the established UI.\nCheck the actual rendered result.\n'
+    });
+    const profile = saved.agentProfiles[0]!;
+    const request = {
+      agentProfileId: profile.id,
       brief: 'Create a compact reporting page.',
       creationToken: 'design-long-create',
       runtimeId: 'codex',
       model: 'scenario-model',
       reasoningEffort: 'medium'
-    });
+    };
+    let detail = await scenario.service.createBlankDesign(request);
+    expect(detail.task.agentProfile).toEqual(profile);
+    expect(scenario.agent.startedTurns[0]?.prompt).toContain(profile.instructions);
+    await scenario.service.saveAgentProfile({ ...profile, instructions: 'Updated library direction.' });
+    await scenario.service.deleteAgentProfile(profile.id);
+    await expect(scenario.service.createBlankDesign(request)).resolves.toMatchObject({ task: { id: detail.task.id, agentProfile: profile } });
+    await expect(scenario.service.createBlankDesign({ ...request, agentProfileId: undefined })).rejects.toThrow('already used for a different request');
+    await expect(scenario.service.createBlankDesign({ ...request, creationToken: 'missing-profile-design' })).rejects.toThrow('no longer in the library');
     const firstRun = detail.currentRun!;
     const attachmentDraft = await scenario.service.stageTaskAttachmentBatch({
       attachments: [{
@@ -939,6 +952,9 @@ describeMac('TaskManagerService Design vertical slice', () => {
       })
     ]);
     expect(scenario.agent.startedTurns[1]?.prompt).toContain('queued-direction.txt');
+    expect(scenario.agent.startedTurns[1]?.prompt).toContain(profile.instructions);
+    expect(scenario.agent.startedTurns[1]?.prompt).not.toContain('Updated library direction.');
+    expect(detail.task.agentProfile).toEqual(profile);
 
     await scenario.service.deleteDesignDraft({
       designId: detail.design.id,

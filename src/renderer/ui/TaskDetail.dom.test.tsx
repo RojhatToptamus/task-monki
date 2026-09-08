@@ -39,7 +39,7 @@ describe('imported task actions', () => {
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', 'Fix the imported validation bug.'));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     fireEvent.click(screen.getByRole('button', { name: 'Run agent review' }));
-    await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined, undefined));
+    await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined));
     expect(props.onTransition).not.toHaveBeenCalled();
     expect(props.onPrepareWorktree).not.toHaveBeenCalled();
   });
@@ -97,12 +97,9 @@ describe('imported task actions', () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     const props = detailProps();
     props.task!.workflowPhase = 'REVIEW';
-    const profile = { id: 'be380b13-c592-4c76-8d02-d59f9afdd371', name: 'Security', description: '', instructions: 'Trace input validation.' };
-    props.agentProfiles = [profile];
     const mounted = render(<TaskDetail {...props} />);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Review profile' }), { target: { value: profile.id } });
     fireEvent.click(screen.getByRole('button', { name: 'Run review' }));
-    await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined, profile.id));
+    await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined));
     mounted.unmount();
     props.task = makeTaskRecord({ ...props.task, projection: { ...props.task!.projection, agentReview: {
       status: 'NEEDS_CHANGES', runId: 'review-1', result: { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'Fix validation.', findings: [{ id: 'finding-1', severity: 'MAJOR', title: 'Invalid input accepted', explanation: 'Reject an invalid value.', path: 'src/input.ts', line: 1 }] }

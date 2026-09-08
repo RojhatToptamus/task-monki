@@ -156,8 +156,8 @@ restore or quarantine data automatically.
 
 SQLite migration 3 adds an empty custom agent profile library to settings schema
 12 and advances the settings payload to schema 13. Existing preferences remain
-unchanged. Task assignments and Discourse participant revisions retain optional
-profile copies in their existing payloads. They need no additional table or column.
+unchanged. Tasks and Designs retain their creation-time profile selection in their existing
+task payloads. They need no additional table or column.
 
 `WorktreeRecord.ownership` distinguishes Task Monki-managed worktrees from
 external checkouts. SQLite migration 2 assigns `MANAGED` to existing records;

@@ -917,15 +917,6 @@ export function NewTaskPanel({
               />
             ) : null}
             {!importing ? <>
-            <AgentProfileSelect
-              profiles={agentProfiles}
-              value={agentProfileId}
-              disabled={composerLocked}
-              onChange={(profileId) => {
-                setAgentProfileId(profileId ?? undefined);
-                onTextDraftChange?.({ title, prompt, agentProfileId: profileId ?? undefined });
-              }}
-            />
             <label className="field">
               <span>Title</span>
               <input
@@ -978,6 +969,17 @@ export function NewTaskPanel({
               <AttachmentComposerShell
                 attachments={attachments}
                 attachmentLabel="Task attachments"
+                toolbarAction={
+                  <AgentProfileSelect
+                    profiles={agentProfiles}
+                    value={agentProfileId}
+                    disabled={composerLocked}
+                    onChange={(profileId) => {
+                      setAgentProfileId(profileId);
+                      onTextDraftChange?.({ title, prompt, agentProfileId: profileId });
+                    }}
+                  />
+                }
                 className={isRefining ? 'field__prompt-shell--running' : ''}
                 bindDropTarget={false}
                 removeDisabled={composerLocked}

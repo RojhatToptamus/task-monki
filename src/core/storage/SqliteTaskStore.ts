@@ -147,6 +147,7 @@ export interface ManagedDesignRepositoryInput {
 }
 
 export interface CreateDesignBundleInput {
+  agentProfile?: CustomAgentProfile;
   request: CreateBlankDesignRequest;
   agentSettings: AgentExecutionSettings;
   repository: ManagedDesignRepositoryInput;
@@ -396,6 +397,7 @@ function designCreationMetadata(
   }
   const canonicalRequest = stableJsonStringify({
     kind: 'DESIGN_BLANK',
+    ...(input.agentProfileId !== undefined ? { agentProfileId: input.agentProfileId } : {}),
     brief,
     runtimeId,
     model: model ?? null,
@@ -2477,6 +2479,7 @@ export class SqliteTaskStore {
         throw new Error('Design runtime and execution settings runtime must match.');
       }
       if (!brief) throw new Error('Design brief is required.');
+      if (input.agentProfile) validateAgentProfile(input.agentProfile);
       const repositoryPath = path.resolve(input.repository.path);
       if (
         !UUID_FILE_SEGMENT_PATTERN.test(input.repository.id) ||
@@ -2514,6 +2517,7 @@ export class SqliteTaskStore {
       const task: Task = {
         id: randomUUID(),
         kind: 'DESIGN',
+        ...(input.agentProfile ? { agentProfile: clone(input.agentProfile) } : {}),
         runtimeId,
         title: deriveDesignTitle(brief),
         prompt: brief,
@@ -3533,25 +3537,6 @@ export class SqliteTaskStore {
         designTurns: this.state.designTurns.map((candidate) =>
           candidate.id === updated.id ? updated : candidate
         )
-      };
-      await this.persistSnapshot();
-      return clone(updated);
-    });
-  }
-
-  setTaskAgentProfile(taskId: string, agentProfile: CustomAgentProfile | undefined): Promise<Task> {
-    if (agentProfile) validateAgentProfile(agentProfile);
-    return this.serializeMutation(async () => {
-      const task = this.state.tasks.find((candidate) => candidate.id === taskId);
-      if (!task || task.kind !== 'NORMAL') throw new Error('Normal task not found.');
-      const updated = {
-        ...task,
-        agentProfile: agentProfile ? clone(agentProfile) : undefined,
-        updatedAt: new Date().toISOString()
-      };
-      this.state = {
-        ...this.state,
-        tasks: this.state.tasks.map((candidate) => candidate.id === taskId ? updated : candidate)
       };
       await this.persistSnapshot();
       return clone(updated);

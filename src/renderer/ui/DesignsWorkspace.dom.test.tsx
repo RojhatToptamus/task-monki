@@ -55,10 +55,12 @@ describe('mounted Design workspace', () => {
   });
 
   it('creates one blank Design with the selected compatible model', async () => {
+    const profile = { id: '83bf4f11-9ef5-40b1-b0a5-bfbfef05fed8', name: 'Frontend', description: '', instructions: 'Use the established UI.' };
     const onCreateBlankDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(
       <DesignsWorkspace
         {...workspaceProps({
+          agentProfiles: [profile],
           designs: [],
           selectedDesignId: undefined,
           project: undefined,
@@ -73,6 +75,7 @@ describe('mounted Design workspace', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: '  Build a calm project portfolio.  ' }
     });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
     const create = screen.getByRole('button', { name: 'Create Design' });
     fireEvent.click(create);
     fireEvent.click(create);
@@ -80,6 +83,7 @@ describe('mounted Design workspace', () => {
     await waitFor(() => expect(onCreateBlankDesign).toHaveBeenCalledOnce());
     expect(onCreateBlankDesign).toHaveBeenCalledWith({
       brief: 'Build a calm project portfolio.',
+      agentProfileId: profile.id,
       creationToken: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/u),
       runtimeId: 'codex',
       model: 'gpt-5.6-luna',

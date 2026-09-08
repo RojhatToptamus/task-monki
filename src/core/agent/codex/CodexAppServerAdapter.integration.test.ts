@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { buildAgentProfileGuidance } from '../../../shared/agentProfiles';
 import type {
   AgentExecutionSettings,
   AgentRunMode,
@@ -82,13 +81,6 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     scope,
     purpose
   }) => {
-    const prompt = purpose === 'DISCOURSE_ANSWER'
-      ? `${buildAgentProfileGuidance({
-          id: 'be380b13-c592-4c76-8d02-d59f9afdd371',
-          name: 'Security', description: '',
-          instructions: '  Trace every untrusted path to its consumer.\n'
-        })}\n\nQuestion the proposed architecture.`
-      : 'Question the proposed architecture.';
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
     const executable = await writeFakeCodexExecutable(dir, 'scoped');
     const workspacePath = path.join(dir, 'read-only-workspace');
@@ -190,7 +182,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
           runId: run.id,
           kind: 'PROMPT',
           clientOperationId: 'create-scoped-prompt',
-          content: prompt
+          content: 'Question the proposed architecture.'
         }),
         runtime.createArtifact({
           id: run.outputArtifactId,
@@ -219,7 +211,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         session,
         run: starting,
         executionContext,
-        prompt,
+        prompt: 'Question the proposed architecture.',
         attachments: [attachment]
       });
       const afterResponse = await runtime.getRun(run.id);
@@ -299,10 +291,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
         model: 'fake-model',
-        effort: 'high',
-        input: expect.arrayContaining([
-          expect.objectContaining({ type: 'text', text: expect.stringContaining(prompt) })
-        ])
+        effort: 'high'
       });
       const taskSnapshot = await store.snapshot();
       expect(taskSnapshot.tasks).toEqual([]);

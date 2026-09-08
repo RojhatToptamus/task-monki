@@ -139,7 +139,6 @@ const api: TaskManagerApi = {
   deleteBoard: (boardId) => invokeIpc('board:delete', boardId),
   saveAgentProfile: (input) => invokeIpc('profile:save', input),
   deleteAgentProfile: (profileId) => invokeIpc('profile:delete', profileId),
-  setTaskAgentProfile: (input) => invokeIpc('task:setAgentProfile', input),
   getAppSettings: () => invokeIpc('settings:get'),
   updateAppSettings: (input: UpdateAppSettingsRequest) =>
     invokeIpc('settings:update', input),

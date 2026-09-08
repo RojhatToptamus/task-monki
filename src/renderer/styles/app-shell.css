@@ -3626,8 +3626,7 @@ button.tm-software-update:hover {
 }
 
 /* Reusable profile instructions share the settings and form controls. */
-.tm-profile-editor,
-.tm-profile-select {
+.tm-profile-editor {
   display: grid;
   gap: 12px;
   min-width: 0;
@@ -3664,28 +3663,4 @@ button.tm-software-update:hover {
   flex-basis: 100%;
   margin: 0;
   font-size: 12px;
-}
-
-.tm-profile-select {
-  gap: 6px;
-}
-
-.tm-profile-select > small,
-.tm-profile-select__instructions {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.tm-profile-select__instructions summary {
-  cursor: pointer;
-}
-
-.tm-profile-select__instructions pre {
-  max-height: 240px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font: inherit;
-  line-height: 1.6;
 }

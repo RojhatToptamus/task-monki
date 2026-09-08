@@ -1,4 +1,3 @@
-import { resolveAgentProfile, agentProfilesEqual, type CustomAgentProfile } from '../../shared/agentProfiles';
 import crypto, { randomUUID } from 'node:crypto';
 import type { AgentRuntimeCatalog, TaskManagerAppSettings } from '../../shared/agent';
 import { DISCOURSE_LIMITS } from '../../shared/discourse';
@@ -127,7 +126,6 @@ export class DiscourseService {
     }).profiles;
     return {
       agents,
-      customAgentProfiles: settings.agentProfiles,
       runtimeCatalog,
       tasks: contextCatalog.tasks,
       repositories: contextCatalog.repositories,
@@ -179,7 +177,6 @@ export class DiscourseService {
           createdAt: now
         },
         revision: {
-          customProfile: resolveAgentProfile(settings.agentProfiles, selection.customProfileId),
           id: revisionId,
           conversationId: '',
           stableParticipantId: participantId,
@@ -313,7 +310,6 @@ export class DiscourseService {
     };
     const profileCatalog = this.profiles.list(runtimeCatalog, catalogSettings);
     const entries = new Map<BuiltInAgentProfileId, AgentProfileCatalogEntry>();
-    const customProfiles = new Map<BuiltInAgentProfileId, CustomAgentProfile | undefined>();
     const resolvedSelections = new Map<
       BuiltInAgentProfileId,
       NonNullable<AgentProfileCatalogEntry['resolvedSettings']>
@@ -337,9 +333,6 @@ export class DiscourseService {
           throw new Error(`Discourse participant revision is missing: ${profileId}`);
         }
       }
-      customProfiles.set(profileId, selection.customProfileId === undefined
-        ? currentRevision?.customProfile
-        : resolveAgentProfile(settings.agentProfiles, selection.customProfileId));
       let resolved: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>;
       if (currentRevision && !selection.runtimeId && !selection.modelId) {
         assertParticipantRevisionAvailable(entry, currentRevision, runtimeCatalog);
@@ -371,8 +364,7 @@ export class DiscourseService {
       aggregate,
       profileIds,
       entries,
-      resolvedSelections,
-      customProfiles
+      resolvedSelections
     );
     const projectedAggregate = projectParticipantConfiguration(aggregate, configuration);
     const assignments = assignmentsFromRoster(projectedAggregate, input.policy, profileIds);
@@ -1385,8 +1377,7 @@ export class DiscourseService {
     resolvedSelections: ReadonlyMap<
       BuiltInAgentProfileId,
       NonNullable<AgentProfileCatalogEntry['resolvedSettings']>
-    >,
-    customProfiles: ReadonlyMap<BuiltInAgentProfileId, CustomAgentProfile | undefined>
+    >
   ): {
     participants: DiscourseParticipantRecord[];
     participantRevisions: DiscourseParticipantRevisionRecord[];
@@ -1409,10 +1400,7 @@ export class DiscourseService {
         if (!currentRevision) {
           throw new Error(`Discourse participant revision is missing: ${profileId}`);
         }
-        if (
-          participantSettingsMatch(currentRevision, resolved) &&
-          agentProfilesEqual(currentRevision.customProfile, customProfiles.get(profileId))
-        ) continue;
+        if (participantSettingsMatch(currentRevision, resolved)) continue;
         const revisionId = this.createId();
         participants.push({
           ...existing,
@@ -1428,8 +1416,7 @@ export class DiscourseService {
           resolved,
           revision: currentRevision.revision + 1,
           createdAt: this.now(),
-          roleContractHash: sha256(this.profiles.roleContract(profileId)),
-          customProfile: customProfiles.get(profileId)
+          roleContractHash: sha256(this.profiles.roleContract(profileId))
         }));
         continue;
       }
@@ -1454,8 +1441,7 @@ export class DiscourseService {
         resolved,
         revision: 1,
         createdAt: now,
-        roleContractHash: sha256(this.profiles.roleContract(profileId)),
-        customProfile: customProfiles.get(profileId)
+        roleContractHash: sha256(this.profiles.roleContract(profileId))
       }));
     }
     return { participants, participantRevisions };
@@ -1723,13 +1709,6 @@ function validateAgentSelections(
   policy: DiscourseDefaultPolicy,
   input: readonly DiscourseAgentSelectionInput[]
 ): DiscourseAgentSelectionInput[] {
-  if (input.some((selection) =>
-    selection.customProfileId !== undefined &&
-    selection.customProfileId !== null &&
-    typeof selection.customProfileId !== 'string'
-  )) {
-    throw new Error('Custom profile selection must be an id or None.');
-  }
   const ids = [...new Set(input.map((selection) => selection.agentProfileId))];
   if (ids.length !== input.length || ids.some((id) => !['builtin.lead', 'builtin.skeptic', 'builtin.verifier'].includes(id))) {
     throw new Error('Discourse participant roster is invalid.');
@@ -1767,8 +1746,7 @@ function discourseSendRequestFingerprint(
       agentProfileId: selection.agentProfileId,
       runtimeId: selection.runtimeId ?? null,
       modelId: selection.modelId ?? null,
-      reasoningEffort: selection.reasoningEffort ?? null,
-      ...(selection.customProfileId !== undefined ? { customProfileId: selection.customProfileId } : {})
+      reasoningEffort: selection.reasoningEffort ?? null
     })),
     previewFingerprint: input.previewFingerprint ?? null
   }));
@@ -1785,8 +1763,7 @@ function discourseCreateRequestFingerprint(
       agentProfileId: selection.agentProfileId,
       runtimeId: selection.runtimeId ?? null,
       modelId: selection.modelId ?? null,
-      reasoningEffort: selection.reasoningEffort ?? null,
-      ...(selection.customProfileId !== undefined ? { customProfileId: selection.customProfileId } : {})
+      reasoningEffort: selection.reasoningEffort ?? null
     }))
   }));
 }
@@ -1873,7 +1850,6 @@ function preserveCurrentImplicitSettings(
 }
 
 function participantRevisionFromSettings(input: {
-  customProfile?: CustomAgentProfile;
   id: string;
   conversationId: string;
   participantId: string;
@@ -1888,7 +1864,6 @@ function participantRevisionFromSettings(input: {
     id: input.id,
     conversationId: input.conversationId,
     stableParticipantId: input.participantId,
-    customProfile: input.customProfile,
     agentProfileId: input.profileId,
     profileRevision: input.entry.profile.revision,
     displayNameSnapshot: input.entry.profile.displayName,

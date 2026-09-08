@@ -1627,7 +1627,6 @@ async function exerciseRepresentativeScenarios(
       assert(!task.currentRunId && !task.currentAgentSessionId, 'Import started coding work.');
       assert(task.workflowPhase === 'IN_PROGRESS', 'Import did not remain idle in progress.');
       assert(!task.agentProfile, 'Import unexpectedly assigned a profile.');
-      task = await environment.service.setTaskAgentProfile({ taskId: task.id, profileId: profile.id });
       worktree = requireValue((await environment.store.snapshot()).worktrees.find((record) => record.id === task.currentWorktreeId), 'Imported checkout missing.');
       assert(worktree.ownership === 'EXTERNAL', 'Import lost checkout ownership.');
     } else {
@@ -1658,7 +1657,8 @@ async function exerciseRepresentativeScenarios(
     reports.push(
       await buildScenarioReport(kind, task.id, worktree, started.id, snapshot)
     );
-    assert((await environment.service.readArtifact({ artifactId: started.promptArtifactId })).includes(profile.instructions), 'Run prompt lost its assigned profile.');
+    const prompt = await environment.service.readArtifact({ artifactId: started.promptArtifactId });
+    assert(prompt.includes(profile.instructions) === (kind !== 'import'), 'Run prompt did not preserve its creation profile.');
   }
   assert((await fs.readFile(environment.providerLogPath, 'utf8')).includes('"event":"profile-guidance-received"'), 'The ACP process did not receive custom profile guidance.');
   return reports;

@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   resolveAgentProfile,
-  type SaveAgentProfileRequest,
-  type SetTaskAgentProfileRequest
+  type SaveAgentProfileRequest
 } from '../../shared/agentProfiles';
 import type {
   Board,
@@ -953,21 +952,6 @@ export class TaskManagerService {
     });
   }
 
-  setTaskAgentProfile(input: SetTaskAgentProfileRequest): Promise<Task> {
-    return this.withTaskAction(input.taskId, 'Agent profile change', async () => {
-      await this.requireNormalTask(input.taskId, 'Agent profile change');
-      this.assertNoActiveTaskRun(await this.store.snapshot(), input.taskId, 'changing the agent profile');
-      if (input.profileId === undefined) throw new Error('Choose an agent profile or None.');
-      const settings = await this.appSettingsStore.get();
-      const task = await this.store.setTaskAgentProfile(
-        input.taskId,
-        resolveAgentProfile(settings.agentProfiles, input.profileId)
-      );
-      this.events.emit({ type: 'task.updated', taskId: task.id, payload: task, at: new Date().toISOString() });
-      return task;
-    });
-  }
-
   updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
@@ -1779,6 +1763,7 @@ export class TaskManagerService {
       return this.getDesign(acknowledged.task.id);
     }
 
+    const agentProfile = resolveAgentProfile((await this.appSettingsStore.get()).agentProfiles, input.agentProfileId);
     const designUpdates = await this.requireDesignUpdates();
     const adapter = this.runtimeRegistry.require(input.runtimeId);
     this.assertRuntimeEnabled(input.runtimeId);
@@ -1807,6 +1792,7 @@ export class TaskManagerService {
       try {
         return await this.store.createDesignBundle({
           request: input,
+          agentProfile,
           agentSettings: execution.settings,
           repository: repositoryInput
         });
@@ -3069,7 +3055,6 @@ export class TaskManagerService {
             type: 'CUSTOM',
             instructions: `Review all committed changes from ${worktree.baseSha} to HEAD. Also review staged, unstaged, and untracked changes.`
           } : { type: 'UNCOMMITTED_CHANGES' }),
-          agentProfile: resolveAgentProfile((await this.appSettingsStore.get()).agentProfiles, input.agentProfileId),
           settings,
           generationKey: gitSnapshot.dirtyFingerprint,
           beforeGitSnapshotId: gitSnapshot.id

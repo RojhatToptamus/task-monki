@@ -158,7 +158,6 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     stringField(task, 'prompt', 'tasks', task.prompt === '' && externalTaskIds.has(task.id));
     if (task.agentProfile !== undefined) {
       validateAgentProfile(task.agentProfile);
-      if (task.kind !== 'NORMAL') throw new Error('Design tasks cannot carry custom agent profiles.');
     }
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');

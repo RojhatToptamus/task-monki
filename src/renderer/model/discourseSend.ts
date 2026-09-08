@@ -25,8 +25,7 @@ export function discoursePendingConversationFingerprint(
         agentProfileId: selection.agentProfileId,
         runtimeId: selection.runtimeId ?? '',
         modelId: selection.modelId ?? '',
-        reasoningEffort: selection.reasoningEffort ?? '',
-        ...(selection.customProfileId !== undefined ? { customProfileId: selection.customProfileId } : {})
+        reasoningEffort: selection.reasoningEffort ?? ''
       }))
   });
 }

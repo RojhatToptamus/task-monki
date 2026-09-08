@@ -1,5 +1,3 @@
-import type { CustomAgentProfile } from '../../shared/agentProfiles';
-import { AgentProfileSelect, TaskAgentProfileSetting } from './AgentProfileSelect';
 import {
   useEffect,
   useId,
@@ -215,9 +213,7 @@ interface TaskDetailProps {
   onSteer(runId: string, instruction: string): Promise<void>;
   onContinue(runId: string, instruction?: string): Promise<void>;
   onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string): Promise<void>;
-  agentProfiles?: readonly CustomAgentProfile[];
-  onSetAgentProfile?(profileId: string | null): Promise<void>;
-  onReview(runId?: string, agentProfileId?: string): Promise<void>;
+  onReview(runId?: string): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
   onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
   onRespondToInteraction(
@@ -325,7 +321,6 @@ export function TaskDetail(props: TaskDetailProps) {
   const [evidenceGitSnapshotId, setEvidenceGitSnapshotId] = useState<string | undefined>();
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
-  const [reviewProfileId, setReviewProfileId] = useState<string | null>(null);
   const [reviewStartPending, setReviewStartPending] = useState(false);
   const [reviewMascotHoldGeneration, setReviewMascotHoldGeneration] = useState(0);
   const reviewActionInFlightRef = useRef(false);
@@ -406,7 +401,6 @@ export function TaskDetail(props: TaskDetailProps) {
   useEffect(() => {
     setExistingWorkModal(undefined);
     setReviewStartPending(false);
-    setReviewProfileId(null);
     setReviewMascotHoldGeneration(0);
     setRequestDrawerOpen(false);
     setSelectedReviewFindingIds([]);
@@ -608,7 +602,7 @@ export function TaskDetail(props: TaskDetailProps) {
     setReviewMascotHoldGeneration((generation) => generation + 1);
     await runReviewAction(async () => {
       try {
-        await props.onReview(sourceRunId, reviewProfileId ?? undefined);
+        await props.onReview(sourceRunId);
       } catch {
         setReviewStartPending(false);
         setReviewMascotHoldGeneration(0);
@@ -1217,13 +1211,6 @@ export function TaskDetail(props: TaskDetailProps) {
                   />
                 ) : null}
 
-                {reviewPhaseVisible && !reviewIsRunning ? <AgentProfileSelect
-                  profiles={props.agentProfiles ?? []}
-                  label="Review profile"
-                  value={reviewProfileId}
-                  disabled={reviewActionsPaused}
-                  onChange={(profileId) => setReviewProfileId(profileId ?? null)}
-                /> : null}
                 {reviewPhaseVisible ? (
                   <ReviewPanel
                     reviewGate={reviewGate}
@@ -1265,13 +1252,6 @@ export function TaskDetail(props: TaskDetailProps) {
                 />
               </TaskWorkPanels>
 
-              {props.onSetAgentProfile ? <TaskAgentProfileSetting
-                key={task.id}
-                profiles={props.agentProfiles ?? []}
-                profile={task.agentProfile}
-                disabled={reviewActionsPaused || props.runs.some((candidate) => candidate.status === 'RECOVERY_REQUIRED')}
-                onChange={props.onSetAgentProfile}
-              /> : null}
               <RequestCard
                 prompt={task.prompt}
                 promptLineCount={promptLineCount}

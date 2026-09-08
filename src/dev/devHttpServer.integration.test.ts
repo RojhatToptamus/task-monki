@@ -65,13 +65,11 @@ describe('development HTTP server', () => {
   it('authenticates profile mutations and forwards only the selected operation to core', async () => {
     const saveAgentProfile = vi.fn(async () => ({}));
     const deleteAgentProfile = vi.fn(async () => ({}));
-    const setTaskAgentProfile = vi.fn(async () => ({}));
-    const running = await startServer({ saveAgentProfile, deleteAgentProfile, setTaskAgentProfile });
+    const running = await startServer({ saveAgentProfile, deleteAgentProfile });
     const profile = { name: 'Testing', description: '', instructions: 'Inspect the actual result.\n' };
     const cases = [
       { route: '/api/agent-profiles/save', body: profile, handler: saveAgentProfile, argument: profile },
       { route: '/api/agent-profiles/delete', body: { profileId: 'profile-id' }, handler: deleteAgentProfile, argument: 'profile-id' },
-      { route: '/api/tasks/agent-profile', body: { taskId: 'task-id', profileId: null }, handler: setTaskAgentProfile, argument: { taskId: 'task-id', profileId: null } }
     ];
     for (const entry of cases) {
       const request = { method: 'POST', body: JSON.stringify(entry.body) };

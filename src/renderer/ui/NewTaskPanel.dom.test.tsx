@@ -13,6 +13,19 @@ type RefinePromptInput = Parameters<
 >[0];
 
 describe('mounted NewTaskPanel prompt refinement', () => {
+  it('keeps the selected creation profile in the draft and submits it with the task', async () => {
+    const profile = { id: '83bf4f11-9ef5-40b1-b0a5-bfbfef05fed8', name: 'Frontend', description: '', instructions: 'Use the established UI.' };
+    const onCreate = vi.fn(() => new Promise<void>(() => undefined));
+    const onTextDraftChange = vi.fn();
+    renderPanel({ agentProfiles: [profile], onCreate, onTextDraftChange });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
+    expect(onTextDraftChange).toHaveBeenLastCalledWith({ title: 'Sync badge', prompt: 'add a sync badge', agentProfileId: profile.id });
+    fireEvent.click(screen.getByRole('button', { name: 'Create task in project' }));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ agentProfileId: profile.id }));
+    expect((screen.getByRole('combobox', { name: 'Agent profile' }) as HTMLSelectElement).disabled).toBe(true);
+  });
+
   it('sends the full refinement input and invalidates a proposal when that input changes', async () => {
     const onRefinePrompt = vi.fn(async (_input: RefinePromptInput) => ({
       titleSuggestion: 'Clarify the sync badge',

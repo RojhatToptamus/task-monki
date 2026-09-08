@@ -121,7 +121,6 @@ export const IPC_INVOKE_CHANNELS = [
   'task:getDetail',
   'task:import',
   'task:importPreview',
-  'task:setAgentProfile',
   'task:transition',
   'worktree:comparison',
   'worktree:list',

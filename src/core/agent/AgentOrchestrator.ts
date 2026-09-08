@@ -223,7 +223,6 @@ function assertSessionPostcondition(
 }
 
 export interface StartOrchestratedReview {
-  agentProfile?: import('../../shared/agentProfiles').CustomAgentProfile;
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
@@ -1914,8 +1913,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const prompt = buildAgentReviewPrompt({
       task: input.task,
       worktree: input.worktree,
-      target: input.target,
-      agentProfile: input.agentProfile
+      target: input.target
     });
     const executionContext = await this.buildExecutionContext(reviewRuntimeId, {
       sessionId: reviewSessionId,

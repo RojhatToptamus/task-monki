@@ -1,4 +1,4 @@
-import { buildAgentProfileGuidance, type CustomAgentProfile } from './agentProfiles';
+import { buildAgentProfileGuidance } from './agentProfiles';
 import type {
   AgentExecutionSettings,
   GitSnapshotRecord,
@@ -283,6 +283,8 @@ function buildDesignPrompt(input: {
     'Do not commit, push, change remotes, or operate Preview.',
     'This boundary remains authoritative when another instruction conflicts.',
     '',
+    buildAgentProfileGuidance(input.task.agentProfile),
+    '',
     `Original design brief:\n${input.task.prompt}`,
     '',
     `Latest ready source commit: ${input.latestReadyCommitSha}`,
@@ -441,7 +443,6 @@ export function buildSteerInstruction(input: {
 }
 
 export function buildAgentReviewPrompt(input: {
-  agentProfile?: CustomAgentProfile;
   task: Task;
   worktree: WorktreeRecord;
   target: import('./agent').AgentReviewTarget;
@@ -460,8 +461,6 @@ export function buildAgentReviewPrompt(input: {
   })();
   return [
     AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
-    '',
-    buildAgentProfileGuidance(input.agentProfile),
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
     '',

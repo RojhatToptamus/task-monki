@@ -1,4 +1,3 @@
-import { AgentProfileSelect } from './AgentProfileSelect';
 import { useId, useRef } from 'react';
 import type {
   BuiltInAgentProfileId,
@@ -196,14 +195,6 @@ export function DiscourseAgentConfigurationBar({
                   <strong>{entry.profile.displayName}</strong>
                   <small>{capitalize(entry.profile.roleTemplate)}</small>
                 </div>
-                <AgentProfileSelect
-                  profiles={catalog.customAgentProfiles ?? []}
-                  savedProfile={currentRevision?.customProfile}
-                  value={selection.customProfileId}
-                  label={`${entry.profile.displayName} profile`}
-                  disabled={disabled}
-                  onChange={(customProfileId) => onSelectionChange({ ...selection, customProfileId })}
-                />
                 <AgentModelSelector
                   presentation="compact"
                   label={`${entry.profile.displayName} provider and model`}
@@ -231,7 +222,6 @@ export function DiscourseAgentConfigurationBar({
                         : model?.defaultReasoningEffort;
                     onSelectionChange({
                       agentProfileId: selection.agentProfileId,
-                      customProfileId: selection.customProfileId,
                       ...(runtimeId ? { runtimeId } : {}),
                       ...(modelId ? { modelId } : {}),
                       ...(reasoningEffort ? { reasoningEffort } : {})

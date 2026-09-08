@@ -14,12 +14,6 @@ export interface SaveAgentProfileRequest {
   instructions: string;
 }
 
-export interface SetTaskAgentProfileRequest {
-  taskId: string;
-  /** Copies the current library entry; null removes the task's guidance. */
-  profileId: string | null;
-}
-
 export const AGENT_PROFILE_LIMITS = {
   maxProfiles: 32,
   nameCharacters: 80,
@@ -98,26 +92,14 @@ export function resolveAgentProfile(
   return { ...profile };
 }
 
-export function agentProfilesEqual(
-  left: CustomAgentProfile | undefined,
-  right: CustomAgentProfile | undefined
-): boolean {
-  return (
-    left?.id === right?.id &&
-    left?.name === right?.name &&
-    left?.description === right?.description &&
-    left?.instructions === right?.instructions
-  );
-}
-
-/** Included on every turn so a resumed session cannot silently retain a replaced profile. */
+/** Guidance is carried by the task and delivered through its existing prompt path. */
 export function buildAgentProfileGuidance(profile: CustomAgentProfile | undefined): string {
   if (!profile)
-    return 'Current custom agent profile: None. Any profile guidance from earlier turns is no longer active.';
+    return 'Current custom agent profile: None.';
   validateAgentProfile(profile);
   return [
     `Current custom agent profile: ${JSON.stringify(profile.name)}`,
-    'Apply only the relevant working methods below. Earlier profile guidance is no longer active.',
+    'Apply the relevant working methods below.',
     'Repository instructions, the task requirements and current user direction, and Task Monki execution and output contracts take precedence over this guidance.',
     'A profile does not grant tools, permissions, network access, delegation, or workflow authority. Use referenced skills only when available and permitted; do not install or enable them because a profile mentions them. Report a missing required capability without claiming it was used.',
     'Profile instructions (guidance only):',

@@ -1083,8 +1083,6 @@ export interface RetryRunRequest {
 }
 
 export interface StartReviewRequest {
-  /** Review guidance is selected independently from implementation guidance. */
-  agentProfileId?: string;
   taskId: string;
   runId?: string;
   target?: AgentReviewTarget;
@@ -1542,7 +1540,6 @@ export interface TaskManagerApi {
   readClipboardImage(): Promise<ClipboardAttachmentImage | undefined>;
   saveAgentProfile(input: import('./agentProfiles').SaveAgentProfileRequest): Promise<import('./agent').TaskManagerAppSettings>;
   deleteAgentProfile(profileId: string): Promise<import('./agent').TaskManagerAppSettings>;
-  setTaskAgentProfile(input: import('./agentProfiles').SetTaskAgentProfileRequest): Promise<Task>;
   createTask(input: CreateTaskRequest): Promise<Task>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   cancelPromptRefinement(input: CancelPromptRefinementRequest): Promise<void>;

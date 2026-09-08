@@ -355,13 +355,10 @@ describe('Import existing work', () => {
 
   it('reviews imported work without a coding session and invalidates review when only the comparison changes', async () => {
     const s = await scenarios.create();
-    const settings = await s.service.saveAgentProfile({ name: 'Security', description: '', instructions: 'Trace input validation across the imported changes.' });
-    const profile = settings.agentProfiles[0]!;
     const request = await importRequest(s);
     await s.commitFile('committed.txt', 'existing feature\n');
     await fs.writeFile(path.join(s.repositoryPath, 'dirty.txt'), 'untracked feature\n');
     const task = await s.service.importTask(request);
-    expect(task.agentProfile).toBeUndefined();
     s.agent.nextRuntimeTurnResult = {
       output: 'No regressions found.\n```json\n' + JSON.stringify({
         schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'No regressions found.', findings: []
@@ -370,7 +367,7 @@ describe('Import existing work', () => {
     // Starting review immediately after task open waits for the same observation.
     const [, review] = await Promise.all([
       s.service.refreshEvidence({ taskId: task.id }),
-      s.service.startReview({ taskId: task.id, agentProfileId: profile.id })
+      s.service.startReview({ taskId: task.id })
     ]);
     const reviewed = await s.waitForSnapshot((state) =>
       state.tasks[0]?.projection.agentReview?.status === 'PASSED' && Boolean(state.runs[0]?.afterGitSnapshotId));
@@ -380,8 +377,6 @@ describe('Import existing work', () => {
     expect(reviewed.agentSessions.map((session) => session.role)).toEqual(['REVIEW']);
     expect(reviewed.agentSessions[0]?.parentSessionId).toBeUndefined();
     const prompt = await s.runtimeStore.readArtifact(review.promptArtifactId);
-    expect(prompt).toContain(profile.instructions);
-    expect(s.agent.startedRuntimeTurns.find((turn) => turn.run.id === review.id)?.prompt).toBe(prompt);
     expect(prompt).toContain(`from ${request.baseRef} to HEAD`);
     expect(prompt).toContain('staged, unstaged, and untracked');
     expect(review.requestedSettings.sandbox).toBe('READ_ONLY');

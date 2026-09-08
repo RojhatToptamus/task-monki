@@ -484,6 +484,42 @@
   display: none;
 }
 
+.tm-profile-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: var(--t-meta);
+}
+
+.field__prompt-toolbar .tm-profile-picker select {
+  width: auto;
+  max-width: 180px;
+  min-width: 0;
+  height: var(--h-toolbar);
+  min-height: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+.field__prompt-toolbar .tm-profile-picker select:not(:disabled):hover {
+  background: var(--hover);
+}
+
+.field__prompt-toolbar .tm-profile-picker select:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
 .task-attachment-add {
   display: inline-flex;
   align-items: center;
@@ -515,7 +551,10 @@
 }
 
 .task-attachment-hint {
+  min-width: 0;
   margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;

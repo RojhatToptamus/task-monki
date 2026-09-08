@@ -302,12 +302,6 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         sendJson(response, requestId, 200, await options.service.deleteAgentProfile(input.profileId));
         return;
       }
-      if (request.method === 'POST' && url.pathname === '/api/tasks/agent-profile') {
-        const input = await readJson() as Parameters<TaskManagerService['setTaskAgentProfile']>[0];
-        sendJson(response, requestId, 200, await options.service.setTaskAgentProfile(input));
-        return;
-      }
-
       if (request.method === 'GET' && url.pathname === '/api/settings') {
         sendJson(response, requestId, 200, await options.service.getAppSettings());
         return;
