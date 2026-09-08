@@ -25,6 +25,90 @@ afterEach(async () => {
 });
 
 describe('SqliteAgentRuntimeStore', () => {
+  it('loads equivalent read-only paths without rewriting records or trusting redirected aliases', async () => {
+    const fixture = await storeFixture();
+    const root = await fs.realpath(fixture.root);
+    const worktrees = path.join(root, 'worktrees');
+    const alias = path.join(root, 'worktree-alias');
+    const worktree = path.join(worktrees, 'task-1');
+    await fs.mkdir(worktree, { recursive: true });
+    await fs.symlink(worktrees, alias, 'junction');
+    const context = {
+      ...executionContext('review-path-alias'),
+      primaryCwd: worktree,
+      readRoots: [{ canonicalPath: worktree, kind: 'WORKTREE' as const }]
+    };
+    const input = sessionInput(
+      'review-path-alias', { kind: 'TASK', taskId: 'task-1' }, 'review-path-alias', context
+    );
+    input.role = 'REVIEW';
+    input.taskContext!.worktreePath = path.join(alias, 'task-1');
+
+    const stored = await fixture.store.createSession(input);
+    expect(stored.taskContext?.worktreePath).toBe(input.taskContext!.worktreePath);
+    expect(stored.executionContext).toEqual(context);
+    await expect(fixture.openStore().getSession(stored.id)).resolves.toEqual(stored);
+
+    // Historical sessions outlive their worktrees. Resolve the surviving parent
+    // alias without requiring the removed checkout to be recreated.
+    await fs.rm(worktree, { recursive: true });
+    await expect(fixture.openStore().getSession(stored.id)).resolves.toEqual(stored);
+
+    const unrelated = path.join(root, 'unrelated-worktrees');
+    await fs.mkdir(unrelated);
+    await fs.unlink(alias);
+    await fs.symlink(unrelated, alias, 'junction');
+    await expect(fixture.openStore().init()).rejects.toThrow(
+      'Task agent runtime session context is invalid.'
+    );
+  });
+
+  it.each([
+    { access: 'READ_ONLY', target: 'different', description: 'different read-only directories' },
+    { access: 'READ_ONLY', target: 'missing', description: 'different missing read-only paths' },
+    { access: 'WRITE', target: 'alias', description: 'aliased write-session paths' }
+  ] as const)('rejects $description on creation and restart', async ({ access, target }) => {
+    const fixture = await storeFixture();
+    const root = await fs.realpath(fixture.root);
+    const worktree = path.join(root, 'worktree');
+    const other = path.join(root, 'different');
+    const alias = path.join(root, 'worktree-alias');
+    await fs.mkdir(worktree);
+    await fs.mkdir(other);
+    await fs.symlink(worktree, alias, 'junction');
+    const context: AgentExecutionContext = {
+      ...executionContext('task-path-boundary'),
+      repositoryAccess: access,
+      primaryCwd: worktree,
+      readRoots: [{ canonicalPath: worktree, kind: 'WORKTREE' }]
+    };
+    if (access === 'WRITE') context.modelSettings.sandbox = 'WORKSPACE_WRITE';
+    const input = sessionInput(
+      'task-path-boundary', { kind: 'TASK', taskId: 'task-1' }, 'task-path-boundary', context
+    );
+    input.requestedSettings = context.modelSettings;
+    input.taskContext!.worktreePath = target === 'alias'
+      ? alias
+      : target === 'different' ? other : path.join(other, 'missing');
+    await expect(fixture.store.createSession(input)).rejects.toThrow(
+      'Task agent runtime session context is invalid.'
+    );
+    expect((await fixture.store.snapshot()).sessions).toEqual([]);
+
+    const stored = await fixture.store.createSession({
+      ...input,
+      taskContext: { ...input.taskContext!, worktreePath: worktree }
+    });
+    await fixture.database.write((transaction) => {
+      transaction.run('UPDATE runtime_sessions SET payload_json = ? WHERE id = ?', [
+        JSON.stringify({ ...stored, taskContext: input.taskContext }), stored.id
+      ]);
+    });
+    await expect(fixture.openStore().init()).rejects.toThrow(
+      'Task agent runtime session context is invalid.'
+    );
+  });
+
   it('creates and restarts the shared Task runtime projection with atomic artifacts', async () => {
     const fixture = await storeFixture();
     const delivered: string[] = [];
@@ -1866,9 +1950,9 @@ async function storeFixture(root?: string) {
 function sessionInput(
   id: string,
   owner: AgentOwnerScope,
-  clientOperationId: string
+  clientOperationId: string,
+  context: AgentExecutionContext = executionContext(clientOperationId)
 ): CreateRuntimeSessionInput {
-  const context = executionContext(clientOperationId);
   return {
     id,
     owner,

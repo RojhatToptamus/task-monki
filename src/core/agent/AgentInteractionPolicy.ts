@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { realpathSync } from 'node:fs';
+import { canonicalPath } from '../filesystem/secureFilesystem';
 import { isAgentProviderPermissionAction } from '../../shared/contracts';
 import type {
   AgentCommandApprovalDecision,
@@ -649,28 +649,6 @@ function isAllowedWorkspacePath(worktreePath: string, candidate: string): boolea
   }
   const firstSegment = relative.split(path.sep)[0];
   return !['.git', '.agents', '.codex'].includes(firstSegment);
-}
-
-function canonicalPath(candidate: string): string | undefined {
-  let current = path.resolve(candidate);
-  const missingSegments: string[] = [];
-
-  while (true) {
-    try {
-      return path.resolve(realpathSync.native(current), ...missingSegments);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        return undefined;
-      }
-      const parent = path.dirname(current);
-      if (parent === current) {
-        return undefined;
-      }
-      missingSegments.unshift(path.basename(current));
-      current = parent;
-    }
-  }
 }
 
 function hasAnyPermission(permissions: AgentPermissionProfile): boolean {

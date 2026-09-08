@@ -1,5 +1,6 @@
 import crypto, { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { canonicalPath } from '../filesystem/secureFilesystem';
 import type {
   AgentGoalSnapshotRecord,
   AgentItemRecord,
@@ -4036,6 +4037,15 @@ function isUndeliveredSessionReplacement(
   });
 }
 
+function taskSessionCwdMatches(session: AgentRuntimeSessionRecord): boolean {
+  const worktreePath = session.taskContext?.worktreePath;
+  const { primaryCwd, repositoryAccess } = session.executionContext;
+  if (worktreePath === primaryCwd) return true;
+  if (!worktreePath || repositoryAccess !== 'READ_ONLY') return false;
+  const canonicalWorktree = canonicalPath(worktreePath);
+  return canonicalWorktree !== undefined && canonicalWorktree === canonicalPath(primaryCwd);
+}
+
 function validateState(state: AgentRuntimeStoreState): void {
   if (
     !state ||
@@ -4121,7 +4131,7 @@ function validateState(state: AgentRuntimeStoreState): void {
         !session.taskContext.iterationId ||
         !session.taskContext.worktreeId ||
         !path.isAbsolute(session.taskContext.worktreePath) ||
-        session.taskContext.worktreePath !== session.executionContext.primaryCwd
+        !taskSessionCwdMatches(session)
       ) {
         throw new Error('Task agent runtime session context is invalid.');
       }

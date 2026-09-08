@@ -696,9 +696,10 @@ jobs:
         run: |
           set -euo pipefail
           release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
-          test "$(printf '%s' "$release_json" | jq -r '.draft')" = "false"
-          test "$(printf '%s' "$release_json" | jq -r '.immutable')" = "true"
-          actual="$(printf '%s' "$release_json" | jq -r '.assets[].name' | sort)"
+          # Native Windows jq needs binary output for Bash string comparisons.
+          test "$(printf '%s' "$release_json" | jq -br '.draft')" = "false"
+          test "$(printf '%s' "$release_json" | jq -br '.immutable')" = "true"
+          actual="$(printf '%s' "$release_json" | jq -br '.assets[].name' | sort)"
           expected="$(printf '%s\n' \
             "$MAC_DMG" "$MAC_ZIP" "$MAC_ZIP.blockmap" latest-mac.yml SHA256SUMS-macOS.txt \
             "$WINDOWS_INSTALLER" "$WINDOWS_INSTALLER.blockmap" latest.yml SHA256SUMS-Windows.txt \

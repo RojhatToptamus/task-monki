@@ -1,9 +1,32 @@
 import { randomUUID } from 'node:crypto';
-import { constants as fsConstants, type Stats } from 'node:fs';
+import { constants as fsConstants, realpathSync, type Stats } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 type ChmodHandle = Pick<Awaited<ReturnType<typeof fs.open>>, 'chmod'>;
+
+/** Resolve existing ancestors while retaining a missing file or worktree suffix. */
+export function canonicalPath(candidate: string): string | undefined {
+  let current = path.resolve(candidate);
+  const missingSegments: string[] = [];
+
+  while (true) {
+    try {
+      return path.resolve(realpathSync.native(current), ...missingSegments);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        return undefined;
+      }
+      const parent = path.dirname(current);
+      if (parent === current) {
+        return undefined;
+      }
+      missingSegments.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
 
 /**
  * Node exposes POSIX mode APIs on Windows, but Windows does not implement the
