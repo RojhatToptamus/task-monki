@@ -3432,7 +3432,8 @@ export class SqliteTaskStore {
             'STARTING',
             'RUNNING',
             'AWAITING_APPROVAL',
-            'AWAITING_USER_INPUT'
+            'AWAITING_USER_INPUT',
+            'COMPLETED'
           ].includes(candidate.status)
       );
       const source = input.candidate.source;
@@ -3457,6 +3458,8 @@ export class SqliteTaskStore {
       );
       if (
         !run ||
+        (run.status === 'COMPLETED' &&
+          !sameJsonValue(turn.finalOpenedCandidate?.source, source)) ||
         !worktree ||
         source.repositoryId !== design.repositoryId ||
         !isGitObjectId(source.expectedParentCommit) ||

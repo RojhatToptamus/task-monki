@@ -2,14 +2,19 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DesignDetailSnapshot, PreviewGenerationRecord } from '../../shared/contracts';
 import { codexCapabilities } from '../agent/codex/codexCapabilities';
 import { git } from '../git/gitCli';
 import {
   TaskMonkiScenarioRegistry,
+  createScriptedAgentRuntimeFixture,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
+import { AppEventBus } from '../runner/AppEventBus';
+import { TaskManagerService } from './TaskManagerService';
 
 const scenarioRegistry = new TaskMonkiScenarioRegistry();
 const createTaskMonkiScenario = scenarioRegistry.create.bind(scenarioRegistry);
@@ -21,6 +26,126 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService Design vertical slice', () => {
+  it('upgrades and recovers a Design interrupted after branch publication but before index repair', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-design-upgrade-recovery',
+      previewEnabled: true,
+      designMode: true
+    });
+    const detail = await scenario.service.createBlankDesign({
+      brief: 'Preserve the interrupted Design update.',
+      creationToken: 'design-upgrade-recovery',
+      runtimeId: 'codex'
+    });
+    const worktree = detail.currentWorktree!;
+    const content = '<!doctype html><title>Recovered Design</title><h1>Recovered Design</h1>';
+    await fs.writeFile(path.join(worktree.worktreePath, 'index.html'), content);
+    const updateCheckpoint = scenario.store.updateDesignTurnCheckpoint.bind(scenario.store);
+    const checkpointWrite = vi.spyOn(scenario.store, 'updateDesignTurnCheckpoint')
+      .mockImplementation(async (input) => {
+        if (input.checkpoint.boundary === 'REF_UPDATED_INDEX_PENDING') {
+          throw new Error('Interrupted before recording branch publication.');
+        }
+        return updateCheckpoint(input);
+      });
+    const deferredRecovery = scenario.waitForEvent((event) =>
+      event.type === 'design.updated' &&
+      (event.payload as { reason?: string })?.reason === 'source-recovery-deferred',
+      15_000
+    );
+    await scenario.completeRun(requireRunId(detail));
+    await deferredRecovery;
+    const interrupted = await scenario.store.getDesignDetail(detail.design.id);
+    const opened = interrupted.turns[0]!.finalOpenedCandidate!;
+    const candidate = opened.source;
+    const originalTree = (await git(detail.repository.path, ['rev-parse', 'HEAD^{tree}'])).trim();
+    await expect(scenario.store.updateDesignOpenedCandidate({
+      designId: detail.design.id,
+      turnId: interrupted.turns[0]!.id,
+      candidate: { ...opened, source: { ...candidate, treeSha: originalTree } }
+    })).rejects.toThrow('Opened Design candidate ownership is inconsistent.');
+    await scenario.service.shutdown();
+    checkpointWrite.mockRestore();
+    expect(interrupted.turns[0]?.outcome).toBeUndefined();
+    expect(interrupted.turns[0]?.checkpoint?.boundary).toBe('SOURCE_CAPTURED');
+    expect(candidate.candidateCommitSha).not.toBe(worktree.headSha);
+    expect((await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim()).toBe(candidate.candidateCommitSha);
+    expect(await git(worktree.worktreePath, ['status', '--porcelain=v1'])).not.toBe('');
+    expect((await git(detail.repository.path, ['rev-parse', 'HEAD'])).trim()).toBe(detail.repository.headSha);
+    expect(await git(detail.repository.path, ['status', '--porcelain=v1'])).toBe('');
+
+    const paths = scenario.persistence.paths;
+    await scenario.persistence.close();
+    // Migration 3 changes only settings JSON; the interrupted task/Git records
+    // already have the schema 2 shape. Recreate that settings/version boundary.
+    const oldDatabase = new DatabaseSync(paths.databasePath);
+    try {
+      oldDatabase.exec(`
+        UPDATE app_settings
+        SET settings_json = json_remove(json_set(settings_json, '$.schemaVersion', 12), '$.agentProfiles');
+        PRAGMA user_version = 2;
+      `);
+    } finally {
+      oldDatabase.close();
+    }
+
+    const persistence = await openTestPersistence(paths.profileRoot);
+    const runtime = createScriptedAgentRuntimeFixture(persistence);
+    const restarted = new TaskManagerService(persistence.tasks, scenario.repositoryPath, new AppEventBus(), {
+      ...runtime.serviceOptions,
+      worktreeRoot: scenario.worktreeRoot,
+      previewEnabled: true,
+      previewRoot: scenario.previewRoot,
+      previewLauncherPath: path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
+      managedDesignStaticServerPath: path.join(process.cwd(), 'src/core/preview/runtime/managed-design-static-server.mjs'),
+      designRepositoryRoot: paths.designRepositoryRoot,
+      designWorktreeRoot: paths.designWorktreeRoot,
+      designDraftStore: persistence.designDrafts,
+      designBrowserRuntime: {
+        async attest() {},
+        async recover() {},
+        async openCandidate() { return { snapshot: 'test page', console: '(no output)', errors: '(no output)' }; },
+        async inspect() { return { text: 'test page' }; },
+        abortRun() {},
+        async closeRun() {},
+        async shutdown() {}
+      },
+      designCanvasFence: {
+        async begin() { return { async commit() {}, async rollback() {} }; }
+      }
+    });
+    try {
+      const backups = await fs.readdir(paths.backupsRoot);
+      expect(backups).toHaveLength(1);
+      const backup = await persistence.backups.verifyBackup(backups[0]!);
+      expect(backup.manifest).toMatchObject({ purpose: 'PRE_UPGRADE', database: { schemaVersion: 2 } });
+      expect(backup.manifest.designRepositories[0]?.refs).toContainEqual({
+        name: `refs/heads/${worktree.branchName}`,
+        objectId: candidate.candidateCommitSha
+      });
+      expect((await persistence.settings.get()).schemaVersion).toBe(13);
+      expect(await git(worktree.worktreePath, ['status', '--porcelain=v1'])).not.toBe('');
+
+      await restarted.init();
+
+      const recovered = await restarted.getDesign(detail.design.id);
+      expect(recovered.turns[0]?.failureReason).toBeUndefined();
+      expect(recovered.turns[0]?.outcome).toBe('READY');
+      expect(recovered.revisions).toHaveLength(1);
+      expect(recovered.revisions[0]?.commitSha).toBe(candidate.candidateCommitSha);
+      expect(runtime.adapter.startedTurns).toEqual([]);
+      expect((await git(worktree.worktreePath, ['write-tree'])).trim()).toBe(candidate.treeSha);
+      expect(await git(worktree.worktreePath, ['status', '--porcelain=v1'])).toBe('');
+      expect(await requestActiveRoute(requireActivePreview(recovered))).toContain('Recovered Design');
+    } finally {
+      try {
+        await restarted.shutdown();
+      } finally {
+        await persistence.close();
+      }
+    }
+  }, 60_000);
+
   it('uses the provider approval-free write policy for Design work', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-autonomous-policy',

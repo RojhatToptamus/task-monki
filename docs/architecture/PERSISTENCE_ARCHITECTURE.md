@@ -194,7 +194,13 @@ after verification. It contains:
   repository. The manifest binds the bundle's exact HEAD to the repository
   `head_sha` in the SQLite snapshot. Its saved HEAD reference must resolve to
   that commit. The bundle also includes every Git object required by structured
-  Design state.
+  Design state. Capture includes shared refs and the main checkout's HEAD,
+  excluding transient linked-worktree HEAD aliases. Pending Design commits
+  remain reachable through their branches and stored source checkpoints.
+
+After an upgrade, normal Design recovery repairs interrupted source publication
+and recreates stopped Preview candidates. A completed run can replace its
+Preview candidate only for the exact source it had already verified.
 
 Before capture, runtime journal writers flush queued entries. The service hashes
 each segment before and after the copy. A concurrent append stops the staged
