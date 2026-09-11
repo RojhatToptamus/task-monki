@@ -85,6 +85,10 @@ terminal. Each adapter reconciles the provider it owns and applies its existing
 no-resend rules. A prompt, approval, answer, interrupt, review request, or other
 ambiguous mutation is never replayed automatically.
 
+Terminal reconciliation preserves the recorded run completion time. The time
+of event receipt does not replace that historical value. Repeated startup uses
+the same completion identity and does not publish the review result again.
+
 Graceful runtime shutdown first removes adapter event producers. It then drains
 events that Task Monki already accepted before it stops the adapters. Store
 shutdown cannot race a previously accepted provider terminal event.

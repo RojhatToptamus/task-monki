@@ -154,6 +154,10 @@ Expected UI:
 
 ### Review completion
 
+Only events for the current review run can update its projection. Late events
+for earlier reviews remain in their run history. Terminal events cannot make a
+stale review current again. A new review requires an explicit start.
+
 When the review run emits a terminal event:
 
 - `AGENT_RUN_COMPLETED`
