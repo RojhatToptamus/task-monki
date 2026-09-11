@@ -6,6 +6,45 @@ import { applyEventToState, createEmptyState, reduceProjection, reduceRun } from
 const now = '2026-06-20T10:00:00.000Z';
 
 describe('projection reducer', () => {
+  it.each(['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'] as const)(
+    'preserves the recorded completion time when replaying %s', (type) => {
+      const run = createRun({ status: 'COMPLETED', endedAt: now });
+      const event = { ...createEvent(type, {}), receivedAt: '2026-06-21T10:00:00.000Z' };
+      expect(reduceRun(run, event).endedAt).toBe(now);
+    }
+  );
+
+  it.each(['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'ARTIFACT_CREATED', 'AGENT_RUNTIME_RECONCILED'] as const)(
+    'keeps a newer review unchanged when an older run emits %s', (type) => {
+      const task = createTask();
+      const review = createRun({ id: 'new-review', mode: 'REVIEW', status: 'COMPLETED' });
+      task.projection.agentReview = {
+        status: 'PASSED', runId: review.id, finalArtifactId: 'new-final', summary: 'Current review.'
+      };
+      const oldReview = createRun({ id: 'old-review', mode: 'REVIEW', status: 'COMPLETED' });
+      const next = applyEventToState(
+        { ...createEmptyState(), tasks: [task], runs: [oldReview, review] },
+        { ...createEvent(type, {
+          finalArtifactId: 'old-final', artifactId: 'old-final', kind: 'agent-final',
+          terminal: true, status: 'COMPLETED', agentReviewStatus: 'NEEDS_CHANGES'
+        }), runId: oldReview.id }
+      );
+      expect(next.tasks[0].projection).toEqual(task.projection);
+      expect(next.events).toHaveLength(1);
+    }
+  );
+
+  it.each(['STALE', 'NOT_RUN'] as const)('does not promote a %s review when a historical completion is redelivered', (status) => {
+    const run = createRun({ mode: 'REVIEW', status: 'COMPLETED' });
+    const projection = createInitialProjection(now);
+    projection.agentReview = status === 'STALE'
+      ? { status, runId: run.id, summary: 'Diff changed.' }
+      : { status };
+    expect(reduceProjection(projection, createEvent('AGENT_RUN_COMPLETED', {
+      agentReviewStatus: 'PASSED', finalArtifactId: 'old-final'
+    }), run)).toEqual(projection);
+  });
+
   it('keeps preview lifecycle events out of task workflow and agent projections', () => {
     const state = createEmptyState();
     const task = createTask();

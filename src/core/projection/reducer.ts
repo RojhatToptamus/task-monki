@@ -229,7 +229,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
         ...run,
         status: 'COMPLETED',
         recoveryState: 'NONE',
-        endedAt: event.receivedAt,
+        endedAt: run.endedAt ?? event.occurredAt,
         finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
         terminalReason: getString(event.payload, 'terminalReason') ?? run.terminalReason
       };
@@ -238,7 +238,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
         ...run,
         status: 'FAILED',
         recoveryState: 'NONE',
-        endedAt: event.receivedAt,
+        endedAt: run.endedAt ?? event.occurredAt,
         finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
         terminalReason:
           getString(event.payload, 'error') ??
@@ -250,7 +250,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
         ...run,
         status: 'INTERRUPTED',
         recoveryState: 'NONE',
-        endedAt: event.receivedAt,
+        endedAt: run.endedAt ?? event.occurredAt,
         finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
         terminalReason:
           getString(event.payload, 'terminalReason') ??
@@ -292,7 +292,9 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
             'recoveryState'
           ) as RunRecord['recoveryState'] | undefined) ?? run.recoveryState,
         endedAt:
-          getBoolean(event.payload, 'terminal') === true ? event.receivedAt : run.endedAt
+          getBoolean(event.payload, 'terminal') === true
+            ? run.endedAt ?? event.occurredAt
+            : run.endedAt
       };
     case 'CANCEL_REQUESTED':
       return {
@@ -881,6 +883,14 @@ function reduceReviewProjection(
   run: RunRecord | undefined,
   findings: Finding[]
 ): StatusProjection {
+  // Retain late events in the run history without changing the current review.
+  if (
+    event.type !== 'AGENT_RUN_STARTED' &&
+    (base.agentReview?.runId !== (event.runId ?? run?.id) ||
+      base.agentReview?.status === 'STALE')
+  ) {
+    return base;
+  }
   switch (event.type) {
     case 'AGENT_RUN_STARTED':
     case 'AGENT_RUN_COMPLETED':

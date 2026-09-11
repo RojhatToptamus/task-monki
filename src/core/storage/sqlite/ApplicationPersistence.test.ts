@@ -54,6 +54,79 @@ function designAgentSettings() {
 }
 
 describe('ApplicationPersistence', () => {
+  it('backs up and invalidates mixed review results without changing their history', async () => {
+    const profileRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-upgrade-'));
+    let persistence = await open(profileRoot);
+    const paths = persistence.paths;
+    const task = await persistence.tasks.createTask({
+      title: 'Review history', prompt: 'Preserve both reviews.',
+      repositoryId: (await addTestRepository(persistence.tasks, profileRoot)).id
+    });
+    const ownership = await persistence.tasks.createIterationAndWorktree({
+      task, branchName: 'codex/review-history', worktreePath: profileRoot, baseSha: 'base'
+    });
+    const scripted = createScriptedAgentRuntimeFixture(persistence);
+    const reviews = [];
+    for (const content of ['Earlier review', 'Current review']) {
+      const session = await scripted.createSession({ task, ...ownership, role: 'REVIEW' });
+      const run = await scripted.createRun({ task, session, mode: 'REVIEW', prompt: content });
+      const artifact = await persistence.taskRuntime.writeFinalArtifact(
+        task.id, run.id, content, `test-review-final:${run.id}`
+      );
+      reviews.push({ run, artifact, content });
+    }
+    const readHistory = (owner: ApplicationPersistence) => owner.database.read((reader) =>
+      ['runtime_runs', 'runtime_artifacts', 'runtime_events', 'task_domain_events'].map((table) =>
+        reader.all(`SELECT * FROM ${table} ORDER BY id`)
+      )
+    );
+    const runtime = await readHistory(persistence);
+    await close(persistence);
+
+    const legacy = new DatabaseSync(paths.databasePath);
+    const payload = JSON.parse(String(legacy.prepare('SELECT payload_json FROM tasks WHERE id = ?').get(task.id)!.payload_json));
+    payload.projection.agentReview = {
+      status: 'PASSED', runId: reviews[1]!.run.id,
+      finalArtifactId: reviews[0]!.artifact.id,
+      result: { schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'Mixed result.', findings: [] }
+    };
+    legacy.prepare('UPDATE tasks SET payload_json = ? WHERE id = ?').run(JSON.stringify(payload), task.id);
+    legacy.exec(`PRAGMA user_version = 3;
+      CREATE TRIGGER fail_review_repair BEFORE UPDATE ON tasks
+      BEGIN SELECT RAISE(ABORT, 'test repair write failure'); END;`);
+    legacy.close();
+
+    await expect(open(profileRoot)).rejects.toThrow('test repair write failure');
+    const failed = new DatabaseSync(paths.databasePath);
+    expect(failed.prepare('PRAGMA user_version').get()!.user_version).toBe(3);
+    expect(JSON.parse(String(failed.prepare('SELECT payload_json FROM tasks WHERE id = ?').get(task.id)!.payload_json))).toEqual(payload);
+    failed.exec('DROP TRIGGER fail_review_repair');
+    failed.close();
+
+    persistence = await open(profileRoot);
+    const repaired = (await persistence.tasks.getTask(task.id))!;
+    expect(repaired.projection.agentReview).toEqual({ status: 'NOT_RUN' });
+    expect(await readHistory(persistence)).toEqual(runtime);
+    for (const review of reviews) {
+      expect(await persistence.agentRuntime.readArtifact(review.artifact.id)).toBe(review.content);
+    }
+    const backups = await fs.readdir(paths.backupsRoot);
+    for (const id of backups) {
+      const backup = await persistence.backups.verifyBackup(id);
+      expect(backup.manifest.database.schemaVersion).toBe(3);
+      const saved = new DatabaseSync(path.join(backup.backupDirectory, backup.manifest.database.relativePath), { readOnly: true });
+      expect(JSON.parse(String(saved.prepare('SELECT payload_json FROM tasks WHERE id = ?').get(task.id)!.payload_json))).toEqual(payload);
+      saved.close();
+    }
+    expect(backups.length).toBeGreaterThan(0);
+    await close(persistence);
+    persistence = await open(profileRoot);
+    expect(await persistence.tasks.getTask(task.id)).toEqual(repaired);
+    expect(await fs.readdir(paths.backupsRoot)).toEqual(backups);
+    await close(persistence);
+    await fs.rm(profileRoot, { recursive: true, force: true });
+  });
+
   it('upgrades schema 2 settings with an empty profile library after preserving a verified backup', async () => {
     const profileRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-profile-upgrade-'));
     const paths = resolveApplicationPersistencePaths(profileRoot);

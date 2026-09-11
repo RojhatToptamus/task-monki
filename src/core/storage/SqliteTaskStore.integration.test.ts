@@ -49,6 +49,30 @@ function closeStore(store: SqliteTaskStore): Promise<void> {
 }
 
 describe('SqliteTaskStore', () => {
+  it('reopens a task after persisting a multiline command failure', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-command-failure-'));
+    const store = await createStore(dir);
+    const repository = await addTestRepository(store, dir);
+    const task = await store.createTask({
+      title: 'Unavailable worktree',
+      prompt: 'Keep command diagnostics readable after restart.',
+      repositoryId: repository.id
+    });
+    const error = 'Command failed: git worktree list --porcelain -z\nfatal: not a git repository\n';
+    const { worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/unavailable-worktree', worktreePath: dir, baseSha: 'base'
+    });
+    await store.updateWorktree({ ...worktree, status: 'ERROR', error }, 'WORKTREE_FAILED');
+    await closeStore(store);
+
+    const reopened = await createStore(dir);
+    expect((await reopened.getTask(task.id))?.projection.findings).toEqual([
+      expect.objectContaining({ code: 'WORKTREE_OPERATION_FAILED', message: error })
+    ]);
+    expect((await reopened.snapshot()).worktrees[0]?.error).toBe(error);
+    await closeStore(reopened);
+  });
+
   it('drains an admitted mutation before terminal close and rejects late work', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-close-'));
     const store = await createStore(dir);
