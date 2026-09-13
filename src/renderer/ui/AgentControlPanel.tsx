@@ -2,9 +2,11 @@ import { useState } from 'react';
 import type {
   AgentRetryStrategy,
   InteractionRequestRecord,
-  RunRecord
+  RunRecord,
+  WorktreeRecord
 } from '../../shared/contracts';
 import {
+  describeForkAlternativeBoundary,
   getAgentComposerCopy,
   getPostRunActionState,
   type AgentComposerMode
@@ -13,6 +15,7 @@ import { humanizeEnum } from './display';
 
 interface AgentControlPanelProps {
   run?: RunRecord;
+  worktree?: Pick<WorktreeRecord, 'baseRef' | 'baseSha'>;
   requiresRecovery?: boolean;
   activeTurnSteeringSupported: boolean;
   interactions: InteractionRequestRecord[];
@@ -28,6 +31,7 @@ interface AgentControlPanelProps {
 
 export function AgentControlPanel({
   run,
+  worktree,
   requiresRecovery = false,
   activeTurnSteeringSupported,
   interactions,
@@ -55,6 +59,10 @@ export function AgentControlPanel({
     continuationKind
   } = getPostRunActionState(run, requiresRecovery);
   const composerCopy = mode ? getAgentComposerCopy(mode, continuationKind) : undefined;
+  const composerHelperText =
+    mode === 'RETRY_FORK' && worktree
+      ? describeForkAlternativeBoundary(worktree)
+      : composerCopy?.helperText;
   const staleInteractions = interactions.filter((interaction) =>
     ['STALE', 'ABORTED_SERVER_LOST'].includes(interaction.status)
   );
@@ -262,7 +270,7 @@ export function AgentControlPanel({
         <div className="agent-controls__composer">
           <div className="agent-controls__composer-head">
             <strong>{composerCopy.title}</strong>
-            {composerCopy.helperText ? <span>{composerCopy.helperText}</span> : null}
+            {composerHelperText ? <span>{composerHelperText}</span> : null}
           </div>
           <label htmlFor={`agent-control-${run.id}`}>{composerCopy.fieldLabel}</label>
           <textarea

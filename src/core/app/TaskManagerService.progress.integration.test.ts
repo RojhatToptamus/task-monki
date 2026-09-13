@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import {
   TaskMonkiScenarioRegistry
 } from '../../testSupport/taskMonkiScenario';
@@ -24,6 +25,7 @@ describe('TaskManagerService progress harness', () => {
         prompt: 'Add a hello.txt file and verify the repository status.'
       });
 
+      await prepareTestWorktree(scenario.service, task.id);
       const run = await scenario.service.startRun({ taskId: task.id });
       const providerPrompt = scenario.agent.startedTurns[0]?.prompt ?? '';
       expect(providerPrompt).toContain('Task Monki progress contract');

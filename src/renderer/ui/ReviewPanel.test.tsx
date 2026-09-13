@@ -26,7 +26,7 @@ describe('ReviewPanel', () => {
       />
     );
 
-    expect(html).toContain('Reviewing');
+    expect(html).toContain('Agent review');
     expect(html).toContain('abc12345');
     expect(html).toContain('Current activity');
     expect(html).toContain('Reading src/renderer/ui/TaskDetail.tsx.');

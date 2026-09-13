@@ -196,7 +196,8 @@ describe('prompt templates', () => {
       'Task Monki derives routine read/search/edit/run activity from provider tool telemetry'
     );
     expect(prompt).toContain('write short progress messages beginning with "Progress:"');
-    expect(prompt).toContain('Task Monki independently verifies Git, tests, reviews, and delivery');
+    expect(prompt).toContain('Task Monki independently observes Git and GitHub delivery');
+    expect(prompt).toContain('Local command and test claims remain provider telemetry');
     expect(prompt.endsWith('Authoritative Task Monki goal:\nAdd a progress panel.')).toBe(true);
     expect(prompt).not.toContain('When finished, summarize');
   });

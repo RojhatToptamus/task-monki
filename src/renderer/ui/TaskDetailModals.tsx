@@ -224,6 +224,8 @@ export function ReviewRequestDrawer({
   note,
   instruction,
   busy,
+  disabled,
+  disabledReason,
   onToggleFinding,
   onNoteChange,
   onInstructionChange,
@@ -237,6 +239,8 @@ export function ReviewRequestDrawer({
   note: string;
   instruction: string;
   busy: boolean;
+  disabled: boolean;
+  disabledReason?: string;
   onToggleFinding(findingId: string): void;
   onNoteChange(value: string): void;
   onInstructionChange(value: string): void;
@@ -275,7 +279,12 @@ export function ReviewRequestDrawer({
         </header>
 
         <div className="tm-reviewdrawer__body" inert={busy ? true : undefined}>
-          <section className="tm-reviewdrawer__section">
+          {disabledReason ? (
+            <p className="tm-reviewdrawer__empty" role="status">
+              {disabledReason}
+            </p>
+          ) : null}
+          <section className="tm-reviewdrawer__section" inert={disabled ? true : undefined}>
             <h4>Findings to attach · {selectedCount} selected</h4>
             {findings.length > 0 ? (
               <div className="tm-reviewdrawer__findings tm-reviewfindings__list">
@@ -309,7 +318,7 @@ export function ReviewRequestDrawer({
               ref={noteRef}
               className="tm-reviewdrawer__note"
               value={note}
-              disabled={busy}
+              disabled={busy || disabled}
               placeholder="Add context for the follow-up"
               onChange={(event) => onNoteChange(event.target.value)}
               rows={3}
@@ -322,7 +331,7 @@ export function ReviewRequestDrawer({
               <span>Instruction to agent</span>
               <textarea
                 value={instruction}
-                disabled={busy}
+                disabled={busy || disabled}
                 onChange={(event) => onInstructionChange(event.target.value)}
                 rows={11}
               />
@@ -340,7 +349,7 @@ export function ReviewRequestDrawer({
             <button
               type="button"
               className="primary-button"
-              disabled={busy || !instruction.trim()}
+              disabled={busy || disabled || !instruction.trim()}
               onClick={onSubmit}
             >
               {busy ? 'Sending...' : 'Send to agent'}

@@ -1,3 +1,4 @@
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,7 +28,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-unchanged-restart'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const before = await scenario.store.snapshot();
 
     const restarted = await restartScenario(scenario);
@@ -125,7 +126,7 @@ describe('TaskManagerService crash recovery', () => {
         id: created.worktree.id,
         status: 'MISSING'
       });
-      const retried = await restarted.service.prepareWorktree({ taskId: task.id });
+      const retried = await prepareTestWorktree(restarted.service, task.id);
       expect(retried).toMatchObject({
         id: created.worktree.id,
         iterationId: created.iteration.id,
@@ -142,7 +143,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recover-moved-repository'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.rename(
       scenario.repositoryPath,
       path.join(scenario.rootDir, 'repository-moved')
@@ -170,7 +171,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recover-push'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'push.txt'), 'push\n');
     await git(worktree.worktreePath, ['add', 'push.txt']);
     await git(worktree.worktreePath, ['commit', '-m', 'Push before crash']);
@@ -215,7 +216,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recover-unstarted-push'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'not-pushed.txt'), 'pending\n');
     await git(worktree.worktreePath, ['add', 'not-pushed.txt']);
     await git(worktree.worktreePath, ['commit', '-m', 'Pending push']);
@@ -247,6 +248,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recheck-before-commit'
     });
     const task = await scenario.createTask();
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     const worktree = await scenario.store.getCurrentWorktree(task.id);
     if (!worktree) throw new Error('Scenario worktree was not created.');
@@ -289,6 +291,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recheck-pr-before-commit'
     });
     const task = await scenario.createTask();
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     const worktree = await scenario.store.getCurrentWorktree(task.id);
     if (!worktree) throw new Error('Scenario worktree was not created.');
@@ -331,7 +334,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recheck-ambiguous-push'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'ambiguous.txt'), 'local\n');
     await git(worktree.worktreePath, ['add', 'ambiguous.txt']);
     await git(worktree.worktreePath, ['commit', '-m', 'Attempted push']);
@@ -397,7 +400,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recover-pr'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const headSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
     const ghPath = await writeRecoveryGh(
       scenario.rootDir,
@@ -429,7 +432,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-failed-pr-recovery'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const invocationPath = path.join(scenario.rootDir, 'gh-recovery-failures.log');
     const ghPath = await writeFailingRecoveryGh(
       scenario.rootDir,
@@ -463,7 +466,7 @@ describe('TaskManagerService crash recovery', () => {
       name: 'task-monki-recover-github-refresh'
     });
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const headSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
     await scenario.store.recordPullRequestSync(
       parsePrView(

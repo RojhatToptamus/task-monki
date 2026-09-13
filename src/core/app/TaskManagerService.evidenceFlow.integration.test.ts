@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import type { RunRecord } from '../../shared/contracts';
 import type {
   AgentInteractionDecision,
@@ -34,6 +35,7 @@ describe('TaskManagerService evidence flow', () => {
       prompt: 'Run through implementation evidence.'
     });
 
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     expect(run.status).toBe('RUNNING');
     expect(scenario.agent.startedTurns).toHaveLength(1);
@@ -43,7 +45,14 @@ describe('TaskManagerService evidence flow', () => {
         (candidate) => candidate.id === run.id && Boolean(candidate.afterGitSnapshotId)
       )
     );
+    const settledUpdate = scenario.waitForEvent((event) =>
+      event.type === 'run.state.updated' && event.runId === run.id &&
+      Boolean((event.payload as { afterGitSnapshotId?: string } | undefined)?.afterGitSnapshotId)
+    );
     await scenario.completeRun(run.id, 'Implementation finished.');
+    await settledUpdate;
+    expect((await scenario.service.getTaskDetail(task.id)).postRunEvidencePendingRunIds)
+      .not.toContain(run.id);
     const afterRunSnapshot = await postRunEvidence;
     const afterRunTask = afterRunSnapshot.tasks.find((candidate) => candidate.id === task.id);
     const completedRun = afterRunSnapshot.runs.find((candidate) => candidate.id === run.id);
@@ -66,6 +75,7 @@ describe('TaskManagerService evidence flow', () => {
         title: 'Rejected command',
         prompt: 'Create a file with a command.'
       });
+      await prepareTestWorktree(scenario.service, task.id);
       const run = await scenario.service.startRun({ taskId: task.id });
       await recordDecision(scenario, run);
       const retryReason = new RegExp(`${outcome}.*no Git change`, 'i');
@@ -128,6 +138,7 @@ describe('TaskManagerService evidence flow', () => {
       title: 'Declined provider form',
       prompt: 'Finish without the optional provider form.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     await recordResolvedInteraction(scenario, run, {
       type: 'MCP_ELICITATION',
@@ -162,6 +173,7 @@ describe('TaskManagerService evidence flow', () => {
       title: 'Declined optional command',
       prompt: 'Make the requested edit without the optional command.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     await recordDeclinedCommand(scenario, run);
     const worktree = await scenario.store.getCurrentWorktree(task.id);
@@ -194,6 +206,7 @@ describe('TaskManagerService evidence flow', () => {
       title: 'Shutdown evidence flow',
       prompt: 'Finish while application shutdown begins.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     const originalRecordGitSnapshot = scenario.store.recordGitSnapshot.bind(scenario.store);
     let releaseEvidence!: () => void;
@@ -214,11 +227,18 @@ describe('TaskManagerService evidence flow', () => {
 
     await scenario.completeRun(run.id, 'Implementation finished during shutdown.');
     await evidenceEntered;
+    expect((await scenario.service.getTaskDetail(task.id)).postRunEvidencePendingRunIds)
+      .toContain(run.id);
+    const settledUpdate = scenario.waitForEvent((event) =>
+      event.type === 'run.state.updated' && event.runId === run.id &&
+      Boolean((event.payload as { afterGitSnapshotId?: string } | undefined)?.afterGitSnapshotId)
+    );
     const shutdown = scenario.service.shutdown();
     await Promise.resolve();
     expect(closeStore).not.toHaveBeenCalled();
 
     releaseEvidence();
+    await settledUpdate;
     await expect(shutdown).resolves.toBeUndefined();
     expect(updateRun).toHaveBeenCalledWith(
       run.id,
@@ -236,6 +256,7 @@ describe('TaskManagerService evidence flow', () => {
       title: 'Restart reconciliation',
       prompt: 'Create a file after approval.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     await recordDeclinedCommand(scenario, run);
     let observeFailedCapture!: () => void;
@@ -298,6 +319,7 @@ describe('TaskManagerService evidence flow', () => {
       title: 'Reconcile before merge',
       prompt: 'Create a file after approval.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     await recordDeclinedCommand(scenario, run);
     let observeFailedCapture!: () => void;

@@ -57,16 +57,15 @@ describe('RunProgressCard', () => {
           headerLabel: 'Completed',
           activityTail: [],
           footer: {
-            title: 'Completed',
-            detail: '10 files changed · verification not run',
-            tone: 'success'
+            title: 'Agent run completed',
+            tone: 'neutral'
           }
         }}
         completedChangeSummary={<span>change summary</span>}
       />
     );
 
-    expect(html).toContain('Completed: 10 files changed · verification not run');
+    expect(html).toContain('Agent run completed');
     expect(html).toContain('change summary');
     expect(html).not.toContain('Activity');
   });

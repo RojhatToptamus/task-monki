@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentExecutionSettings } from '../../shared/agent';
 import {
@@ -36,6 +37,7 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
         title: 'Cancel queued Task start',
         prompt: 'This prompt must remain unsent after Stop.'
       });
+      await prepareTestWorktree(scenario.service, task.id);
       const createSession = scenario.agent.createSession.bind(scenario.agent);
       let markSessionStarted!: () => void;
       const sessionStarted = new Promise<void>((resolve) => {

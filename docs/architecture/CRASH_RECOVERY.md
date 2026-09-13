@@ -64,10 +64,15 @@ failure. Startup asks Git for registered worktrees and records `PRESENT`,
 snapshot adopts a commit or dirty state that completed before the crash even if
 Task Monki never saved the completion event.
 
-A missing worktree is not recreated during startup. The next explicit Prepare
-action revalidates the repository and creates the same Task Monki-owned
-worktree record, branch, and iteration. It refuses conflicting paths or branch
-ownership through the existing worktree checks.
+A missing worktree is not recreated during startup. Explicit restoration keeps
+the same worktree record, branch, iteration, and recorded base. It recreates the
+last verified commit, or the base when no later commit was recorded. An existing
+branch at another commit blocks recreation. Restoration never transfers dirty
+files or silently changes the base. Start requires an already prepared worktree.
+
+Existing Design worktrees use ordinary verification before Git evidence refresh.
+Their observed HEAD can advance after publication. Exact-commit checks apply
+when a worktree must be recreated, not when observing a new Design commit.
 
 External checkout verification never creates directories, changes permissions,
 switches branches, or removes checkout files. A moved external checkout requires

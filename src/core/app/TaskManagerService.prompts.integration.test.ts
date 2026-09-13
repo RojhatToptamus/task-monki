@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import {
   TaskMonkiScenarioRegistry
 } from '../../testSupport/taskMonkiScenario';
@@ -19,6 +20,7 @@ describe('TaskManagerService prompt composition', () => {
       title: 'Steer safely',
       prompt: 'Update the progress panel.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
 
     await scenario.service.steerRun({
@@ -50,6 +52,7 @@ describe('TaskManagerService prompt composition', () => {
       title: 'Recover prompt',
       prompt: 'Recover the task after provider ambiguity.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     await scenario.transitionRun(
       run.id,
@@ -100,6 +103,7 @@ describe('TaskManagerService prompt composition', () => {
       title: 'Retry prompt',
       prompt: 'Complete the original implementation safely.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     await scenario.transitionRun(
       run.id,
@@ -140,6 +144,7 @@ describe('TaskManagerService prompt composition', () => {
       title: 'Successful implementation',
       prompt: 'Complete this implementation once.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     await scenario.transitionRun(
       run.id,

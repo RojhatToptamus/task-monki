@@ -333,6 +333,30 @@ routes:
     expect(html).toContain('Routes stay on the active generation until readiness');
   });
 
+  it('distinguishes the latest Git capture, stale source, and unknown freshness', () => {
+    const current = renderToStaticMarkup(
+      <PreviewWorkspace {...previewProps({ approved: true, generation: activeGeneration() })} />
+    );
+    const stale = renderToStaticMarkup(
+      <PreviewWorkspace {...previewProps({
+        approved: true,
+        generation: { ...activeGeneration(), freshness: 'STALE' }
+      })} />
+    );
+    const unknown = renderToStaticMarkup(
+      <PreviewWorkspace {...previewProps({
+        approved: true,
+        generation: { ...activeGeneration(), freshness: 'UNKNOWN' }
+      })} />
+    );
+
+    expect(current).toContain('Matches latest Git capture');
+    expect(current).not.toContain('Source current');
+    expect(stale).toContain('Source changed after capture');
+    expect(unknown).toContain('Freshness against the latest worktree state is unknown');
+    expect(unknown).toContain('Replace');
+  });
+
   it('explains failed replacement readiness without exposing raw failure text', () => {
     const active = activeGeneration();
     const failed = generationFixture({

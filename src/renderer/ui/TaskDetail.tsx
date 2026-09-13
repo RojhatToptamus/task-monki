@@ -62,7 +62,6 @@ import type { TaskAttachmentRecord } from '../../shared/attachments';
 import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import {
   canCreateDeliveryCommit,
-  canPrepareWorktree,
   canStartRun
 } from '../model/selectors';
 import { describeHealthFinding } from '../model/debugDiagnostics';
@@ -93,6 +92,7 @@ import {
 import {
   canRequestReviewChanges,
   describeRunFailureBanner,
+  describeTaskCompletionEvidence,
   describeTaskHeaderState
 } from '../model/taskView';
 import {
@@ -166,6 +166,7 @@ interface TaskDetailProps {
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
   gitSnapshots: GitSnapshotRecord[];
+  postRunEvidencePendingRunIds?: string[];
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -204,6 +205,7 @@ interface TaskDetailProps {
   reviewDisabledReason?: string;
   previewRecipeGenerationDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
+  worktreePreparationPending?: boolean;
   onStart(taskId: string, instruction?: string): Promise<void>;
   onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
   onReconnectWorktree?(taskId: string, worktreePath: string): Promise<void>;
@@ -306,7 +308,11 @@ export function TaskDetail(props: TaskDetailProps) {
   } = props;
   const [tab, setTab] = useState<DetailTab>('overview');
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
-  const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
+  const [reviewRequest, setReviewRequest] = useState<{
+    reviewRunId: string;
+    sourceRunId?: string;
+  }>();
+  const requestDrawerOpen = Boolean(reviewRequest);
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
@@ -357,6 +363,9 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewMascotHoldActive = reviewMascotHoldGeneration > 0;
   const reviewActiveForMascot = reviewMascotHoldActive || reviewIsRunning;
   const headerState = task ? describeTaskHeaderState(task) : undefined;
+  const completionEvidence = task
+    ? describeTaskCompletionEvidence(task, props.events)
+    : undefined;
   const prStatus = task
     ? buildPrStatusViewModel({
         task,
@@ -402,7 +411,7 @@ export function TaskDetail(props: TaskDetailProps) {
     setExistingWorkModal(undefined);
     setReviewStartPending(false);
     setReviewMascotHoldGeneration(0);
-    setRequestDrawerOpen(false);
+    setReviewRequest(undefined);
     setSelectedReviewFindingIds([]);
     setRequestNote('');
     setRequestReviewOutput(undefined);
@@ -471,7 +480,6 @@ export function TaskDetail(props: TaskDetailProps) {
       'ACTIVE_TURN_STEERING'
     ).supported
   );
-  const promptLineCount = task.prompt.split(/\r?\n/).length;
   const reviewFindings = reviewGate.result?.findings ?? [];
   const reviewActivity = buildReviewActivityViewModel({
     reviewRun,
@@ -508,6 +516,22 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewActionsPausedReason: ReviewActionPauseReason | undefined =
     deliveryActionBusy ? 'delivery-running' : reviewPauseReason;
   const reviewActionsPaused = Boolean(reviewActionsPausedReason);
+  const reviewHasOutput =
+    Boolean(reviewGate.result) ||
+    Boolean(
+      reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
+      (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
+    );
+  const reviewHasActionableFindings =
+    hasActionableReviewSource &&
+    canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
+  const requestChangesStillValid = Boolean(
+    reviewRequest &&
+    reviewRequest.reviewRunId === reviewGate.runId &&
+    reviewRequest.sourceRunId === actionableReviewSourceRun?.id &&
+    reviewHasActionableFindings &&
+    !reviewActionsPaused
+  );
   const deliverySourceRun =
     (task.currentRunId
       ? props.runs.find((candidate) => candidate.id === task.currentRunId && candidate.mode !== 'REVIEW')
@@ -550,11 +574,9 @@ export function TaskDetail(props: TaskDetailProps) {
         preferredRun: run,
         runs: props.runs,
         planRevisions,
-        items: props.items,
-        gitSnapshot,
-        ciStatus: ciRollup?.status ?? task.projection.ciChecks
+        items: props.items
       }),
-    [run, props.runs, planRevisions, props.items, gitSnapshot, ciRollup?.status, task.projection.ciChecks]
+    [run, props.runs, planRevisions, props.items]
   );
   // The run the progress card reflects (for its RunHeader's elapsed timer + Stop)
   // and its scope in mono (audit §05 RunHeader row).
@@ -563,8 +585,11 @@ export function TaskDetail(props: TaskDetailProps) {
     : undefined;
   const runProgressScope = describeGitSnapshot(gitSnapshot);
   const evidenceGitSnapshot = evidenceGitSnapshotId
-    ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId) ?? gitSnapshot
+    ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId)
     : gitSnapshot;
+  const evidenceGitSnapshotIsHistorical = Boolean(
+    evidenceGitSnapshotId && evidenceGitSnapshotId !== gitSnapshot?.id
+  );
 
   const runReviewAction = async (action: () => Promise<void>) => {
     if (reviewActionInFlightRef.current) {
@@ -635,16 +660,10 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const openRequestChanges = async (findingIds?: string[]) => {
-    const hasReviewOutput =
-      Boolean(reviewGate.result) ||
-      Boolean(
-        reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
-        (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
-      );
     if (
-      !hasActionableReviewSource ||
+      !reviewGate.runId ||
       reviewActionsPaused ||
-      !canRequestReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
+      !reviewHasActionableFindings
     ) {
       return;
     }
@@ -665,21 +684,24 @@ export function TaskDetail(props: TaskDetailProps) {
     setRequestInstruction(
       buildReviewFollowUpInstruction(task, reviewGate, reviewOutput, selectedIds)
     );
-    setRequestDrawerOpen(true);
+    setReviewRequest({
+      reviewRunId: reviewGate.runId,
+      sourceRunId: actionableReviewSourceRun?.id
+    });
   };
 
   const submitRequestChanges = async () => {
-    if (!hasActionableReviewSource || !requestInstruction.trim() || reviewActionsPaused) {
+    if (!reviewRequest || !requestInstruction.trim() || !requestChangesStillValid) {
       return;
     }
     await runReviewAction(async () => {
       try {
-        if (actionableReviewSourceRun) {
-          await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim());
+        if (reviewRequest.sourceRunId) {
+          await props.onContinue(reviewRequest.sourceRunId, requestInstruction.trim());
         } else {
           await props.onStart(task.id, requestInstruction.trim());
         }
-        setRequestDrawerOpen(false);
+        setReviewRequest(undefined);
       } catch {
         // The app shell reports the error. Keep the drawer open so the user can retry.
       }
@@ -863,6 +885,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const primaryAction = getPrimaryAction({
     task,
+    worktreePreparationPending: props.worktreePreparationPending,
     worktree,
     onPrepareWorktree: props.onPrepareWorktree,
     onStart: externalWork ? async () => setExistingWorkModal('instruction') : props.onStart
@@ -951,15 +974,6 @@ export function TaskDetail(props: TaskDetailProps) {
 
   // The single "what next" model for the rail. Kept in one place so the header,
   // run surface, and rail all agree instead of each inventing an action.
-  const reviewHasOutput =
-    Boolean(reviewGate.result) ||
-    Boolean(
-      reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
-      (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
-    );
-  const reviewHasActionableFindings =
-    hasActionableReviewSource &&
-    canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
   const nextAction = selectNextAction({
     task,
     reviewStatus: reviewPending ? 'RUNNING' : reviewGate.status,
@@ -1044,6 +1058,12 @@ export function TaskDetail(props: TaskDetailProps) {
             </div>
             <div className="tm-detail__context">
               <Chip tone={headerState.tone} label={headerState.label} />
+              {completionEvidence ? (
+                <details className="tm-detail__completion-source">
+                  <summary>{completionEvidence.label}</summary>
+                  <p>{completionEvidence.detail}</p>
+                </details>
+              ) : null}
               <div id={repositoryContextId} className="tm-detail__meta">
                 <span>
                   {props.repository?.name ?? 'Unknown repository'}
@@ -1156,7 +1176,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
         {tab === 'overview' ? (
           <div className="tm-overview">
-            {/* WORK STREAM — live run state on top, static request collapsed below. */}
+            {/* Action and recovery risks first, then the request and execution. */}
             <div className="tm-overview__col">
               <InteractionPanel
                 interactions={interactions}
@@ -1181,6 +1201,49 @@ export function TaskDetail(props: TaskDetailProps) {
                 </div>
               ) : null}
 
+              <RequestCard
+                prompt={task.prompt}
+                attachments={props.attachments}
+                summaryLine={`${model}/${effort} · ${formatAgentPermissionMode(
+                  displayedAgentSettings
+                )}${
+                  props.attachments.length > 0
+                    ? ` · ${props.attachments.length} ${
+                        props.attachments.length === 1 ? 'attachment' : 'attachments'
+                      }`
+                    : ''
+                }`}
+                hasRun={Boolean(run)}
+                config={
+                  <>
+                    <ConfigRow k="Model / effort" v={`${model} / ${effort}`} />
+                    <ConfigRow
+                      k="Permissions"
+                      v={formatAgentPermissionMode(displayedAgentSettings)}
+                    />
+                    <ConfigRow k="Network" v={formatAgentNetworkAccess(displayedAgentSettings)} />
+                    <ConfigRow
+                      k={externalWork ? 'Comparison base' : 'Base'}
+                      v={worktree ? `${worktree.baseRef ?? 'Detached HEAD'} @ ${worktree.baseSha.slice(0, 12)}` : 'Not selected'}
+                    />
+                    <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
+                    {externalWork && worktree ? <>
+                      <ConfigRow k="Checkout" v={worktree.worktreePath} />
+                      <div className="tm-config__actions">
+                        <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                          title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                          onClick={() => void runReviewAction(async () => { await props.onRefreshEvidence?.(task.id); })}>Refresh checkout</button>
+                        {['MISSING', 'ERROR'].includes(worktree.status) ? (
+                          <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                            title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                            onClick={() => setExistingWorkModal('reconnect')}>Reconnect checkout</button>
+                        ) : null}
+                      </div>
+                    </> : null}
+                  </>
+                }
+              />
+
               <TaskWorkPanels>
                 {runProgress ? (
                   <RunProgressCard
@@ -1192,6 +1255,7 @@ export function TaskDetail(props: TaskDetailProps) {
                       progressRun ? (
                         <CompletedChangeSummaryPanel
                           run={progressRun}
+                          capturePending={props.postRunEvidencePendingRunIds?.includes(progressRun.id)}
                           gitSnapshots={gitSnapshots}
                           artifacts={props.artifacts}
                           onViewDiff={(snapshotId) => {
@@ -1242,6 +1306,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
                 <AgentControlPanel
                   run={run}
+                  worktree={worktree}
                   requiresRecovery={implementationRetryRequired}
                   activeTurnSteeringSupported={activeTurnSteeringSupported}
                   interactions={interactions}
@@ -1251,46 +1316,6 @@ export function TaskDetail(props: TaskDetailProps) {
                   onRetry={props.onRetry}
                 />
               </TaskWorkPanels>
-
-              <RequestCard
-                prompt={task.prompt}
-                promptLineCount={promptLineCount}
-                attachments={props.attachments}
-                summaryLine={`${model}/${effort} · ${formatAgentPermissionMode(
-                  displayedAgentSettings
-                )} · ${promptLineCount}-line prompt${
-                  props.attachments.length > 0
-                    ? ` · ${props.attachments.length} ${
-                        props.attachments.length === 1 ? 'attachment' : 'attachments'
-                      }`
-                    : ''
-                }`}
-                hasRun={Boolean(run)}
-                config={
-                  <>
-                    <ConfigRow k="Model / effort" v={`${model} / ${effort}`} />
-                    <ConfigRow
-                      k="Permissions"
-                      v={formatAgentPermissionMode(displayedAgentSettings)}
-                    />
-                    <ConfigRow k="Network" v={formatAgentNetworkAccess(displayedAgentSettings)} />
-                    <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
-                    {externalWork && worktree ? <>
-                      <ConfigRow k="Checkout" v={worktree.worktreePath} />
-                      <div className="tm-config__actions">
-                        <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
-                          title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
-                          onClick={() => void runReviewAction(async () => { await props.onRefreshEvidence?.(task.id); })}>Refresh checkout</button>
-                        {['MISSING', 'ERROR'].includes(worktree.status) ? (
-                          <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
-                            title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
-                            onClick={() => setExistingWorkModal('reconnect')}>Reconnect checkout</button>
-                        ) : null}
-                      </div>
-                    </> : null}
-                  </>
-                }
-              />
             </div>
 
             {/* CONTEXT RAIL — delivery state and history stay secondary to the
@@ -1339,7 +1364,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
         {tab === 'evidence' ? (
           <div className="tm-evtab">
-            {externalWork && worktree ? (
+            {externalWork && worktree && !evidenceGitSnapshotIsHistorical ? (
               <div className="tm-evtab__toolbar">
                 <span className="tm-evtab__comparison" title={`${worktree.baseRef} · ${worktree.baseSha}`}>
                   Compare against <code>{worktree.baseRef} · {worktree.baseSha.slice(0, 8)}</code>
@@ -1354,6 +1379,7 @@ export function TaskDetail(props: TaskDetailProps) {
               run={run}
               worktree={worktree}
               gitSnapshot={evidenceGitSnapshot}
+              historicalCapture={evidenceGitSnapshotIsHistorical}
               githubRepository={props.githubRepository}
               branchPublication={props.branchPublication}
               pullRequest={pullRequest}
@@ -1461,10 +1487,14 @@ export function TaskDetail(props: TaskDetailProps) {
           note={requestNote}
           instruction={requestInstruction}
           busy={reviewActionBusy}
+          disabled={!requestChangesStillValid}
+          disabledReason={requestChangesStillValid
+            ? undefined
+            : 'The review or implementation changed. Close this request and inspect the current review.'}
           onToggleFinding={toggleSelectedReviewFinding}
           onNoteChange={updateRequestNote}
           onInstructionChange={setRequestInstruction}
-          onCancel={() => setRequestDrawerOpen(false)}
+          onCancel={() => setReviewRequest(undefined)}
           onSubmit={() => void submitRequestChanges()}
           fallbackReturnFocusRef={detailRootRef}
         />
@@ -1493,22 +1523,14 @@ function ConfigRow({ k, v }: { k: string; v: string }) {
   );
 }
 
-/**
- * The task's static request (prompt + run config). It outranks live state on
- * the current page (audit §04: "static config outranks live state"), so once a
- * run exists it collapses to a one-line summary and expands on demand; before a
- * run it stays open as the primary thing on the page.
- */
 export function RequestCard({
   prompt,
-  promptLineCount,
   attachments,
   summaryLine,
   config,
   hasRun
 }: {
   prompt: string;
-  promptLineCount: number;
   attachments: TaskAttachmentRecord[];
   summaryLine: string;
   config: ReactNode;
@@ -1547,13 +1569,9 @@ export function RequestCard({
           </ul>
         </div>
       ) : null}
-      <details className="tm-raw tm-requestcard__prompt">
-        <summary>
-          <DisclosureChevron />
-          <span>Prompt · {promptLineCount} lines</span>
-        </summary>
+      <div className="tm-raw tm-requestcard__prompt">
         <pre>{prompt}</pre>
-      </details>
+      </div>
     </details>
   );
 }
@@ -1964,6 +1982,7 @@ function healthFindingTone(severity: Finding['severity']): Tone {
 function getPrimaryAction(input: {
   task: Task;
   worktree?: WorktreeRecord;
+  worktreePreparationPending?: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
 }): { label: string; disabled?: boolean; onClick(): void } | undefined {
@@ -1971,15 +1990,19 @@ function getPrimaryAction(input: {
     return undefined;
   }
 
-  if (canPrepareWorktree(input.task)) {
+  if (!input.worktree || ['REMOVED', 'MISSING', 'ERROR'].includes(input.worktree.status)) {
     if (input.worktree?.ownership === 'EXTERNAL') return undefined;
     return {
-      label: 'Prepare worktree',
+      label: input.worktreePreparationPending ? 'Inspecting base…'
+        : input.worktree?.status === 'MISSING' ? 'Restore worktree'
+        : input.worktree?.status === 'ERROR' ? 'Retry worktree setup'
+        : 'Prepare worktree',
+      disabled: input.worktreePreparationPending,
       onClick: () => void input.onPrepareWorktree(input.task.id)
     };
   }
 
-  if (canStartRun(input.task)) {
+  if (input.worktree.status === 'PRESENT' && canStartRun(input.task)) {
     return {
       label: 'Start implementation',
       onClick: () => void input.onStart(input.task.id)

@@ -24,6 +24,7 @@ import type {
   InspectOpenTargetRequest,
   ImportDesignReferenceAssetRequest,
   PrepareWorktreeRequest,
+  InspectWorktreePreparationRequest,
   ApprovePreviewPlanRequest,
   OpenPreviewRequest,
   PublishBranchRequest,
@@ -261,6 +262,8 @@ const api: TaskManagerApi = {
   cancelPromptRefinement: (input: CancelPromptRefinementRequest) =>
     invokeIpc('prompt:refine:cancel', input),
   prepareWorktree: (input: PrepareWorktreeRequest) => invokeIpc('worktree:prepare', input),
+  inspectWorktreePreparation: (input: InspectWorktreePreparationRequest) =>
+    invokeIpc('worktree:inspectPreparation', input),
   startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),
   steerRun: (input: SteerRunRequest) => invokeIpc('agent:steerRun', input),
   continueRun: (input: ContinueRunRequest) =>
