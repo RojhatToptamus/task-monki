@@ -1,3 +1,4 @@
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
@@ -86,7 +87,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     await git(scenario.repositoryPath, ['add', '.taskmonki/preview.yaml', 'server.mjs']);
     await git(scenario.repositoryPath, ['commit', '-m', 'Use local backend binding']);
     const task = await scenario.createTask({ title: 'Frontend binding' });
-    await scenario.service.prepareWorktree({ taskId: task.id });
+    await prepareTestWorktree(scenario.service, task.id);
 
     const required = await scenario.service.resolvePreview({
       taskId: task.id,
@@ -170,8 +171,8 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     });
     const producer = await scenario.createTask({ title: 'Backend producer' });
     const consumer = await scenario.createTask({ title: 'Frontend consumer' });
-    const producerWorktree = await scenario.service.prepareWorktree({ taskId: producer.id });
-    const consumerWorktree = await scenario.service.prepareWorktree({ taskId: consumer.id });
+    const producerWorktree = await prepareTestWorktree(scenario.service, producer.id);
+    const consumerWorktree = await prepareTestWorktree(scenario.service, consumer.id);
     await fs.mkdir(path.join(producerWorktree.worktreePath, '.taskmonki'), { recursive: true });
     await fs.mkdir(path.join(consumerWorktree.worktreePath, '.taskmonki'), { recursive: true });
     await fs.writeFile(
@@ -335,7 +336,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
       branchName: (await git(scenario.repositoryPath, ['branch', '--show-current'])).trim(),
       baseRef: 'HEAD', title: 'Imported Preview', prompt: 'Inspect existing work.'
     }) : await scenario.createTask({ title: 'Preview vertical slice' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'captured-untracked');
     const statusBefore = await git(worktree.worktreePath, ['status', '--porcelain=v1', '-uall']);
 
@@ -404,7 +405,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
   it('retains every concurrent attachment-readiness result in generation evidence', async () => {
     const scenario = await previewScenario('task-monki-preview-attachment-evidence');
     const task = await scenario.createTask({ title: 'Concurrent attachment evidence' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const target = net.createServer((socket) => socket.end());
     await new Promise<void>((resolve, reject) => {
       target.once('error', reject);
@@ -449,7 +450,7 @@ routes:
   it('invalidates approval for capability changes and never starts the changed command', async () => {
     const scenario = await previewScenario('task-monki-preview-approval');
     const task = await scenario.createTask();
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const first = await scenario.service.resolvePreview({ taskId: task.id });
     if (first.status !== 'PLAN') throw new Error('Expected a preview plan.');
     await scenario.service.approvePreviewPlan({
@@ -473,7 +474,7 @@ routes:
   it('cuts over a ready replacement atomically and preserves the active generation when the next candidate fails', async () => {
     const scenario = await previewScenario('task-monki-preview-replacement');
     const task = await scenario.createTask({ title: 'Atomic replacement' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'version-one');
     const resolved = await scenario.service.resolvePreview({ taskId: task.id });
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
@@ -533,7 +534,7 @@ http.createServer((request, response) => {
   it('hands off an exclusive worker without overlap and restores the old graph after candidate activation fails', async () => {
     const scenario = await previewScenario('task-monki-preview-exclusive-handoff');
     const task = await scenario.createTask({ title: 'Exclusive worker handoff' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const lockPath = path.join(scenario.repositoryPath, 'exclusive-worker.lock');
     const overlapPath = path.join(scenario.repositoryPath, 'exclusive-worker-overlap');
     await fs.writeFile(path.join(worktree.worktreePath, 'server.mjs'), `
@@ -601,7 +602,7 @@ process.exit(7);
   it('runs a shared install, multiple services, typed origins, TCP and argv probes, routes, and a bounded worker restart', async () => {
     const scenario = await previewScenario('task-monki-preview-phase-two');
     const task = await scenario.createTask({ title: 'Phase 2 native graph' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'scripts', 'install.mjs'), `
 import fs from 'node:fs/promises';
 const path = 'install-count.txt';
@@ -706,7 +707,7 @@ routes:
   it('refuses cutover when an argv-ready route port is not owned by its service', async () => {
     const scenario = await previewScenario('task-monki-preview-unowned-route');
     const task = await scenario.createTask({ title: 'Unowned routed port' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'health-only.mjs'), `
 import http from 'node:http';
 http.createServer((_request, response) => response.end('health')).listen(Number(process.env.HEALTH_PORT), '127.0.0.1');
@@ -737,7 +738,7 @@ routes:
   it('waits for an in-flight argv liveness probe before removing its generation', async () => {
     const scenario = await previewScenario('task-monki-preview-probe-stop');
     const task = await scenario.createTask({ title: 'Probe shutdown ownership' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'worker.mjs'), 'setInterval(() => {}, 1000);\n');
     await fs.writeFile(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'), `
 version: 1
@@ -782,7 +783,7 @@ routes:
   it('stops graph supervision before cleaning a generation whose cutover persistence fails', async () => {
     const scenario = await previewScenario('task-monki-preview-cutover-cleanup');
     const task = await scenario.createTask({ title: 'Cutover cleanup ownership' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const recipePath = path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml');
     const recipe = await fs.readFile(recipePath, 'utf8');
     await fs.writeFile(
@@ -820,7 +821,7 @@ routes:
   it('fails and cleans an active generation when a critical worker exhausts liveness policy', async () => {
     const scenario = await previewScenario('task-monki-preview-critical-worker');
     const task = await scenario.createTask({ title: 'Critical worker liveness' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'worker.mjs'), 'setInterval(() => {}, 1000);\n');
     await fs.writeFile(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'), `
 version: 1
@@ -864,7 +865,7 @@ routes:
   it('records bounded job failure evidence and blocks service start', async () => {
     const scenario = await previewScenario('task-monki-preview-job-failure', true);
     const task = await scenario.createTask();
-    await scenario.service.prepareWorktree({ taskId: task.id });
+    await prepareTestWorktree(scenario.service, task.id);
     const resolved = await scenario.service.resolvePreview({ taskId: task.id });
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
     await scenario.service.approvePreviewPlan({
@@ -1052,7 +1053,7 @@ routes:
       scenario.createTask({ title: 'Preview B' }),
       scenario.createTask({ title: 'Preview C' })
     ]);
-    await Promise.all(tasks.map((task) => scenario.service.prepareWorktree({ taskId: task.id })));
+    await Promise.all(tasks.map((task) => prepareTestWorktree(scenario.service, task.id)));
     for (const task of tasks) {
       const resolved = await scenario.service.resolvePreview({ taskId: task.id });
       if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
@@ -1091,7 +1092,7 @@ routes:
   it('keeps one active graph and stable routes when replacing a preview', async () => {
     const scenario = await previewScenario('task-monki-preview-replacement');
     const task = await scenario.createTask({ title: 'Preview replacement' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const resolved = await scenario.service.resolvePreview({ taskId: task.id });
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
     await scenario.service.approvePreviewPlan({
@@ -1123,7 +1124,7 @@ routes:
   it('blocks capture during agent work and cleans a verified preview before task deletion', async () => {
     const scenario = await previewScenario('task-monki-preview-delete');
     const activeTask = await scenario.createTask({ title: 'Active agent preview guard' });
-    const activeWorktree = await scenario.service.prepareWorktree({ taskId: activeTask.id });
+    const activeWorktree = await prepareTestWorktree(scenario.service, activeTask.id);
     const activePlan = await scenario.service.resolvePreview({ taskId: activeTask.id });
     if (activePlan.status !== 'PLAN') throw new Error('Expected plan.');
     await scenario.service.approvePreviewPlan({
@@ -1138,7 +1139,7 @@ routes:
     expect(await fs.access(activeWorktree.worktreePath).then(() => true)).toBe(true);
 
     const task = await scenario.createTask({ title: 'Delete running preview' });
-    await scenario.service.prepareWorktree({ taskId: task.id });
+    await prepareTestWorktree(scenario.service, task.id);
     const resolved = await scenario.service.resolvePreview({ taskId: task.id });
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
     await scenario.service.approvePreviewPlan({
@@ -1268,7 +1269,7 @@ defaultScenario: full
       await git(scenario.repositoryPath, ['add', '.']);
       await git(scenario.repositoryPath, ['commit', '-m', 'Add OCI preview stack fixture']);
       const task = await scenario.createTask({ title: 'Full OCI stack' });
-      await scenario.service.prepareWorktree({ taskId: task.id });
+      await prepareTestWorktree(scenario.service, task.id);
       const resolved = await scenario.service.resolvePreview({ taskId: task.id, scenarioId: 'full' });
       if (resolved.status !== 'PLAN') throw new Error('Expected OCI preview plan.');
       await scenario.service.approvePreviewPlan({
@@ -1365,7 +1366,7 @@ routes:
 
 async function prepareApprovedPreview(scenario: TaskMonkiScenario) {
   const task = await scenario.createTask();
-  await scenario.service.prepareWorktree({ taskId: task.id });
+  await prepareTestWorktree(scenario.service, task.id);
   const resolved = await scenario.service.resolvePreview({ taskId: task.id });
   if (resolved.status !== 'PLAN') throw new Error('Expected preview plan.');
   await scenario.service.approvePreviewPlan({

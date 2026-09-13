@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import type { AgentPlanRevisionRecord, RunRecord } from '../../shared/contracts';
 import {
   makeAgentItemRecord as itemFixture,
-  makeGitSnapshotRecord as gitSnapshotFixture,
   makeRawMessage,
   makeRunRecord as runFixture
 } from '../../testSupport/rendererRecords';
@@ -157,7 +156,7 @@ describe('run progress model', () => {
     ]);
   });
 
-  it('shows the final provider plan with a compact local-evidence footer', () => {
+  it('shows the final provider plan without treating agent completion as verification', () => {
     const run = runFixture({
       id: 'run-1',
       status: 'COMPLETED',
@@ -185,9 +184,7 @@ describe('run progress model', () => {
           payload: { text: 'Progress: Running final verification.' },
           providerCompletedAt: '2026-07-07T10:09:00.000Z'
         })
-      ],
-      gitSnapshot: gitSnapshotFixture({ committedDiffFileCount: 3 }),
-      ciStatus: 'PASSING'
+      ]
     });
 
     expect(view).toMatchObject({
@@ -195,9 +192,8 @@ describe('run progress model', () => {
       headerLabel: 'Final plan',
       activityTail: [],
       footer: {
-        title: 'Completed',
-        detail: '3 files changed · verification passed',
-        tone: 'success'
+        title: 'Agent run completed',
+        tone: 'neutral'
       }
     });
     expect(view?.activityTail).toEqual([]);

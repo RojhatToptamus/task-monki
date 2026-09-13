@@ -154,6 +154,15 @@ restore or quarantine data automatically.
 
 ## Schema Upgrades
 
+SQLite migration 4 invalidates review projections that combine one review run
+with another run's final artifact. It resets only those review gates to
+`NOT_RUN`. Users must run a new review. Historical runs,
+events, and artifact bytes remain unchanged. The normal verified backup and
+migration transaction protect the upgrade.
+
+Diagnostic messages can contain whitespace and line breaks from command output.
+Validation checks their string type. Identifier validation remains strict.
+
 SQLite migration 3 adds an empty custom agent profile library to settings schema
 12 and advances the settings payload to schema 13. Existing preferences remain
 unchanged. Tasks and Designs retain their creation-time profile selection in their existing

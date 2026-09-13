@@ -2,11 +2,13 @@ import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
   BoardTaskSummary,
+  DomainEvent,
   Repository,
   Task,
   WorkflowPhase
 } from '../../shared/contracts';
 import {
+  completionPolicyRequiresMerge,
   getImplementationRetryReason
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
@@ -46,6 +48,51 @@ export interface RunFailureBannerViewModel {
   status: 'FAILED' | 'LOST' | 'RECOVERY_REQUIRED' | 'NEEDS_RETRY';
   title: string;
   detail: string;
+}
+
+export interface TaskCompletionEvidenceViewModel {
+  label: 'Marked done' | 'Auto-completed' | 'Completion unknown';
+  detail: string;
+}
+
+export function describeTaskCompletionEvidence(
+  task: Pick<Task, 'id' | 'workflowPhase' | 'completionPolicy' | 'projection'>,
+  events: readonly DomainEvent[]
+): TaskCompletionEvidenceViewModel | undefined {
+  if (task.workflowPhase !== 'DONE') {
+    return undefined;
+  }
+  const latestTransition = events
+    .filter((event) => event.taskId === task.id && event.type === 'TRANSITION_COMPLETED')
+    .reduce<DomainEvent | undefined>(
+      (latest, event) => !latest || event.receivedAt > latest.receivedAt ? event : latest,
+      undefined
+    );
+  const markedDone = Boolean(
+    latestTransition?.source === 'ui' &&
+    typeof latestTransition.payload === 'object' &&
+    latestTransition.payload !== null &&
+    (latestTransition.payload as Record<string, unknown>).toPhase === 'DONE'
+  );
+  if (markedDone) {
+    return {
+      label: 'Marked done',
+      detail: 'Accepted in Task Monki. This records acceptance, not independent verification.'
+    };
+  }
+  if (
+    completionPolicyRequiresMerge(task.completionPolicy) &&
+    (task.projection.merge === 'MERGED' || task.projection.githubPullRequest === 'MERGED')
+  ) {
+    return {
+      label: 'Auto-completed',
+      detail: 'Completed from the task merge policy. Human acceptance was not recorded.'
+    };
+  }
+  return {
+    label: 'Completion unknown',
+    detail: 'Task Monki cannot establish how this task reached Done.'
+  };
 }
 
 export function describeRunFailureBanner(

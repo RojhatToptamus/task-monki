@@ -103,7 +103,9 @@ export function selectPreviewOverviewProjection(
         .map((id) => view.actions.find((action) => action.id === id))
         .find((action): action is PreviewActionModel => Boolean(action));
   const secondaryAction = hasServingGeneration && (
-    view.status === 'Running · stale' || Boolean(view.failedReplacementGeneration)
+    view.status === 'Running · stale' ||
+    view.status === 'Running · freshness unknown' ||
+    Boolean(view.failedReplacementGeneration)
   ) ? startAction : undefined;
   const route = openGeneration?.routes.find((candidate) => candidate.state === 'ATTACHED');
 
@@ -154,8 +156,11 @@ function previewOverviewSummary(view: PreviewViewModel): string {
   if (view.status === 'Running · stale' && activeId) {
     return `Source changed after ${activeId} · still serving captured code`;
   }
+  if (view.status === 'Running · freshness unknown' && activeId) {
+    return `Serving ${activeId} · freshness against the worktree is unknown`;
+  }
   if (view.status === 'Running' && activeId) {
-    return `Serving ${activeId} · source current`;
+    return `Serving ${activeId} · matches latest Git capture`;
   }
   if (view.status === 'Stopped') return summarizeStoppedPreview(view.plan, true);
   return view.summary;
@@ -612,7 +617,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
       tone: 'action',
       summary: plan.executionPlan.adapter === 'COMPOSE'
         ? 'Task Monki is preparing the stable Compose project. Routes may be temporarily detached once activation begins.'
-        : 'The current preview remains available while Task Monki prepares and verifies its replacement.',
+        : 'The current preview remains available while Task Monki starts its replacement and checks configured readiness.',
       plan,
       approval,
       generation: replacementGeneration,
@@ -628,14 +633,22 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
   if (generation.state === 'READY') {
     const setupRecovery = evaluateSetupRecovery(input, plan, currentFailedReplacement);
     const composeResetRequired = currentFailedReplacement?.composeChange === 'DESTRUCTIVE_RESET_REQUIRED';
+    const freshnessUnknown = generation.freshness === 'UNKNOWN';
     return {
-      status: generation.freshness === 'STALE' ? 'Running · stale' : 'Running',
-      tone: generation.freshness === 'STALE' ? 'warning' : 'success',
+      status:
+        generation.freshness === 'STALE'
+          ? 'Running · stale'
+          : freshnessUnknown
+            ? 'Running · freshness unknown'
+            : 'Running',
+      tone: generation.freshness === 'CURRENT' ? 'success' : 'warning',
       summary:
         currentFailedReplacement
           ? 'The current preview is still serving captured source. Its latest replacement did not reach readiness.'
           : generation.freshness === 'STALE'
             ? 'This preview still serves its captured source. The task changed after capture.'
+            : freshnessUnknown
+              ? 'This preview is serving captured source, but Task Monki cannot compare it with the latest worktree state.'
             : plan.executionPlan.adapter === 'COMPOSE'
               ? 'The task-scoped Compose project is ready and the stable Task Monki routes are attached.'
               : 'All required nodes are ready and the stable Task Monki routes are attached.',

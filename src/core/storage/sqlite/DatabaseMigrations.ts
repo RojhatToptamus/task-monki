@@ -1360,6 +1360,29 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
           record_revision = record_revision + 1
       WHERE json_extract(settings_json, '$.schemaVersion') = 12
         AND json_type(settings_json, '$.agentProfiles') IS NULL;`
+  },
+  {
+    version: 4,
+    name: 'invalidate-mixed-review-results',
+    // Older terminal events could replace a newer review's result without
+    // replacing its run identity. Preserve history and require a fresh review.
+    sql: `UPDATE tasks
+      SET payload_json = json_set(
+            payload_json,
+            '$.projection.agentReview', json_object('status', 'NOT_RUN'),
+            '$.projection.summary', 'Run agent review again to refresh this result.'),
+          record_revision = record_revision + 1
+      WHERE EXISTS (
+        SELECT 1 FROM runtime_artifacts AS artifact
+        JOIN runtime_runs AS review_run
+          ON review_run.id = json_extract(tasks.payload_json, '$.projection.agentReview.runId')
+        WHERE artifact.id = json_extract(tasks.payload_json, '$.projection.agentReview.finalArtifactId')
+          AND artifact.owner_kind = 'TASK' AND artifact.task_id = tasks.id
+          AND artifact.kind = 'FINAL'
+          AND review_run.owner_kind = 'TASK' AND review_run.task_id = tasks.id
+          AND json_extract(review_run.payload_json, '$.purpose') = 'TASK_REVIEW'
+          AND artifact.run_id <> review_run.id
+      );`
   }
 ] as const;
 

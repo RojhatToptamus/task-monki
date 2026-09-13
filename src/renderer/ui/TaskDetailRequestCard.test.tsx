@@ -27,9 +27,8 @@ describe('RequestCard attachments', () => {
     const html = renderToStaticMarkup(
       <RequestCard
         prompt="Implement the task."
-        promptLineCount={1}
         attachments={attachments}
-        summaryLine="Model · 1-line prompt · 2 attachments"
+        summaryLine="Model · 2 attachments"
         config={<span>Configuration</span>}
         hasRun={false}
       />
@@ -40,7 +39,7 @@ describe('RequestCard attachments', () => {
     expect(html).toContain('&lt;unsafe&gt;.svg');
     expect(html).toContain('Image · 1 MB');
     expect(html).toContain('Text · 42 KB');
-    expect(html.indexOf('Configuration')).toBeLessThan(html.indexOf('Prompt · 1 lines'));
+    expect(html).toContain('Implement the task.');
     expect(html).not.toContain('<img');
     expect(html).not.toContain('<object');
     expect(html).not.toContain('<iframe');

@@ -2,8 +2,6 @@ import type {
   AgentItemRecord,
   AgentPlanRevisionRecord,
   AgentPlanStep,
-  CiChecksStatus,
-  GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
 import {
@@ -95,8 +93,6 @@ export function buildRunProgressViewModel(input: {
   runs: RunRecord[];
   planRevisions: AgentPlanRevisionRecord[];
   items: AgentItemRecord[];
-  gitSnapshot?: GitSnapshotRecord;
-  ciStatus?: CiChecksStatus;
 }): RunProgressViewModel | undefined {
   const progressRun = selectProgressRun(input.preferredRun, input.runs);
   if (!progressRun) {
@@ -116,7 +112,7 @@ export function buildRunProgressViewModel(input: {
   const footer =
     state === 'RUNNING'
       ? undefined
-      : footerForRun(progressRun, state, input.gitSnapshot, input.ciStatus);
+      : footerForRun(progressRun, state);
 
   return {
     runId: progressRun.id,
@@ -235,15 +231,12 @@ function activityProjectionForRun(
 
 function footerForRun(
   run: RunRecord,
-  state: RunProgressState,
-  gitSnapshot: GitSnapshotRecord | undefined,
-  ciStatus: CiChecksStatus | undefined
+  state: RunProgressState
 ): RunProgressFooter {
   if (state === 'COMPLETED') {
     return {
-      title: 'Completed',
-      detail: completedFooterDetail(gitSnapshot, ciStatus),
-      tone: 'success'
+      title: 'Agent run completed',
+      tone: 'neutral'
     };
   }
   if (state === 'FAILED') {
@@ -265,57 +258,6 @@ function footerForRun(
     detail: terminalFooterDetail(run) ?? 'Task Monki needs recovery before this run can continue.',
     tone: 'error'
   };
-}
-
-function completedFooterDetail(
-  gitSnapshot: GitSnapshotRecord | undefined,
-  ciStatus: CiChecksStatus | undefined
-): string {
-  const fileCount = changedFileCount(gitSnapshot);
-  const parts: string[] = [];
-  if (fileCount !== undefined) {
-    parts.push(fileCount === 0 ? 'no file changes' : `${fileCount} ${plural(fileCount, 'file')} changed`);
-  }
-  parts.push(verificationFooterText(ciStatus));
-  return parts.join(' · ');
-}
-
-function changedFileCount(gitSnapshot: GitSnapshotRecord | undefined): number | undefined {
-  if (!gitSnapshot) {
-    return undefined;
-  }
-  const diffCount =
-    Math.max(0, gitSnapshot.committedDiffFileCount) +
-    Math.max(0, gitSnapshot.workingDiffFileCount);
-  if (diffCount > 0) {
-    return diffCount;
-  }
-  return (
-    Math.max(0, gitSnapshot.stagedCount) +
-    Math.max(0, gitSnapshot.unstagedCount) +
-    Math.max(0, gitSnapshot.untrackedCount)
-  );
-}
-
-function verificationFooterText(status: CiChecksStatus | undefined): string {
-  switch (status) {
-    case 'PASSING':
-      return 'verification passed';
-    case 'FAILING':
-    case 'BLOCKED':
-      return 'verification failed';
-    case 'PENDING':
-    case 'EXPECTED_NOT_REPORTED':
-      return 'verification pending';
-    case 'CANCELED':
-      return 'verification canceled';
-    case 'NOT_APPLICABLE':
-    case 'NO_CHECKS':
-    case 'STALE':
-    case 'UNKNOWN':
-    default:
-      return 'not verified';
-  }
 }
 
 function terminalFooterDetail(run: RunRecord): string | undefined {
@@ -399,10 +341,6 @@ function shortPath(path: string | undefined): string | undefined {
     return segments.join('/');
   }
   return segments.slice(-3).join('/');
-}
-
-function plural(count: number, word: string): string {
-  return count === 1 ? word : `${word}s`;
 }
 
 function truncateText(text: string, maxLength: number): string {

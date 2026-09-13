@@ -1,3 +1,4 @@
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -18,7 +19,7 @@ describe('TaskManagerService repository lifecycle', () => {
       prompt: 'Create an isolated worktree.',
       repositoryId: repository.id
     });
-    const worktree = await harness.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(harness.service, task.id);
 
     await expect(harness.service.getRepositoryImpact(repository.id)).resolves.toMatchObject({
       taskCount: 1,
@@ -66,7 +67,7 @@ describe('TaskManagerService repository lifecycle', () => {
     });
     expect((await harness.store.getTask(task.id))?.repositoryId).toBe(repository.id);
 
-    const worktree = await harness.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(harness.service, task.id);
     expect(worktree.repositoryId).toBe(repository.id);
     expect(worktree.status).toBe('PRESENT');
   }, 20_000);

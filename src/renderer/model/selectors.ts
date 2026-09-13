@@ -114,10 +114,6 @@ export function canStartRun(task: Task): boolean {
   ].includes(task.projection.agentRun);
 }
 
-export function canPrepareWorktree(task: Task): boolean {
-  return !['CREATING', 'PRESENT'].includes(task.projection.worktree);
-}
-
 export function canCreateDeliveryCommit(task: Task, worktree?: WorktreeRecord): boolean {
   return (
     worktree?.ownership !== 'EXTERNAL' &&

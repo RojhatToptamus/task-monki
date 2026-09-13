@@ -194,7 +194,13 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
     controller.view.generation
   )?.attachmentReadiness ?? [];
   const showLiveBindings = showOperationalEvidence && (
-    ['Starting', 'Replacing', 'Running', 'Running · stale'].includes(controller.view.status) ||
+    [
+      'Starting',
+      'Replacing',
+      'Running',
+      'Running · stale',
+      'Running · freshness unknown'
+    ].includes(controller.view.status) ||
     attachmentReadiness.length > 0
   );
   const showHeaderLogs = Boolean(controller.view.latestAttempt) && (
@@ -2101,14 +2107,20 @@ function workspacePresentation(
       detail: `${activeId ?? 'The current preview'} stays routed until the full candidate reaches readiness.`
     };
   }
-  if (view.status === 'Running' || view.status === 'Running · stale') {
+  if (
+    view.status === 'Running' ||
+    view.status === 'Running · stale' ||
+    view.status === 'Running · freshness unknown'
+  ) {
     return {
       status: 'Running',
-      tone: 'success',
+      tone: view.status === 'Running' ? 'success' : 'action',
       meta: activeId ? `· serving ${activeId}` : undefined,
       detail: view.status === 'Running · stale'
         ? 'Source changed after capture. The running preview still serves its captured code.'
-        : 'Source current · stable routes attached'
+        : view.status === 'Running · freshness unknown'
+          ? 'Freshness against the latest worktree state is unknown. The preview still serves its captured code.'
+          : 'Matches latest Git capture · stable routes attached'
     };
   }
   if (view.status === 'Starting') {
@@ -2147,7 +2159,10 @@ function selectWorkspaceActions(
   if (view.failedReplacementGeneration && view.activeGeneration) {
     return { primary: open, secondary: start };
   }
-  if (view.status === 'Running · stale') {
+  if (
+    view.status === 'Running · stale' ||
+    view.status === 'Running · freshness unknown'
+  ) {
     return { primary: open, secondary: start };
   }
   return { primary: recommendedAction };

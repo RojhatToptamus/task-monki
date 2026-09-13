@@ -1,4 +1,4 @@
-import type { RunRecord } from '../../shared/contracts';
+import type { RunRecord, WorktreeRecord } from '../../shared/contracts';
 
 const TERMINAL_OR_RECOVERY = new Set<RunRecord['status']>([
   'COMPLETED',
@@ -33,6 +33,12 @@ export interface AgentComposerCopy {
   helperText?: string;
   placeholder: string;
   submitLabel: string;
+}
+
+export function describeForkAlternativeBoundary(
+  worktree: Pick<WorktreeRecord, 'baseRef' | 'baseSha'>
+): string {
+  return `The new task starts from the source task's recorded base ${worktree.baseRef ?? 'Detached HEAD'} @ ${worktree.baseSha}. Commits and local changes from the current attempt are not included. Checkout uses your local Git configuration; hooks or content filters may run local commands.`;
 }
 
 export function getPostRunActionState(

@@ -211,7 +211,96 @@ describe('buildPrStatusViewModel', () => {
     expect(view.checkSummaryLine).toBeUndefined();
     expect(view.reviewLine).toBe('Approved');
     expect(view.mergeLine).toBe('Mergeable');
-    expect(view.evidenceLine).toBe('Approved · Mergeable');
+    expect(view.evidenceLine).toBe('3 checks passed for head abc123 · Approved · Mergeable');
+  });
+
+  it('shows passing checks only when they match the current PR identity', () => {
+    const current = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture({ isDraft: true, status: 'OPEN_DRAFT' }),
+      ciRollup: ciFixture({ status: 'PASSING', passingCount: 2 })
+    });
+    const stale = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({ pullRequestNumber: 81, status: 'PASSING', passingCount: 2 })
+    });
+    const unknown = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture({ number: undefined }),
+      ciRollup: ciFixture({ status: 'PASSING', passingCount: 2 })
+    });
+
+    expect(current.evidenceLine).toBe('2 checks passed for head abc123');
+    expect(stale).toMatchObject({ kind: 'STALE', headline: 'Stale' });
+    expect(stale.evidenceLine).toBeUndefined();
+    expect(unknown).toMatchObject({ kind: 'UNKNOWN', headline: 'Checks identity unknown' });
+  });
+
+  it('keeps missing, not-reported, no-check, and unknown CI states distinct', () => {
+    const missing = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      reviewRollup: reviewFixture({ status: 'REQUESTED' })
+    });
+    const expected = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({ status: 'EXPECTED_NOT_REPORTED' })
+    });
+    const none = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({ status: 'NO_CHECKS' })
+    });
+    const skipped = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({ status: 'NO_CHECKS', totalCount: 2, skippedCount: 2 })
+    });
+    const unknown = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({ status: 'UNKNOWN' })
+    });
+
+    expect(missing.evidenceLine).toBe('Checks not observed');
+    expect(expected.headline).toBe('Expected checks not reported');
+    expect(none.headline).toBe('No checks reported');
+    expect(skipped.headline).toBe('Checks skipped');
+    expect(unknown.headline).toBe('Checks unknown');
+  });
+
+  it('does not apply delivery records without the current PR identity', () => {
+    const failedChecks = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({ headSha: undefined, status: 'FAILING', failingCount: 1 })
+    });
+    const requestedChanges = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      reviewRollup: reviewFixture({ headSha: undefined, status: 'CHANGES_REQUESTED' })
+    });
+    const terminalMerge = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      mergeSnapshot: mergeFixture({ headSha: undefined, status: 'MERGED' })
+    });
+
+    expect(failedChecks).toMatchObject({ kind: 'UNKNOWN', headline: 'Checks identity unknown' });
+    expect(requestedChanges).toMatchObject({ kind: 'UNKNOWN', headline: 'Review identity unknown' });
+    expect(terminalMerge).toMatchObject({ kind: 'OPEN', headline: 'Open PR' });
+  });
+
+  it('does not let a stale merge record make the current PR terminal', () => {
+    const view = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture({ headRefOid: 'current-head' }),
+      mergeSnapshot: mergeFixture({ headSha: 'old-head', status: 'MERGED' })
+    });
+
+    expect(view).toMatchObject({ kind: 'STALE', headline: 'Stale' });
   });
 
   it('does not call a PR ready to merge when CI or review evidence is missing', () => {
@@ -359,7 +448,7 @@ describe('buildPrStatusViewModel', () => {
           pullRequest: prFixture(),
           ciRollup: ciFixture({ status: 'NO_CHECKS', totalCount: 2, skippedCount: 2 })
         },
-        expected: { kind: 'NO_REQUIRED_CHECKS', headline: 'No required checks ran', tone: 'action' }
+        expected: { kind: 'NO_REQUIRED_CHECKS', headline: 'Checks skipped', tone: 'action' }
       },
       {
         name: 'review waiting',
@@ -899,6 +988,22 @@ describe('buildBoardDeliveryLine', () => {
         })
       )
     ).toBe('PR #82 | checks failing');
+  });
+
+  it('does not infer ready-to-merge from projection scalars alone', () => {
+    expect(
+      buildBoardDeliveryLine(
+        taskFixture({
+          projection: {
+            ...createInitialProjection(now),
+            githubPullRequest: 'OPEN_READY',
+            githubPullRequestNumber: 82,
+            ciChecks: 'PASSING',
+            merge: 'MERGEABLE'
+          }
+        })
+      )
+    ).toBe('PR #82 | checks passing · mergeable');
   });
 });
 

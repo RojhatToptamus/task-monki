@@ -62,6 +62,21 @@ export interface DiffFileFilterOptions {
 
 export type DiffEvidenceScope = 'all' | 'committed' | 'uncommitted';
 export type DiffSectionSource = 'committed' | 'staged' | 'unstaged' | 'local';
+export type GitDiffEvidenceCompleteness = 'COMPLETE' | 'INCOMPLETE' | 'UNINTERPRETABLE';
+
+export interface GitDiffEvidenceInspection {
+  files: DiffFile[];
+  completeness: GitDiffEvidenceCompleteness;
+}
+
+const UNAVAILABLE_DIFF_SECTION = /^##[ \t]+.+ unavailable[ \t]*$/im;
+const TRUNCATED_ARTIFACT_MARKER = /\[Task Monki truncated [^\]]+ after \d+ retained bytes\.\]/i;
+const TASK_MONKI_DIFF_HEADER = /^# Git diff evidence[ \t]*$/m;
+const EMPTY_DIFF_MARKERS: Record<Exclude<DiffSectionSource, 'local'>, string> = {
+  committed: 'No committed diff.',
+  staged: 'No staged diff.',
+  unstaged: 'No unstaged diff.'
+};
 
 interface RawDiffSection {
   label: string;
@@ -78,8 +93,46 @@ interface ParsedFileBlock {
   lines: DiffLine[];
 }
 
+interface ParsedDiffSections {
+  files: DiffFile[];
+  totalChunkCount: number;
+  parsedChunkCount: number;
+}
+
 export function parseGitDiffEvidence(text: string): DiffFile[] {
   return parseGitDiffEvidenceForScope(text, 'all');
+}
+
+export function inspectGitDiffEvidence(text: string): GitDiffEvidenceInspection {
+  const sections = extractDiffSections(text);
+  const parsed = parseDiffSections(sections);
+  const files = parsed.files;
+  const hasUnparsedChunk = parsed.totalChunkCount > parsed.parsedChunkCount;
+  const isTaskMonkiArtifact = TASK_MONKI_DIFF_HEADER.test(text);
+  const hasCompleteTaskMonkiSections = isTaskMonkiArtifact
+    ? (['committed', 'staged', 'unstaged'] as const).every((source) => {
+        const section = sections.find((candidate) => candidate.source === source);
+        if (!section) {
+          return false;
+        }
+        return (
+          section.lines.some((line) => line.trim() === EMPTY_DIFF_MARKERS[source]) ||
+          section.lines.some((line) => line.startsWith('diff --git '))
+        );
+      })
+    : true;
+
+  let completeness: GitDiffEvidenceCompleteness = 'COMPLETE';
+  if (UNAVAILABLE_DIFF_SECTION.test(text) || TRUNCATED_ARTIFACT_MARKER.test(text)) {
+    completeness = 'INCOMPLETE';
+  } else if (hasUnparsedChunk) {
+    completeness = files.length > 0 ? 'INCOMPLETE' : 'UNINTERPRETABLE';
+  } else if (isTaskMonkiArtifact && !hasCompleteTaskMonkiSections) {
+    completeness = sections.length > 0 ? 'INCOMPLETE' : 'UNINTERPRETABLE';
+  } else if (!isTaskMonkiArtifact && parsed.totalChunkCount === 0) {
+    completeness = 'UNINTERPRETABLE';
+  }
+  return { files, completeness };
 }
 
 export function parseGitDiffEvidenceForScope(
@@ -87,15 +140,25 @@ export function parseGitDiffEvidenceForScope(
   scope: DiffEvidenceScope
 ): DiffFile[] {
   const sections = extractDiffSections(text);
-  return parseDiffSections(filterDiffSectionsByScope(sections, scope));
+  return parseDiffSections(filterDiffSectionsByScope(sections, scope)).files;
 }
 
-function parseDiffSections(sections: RawDiffSection[]): DiffFile[] {
+function parseDiffSections(
+  sections: RawDiffSection[]
+): ParsedDiffSections {
   const filesByPath = new Map<string, DiffFile>();
+  let totalChunkCount = 0;
+  let parsedChunkCount = 0;
 
   for (const section of sections) {
-    const parsedFiles = parseUnifiedDiff(section.lines);
-    for (const parsed of parsedFiles) {
+    const chunks = splitFileChunks(section.lines);
+    totalChunkCount += chunks.length;
+    for (const chunk of chunks) {
+      const parsed = parseFileChunk(chunk);
+      if (!parsed) {
+        continue;
+      }
+      parsedChunkCount += 1;
       const existing = filesByPath.get(parsed.path);
       const block: DiffBlock = {
         id: `${section.label}:${parsed.path}:${existing?.blocks.length ?? 0}`,
@@ -123,7 +186,11 @@ function parseDiffSections(sections: RawDiffSection[]): DiffFile[] {
     }
   }
 
-  return [...filesByPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+  return {
+    files: [...filesByPath.values()].sort((a, b) => a.path.localeCompare(b.path)),
+    totalChunkCount,
+    parsedChunkCount
+  };
 }
 
 function filterDiffSectionsByScope(
@@ -267,17 +334,14 @@ function diffSectionSource(heading: string): DiffSectionSource {
   }
 }
 
-function parseUnifiedDiff(lines: string[]): ParsedFileBlock[] {
-  const files: ParsedFileBlock[] = [];
+function splitFileChunks(lines: string[]): string[][] {
+  const chunks: string[][] = [];
   let chunk: string[] = [];
 
   for (const line of lines) {
     if (line.startsWith('diff --git ')) {
       if (chunk.length > 0) {
-        const parsed = parseFileChunk(chunk);
-        if (parsed) {
-          files.push(parsed);
-        }
+        chunks.push(chunk);
       }
       chunk = [line];
     } else if (chunk.length > 0) {
@@ -286,13 +350,10 @@ function parseUnifiedDiff(lines: string[]): ParsedFileBlock[] {
   }
 
   if (chunk.length > 0) {
-    const parsed = parseFileChunk(chunk);
-    if (parsed) {
-      files.push(parsed);
-    }
+    chunks.push(chunk);
   }
 
-  return files;
+  return chunks;
 }
 
 function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {

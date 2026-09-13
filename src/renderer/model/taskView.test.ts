@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection } from '../../shared/contracts';
-import type { Task } from '../../shared/contracts';
+import type { DomainEvent, Task } from '../../shared/contracts';
 import {
   BOARD_COLUMNS,
   buildTaskCardVM,
@@ -8,6 +8,7 @@ import {
   columnTasks,
   computeNavCounts,
   describeRunFailureBanner,
+  describeTaskCompletionEvidence,
   describeTaskHeaderState,
   evidenceLineForTask,
   reviewFindingCountLabel,
@@ -24,6 +25,66 @@ import {
 const now = '2026-06-24T10:00:00.000Z';
 
 describe('task card view model', () => {
+  it('distinguishes marked-done, automatic, and unknown completion sources', () => {
+    const doneTask = createTask({ workflowPhase: 'DONE' });
+    const markedDoneEvent: DomainEvent = {
+      id: 'event-done',
+      type: 'TRANSITION_COMPLETED',
+      taskId: doneTask.id,
+      source: 'ui',
+      sourceEventId: 'source-done',
+      occurredAt: now,
+      receivedAt: now,
+      payload: { fromPhase: 'REVIEW', toPhase: 'DONE', reason: 'Accepted locally' }
+    };
+
+    expect(describeTaskCompletionEvidence(doneTask, [markedDoneEvent])).toMatchObject({
+      label: 'Marked done'
+    });
+    expect(describeTaskCompletionEvidence(
+      createTask({
+        workflowPhase: 'DONE',
+        completionPolicy: 'MERGED',
+        projection: { ...createInitialProjection(now), merge: 'MERGED' }
+      }),
+      []
+    )).toMatchObject({ label: 'Auto-completed' });
+    expect(describeTaskCompletionEvidence(doneTask, [])).toMatchObject({
+      label: 'Completion unknown'
+    });
+    expect(describeTaskCompletionEvidence(createTask(), [])).toBeUndefined();
+  });
+
+  it('uses the latest workflow transition when it explains a Done task', () => {
+    const oldDone: DomainEvent = {
+      id: 'event-old-done',
+      type: 'TRANSITION_COMPLETED',
+      taskId: 'task-1',
+      source: 'ui',
+      sourceEventId: 'source-old-done',
+      occurredAt: now,
+      receivedAt: now,
+      payload: { fromPhase: 'REVIEW', toPhase: 'DONE' }
+    };
+    const reopened: DomainEvent = {
+      ...oldDone,
+      id: 'event-reopened',
+      sourceEventId: 'source-reopened',
+      occurredAt: '2026-06-24T10:01:00.000Z',
+      receivedAt: '2026-06-24T10:01:00.000Z',
+      payload: { fromPhase: 'DONE', toPhase: 'REVIEW' }
+    };
+    const autoCompleted = createTask({
+      workflowPhase: 'DONE',
+      completionPolicy: 'MERGED',
+      projection: { ...createInitialProjection(now), merge: 'MERGED' }
+    });
+
+    expect(describeTaskCompletionEvidence(autoCompleted, [oldDone, reopened])).toMatchObject({
+      label: 'Auto-completed'
+    });
+  });
+
   it('shows review gate status for tasks in the Review phase', () => {
     const vm = buildTaskCardVM(
       createTask({

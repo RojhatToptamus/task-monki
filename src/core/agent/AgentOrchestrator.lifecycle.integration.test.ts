@@ -1199,7 +1199,7 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     ).toBe(false);
   });
 
-  it('projects a preverified terminal review after restart', async () => {
+  it('projects a preverified terminal review once across repeated restarts', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-preverified-recovery-')
     );
@@ -1285,6 +1285,7 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       },
       `preverified-review-terminal:${review.id}`
     );
+    await new Promise((resolve) => setTimeout(resolve, 5));
 
     const restarted = new AgentOrchestrator(
       store,
@@ -1313,6 +1314,27 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       )
     ).toMatchObject({ status: 'SETTLED' });
     expect(adapter.runtimeReleaseCount).toBe(1);
+    expect((await runtime.store.getRun(review.id))?.endedAt).toBe(completedAt);
+    const terminalEvents = (await store.snapshot()).events.filter(
+      (event) => event.runId === review.id && event.type === 'AGENT_RUN_COMPLETED'
+    );
+    await restarted.shutdown();
+    await persistenceByTaskStore.get(store)!.close();
+
+    for (let restart = 0; restart < 2; restart += 1) {
+      const reopened = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+      const reopenedRuntime = bindTaskRuntime(reopened);
+      const nextAdapter = new Phase4Adapter(reopenedRuntime.task);
+      const next = new AgentOrchestrator(reopened, reopenedRuntime.store, new AppEventBus(), nextAdapter);
+      await next.initialize();
+      expect((await reopenedRuntime.store.getRun(review.id))?.endedAt).toBe(completedAt);
+      expect((await reopened.snapshot()).events.filter(
+        (event) => event.runId === review.id && event.type === 'AGENT_RUN_COMPLETED'
+      )).toEqual(terminalEvents);
+      expect(nextAdapter.runtimeReleaseCount).toBe(0);
+      await next.shutdown();
+      await persistenceByTaskStore.get(reopened)!.close();
+    }
   });
 
   it('preserves the provider startup error when supplementary artifact creation fails', async () => {

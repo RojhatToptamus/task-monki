@@ -435,23 +435,19 @@ describe('Task Monki development seed data', () => {
 
     const completedTask = taskForScenario(manifest, snapshot, 'review-not-run');
     const completedRun = snapshot.runs.find((run) => run.id === completedTask.currentRunId);
-    const completedCi = selectLatestCiRollup(snapshot, completedTask);
     const completedProgress = buildRunProgressViewModel({
       preferredRun: completedRun,
       runs: snapshot.runs.filter((run) => run.taskId === completedTask.id),
       planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === completedTask.id),
-      items: snapshot.agentItems.filter((item) => item.taskId === completedTask.id),
-      gitSnapshot: selectLatestGitSnapshot(snapshot, completedTask),
-      ciStatus: completedCi?.status ?? completedTask.projection.ciChecks
+      items: snapshot.agentItems.filter((item) => item.taskId === completedTask.id)
     });
     expect(completedProgress).toMatchObject({
       state: 'COMPLETED',
       headerLabel: 'Final plan',
       activityTail: [],
       footer: {
-        title: 'Completed',
-        detail: '1 file changed · not verified',
-        tone: 'success'
+        title: 'Agent run completed',
+        tone: 'neutral'
       }
     });
     expect(completedProgress?.steps.map((step) => step.step)).toEqual([

@@ -370,6 +370,23 @@ describe('preview view model', () => {
         freshness: 'STALE'
       }]
     }).status).toBe('Running · stale');
+    const unknown = buildPreviewViewModel({
+      ...input,
+      generations: [{
+        ...baseGeneration,
+        state: 'READY',
+        routingState: 'ACTIVE',
+        freshness: 'UNKNOWN'
+      }]
+    });
+    expect(unknown).toMatchObject({
+      status: 'Running · freshness unknown',
+      tone: 'warning'
+    });
+    expect(selectPreviewOverviewProjection(unknown)).toMatchObject({
+      summary: expect.stringContaining('freshness against the worktree is unknown'),
+      secondaryAction: { id: 'START' }
+    });
   });
 
   it('keeps current preview controls visible while a changed plan awaits approval or replacement', () => {

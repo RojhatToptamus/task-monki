@@ -199,7 +199,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     strings(worktree, 'worktrees', [
       'worktreePath', 'branchName', 'baseSha'
     ]);
-    optionalStrings(worktree, 'worktrees', ['baseRef', 'headSha', 'error']);
+    optionalStrings(worktree, 'worktrees', ['baseRef', 'headSha', 'error'], new Set(['error']));
     uuidFields(worktree, 'worktrees', ['id', 'taskId', 'iterationId', 'repositoryId']);
     enumField(worktree, 'status', WORKTREE_STATUSES, 'worktrees');
     enumField(worktree, 'ownership', ['MANAGED', 'EXTERNAL'] as const, 'worktrees');
@@ -1137,7 +1137,7 @@ function validateGitHubRecords(state: StoreState): void {
   for (const record of state.githubRepositories) {
     optionalStrings(record, 'githubRepositories', [
       'remoteName', 'remoteUrl', 'host', 'owner', 'repo', 'ghVersion', 'authStatus', 'error'
-    ]);
+    ], new Set(['error']));
     enumField(record, 'status', GITHUB_REPOSITORY_STATUSES, 'githubRepositories');
     optionalEnumField(
       record,
@@ -1149,7 +1149,7 @@ function validateGitHubRecords(state: StoreState): void {
   }
   for (const record of state.branchPublications) {
     strings(record, 'branchPublications', ['remoteName', 'branchName', 'remoteRef']);
-    optionalStrings(record, 'branchPublications', ['remoteUrl', 'headSha', 'error']);
+    optionalStrings(record, 'branchPublications', ['remoteUrl', 'headSha', 'error'], new Set(['error']));
     enumField(record, 'status', BRANCH_PUBLICATION_STATUSES, 'branchPublications');
     timestamp(record, 'requestedAt', 'branchPublications');
     timestamp(record, 'updatedAt', 'branchPublications');
@@ -1249,13 +1249,14 @@ function projection(value: unknown): void {
   if (record.implementationRetry !== undefined) {
     const retry = persistedRecord(record.implementationRetry, 'tasks.projection');
     uuidField(retry, 'runId', 'tasks.projection');
-    strings(retry, 'tasks.projection', ['reason']);
+    stringField(retry, 'reason', 'tasks.projection', true);
   }
   timestamp(record, 'updatedAt', 'tasks.projection');
   if (!Array.isArray(record.findings)) invalid('tasks.projection');
   for (const finding of record.findings) {
     const item = persistedRecord(finding, 'tasks.projection');
-    strings(item, 'tasks.projection', ['id', 'code', 'message']);
+    strings(item, 'tasks.projection', ['id', 'code']);
+    stringField(item, 'message', 'tasks.projection', true);
     enumField(item, 'severity', HEALTH_STATUSES, 'tasks.projection');
     timestamp(item, 'createdAt', 'tasks.projection');
     optionalTimestamp(item, 'clearedAt', 'tasks.projection');

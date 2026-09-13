@@ -2,7 +2,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
   Repository,
-  RepositoryPreflight,
   Task,
   WorktreeRecord,
   WorktreeStatus
@@ -42,17 +41,6 @@ export class WorktreeService {
     return this.rootDir;
   }
 
-  buildSpec(task: Task, preflight: RepositoryPreflight): WorktreeSpec {
-    if (preflight.status !== 'VALID' || !preflight.headSha) {
-      throw new Error(preflight.error ?? 'Repository preflight must pass before creating a worktree.');
-    }
-
-    return this.buildSpecFromBase(task, {
-      baseRef: preflight.branch,
-      baseSha: preflight.headSha
-    });
-  }
-
   buildSpecFromBase(
     task: Task,
     base: { baseRef?: string; baseSha: string }
@@ -67,33 +55,59 @@ export class WorktreeService {
   }
 
   async create(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    requireFullObjectId(record.baseSha, 'recorded base');
+    if (record.headSha) requireFullObjectId(record.headSha, 'last verified head');
     this.assertManaged(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
+    const expectedHeadSha = record.headSha ?? record.baseSha;
 
     if (await pathExists(record.worktreePath)) {
-      return this.verify(record, repositoryPath);
+      return requireExpectedHead(
+        await this.verify(record, repositoryPath),
+        expectedHeadSha
+      );
     }
 
-    const branchExists = await gitSucceeds(repositoryPath, [
-      'show-ref',
-      '--verify',
-      '--quiet',
-      `refs/heads/${record.branchName}`
-    ]);
+    if (
+      expectedHeadSha !== record.baseSha &&
+      !(await gitSucceeds(repositoryPath, [
+        'merge-base',
+        '--is-ancestor',
+        record.baseSha,
+        expectedHeadSha
+      ]))
+    ) {
+      throw new Error(
+        'The last verified task commit is unavailable or no longer descends from the recorded base. Recovery requires review.'
+      );
+    }
 
-    if (branchExists) {
+    const branchSha = await resolveLocalBranch(
+      repositoryPath,
+      `refs/heads/${record.branchName}`
+    );
+
+    if (branchSha) {
+      if (branchSha !== expectedHeadSha) {
+        throw new Error(
+          'The task branch already exists at a different commit than the last verified task state. Recovery requires review.'
+        );
+      }
       await git(repositoryPath, ['worktree', 'add', record.worktreePath, record.branchName], 60_000);
     } else {
       await git(
         repositoryPath,
-        ['worktree', 'add', '-b', record.branchName, record.worktreePath, record.baseSha],
+        ['worktree', 'add', '-b', record.branchName, record.worktreePath, expectedHeadSha],
         60_000
       );
     }
 
     await enforcePosixMode(record.worktreePath, 0o700);
-    return this.verify(record, repositoryPath);
+    return requireExpectedHead(
+      await this.verify(record, repositoryPath),
+      expectedHeadSha
+    );
   }
 
   async verify(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
@@ -126,6 +140,7 @@ export class WorktreeService {
     this.assertManaged(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
+    requireFullObjectId(record.baseSha, 'recorded base');
     const parsed = await listGitWorktrees(repositoryPath);
     const expectedPath = await canonicalPath(record.worktreePath);
     const resolved = await Promise.all(
@@ -143,6 +158,31 @@ export class WorktreeService {
         updatedAt: new Date().toISOString(),
         lastVerifiedAt: new Date().toISOString()
       };
+    }
+
+    if (match.bare || match.detached || match.branch !== record.branchName) {
+      return worktreeVerificationError(
+        record,
+        'The registered worktree does not use the Task Monki-owned branch. Recovery requires review.'
+      );
+    }
+    if (!match.headSha) {
+      return worktreeVerificationError(
+        record,
+        'Git did not report a commit for the registered worktree. Recovery requires review.'
+      );
+    }
+    const descendsFromBase = await gitSucceeds(repositoryPath, [
+      'merge-base',
+      '--is-ancestor',
+      record.baseSha,
+      match.headSha
+    ]);
+    if (!descendsFromBase) {
+      return worktreeVerificationError(
+        record,
+        'The task branch no longer descends from its recorded base. Recovery requires review.'
+      );
     }
 
     return {
@@ -440,6 +480,62 @@ async function canonicalPath(filePath: string): Promise<string> {
   } catch {
     return path.resolve(filePath);
   }
+}
+
+function requireFullObjectId(value: string, label: string): void {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) {
+    throw new Error(`The ${label} is not an exact Git object ID. Recovery requires review.`);
+  }
+}
+
+async function resolveLocalBranch(
+  repositoryPath: string,
+  refName: string
+): Promise<string | undefined> {
+  try {
+    const sha = (
+      await git(repositoryPath, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        '--end-of-options',
+        `${refName}^{commit}`
+      ])
+    ).trim();
+    requireFullObjectId(sha, 'task branch commit');
+    return sha;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 1) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function requireExpectedHead(record: WorktreeRecord, expectedHeadSha: string): WorktreeRecord {
+  if (record.status !== 'PRESENT') {
+    throw new Error(record.error ?? 'Task Monki could not verify the worktree.');
+  }
+  if (record.headSha !== expectedHeadSha) {
+    throw new Error(
+      'The recreated worktree does not match the exact commit approved for creation or recovery. Review its current Git state before retrying.'
+    );
+  }
+  return record;
+}
+
+function worktreeVerificationError(
+  record: WorktreeRecord,
+  error: string
+): WorktreeRecord {
+  const now = new Date().toISOString();
+  return {
+    ...record,
+    status: 'ERROR',
+    error,
+    updatedAt: now,
+    lastVerifiedAt: now
+  };
 }
 
 function samePath(left: string, right: string): boolean {

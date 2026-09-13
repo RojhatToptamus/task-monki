@@ -42,13 +42,29 @@ export function buildCompletedChangeSummary(
 
   return {
     fileCount: files.length,
-    title: `Edited ${files.length} ${plural(files.length, 'file')}`,
+    title: `Captured Git changes · ${files.length} ${plural(files.length, 'file')}`,
     additions,
     deletions,
     previewFiles,
     hiddenFiles,
     hiddenFileCount: hiddenFiles.length
   };
+}
+
+export function hasNewerGitEvidence(
+  captured: GitSnapshotRecord,
+  gitSnapshots: GitSnapshotRecord[]
+): boolean {
+  return gitSnapshots.some(
+    (snapshot) =>
+      snapshot.id !== captured.id &&
+      snapshot.taskId === captured.taskId &&
+      snapshot.iterationId === captured.iterationId &&
+      snapshot.worktreeId === captured.worktreeId &&
+      snapshot.capturedAt > captured.capturedAt &&
+      (snapshot.headSha !== captured.headSha ||
+        snapshot.dirtyFingerprint !== captured.dirtyFingerprint)
+  );
 }
 
 export function selectCompletedRunChangeSnapshot(

@@ -747,8 +747,22 @@ async function createPreparedDeterministicTask(
     runtimeId: RUNTIME_ID,
     agentSettings: deterministicAgentSettings()
   });
-  const worktree = await environment.service.prepareWorktree({ taskId: task.id });
+  const worktree = await prepareDeterministicWorktree(environment, task.id);
   return { task, worktree };
+}
+
+async function prepareDeterministicWorktree(
+  environment: AgentTestEnvironment,
+  taskId: string
+): Promise<WorktreeRecord> {
+  const inspection = await environment.service.inspectWorktreePreparation({ taskId });
+  assert(inspection.mode === 'CREATE', 'New test task already has a worktree.');
+  const base = requireValue(inspection.bases.find((candidate) => candidate.current), 'Test base missing.');
+  const result = await environment.service.prepareWorktree({
+    taskId, intent: 'CREATE', baseRef: base.refName, expectedBaseSha: base.sha
+  });
+  assert(result.outcome === 'PREPARED', 'Test worktree was not prepared.');
+  return result.worktree;
 }
 
 async function runPreparedDeterministicTask(
@@ -1631,7 +1645,7 @@ async function exerciseRepresentativeScenarios(
       assert(worktree.ownership === 'EXTERNAL', 'Import lost checkout ownership.');
     } else {
       task = await environment.service.createTask(input);
-      worktree = await environment.service.prepareWorktree({ taskId: task.id });
+      worktree = await prepareDeterministicWorktree(environment, task.id);
     }
     const started = await environment.service.startRun({
       taskId: task.id,

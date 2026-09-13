@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { TaskMonkiScenarioRegistry } from '../../testSupport/taskMonkiScenario';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import path from 'node:path';
@@ -29,6 +30,7 @@ describe('Task agent profiles', () => {
       ...original,
       instructions: 'Updated library instructions.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
     const prompt = await scenario.runtimeStore.readArtifact(run.promptArtifactId);
     expect(prompt).toContain(original.instructions);

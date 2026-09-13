@@ -1215,7 +1215,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           finalArtifactId: finalArtifact.id,
           agentReviewStatus: reviewStatus,
           agentReviewResult: reviewResult
-        }
+        },
+        occurredAt: event.completedAt
       }),
       `shared-review-terminal:${run.id}:${event.completedAt}`
     );

@@ -44,6 +44,8 @@ import type {
   PreviewApprovalRecord,
   PreviewGenerationRecord,
   PrepareWorktreeRequest,
+  InspectWorktreePreparationRequest,
+  PrepareWorktreeResult,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
@@ -66,6 +68,7 @@ import type {
   TransitionTaskRequest,
   StopPreviewRequest,
   WorktreeRecord,
+  WorktreePreparationInspection,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RefinePromptRequest,
@@ -461,7 +464,9 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     cancelPromptRefinement: (input: CancelPromptRefinementRequest) =>
       post<void>(baseUrl, '/api/prompt/refine/cancel', input),
     prepareWorktree: (input: PrepareWorktreeRequest) =>
-      post<WorktreeRecord>(baseUrl, '/api/worktrees/prepare', input),
+      post<PrepareWorktreeResult>(baseUrl, '/api/worktrees/prepare', input),
+    inspectWorktreePreparation: (input: InspectWorktreePreparationRequest) =>
+      post<WorktreePreparationInspection>(baseUrl, '/api/worktrees/inspect-preparation', input),
     startRun: (input: StartRunRequest) => post<RunRecord>(baseUrl, '/api/runs/start', input),
     steerRun: (input: SteerRunRequest) => post<void>(baseUrl, '/api/runs/steer', input),
     continueRun: (input: ContinueRunRequest) =>

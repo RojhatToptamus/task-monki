@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import type { RunRecord, StartRunRequest } from '../../shared/contracts';
 import {
   TaskMonkiScenarioRegistry,
@@ -44,6 +45,7 @@ describe('TaskManagerService review and PR action coordination', () => {
       title: 'Failed implementation',
       prompt: 'Fail before implementation completes.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id });
 
     await scenario.transitionRun(run.id, {
@@ -68,6 +70,7 @@ describe('TaskManagerService review and PR action coordination', () => {
       title: 'Read-only analysis',
       prompt: 'Inspect without changing the worktree.'
     });
+    await prepareTestWorktree(scenario.service, task.id);
     const run = await scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' });
 
     await scenario.completeRun(run.id, 'Analysis completed.');
@@ -91,6 +94,7 @@ describe('TaskManagerService review and PR action coordination', () => {
         title: 'Historical review context',
         prompt: 'Implement, review, then perform newer non-implementation work.'
       });
+      await prepareTestWorktree(scenario.service, task.id);
       const implementation = await scenario.service.startRun({ taskId: task.id });
       await scenario.completeRun(implementation.id, 'Implementation finished.');
 
@@ -225,6 +229,7 @@ async function createScenarioWithCompletedRun(
     title: 'Review and PR action task',
     prompt: 'Exercise review and PR action coordination.'
   });
+  await prepareTestWorktree(serviceHarness.service, task.id);
   const run = await serviceHarness.service.startRun({ taskId: task.id });
   await serviceHarness.completeRun(run.id, 'Implementation finished.');
   return {

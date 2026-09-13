@@ -986,6 +986,8 @@ export interface TaskDetailSnapshot {
   attachments: TaskAttachmentRecord[];
   previewTaskRoutes: PreviewTaskRouteOption[];
   textExcerpts: ClientTextExcerpt[];
+  /** Process-owned post-run captures that have not settled yet. Never persisted. */
+  postRunEvidencePendingRunIds?: string[];
 }
 
 export interface CreateTaskRequest {
@@ -1118,9 +1120,56 @@ export interface RespondToInteractionRequest {
   decision: import('./agent').AgentInteractionDecision;
 }
 
-export interface PrepareWorktreeRequest {
+export interface InspectWorktreePreparationRequest {
   taskId: string;
 }
+
+export interface WorktreeBaseOption {
+  /** Canonical local branch ref. Absent only for the current detached HEAD. */
+  refName?: string;
+  displayName: string;
+  sha: string;
+  current: boolean;
+}
+
+export interface WorktreePreparationCreateInspection {
+  mode: 'CREATE';
+  taskId: string;
+  repositoryName: string;
+  bases: WorktreeBaseOption[];
+}
+
+export interface WorktreePreparationRecoveryInspection {
+  mode: 'RECOVER';
+  taskId: string;
+  repositoryName: string;
+  worktree: WorktreeRecord;
+}
+
+export type WorktreePreparationInspection =
+  | WorktreePreparationCreateInspection
+  | WorktreePreparationRecoveryInspection;
+
+export type PrepareWorktreeRequest =
+  | {
+      taskId: string;
+      intent: 'CREATE';
+      /** Canonical local branch ref. Absent only for the inspected detached HEAD. */
+      baseRef?: string;
+      expectedBaseSha: string;
+    }
+  | {
+      taskId: string;
+      intent: 'RECOVER';
+    };
+
+export type PrepareWorktreeResult =
+  | { outcome: 'PREPARED'; worktree: WorktreeRecord }
+  | {
+      outcome: 'BASE_CHANGED';
+      inspection: WorktreePreparationCreateInspection;
+    }
+  | { outcome: 'BASE_ALREADY_BOUND'; worktree: WorktreeRecord };
 
 export interface RefreshEvidenceRequest {
   taskId: string;
@@ -1543,7 +1592,8 @@ export interface TaskManagerApi {
   createTask(input: CreateTaskRequest): Promise<Task>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   cancelPromptRefinement(input: CancelPromptRefinementRequest): Promise<void>;
-  prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;
+  inspectWorktreePreparation(input: InspectWorktreePreparationRequest): Promise<WorktreePreparationInspection>;
+  prepareWorktree(input: PrepareWorktreeRequest): Promise<PrepareWorktreeResult>;
   startRun(input: StartRunRequest): Promise<RunRecord>;
   steerRun(input: SteerRunRequest): Promise<void>;
   continueRun(input: ContinueRunRequest): Promise<RunRecord>;

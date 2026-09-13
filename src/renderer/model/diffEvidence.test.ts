@@ -3,6 +3,7 @@ import {
   buildDiffFileTree,
   filterDiffFiles,
   groupDiffFiles,
+  inspectGitDiffEvidence,
   parseGitDiffEvidence,
   parseGitDiffEvidenceForScope
 } from './diffEvidence';
@@ -54,6 +55,64 @@ index 0000000..3333333
       additions: 2,
       deletions: 0
     });
+  });
+
+  it('distinguishes complete, incomplete, truncated, and uninterpretable evidence', () => {
+    const completeEmptyEvidence = `# Git diff evidence
+
+## Committed diff
+
+No committed diff.
+
+## Staged diff
+
+No staged diff.
+
+## Unstaged diff
+
+No unstaged diff.
+`;
+
+    expect(inspectGitDiffEvidence(completeEmptyEvidence).completeness).toBe('COMPLETE');
+    expect(
+      inspectGitDiffEvidence(
+        '# Git diff evidence\n\n## Committed diff unavailable\n\ngit failed'
+      ).completeness
+    ).toBe('INCOMPLETE');
+    expect(
+      inspectGitDiffEvidence(
+        '[Task Monki truncated diff after 33554432 retained bytes.]'
+      ).completeness
+    ).toBe('INCOMPLETE');
+    expect(
+      inspectGitDiffEvidence('diff --git malformed evidence without a parsed file').completeness
+    ).toBe('UNINTERPRETABLE');
+    expect(inspectGitDiffEvidence('').completeness).toBe('UNINTERPRETABLE');
+    expect(
+      inspectGitDiffEvidence('# Git diff evidence\n\n## Committed diff\n\nNo committed diff.')
+        .completeness
+    ).toBe('INCOMPLETE');
+  });
+
+  it('marks a mixed parsed and unparsed diff as incomplete instead of omitting a path', () => {
+    const evidence = `diff --git a/src/parsed.ts b/src/parsed.ts
+--- a/src/parsed.ts
++++ b/src/parsed.ts
+@@ -1 +1 @@
+-old
++new
+diff --git "a/src/quoted name.ts" "b/src/quoted name.ts"
+--- "a/src/quoted name.ts"
++++ "b/src/quoted name.ts"
+@@ -1 +1 @@
+-old
++new
+`;
+
+    const inspected = inspectGitDiffEvidence(evidence);
+
+    expect(inspected.files.map((file) => file.path)).toEqual(['src/parsed.ts']);
+    expect(inspected.completeness).toBe('INCOMPLETE');
   });
 
   it('groups files by directory with root files first', () => {
