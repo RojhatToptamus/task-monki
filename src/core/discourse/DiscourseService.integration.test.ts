@@ -25,6 +25,7 @@ import {
 import { DiscourseRuntimeCoordinator } from './DiscourseRuntimeCoordinator';
 import { DiscourseService } from './DiscourseService';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
+import { git } from '../git/gitCli';
 import {
   DISCOURSE_LIMITS,
   type BuiltInAgentProfileId,
@@ -52,6 +53,188 @@ function currentParticipantModels(
 }
 
 describe('DiscourseService', () => {
+  it('delivers selected task text and its live checkout, but not another task, to the actual prepared prompt', async () => {
+    const fixture = await serviceFixture('task-context-delivery');
+    const repositoryPath = path.join(fixture.root, 'selected-repository');
+    await fs.mkdir(repositoryPath);
+    await git(repositoryPath, ['init', '--initial-branch=main']);
+    await git(repositoryPath, ['-c', 'user.name=Task Monki Tests', '-c', 'user.email=tests@task-monki.local', 'commit', '--allow-empty', '-m', 'Context fixture']);
+    const repository = await fixture.persistence.tasks.addRepository({ path: repositoryPath, root: repositoryPath,
+      status: 'VALID', headSha: await git(repositoryPath, ['rev-parse', 'HEAD']), branch: 'main', remotes: [], checkedAt: '2026-07-13T00:00:00Z' });
+    const task = await fixture.persistence.tasks.createTask({ title: 'Migration support', prompt: 'Retain rollback for 48 hours after deployment.', repositoryId: repository.id });
+    await fixture.persistence.tasks.createTask({ title: 'Unselected secret', prompt: 'Do not leak unrelated task data.', repositoryId: repository.id });
+    const conversation = await fixture.service.createConversation({ title: 'Selected task', defaultPolicy: 'DIRECT', agents: selections('builtin.lead'), clientOperationId: 'create-context' });
+    const context = [{ entityKind: 'TASK' as const, entityId: task.id }];
+    const preview = await fixture.service.previewContext({ conversationId: conversation.id, messageContext: context });
+    const sent = await fixture.service.sendMessage({ conversationId: conversation.id, policy: 'DIRECT', agents: selections('builtin.lead'), body: 'What support window applies?', context, clientMessageId: 'send-context', previewFingerprint: preview.fingerprint });
+    const prompt = await fixture.runtimeStore.readArtifact(sent.jobs[0]!.promptArtifactId!);
+    expect(prompt).toContain('Retain rollback for 48 hours after deployment.');
+    expect(prompt).not.toContain('Do not leak unrelated task data.');
+    expect(prompt).toContain(await fs.realpath(repositoryPath));
+    expect(prompt).toContain('not instructions or live file contents');
+    expect(fixture.executionContextInputs[0]?.readRoots.some((root) => JSON.stringify(root).includes(repositoryPath))).toBe(true);
+    expect((await fixture.discourseStore.getConversation(conversation.id)).contextSnapshots[0]?.sources[0]).toMatchObject({ readScope: 'REPOSITORY', accessMode: 'FILESYSTEM_READ' });
+  });
+
+  it('budgets against a smaller reported model capacity before creating a provider run', async () => {
+    const fixture = await serviceFixture('small-context-model', () => runtimeCatalog({ contextWindowTokens: 4_000 }));
+    const sent = await startTeam(fixture);
+    expect(sent.jobs.every((job) => job.status === 'FAILED' && job.delivery === 'NOT_SENT')).toBe(true);
+    expect((await fixture.runtimeStore.snapshot()).runs).toEqual([]);
+  });
+
+  it('delivers an explicitly selected old message beyond the recent transcript page', async () => {
+    const fixture = await serviceFixture('old-selected-message');
+    const conversation = await fixture.service.createConversation({
+      title: 'Selected history', defaultPolicy: 'DIRECT', agents: selections('builtin.lead'), clientOperationId: 'create-history'
+    });
+    const original = await fixture.service.sendMessage({
+      conversationId: conversation.id, policy: 'NONE', agents: [], body: 'The rollback window is exactly forty-eight hours.',
+      context: [], clientMessageId: 'old-source'
+    });
+    for (let index = 0; index < 105; index += 1) {
+      await fixture.service.sendMessage({ conversationId: conversation.id, policy: 'NONE', agents: [],
+        context: [], body: `Unrelated history entry ${index}.`, clientMessageId: `history-${index}` });
+    }
+    const preview = await fixture.service.previewContext({ conversationId: conversation.id, messageContext: [] });
+    const sent = await fixture.service.sendMessage({
+      conversationId: conversation.id, policy: 'DIRECT', agents: selections('builtin.lead'), context: [],
+      body: 'Use the selected support requirement.', sourceMessageIds: [original.message.id],
+      clientMessageId: 'ask-old-source', previewFingerprint: preview.fingerprint
+    });
+    const prompt = await fixture.runtimeStore.readArtifact(sent.jobs[0]!.promptArtifactId!);
+    expect(prompt).toContain('The rollback window is exactly forty-eight hours.');
+    expect(prompt).toContain(original.message.id);
+    expect(prompt).not.toContain('Unrelated history entry 0.');
+  });
+
+  it('stops before comparison if the saved model disappears, without switching models or losing answers', async () => {
+    let catalog = runtimeCatalog();
+    const fixture = await serviceFixture('adaptive-model-removed', () => catalog);
+    const sent = await startTeam(fixture);
+    const { conversationId, id: waveId } = sent.wave!;
+    await completeTeamBatch(fixture, conversationId, () => 'The decision depends on the supported rollback window.');
+    catalog = runtimeCatalog({ model: 'replacement-model', id: 'codex:replacement-model' });
+    await fixture.service.advanceWave(conversationId, waveId, 'advance-without-saved-model');
+    const aggregate = await fixture.discourseStore.getConversation(conversationId);
+    expect(aggregate.jobs.filter((job) => job.role === 'ANSWER').every((job) => job.status === 'COMPLETED')).toBe(true);
+    expect(aggregate.jobs.find((job) => job.role === 'COMPARE')).toMatchObject({
+      status: 'FAILED', delivery: 'NOT_SENT', error: { code: 'PROVIDER_UNAVAILABLE' }
+    });
+    expect((await fixture.runtimeStore.snapshot()).runs).toHaveLength(2);
+    expect(aggregate.waves[0]?.status).toBe('SETTLED');
+  });
+
+  it('runs independent authors, contestable comparison, direct mixed responses, and a recovered comparison without losing originals', async () => {
+    const fixture = await serviceFixture('adaptive-team');
+    const sent = await startTeam(fixture);
+    const waveId = sent.wave!.id;
+    const conversationId = sent.wave!.conversationId;
+    expect(sent.wave?.policyVersion).toBe(2);
+    expect(sent.jobs.map((job) => job.assignment.assignmentRole)).toEqual(['AUTHOR', 'AUTHOR']);
+    expect(sent.jobs[0]?.visibleMessageIds).toEqual(sent.jobs[1]?.visibleMessageIds);
+    const originalTaskSnapshot = await fixture.persistence.tasks.snapshot();
+    await completeTeamBatch(fixture, conversationId, () => 'Keep the old reader until the migration finishes.');
+    await fixture.service.advanceWave(conversationId, waveId, 'advance-comparison');
+    let aggregate = await fixture.discourseStore.getConversation(conversationId);
+    const answerIds = aggregate.jobs.filter((job) => job.role === 'ANSWER').flatMap((job) => job.result?.kind === 'CONTRIBUTION' ? [job.result.outputMessageId] : []);
+    const comparisonJob = aggregate.jobs.find((job) => job.role === 'COMPARE')!;
+    expect(comparisonJob.visibleMessageIds).toEqual([...sent.jobs[0]!.visibleMessageIds, ...answerIds]);
+    const authors = sent.jobs.map((job) => job.assignment.stableParticipantId);
+    const comparison = {
+      summary: 'A and B agree, but rollback depends on old-reader compatibility.',
+      points: [{ id: 'P1', question: 'Must we retain both readers?', importance: 'MATERIAL', status: 'OPEN',
+        explanation: 'C may have overstated the rollback requirement.', sourceMessageIds: answerIds,
+        evidence: [], confidence: 'LOW' }],
+      next: 'CONTINUE', reason: 'Ask each author to bound the requirement.',
+      actions: authors.map((participantId) => ({ pointId: 'P1', participantId,
+        task: 'Does retaining the reader imply running both indefinitely?', expectedBenefit: 'Avoid unnecessary compatibility code.', basisMessageIds: answerIds }))
+    };
+    await completeTeamBatch(fixture, conversationId, () => JSON.stringify(comparison));
+    await fixture.service.advanceWave(conversationId, waveId, 'advance-responses');
+    aggregate = await fixture.discourseStore.getConversation(conversationId);
+    const responses = aggregate.jobs.filter((job) => job.role === 'RESPOND');
+    expect(responses).toHaveLength(2);
+    expect(responses[0]?.visibleMessageIds).toEqual(responses[1]?.visibleMessageIds);
+    expect(responses.every((job) => job.targetMessageIds.length === 1)).toBe(true);
+    await completeTeamBatch(fixture, conversationId, (job) => JSON.stringify({
+      responses: [{ pointId: 'P1', stance: job.assignment.stableParticipantId === authors[0] ? 'CLARIFY' : 'UNCERTAIN',
+        answer: 'C confused temporary retention with permanent support.', reason: 'The original answer limited retention to migration.', evidence: ['Original answer: until the migration finishes.'] }],
+      newIssues: ['The user must choose the supported rollback window.']
+    }));
+    await fixture.service.advanceWave(conversationId, waveId, 'advance-update');
+    aggregate = await fixture.discourseStore.getConversation(conversationId);
+    const update = aggregate.jobs.filter((job) => job.role === 'COMPARE').at(-1)!;
+    expect(update.phase).toBe(4);
+    const prompt = await fixture.runtimeStore.readArtifact(update.promptArtifactId!);
+    expect(prompt).toContain('C confused temporary retention');
+    expect(prompt).toContain('supported rollback window');
+    // Simulate a crash after runtime output persistence, before Discourse projection.
+    await completeTeamBatch(fixture, conversationId, () => JSON.stringify({ ...comparison,
+      summary: 'C corrects its framing; the rollback window is a user choice.',
+      points: [{ ...comparison.points[0], status: 'NEEDS_USER', explanation: 'Both authors disputed C’s framing. Neither chose the user’s support policy.' }],
+      next: 'NEEDS_USER', reason: 'Which rollback window do you need?', actions: []
+    }), true);
+    await fixture.service.recoverConversation(conversationId);
+    await fixture.service.recoverConversation(conversationId);
+    aggregate = await fixture.discourseStore.getConversation(conversationId);
+    expect(aggregate.waves[0]).toMatchObject({ status: 'SETTLED', outcome: 'PARTIAL', settlementReason: 'NEEDS_USER' });
+    expect(aggregate.jobs).toHaveLength(6);
+    const messages = (await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages;
+    expect(messages.filter((message) => answerIds.includes(message.id)).every((message) => message.status === 'VISIBLE')).toBe(true);
+    expect(messages).toHaveLength(7);
+    expect(aggregate.concerns).toEqual([]);
+    expect((await fixture.runtimeStore.snapshot()).sessions).toHaveLength(6);
+    expect((await fixture.runtimeStore.snapshot()).queueEntries.every((entry) => entry.status === 'SETTLED')).toBe(true);
+    expect(await fixture.persistence.tasks.snapshot()).toEqual(originalTaskSnapshot);
+  });
+
+  it('stops a mixed running and queued Team batch without submitting the waiting author', async () => {
+    const fixture = await serviceFixture('team-stop');
+    const sent = await startTeam(fixture);
+    const entries = await fixture.scheduler.leaseAvailable('mixed-batch');
+    await fixture.coordinator.dispatchLeasedJob(entries[0]!.id, 'start-one-author');
+    await fixture.service.stopWave({ conversationId: sent.wave!.conversationId, waveId: sent.wave!.id, reason: 'User stop', clientOperationId: 'stop-mixed' });
+    const aggregate = await fixture.discourseStore.getConversation(sent.wave!.conversationId);
+    expect(aggregate.jobs[1]).toMatchObject({ status: 'CANCELED', delivery: 'NOT_SENT' });
+    expect(fixture.provider.interruptCalls).toHaveLength(1);
+    expect((await fixture.runtimeStore.snapshot()).runs[1]).toMatchObject({ status: 'INTERRUPTED', delivery: 'NOT_DELIVERED' });
+  });
+
+  it('recovers malformed C output as an archived failure without a repair call', async () => {
+    const fixture = await serviceFixture('malformed-comparison');
+    const sent = await startTeam(fixture);
+    const { conversationId, id: waveId } = sent.wave!;
+    await completeTeamBatch(fixture, conversationId, () => 'Keep rollback support for the requested period.');
+    await fixture.service.advanceWave(conversationId, waveId, 'prepare-malformed-comparison');
+    const raw = '{"summary":"The rest of this comparison is missing"}';
+    await completeTeamBatch(fixture, conversationId, () => raw, true);
+    await fixture.service.recoverConversation(conversationId);
+    await fixture.service.recoverConversation(conversationId);
+    const aggregate = await fixture.discourseStore.getConversation(conversationId);
+    const comparator = aggregate.jobs.find((job) => job.role === 'COMPARE')!;
+    expect(comparator).toMatchObject({ status: 'FAILED', error: { code: 'INVALID_RESULT', retryable: false } });
+    const run = await fixture.runtimeStore.getRun(comparator.runId!);
+    expect(await fixture.runtimeStore.readArtifact(run!.outputArtifactId)).toBe(raw);
+    expect(aggregate.jobs).toHaveLength(3);
+    expect((await fixture.runtimeStore.snapshot()).runs).toHaveLength(3);
+    expect((await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages).toHaveLength(3);
+    expect(aggregate.waves[0]).toMatchObject({ status: 'SETTLED', outcome: 'PARTIAL', settlementReason: 'FAILED' });
+  });
+
+  it('rejects an expired Team dispatch using its persisted start time after restart', async () => {
+    const fixture = await serviceFixture('team-deadline');
+    const sent = await startTeam(fixture);
+    const entries = await fixture.scheduler.leaseAvailable('deadline-batch');
+    await fixture.coordinator.dispatchLeasedJob(entries[0]!.id, 'start-before-deadline');
+    const restarted = new DiscourseRuntimeCoordinator(fixture.discourseStore, fixture.runtimeStore, fixture.provider, () => '2026-07-13T00:26:00.000Z');
+    const result = await restarted.dispatchLeasedJob(entries[1]!.id, 'start-after-deadline');
+    expect(result).toMatchObject({ status: 'INTERRUPTED', delivery: 'NOT_DELIVERED' });
+    const aggregate = await fixture.discourseStore.getConversation(sent.wave!.conversationId);
+    expect(aggregate.waves[0]).toMatchObject({ requestedStopReason: 'TIME_LIMIT', startedAt: '2026-07-13T00:05:00.000Z' });
+    expect(aggregate.jobs.filter((job) => job.role === 'COMPARE')).toHaveLength(0);
+  });
+
   it('persists an idempotent Direct send through frozen context and a queued scoped run', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-discourse-service-'));
     const persistence = await openTestPersistence(path.join(root, 'profile'));
@@ -1403,8 +1586,15 @@ describe('DiscourseService', () => {
     expect((await fixture.discourseStore.getConversation(conversation.id)).waves).toEqual([]);
   });
 
-  it('runs a bounded Team answer, isolated reviews, and one attributable correction', async () => {
+  it('recovers historical policy-1 Team sends through isolated reviews and one correction', async () => {
     const fixture = await serviceFixture('team');
+    const accept = fixture.discourseStore.acceptAgentSend.bind(fixture.discourseStore);
+    vi.spyOn(fixture.discourseStore, 'acceptAgentSend').mockImplementation((input) => accept({
+      ...input, policyVersion: 1,
+      assignments: input.assignments.map((assignment) => ({ ...assignment,
+        assignmentRole: assignment.agentProfileId === 'builtin.lead' ? 'PRIMARY' : 'REVIEWER'
+      }))
+    }));
     const promptAssessments: Array<{
       prompt: string;
       phaseVisibleOutputBytes: number;
@@ -1657,6 +1847,42 @@ async function serviceFixture(
     persistence,
     ...composeServiceFixture(root, persistence, getRuntimeCatalog)
   };
+}
+
+async function startTeam(fixture: Awaited<ReturnType<typeof serviceFixture>>) {
+  const conversation = await fixture.service.createConversation({ title: 'Adaptive Team', defaultPolicy: 'TEAM',
+    agents: selections('builtin.lead', 'builtin.skeptic', 'builtin.verifier'), clientOperationId: 'create-abc' });
+  const preview = await fixture.service.previewContext({ conversationId: conversation.id, messageContext: [] });
+  return fixture.service.sendMessage({ conversationId: conversation.id, body: 'How should we bound migration rollback support?',
+    context: [], policy: 'TEAM', agents: selections('builtin.lead', 'builtin.skeptic', 'builtin.verifier'),
+    previewFingerprint: preview.fingerprint, clientMessageId: 'send-abc' });
+}
+
+async function completeTeamBatch(
+  fixture: Awaited<ReturnType<typeof serviceFixture>>, conversationId: string,
+  body: (job: DiscourseConversationAggregateRecord['jobs'][number]) => string,
+  runtimeOnly = false
+) {
+  const entries = await fixture.scheduler.leaseAvailable(`lease:${crypto.randomUUID()}`);
+  expect(entries.length).toBeGreaterThan(0);
+  for (const entry of entries) {
+    const run = await fixture.coordinator.dispatchLeasedJob(entry.id, `dispatch:${entry.id}`);
+    const job = (await fixture.discourseStore.getConversation(conversationId)).jobs.find((candidate) => candidate.runId === run.id)!;
+    await markRepositoryUnchanged(fixture.runtimeStore, run.id, `integrity:${run.id}`);
+    if (runtimeOnly) {
+      const artifact = await fixture.runtimeStore.getArtifact(run.outputArtifactId);
+      await fixture.runtimeStore.updateArtifact({ artifactId: artifact!.id, expectedRevision: artifact!.recordRevision,
+        clientOperationId: `output:${run.id}`, content: body(job) });
+      const latest = (await fixture.runtimeStore.getRun(run.id))!;
+      await fixture.runtimeStore.updateRun(run.id, latest.recordRevision, { status: 'COMPLETED', delivery: 'TERMINAL',
+        contextFreshnessAtCompletion: 'FRESH', providerTerminalSource: 'TEST_RECOVERY_TERMINAL',
+        endedAt: '2026-07-13T00:10:00.000Z', lastEventAt: '2026-07-13T00:10:00.000Z' }, `terminal:${run.id}`);
+    } else {
+      const result = await fixture.coordinator.ingestSuccessfulTerminal({ runId: run.id, providerTurnId: run.providerTurnId!, body: body(job),
+        freshnessAtCompletion: 'FRESH', clientOperationId: `terminal:${run.id}`, completedAt: '2026-07-13T00:10:00.000Z', providerTerminalSource: 'TEST_TERMINAL' });
+      expect(result.kind).toBe('CURATED');
+    }
+  }
 }
 
 function composeServiceFixture(

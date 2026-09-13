@@ -110,7 +110,7 @@ export function DiscourseModeMenu({
                 aria-checked={value === option.policy}
                 aria-disabled={unavailable || undefined}
                 title={unavailable
-                  ? 'Team requires Lead, Skeptic, and Verifier to be available.'
+                  ? 'Team requires A, B, and C to be available.'
                   : undefined}
                 onKeyDown={(event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -127,7 +127,7 @@ export function DiscourseModeMenu({
                   <strong>{option.label}</strong>
                   <small>{option.description}</small>
                   {unavailable ? (
-                    <em>Lead, Skeptic, and Verifier must all be available.</em>
+                    <em>A, B, and C must all be available.</em>
                   ) : null}
                 </span>
                 <span className="tm-discourse-mode-menu__check">

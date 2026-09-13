@@ -14,30 +14,30 @@ import type {
 const BUILT_IN_PROFILES: readonly AgentProfileRecord[] = [
   {
     id: 'builtin.lead',
-    displayName: 'Lead',
-    roleTemplate: 'LEAD',
+    displayName: 'A',
+    roleTemplate: 'GENERAL',
     defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT',
     defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT',
-    roleContractVersion: 3,
-    revision: 1
+    roleContractVersion: 4,
+    revision: 2
   },
   {
     id: 'builtin.skeptic',
-    displayName: 'Skeptic',
-    roleTemplate: 'SKEPTIC',
+    displayName: 'B',
+    roleTemplate: 'GENERAL',
     defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT',
     defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT',
-    roleContractVersion: 3,
-    revision: 1
+    roleContractVersion: 4,
+    revision: 2
   },
   {
     id: 'builtin.verifier',
-    displayName: 'Verifier',
-    roleTemplate: 'VERIFIER',
+    displayName: 'C',
+    roleTemplate: 'GENERAL',
     defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT',
     defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT',
-    roleContractVersion: 3,
-    revision: 1
+    roleContractVersion: 4,
+    revision: 2
   }
 ];
 
@@ -107,6 +107,7 @@ export class AgentProfileCatalog {
 
   roleContract(profileId: string, version = this.require(profileId).roleContractVersion): string {
     this.require(profileId);
+    if (version === 4) return 'Answer the assigned question using concise claims, evidence, assumptions, and uncertainty. No permanent adversarial role or authority applies. Agreement, no issue found, uncertainty, and abstention are valid. Never invent criticism or evidence. Change position only for an explicit reason.';
     const contract = ROLE_CONTRACTS[profileId]?.[version];
     if (!contract) {
       throw new Error(`Unknown role contract version ${version} for ${profileId}.`);

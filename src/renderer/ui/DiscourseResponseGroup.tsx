@@ -1,4 +1,4 @@
-import type { DiscourseConversationAggregateRecord } from '../../shared/discourse';
+import { DISCOURSE_LIMITS, type DiscourseConversationAggregateRecord } from '../../shared/discourse';
 import {
   discourseConcernResolutionLabel,
   discourseJobStatusLabel,
@@ -35,6 +35,9 @@ export function DiscourseResponseGroup({
         (candidate) => candidate.status !== 'SETTLED' && candidate.id !== wave.id
       ).length;
   const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
+  const adaptive = wave.policy === 'TEAM' && wave.policyVersion === 2;
+  const latestComparisonJob = jobs.filter((job) => job.role === 'COMPARE' && job.result?.kind === 'CONTRIBUTION').sort((a, b) => a.phase - b.phase).at(-1);
+  const comparison = latestComparisonJob?.result?.kind === 'CONTRIBUTION' && latestComparisonJob.result.team?.kind === 'COMPARISON' ? latestComparisonJob.result.team : undefined;
   const reviews = jobs.filter((job) => job.role === 'CRITIQUE');
   const reviewGroups = reviews.reduce<Array<{ label: string; names: string[] }>>((groups, review) => {
     const label = discourseReviewResultLabel(review);
@@ -56,7 +59,7 @@ export function DiscourseResponseGroup({
     (job) => job.role === 'ANSWER' && Boolean(streamDrafts[job.id])
   );
   const completedTeam =
-    wave.policy === 'TEAM' && wave.status === 'SETTLED' && wave.outcome === 'COMPLETE';
+    wave.policy === 'TEAM' && !adaptive && wave.status === 'SETTLED' && wave.outcome === 'COMPLETE';
   const teamSummary = completedTeam
     ? discourseTeamCompletionSummary({ jobs, concerns })
     : undefined;
@@ -66,10 +69,16 @@ export function DiscourseResponseGroup({
     ? 'Stopping response'
     : wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
     ? 'Context changed before dispatch'
+    : adaptive && wave.status === 'SETTLED'
+      ? adaptiveStopLabel(wave.settlementReason)
     : teamSummary
       ? teamSummary.label
       : active
-        ? active.role === 'CRITIQUE'
+        ? active.role === 'COMPARE'
+          ? latestComparisonJob ? 'Updating the comparison' : 'Comparing independent answers'
+          : active.role === 'RESPOND'
+            ? 'Authors responding to specific points'
+          : active.role === 'CRITIQUE'
           ? 'Reviewing the lead answer'
           : active.role === 'CORRECT'
             ? 'Preparing a correction'
@@ -87,6 +96,8 @@ export function DiscourseResponseGroup({
     ? 'Finishing the current agent step and preserving completed work.'
     : wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
     ? 'Review the latest context before asking the agent again.'
+    : adaptive && wave.status === 'SETTLED'
+      ? terminalDetail ?? (['COMPLETED', 'NEEDS_EVIDENCE', 'NEEDS_USER', 'OPEN_DISAGREEMENT'].includes(wave.settlementReason ?? '') ? comparison?.reason : undefined) ?? 'Completed answers are preserved. No further agent turns will run automatically.'
     : teamSummary
       ? teamSummary.detail
       : active?.status === 'RECOVERY_REQUIRED'
@@ -107,7 +118,7 @@ export function DiscourseResponseGroup({
   ].includes(wave.status);
   const retryable =
     wave.status === 'SETTLED' && wave.outcome !== 'COMPLETE' && wave.outcome !== 'CANCELED';
-  const tone = discourseResponseTone({
+  const tone = adaptive && wave.outcome === 'COMPLETE' ? 'idle' : discourseResponseTone({
     wave,
     activeJobStatus: active?.status
   });
@@ -138,7 +149,7 @@ export function DiscourseResponseGroup({
             {stopPending ? 'Stopping…' : 'Stop'}
           </button>
         ) : retryable ? (
-          <button type="button" onClick={() => onRetry(wave.id)}>Try again</button>
+          <button type="button" onClick={() => onRetry(wave.id)}>{adaptive ? 'Add a follow-up' : 'Try again'}</button>
         ) : null}
       </header>
       {streamingJobs.length > 0 ? (
@@ -188,13 +199,30 @@ export function DiscourseResponseGroup({
         </div>
       ) : null}
       <footer>
-        {discourseResponsePolicyLabel(wave.policy)} · up to {wave.policy === 'TEAM' ? 4 : wave.assignments.length} agent turn{wave.policy === 'DIRECT' ? '' : 's'}
+        {discourseResponsePolicyLabel(wave.policy)} · {adaptive ? `${jobs.length} planned of ${DISCOURSE_LIMITS.maxAdaptiveTeamJobs}` : `up to ${wave.policy === 'TEAM' ? 4 : wave.assignments.length}`} agent turn{wave.policy === 'DIRECT' ? '' : 's'}
+        {adaptive ? ' · 20-minute limit · comparison is not a review verdict' : ''}
         {queuedAfterCurrent > 0
           ? ` · ${queuedAfterCurrent} follow-up${queuedAfterCurrent === 1 ? '' : 's'} queued`
           : ''}
       </footer>
     </li>
   );
+}
+
+function adaptiveStopLabel(reason: DiscourseConversationAggregateRecord['waves'][number]['settlementReason']): string {
+  switch (reason) {
+    case 'COMPLETED': return 'Comparison ready';
+    case 'NEEDS_EVIDENCE': return 'Waiting for evidence';
+    case 'NEEDS_USER': return 'Your decision is needed';
+    case 'OPEN_DISAGREEMENT': return 'Disagreement remains';
+    case 'TURN_LIMIT': return 'Turn limit reached';
+    case 'TIME_LIMIT': return 'Time limit reached';
+    case 'NO_NEW_BASIS': return 'No useful next step';
+    case 'CONTEXT_CHANGED': return 'Context changed';
+    case 'USER_CANCELED':
+    case 'STOPPED': return 'Team stopped';
+    default: return 'Team incomplete';
+  }
 }
 
 function waveTerminalDetail(

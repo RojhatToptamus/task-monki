@@ -1,4 +1,5 @@
 import { isEligibleDiscourseConcern } from '../../shared/discourse';
+import { isAdaptiveTeam, nextTeamStep } from './DiscourseTeam';
 import type {
   ContextSnapshotRecord,
   ContextSnapshotStatus,
@@ -365,7 +366,7 @@ export function deriveDiscourseWaveAggregate(
       throw new Error('A discourse job must use an immutable assignment from its wave.');
     }
     assertJobMatchesPolicy(wave, job);
-    const jobKey = `${job.assignment.stableParticipantId}:${job.role}`;
+    const jobKey = `${job.assignment.stableParticipantId}:${job.role}${isAdaptiveTeam(wave) ? `:${job.phase}` : ''}`;
     if (jobKeys.has(jobKey)) {
       throw new Error('A discourse wave cannot create duplicate jobs for one assignment and role.');
     }
@@ -400,6 +401,7 @@ export function deriveDiscourseWaveAggregate(
     if (activeJobs.length > 0) {
       return { status: 'STOPPING' };
     }
+    if (wave.requestedStopReason === 'TIME_LIMIT') return settled('PARTIAL', 'TIME_LIMIT');
     return hasUsableContribution(jobs)
       ? settled('PARTIAL', 'STOPPED')
       : settled('CANCELED', 'USER_CANCELED');
@@ -423,6 +425,11 @@ export function deriveDiscourseWaveAggregate(
 
   switch (wave.policy) {
     case 'TEAM':
+      if (isAdaptiveTeam(wave)) {
+        const next = nextTeamStep(wave, jobs);
+        if (next.jobs) return { status: 'RUNNING', nextPhase: next.jobs[0]!.role };
+        return settled(next.stop === 'COMPLETED' ? 'COMPLETE' : next.stop === 'CONTEXT_CHANGED' ? 'STALE' : 'PARTIAL', next.stop);
+      }
       return deriveTeamSettlement(input);
     case 'PANEL':
       return derivePanelSettlement(input);
@@ -735,6 +742,13 @@ function assertWaveAssignments(wave: DiscourseResponseWaveRecord): void {
   const required = wave.assignments;
   assertDiscoursePolicyRoster(wave.policy, required.length);
   if (wave.policy === 'TEAM') {
+    if (isAdaptiveTeam(wave)) {
+      if (required.filter((assignment) => assignment.assignmentRole === 'AUTHOR').length !== 2 ||
+        required.filter((assignment) => assignment.assignmentRole === 'COMPARATOR').length !== 1) {
+        throw new Error('Adaptive Team requires two equal authors and one comparator.');
+      }
+      return;
+    }
     const primaries = required.filter((assignment) => assignment.assignmentRole === 'PRIMARY');
     const reviewers = required.filter((assignment) => assignment.assignmentRole === 'REVIEWER');
     if (primaries.length !== 1 || reviewers.length !== 2 || wave.assignments.length !== 3) {
@@ -754,6 +768,11 @@ function assertJobMatchesPolicy(
   job: DiscourseAgentJobRecord
 ): void {
   const role = job.assignment.assignmentRole;
+  if (isAdaptiveTeam(wave)) {
+    if ((role === 'AUTHOR' && ['ANSWER', 'RESPOND'].includes(job.role)) ||
+      (role === 'COMPARATOR' && job.role === 'COMPARE')) return;
+    throw new Error('Adaptive Team job does not match its assignment.');
+  }
   const valid =
     (wave.policy === 'TEAM' &&
       ((role === 'PRIMARY' && (job.role === 'ANSWER' || job.role === 'CORRECT')) ||
@@ -778,7 +797,7 @@ function assertWaveSettlementPair(
 ): void {
   const allowed: Readonly<Record<DiscourseWaveOutcome, readonly DiscourseWaveSettlementReason[]>> = {
     COMPLETE: ['COMPLETED'],
-    PARTIAL: ['COMPLETED', 'FAILED', 'STOPPED', 'SUPERSEDED'],
+    PARTIAL: ['COMPLETED', 'FAILED', 'STOPPED', 'SUPERSEDED', 'NEEDS_EVIDENCE', 'NEEDS_USER', 'OPEN_DISAGREEMENT', 'TURN_LIMIT', 'TIME_LIMIT', 'NO_NEW_BASIS'],
     NO_RESPONSE: ['FAILED'],
     CANCELED: ['USER_CANCELED', 'STOPPED', 'SUPERSEDED'],
     STALE: ['CONTEXT_CHANGED'],
@@ -810,6 +829,10 @@ function assertResultMatchesRole(
           : 'CONTRIBUTION';
   if (result.kind !== expected) {
     throw new Error(`Discourse ${role} jobs require a ${expected} result.`);
+  }
+  if ((role === 'COMPARE' || role === 'RESPOND') && (result.kind !== 'CONTRIBUTION' ||
+    result.team?.kind !== (role === 'COMPARE' ? 'COMPARISON' : 'RESPONSE'))) {
+    throw new Error('Adaptive Team jobs require their parsed structured result.');
   }
 }
 

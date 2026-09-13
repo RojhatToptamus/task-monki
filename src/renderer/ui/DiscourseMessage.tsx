@@ -16,12 +16,15 @@ import {
   DiscourseTaskIcon
 } from './DiscourseIcons';
 import { DiscourseMarkdown } from './DiscourseMarkdown';
+import { DiscourseTeamContent } from './DiscourseTeamContent';
 
 export function DiscourseMessage({
   message,
   replyTarget,
   context,
   job,
+  relatedJobs = [],
+  sourceMessages = [],
   onNavigate,
   onReply,
   onCorrect,
@@ -35,6 +38,8 @@ export function DiscourseMessage({
   replyTarget?: DiscourseMessageRecord;
   context: ConversationContextReferenceSnapshot[];
   job?: DiscourseConversationAggregateRecord['jobs'][number];
+  relatedJobs?: DiscourseConversationAggregateRecord['jobs'];
+  sourceMessages?: DiscourseMessageRecord[];
   onNavigate(messageId: string): void;
   onReply(): void;
   onCorrect(): void;
@@ -45,6 +50,8 @@ export function DiscourseMessage({
   onToggleSource(): void;
 }) {
   const user = message.author.kind === 'USER';
+  const team = job?.result?.kind === 'CONTRIBUTION' ? job.result.team : undefined;
+  const comparisonOutdated = team?.kind === 'COMPARISON' && relatedJobs.some((candidate) => candidate.phase > job!.phase && candidate.result?.kind === 'CONTRIBUTION');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => () => {
@@ -81,6 +88,7 @@ export function DiscourseMessage({
       <article>
         <header>
           <strong>{messageAuthorLabel(message)}</strong>
+          {team ? <span className="tm-discourse-message__state">{team.kind === 'COMPARISON' ? 'Comparison' : 'Response'}</span> : null}
           <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
           {message.status === 'SUPERSEDED' ? (
             <span className="tm-discourse-message__state">Corrected</span>
@@ -116,8 +124,11 @@ export function DiscourseMessage({
             Context changed while this response was running. It is preserved for history, not accepted as current evidence.
           </p>
         ) : null}
+        {comparisonOutdated ? <p className="tm-discourse-message__stale-note">Newer responses follow. This comparison does not include them.</p> : null}
         {message.status === 'TOMBSTONE' ? (
           <p className="tm-discourse-message__tombstone">Message deleted</p>
+        ) : team ? (
+          <DiscourseTeamContent result={team} sources={sourceMessages} onNavigate={onNavigate} />
         ) : message.author.kind === 'AGENT' ? (
           <DiscourseMarkdown text={message.body} />
         ) : (

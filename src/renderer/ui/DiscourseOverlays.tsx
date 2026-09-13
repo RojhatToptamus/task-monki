@@ -143,6 +143,8 @@ export function ContextPreview({
                     <small>
                       {reference.scope === 'PINNED' ? 'Pinned' : 'This message'} ·{' '}
                       {accessModeLabel(reference.accessMode)}
+                      {reference.entityKind === 'TASK' ? ' · Task description and recorded status' : ''}
+                      {reference.readScope === 'TASK_WORKTREE' ? ' · Task worktree' : reference.readScope === 'REPOSITORY' ? ' · Repository checkout' : ''}
                     </small>
                   </span>
                 </li>
@@ -151,13 +153,13 @@ export function ContextPreview({
           )}
         </section>
         <section>
-          <h3>Safety boundary</h3>
+          <h3>Requested access</h3>
           <dl className="tm-discourse-preview__policy">
             <div><dt>Repository roots</dt><dd>{preview.filesystemRootCount} read-only</dd></div>
-            <div><dt>Writes</dt><dd>Disabled</dd></div>
-            <div><dt>Network</dt><dd>Disabled</dd></div>
-            <div><dt>Tools & apps</dt><dd>Disabled</dd></div>
+            <div><dt>Writes and network</dt><dd>Not permitted</dd></div>
+            <div><dt>Task Monki tools & apps</dt><dd>Not attached</dd></div>
           </dl>
+          <p>Repository files are live, not copied into the prompt. Runtime controls enforce the requested policy where supported. Recorded status and agent claims are not fresh test or review results.</p>
         </section>
         {preview.exclusions.length > 0 ? (
           <section className="tm-discourse-preview__exclusions">

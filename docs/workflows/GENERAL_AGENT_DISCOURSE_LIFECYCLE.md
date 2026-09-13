@@ -1,10 +1,10 @@
 # General Agent Discourse Lifecycle
 
-Date: 2026-08-29
+Date: 2026-09-13
 
 This document is the source of truth for Task Monki's global Discourse
 workspace: human conversation, global mentions, Direct and Panel responses,
-Team review/correction, context freshness, waiting, cancellation, and recovery.
+Team comparison and responses, context freshness, waiting, cancellation, and recovery.
 It does not change task workflow or the detached agent review gate.
 
 ## Authority boundary
@@ -19,8 +19,9 @@ Task Monki is authoritative for:
 - whether an agent result is eligible to become a visible message or concern.
 
 Each selected agent runtime is authoritative only for its own process, session,
-turn, item, model, settings, tool, and usage events. Provider output is
-untrusted telemetry until Task Monki validates and persists it. Discourse does
+turn, item, model, settings, tool, and usage events. Task Monki validates output
+shape and source references before publication. Publication does not verify
+the truth of a model claim. Discourse does
 not create a hidden task, worktree, iteration, or task workflow transition.
 
 Curated conversation state lives in `SqliteDiscourseStore`. Owner-neutral
@@ -67,8 +68,9 @@ Untrusted repository content is clearly separated from Task Monki instructions i
 
 The preview fingerprint is checked again before dispatch. If selected context
 changed after preview, the wave stays planned and requires an explicit Continue
-or Cancel decision. Continue confirms the current fingerprint and creates fresh
-execution attestations; it does not reuse the stale preview. A source that
+or Cancel decision. Continue confirms the displayed fingerprint and checks the
+captured sources again. If that snapshot is stale, the wave stops. The user must
+send a new message to capture changed sources. A source that
 cannot be safely resolved is shown as unavailable or blocks the wave rather
 than silently widening access.
 
@@ -79,6 +81,21 @@ When more than one repository root is readable, every phase prompt includes a
 bounded filesystem guide naming the exact roots available to that provider
 turn. The guide is provider-only execution context; absolute local paths do not
 leak into the normal transcript or context inspector.
+
+### What selected context supplies
+
+A selected task supplies its title, description, phase, resolution, and recorded
+Git, delivery, and review status. These records are not fresh tests or verified
+agent claims. Attachments, provider transcripts, and unrelated tasks are excluded.
+A task with a worktree grants only that worktree. A missing task worktree never
+falls back to the repository checkout. Its recorded information remains available
+without file access. A task without a worktree uses its available repository checkout.
+
+A selected repository supplies recorded repository status and live checkout
+access. It does not include task descriptions or other worktrees. An explicit
+source-message or reply selection includes the message body outside the recent
+transcript page. It does not expand filesystem permissions.
+Context previews distinguish recorded information from live file access.
 
 ## Response policies
 
@@ -99,18 +116,18 @@ leak into the normal transcript or context inspector.
 - Gives every panelist the same frozen initial transcript and context snapshot.
 - Runs panelists independently. One panelist never sees another panelist's
   answer, and one failure does not erase successful answers.
-- Applies complementary versioned decision lenses: Lead owns the actionable
-  operating path, Skeptic develops the strongest counter-position or boundary
-  condition, and Verifier audits the decisive evidence boundary. Agreement is
-  allowed, but panelists must contribute distinct reasoning instead of
-  paraphrasing the likely consensus.
+- Uses neutral answer instructions. Agreement, uncertainty, and abstention are
+  valid. Panelists do not need to invent differences or criticism.
 
 `Team`
 
-- Uses the canonical Lead, Skeptic, and Verifier roster.
-- The Team lifecycle is Lead answer, two independent reviews, then at most one
-  Lead correction when an eligible material concern exists.
-- It consumes at most four agent turns.
+- A and B answer independently from the same initial context.
+- C compares their answers and records consequential differences with source links.
+- Authors respond directly to specific points. C then updates the comparison.
+- A further response needs a material open point, a specific task, and a useful
+  new basis. Agreement does not determine whether the process stops.
+- Each wave permits at most 12 agent turns and 20 minutes from first dispatch.
+  These are provisional product defaults, not evidence of optimal quality.
 
 Current product code creates only Direct, Panel, and Team waves. The stored
 contract still recognizes the earlier targeted-review, targeted-reply,
@@ -170,8 +187,9 @@ revalidated against live runtime availability, a scoped-runtime binding, and
 the exact model, model-provider, reasoning, and service-tier settings in its
 immutable participant revision. Drift blocks the send; Task Monki does not
 silently reroute a historical participant. Role contracts are versioned, and a
-historical participant continues to receive the contract version recorded in
-its revision.
+historical job continues to receive the contract version recorded in
+its revision. New stages also check the saved model and settings before run
+preparation. No fallback model is selected for an unavailable assignment.
 
 ## Renderer interaction contract
 
@@ -185,7 +203,7 @@ the policy with which they started.
 
 Responder configuration is conversation-scoped and stays adjacent to the
 composer. Direct and Panel expose the selected mentioned agents; Team exposes
-Lead, Skeptic, and Verifier. Provider, model, and reasoning selections remain
+A, B, and C. Provider, model, and reasoning selections remain
 attached to the participant revision described above, while core resolves any
 service-tier value, so the UI does not maintain a parallel routing source of
 truth. Configuration can be opened and dismissed without replacing the draft,
@@ -239,7 +257,7 @@ Routine provider events are coalesced into quiet background refreshes; only an
 initial load or an explicit stale/error recovery blocks composer actions.
 
 Acceptance also freezes the exact bounded visible-message ID window. Recovery
-resolves that window in its stored order instead of rereading the latest
+resolves those exact messages in transcript order instead of rereading the latest
 transcript, so an earlier interrupted response never receives prompts that were
 added later.
 
@@ -259,6 +277,9 @@ A queue lease represents capacity, not completion, and remains owned until
 authoritative terminal or recovery resolution.
 
 ## Team review and correction
+
+This section describes historical policy-1 waves only. New Team waves use the
+comparison protocol below. Historical prompts and records remain readable.
 
 The Lead first creates a normal attributable answer. Skeptic and Verifier then
 receive fresh provider sessions with the same immutable context snapshot and
@@ -294,13 +315,80 @@ that both reviewers found no material concerns with complete access. Partial,
 failed, and abstained reviews remain explicit; silence is never interpreted as
 agreement.
 
+## Adaptive Team protocol
+
+`TEAM` policy version 2 uses the existing wave, jobs, scheduler, and runtime store.
+`DiscourseTeam.nextTeamStep` derives the next jobs from durable results. It does
+not store a second lifecycle. Every job uses a fresh runtime session and the
+model settings from its immutable assignment.
+
+A and B see the accepted transcript, question, and selected context. Neither
+sees the other current answer. C sees both original answers and all completed
+responses from this wave. Authors receive C's specific requests and completed
+earlier messages. Authors in the same response batch do not see each other's
+new responses. New user messages do not enter an active wave implicitly.
+
+C returns a summary and up to 16 points. Each point records source message IDs,
+an explanation, evidence claims, confidence, importance, and a resolution state.
+Source IDs locate arguments. They do not prove factual claims. Empty point and
+evidence lists are valid. C cannot erase an earlier point ID in an update.
+Original answers and responses remain separate messages after C changes its
+interpretation. No majority vote or winner field exists.
+
+Each author response contains a stance, answer, reason, and evidence for every
+assigned point. Stances include revision, defense, clarification, withdrawal,
+uncertainty, and abstention. Authors can record new issues or corrections to C.
+An abstention-only batch with no new issues stops without another comparison.
+An update reconstructs C's context from public messages. It does not depend on
+hidden provider memory or private chain-of-thought.
+
+Continuation requires all of the following:
+
+- An open material point.
+- An assigned author and a specific response or read-only investigative task.
+- A stated potential effect on the decision.
+- A visible non-comparator message that supplies an unanswered or new basis.
+- Capacity for the response batch and C's subsequent update.
+
+Rephrasing a request on already-seen inputs does not justify another response.
+These structural rules limit repetition. They do not prove that a new argument
+is sound or useful. Agents can still produce correlated errors or false criticism.
+
+C can finish with a useful comparison, missing evidence, a user question, or an
+unresolved disagreement. Each state settles the wave and releases completed
+runtime capacity. The UI preserves the stopping reason. A follow-up action opens
+an empty composer with the original question linked. Only a new user send
+authorizes another bounded response with current context.
+
+Evidence gathering stays within the existing read-only scope. A missing trace,
+external source, write permission, or preference requires user involvement.
+Suggested tests are not executed tests. Discourse never changes review findings,
+PR approval, task acceptance, or delivery state.
+
+Malformed output fails that job. Task Monki retains the raw runtime output and
+does not run a repair call. An author failure prevents a claimed two-answer
+comparison. A failed response or comparison preserves all completed messages
+and settles the wave as incomplete. The UI marks earlier comparisons when
+newer responses exist, even if the update fails.
+
+Accepted sends without a policy version retain policy 1. New sends record their
+version explicitly. These optional values use the existing JSON payloads; no
+database migration or new table is needed. New sends use neutral role contracts
+and new participant revisions. Historical job assignments and messages do not change.
+
+The deadline starts at first dispatch, not queue entry. An owned timer requests
+interruption after 20 minutes. Dispatch and continuation also check the durable
+start time. Restart does not reset the deadline. Stop handles running and queued
+jobs in the same batch. Unknown delivery keeps its recovery fence and capacity.
+The deadline is not a hard provider billing or process-termination guarantee.
+
 ## Targeted follow-up and synthesis
 
 Agent messages expose actions to ask the author or ask other available agents.
 These actions prepare a normal Direct or Panel follow-up with explicit
 recipients and a reply link; they do not mutate the completed Team wave.
 
-Users can select two or more visible messages and ask Lead to synthesize them.
+Users can select two or more visible messages and ask A to synthesize them.
 The resulting message records the exact selected source message IDs. The prompt
 requires a concise synthesis that preserves material disagreement, uncertainty,
 and context limitations. Selection does not imply that an agent endorsed every
@@ -394,8 +482,8 @@ tests.
 
 ## Storage, paging, and limits
 
-Each conversation uses a private checksummed segmented event log. Segments are
-bounded by event count and encoded bytes. The store also bounds message sizes,
+Conversations and typed events use the existing SQLite store. Runtime output
+and protocol journals remain under their existing runtime owner. The store bounds message sizes,
 context manifests, transcript input, wave output, drafts, summaries, open
 conversation indexes, queued waves, and the total events/segments per
 conversation. Transcript and conversation paging use opaque cursors; renderer
@@ -419,13 +507,22 @@ auditable error with actual and limit values and fails while still `NOT_SENT`;
 one over-budget Panel member does not fabricate delivery or erase independently
 runnable members.
 
+The app uses a 128,000-token planning ceiling, reduced to the model capacity
+when the runtime explicitly reports a smaller value. OpenCode supplies its
+reported context limit. An absent model limit remains unknown. The 16,000-token
+output reserve and byte estimates do not enforce a provider output-token cap.
+The runtime store retains provider usage observations without inventing missing values.
+
 ## Development verification
 
 Run `npm run dev:seed` before UI or workflow testing. The current authoritative
 discourse scenarios cover human-only messages, running Team work, partial
 Panel results, silent review success, author correction, queued follow-up,
 context reconfirmation, unavailable historical context, recovery-required
-delivery, settled cancellation, paging, drafts, and archive.
+delivery, settled cancellation, paging, drafts, and archive. Adaptive Team seeds
+cover completed comparisons, missing user decisions, author responses, failures,
+and stale context. Provider-inert seed startup does not recover projected jobs
+or arm their deadline timers.
 
 Changes to this lifecycle require focused storage/service/runtime tests plus:
 

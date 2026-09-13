@@ -258,7 +258,7 @@ function configurationNote(policy: DiscourseDefaultPolicy): string {
   switch (policy) {
     case 'DIRECT': return 'Choose one responder.';
     case 'PANEL': return 'Choose two or three independent responders.';
-    case 'TEAM': return 'Lead answers, then Skeptic and Verifier review before any correction.';
+    case 'TEAM': return 'A and B answer independently; C compares and requests useful follow-ups.';
     case 'NONE': return '';
   }
 }

@@ -1201,6 +1201,22 @@
   font-size: 11px;
 }
 
+/* Comparison explanations are prose, not the legacy review label/value grid. */
+.tm-discourse-team .tm-discourse-markdown p {
+  display: block;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.tm-discourse-team .tm-discourse-response__concerns summary {
+  font-size: 12px;
+  min-height: 36px;
+}
+
+.tm-discourse-team .tm-discourse-response__concerns details {
+  padding-bottom: 8px;
+}
+
 @media (max-width: 620px) {
   .tm-discourse-response__concerns p {
     grid-template-columns: 1fr;
@@ -1882,7 +1898,8 @@
   from { transform: translateY(5px); opacity: 0; }
 }
 
-.tm-discourse-composer__requirement {
+.tm-discourse-composer__requirement,
+.tm-discourse-composer__allowance {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1891,6 +1908,10 @@
   color: var(--waiting-ink);
   font-size: 11px;
   line-height: 1.4;
+}
+
+.tm-discourse-composer__allowance {
+  color: var(--text-soft);
 }
 
 .tm-discourse-composer__requirement button {

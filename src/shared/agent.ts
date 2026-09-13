@@ -849,6 +849,8 @@ export interface AgentModel {
   serviceTiers: string[];
   defaultServiceTier?: string;
   inputModalities: string[];
+  /** Input/output context capacity, only when explicitly reported by the runtime catalog. */
+  contextWindowTokens?: number;
   /** Provider-owned model support for the full Design workflow. */
   designSupport?: AgentDesignCapability;
   isDefault: boolean;

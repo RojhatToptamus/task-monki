@@ -503,7 +503,7 @@ async function seedDiscourseScenario(input: {
   const { definition, discourseStore } = input;
   const conversationId = `seed-${definition.slug}`;
   const seededPolicy = discourseSeedPolicy(definition.slug);
-  const bindings = discourseSeedBindings(conversationId, seededPolicy);
+  const bindings = discourseSeedBindings(conversationId, seededPolicy, definition.slug.startsWith('discourse-abc-'));
   const conversation = await discourseStore.createConversation({
     id: conversationId,
     title: `[seed:${definition.slug}] ${definition.title}`,
@@ -583,7 +583,7 @@ async function seedDiscourseScenario(input: {
     return conversation.id;
   }
 
-  if ([
+  if (definition.slug.startsWith('discourse-abc-') || [
     'discourse-team-running',
     'discourse-panel-partial',
     'discourse-review-silent',
@@ -592,7 +592,12 @@ async function seedDiscourseScenario(input: {
     'discourse-recovery-required',
     'discourse-canceled'
   ].includes(definition.slug)) {
-    const trigger = await append(definition.description, 'message');
+    const trigger = await append(
+      definition.slug === 'discourse-abc-ready'
+        ? 'Rollback support must remain available for one release. How should we remove the old reader safely?'
+        : definition.description,
+      'message'
+    );
     await seedDiscourseAgentWaveState({
       slug: definition.slug,
       store: discourseStore,
@@ -680,6 +685,7 @@ async function seedDiscourseScenario(input: {
 const DISCOURSE_SEED_TIME = '2026-07-20T09:00:00.000Z';
 
 function discourseSeedPolicy(slug: string): DiscourseDefaultPolicy {
+  if (slug.startsWith('discourse-abc-')) return 'TEAM';
   if ([
     'discourse-team-running',
     'discourse-review-silent',
@@ -694,7 +700,8 @@ function discourseSeedPolicy(slug: string): DiscourseDefaultPolicy {
 
 function discourseSeedBindings(
   conversationId: string,
-  policy: DiscourseDefaultPolicy
+  policy: DiscourseDefaultPolicy,
+  adaptive = false
 ): Array<{
   participant: DiscourseParticipantRecord;
   revision: DiscourseParticipantRevisionRecord;
@@ -710,8 +717,8 @@ function discourseSeedBindings(
     const suffix = profileId.split('.').at(-1)!;
     const participantId = `${conversationId}-${suffix}`;
     const revisionId = `${participantId}-revision`;
-    const displayName = suffix.charAt(0).toUpperCase() + suffix.slice(1);
-    const configuredRole = profileId === 'builtin.lead'
+    const displayName = adaptive ? ({ 'builtin.lead': 'A', 'builtin.skeptic': 'B', 'builtin.verifier': 'C' }[profileId]) : suffix.charAt(0).toUpperCase() + suffix.slice(1);
+    const configuredRole = adaptive ? 'GENERAL' as const : profileId === 'builtin.lead'
       ? 'LEAD' as const
       : profileId === 'builtin.skeptic'
         ? 'SKEPTIC' as const
@@ -731,14 +738,14 @@ function discourseSeedBindings(
         conversationId,
         stableParticipantId: participantId,
         agentProfileId: profileId,
-        profileRevision: 1,
+        profileRevision: adaptive ? 2 : 1,
         displayNameSnapshot: displayName,
         runtimeId: 'codex',
         model: 'scenario-model',
         modelProvider: 'openai',
         reasoningEffort: 'medium',
         configuredRole,
-        roleContractVersion: 1,
+        roleContractVersion: adaptive ? 4 : 1,
         roleContractHash: 'a'.repeat(64),
         revision: 1,
         createdAt: DISCOURSE_SEED_TIME
@@ -769,7 +776,9 @@ async function seedDiscourseAgentWaveState(input: {
     configuredRole: binding.revision.configuredRole,
     roleContractVersion: binding.revision.roleContractVersion,
     roleContractHash: binding.revision.roleContractHash,
-    assignmentRole: input.slug === 'discourse-panel-partial'
+    assignmentRole: input.slug.startsWith('discourse-abc-')
+      ? binding.revision.agentProfileId === 'builtin.verifier' ? 'COMPARATOR' : 'AUTHOR'
+      : input.slug === 'discourse-panel-partial'
       ? 'PANELIST'
       : binding.revision.agentProfileId === 'builtin.lead'
         ? 'PRIMARY'
@@ -780,9 +789,10 @@ async function seedDiscourseAgentWaveState(input: {
   const first = await seedWavePlan({
     ...input,
     suffix: 'wave-1',
+    policyVersion: input.slug.startsWith('discourse-abc-') ? 2 : 1,
     policy: policy === 'NONE' ? 'DIRECT' : policy,
     assignments,
-    answerAssignments: policy === 'TEAM' ? assignments.slice(0, 1) : assignments,
+    answerAssignments: policy === 'TEAM' ? assignments.slice(0, input.slug.startsWith('discourse-abc-') ? 2 : 1) : assignments,
     ...(input.slug === 'discourse-context-stale'
       ? {
           dispatchGate: {
@@ -795,6 +805,10 @@ async function seedDiscourseAgentWaveState(input: {
       : {})
   });
 
+  if (input.slug.startsWith('discourse-abc-')) {
+    await seedAdaptiveTeam(input, first, assignments);
+    return;
+  }
   if (input.slug === 'discourse-context-stale') return;
   if (input.slug === 'discourse-followup-queued') {
     await seedWaveRunning(input.store, input.conversationId, first.wave.id);
@@ -1017,6 +1031,69 @@ async function seedDiscourseAgentWaveState(input: {
   await seedSettleWave(input.store, input.conversationId, first.wave.id, 'COMPLETE', 'COMPLETED');
 }
 
+async function seedAdaptiveTeam(
+  input: { slug: string; store: SqliteDiscourseStore; conversationId: string; triggerMessageId: string },
+  first: { wave: DiscourseResponseWaveRecord; jobs: DiscourseAgentJobRecord[] },
+  assignments: AgentAssignmentSnapshot[]
+) {
+  const { store, conversationId, slug } = input;
+  const ready = slug.endsWith('-ready');
+  await seedWaveRunning(store, conversationId, first.wave.id);
+  const a = await seedCompleteContribution(store, conversationId, first.jobs[0]!.id,
+    'Retain the old reader during migration. Remove it after the rollback window closes. This avoids permanent compatibility code.');
+  if (slug.endsWith('-failed')) {
+    await seedFailJob(store, conversationId, first.jobs[1]!.id);
+    await seedSettleWave(store, conversationId, first.wave.id, 'PARTIAL', 'FAILED');
+    return;
+  }
+  const b = await seedCompleteContribution(store, conversationId, first.jobs[1]!.id,
+    ready
+      ? 'The requested support window is one release. Retain the old reader for that window, then remove it.'
+      : 'Keep rollback available for one release. If customers require longer support, retain the reader longer. We need that policy from the user.');
+  const comparisonJob = seedJobRecord({ conversationId, waveId: first.wave.id, snapshotId: first.wave.contextSnapshotId!,
+    assignment: assignments[2]!, id: `${first.wave.id}-comparison`, role: 'COMPARE', phase: 2,
+    targetMessageIds: [a, b], visibleMessageIds: [input.triggerMessageId, a, b] });
+  const appendJobs = async (jobs: DiscourseAgentJobRecord[]) => store.addJobsToWave({ conversationId, waveId: first.wave.id, jobs,
+    expectedConversationRevision: (await store.getConversation(conversationId)).conversation.recordRevision,
+    clientOperationId: `${jobs[0]!.id}:add` });
+  await appendJobs([comparisonJob]);
+  if (slug.endsWith('-stale')) {
+    const running = await seedJobRunning(store, conversationId, comparisonJob.id);
+    await store.updateJob({ conversationId, expectedRevision: running.recordRevision, clientOperationId: `${running.id}:stale`,
+      job: { ...running, recordRevision: running.recordRevision + 1, status: 'CONTEXT_STALE', delivery: 'TERMINAL', finishedAt: DISCOURSE_SEED_TIME } });
+    await seedSettleWave(store, conversationId, first.wave.id, 'STALE', 'CONTEXT_CHANGED');
+    return;
+  }
+  const responding = slug.endsWith('-responding');
+  const comparison: import('../shared/discourse').DiscourseTeamComparison = {
+    kind: 'COMPARISON', summary: ready ? 'Retain rollback support for the agreed release window, then remove the compatibility path.' : 'The answers agree on temporary compatibility. The open question is how long rollback must remain possible.',
+    points: [{ id: 'P1', question: 'How long should rollback remain available?', importance: 'MATERIAL',
+      status: ready ? 'AGREED' : responding ? 'OPEN' : 'NEEDS_USER',
+      explanation: ready
+        ? 'Both answers support temporary compatibility. The user has specified one release, so that sets the removal point.'
+        : 'A ties removal to the rollback window. B proposes one release, but this is a preference, not a verified requirement. Neither answer supports permanent dual readers.',
+      sourceMessageIds: ready ? [input.triggerMessageId, a, b] : [a, b], evidence: [], confidence: 'MEDIUM' }],
+    next: ready ? 'READY' : responding ? 'CONTINUE' : 'NEEDS_USER',
+    reason: ready ? 'The implementation can proceed with the agreed support window.' : responding ? 'Ask the authors to check the scope of their recommendations.' : 'Should rollback remain available for one release or for a longer support period?',
+    actions: responding ? assignments.slice(0, 2).map((assignment) => ({ pointId: 'P1', participantId: assignment.stableParticipantId,
+      task: 'Clarify the rollback requirement and correct any misreading.', expectedBenefit: 'Avoid unnecessary permanent support.', basisMessageIds: [a, b] })) : []
+  };
+  const c = await seedCompleteContribution(store, conversationId, comparisonJob.id, comparison.summary, comparison);
+  if (!responding) {
+    await seedSettleWave(store, conversationId, first.wave.id, ready ? 'COMPLETE' : 'PARTIAL', ready ? 'COMPLETED' : 'NEEDS_USER');
+    return;
+  }
+  const responseJobs = assignments.slice(0, 2).map((assignment, index) => seedJobRecord({ conversationId, waveId: first.wave.id,
+    snapshotId: first.wave.contextSnapshotId!, assignment, id: `${first.wave.id}-response-${index}`, role: 'RESPOND', phase: 3,
+    targetMessageIds: [c], visibleMessageIds: [input.triggerMessageId, a, b, c] }));
+  await appendJobs(responseJobs);
+  await seedCompleteContribution(store, conversationId, responseJobs[0]!.id, 'I did not recommend permanent support.', {
+    kind: 'RESPONSE', responses: [{ pointId: 'P1', stance: 'CLARIFY', answer: 'I did not recommend permanent support. My answer was conditional on the user’s rollback window.',
+      reason: 'C must not turn a condition into a requirement.', evidence: ['Original answer: remove it after the rollback window closes.'] }], newIssues: []
+  });
+  await seedJobRunning(store, conversationId, responseJobs[1]!.id);
+}
+
 async function seedWavePlan(input: {
   slug: string;
   suffix: string;
@@ -1026,6 +1103,7 @@ async function seedWavePlan(input: {
   triggerOrdinal: number;
   contextRevisionId: string;
   policy: 'DIRECT' | 'PANEL' | 'TEAM';
+  policyVersion?: number;
   assignments: AgentAssignmentSnapshot[];
   answerAssignments: AgentAssignmentSnapshot[];
   dispatchGate?: DiscourseResponseWaveRecord['dispatchGate'];
@@ -1037,7 +1115,7 @@ async function seedWavePlan(input: {
     conversationId: input.conversationId,
     triggerMessageId: input.triggerMessageId,
     policy: input.policy,
-    policyVersion: 1,
+    policyVersion: input.policyVersion ?? 1,
     assignments: input.assignments,
     sourceMessageIds: [input.triggerMessageId],
     plannedContextRevisionId: input.contextRevisionId,
@@ -1107,7 +1185,7 @@ function seedJobRecord(input: {
   snapshotId: string;
   assignment: AgentAssignmentSnapshot;
   id: string;
-  role: 'ANSWER' | 'CRITIQUE' | 'CORRECT';
+  role: DiscourseAgentJobRecord['role'];
   phase: number;
   targetMessageIds: string[];
   visibleMessageIds: string[];
@@ -1201,7 +1279,8 @@ async function seedCompleteContribution(
   store: SqliteDiscourseStore,
   conversationId: string,
   jobId: string,
-  body: string
+  body: string,
+  team?: Extract<DiscourseAgentJobRecord['result'], { kind: 'CONTRIBUTION' }>['team']
 ): Promise<string> {
   const job = await seedJobRunning(store, conversationId, jobId);
   const message = await store.appendAgentMessage({
@@ -1227,7 +1306,7 @@ async function seedCompleteContribution(
       status: 'COMPLETED',
       delivery: 'TERMINAL',
       freshnessAtCompletion: 'FRESH',
-      result: { kind: 'CONTRIBUTION', outputMessageId: message.id },
+      result: { kind: 'CONTRIBUTION', outputMessageId: message.id, ...(team ? { team } : {}) },
       finishedAt: DISCOURSE_SEED_TIME
     }
   });
@@ -1338,8 +1417,8 @@ async function seedSettleWave(
   store: SqliteDiscourseStore,
   conversationId: string,
   waveId: string,
-  outcome: 'COMPLETE' | 'PARTIAL',
-  settlementReason: 'COMPLETED' | 'FAILED'
+  outcome: NonNullable<DiscourseResponseWaveRecord['outcome']>,
+  settlementReason: NonNullable<DiscourseResponseWaveRecord['settlementReason']>
 ) {
   const wave = requireSeedWave(await store.getConversation(conversationId), waveId);
   await store.updateWave({

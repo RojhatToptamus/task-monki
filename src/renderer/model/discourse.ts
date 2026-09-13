@@ -79,7 +79,7 @@ export const DISCOURSE_RESPONSE_MODE_OPTIONS: readonly DiscourseResponseModeOpti
   {
     policy: 'TEAM',
     label: 'Team',
-    description: 'A Lead answers, reviewers critique it, then the Lead may correct or defend the answer.'
+    description: 'A and B answer independently. C compares their answers and asks for targeted responses when useful.'
   }
 ];
 

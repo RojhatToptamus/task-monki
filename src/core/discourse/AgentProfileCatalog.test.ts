@@ -19,11 +19,12 @@ describe('AgentProfileCatalog', () => {
       'builtin.verifier'
     ]);
     expect(snapshot.profiles.map((entry) => entry.profile.roleTemplate)).toEqual([
-      'LEAD',
-      'SKEPTIC',
-      'VERIFIER'
+      'GENERAL',
+      'GENERAL',
+      'GENERAL'
     ]);
-    expect(snapshot.profiles.every((entry) => entry.profile.roleContractVersion === 3)).toBe(true);
+    expect(snapshot.profiles.every((entry) => entry.profile.roleContractVersion === 4)).toBe(true);
+    expect(snapshot.profiles.map((entry) => entry.profile.displayName)).toEqual(['A', 'B', 'C']);
     expect(snapshot.profiles.every((entry) => entry.availability === 'AVAILABLE')).toBe(true);
     expect(snapshot.profiles.map((entry) => entry.resolvedSettings)).toEqual([
       {
@@ -167,7 +168,8 @@ describe('AgentProfileCatalog', () => {
   it('rejects forged profile ids and does not share mutable settings', () => {
     const profiles = new AgentProfileCatalog();
     expect(() => profiles.require('builtin.admin')).toThrow('Unknown agent profile id');
-    expect(profiles.roleContract('builtin.verifier')).toContain('supplied facts');
+    expect(profiles.roleContract('builtin.verifier')).toContain('abstention');
+    expect(profiles.roleContract('builtin.verifier', 3)).toContain('supplied facts');
     const entries = profiles.list(runtimeCatalog()).profiles;
     entries[0]!.resolvedSettings!.model = 'mutated';
     expect(entries[1]?.resolvedSettings?.model).toBe('gpt-primary');

@@ -20,6 +20,7 @@ import type {
   DiscourseMessageRecord,
   DiscourseMentionCatalogSnapshot
 } from '../../shared/discourse';
+import { DISCOURSE_LIMITS } from '../../shared/discourse';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
@@ -981,7 +982,7 @@ export function DiscourseWorkspace({
       (entry) => entry.profile.id === 'builtin.lead' && entry.availability === 'AVAILABLE'
     );
     if (!lead) {
-      onNotify('Lead is not currently available to synthesize these messages.', 'info');
+      onNotify('A is not currently available to synthesize these messages.', 'info');
       return;
     }
     const text = 'Synthesize the selected messages into one concise answer. Preserve material disagreement, uncertainty, and any context limitations.';
@@ -1136,6 +1137,10 @@ export function DiscourseWorkspace({
 
   const selectConversation = (conversationId: string) => {
     if (sending) return;
+    if (selectedConversationIdRef.current === conversationId) {
+      setRailOpen(false);
+      return;
+    }
     const pendingShell = pendingNewConversationRef.current?.conversationId;
     const draftFlush = flushCurrentDraft(
       pendingSendIdentityRef.current?.clientMessageId,
@@ -1753,6 +1758,7 @@ export function DiscourseWorkspace({
       ? aggregate.contextRevisions.find((revision) => revision.id === wave.plannedContextRevisionId)
       : undefined;
     if (!wave || !trigger) return;
+    const adaptive = wave.policy === 'TEAM' && wave.policyVersion === 2;
     const policy: DiscourseDefaultPolicy = ['DIRECT', 'PANEL', 'TEAM'].includes(wave.policy)
       ? wave.policy as DiscourseDefaultPolicy
       : 'DIRECT';
@@ -1773,15 +1779,15 @@ export function DiscourseWorkspace({
       available: reference.availability === 'AVAILABLE'
     })) ?? [];
     setComposer({
-      ...createDiscourseComposerMentionState(trigger.body),
+      ...createDiscourseComposerMentionState(adaptive ? '' : trigger.body),
       tokens: [...agentTokens, ...contextTokens]
     });
     setResponsePolicy(policy);
     setSelectedSourceMessageIds(trigger.sourceMessageIds);
-    setReplyTargetId(trigger.replyToMessageId);
+    setReplyTargetId(adaptive ? trigger.id : trigger.replyToMessageId);
     setCorrectionTargetId(undefined);
     setComposerVersion((value) => value + 1);
-    onNotify('Review the refreshed context, then send when ready.', 'info');
+    onNotify(adaptive ? 'Add the missing evidence, your decision, or a specific next question. Sending starts a new bounded response.' : 'Review the refreshed context, then send when ready.', 'info');
   };
 
   const displayedConversations = visibleConversationSummaries(
@@ -2071,6 +2077,8 @@ export function DiscourseWorkspace({
                     replyTarget={findReplyTarget(messages, message)}
                     context={messageContext(aggregate, message)}
                     job={aggregate?.jobs.find((job) => job.id === message.jobId)}
+                    relatedJobs={aggregate?.jobs.filter((job) => job.waveId === message.waveId)}
+                    sourceMessages={messages}
                     onNavigate={(messageId) => navigateToMessage(messageId)}
                     onReply={() => {
                       setReplyTargetId(message.replyToMessageId ?? message.id);
@@ -2243,6 +2251,11 @@ export function DiscourseWorkspace({
                 {responseRequirement}
               </p>
             ) : null}
+            {responsePolicy === 'TEAM' ? (
+              <p className="tm-discourse-composer__allowance">
+                Up to {DISCOURSE_LIMITS.maxAdaptiveTeamJobs} agent turns · {DISCOURSE_LIMITS.maxAdaptiveTeamDurationMs / 60_000} minutes · No fixed token or billing cap
+              </p>
+            ) : null}
           </div>
         </div>
       </section>
@@ -2318,13 +2331,14 @@ export function DiscourseWorkspace({
               </ul>
             ) : <p className="tm-discourse-inspector__empty">No agents are bound to this human-only conversation.</p>}
           </InspectorSection>
-          <InspectorSection title="Access policy">
+          <InspectorSection title="Requested access">
             <dl className="tm-discourse-access-policy">
               <div><dt>Files</dt><dd>Read only</dd></div>
               <div><dt>Network</dt><dd>Off</dd></div>
-              <div><dt>Tools & apps</dt><dd>Off</dd></div>
+              <div><dt>Task Monki tools & apps</dt><dd>Not attached</dd></div>
               <div><dt>Approvals</dt><dd>Never</dd></div>
             </dl>
+            <p className="tm-discourse-inspector__empty">Recorded task information is not a live test result. Prompt estimates use an app ceiling and a smaller model limit when reported; unknown capacity and provider billing are not hard-capped here.</p>
           </InspectorSection>
           </InspectorDrawer>
         </>

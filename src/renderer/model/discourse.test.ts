@@ -95,7 +95,7 @@ describe('discourse renderer model', () => {
       {
         policy: 'TEAM',
         label: 'Team',
-        description: 'A Lead answers, reviewers critique it, then the Lead may correct or defend the answer.'
+        description: 'A and B answer independently. C compares their answers and asks for targeted responses when useful.'
       }
     ]);
     expect(discourseResponsePolicyLabel('NONE')).toBe('Note');

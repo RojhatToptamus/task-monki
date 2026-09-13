@@ -12,6 +12,8 @@ export const DISCOURSE_LIMITS = {
   maxFilesystemRootsPerWave: 3,
   maxTeamParticipants: 3,
   maxTeamJobs: 4,
+  maxAdaptiveTeamJobs: 12,
+  maxAdaptiveTeamDurationMs: 20 * 60 * 1000,
   maxPanelParticipants: 3,
   maxHumanMessageBytes: 32 * 1024,
   maxAgentContributionBytes: 64 * 1024,
@@ -160,6 +162,8 @@ export interface DiscourseAcceptedSendRecord {
   triggerMessageId: string;
   clientMessageId: string;
   policy: Exclude<DiscourseDefaultPolicy, 'NONE'>;
+  /** Missing on historical accepted sends, which retain policy version 1. */
+  policyVersion?: number;
   assignments: AgentAssignmentSnapshot[];
   /** Exact bounded conversation window visible to every initial response job. */
   visibleMessageIds: string[];
@@ -172,6 +176,8 @@ export interface DiscourseAcceptedSendRecord {
 }
 
 export type DiscourseAssignmentRole =
+  | 'AUTHOR'
+  | 'COMPARATOR'
   | 'PRIMARY'
   | 'REVIEWER'
   | 'PANELIST'
@@ -287,6 +293,9 @@ export interface ContextSnapshotSourceRecord {
   generation?: ContextGenerationFingerprint;
   inspectedAt?: string;
   exclusionReasons: string[];
+  /** Recorded information included in this prompt, not a copy of live repository files. */
+  recordedContext?: string;
+  readScope?: 'TASK_WORKTREE' | 'REPOSITORY';
 }
 
 /**
@@ -341,7 +350,7 @@ export type DiscourseWaveStatus =
   | 'RECOVERY_REQUIRED'
   | 'SETTLED';
 
-export type DiscourseWavePhase = 'ANSWER' | 'REVIEW' | 'CORRECT' | 'SYNTHESIZE' | 'COMPLETE';
+export type DiscourseWavePhase = 'ANSWER' | 'REVIEW' | 'CORRECT' | 'SYNTHESIZE' | 'COMPARE' | 'RESPOND' | 'COMPLETE';
 export type DiscourseWaveOutcome =
   | 'COMPLETE'
   | 'PARTIAL'
@@ -350,6 +359,12 @@ export type DiscourseWaveOutcome =
   | 'STALE'
   | 'FAILED';
 export type DiscourseWaveSettlementReason =
+  | 'NEEDS_EVIDENCE'
+  | 'NEEDS_USER'
+  | 'OPEN_DISAGREEMENT'
+  | 'TURN_LIMIT'
+  | 'TIME_LIMIT'
+  | 'NO_NEW_BASIS'
   | 'COMPLETED'
   | 'USER_CANCELED'
   | 'SUPERSEDED'
@@ -389,10 +404,13 @@ export interface DiscourseResponseWaveRecord {
       };
   createdAt: string;
   startedAt?: string;
+  requestedStopReason?: 'TIME_LIMIT';
   settledAt?: string;
 }
 
 export type CurrentDiscourseJobRole =
+  | 'COMPARE'
+  | 'RESPOND'
   | 'ANSWER'
   | 'CRITIQUE'
   | 'CORRECT';
@@ -432,8 +450,48 @@ export type DiscourseCorrectionOutcome =
   | 'ACKNOWLEDGED_UNRESOLVED'
   | 'ABSTAINED';
 
+/** C's map is a contestable agent statement, never a verified review verdict. */
+export interface DiscourseTeamComparison {
+  kind: 'COMPARISON';
+  summary: string;
+  points: {
+    id: string;
+    question: string;
+    importance: 'MATERIAL' | 'ADVISORY';
+    status: 'OPEN' | 'AGREED' | 'CORRECTED' | 'DISAGREED' | 'NEEDS_EVIDENCE' | 'NEEDS_USER';
+    explanation: string;
+    /** Message IDs locate arguments, not independent factual evidence. */
+    sourceMessageIds: string[];
+    evidence: string[];
+    confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  }[];
+  next: 'CONTINUE' | 'READY' | 'NEEDS_EVIDENCE' | 'NEEDS_USER' | 'OPEN_DISAGREEMENT';
+  reason: string;
+  actions: {
+    pointId: string;
+    participantId: string;
+    task: string;
+    expectedBenefit: string;
+    /** A previously unexamined claim, new response, or evidence in the visible messages. */
+    basisMessageIds: string[];
+  }[];
+}
+
+export interface DiscourseTeamResponse {
+  kind: 'RESPONSE';
+  responses: {
+    pointId: string;
+    stance: 'REVISE' | 'DEFEND' | 'CLARIFY' | 'WITHDRAW' | 'UNCERTAIN' | 'ABSTAIN';
+    answer: string;
+    reason: string;
+    evidence: string[];
+  }[];
+  /** Includes corrections to C and self-found issues. An empty list is valid. */
+  newIssues: string[];
+}
+
 export type DiscourseJobResult =
-  | { kind: 'CONTRIBUTION'; outputMessageId: string }
+  | { kind: 'CONTRIBUTION'; outputMessageId: string; team?: DiscourseTeamComparison | DiscourseTeamResponse }
   | {
       kind: 'REVIEW';
       outcome: DiscourseReviewOutcome;
@@ -646,6 +704,7 @@ export interface DiscourseContextPreviewReference
   taskWorkflowPhase?: string;
   accessMode: ContextSourceAccessMode;
   exclusionReasons: string[];
+  readScope?: 'TASK_WORKTREE' | 'REPOSITORY';
 }
 
 export interface DiscourseContextPreview {

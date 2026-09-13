@@ -24,8 +24,11 @@ import {
 } from './DiscourseState';
 import {
   parseDiscourseCorrection,
-  parseDiscourseReview
+  parseDiscourseReview,
+  parseDiscourseTeamOutput,
+  discourseTeamOutputBody
 } from './DiscourseStructuredOutput';
+import { teamTimeExpired } from './DiscourseTeam';
 import type { DiscourseStore } from './DiscourseStore';
 
 export interface PrepareDiscourseJobInput {
@@ -304,7 +307,7 @@ export class DiscourseRuntimeCoordinator {
           (run.status === 'INTERRUPTED' && run.delivery === 'NOT_DELIVERED')
         ) ||
         !entry ||
-        !['QUEUED', 'CANCELED'].includes(entry.status)
+        !['QUEUED', 'LEASED', 'CANCELED', 'SETTLED'].includes(entry.status)
       ) {
         throw new Error('Queued cancellation cannot prove that provider delivery never began.');
       }
@@ -317,7 +320,8 @@ export class DiscourseRuntimeCoordinator {
         wave: {
           ...wave,
           recordRevision: wave.recordRevision + 1,
-          status: 'STOP_REQUESTED'
+          status: 'STOP_REQUESTED',
+          ...(teamTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
         }
       });
     }
@@ -325,58 +329,7 @@ export class DiscourseRuntimeCoordinator {
       if (['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(originalJob.status)) {
         continue;
       }
-      let job = originalJob;
-      if (job.status === 'QUEUED') {
-        await this.discourse.updateJob({
-          conversationId: input.conversationId,
-          expectedRevision: job.recordRevision,
-          clientOperationId: `${input.clientOperationId}:job-canceled:${job.id}`,
-          job: {
-            ...job,
-            recordRevision: job.recordRevision + 1,
-            status: 'CANCELED',
-            finishedAt: this.now()
-          }
-        });
-        continue;
-      }
-      if (job.status === 'RESOLVING_CONTEXT') {
-        job = await this.discourse.updateJob({
-          conversationId: input.conversationId,
-          expectedRevision: job.recordRevision,
-          clientOperationId: `${input.clientOperationId}:job-stop-intent:${job.id}`,
-          job: {
-            ...job,
-            recordRevision: job.recordRevision + 1,
-            status: 'CANCEL_REQUESTED'
-          }
-        });
-      }
-      let run = requireRuntimeRun(
-        (await this.runtime.snapshot()).runs,
-        job.runId!
-      );
-      if (run.status === 'QUEUED' && run.delivery === 'NOT_SENT') {
-        run = await this.agents.cancelQueuedTurn(
-          run.id,
-          input.reason,
-          `${input.clientOperationId}:runtime-canceled:${job.id}`
-        );
-      }
-      if (!isRuntimeTerminal(run.status) || run.delivery !== 'NOT_DELIVERED') {
-        throw new Error('Queued cancellation did not remain before provider delivery.');
-      }
-      await this.discourse.updateJob({
-        conversationId: input.conversationId,
-        expectedRevision: job.recordRevision,
-        clientOperationId: `${input.clientOperationId}:job-canceled:${job.id}`,
-        job: {
-          ...job,
-          recordRevision: job.recordRevision + 1,
-          status: 'CANCELED',
-          finishedAt: this.now()
-        }
-      });
+      await this.cancelUnsubmittedJob(originalJob, input);
     }
     await this.reconcileWaveFromChildren(
       input.conversationId,
@@ -407,6 +360,11 @@ export class DiscourseRuntimeCoordinator {
     for (const job of jobs) {
       if (['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)) {
         continue;
+      }
+      if (job.status === 'QUEUED' && !job.runId) continue;
+      if (job.status === 'RESOLVING_CONTEXT' && job.runId) {
+        const queuedRun = requireRuntimeRun(runtimeSnapshot.runs, job.runId);
+        if (queuedRun.status === 'QUEUED' && queuedRun.delivery === 'NOT_SENT' && runtimeRunMatchesExactJobAttempt(queuedRun, input.conversationId, job)) continue;
       }
       if (!['RUNNING', 'CANCEL_REQUESTED', 'RECOVERY_REQUIRED'].includes(job.status)) {
         throw new Error('Active wave interruption found an unsafe job checkpoint.');
@@ -463,7 +421,8 @@ export class DiscourseRuntimeCoordinator {
         wave: {
           ...wave,
           recordRevision: wave.recordRevision + 1,
-          status: 'STOP_REQUESTED'
+          status: 'STOP_REQUESTED',
+          ...(teamTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
         }
       });
     } else if (wave.status === 'RECOVERY_REQUIRED') {
@@ -474,7 +433,8 @@ export class DiscourseRuntimeCoordinator {
         wave: {
           ...wave,
           recordRevision: wave.recordRevision + 1,
-          status: 'STOPPING'
+          status: 'STOPPING',
+          ...(teamTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
         }
       });
     }
@@ -484,6 +444,10 @@ export class DiscourseRuntimeCoordinator {
         continue;
       }
       let job = originalJob;
+      if (job.status === 'QUEUED' || job.status === 'RESOLVING_CONTEXT') {
+        await this.cancelUnsubmittedJob(job, input);
+        continue;
+      }
       if (job.status === 'RECOVERY_REQUIRED') {
         recoveryRequired = (await this.cancelRecoveredJob(
           input.conversationId,
@@ -620,6 +584,45 @@ export class DiscourseRuntimeCoordinator {
     );
   }
 
+  /** Shared by queued cancellation and mixed running/queued response batches. */
+  private async cancelUnsubmittedJob(
+    job: DiscourseAgentJobRecord,
+    input: CancelQueuedDiscourseWaveInput
+  ): Promise<void> {
+    if (job.status !== 'QUEUED') {
+      let run = requireRuntimeRun((await this.runtime.snapshot()).runs, job.runId!);
+      if (!runtimeRunMatchesExactJobAttempt(run, input.conversationId, job) ||
+        !((run.status === 'QUEUED' && run.delivery === 'NOT_SENT') ||
+          (run.status === 'INTERRUPTED' && run.delivery === 'NOT_DELIVERED'))) {
+        throw new Error('Queued cancellation cannot prove the exact unsubmitted turn.');
+      }
+      if (job.status === 'RESOLVING_CONTEXT') {
+        job = await this.discourse.updateJob({
+          conversationId: input.conversationId,
+          expectedRevision: job.recordRevision,
+          clientOperationId: `${input.clientOperationId}:job-stop-intent:${job.id}`,
+          job: { ...job, recordRevision: job.recordRevision + 1, status: 'CANCEL_REQUESTED' }
+        });
+      }
+      if (run.status === 'QUEUED') {
+        run = await this.agents.cancelQueuedTurn(
+          run.id,
+          input.reason,
+          `${input.clientOperationId}:runtime-canceled:${job.id}`
+        );
+      }
+      if (!isRuntimeTerminal(run.status) || run.delivery !== 'NOT_DELIVERED') {
+        throw new Error('Queued cancellation crossed the delivery boundary.');
+      }
+    }
+    await this.discourse.updateJob({
+      conversationId: input.conversationId,
+      expectedRevision: job.recordRevision,
+      clientOperationId: `${input.clientOperationId}:job-canceled:${job.id}`,
+      job: { ...job, recordRevision: job.recordRevision + 1, status: 'CANCELED', finishedAt: this.now() }
+    });
+  }
+
   setConversationArchived(input: {
     conversationId: string;
     archived: boolean;
@@ -698,6 +701,12 @@ export class DiscourseRuntimeCoordinator {
     assertExistingJobLink(job, session, run);
     if (run.status !== 'QUEUED' || job.status !== 'RESOLVING_CONTEXT') {
       throw new Error('Discourse dispatch checkpoint is not safe to submit.');
+    }
+    if (teamTimeExpired(wave, this.now()) || ['STOP_REQUESTED', 'STOPPING', 'SETTLED'].includes(wave.status)) {
+      const stop = { conversationId: wave.conversationId, waveId: wave.id, clientOperationId: `${clientOperationId}:dispatch-stop`, reason: 'Team stopped or reached its time limit before dispatch.' };
+      if (['PLANNED', 'SNAPSHOTTING', 'QUEUED'].includes(wave.status)) await this.cancelQueuedWave(stop);
+      else await this.stopActiveWave(stop);
+      return requireRuntimeRun((await this.runtime.snapshot()).runs, run.id);
     }
     if (wave.status === 'QUEUED') {
       wave = await this.discourse.updateWave({
@@ -1103,7 +1112,7 @@ export class DiscourseRuntimeCoordinator {
     }
     const aggregate = await this.discourse.getConversation(scope.conversationId);
     let job = requireJob(aggregate.jobs, scope.jobId, scope.waveId);
-    if (!['ANSWER', 'TARGETED_REPLY', 'SYNTHESIZE'].includes(job.role)) {
+    if (!['ANSWER', 'TARGETED_REPLY', 'SYNTHESIZE', 'COMPARE', 'RESPOND'].includes(job.role)) {
       throw new Error('This terminal ingestion path accepts contribution-producing jobs only.');
     }
     const projection = await this.prepareTerminalProjection(
@@ -1124,7 +1133,18 @@ export class DiscourseRuntimeCoordinator {
       );
       return { kind: 'IGNORED_TERMINAL', job };
     }
-    const bodyError = await this.terminalBodyError(run, input.body);
+    let bodyError = await this.terminalBodyError(run, input.body);
+    let team: ReturnType<typeof parseDiscourseTeamOutput> | undefined;
+    if (!bodyError && (job.role === 'COMPARE' || job.role === 'RESPOND')) {
+      try {
+        team = parseDiscourseTeamOutput(input.body, job, requireWave(aggregate.waves, job.waveId), aggregate.jobs.filter((candidate) => candidate.waveId === job.waveId));
+      } catch (error) {
+        bodyError = { code: 'INVALID_RESULT', category: 'VALIDATION', retryable: false,
+          message: error instanceof Error ? error.message : 'Invalid Team output.' };
+      }
+    }
+    const messageBody = team ? discourseTeamOutputBody(team) : input.body;
+    if (team && !bodyError) bodyError = await this.terminalBodyError(run, messageBody);
     if (bodyError) {
       job = await this.failTerminalResult(job, input, bodyError);
       await this.settleRuntimeAfterTerminal(
@@ -1154,7 +1174,7 @@ export class DiscourseRuntimeCoordinator {
         )
       : await this.discourse.appendAgentMessage({
           conversationId: scope.conversationId,
-          body: input.body,
+          body: messageBody,
           stableParticipantId: job.assignment.stableParticipantId,
           participantRevisionId: job.assignment.participantRevisionId,
           displayNameSnapshot: job.assignment.displayNameSnapshot,
@@ -1177,7 +1197,7 @@ export class DiscourseRuntimeCoordinator {
           delivery: 'TERMINAL',
           error: undefined,
           freshnessAtCompletion: input.freshnessAtCompletion,
-          result: { kind: 'CONTRIBUTION', outputMessageId: message.id },
+          result: { kind: 'CONTRIBUTION', outputMessageId: message.id, ...(team ? { team } : {}) },
           finishedAt: input.completedAt
         }
       });
@@ -1214,6 +1234,8 @@ export class DiscourseRuntimeCoordinator {
       case 'DISCOURSE_CORRECT':
         return this.ingestCorrection(input);
       case 'DISCOURSE_ANSWER':
+      case 'DISCOURSE_COMPARE':
+      case 'DISCOURSE_RESPOND':
       case 'DISCOURSE_TARGETED_REPLY':
       case 'DISCOURSE_SYNTHESIZE':
         return this.ingestContribution(input);
@@ -2621,6 +2643,8 @@ function runtimeRunMatchesExactJobAttempt(
 function purposeForJob(job: DiscourseAgentJobRecord): AgentRuntimePurpose {
   switch (job.role) {
     case 'ANSWER': return 'DISCOURSE_ANSWER';
+    case 'COMPARE': return 'DISCOURSE_COMPARE';
+    case 'RESPOND': return 'DISCOURSE_RESPOND';
     case 'CRITIQUE': return 'DISCOURSE_CRITIQUE';
     case 'CORRECT': return 'DISCOURSE_CORRECT';
     case 'TARGETED_REPLY': return 'DISCOURSE_TARGETED_REPLY';
@@ -2638,6 +2662,7 @@ function priorityForJob(job: DiscourseAgentJobRecord) {
 }
 
 function phaseForJob(job: DiscourseAgentJobRecord): DiscourseResponseWaveRecord['phase'] {
+  if (job.role === 'COMPARE' || job.role === 'RESPOND') return job.role;
   return job.role === 'CRITIQUE'
     ? 'REVIEW'
     : job.role === 'CORRECT'

@@ -22,7 +22,8 @@ import type {
 } from './DiscourseContextResolver';
 import type { DiscourseWorkspace } from './DiscourseWorkspace';
 
-const DEFAULT_MODEL_CONTEXT_TOKENS = 128_000;
+// An app planning ceiling, not an assertion about an unreported model capacity.
+const PLANNING_CONTEXT_TOKENS = 128_000;
 
 export interface DiscourseReadOnlyExecutionScopeInput {
   sessionId: string;
@@ -71,16 +72,8 @@ export class DiscourseContextSnapshotService {
     const pinned = input.contextRevision.references.filter(
       (reference) => reference.scope === 'PINNED'
     );
-    const messageContext = input.contextRevision.references
-      .filter((reference) => reference.scope === 'MESSAGE')
-      .map((reference) => ({
-        entityKind: reference.entityKind,
-        entityId: reference.entityId
-      }));
-    const [resolved, preview] = await Promise.all([
-      this.resolver.resolveSelections(selections),
-      this.resolver.preview({ pinned, messageContext })
-    ]);
+    const resolved = await this.resolver.resolveSelections(selections);
+    const preview = this.resolver.previewResolved(resolved, pinned);
     const sourceByKey = new Map(
       resolved.map((reference) => [selectionKey(reference), reference])
     );
@@ -104,7 +97,9 @@ export class DiscourseContextSnapshotService {
         ...(reference.repositoryId ? { repositoryId: reference.repositoryId } : {}),
         ...(resolvedReference?.generation ? { generation: resolvedReference.generation } : {}),
         inspectedAt: this.now(),
-        exclusionReasons: [...reference.exclusionReasons]
+        exclusionReasons: [...reference.exclusionReasons],
+        ...(resolvedReference?.recordedContext ? { recordedContext: resolvedReference.recordedContext } : {}),
+        ...(reference.readScope ? { readScope: reference.readScope } : {})
       };
     });
     const unavailable = sources.find(
@@ -143,7 +138,7 @@ export class DiscourseContextSnapshotService {
           attachmentIds: [],
           budget: emptyBudget(sources.length),
           exclusions: [...preview.exclusions],
-          contextSchemaVersion: 1,
+          contextSchemaVersion: 2,
           promptPolicyVersion: DISCOURSE_PROMPT_POLICY_VERSION,
           createdAt,
           resolvedAt: createdAt,
@@ -169,7 +164,7 @@ export class DiscourseContextSnapshotService {
           permissionProfileHash: executionContext!.permissionProfileHash,
           budget: emptyBudget(sources.length),
           exclusions: [...preview.exclusions],
-          contextSchemaVersion: 1,
+          contextSchemaVersion: 2,
           promptPolicyVersion: DISCOURSE_PROMPT_POLICY_VERSION,
           createdAt,
           resolvedAt: createdAt
@@ -210,13 +205,15 @@ export class DiscourseContextSnapshotService {
 
   assessPrompt(
     assembly: DiscoursePromptAssembly,
-    cumulativeWaveOutputBytes: number
+    cumulativeWaveOutputBytes: number,
+    reportedModelContextTokens?: number
   ): {
     budget: ContextSnapshotRecord['budget'];
     assessment: DiscourseJobBudgetAssessment;
   } {
     const assessment = assessDiscourseJobBudget({
-      modelContextTokens: DEFAULT_MODEL_CONTEXT_TOKENS,
+      modelContextTokens: reportedModelContextTokens && Number.isFinite(reportedModelContextTokens) && reportedModelContextTokens > 0
+        ? Math.min(PLANNING_CONTEXT_TOKENS, reportedModelContextTokens) : PLANNING_CONTEXT_TOKENS,
       ...assembly.budgetSections,
       cumulativeWaveOutputBytes
     });
@@ -252,6 +249,7 @@ export class DiscourseContextSnapshotService {
       if (
         !current ||
         current.snapshot.availability !== source.availability ||
+        (source.recordedContext !== undefined && source.recordedContext !== current.recordedContext) ||
         (current.generation?.value ?? null) !== (source.generation?.value ?? null)
       ) {
         throw new Error('Discourse context changed before the next phase could start.');
@@ -291,6 +289,7 @@ export class DiscourseContextSnapshotService {
       return Boolean(
         next &&
         next.snapshot.availability === source.availability &&
+        (source.recordedContext === undefined || source.recordedContext === next.recordedContext) &&
         (next.generation?.value ?? null) === (source.generation?.value ?? null)
       );
     }) ? 'FRESH' : 'CHANGED_DURING_JOB';

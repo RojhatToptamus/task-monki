@@ -20,6 +20,7 @@ import { DiscourseContextResolver } from '../discourse/DiscourseContextResolver'
 import { DiscourseContextSnapshotService } from '../discourse/DiscourseContextSnapshotService';
 import { DiscourseRuntimeCoordinator } from '../discourse/DiscourseRuntimeCoordinator';
 import { DiscourseService } from '../discourse/DiscourseService';
+import { teamDeadline } from '../discourse/DiscourseTeam';
 import type { DiscourseStore } from '../discourse/DiscourseStore';
 import { DiscourseWorkspace } from '../discourse/DiscourseWorkspace';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -49,6 +50,7 @@ export class DiscourseRuntimeHost {
   private readonly scheduler: AgentTurnScheduler;
   private readonly deltaStates = new Map<string, DiscourseDeltaAccumulatorState>();
   private readonly deltaTimers = new Map<string, NodeJS.Timeout>();
+  private readonly waveDeadlineTimers = new Map<string, NodeJS.Timeout>();
   private readonly disposeRuntimeTurnEvents?: () => void;
   private schedulerWork?: Promise<void>;
   private schedulerRetryTimer?: NodeJS.Timeout;
@@ -103,6 +105,9 @@ export class DiscourseRuntimeHost {
 
   async initialize(): Promise<void> {
     await this.options.discourseStore.init();
+    // Provider-inert development profiles contain projected jobs, not owned
+    // runtime attempts. Recovery and deadline timers must not execute them.
+    if (this.options.providerStartupDisabledReason) return;
     const conversationIds = new Set<string>();
     let cursor: string | undefined;
     do {
@@ -123,6 +128,8 @@ export class DiscourseRuntimeHost {
     });
     for (const conversationId of conversationIds) {
       await this.service.recoverConversation(conversationId);
+      const aggregate = await this.options.discourseStore.getConversation(conversationId);
+      for (const wave of aggregate.waves) this.watchWaveDeadline(wave);
     }
     const recovered = await this.options.runtimeStore.snapshot();
     if (
@@ -135,6 +142,8 @@ export class DiscourseRuntimeHost {
   }
 
   async beginShutdown(): Promise<void> {
+    for (const timer of this.waveDeadlineTimers.values()) clearTimeout(timer);
+    this.waveDeadlineTimers.clear();
     if (this.schedulerRetryTimer) {
       clearTimeout(this.schedulerRetryTimer);
       this.schedulerRetryTimer = undefined;
@@ -239,6 +248,9 @@ export class DiscourseRuntimeHost {
             entry.id,
             `discourse-dispatch:${entry.id}:${entry.recordRevision}`
           );
+          const dispatched = await this.options.discourseStore.getConversation(scope.conversationId);
+          const dispatchedWave = dispatched.waves.find((wave) => wave.id === scope.waveId);
+          if (dispatchedWave) this.watchWaveDeadline(dispatchedWave);
           this.emitJobUpdate(scope, run.id, {
             status: run.status,
             delivery: run.delivery
@@ -264,6 +276,35 @@ export class DiscourseRuntimeHost {
         }
       }
     }
+  }
+
+  private watchWaveDeadline(wave: import('../../shared/discourse').DiscourseResponseWaveRecord): void {
+    const existing = this.waveDeadlineTimers.get(wave.id);
+    if (existing) clearTimeout(existing);
+    this.waveDeadlineTimers.delete(wave.id);
+    const deadline = teamDeadline(wave);
+    if (
+      deadline === undefined ||
+      ['SETTLED', 'STOP_REQUESTED', 'STOPPING'].includes(wave.status) ||
+      this.options.runtimeOperations.isClosing
+    ) return;
+    const timer = setTimeout(() => {
+      this.waveDeadlineTimers.delete(wave.id);
+      if (this.options.runtimeOperations.isClosing) return;
+      void this.options.runtimeOperations.runOperation(async () => {
+        await this.service.stopWave({
+          conversationId: wave.conversationId,
+          waveId: wave.id,
+          clientOperationId: `team-time-limit:${wave.id}`,
+          reason: 'Team reached its 20-minute limit.'
+        });
+      }).catch((error) => (this.options.logger ?? console).error(
+        'Team deadline stop requires recovery; further dispatch remains blocked.',
+        error
+      ));
+    }, Math.max(0, deadline - Date.now()));
+    timer.unref?.();
+    this.waveDeadlineTimers.set(wave.id, timer);
   }
 
   private async flushDeltas(runId: string, observedAt: string): Promise<void> {
@@ -411,6 +452,8 @@ export class DiscourseRuntimeHost {
     const settledAggregate = await this.options.discourseStore.getConversation(
       scope.conversationId
     );
+    const currentWave = settledAggregate.waves.find((wave) => wave.id === scope.waveId);
+    if (currentWave) this.watchWaveDeadline(currentWave);
     const settledJob = settledAggregate.jobs.find(
       (candidate) => candidate.id === scope.jobId
     );
