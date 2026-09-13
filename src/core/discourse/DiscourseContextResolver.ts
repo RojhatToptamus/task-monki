@@ -104,12 +104,16 @@ export class DiscourseContextResolver {
     const liveGitGeneration = (canonicalRoot: string): Promise<string> => {
       const existing = liveGitGenerations.get(canonicalRoot);
       if (existing) return existing;
-      const inspection = inspectGitWorkingTreeFingerprint(canonicalRoot).catch((cause) => {
+      const inspection = inspectGitWorkingTreeFingerprint(canonicalRoot)
+        // Source identity includes the actual read root, independently of each
+        // provider's native permission policy. Keep paths out of the manifest.
+        .then((fingerprint) => sha256(`${canonicalRoot}\0${fingerprint}`))
+        .catch((cause) => {
         throw new Error(
           'Could not inspect live Git working-tree state for discourse context.',
           { cause }
         );
-      });
+        });
       liveGitGenerations.set(canonicalRoot, inspection);
       return inspection;
     };

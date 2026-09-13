@@ -49,7 +49,7 @@ import {
   discourseModelMatches,
   discourseRuntimeUnavailableReason
 } from './AgentProfileCatalog';
-import type { DiscourseContextSnapshotService } from './DiscourseContextSnapshotService';
+import { DiscourseContextChangedError, type DiscourseContextSnapshotService } from './DiscourseContextSnapshotService';
 import type { DiscourseContextResolver } from './DiscourseContextResolver';
 import {
   DiscourseRuntimeCoordinator,
@@ -560,7 +560,7 @@ export class DiscourseService {
           messages: transcript
         });
         if (bounded.error) {
-          await this.markQueuedJobsPromptBlocked(
+          await this.markQueuedJobsFailed(
             accepted.conversationId,
             [job],
             bounded.error,
@@ -568,14 +568,20 @@ export class DiscourseService {
           );
           continue;
         }
-        const executionContext = job.id === firstJob.id
-          ? prepared.executionContext
-          : await runtime.contextSnapshots.executionContextForSnapshot({
-              snapshot: prepared.snapshot,
-              assignment: job.assignment,
-              sessionId: discourseRuntimeSessionId(prepareOperationId),
-              clientOperationId: prepareOperationId
-            });
+        let executionContext;
+        try {
+          executionContext = job.id === firstJob.id
+            ? prepared.executionContext
+            : await runtime.contextSnapshots.executionContextForSnapshot({
+                snapshot: prepared.snapshot,
+                assignment: job.assignment,
+                sessionId: discourseRuntimeSessionId(prepareOperationId),
+                clientOperationId: prepareOperationId
+              });
+        } catch (error) {
+          await this.markQueuedPreparationFailure(accepted.conversationId, [job], error, prepareOperationId);
+          continue;
+        }
         const runtimeJob = await runtime.coordinator.prepareJob({
           conversationId: accepted.conversationId,
           waveId,
@@ -806,7 +812,7 @@ export class DiscourseService {
         const operationId = `${wave.clientOperationId}:prepare:${job.id}`;
         const bounded = await this.buildBoundedPrompt({ aggregate, job, snapshot, messages });
         if (bounded.error) {
-          await this.markQueuedJobsPromptBlocked(
+          await this.markQueuedJobsFailed(
             input.conversationId,
             [job],
             bounded.error,
@@ -814,12 +820,18 @@ export class DiscourseService {
           );
           continue;
         }
-        const executionContext = await runtime.contextSnapshots.executionContextForSnapshot({
-          snapshot,
-          assignment: job.assignment,
-          sessionId: discourseRuntimeSessionId(operationId),
-          clientOperationId: operationId
-        });
+        let executionContext;
+        try {
+          executionContext = await runtime.contextSnapshots.executionContextForSnapshot({
+            snapshot,
+            assignment: job.assignment,
+            sessionId: discourseRuntimeSessionId(operationId),
+            clientOperationId: operationId
+          });
+        } catch (error) {
+          await this.markQueuedPreparationFailure(input.conversationId, [job], error, operationId);
+          continue;
+        }
         const prepared = await runtime.coordinator.prepareJob({
           conversationId: input.conversationId,
           waveId: wave.id,
@@ -943,7 +955,7 @@ export class DiscourseService {
     for (const job of downstreamJobs) {
       const bounded = await this.buildBoundedPrompt({ aggregate, job, snapshot, messages });
       if (bounded.error) {
-        await this.markQueuedJobsPromptBlocked(
+        await this.markQueuedJobsFailed(
           conversationId,
           [job],
           bounded.error,
@@ -966,20 +978,9 @@ export class DiscourseService {
         }));
       }
     } catch (error) {
-      await this.markQueuedJobsContextStale(
-        conversationId,
-        downstreamJobs,
-        `${clientOperationId}:context-stale`
-      );
-      const currentWave = requireWave(
-        (await this.store.getConversation(conversationId)).waves,
-        waveId
-      );
-      const settled = await this.settleWaveForChangedContext(
-        conversationId,
-        currentWave,
-        clientOperationId
-      );
+      await this.markQueuedPreparationFailure(conversationId, runnableJobs, error, clientOperationId);
+      const settled = await runtime.coordinator.reconcileWave(conversationId, waveId, clientOperationId);
+      this.emit('discourse.wave.updated', conversationId, settled);
       return (await this.activateNextWave(conversationId, `${clientOperationId}:next`)) ?? settled;
     }
     for (const job of runnableJobs) {
@@ -1072,7 +1073,7 @@ export class DiscourseService {
       for (const job of jobsWithoutRuntime) {
         const bounded = await this.buildBoundedPrompt({ aggregate, job, snapshot, messages });
         if (bounded.error) {
-          await this.markQueuedJobsPromptBlocked(
+          await this.markQueuedJobsFailed(
             conversationId,
             [job],
             bounded.error,
@@ -1103,17 +1104,10 @@ export class DiscourseService {
             clientOperationId: operationId
           }));
         }
-      } catch {
-        await this.markQueuedJobsContextStale(
-          conversationId,
-          runnableJobs,
-          `${clientOperationId}:attestation:${wave.id}`
-        );
-        await this.settleWaveForChangedContext(
-          conversationId,
-          requireWave((await this.store.getConversation(conversationId)).waves, wave.id),
-          `${clientOperationId}:attestation:${wave.id}`
-        );
+      } catch (error) {
+        await this.markQueuedPreparationFailure(conversationId, runnableJobs, error, `${clientOperationId}:attestation:${wave.id}`);
+        const settled = await runtime.coordinator.reconcileWave(conversationId, wave.id, clientOperationId);
+        this.emit('discourse.wave.updated', conversationId, settled);
         continue;
       }
       for (const job of runnableJobs) {
@@ -1192,7 +1186,26 @@ export class DiscourseService {
     };
   }
 
-  private async markQueuedJobsPromptBlocked(
+  private async markQueuedPreparationFailure(
+    conversationId: string,
+    jobs: readonly DiscourseAgentJobRecord[],
+    error: unknown,
+    operationId: string
+  ): Promise<void> {
+    if (error instanceof DiscourseContextChangedError) {
+      await this.markQueuedJobsContextStale(conversationId, jobs, operationId);
+      return;
+    }
+    await this.markQueuedJobsFailed(conversationId, jobs, {
+      code: 'PERMISSION_ATTESTATION_FAILED',
+      message: 'The agent could not prepare its read-only session.',
+      category: 'PERMISSION',
+      retryable: true,
+      detail: error instanceof Error ? error.message : String(error)
+    }, operationId);
+  }
+
+  private async markQueuedJobsFailed(
     conversationId: string,
     jobs: readonly DiscourseAgentJobRecord[],
     error: StructuredDiscourseError,
@@ -1206,7 +1219,7 @@ export class DiscourseService {
         continue;
       }
       if (current.runId) {
-        throw new Error('Prompt-budget settlement cannot discard prepared runtime work.');
+        throw new Error('Preparation failure cannot discard prepared runtime work.');
       }
       if (current.status === 'QUEUED') {
         current = await this.store.updateJob({
@@ -1221,7 +1234,7 @@ export class DiscourseService {
         });
       }
       if (current.status !== 'RESOLVING_CONTEXT') {
-        throw new Error('Prompt-budget settlement found an unsafe job checkpoint.');
+        throw new Error('Preparation failure found an unsafe job checkpoint.');
       }
       await this.store.updateJob({
         conversationId,

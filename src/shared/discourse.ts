@@ -7,6 +7,9 @@
  * thread.
  */
 
+import type { BuiltInAgentProfileId, DiscourseDefaultPolicy, DiscourseAgentSelectionInput } from './discourseSettings';
+export type { BuiltInAgentProfileId, DiscourseDefaultPolicy, DiscourseAgentSelectionInput, DiscourseDefaults } from './discourseSettings';
+
 export const DISCOURSE_LIMITS = {
   maxContextReferencesPerWave: 8,
   maxFilesystemRootsPerWave: 3,
@@ -40,8 +43,6 @@ export const DISCOURSE_LIMITS = {
 
 export type DiscourseConversationStatus = 'OPEN' | 'ARCHIVED';
 
-export type DiscourseDefaultPolicy = 'TEAM' | 'PANEL' | 'DIRECT' | 'NONE';
-
 /** Current user-authored response waves. */
 export type CurrentDiscourseWavePolicy = Exclude<DiscourseDefaultPolicy, 'NONE'>;
 
@@ -71,11 +72,6 @@ export interface DiscourseConversationRecord {
   updatedAt: string;
   archivedAt?: string;
 }
-
-export type BuiltInAgentProfileId =
-  | 'builtin.lead'
-  | 'builtin.skeptic'
-  | 'builtin.verifier';
 
 export interface AgentProfileRecord {
   id: BuiltInAgentProfileId;
@@ -325,6 +321,7 @@ interface ContextSnapshotBase {
   transcriptOrdinals: number[];
   summaryRevisionId?: string;
   attachmentIds: string[];
+  /** Historical snapshots only. Native permission identity now belongs to each runtime session. */
   permissionProfileHash?: string;
   budget: ContextSnapshotBudgetRecord;
   exclusions: string[];
@@ -685,14 +682,6 @@ export interface DiscourseMentionCatalogSnapshot {
   tasks: DiscourseMentionTaskEntry[];
   repositories: DiscourseMentionRepositoryEntry[];
   refreshedAt: string;
-}
-
-/** Renderer-selected identity; core resolves provider/service details from the live catalog. */
-export interface DiscourseAgentSelectionInput {
-  agentProfileId: BuiltInAgentProfileId;
-  runtimeId?: import('./agent').AgentRuntimeId;
-  modelId?: string;
-  reasoningEffort?: string;
 }
 
 export interface DiscourseContextPreviewReference

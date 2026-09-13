@@ -45,6 +45,13 @@ export interface PreparedDiscourseContextSnapshot {
   prompt: string;
 }
 
+export class DiscourseContextChangedError extends Error {
+  constructor() {
+    super('The selected context changed before this phase started.');
+    this.name = 'DiscourseContextChangedError';
+  }
+}
+
 /** Resolves renderer-safe IDs into one immutable, path-free manifest plus an attested run scope. */
 export class DiscourseContextSnapshotService {
   constructor(
@@ -161,7 +168,6 @@ export class DiscourseContextSnapshotService {
           sources,
           transcriptOrdinals: input.transcript.map((message) => message.ordinal),
           attachmentIds: [],
-          permissionProfileHash: executionContext!.permissionProfileHash,
           budget: emptyBudget(sources.length),
           exclusions: [...preview.exclusions],
           contextSchemaVersion: 2,
@@ -189,7 +195,6 @@ export class DiscourseContextSnapshotService {
       snapshot = {
         ...snapshot,
         status: 'BLOCKED',
-        permissionProfileHash: undefined,
         error: {
           code: 'CONTEXT_TOO_LARGE',
           message: 'The discourse response exceeds its bounded prompt budget.',
@@ -252,7 +257,7 @@ export class DiscourseContextSnapshotService {
         (source.recordedContext !== undefined && source.recordedContext !== current.recordedContext) ||
         (current.generation?.value ?? null) !== (source.generation?.value ?? null)
       ) {
-        throw new Error('Discourse context changed before the next phase could start.');
+        throw new DiscourseContextChangedError();
       }
     }
     const filesystemRoots = uniqueStrings(
@@ -270,9 +275,9 @@ export class DiscourseContextSnapshotService {
       ...scope,
       clientOperationId: input.clientOperationId
     });
-    if (executionContext.permissionProfileHash !== input.snapshot.permissionProfileHash) {
-      throw new Error('Discourse read-only permission scope changed after context freezing.');
-    }
+    // Native policy identity belongs to this runtime session, not the shared
+    // source snapshot. Adapters attest and verify their own exact execution
+    // context before delivery; different sessions need not have equal hashes.
     return executionContext;
   }
 

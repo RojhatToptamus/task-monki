@@ -46,7 +46,7 @@ export interface DiscourseResponseModeOption {
 
 export interface DiscourseWorkspaceLayout {
   compact: boolean;
-  inspectorOverlay: boolean;
+  collapseHistoryForInspector: boolean;
 }
 
 const COMPACT_DISCOURSE_WORKSPACE_WIDTH = 880;
@@ -55,7 +55,7 @@ const DOCKED_DISCOURSE_INSPECTOR_WIDTH = 1220;
 export function discourseWorkspaceLayout(width: number): DiscourseWorkspaceLayout {
   return {
     compact: width < COMPACT_DISCOURSE_WORKSPACE_WIDTH,
-    inspectorOverlay: width < DOCKED_DISCOURSE_INSPECTOR_WIDTH
+    collapseHistoryForInspector: width < DOCKED_DISCOURSE_INSPECTOR_WIDTH
   };
 }
 

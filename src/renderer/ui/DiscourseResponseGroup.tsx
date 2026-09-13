@@ -200,7 +200,7 @@ export function DiscourseResponseGroup({
       ) : null}
       <footer>
         {discourseResponsePolicyLabel(wave.policy)} · {adaptive ? `${jobs.length} planned of ${DISCOURSE_LIMITS.maxAdaptiveTeamJobs}` : `up to ${wave.policy === 'TEAM' ? 4 : wave.assignments.length}`} agent turn{wave.policy === 'DIRECT' ? '' : 's'}
-        {adaptive ? ' · 20-minute limit · comparison is not a review verdict' : ''}
+        {adaptive && wave.status !== 'SETTLED' ? ' · 20-minute limit' : ''}
         {queuedAfterCurrent > 0
           ? ` · ${queuedAfterCurrent} follow-up${queuedAfterCurrent === 1 ? '' : 's'} queued`
           : ''}

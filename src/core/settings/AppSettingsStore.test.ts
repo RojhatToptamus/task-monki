@@ -64,6 +64,28 @@ describe('AppSettingsStore', () => {
     });
   });
 
+  it('persists exact Discourse defaults without changing other preferences, including unavailable selections', async () => {
+    const { database, databasePath } = await createDatabase();
+    const store = new AppSettingsStore(database);
+    const before = await store.get();
+    expect(before.discourseDefaults).toBeUndefined();
+    const discourseDefaults = {
+      policy: 'TEAM' as const,
+      responderProfileIds: ['builtin.lead' as const],
+      agents: [
+        { agentProfileId: 'builtin.lead' as const, runtimeId: 'codex', modelId: 'exact-unavailable-model', reasoningEffort: 'high' },
+        { agentProfileId: 'builtin.verifier' as const, runtimeId: 'grok-acp', modelId: 'grok-4.6', reasoningEffort: 'low' }
+      ]
+    };
+    expect(await store.update({ discourseDefaults })).toEqual({ ...before, discourseDefaults });
+    await expect(store.update({ discourseDefaults: { ...discourseDefaults, agents: [...discourseDefaults.agents, discourseDefaults.agents[0]!] } })).rejects.toThrow('Discourse defaults are invalid');
+    expect((await store.get()).discourseDefaults).toEqual(discourseDefaults);
+    await closeDatabase(database);
+    const reopened = await AppDatabase.open(databasePath);
+    databases.push(reopened);
+    expect((await new AppSettingsStore(reopened).get()).discourseDefaults).toEqual(discourseDefaults);
+  });
+
   it('preserves exact profile text and rolls back failed edits and deletions', async () => {
     const { database, databasePath } = await createDatabase();
     const store = new AppSettingsStore(database);

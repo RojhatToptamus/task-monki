@@ -3341,6 +3341,8 @@ export function App() {
           />
         ) : view === 'discourse' ? (
           <DiscourseWorkspace
+            defaults={appSettings.discourseDefaults}
+            onDefaultsChange={async (discourseDefaults) => { await updateAppSettings({ discourseDefaults }, ''); }}
             historyCollapsed={discourseHistoryCollapsed}
             onHistoryCollapsedChange={(collapsed) => {
               setDiscourseHistoryCollapsed(collapsed);

@@ -55,23 +55,23 @@ describe('discourse renderer model', () => {
   it('derives responsive Discourse layout from available workspace width', () => {
     expect(discourseWorkspaceLayout(549)).toEqual({
       compact: true,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(879)).toEqual({
       compact: true,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(880)).toEqual({
       compact: false,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(1219)).toEqual({
       compact: false,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(1220)).toEqual({
       compact: false,
-      inspectorOverlay: false
+      collapseHistoryForInspector: false
     });
   });
 

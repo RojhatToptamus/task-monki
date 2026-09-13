@@ -58,9 +58,12 @@ their original context revision when pins change or a source becomes
 unavailable.
 
 Before agent work, Task Monki resolves selected references, canonical repository
-roots, readable manifests, recent transcript, and permissions into an immutable
+roots, readable manifests, and recent transcript into an immutable
 context snapshot. At most eight references and three filesystem roots can be
 selected for one wave. Files are read-only under the selected provider profile.
+Each runtime session owns its native permission identity and validates it before delivery.
+The shared snapshot does not compare permission hashes across agents or fresh sessions.
+Appending an agent answer does not change the captured source generations.
 Task Monki does not grant app-owned web, MCP, app, attachment, dynamic-tool, or approval access.
 An ACP provider can still expose its own tools when its native policy permits them.
 The provider process can still use its model transport.
@@ -74,7 +77,7 @@ send a new message to capture changed sources. A source that
 cannot be safely resolved is shown as unavailable or blocks the wave rather
 than silently widening access.
 
-Context generations include live Git HEAD, staged, unstaged, and untracked
+Context generations include the resolved read root and live Git HEAD, staged, unstaged, and untracked
 working-tree evidence for each readable task worktree or repository root.
 Stored Git snapshots alone do not prove freshness between Team phases.
 When more than one repository root is readable, every phase prompt includes a
@@ -141,9 +144,12 @@ Choosing a policy explicitly remains stable while the user selects recipients.
 Choosing Team or No agents removes stale agent-recipient mentions. Task and
 repository mentions remain intact.
 
-Each responding agent has a conversation-scoped provider/model control in the
-composer. A new selection starts from the first Discourse-safe app/provider
-default; an existing participant starts from its current durable revision.
+Each responding agent has provider, model, and reasoning controls in the conversation sidebar.
+Application settings retain the last-used mode, responder roster, and agent selections.
+New conversations use these defaults across navigation and application restarts.
+Older profiles without these optional defaults retain the existing app/provider defaults.
+Existing participants start from their current durable revision unless a draft or explicit selection overrides it.
+An unavailable saved model stays visible and blocks sending until the user selects an available model.
 Direct and Panel expose the explicitly mentioned recipients, while Team exposes
 the canonical three-agent roster. Drafts persist the selected runtime-qualified
 model and reasoning level. Pending draft work is flushed before navigation, and
@@ -201,9 +207,9 @@ and focus treatment rather than a color-only highlight. Changing the composer
 mode affects the next message only. An accepted intent and any active wave keep
 the policy with which they started.
 
-Responder configuration is conversation-scoped and stays adjacent to the
-composer. Direct and Panel expose the selected mentioned agents; Team exposes
-A, B, and C. Provider, model, and reasoning selections remain
+Responder controls appear in the docked conversation sidebar.
+Direct and Panel expose the selected agents. Team exposes A, B, and C.
+Provider, model, and reasoning selections remain
 attached to the participant revision described above, while core resolves any
 service-tier value, so the UI does not maintain a parallel routing source of
 truth. Configuration can be opened and dismissed without replacing the draft,
@@ -218,11 +224,12 @@ stable labels, tooltips, hover treatment, and visible keyboard focus. All
 Discourse glyphs are exported through `DiscourseIcons.tsx`, backed by Lucide,
 so navigation and conversation actions do not introduce one-off SVG styles.
 
-At compact widths, the conversation rail becomes a dismissible drawer and the
-context inspector and agent configuration use restrained overlay surfaces.
+At compact widths, conversation history collapses when the settings sidebar opens.
+The settings sidebar stays beside the conversation and never covers its content.
+Opening history at these widths closes the settings sidebar.
 Controls preserve their meaning and keyboard behavior when labels condense.
-Overlays stay within the viewport, have explicit close behavior, and avoid
-decorative halos or heavy shadows. Light, dark, increased-contrast, and reduced-
+Model menus stay within the viewport and have explicit close behavior.
+Light, dark, increased-contrast, and reduced-
 motion behavior inherit the shared Task Monki tokens and accessibility rules in
 `DESIGN.md`.
 

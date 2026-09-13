@@ -97,9 +97,7 @@ describe('DiscourseAgentConfigurationBar', () => {
     const html = renderToStaticMarkup(
       <DiscourseAgentConfigurationBar
         catalog={catalog}
-        compact
         disabled={false}
-        expanded
         policy="DIRECT"
         selections={[
           {
@@ -110,7 +108,6 @@ describe('DiscourseAgentConfigurationBar', () => {
         ]}
         selectedProfileIds={['builtin.lead']}
         onDiscoverModels={async () => undefined}
-        onExpandedChange={() => undefined}
         onToggleAgent={() => undefined}
         onSelectionChange={() => undefined}
       />

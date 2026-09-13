@@ -7,65 +7,28 @@ import {
 } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
 
-export function InspectorDrawer({
-  children,
-  modal,
-  returnFocus,
-  onClose
-}: {
+export function InspectorSidebar({ children, returnFocus, onClose }: {
   children: ReactNode;
-  modal: boolean;
   returnFocus?: HTMLElement | null;
   onClose(): void;
 }) {
-  const dialogRef = useRef<HTMLElement>(null);
   const closeAndReturnFocus = () => {
     onClose();
     queueMicrotask(() => returnFocus?.focus({ preventScroll: true }));
   };
-  useDialogFocusBoundary({
-    dialogRef,
-    busy: false,
-    onClose: closeAndReturnFocus,
-    returnFocus,
-    active: modal
-  });
-  const inspector = (
-    <aside
-      id="discourse-inspector-panel"
-      ref={dialogRef}
-      className={`tm-discourse-inspector ${modal ? 'tm-discourse-inspector--overlay' : ''}`}
-      role={modal ? 'dialog' : 'complementary'}
-      aria-modal={modal || undefined}
-      aria-labelledby="discourse-inspector-title"
-      tabIndex={modal ? -1 : undefined}
-    >
+  return (
+    <aside id="discourse-inspector-panel" className="tm-discourse-inspector"
+      aria-labelledby="discourse-inspector-title">
       <div className="tm-discourse-inspector__head">
-        <h2 id="discourse-inspector-title">Conversation details</h2>
-        <button
-          type="button"
-          className="tm-iconbtn"
-          aria-label="Close conversation details"
-          title="Close conversation details"
-          onClick={closeAndReturnFocus}
-        >
+        <h2 id="discourse-inspector-title">Conversation settings</h2>
+        <button type="button" className="tm-iconbtn" aria-label="Close conversation settings"
+          title="Close conversation settings" onClick={closeAndReturnFocus}>
           <DiscourseCloseIcon />
         </button>
       </div>
       {children}
     </aside>
   );
-  return modal ? (
-    <div className="tm-discourse-drawer">
-      <button
-        type="button"
-        className="tm-discourse-drawer-scrim"
-        aria-label="Close conversation details"
-        onClick={closeAndReturnFocus}
-      />
-      {inspector}
-    </div>
-  ) : inspector;
 }
 
 export function ContextPreview({

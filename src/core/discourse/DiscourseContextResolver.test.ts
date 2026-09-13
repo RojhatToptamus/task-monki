@@ -145,6 +145,20 @@ describe('DiscourseContextResolver', () => {
     expect(preview.filesystemRootCount).toBe(0);
   });
 
+  it('changes source generation when the canonical read root moves despite identical Git content', async () => {
+    const fixture = await contextFixture();
+    const selections = [{ entityKind: 'REPOSITORY' as const, entityId: fixture.repository.id }];
+    const [before] = await fixture.resolver.resolveSelections(selections);
+    const moved = `${fixture.repositoryPath}-moved`;
+    await fs.rename(fixture.repositoryPath, moved);
+    await fs.symlink(moved, fixture.repositoryPath, 'dir');
+    const [after] = await fixture.resolver.resolveSelections(selections);
+    expect(after?.snapshot).toEqual(before?.snapshot);
+    expect(after?.canonicalRoot).not.toBe(before?.canonicalRoot);
+    expect(after?.generation?.value).not.toBe(before?.generation?.value);
+    expect(JSON.stringify(after?.generation)).not.toContain(moved);
+  });
+
   it('changes task and repository generations when their live working tree changes', async () => {
     const fixture = await contextFixture();
     const task = await fixture.tasks.createTask({

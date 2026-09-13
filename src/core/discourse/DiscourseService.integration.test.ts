@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -20,6 +21,7 @@ import type { ApplicationPersistence } from '../storage/sqlite/ApplicationPersis
 import { DiscourseContextResolver } from './DiscourseContextResolver';
 import {
   DiscourseContextSnapshotService,
+  DiscourseContextChangedError,
   type DiscourseReadOnlyExecutionScopeInput
 } from './DiscourseContextSnapshotService';
 import { DiscourseRuntimeCoordinator } from './DiscourseRuntimeCoordinator';
@@ -187,6 +189,23 @@ describe('DiscourseService', () => {
     expect((await fixture.runtimeStore.snapshot()).sessions).toHaveLength(6);
     expect((await fixture.runtimeStore.snapshot()).queueEntries.every((entry) => entry.status === 'SETTLED')).toBe(true);
     expect(await fixture.persistence.tasks.snapshot()).toEqual(originalTaskSnapshot);
+  });
+
+  it.each([
+    [new DiscourseContextChangedError(), 'CONTEXT_STALE', 'CONTEXT_CHANGED'],
+    [new Error('Selected runtime refused its read-only policy.'), 'FAILED', 'PERMISSION_ATTESTATION_FAILED']
+  ] as const)('preserves answers and distinguishes comparison preparation failure: %s', async (error, status, code) => {
+    const fixture = await serviceFixture('comparison-preparation-failure');
+    const sent = await startTeam(fixture);
+    const { conversationId, id: waveId } = sent.wave!;
+    await completeTeamBatch(fixture, conversationId, () => 'An independent answer.');
+    vi.spyOn(fixture.snapshots, 'executionContextForSnapshot').mockRejectedValueOnce(error);
+    await fixture.service.advanceWave(conversationId, waveId, 'prepare-comparison');
+    const aggregate = await fixture.discourseStore.getConversation(conversationId);
+    expect(aggregate.jobs.filter((job) => job.role === 'ANSWER').every((job) => job.status === 'COMPLETED')).toBe(true);
+    expect(aggregate.jobs.find((job) => job.role === 'COMPARE')).toMatchObject({ status, delivery: 'NOT_SENT', error: { code } });
+    expect(aggregate.waves[0]?.status).toBe('SETTLED');
+    expect((await fixture.runtimeStore.snapshot()).runs).toHaveLength(2);
   });
 
   it('stops a mixed running and queued Team batch without submitting the waiting author', async () => {
@@ -1906,7 +1925,9 @@ function composeServiceFixture(
         primaryCwd: input.primaryCwd,
         readRoots: input.readRoots,
         managedAttachments: [],
-        permissionProfileHash: 'd'.repeat(64),
+        // ACP policies include runtime/session identity. Fresh sessions must not
+        // have to equal the first author's native permission hash.
+        permissionProfileHash: createHash('sha256').update(`${input.runtimeId}:${input.sessionId}`).digest('hex'),
         modelSettings: input.modelSettings,
         externalTools: {
           network: false,

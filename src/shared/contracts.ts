@@ -1242,6 +1242,7 @@ export interface RefinePromptResponse {
 }
 
 export interface UpdateAppSettingsRequest {
+  discourseDefaults?: import('./discourse').DiscourseDefaults;
   theme?: import('./agent').TaskManagerThemePreference;
   themePreset?: import('./agent').TaskManagerThemePreset;
   sidebarCollapsed?: boolean;
