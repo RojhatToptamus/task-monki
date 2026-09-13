@@ -1,3 +1,4 @@
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -55,7 +56,7 @@ routes:
       'import http from "node:http"; http.createServer().listen(Number(process.env.PORT));\n'
     );
     const task = await scenario.createTask({ title: 'Generate Preview recipe' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     const generationStatuses: string[] = [];
     const unsubscribe = scenario.events.on((event) => {
       if (event.type === 'preview.recipe-generation.updated') {
@@ -116,7 +117,7 @@ routes:
       'import http from "node:http"; http.createServer().listen(Number(process.env.PORT));\n'
     );
     const task = await scenario.createTask({ title: 'Generate Preview recipe' });
-    await scenario.service.prepareWorktree({ taskId: task.id });
+    await prepareTestWorktree(scenario.service, task.id);
     const [baseModel] = await scenario.agent.listModels();
     const resolveExecution = vi
       .spyOn(scenario.agent, 'resolveExecution')
@@ -219,7 +220,7 @@ routes:
       previewEnabled: true
     });
     const task = await scenario.createTask({ title: 'Reject Preview fallback' });
-    await scenario.service.prepareWorktree({ taskId: task.id });
+    await prepareTestWorktree(scenario.service, task.id);
     await expect(
       scenario.service.updateAppSettings({
         previewRecipeGenerationRuntimeId: scenario.agent.descriptor.id,
@@ -236,7 +237,7 @@ routes:
       previewEnabled: true
     });
     const task = await scenario.createTask({ title: 'Generate Preview recipe' });
-    await scenario.service.prepareWorktree({ taskId: task.id });
+    await prepareTestWorktree(scenario.service, task.id);
     const internals = scenario.service as unknown as {
       appSettings: Record<string, unknown>;
     };
@@ -262,7 +263,7 @@ routes:
       previewEnabled: true
     });
     const task = await scenario.createTask({ title: 'Recover Preview generation' });
-    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
     scenario.agent.ambiguousRuntimeInterrupt = true;
     const internals = scenario.service as unknown as {
       startPreviewRecipeGenerationRuntimeTurn(input: {

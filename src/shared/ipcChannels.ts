@@ -123,6 +123,7 @@ export const IPC_INVOKE_CHANNELS = [
   'task:importPreview',
   'task:transition',
   'worktree:comparison',
+  'worktree:inspectPreparation',
   'worktree:list',
   'worktree:prepare',
   'worktree:reconnect'

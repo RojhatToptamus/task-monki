@@ -1,3 +1,4 @@
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -232,7 +233,7 @@ describe('Import existing work', () => {
     const s = await scenarios.create();
     const task = await s.service.importTask({ ...await importRequest(s), baseRef: 'HEAD' });
     const originalHead = (await git(s.repositoryPath, ['rev-parse', 'HEAD'])).trim();
-    await s.service.prepareWorktree({ taskId: task.id });
+    await prepareTestWorktree(s.service, task.id);
     await fs.writeFile(path.join(s.repositoryPath, 'external.txt'), 'keep this external file\n');
     await expect(s.service.createDeliveryCommit({ taskId: task.id })).rejects.toThrow('external checkout');
     await expect(s.service.publishBranch({ taskId: task.id })).rejects.toThrow('external checkout');
@@ -248,7 +249,7 @@ describe('Import existing work', () => {
   it('upgrades existing managed worktrees through a forward migration and keeps a pre-upgrade backup', async () => {
     const s = await scenarios.create();
     const task = await s.createTask();
-    const worktree = await s.service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(s.service, task.id);
     const databasePath = s.persistence.database.databasePath;
     await s.service.shutdown();
     await s.persistence.close();

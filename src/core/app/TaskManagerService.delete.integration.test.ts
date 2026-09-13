@@ -1,3 +1,4 @@
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -261,7 +262,7 @@ describe('TaskManagerService task deletion', () => {
       prompt: 'Create a dirty worktree.',
       repositoryId: repository.id
     });
-    const worktree = await service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(service, task.id);
     await fs.writeFile(path.join(worktree.worktreePath, 'dirty.txt'), 'dirty\n');
 
     await expect(
@@ -290,7 +291,7 @@ describe('TaskManagerService task deletion', () => {
       prompt: 'Remove the clean worktree.',
       repositoryId: repository.id
     });
-    const worktree = await service.prepareWorktree({ taskId: task.id });
+    const worktree = await prepareTestWorktree(service, task.id);
 
     const result = await service.deleteTask({ taskId: task.id, removeWorktree: true });
 

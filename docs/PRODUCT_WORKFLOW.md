@@ -9,7 +9,7 @@ is not just an AI chat UI.
 
 1. User creates a task in one repository with a goal, model, and
    reasoning effort.
-2. Task Monki prepares an isolated Git worktree.
+2. User selects a local base branch. Task Monki prepares an isolated Git worktree.
 3. The selected coding-agent runtime runs in that worktree.
 4. Task Monki records provider activity, approvals, Git evidence, GitHub
    delivery evidence, and audit history.
@@ -175,6 +175,15 @@ iteration records rather than the current sidebar default or a saved view.
 Switching the default repository never closes or mutates an open task.
 
 ## UI priority
+
+The task request appears before execution details. Its description defines the
+planned scope. Captured changes show the files and diff that Task Monki observed after a run. These
+observations do not prove that every requested behavior works.
+
+Agent commands and test results remain provider reports. GitHub checks identify
+their recorded PR and head. Preview readiness does not imply passing tests.
+Local completion shows the human decision separately from completion through
+the task's GitHub policy.
 
 Screens should prioritize:
 
@@ -369,7 +378,13 @@ The detailed source of truth is
 
 Ready:
 
-- Prepare worktree.
+- Prepare worktree opens local branch selection. Detached HEAD is also available
+  when it is the current checkout state. Inspection does not fetch or change files.
+- Uncommitted source-checkout changes stay excluded. The dialog warns about this
+  without inspecting, saving, or transferring dirty state.
+- Core resolves the selected branch again before creation. A moved or deleted
+  branch requires another selection and confirmation. An existing iteration
+  keeps its recorded base. Recovery does not select a new base.
 - Start implementation once the worktree exists.
 
 In Progress:
@@ -379,7 +394,7 @@ In Progress:
   running run, a compact activity tail may summarize recent provider telemetry
   such as reads, searches, file changes, verification commands, tool calls, and
   approval waits. This tail is context only; completed, failed, interrupted, and
-  recovery-required runs should return to the plan plus local-evidence footer.
+  recovery-required runs return to the plan plus a terminal-status footer.
   The detailed data flow and invariants are documented in
   `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
 - Allow steering, approval/input responses, and interrupt controls.

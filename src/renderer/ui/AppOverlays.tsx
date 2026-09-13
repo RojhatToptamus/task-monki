@@ -11,6 +11,8 @@ import {
   type RepositoryImpact,
   type Task,
   type WorkflowPhase,
+  type WorktreePreparationCreateInspection,
+  type WorktreePreparationRecoveryInspection,
   type WorktreeRecord
 } from '../../shared/contracts';
 import type { RepositoryOption } from '../model/repositories';
@@ -19,6 +21,7 @@ import { ImpactList } from './ImpactList';
 import { RepositoryPicker } from './RepositoryPicker';
 import { StatusGlyph } from './StatusBadge';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { DisclosureChevron } from './DisclosureChevron';
 
 export type NotificationTone = 'info' | 'success' | 'error';
 
@@ -361,6 +364,204 @@ export function DesignExternalLinkModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+export function PrepareWorktreeModal({
+  inspection,
+  taskTitle,
+  selectedBaseRef,
+  busy,
+  error,
+  onSelectBase,
+  onCancel,
+  onConfirm,
+  fallbackReturnFocusRef
+}: {
+  inspection: WorktreePreparationCreateInspection;
+  taskTitle: string;
+  selectedBaseRef?: string;
+  busy: boolean;
+  error?: string;
+  onSelectBase(refName: string | undefined): void;
+  onCancel(): void;
+  onConfirm(): void;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+}) {
+  const panelRef = useRef<HTMLFormElement>(null);
+  const selectRef = useRef<HTMLSelectElement>(null);
+  const selectedBase = inspection.bases.find(
+    (candidate) => candidate.refName === selectedBaseRef
+  );
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: selectRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!busy && selectedBase) {
+      onConfirm();
+    }
+  };
+
+  return (
+    <div
+      className="tm-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="prepare-worktree-title"
+    >
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <form
+        ref={panelRef}
+        className="tm-modal__panel tm-prepare-worktree"
+        tabIndex={-1}
+        onSubmit={submit}
+      >
+        <h3 id="prepare-worktree-title">Prepare worktree</h3>
+        <p>{taskTitle} · {inspection.repositoryName}</p>
+
+        <label className="field tm-prepare-worktree__base">
+          <span>Base branch</span>
+          <select
+            ref={selectRef}
+            value={selectedBaseRef ?? ''}
+            disabled={busy}
+            onChange={(event) => onSelectBase(event.target.value || undefined)}
+          >
+            {inspection.bases.map((base) => (
+              <option key={base.refName ?? `detached-${base.sha}`} value={base.refName ?? ''}>
+                {base.displayName}{base.current ? ' (current checkout)' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <details className="tm-raw">
+          <summary className="tm-disclosure__label"><DisclosureChevron />Git details</summary>
+          <div className="tm-prepare-worktree__commit">
+            <span>Commit</span>
+            <code>{selectedBase?.sha ?? 'Unavailable'}</code>
+          </div>
+        </details>
+
+        <p>
+          Starts from committed files. Uncommitted, untracked, ignored, and submodule
+          changes stay in the source checkout.
+        </p>
+
+        {error ? (
+          <div className="tm-error tm-prepare-worktree__error" role="alert">
+            {error}
+          </div>
+        ) : null}
+
+        <small className="tm-prepare-worktree__trust">
+          Git checkout hooks and content filters can run local commands.
+        </small>
+
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={busy || !selectedBase}>
+            {busy ? 'Preparing…' : 'Prepare worktree'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+export function RecoverWorktreeModal({
+  inspection,
+  taskTitle,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+  fallbackReturnFocusRef
+}: {
+  inspection: WorktreePreparationRecoveryInspection;
+  taskTitle: string;
+  busy: boolean;
+  error?: string;
+  onCancel(): void;
+  onConfirm(): void;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+}) {
+  const panelRef = useRef<HTMLFormElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const retry = inspection.worktree.status === 'ERROR';
+  const title = retry ? 'Retry worktree setup' : 'Restore worktree';
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: confirmRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
+
+  return (
+    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="recover-worktree-title">
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <form
+        ref={panelRef}
+        className="tm-modal__panel tm-prepare-worktree"
+        tabIndex={-1}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!busy) onConfirm();
+        }}
+      >
+        <h3 id="recover-worktree-title">{title}</h3>
+        <p>{taskTitle} · {inspection.repositoryName}</p>
+
+        <div className="tm-prepare-worktree__commit">
+          <span>Commit</span>
+          <code title={inspection.worktree.headSha ?? inspection.worktree.baseSha}>
+            {(inspection.worktree.headSha ?? inspection.worktree.baseSha).slice(0, 12)}
+          </code>
+        </div>
+
+        <p>
+          If the worktree is missing, restore it from this commit. Uncommitted files cannot
+          be restored. An existing worktree is checked without replacing files.
+        </p>
+
+        <details className="tm-raw">
+          <summary className="tm-disclosure__label"><DisclosureChevron />Git details</summary>
+          <div className="tm-prepare-worktree__commit">
+            <span>Branch</span>
+            <code>{inspection.worktree.branchName}</code>
+            <span>Original base</span>
+            <code>{inspection.worktree.baseRef ?? 'Detached HEAD'} @ {inspection.worktree.baseSha}</code>
+          </div>
+        </details>
+
+        <small className="tm-prepare-worktree__trust">
+          Git checkout hooks and content filters can run local commands.
+        </small>
+
+        {error ? (
+          <div className="tm-error tm-prepare-worktree__error" role="alert">
+            {error}
+          </div>
+        ) : null}
+
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+          <button ref={confirmRef} type="submit" className="primary-button" disabled={busy}>
+            {busy ? (retry ? 'Retrying…' : 'Restoring…') : title}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

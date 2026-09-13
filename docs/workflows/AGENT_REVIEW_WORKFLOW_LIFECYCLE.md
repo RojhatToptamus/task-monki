@@ -57,8 +57,8 @@ The important product rule is:
 
 ### Initial implementation
 
-1. User starts a task.
-2. `TaskManagerService.startRun` prepares or verifies the worktree.
+1. User selects a base, prepares the worktree, and starts a task.
+2. `TaskManagerService.startRun` verifies the prepared worktree.
 3. `AgentOrchestrator.startTurn` creates a run with `mode: "IMPLEMENTATION"`.
 4. Reducer moves the task to `IN_PROGRESS`.
 5. Only a successfully completed implementation run moves an `IN_PROGRESS`
@@ -153,6 +153,11 @@ Expected UI:
   were the implementation run.
 
 ### Review completion
+
+The runtime coordinator compares repository integrity before accepting a
+read-only review result. Changed or unreadable repository state fails the run.
+Restart recovery repeats an unfinished integrity check before projection. This
+check does not prove the review findings or attribute edits to the agent.
 
 Only events for the current review run can update its projection. Late events
 for earlier reviews remain in their run history. Terminal events cannot make a
@@ -281,7 +286,7 @@ Expected behavior:
   - Interrupt controls belong to the active agent controls, not the review
     panel.
   - The task stays In Progress until the interruption is terminally recorded.
-  - Terminal interruption returns it to Review and leaves the review gate stale.
+  - Terminal interruption keeps it In Progress and leaves the review gate stale.
 
 Provider edge cases:
 

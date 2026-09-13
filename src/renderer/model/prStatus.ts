@@ -86,6 +86,28 @@ export interface PrCheckGroup {
   defaultOpen: boolean;
 }
 
+export type DeliveryEvidenceIdentity = 'CURRENT' | 'STALE' | 'UNKNOWN';
+
+export function deliveryEvidenceIdentity(
+  pullRequest: Pick<PullRequestSnapshotRecord, 'number' | 'headRefOid'> | undefined,
+  evidence: Pick<CiRollupRecord, 'headSha' | 'pullRequestNumber'> |
+    Pick<ReviewRollupRecord, 'headSha' | 'pullRequestNumber'> |
+    Pick<MergeSnapshotRecord, 'headSha' | 'pullRequestNumber'>
+): DeliveryEvidenceIdentity {
+  if (
+    !pullRequest?.headRefOid ||
+    typeof pullRequest.number !== 'number' ||
+    !evidence.headSha ||
+    typeof evidence.pullRequestNumber !== 'number'
+  ) {
+    return 'UNKNOWN';
+  }
+  return evidence.headSha === pullRequest.headRefOid &&
+    evidence.pullRequestNumber === pullRequest.number
+    ? 'CURRENT'
+    : 'STALE';
+}
+
 const NO_TASK_CHANGES_PR_REASON =
   'Run implementation or make a task change before opening a PR.';
 
@@ -212,6 +234,7 @@ export function buildPrStatusViewModel(input: {
   });
   const reviewLine = formatReviewLine(reviewRollup);
   const mergeLine = formatMergeLine(mergeSnapshot);
+  const passingChecks = currentPassingCheckEvidence(pullRequest, ciRollup);
   const terminal = terminalPrStatus(pullRequest, mergeSnapshot);
 
   if (terminal) {
@@ -244,6 +267,15 @@ export function buildPrStatusViewModel(input: {
     };
   }
 
+  if (ciRollup && deliveryEvidenceIdentity(pullRequest, ciRollup) === 'UNKNOWN') {
+    return {
+      ...baseStatus(pullRequest),
+      kind: 'UNKNOWN',
+      headline: 'Checks identity unknown',
+      tone: 'neutral'
+    };
+  }
+
   const checksStatus = checksToStatus(ciRollup);
   if (checksStatus && ciRollup) {
     return {
@@ -255,10 +287,22 @@ export function buildPrStatusViewModel(input: {
   }
 
   const reviewStatus = reviewToStatus(reviewRollup);
-  if (reviewStatus) {
+  if (reviewStatus && reviewRollup) {
+    if (deliveryEvidenceIdentity(pullRequest, reviewRollup) === 'UNKNOWN') {
+      return {
+        ...baseStatus(pullRequest),
+        ...passingChecks,
+        kind: 'UNKNOWN',
+        headline: 'Review identity unknown',
+        tone: 'neutral',
+        evidenceLine: passingChecks.evidenceLine
+      };
+    }
     return {
       ...baseStatus(pullRequest),
-      ...reviewStatus
+      ...passingChecks,
+      ...reviewStatus,
+      evidenceLine: passingChecks.evidenceLine ?? (ciRollup ? undefined : 'Checks not observed')
     };
   }
 
@@ -269,17 +313,20 @@ export function buildPrStatusViewModel(input: {
       kind: 'READY_TO_MERGE',
       headline: 'Ready to merge',
       tone: 'success',
+      ...passingChecks,
       reviewLine,
       mergeLine,
-      evidenceLine: formatEvidenceLine(reviewLine, mergeLine)
+      evidenceLine: formatEvidenceLine(passingChecks.evidenceLine, reviewLine, mergeLine)
     };
   }
 
   return {
     ...baseStatus(pullRequest),
+    ...passingChecks,
     kind: pullRequest.isDraft ? 'DRAFT' : 'OPEN',
     headline: pullRequest.isDraft ? 'Draft PR' : 'Open PR',
-    tone: pullRequest.isDraft ? 'info' : 'neutral'
+    tone: pullRequest.isDraft ? 'info' : 'neutral',
+    evidenceLine: passingChecks.evidenceLine ?? (ciRollup ? undefined : 'Checks not observed')
   };
 
   function baseStatus(pr: PullRequestSnapshotRecord): PrStatusViewModel {
@@ -554,14 +601,21 @@ function terminalPrStatus(
   pullRequest: PullRequestSnapshotRecord,
   mergeSnapshot?: MergeSnapshotRecord
 ): Pick<PrStatusViewModel, 'kind' | 'headline' | 'tone'> | undefined {
-  if (pullRequest.status === 'MERGED' || mergeSnapshot?.status === 'MERGED') {
+  const currentMerge = mergeSnapshot &&
+    deliveryEvidenceIdentity(pullRequest, mergeSnapshot) === 'CURRENT'
+    ? mergeSnapshot
+    : undefined;
+  if (pullRequest.status === 'MERGED' || currentMerge?.status === 'MERGED') {
     return {
       kind: 'MERGED',
       headline: 'Merged',
       tone: 'success'
     };
   }
-  if (pullRequest.status === 'CLOSED_UNMERGED' || mergeSnapshot?.status === 'CLOSED_UNMERGED') {
+  if (
+    pullRequest.status === 'CLOSED_UNMERGED' ||
+    currentMerge?.status === 'CLOSED_UNMERGED'
+  ) {
     return {
       kind: 'CLOSED_UNMERGED',
       headline: 'Closed without merge',
@@ -581,8 +635,8 @@ function deriveFreshness(input: {
 }): { kind?: PrStatusKind; line?: string; pushUpdateDisabledReason?: string } {
   const { gitSnapshot, branchPublication, pullRequest, ciRollup, reviewRollup, mergeSnapshot } = input;
   const prHead = pullRequest.headRefOid;
-  const staleEvidence = [ciRollup?.headSha, reviewRollup?.headSha, mergeSnapshot?.headSha].some(
-    (headSha) => Boolean(headSha && prHead && headSha !== prHead)
+  const staleEvidence = [ciRollup, reviewRollup, mergeSnapshot].some(
+    (row) => row && deliveryEvidenceIdentity(pullRequest, row) === 'STALE'
   );
   if (branchPublication?.status === 'AMBIGUOUS') {
     return {
@@ -680,11 +734,40 @@ function checksToStatus(
       return { kind: 'CHECKS_CANCELED', headline: 'Checks canceled', tone: 'action' };
     case 'NO_CHECKS':
       return ciRollup.totalCount > 0
-        ? { kind: 'NO_REQUIRED_CHECKS', headline: 'No required checks ran', tone: 'action' }
-        : undefined;
+        ? { kind: 'NO_REQUIRED_CHECKS', headline: 'Checks skipped', tone: 'action' }
+        : { kind: 'NO_REQUIRED_CHECKS', headline: 'No checks reported', tone: 'action' };
+    case 'EXPECTED_NOT_REPORTED':
+      return { kind: 'CHECKS_PENDING', headline: 'Expected checks not reported', tone: 'action' };
+    case 'NOT_APPLICABLE':
+      return { kind: 'NO_REQUIRED_CHECKS', headline: 'Checks not applicable', tone: 'neutral' };
+    case 'STALE':
+      return { kind: 'STALE', headline: 'Checks stale', tone: 'action' };
+    case 'UNKNOWN':
+      return { kind: 'UNKNOWN', headline: 'Checks unknown', tone: 'neutral' };
     default:
       return undefined;
   }
+}
+
+function currentPassingCheckEvidence(
+  pullRequest: PullRequestSnapshotRecord,
+  ciRollup?: CiRollupRecord
+): Pick<PrStatusViewModel, 'checkGroups' | 'checkSummaryLine' | 'evidenceLine'> {
+  if (
+    ciRollup?.status !== 'PASSING' ||
+    !ciRollup.headSha ||
+    deliveryEvidenceIdentity(pullRequest, ciRollup) !== 'CURRENT'
+  ) {
+    return { checkGroups: [] };
+  }
+  const evidence = checkEvidence(ciRollup);
+  const count = ciRollup.passingCount > 0
+    ? `${ciRollup.passingCount} ${ciRollup.passingCount === 1 ? 'check' : 'checks'}`
+    : 'Checks';
+  return {
+    ...evidence,
+    evidenceLine: `${count} passed for head ${ciRollup.headSha.slice(0, 8)}`
+  };
 }
 
 function reviewToStatus(
@@ -727,14 +810,8 @@ function evidenceMatchesPullRequestHead(
   reviewRollup: ReviewRollupRecord,
   mergeSnapshot: MergeSnapshotRecord
 ): boolean {
-  const prHead = pullRequest.headRefOid;
-  if (!prHead || typeof pullRequest.number !== 'number') {
-    return false;
-  }
   const rows = [ciRollup, reviewRollup, mergeSnapshot];
-  return rows.every(
-    (row) => row?.headSha === prHead && row.pullRequestNumber === pullRequest.number
-  );
+  return rows.every((row) => deliveryEvidenceIdentity(pullRequest, row) === 'CURRENT');
 }
 
 function formatCheckSummary(ciRollup?: CiRollupRecord): string | undefined {
@@ -853,7 +930,7 @@ function boardDeliveryStatus(task: BoardDeliveryTask): string | undefined {
     return 'review waiting';
   }
   if (task.projection.ciChecks === 'PASSING' && task.projection.merge === 'MERGEABLE') {
-    return 'ready to merge';
+    return 'checks passing · mergeable';
   }
   if (task.projection.githubPullRequest === 'OPEN_DRAFT') {
     return 'draft';

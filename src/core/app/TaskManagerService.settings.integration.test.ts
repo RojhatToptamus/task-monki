@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -789,6 +790,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       runtimeId: 'opencode',
       agentSettings: { runtimeId: 'opencode', model: 'scenario-model' }
     });
+    await prepareTestWorktree(service, task.id);
     const resolvedModel = (await opencode.listModels())[0]!;
     let releaseResolve!: () => void;
     const resolveGate = new Promise<void>((resolve) => {
@@ -917,6 +919,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       runtimeId: 'codex',
       agentSettings: { runtimeId: 'codex', model: 'scenario-model' }
     });
+    await prepareTestWorktree(service, task.id);
     const run = await service.startRun({ taskId: task.id });
     const models = await runtime.listModels();
     vi.mocked(runtime.listModels).mockClear();

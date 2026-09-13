@@ -23,7 +23,7 @@ import { DisclosureChevron } from './DisclosureChevron';
 import {
   buildDiffFileTree,
   filterDiffFiles,
-  parseGitDiffEvidence,
+  inspectGitDiffEvidence,
   parseGitDiffEvidenceForScope,
   type DiffFile,
   type DiffEvidenceScope,
@@ -33,6 +33,7 @@ import {
 } from '../model/diffEvidence';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { openTargetMenuPosition } from '../model/openTargetMenu';
+import { deliveryEvidenceIdentity } from '../model/prStatus';
 import { StatusChip } from './StatusBadge';
 import { humanizeEnum } from './display';
 import { OpenTargetContextMenu } from './OpenTargetMenu';
@@ -49,6 +50,7 @@ interface EvidencePanelProps {
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
+  historicalCapture?: boolean;
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -58,9 +60,11 @@ interface EvidencePanelProps {
   artifacts: ArtifactRecord[];
 }
 
-interface LoadedArtifacts {
-  diff: string;
-}
+type DiffArtifactLoadState =
+  | { status: 'IDLE' }
+  | { status: 'LOADING'; artifactId: string }
+  | { status: 'LOADED'; artifactId: string; text: string }
+  | { status: 'FAILED'; artifactId: string; error: string };
 
 const DIFF_STATUS_FILTERS: Array<{ value: DiffFileStatusFilter; label: string }> = [
   { value: 'all', label: 'All files' },
@@ -84,6 +88,7 @@ export function EvidencePanel({
   run,
   worktree,
   gitSnapshot,
+  historicalCapture = false,
   githubRepository,
   branchPublication,
   pullRequest,
@@ -92,9 +97,9 @@ export function EvidencePanel({
   mergeSnapshot,
   artifacts
 }: EvidencePanelProps) {
-  const [artifactText, setArtifactText] = useState<LoadedArtifacts>({ diff: '' });
-  const [artifactError, setArtifactError] = useState<string | undefined>();
-  const [loadingArtifacts, setLoadingArtifacts] = useState(false);
+  const [artifactLoad, setArtifactLoad] = useState<DiffArtifactLoadState>({
+    status: 'IDLE'
+  });
   const [selectedFileId, setSelectedFileId] = useState<string | undefined>();
   const [diffScope, setDiffScope] = useState<DiffEvidenceScope>('all');
   const [fileFilter, setFileFilter] = useState('');
@@ -121,33 +126,31 @@ export function EvidencePanel({
   useEffect(() => {
     let canceled = false;
 
-    async function loadArtifacts() {
-      setArtifactError(undefined);
-      setArtifactText({ diff: '' });
-
-      setLoadingArtifacts(Boolean(diffArtifact));
-      const next: LoadedArtifacts = { diff: '' };
-      const errors: string[] = [];
-
-      if (diffArtifact) {
-        await taskManagerApi
-          .readArtifact({ artifactId: diffArtifact.id })
-          .then((text) => {
-            next.diff = text;
-          })
-          .catch((error: unknown) => {
-            errors.push(error instanceof Error ? error.message : 'Could not read diff.');
-          });
-      }
-
-      if (!canceled) {
-        setArtifactText(next);
-        setArtifactError(errors.length ? errors.join('\n') : undefined);
-        setLoadingArtifacts(false);
-      }
+    if (!diffArtifact) {
+      setArtifactLoad({ status: 'IDLE' });
+      return () => {
+        canceled = true;
+      };
     }
 
-    void loadArtifacts();
+    setArtifactLoad({ status: 'LOADING', artifactId: diffArtifact.id });
+    void taskManagerApi
+      .readArtifact({ artifactId: diffArtifact.id })
+      .then((text) => {
+        if (!canceled) {
+          setArtifactLoad({ status: 'LOADED', artifactId: diffArtifact.id, text });
+        }
+      })
+      .catch((error: unknown) => {
+        if (!canceled) {
+          setArtifactLoad({
+            status: 'FAILED',
+            artifactId: diffArtifact.id,
+            error: error instanceof Error ? error.message : 'Could not read diff.'
+          });
+        }
+      });
+
     return () => {
       canceled = true;
     };
@@ -156,6 +159,21 @@ export function EvidencePanel({
     diffArtifact?.byteCount,
     diffArtifact?.updatedAt,
   ]);
+
+  const artifactText =
+    artifactLoad.status === 'LOADED' && artifactLoad.artifactId === diffArtifact?.id
+      ? artifactLoad.text
+      : '';
+  const artifactError =
+    artifactLoad.status === 'FAILED' && artifactLoad.artifactId === diffArtifact?.id
+      ? artifactLoad.error
+      : undefined;
+  const loadingArtifacts =
+    Boolean(diffArtifact) &&
+    !(
+      (artifactLoad.status === 'LOADED' || artifactLoad.status === 'FAILED') &&
+      artifactLoad.artifactId === diffArtifact?.id
+    );
 
   useEffect(() => {
     if (!filterMenuOpen) {
@@ -176,13 +194,17 @@ export function EvidencePanel({
     };
   }, [filterMenuOpen]);
 
+  const diffInspection = useMemo(
+    () => inspectGitDiffEvidence(artifactText),
+    [artifactText]
+  );
   const diffFilesByScope = useMemo(
     () => ({
-      all: parseGitDiffEvidence(artifactText.diff),
-      committed: parseGitDiffEvidenceForScope(artifactText.diff, 'committed'),
-      uncommitted: parseGitDiffEvidenceForScope(artifactText.diff, 'uncommitted')
+      all: diffInspection.files,
+      committed: parseGitDiffEvidenceForScope(artifactText, 'committed'),
+      uncommitted: parseGitDiffEvidenceForScope(artifactText, 'uncommitted')
     }),
-    [artifactText.diff]
+    [artifactText, diffInspection.files]
   );
   const diffFiles = diffFilesByScope[diffScope];
   const hasDiffFiles = diffFilesByScope.all.length > 0;
@@ -193,14 +215,24 @@ export function EvidencePanel({
   const filterActive = fileFilter.trim().length > 0 || statusFilter !== 'all';
   const selectedFile =
     filteredDiffFiles.find((file) => file.id === selectedFileId) ?? filteredDiffFiles[0];
-  const diffContext = getDiffScopeContext(diffScope, gitSnapshot ?? worktree);
+  const diffContext = getDiffScopeContext(diffScope, gitSnapshot ?? (historicalCapture ? undefined : worktree));
   const visibleTotals = getDiffTotals(filteredDiffFiles);
   const fileTree = useMemo(() => buildDiffFileTree(filteredDiffFiles), [filteredDiffFiles]);
   const diffBrowserClassName = `tm-diffbrowser ${
     filePanelCollapsed ? 'tm-diffbrowser--files-collapsed' : ''
   }`;
   const filePanelToggleLabel = filePanelCollapsed ? 'Expand file panel' : 'Collapse file panel';
-  const showDiffViewerEmpty = filePanelCollapsed;
+  const unavailableDiffMessage = loadingArtifacts
+    ? 'Loading diff...'
+    : artifactError
+      ? 'Captured diff unavailable.'
+      : !diffArtifact
+        ? historicalCapture
+          ? 'The historical diff is unavailable.'
+          : 'Refresh evidence to capture a diff.'
+        : diffInspection.completeness === 'UNINTERPRETABLE'
+          ? 'Captured paths could not be interpreted.'
+          : undefined;
 
   useLayoutEffect(() => {
     diffBrowserRef.current?.style.setProperty(
@@ -232,7 +264,7 @@ export function EvidencePanel({
     event: MouseEvent,
     line?: number
   ) {
-    if (!worktree) {
+    if (!worktree || historicalCapture) {
       return;
     }
     event.preventDefault();
@@ -251,7 +283,30 @@ export function EvidencePanel({
 
   return (
     <>
-      {artifactError ? <p className="form-error">{artifactError}</p> : null}
+      {historicalCapture ? (
+        <div className="tm-evidence-context" role="status" aria-live="polite">
+          <strong>{gitSnapshot ? 'Historical Git capture' : 'Historical Git capture unavailable'}</strong>
+          {gitSnapshot ? (
+            <span>
+              Head {gitSnapshot.headSha?.slice(0, 12) ?? 'Unknown'} ·{' '}
+              {formatEvidenceCaptureTime(gitSnapshot.capturedAt)}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {artifactError ? (
+        <p className="form-error" role="alert">
+          Could not read captured diff: {artifactError}
+        </p>
+      ) : !loadingArtifacts && diffArtifact && diffInspection.completeness === 'INCOMPLETE' ? (
+        <p className="form-error" role="status" aria-live="polite">
+          Incomplete captured diff. Listed files are observed; absence is not established.
+        </p>
+      ) : !loadingArtifacts && diffArtifact && diffInspection.completeness === 'UNINTERPRETABLE' ? (
+        <p className="form-error" role="status" aria-live="polite">
+          Captured paths could not be interpreted. Actual changes are Unknown.
+        </p>
+      ) : null}
 
       <section ref={diffBrowserRef} className={diffBrowserClassName} aria-label="Changed files">
         <aside className="tm-diffbrowser__files">
@@ -269,8 +324,14 @@ export function EvidencePanel({
             ) : null}
           </div>
           {!filePanelCollapsed && diffArtifact ? (
-            loadingArtifacts && !artifactText.diff ? (
-              <p className="tm-diffbrowser__empty">Loading diff...</p>
+            loadingArtifacts ? (
+              <p className="tm-diffbrowser__empty" role="status" aria-live="polite">
+                Loading diff...
+              </p>
+            ) : artifactError ? (
+              <p className="tm-diffbrowser__empty">Captured diff unavailable.</p>
+            ) : diffInspection.completeness === 'UNINTERPRETABLE' ? (
+              <p className="tm-diffbrowser__empty">Captured paths could not be interpreted.</p>
             ) : hasDiffFiles ? (
               <>
                 <DiffScopeControls
@@ -413,15 +474,25 @@ export function EvidencePanel({
                   />
                 ) : (
                   <p className="tm-diffbrowser__empty">
-                    {diffEmptyMessage(diffScope, filterActive)}
+                    {diffEmptyMessage(
+                      diffScope,
+                      filterActive,
+                      diffInspection.completeness === 'INCOMPLETE'
+                    )}
                   </p>
                 )}
               </>
+            ) : diffInspection.completeness === 'INCOMPLETE' ? (
+              <p className="tm-diffbrowser__empty">
+                No paths could be confirmed from the incomplete captured diff.
+              </p>
             ) : (
               <p className="tm-diffbrowser__empty">No file changes in the captured diff.</p>
             )
           ) : !filePanelCollapsed ? (
-            <p className="tm-diffbrowser__empty">Refresh evidence to capture a diff artifact.</p>
+            <p className="tm-diffbrowser__empty">
+              {historicalCapture ? 'The historical diff is unavailable.' : 'Refresh evidence to capture a diff.'}
+            </p>
           ) : null}
         </aside>
 
@@ -444,14 +515,20 @@ export function EvidencePanel({
                   onToggle={() => setFilePanelCollapsed((collapsed) => !collapsed)}
                 />
               </div>
-              {showDiffViewerEmpty ? (
+              {filePanelCollapsed ? (
                 <div className="tm-diffviewer__empty">
-                  <strong>{filterActive ? 'No matching files' : 'No files in this scope'}</strong>
-                  <span>
-                    {filterActive
-                      ? 'Adjust the file filter to inspect the captured diff.'
-                      : diffEmptyMessage(diffScope, false)}
-                  </span>
+                  <strong>{unavailableDiffMessage ?? (filterActive ? 'No matching files' : 'No files in this scope')}</strong>
+                  {!unavailableDiffMessage ? (
+                    <span>
+                      {filterActive
+                        ? 'Adjust the file filter to inspect the captured diff.'
+                        : diffEmptyMessage(
+                            diffScope,
+                            false,
+                            diffInspection.completeness === 'INCOMPLETE'
+                          )}
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
             </>
@@ -513,29 +590,62 @@ export function EvidencePanel({
         </div>
       </section>
 
-      <details className="tm-evidence-summary" aria-label="Verified evidence">
+      <details
+        className="tm-evidence-summary"
+        aria-label={historicalCapture ? 'Historical Git evidence' : 'Observed evidence'}
+      >
         <summary className="tm-evidence-summary__head">
           <span className="tm-evidence-summary__title">
             <DisclosureChevron className="tm-evidence-summary__caret" />
-            <h3>Verified evidence</h3>
+            <h3>{historicalCapture ? 'Historical Git evidence' : 'Observed evidence'}</h3>
           </span>
           <span className="tm-evidence-summary__strip">
-            {buildEvidenceStrip({ worktree, gitSnapshot, pullRequest })}
+            {buildEvidenceStrip({
+              worktree: historicalCapture ? undefined : worktree,
+              gitSnapshot,
+              pullRequest: historicalCapture ? undefined : pullRequest,
+              includePullRequest: !historicalCapture
+            })}
           </span>
-          {run ? <span className="tm-evidence-summary__run">Run {run.id.slice(0, 8)}</span> : null}
+          {run && !historicalCapture ? (
+            <span className="tm-evidence-summary__run">Run {run.id.slice(0, 8)}</span>
+          ) : null}
         </summary>
 
         {run || worktree || gitSnapshot || pullRequest ? (
           <div className="tm-evidence-summary__body">
             <div className="evidence-grid">
-              {worktree ? <StatusChip label="Worktree" value={worktree.status} /> : null}
+              {worktree && !historicalCapture ? (
+                <StatusChip label="Worktree" value={worktree.status} />
+              ) : null}
               {gitSnapshot ? <StatusChip label="Git" value={gitSnapshot.status} /> : null}
-              {githubRepository ? <StatusChip label="GitHub" value={githubRepository.status} /> : null}
-              {branchPublication ? <StatusChip label="Publish" value={branchPublication.status} /> : null}
-              {pullRequest ? <StatusChip label="PR" value={pullRequest.status} /> : null}
-              {ciRollup ? <StatusChip label="Checks" value={ciRollup.status} /> : null}
-              {reviewRollup ? <StatusChip label="Reviews" value={reviewRollup.status} /> : null}
-              {mergeSnapshot ? <StatusChip label="Merge" value={mergeSnapshot.status} /> : null}
+              {githubRepository && !historicalCapture ? (
+                <StatusChip label="GitHub" value={githubRepository.status} />
+              ) : null}
+              {branchPublication && !historicalCapture ? (
+                <StatusChip label="Publish" value={branchPublication.status} />
+              ) : null}
+              {pullRequest && !historicalCapture ? (
+                <StatusChip label="PR" value={pullRequestEvidenceLabel(pullRequest.status)} />
+              ) : null}
+              {ciRollup && !historicalCapture ? (
+                <StatusChip
+                  label="Checks"
+                  value={deliveryEvidenceStatus(ciRollup, pullRequest)}
+                />
+              ) : null}
+              {reviewRollup && !historicalCapture ? (
+                <StatusChip
+                  label="Reviews"
+                  value={deliveryEvidenceStatus(reviewRollup, pullRequest)}
+                />
+              ) : null}
+              {mergeSnapshot && !historicalCapture ? (
+                <StatusChip
+                  label="Merge"
+                  value={deliveryEvidenceStatus(mergeSnapshot, pullRequest)}
+                />
+              ) : null}
             </div>
 
             <div className="tm-evidence-facts">
@@ -553,19 +663,31 @@ export function EvidencePanel({
                 }
               />
               <EvidenceFact
-                label="Remote"
+                label="Captured"
                 value={
-                  githubRepository?.owner && githubRepository.repo
-                    ? `${githubRepository.owner}/${githubRepository.repo}`
-                    : githubRepository?.status
-                      ? humanizeEnum(githubRepository.status)
-                      : 'not checked'
+                  gitSnapshot
+                    ? formatEvidenceCaptureTime(gitSnapshot.capturedAt)
+                    : 'unknown'
                 }
               />
-              <EvidenceFact
-                label="Pull request"
-                value={pullRequest?.url ?? pullRequest?.status ?? 'not created'}
-              />
+              {!historicalCapture ? (
+                <>
+                  <EvidenceFact
+                    label="Remote"
+                    value={
+                      githubRepository?.owner && githubRepository.repo
+                        ? `${githubRepository.owner}/${githubRepository.repo}`
+                        : githubRepository?.status
+                          ? humanizeEnum(githubRepository.status)
+                          : 'not checked'
+                    }
+                  />
+                  <EvidenceFact
+                    label="Pull request"
+                    value={pullRequest?.url ?? pullRequest?.status ?? 'not created'}
+                  />
+                </>
+              ) : null}
             </div>
           </div>
         ) : (
@@ -600,11 +722,13 @@ function EvidenceFact({ label, value }: { label: string; value: string }) {
 function buildEvidenceStrip({
   worktree,
   gitSnapshot,
-  pullRequest
+  pullRequest,
+  includePullRequest = true
 }: {
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
   pullRequest?: PullRequestSnapshotRecord;
+  includePullRequest?: boolean;
 }): string {
   const parts: string[] = [];
   if (worktree) {
@@ -616,8 +740,40 @@ function buildEvidenceStrip({
   if (gitSnapshot?.headSha) {
     parts.push(`Head ${gitSnapshot.headSha.slice(0, 7)}`);
   }
-  parts.push(pullRequest?.status ? `PR ${humanizeEnum(pullRequest.status)}` : 'PR not created');
+  if (includePullRequest) {
+    parts.push(
+      pullRequest?.status ? `PR ${pullRequestEvidenceLabel(pullRequest.status)}` : 'PR not created'
+    );
+  }
   return parts.join(' · ');
+}
+
+function pullRequestEvidenceLabel(status: PullRequestSnapshotRecord['status']): string {
+  if (status === 'OPEN_READY') {
+    return 'Open';
+  }
+  if (status === 'OPEN_DRAFT') {
+    return 'Draft';
+  }
+  if (status === 'CLOSED_UNMERGED') {
+    return 'Closed';
+  }
+  return humanizeEnum(status);
+}
+
+function formatEvidenceCaptureTime(value: string): string {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
+}
+
+function deliveryEvidenceStatus(
+  evidence: Pick<CiRollupRecord, 'status' | 'headSha' | 'pullRequestNumber'> |
+    Pick<ReviewRollupRecord, 'status' | 'headSha' | 'pullRequestNumber'> |
+    Pick<MergeSnapshotRecord, 'status' | 'headSha' | 'pullRequestNumber'>,
+  pullRequest?: PullRequestSnapshotRecord
+): string {
+  const identity = deliveryEvidenceIdentity(pullRequest, evidence);
+  return identity === 'CURRENT' ? evidence.status : identity;
 }
 
 export function DiffScopeControls({
@@ -954,9 +1110,16 @@ function fileCountShortLabel(count: number): string {
   return `${count} ${count === 1 ? 'file' : 'files'}`;
 }
 
-function diffEmptyMessage(scope: DiffEvidenceScope, filterActive: boolean): string {
+function diffEmptyMessage(
+  scope: DiffEvidenceScope,
+  filterActive: boolean,
+  incomplete = false
+): string {
   if (filterActive) {
     return 'No files match the current filter.';
+  }
+  if (incomplete) {
+    return 'No paths confirmed in this scope; coverage is unknown.';
   }
   switch (scope) {
     case 'committed':

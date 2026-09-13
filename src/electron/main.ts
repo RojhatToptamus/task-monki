@@ -50,6 +50,7 @@ import type {
   OpenPreviewRequest,
   ExecuteOpenTargetActionRequest,
   PrepareWorktreeRequest,
+  InspectWorktreePreparationRequest,
   PublishBranchRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
@@ -764,6 +765,10 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('worktree:prepare', async (_, input: PrepareWorktreeRequest) => {
     return service.prepareWorktree(input);
+  });
+
+  handleTrustedIpc('worktree:inspectPreparation', async (_, input: InspectWorktreePreparationRequest) => {
+    return service.inspectWorktreePreparation(input);
   });
 
   handleTrustedIpc('agent:startRun', async (_, input: StartRunRequest) => {

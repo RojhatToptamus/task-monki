@@ -1,4 +1,4 @@
-import type { RepositoryPreflight } from '../../shared/contracts';
+import type { RepositoryPreflight, WorktreeBaseOption } from '../../shared/contracts';
 import fs from 'node:fs/promises';
 import { git } from '../git/gitCli';
 
@@ -44,6 +44,43 @@ export async function validateRepositoryPath(repositoryPath: string): Promise<Re
   }
 }
 
+export async function inspectRepositoryWorktreePreparation(
+  repositoryPath: string
+): Promise<WorktreeBaseOption[]> {
+  const preflight = await validateRepositoryPath(repositoryPath);
+  if (preflight.status !== 'VALID' || !preflight.root) {
+    throw new Error(preflight.error ?? 'Repository preflight failed.');
+  }
+
+  const root = preflight.root;
+  const [headOutput, currentRef, branchOutput] = await Promise.all([
+    git(root, ['rev-parse', '--verify', 'HEAD^{commit}']),
+    readCurrentBranchRef(root),
+    git(root, [
+      'for-each-ref',
+      '--format=%(refname)%00%(refname:short)%00%(objectname)%00%(objecttype)',
+      'refs/heads'
+    ])
+  ]);
+  const headSha = requireFullObjectId(headOutput.trim());
+  const branchOptions = parseLocalBranchOptions(branchOutput, currentRef);
+  const bases = currentRef
+    ? branchOptions
+    : [
+        {
+          displayName: 'Detached HEAD',
+          sha: headSha,
+          current: true
+        },
+        ...branchOptions
+      ];
+  if (bases.length === 0) {
+    throw new Error('The repository has no local branch that points to a commit.');
+  }
+
+  return bases;
+}
+
 function parseRemotes(output: string): RepositoryPreflight['remotes'] {
   return output
     .split('\n')
@@ -62,4 +99,55 @@ function parseRemotes(output: string): RepositoryPreflight['remotes'] {
         }
       ];
     });
+}
+
+async function readCurrentBranchRef(repositoryPath: string): Promise<string | undefined> {
+  try {
+    const refName = (
+      await git(repositoryPath, ['symbolic-ref', '--quiet', 'HEAD'])
+    ).trim();
+    return refName || undefined;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 1) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function parseLocalBranchOptions(
+  output: string,
+  currentRef: string | undefined
+): WorktreeBaseOption[] {
+  return output
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .flatMap((line) => {
+      const [refName, displayName, rawSha, objectType] = line.split('\0');
+      if (
+        !refName?.startsWith('refs/heads/') ||
+        !displayName ||
+        !rawSha ||
+        objectType !== 'commit'
+      ) {
+        return [];
+      }
+      return [
+        {
+          refName,
+          displayName,
+          sha: requireFullObjectId(rawSha),
+          current: refName === currentRef
+        }
+      ];
+    })
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+}
+
+function requireFullObjectId(value: string): string {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) {
+    throw new Error('Git returned an invalid commit object ID.');
+  }
+  return value;
 }

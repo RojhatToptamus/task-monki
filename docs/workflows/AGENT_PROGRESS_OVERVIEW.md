@@ -23,8 +23,9 @@ supporting context only. It summarizes recent provider telemetry such as file
 reads, searches, edits, commands, tool calls, approval waits, and short progress
 messages.
 
-Provider telemetry is not evidence. Task Monki still owns workflow phase, Git
-state, test/verification state, delivery state, review state, and acceptance.
+Provider telemetry is not independent evidence. Task Monki owns workflow phase,
+observed Git state, GitHub delivery, review state, and acceptance. Agent command
+and test reports remain provider telemetry.
 
 ## User Surfaces
 
@@ -41,7 +42,7 @@ The Overview renders the active or latest implementation-side run with
   runs.
 
 Activity is shown only for running progress. Terminal runs return to plan plus
-local-evidence footer. This keeps the plan as the stable history and avoids
+terminal-status footer. This keeps the plan as the stable history and avoids
 making provider item traffic look like a verified transcript.
 
 ### Review Panel
@@ -92,9 +93,7 @@ The source records are:
   - Task Monki interaction requests for approvals, user input, MCP elicitation,
     and dynamic tools;
 - `GitSnapshotRecord`
-  - local Git evidence used for terminal footer and completed change summary;
-- CI/check status
-  - local/remote verification evidence used for completed-run footer text.
+  - local Git evidence used for the separate captured-change summary.
 
 ### Normalized Activity Projection
 
@@ -298,8 +297,8 @@ Activity Timeline and Debug.
 When a run is not active, `runProgress` does not show the live activity tail.
 Instead it returns a footer:
 
-- `Completed`
-  - combines local changed-file count and verification/check status;
+- `Agent run completed`
+  - records provider completion without implying verification;
 - `Failed`
   - uses terminal reason or a fallback failure sentence;
 - `Interrupted`
@@ -307,15 +306,10 @@ Instead it returns a footer:
 - `Recovery required`
   - tells the user recovery is needed before continuation.
 
-For completed runs, the footer says the completion state and local-evidence
-facts, for example:
-
-```text
-Completed: 10 files changed · verification not run
-```
-
-The file count and verification status are Task Monki evidence, not provider
-claims.
+The separate captured-change card uses the run's recorded Git snapshot. It
+distinguishes capture in progress, unavailable capture, empty changes, and
+incomplete or historical evidence. Expanding it opens that capture, not a newer
+diff. Current GitHub delivery does not become evidence for a historical capture.
 
 ## Renderer Components
 

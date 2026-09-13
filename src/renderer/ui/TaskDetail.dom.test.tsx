@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import { TaskDetail } from './TaskDetail';
 
+vi.mock('../api/taskManagerClient', () => ({
+  taskManagerApi: { readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n') }
+}));
+
 function detailProps(): ComponentProps<typeof TaskDetail> {
   return {
     task: makeTaskRecord({ workflowPhase: 'IN_PROGRESS', currentWorktreeId: 'worktree-1', currentIterationId: 'iteration-1', projection: { worktree: 'PRESENT', git: 'DIRTY' } }),
@@ -19,6 +23,26 @@ function detailProps(): ComponentProps<typeof TaskDetail> {
 }
 
 describe('imported task actions', () => {
+  it('does not replace a missing historical capture with current Git evidence', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = detailProps();
+    const captured = makeGitSnapshotRecord({ id: 'captured', diffArtifactId: 'diff-captured' });
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', currentRunId: 'run-1' });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED', afterGitSnapshotId: captured.id });
+    props.runs = [props.run];
+    props.gitSnapshots = [captured];
+    props.artifacts = [{ id: 'diff-captured', taskId: 'task-1', kind: 'diff', path: '/tmp/captured.diff', byteCount: 120, createdAt: TEST_NOW, updatedAt: TEST_NOW }];
+    const view = render(<TaskDetail {...props} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'View diff' }));
+    expect(screen.getByText('Historical Git capture')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Change comparison' })).toBeNull();
+
+    view.rerender(<TaskDetail {...props} gitSnapshots={[]} gitSnapshot={makeGitSnapshotRecord({ headSha: 'newer-head', diffArtifactId: 'newer-diff' })} />);
+    expect(screen.getByText('Historical Git capture unavailable')).toBeDefined();
+    expect(screen.queryByText(/newer-head/)).toBeNull();
+    expect(screen.queryByText('output.txt')).toBeNull();
+  });
+
   it('requires a first coding instruction but starts review directly without a separate phase action', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     const props = detailProps();
@@ -92,6 +116,48 @@ describe('imported task actions', () => {
     expect(props.onCreatePullRequest).toHaveBeenLastCalledWith('task-1', props.task!.title, 'release/next');
     expect(props.onUpdateWorktreeComparison).not.toHaveBeenCalled();
   });
+
+  it.each(['stale-review', 'replacement-review', 'new-implementation'] as const)(
+    'blocks an open findings request after %s',
+    async (change) => {
+      HTMLElement.prototype.scrollTo = vi.fn();
+      const props = detailProps();
+      props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', projection: {
+        ...props.task!.projection,
+        agentReview: {
+          status: 'NEEDS_CHANGES', runId: 'review-1',
+          result: { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'Fix validation.', findings: [
+            { id: 'finding-1', severity: 'MAJOR', title: 'Invalid input accepted', explanation: 'Reject an invalid value.' }
+          ] }
+        }
+      } });
+      props.runs = [makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' })];
+      const mounted = render(<TaskDetail {...props} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Address findings' }));
+      const send = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Send to agent' });
+      expect(send).toHaveProperty('disabled', false);
+
+      const currentReview = props.task.projection.agentReview!;
+      mounted.rerender(<TaskDetail {...props}
+        task={{ ...props.task,
+          currentRunId: change === 'new-implementation' ? 'run-2' : undefined,
+          projection: { ...props.task.projection, agentReview: {
+            ...currentReview,
+            status: change === 'stale-review' ? 'STALE' : currentReview.status,
+            runId: change === 'replacement-review' ? 'review-2' : currentReview.runId
+          } }
+        }}
+        runs={change === 'new-implementation'
+          ? [...props.runs, makeRunRecord({ id: 'run-2', mode: 'IMPLEMENTATION', status: 'COMPLETED' })]
+          : props.runs}
+      />);
+
+      expect(send).toHaveProperty('disabled', true);
+      fireEvent.click(send);
+      expect(props.onStart).not.toHaveBeenCalled();
+      expect(props.onContinue).not.toHaveBeenCalled();
+    }
+  );
 
   it('starts a detached review without a source run and routes findings to the first coding instruction', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();

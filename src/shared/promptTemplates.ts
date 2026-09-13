@@ -164,7 +164,7 @@ export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract (defau
 - If no plan/progress mechanism is available, write short progress messages beginning with "Progress:" at the same milestones.
 - Do not claim verification until commands, tests, or checks actually ran.
 - For trivial, read-only, or exact-response turns, skip plans and progress messages silently unless the authoritative goal asks for them.
-- Do not treat provider plan progress as proof; Task Monki independently verifies Git, tests, reviews, and delivery.`;
+- Do not treat provider plan progress as proof. Task Monki independently observes Git and GitHub delivery. Local command and test claims remain provider telemetry. Recorded CI is separate evidence for its recorded pull request and head.`;
 
 export const TASK_MONKI_ENGINEERING_QUALITY_CONTRACT = `Task Monki engineering quality contract (defaults for non-trivial repository work):
 - Apply these defaults only when relevant to the authoritative goal. They do not require tools, edits, tests, progress messages, or a summary when the goal forbids them or requires an exact response.

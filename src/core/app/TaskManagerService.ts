@@ -40,6 +40,10 @@ import type {
   GeneratePreviewRecipeRequest,
   GetPreviewRecipeGenerationRequest,
   PrepareWorktreeRequest,
+  InspectWorktreePreparationRequest,
+  PrepareWorktreeResult,
+  WorktreePreparationCreateInspection,
+  WorktreePreparationInspection,
   PublishBranchRequest,
   BranchPublicationRecord,
   PullRequestSnapshotRecord,
@@ -172,7 +176,7 @@ import {
 } from '../../shared/promptTemplates';
 import { inspectExistingWorktree, listGitWorktrees, WorktreeService } from '../worktree/WorktreeService';
 import { inspectImportPreview } from '../git/ImportPreview';
-import { validateRepositoryPath } from '../repository/RepositoryPreflight';
+import { inspectRepositoryWorktreePreparation, validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
@@ -1326,7 +1330,13 @@ export class TaskManagerService {
 
   async getTaskDetail(taskId: string): Promise<TaskDetailSnapshot> {
     await this.requireNormalTask(taskId, 'Task details');
-    return projectTaskDetailForClient(await this.store.getTaskDetail(taskId));
+    const detail = projectTaskDetailForClient(await this.store.getTaskDetail(taskId));
+    return {
+      ...detail,
+      postRunEvidencePendingRunIds: detail.runs
+        .filter((run) => this.postRunEvidenceTasks.has(run.id))
+        .map((run) => run.id)
+    };
   }
 
   listDiscourseConversations(input: ListDiscourseConversationsRequest = {}) {
@@ -2395,7 +2405,27 @@ export class TaskManagerService {
     }
   }
 
-  async prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord> {
+  async inspectWorktreePreparation(
+    input: InspectWorktreePreparationRequest
+  ): Promise<WorktreePreparationInspection> {
+    const task = await this.requireNormalTask(input.taskId, 'Manual worktree preparation');
+    const repository = await this.requireAvailableRepository(task.repositoryId);
+    const existing = await this.store.getCurrentWorktree(task.id);
+    if (existing && !['REMOVED', 'REMOVING'].includes(existing.status)) {
+      return {
+        mode: 'RECOVER',
+        taskId: task.id,
+        repositoryName: repository.name,
+        worktree: existing
+      };
+    }
+    return this.inspectNewWorktreePreparation(task, repository);
+  }
+
+  async prepareWorktree(input: PrepareWorktreeRequest): Promise<PrepareWorktreeResult> {
+    if (input.intent !== 'CREATE' && input.intent !== 'RECOVER') {
+      throw new Error('Worktree preparation requires an explicit CREATE or RECOVER intent.');
+    }
     return this.withTaskAction(input.taskId, 'Worktree preparation', () =>
       this.requireNormalTask(input.taskId, 'Manual worktree preparation').then(() =>
         this.prepareWorktreeUnlocked(input)
@@ -2405,31 +2435,69 @@ export class TaskManagerService {
 
   private async prepareWorktreeUnlocked(
     input: PrepareWorktreeRequest
-  ): Promise<WorktreeRecord> {
+  ): Promise<PrepareWorktreeResult> {
     const task = await this.requireTask(input.taskId);
     const repository = await this.requireAvailableRepository(task.repositoryId);
     const existing = await this.store.getCurrentWorktree(task.id);
-    if (existing?.ownership === 'EXTERNAL') {
-      const verified = await this.worktrees.verify(existing, repository.path);
-      const stored = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
-      if (stored.status !== 'PRESENT') {
-        throw new Error(stored.error ?? 'Reconnect the existing checkout before starting work.');
-      }
-      return stored;
-    }
     if (existing && !['REMOVED', 'REMOVING'].includes(existing.status)) {
+      if (input.intent === 'CREATE') {
+        return { outcome: 'BASE_ALREADY_BOUND', worktree: existing };
+      }
       const verified = await this.worktrees.verify(existing, repository.path);
       const stored = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
-      if (!['ERROR', 'MISSING'].includes(stored.status)) {
-        return stored;
+      if (stored.status === 'PRESENT') {
+        await this.refreshEvidenceInternal(
+          { taskId: task.id },
+          { persistOnlyIfChanged: true, verifiedWorktree: stored }
+        );
+        return { outcome: 'PREPARED', worktree: stored };
+      }
+      if (stored.status !== 'MISSING' || existing.ownership === 'EXTERNAL') {
+        throw new Error(stored.error ?? `The worktree is ${stored.status.toLowerCase()}. Resolve its Git state before restoring it.`);
       }
       await this.validateAndRecordRepository(task);
-      return this.resumeWorktreePreparation(task, stored, repository);
+      return {
+        outcome: 'PREPARED',
+        worktree: await this.resumeWorktreePreparation(task, stored, repository)
+      };
     }
 
-    const preflight = await this.validateAndRecordRepository(task);
-    const spec = this.worktrees.buildSpec(task, preflight);
-    return this.createAndPrepareWorktree(task, spec);
+    if (input.intent !== 'CREATE') {
+      throw new Error('Prepare the worktree and choose its base before starting implementation.');
+    }
+
+    const inspection = await this.inspectNewWorktreePreparation(task, repository);
+    const selectedBase = inspection.bases.find(
+      (candidate) => candidate.refName === input.baseRef
+    );
+    if (!selectedBase || selectedBase.sha !== input.expectedBaseSha) {
+      return {
+        outcome: 'BASE_CHANGED',
+        inspection
+      };
+    }
+    await this.validateAndRecordRepository(task);
+    const spec = this.worktrees.buildSpecFromBase(task, {
+      baseRef: selectedBase.refName?.slice('refs/heads/'.length),
+      baseSha: selectedBase.sha
+    });
+    return {
+      outcome: 'PREPARED',
+      worktree: await this.createAndPrepareWorktree(task, spec)
+    };
+  }
+
+  private async inspectNewWorktreePreparation(
+    task: Task,
+    repository: Repository
+  ): Promise<WorktreePreparationCreateInspection> {
+    const bases = await inspectRepositoryWorktreePreparation(repository.path);
+    return {
+      mode: 'CREATE',
+      taskId: task.id,
+      repositoryName: repository.name,
+      bases
+    };
   }
 
   private async resumeWorktreePreparation(
@@ -2531,7 +2599,28 @@ export class TaskManagerService {
         this.assertRuntimeEnabled(task.runtimeId);
         const snapshot = await this.store.snapshot();
         this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
-        const worktree = await this.prepareWorktreeUnlocked({ taskId: task.id });
+        const existingWorktree = await this.store.getCurrentWorktree(task.id);
+        if (!existingWorktree) {
+          throw new Error('Prepare the worktree and choose its base before starting implementation.');
+        }
+        if (existingWorktree.repositoryId !== task.repositoryId) {
+          throw new Error('The prepared worktree repository does not match its task.');
+        }
+        const repository = await this.requireAvailableRepository(task.repositoryId);
+        const verifiedWorktree = await this.worktrees.verify(
+          existingWorktree,
+          repository.path
+        );
+        const worktree = await this.store.updateWorktree(
+          verifiedWorktree,
+          'WORKTREE_VERIFIED'
+        );
+        if (worktree.status !== 'PRESENT') {
+          throw new Error(
+            worktree.error ??
+              'Prepare or restore the worktree before starting implementation.'
+          );
+        }
         return this.startPreparedRun({
           task,
           worktree,
@@ -4127,32 +4216,6 @@ export class TaskManagerService {
     if (isImplementationRunMode(run.mode) && run.status === 'COMPLETED') {
       await this.reconcileImplementationOutcome(run, snapshot);
     }
-    if (run.mode === 'REVIEW' && run.beforeGitSnapshotId) {
-      const state = await this.store.snapshot();
-      const before = state.gitSnapshots.find(
-        (candidate) => candidate.id === run.beforeGitSnapshotId
-      );
-      const worktree = state.worktrees.find((candidate) => candidate.id === run.worktreeId);
-      // Another editor can change an external checkout during a read-only review.
-      // Git evidence stales that review without attributing the edit to the provider.
-      if (worktree?.ownership !== 'EXTERNAL' && before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
-        await this.store.appendEvent(
-          createDomainEvent({
-            type: 'AGENT_REVIEW_POLICY_VIOLATION',
-            taskId: run.taskId,
-            iterationId: run.iterationId,
-            runId: run.id,
-            worktreeId: run.worktreeId,
-            agentSessionId: run.sessionId,
-            source: 'git',
-            payload: {
-              beforeDirtyFingerprint: before.dirtyFingerprint,
-              afterDirtyFingerprint: snapshot.dirtyFingerprint
-            }
-          })
-        );
-      }
-    }
   }
 
   private async reconcileImplementationOutcome(
@@ -4224,15 +4287,27 @@ export class TaskManagerService {
     if (this.postRunEvidenceTasks.has(runId)) {
       return;
     }
-    const pending = this.capturePostRunEvidence(runId);
+    const capture = this.capturePostRunEvidence(runId);
+    let pending!: Promise<void>;
+    pending = (async () => {
+      await capture.catch(() => undefined);
+      const run = await this.store.getRun(runId).catch(() => undefined);
+      if (this.postRunEvidenceTasks.get(runId) === pending) {
+        this.postRunEvidenceTasks.delete(runId);
+      }
+      if (run) {
+        this.events.emit({
+          type: 'run.state.updated',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          payload: { afterGitSnapshotId: run.afterGitSnapshotId },
+          at: new Date().toISOString()
+        });
+      }
+    })().catch(() => undefined);
     this.postRunEvidenceTasks.set(runId, pending);
-    void pending
-      .catch(() => undefined)
-      .finally(() => {
-        if (this.postRunEvidenceTasks.get(runId) === pending) {
-          this.postRunEvidenceTasks.delete(runId);
-        }
-      });
   }
 
   private async awaitPostRunEvidence(runId: string): Promise<void> {
@@ -4437,7 +4512,10 @@ export class TaskManagerService {
       }));
     }
     try {
-      const prepared = await owner.create(worktree, repository.path);
+      const observed = await owner.verify(worktree, repository.path);
+      const prepared = observed.status === 'MISSING'
+        ? await owner.create(worktree, repository.path)
+        : observed;
       const stored = await this.store.updateWorktree(prepared, 'WORKTREE_CREATED');
       if (stored.status !== 'PRESENT') {
         throw new Error(`Design worktree is not ready: ${stored.status}.`);

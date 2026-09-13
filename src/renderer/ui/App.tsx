@@ -38,6 +38,7 @@ import {
   type TaskManagerAppSettings,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
+  type WorktreePreparationInspection,
   type WorkflowPhase
 } from '../../shared/contracts';
 import type {
@@ -124,6 +125,8 @@ import {
   DeleteTaskModal,
   DesignExternalLinkModal,
   GlobalNotifier,
+  PrepareWorktreeModal,
+  RecoverWorktreeModal,
   RepositoryDisconnectModal,
   type AppNotification,
   type NotificationTone
@@ -263,6 +266,14 @@ export function App() {
     repository: Repository;
     impact: RepositoryImpact;
   }>();
+  const [worktreePreparation, setWorktreePreparation] = useState<{
+    inspection: WorktreePreparationInspection;
+    selectedBaseRef?: string;
+    busy: boolean;
+    error?: string;
+  }>();
+  const [worktreePreparationActionTaskId, setWorktreePreparationActionTaskId] =
+    useState<string>();
   const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [appSettings, setAppSettings] = useState<TaskManagerAppSettings>(
     DEFAULT_TASK_MANAGER_APP_SETTINGS
@@ -294,6 +305,11 @@ export function App() {
     { pointerId: number; startX: number; startScrollLeft: number } | undefined
   >(undefined);
   const deleteCandidateGenerationRef = useRef(0);
+  const worktreePreparationSubmissionRef = useRef(false);
+  const worktreePreparationGenerationRef = useRef(0);
+  const worktreePreparationActionRef = useRef<
+    { taskId: string; generation: number } | undefined
+  >(undefined);
   const selectedDesignIdRef = useRef<string | undefined>(undefined);
   const designListReadGenerationRef = useRef(0);
   const designReadGenerationRef = useRef(0);
@@ -1877,6 +1893,11 @@ export function App() {
 
   const openTaskDetail = useCallback(
     (taskId: string, trigger?: HTMLElement) => {
+      worktreePreparationGenerationRef.current += 1;
+      worktreePreparationActionRef.current = undefined;
+      worktreePreparationSubmissionRef.current = false;
+      setWorktreePreparationActionTaskId(undefined);
+      setWorktreePreparation(undefined);
       if (trigger) {
         taskNavigationReturnFocusRef.current = trigger;
       }
@@ -1892,9 +1913,14 @@ export function App() {
   );
 
   const closeTaskDetail = useCallback(() => {
+    worktreePreparationGenerationRef.current += 1;
+    worktreePreparationActionRef.current = undefined;
+    worktreePreparationSubmissionRef.current = false;
+    setWorktreePreparationActionTaskId(undefined);
     taskDataCoordinator.closeTask();
     setIsDetailOpen(false);
     setTaskDetail(undefined);
+    setWorktreePreparation(undefined);
   }, [taskDataCoordinator]);
 
   const createTask = async (input: CreateTaskRequest) => {
@@ -1977,6 +2003,7 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start run.');
+      await refresh();
       if (instruction) throw caught;
     }
   };
@@ -2001,13 +2028,101 @@ export function App() {
   };
 
   const prepareWorktree = async (taskId: string) => {
+    if (worktreePreparationActionRef.current) return;
+    const generation = ++worktreePreparationGenerationRef.current;
+    worktreePreparationActionRef.current = { taskId, generation };
+    setWorktreePreparationActionTaskId(taskId);
     setError(undefined);
+    const isCurrentRequest = () =>
+      worktreePreparationActionRef.current?.taskId === taskId &&
+      worktreePreparationActionRef.current.generation === generation;
     try {
-      await withAppAction(() => taskManagerApi.prepareWorktree({ taskId }));
-      notify('Worktree prepared.', 'success');
-      await refresh();
+      const inspection = await taskManagerApi.inspectWorktreePreparation({ taskId });
+      if (!isCurrentRequest()) return;
+      const selectedBase = inspection.mode === 'CREATE'
+        ? inspection.bases.find((candidate) => candidate.current) ?? inspection.bases[0]
+        : undefined;
+      setWorktreePreparation({
+        inspection,
+        selectedBaseRef: selectedBase?.refName,
+        busy: false
+      });
     } catch (caught) {
-      reportActionError(caught, 'Failed to prepare worktree.');
+      if (isCurrentRequest()) {
+        reportActionError(caught, 'Failed to prepare worktree.');
+      }
+    } finally {
+      if (isCurrentRequest()) {
+        worktreePreparationActionRef.current = undefined;
+        setWorktreePreparationActionTaskId(undefined);
+      }
+    }
+  };
+
+  const confirmWorktreePreparation = async () => {
+    const pending = worktreePreparation;
+    if (!pending || pending.busy || worktreePreparationSubmissionRef.current) return;
+    const selectedBase = pending.inspection.mode === 'CREATE'
+      ? pending.inspection.bases.find((candidate) => candidate.refName === pending.selectedBaseRef)
+      : undefined;
+    if (pending.inspection.mode === 'CREATE' && !selectedBase) return;
+    const generation = worktreePreparationGenerationRef.current;
+    worktreePreparationSubmissionRef.current = true;
+    setWorktreePreparation({ ...pending, busy: true, error: undefined });
+    try {
+      const result = await withAppAction(() => taskManagerApi.prepareWorktree(selectedBase
+        ? {
+            taskId: pending.inspection.taskId,
+            intent: 'CREATE',
+            baseRef: selectedBase.refName,
+            expectedBaseSha: selectedBase.sha
+          }
+        : { taskId: pending.inspection.taskId, intent: 'RECOVER' }
+      ));
+      if (generation !== worktreePreparationGenerationRef.current) return;
+      if (result.outcome === 'PREPARED') {
+        setWorktreePreparation(undefined);
+        notify(pending.inspection.mode === 'CREATE' ? 'Worktree prepared.' : 'Worktree restored.', 'success');
+        await refresh();
+        return;
+      }
+      if (result.outcome === 'BASE_ALREADY_BOUND') {
+        setWorktreePreparation(undefined);
+        notify('The worktree base was already set.', 'info');
+        await refresh();
+        return;
+      }
+
+      if (!selectedBase) throw new Error('Task Monki could not restore the worktree.');
+      const refreshed = result.inspection;
+      const retainedSelection = refreshed.bases.find(
+        (candidate) => candidate.refName === selectedBase.refName
+      );
+      const nextSelection =
+        retainedSelection ??
+        refreshed.bases.find((candidate) => candidate.current) ??
+        refreshed.bases[0];
+      setWorktreePreparation({
+        inspection: refreshed,
+        selectedBaseRef: nextSelection?.refName,
+        busy: false,
+        error:
+          retainedSelection
+            ? `${selectedBase.displayName} moved from ${selectedBase.sha.slice(0, 12)} to ${retainedSelection.sha.slice(0, 12)}. Review the new commit before preparing.`
+            : `${selectedBase.displayName} at ${selectedBase.sha.slice(0, 12)} is no longer available. Choose another base.`
+      });
+    } catch (caught) {
+      if (generation === worktreePreparationGenerationRef.current) {
+        setWorktreePreparation({
+          ...pending,
+          busy: false,
+          error: caught instanceof Error ? caught.message : 'Could not prepare the worktree.'
+        });
+      }
+    } finally {
+      if (generation === worktreePreparationGenerationRef.current) {
+        worktreePreparationSubmissionRef.current = false;
+      }
     }
   };
 
@@ -2760,6 +2875,7 @@ export function App() {
     deleteCandidate ||
       repositoryDisconnect ||
       boardEditor ||
+      worktreePreparation ||
       designExternalLinkRequest
   );
   const appBackgroundModalOpen = appOwnedModalOpen || isTaskDetailModalOpen;
@@ -3083,6 +3199,7 @@ export function App() {
             )}
             artifacts={taskDetail.artifacts}
             textExcerpts={taskDetail.textExcerpts}
+            postRunEvidencePendingRunIds={taskDetail.postRunEvidencePendingRunIds}
             attachments={selectedTaskAttachments}
             interactions={selectedInteractions}
             previewPlans={selectedPreviewPlans}
@@ -3103,6 +3220,7 @@ export function App() {
               ? previewRecipeGenerations[selectedTask.id]
               : undefined}
             showMascot={appSettings.showMascot}
+            worktreePreparationPending={worktreePreparationActionTaskId === selectedTask?.id}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}
             onCancel={cancelRun}
@@ -3353,6 +3471,51 @@ export function App() {
           destinationHost={designExternalLinkRequest.destinationHost}
           onCancel={() => dismissDesignExternalLink(designExternalLinkRequest)}
           onConfirm={() => approveDesignExternalLink(designExternalLinkRequest)}
+          fallbackReturnFocusRef={appRootRef}
+        />
+      ) : null}
+
+      {worktreePreparation?.inspection.mode === 'CREATE' ? (
+        <PrepareWorktreeModal
+          inspection={worktreePreparation.inspection}
+          taskTitle={
+            snapshot.tasks.find(
+              (task) => task.id === worktreePreparation.inspection.taskId
+            )?.title ?? 'Selected task'
+          }
+          selectedBaseRef={worktreePreparation.selectedBaseRef}
+          busy={worktreePreparation.busy}
+          error={worktreePreparation.error}
+          onSelectBase={(selectedBaseRef) =>
+            setWorktreePreparation((current) =>
+              current
+                ? { ...current, selectedBaseRef, error: undefined }
+                : current
+            )
+          }
+          onCancel={() => {
+            worktreePreparationGenerationRef.current += 1;
+            setWorktreePreparation(undefined);
+          }}
+          onConfirm={() => void confirmWorktreePreparation()}
+          fallbackReturnFocusRef={appRootRef}
+        />
+      ) : null}
+
+      {worktreePreparation?.inspection.mode === 'RECOVER' ? (
+        <RecoverWorktreeModal
+          inspection={worktreePreparation.inspection}
+          taskTitle={
+            snapshot.tasks.find((task) => task.id === worktreePreparation.inspection.taskId)
+              ?.title ?? 'Selected task'
+          }
+          busy={worktreePreparation.busy}
+          error={worktreePreparation.error}
+          onCancel={() => {
+            worktreePreparationGenerationRef.current += 1;
+            setWorktreePreparation(undefined);
+          }}
+          onConfirm={() => void confirmWorktreePreparation()}
           fallbackReturnFocusRef={appRootRef}
         />
       ) : null}

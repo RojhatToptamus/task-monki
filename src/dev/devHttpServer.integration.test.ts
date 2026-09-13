@@ -108,6 +108,10 @@ describe('development HTTP server', () => {
   });
 
   it('round-trips import and checkout actions through the authenticated browser API', async () => {
+    const inspection = { mode: 'CREATE', taskId: 'new-task', repositoryName: 'Repository', bases: [] };
+    const inspectWorktreePreparation = vi.fn(async () => inspection);
+    const changed = { outcome: 'BASE_CHANGED', inspection };
+    const prepareWorktree = vi.fn(async () => changed);
     const listExistingWorktrees = vi.fn(async () => [{ worktreePath: '/tmp/my work', branchName: 'feature' }]);
     const importTask = vi.fn(async (input: unknown) => ({ id: 'imported-task', ...input as object }));
     const previewImport = vi.fn(async (input: unknown) => ({ baseSha: 'abc123', ...input as object }));
@@ -116,13 +120,21 @@ describe('development HTTP server', () => {
     const startRun = vi.fn(async (input: unknown) => input);
     const startReview = vi.fn(async (input: unknown) => input);
     const createPullRequest = vi.fn(async (input: unknown) => input);
-    const running = await startServer({ listExistingWorktrees, importTask, previewImport, reconnectWorktree, updateWorktreeComparison, startRun, startReview, createPullRequest });
+    const running = await startServer({ listExistingWorktrees, importTask, previewImport, reconnectWorktree, updateWorktreeComparison, startRun, startReview, createPullRequest, inspectWorktreePreparation, prepareWorktree });
     const fetchHttp = globalThis.fetch;
     vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => fetchHttp(input, {
       ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...running.headers }
     }));
     try {
       const api = createBrowserTaskManagerApi(running.baseUrl);
+      expect(await api.inspectWorktreePreparation({ taskId: 'new-task' })).toEqual(inspection);
+      expect(inspectWorktreePreparation).toHaveBeenCalledExactlyOnceWith({ taskId: 'new-task' });
+      expect(prepareWorktree).not.toHaveBeenCalled();
+      const preparation = { taskId: 'new-task', intent: 'CREATE' as const, baseRef: 'refs/heads/main', expectedBaseSha: 'a'.repeat(40) };
+      expect(await api.prepareWorktree(preparation)).toEqual(changed);
+      expect(prepareWorktree).toHaveBeenCalledExactlyOnceWith(preparation);
+      await api.prepareWorktree({ taskId: 'new-task', intent: 'RECOVER' });
+      expect(prepareWorktree).toHaveBeenLastCalledWith({ taskId: 'new-task', intent: 'RECOVER' });
       expect(await api.listExistingWorktrees('repo & work')).toEqual([{ worktreePath: '/tmp/my work', branchName: 'feature' }]);
       expect(listExistingWorktrees).toHaveBeenCalledWith('repo & work');
       const request = { repositoryId: 'repo & work', worktreePath: '/tmp/my work', branchName: 'feature', baseRef: 'HEAD', title: 'Existing work', prompt: 'Keep this description.' };

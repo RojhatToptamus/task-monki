@@ -3,6 +3,7 @@ import type { AgentItemRecord, GitSnapshotRecord, RunRecord } from '../../shared
 import type { DiffFile } from './diffEvidence';
 import {
   buildCompletedChangeSummary,
+  hasNewerGitEvidence,
   selectCompletedRunChangeSnapshot
 } from './completedChangeSummary';
 
@@ -17,7 +18,7 @@ describe('completed change summary model', () => {
 
     expect(summary).toEqual({
       fileCount: 4,
-      title: 'Edited 4 files',
+      title: 'Captured Git changes · 4 files',
       additions: 278,
       deletions: 12,
       previewFiles: [
@@ -108,6 +109,36 @@ describe('completed change summary model', () => {
         gitSnapshotFixture({ id: 'other-task-snapshot', taskId: 'task-2' })
       ])
     ).toBeUndefined();
+  });
+
+  it('marks only a later changed worktree observation as historical', () => {
+    const captured = gitSnapshotFixture({
+      id: 'captured',
+      headSha: 'a'.repeat(40),
+      dirtyFingerprint: 'clean',
+      capturedAt: '2026-07-07T10:10:00.000Z'
+    });
+    const sameState = gitSnapshotFixture({
+      id: 'same-state',
+      headSha: captured.headSha,
+      dirtyFingerprint: captured.dirtyFingerprint,
+      capturedAt: '2026-07-07T10:11:00.000Z'
+    });
+    const newerHead = gitSnapshotFixture({
+      id: 'newer-head',
+      headSha: 'b'.repeat(40),
+      dirtyFingerprint: captured.dirtyFingerprint,
+      capturedAt: '2026-07-07T10:12:00.000Z'
+    });
+    const olderDifferentState = gitSnapshotFixture({
+      id: 'older-different',
+      headSha: 'c'.repeat(40),
+      dirtyFingerprint: 'dirty',
+      capturedAt: '2026-07-07T10:09:00.000Z'
+    });
+
+    expect(hasNewerGitEvidence(captured, [captured, sameState, olderDifferentState])).toBe(false);
+    expect(hasNewerGitEvidence(captured, [captured, sameState, newerHead])).toBe(true);
   });
 });
 

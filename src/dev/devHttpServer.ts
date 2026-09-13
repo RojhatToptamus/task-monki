@@ -911,6 +911,19 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (
+        request.method === 'POST' &&
+        url.pathname === '/api/worktrees/inspect-preparation'
+      ) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.inspectWorktreePreparation((await readJson()) as never)
+        );
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/runs/start') {
         sendJson(
           response,

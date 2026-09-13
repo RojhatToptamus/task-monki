@@ -90,7 +90,7 @@ export function ReviewPanel({
           <RunHeader
             running
             tone="info"
-            operationName="Reviewing"
+            operationName="Agent review"
             scope={reviewedDiff}
             startedAt={reviewRun?.startedAt}
             onStop={() => reviewRun && onStopReview(reviewRun.id)}
@@ -105,7 +105,7 @@ export function ReviewPanel({
           ) : null}
           <div>
             <h3 className="tm-panel__title tm-panel__title--flush">
-              Review
+              Agent review
             </h3>
           </div>
           <span className="tm-reviewcard__spacer" />
@@ -386,7 +386,7 @@ function reviewBody(
     case 'NOT_RUN':
       return undefined;
     case 'PASSED':
-      return 'No blocking issues were reported for the reviewed diff.';
+      return 'The agent reviewer reported no blocking issues for the reviewed diff.';
     case 'NEEDS_CHANGES':
       return 'Send the findings back to the agent, then re-review.';
     case 'INCONCLUSIVE':
