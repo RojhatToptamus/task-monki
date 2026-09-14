@@ -105,9 +105,8 @@ describe('DiscourseAgentSettings', () => {
             modelId: codexModel.id
           }
         ]}
-        selectedProfileIds={['builtin.lead']}
         onDiscoverModels={async () => undefined}
-        onToggleAgent={() => undefined}
+        onTogglePeer={() => undefined}
         onSelectionChange={() => undefined}
       />
     );

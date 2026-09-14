@@ -18,6 +18,26 @@ import { ScriptedAgentRuntimeCoordinator } from '../../testSupport/ScriptedAgent
 import { DiscourseRuntimeCoordinator } from './DiscourseRuntimeCoordinator';
 
 describe('DiscourseRuntimeCoordinator', () => {
+  it('cancels a prepared retired-mode job before provider delivery and keeps its request', async () => {
+    const fixture = await coordinatorFixture('DIRECT');
+    const start = vi.spyOn(fixture.provider, 'startPreparedTurn');
+    const prepared = await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId, waveId: fixture.waveId, jobId: fixture.jobId,
+      executionContext: fixture.executionContext, prompt: 'Previously prepared Direct prompt.',
+      clientOperationId: 'legacy-prepare'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('legacy-lease');
+    const result = await fixture.coordinator.dispatchLeasedJob(leased!.id, 'legacy-dispatch');
+    expect(result).toMatchObject({ status: 'INTERRUPTED', delivery: 'NOT_DELIVERED' });
+    expect(start).not.toHaveBeenCalled();
+    expect(await fixture.runtime.readArtifact(prepared.run.promptArtifactId)).toBe('Previously prepared Direct prompt.');
+    const aggregate = await fixture.discourse.getConversation(fixture.conversationId);
+    expect(aggregate.waves[0]?.status).toBe('SETTLED');
+    expect(aggregate.jobs[0]?.status).toBe('CANCELED');
+    expect((await fixture.discourse.listMessages({ conversationId: fixture.conversationId })).messages[0]?.body)
+      .toBe('Explain the runtime boundary.');
+  });
+
   it('runs and settles a scoped contribution without creating task-owned runtime state', async () => {
     const fixture = await coordinatorFixture();
     const prepared = await fixture.coordinator.prepareJob({
@@ -1712,7 +1732,7 @@ describe('DiscourseRuntimeCoordinator', () => {
   });
 });
 
-async function coordinatorFixture() {
+async function coordinatorFixture(policy: 'CHAT' | 'DIRECT' = 'CHAT') {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-discourse-runtime-'));
   const persistence = await openTestPersistence(path.join(root, 'profile'));
   const runtime = persistence.agentRuntime;
@@ -1721,7 +1741,7 @@ async function coordinatorFixture() {
   const conversation = await discourse.createConversation({
     id: 'conversation-1',
     title: 'Scoped runtime test',
-    defaultPolicy: 'DIRECT',
+    defaultPolicy: policy,
     participants: [participant.participant],
     participantRevisions: [participant.revision],
     clientOperationId: 'create-conversation',
@@ -1734,9 +1754,9 @@ async function coordinatorFixture() {
   });
   const aggregate = await discourse.getConversation(conversation.id);
   const assignment = assignmentFromRevision(participant.revision);
-  const wave = directWave(trigger.id, trigger.contextRevisionId!, assignment);
-  const job = directJob(trigger.id, assignment);
-  const contextSnapshot = directContextSnapshot(wave, trigger.ordinal);
+  const wave = chatWave(trigger.id, trigger.contextRevisionId!, assignment, policy);
+  const job = chatJob(trigger.id, assignment);
+  const contextSnapshot = chatContextSnapshot(wave, trigger.ordinal);
   await discourse.createWave({
     conversationId: conversation.id,
     expectedConversationRevision: aggregate.conversation.recordRevision,
@@ -1976,16 +1996,17 @@ function assignmentFromRevision(
   };
 }
 
-function directWave(
+function chatWave(
   triggerMessageId: string,
   contextRevisionId: string,
-  assignment: AgentAssignmentSnapshot
+  assignment: AgentAssignmentSnapshot,
+  policy: 'CHAT' | 'DIRECT'
 ): DiscourseResponseWaveRecord {
   return {
     id: 'wave-1',
     conversationId: 'conversation-1',
     triggerMessageId,
-    policy: 'DIRECT',
+    policy,
     policyVersion: 1,
     assignments: [assignment],
     sourceMessageIds: [triggerMessageId],
@@ -2006,7 +2027,7 @@ function directWave(
   };
 }
 
-function directContextSnapshot(
+function chatContextSnapshot(
   wave: DiscourseResponseWaveRecord,
   triggerOrdinal: number
 ): import('../../shared/discourse').ContextSnapshotRecord {
@@ -2035,7 +2056,7 @@ function directContextSnapshot(
   };
 }
 
-function directJob(
+function chatJob(
   triggerMessageId: string,
   assignment: AgentAssignmentSnapshot
 ): DiscourseAgentJobRecord {

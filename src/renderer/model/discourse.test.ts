@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DiscourseAgentJobRecord,
-  DiscourseConcernRecord,
   DiscourseConversationAggregateRecord,
   DiscourseDraftRecord,
   DiscourseMessageRecord,
@@ -457,28 +456,6 @@ function agentJob(
     status,
     assignment: { displayNameSnapshot: 'Verifier' }
   } as DiscourseAgentJobRecord;
-}
-
-function correctionJob(
-  outcome: NonNullable<DiscourseConcernRecord['resolution']>['outcome']
-): DiscourseAgentJobRecord {
-  return {
-    ...agentJob('COMPLETED', 'CORRECT'),
-    result: { kind: 'CORRECTION', outcome, limitations: [], outputMessageId: 'message-2' }
-  } as DiscourseAgentJobRecord;
-}
-
-function discourseConcern(
-  outcome: NonNullable<DiscourseConcernRecord['resolution']>['outcome']
-): DiscourseConcernRecord {
-  return {
-    id: 'concern-1',
-    severity: 'MATERIAL',
-    confidence: 'HIGH',
-    evidenceStatus: 'LOGICAL_CONTRADICTION',
-    requiredAccessAvailable: true,
-    resolution: { correctionJobId: 'job-1', correctionMessageId: 'message-2', outcome }
-  } as DiscourseConcernRecord;
 }
 
 function catalog(): DiscourseMentionCatalogSnapshot {

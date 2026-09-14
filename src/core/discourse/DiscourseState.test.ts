@@ -666,22 +666,6 @@ function reviewJob(
   });
 }
 
-function correctionJob(
-  outcome: Extract<DiscourseJobResult, { kind: 'CORRECTION' }>['outcome']
-): DiscourseAgentJobRecord {
-  return {
-    ...job('lead', 'CORRECT', 'COMPLETED', {
-      kind: 'CORRECTION',
-      outcome,
-      limitations: outcome === 'ABSTAINED' ? ['Unable to verify the target.'] : [],
-      ...(outcome === 'ABSTAINED' ? {} : { outputMessageId: 'message-lead-correction' })
-    }),
-    id: 'job-lead-correction',
-    attemptId: 'attempt-lead-correction',
-    generationKey: 'generation-lead-correction'
-  };
-}
-
 function concern(
   overrides: Partial<DiscourseConcernRecord> = {}
 ): DiscourseConcernRecord {

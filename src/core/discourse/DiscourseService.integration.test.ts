@@ -55,8 +55,54 @@ function currentParticipantModels(
 }
 
 describe('DiscourseService', () => {
+  it('stops every queued retired response during recovery without rebuilding old prompts', async () => {
+    const fixture = await serviceFixture('retired-queue');
+    const initial = await startChat(fixture);
+    const conversationId = initial.message.conversationId;
+    await completeChatJob(fixture, conversationId, () => 'A preserved answer.');
+    const assignment = initial.jobs[0]!.assignment;
+    for (const index of [1, 2]) {
+      const message = await fixture.service.appendHumanMessage({ conversationId,
+        body: `Saved legacy request ${index}`, context: [], clientMessageId: `legacy-request-${index}` });
+      const aggregate = await fixture.discourseStore.getConversation(conversationId);
+      const waveId = `legacy-wave-${index}`;
+      const snapshotId = `legacy-snapshot-${index}`;
+      await fixture.discourseStore.createWave({ conversationId,
+        expectedConversationRevision: aggregate.conversation.recordRevision,
+        clientOperationId: waveId,
+        wave: { ...initial.wave!, id: waveId, triggerMessageId: message.id,
+          policy: 'DIRECT', status: 'PLANNED', recordRevision: 1, clientOperationId: waveId,
+          sourceMessageIds: [message.id], plannedContextRevisionId: message.contextRevisionId!, contextSnapshotId: snapshotId },
+        contextSnapshot: { ...aggregate.contextSnapshots[0]!, id: snapshotId, waveId,
+          contextRevisionId: message.contextRevisionId!, transcriptOrdinals: [message.ordinal], recordRevision: 1 },
+        jobs: [{ id: `legacy-job-${index}`, conversationId, waveId, assignment, role: 'ANSWER', phase: 1,
+          targetMessageIds: [message.id], visibleMessageIds: [message.id], contextSnapshotId: snapshotId,
+          attemptId: `legacy-attempt-${index}`, generationKey: `legacy-generation-${index}`, recordRevision: 1,
+          status: 'QUEUED', delivery: 'NOT_SENT', createdAt: initial.jobs[0]!.createdAt }]
+      });
+    }
+    const prepare = vi.spyOn(fixture.provider, 'prepareTurn');
+    await fixture.service.recoverConversation(conversationId);
+    await fixture.service.recoverConversation(conversationId);
+    const aggregate = await fixture.discourseStore.getConversation(conversationId);
+    expect(aggregate.waves.every((wave) => wave.status === 'SETTLED')).toBe(true);
+    expect(aggregate.jobs.filter((job) => job.waveId.startsWith('legacy-')).map((job) => job.status))
+      .toEqual(['CANCELED', 'CANCELED']);
+    expect(prepare).not.toHaveBeenCalled();
+    expect((await fixture.discourseStore.listMessages({ conversationId })).messages.map((message) => message.body))
+      .toEqual(['How should we bound email retries?', 'A preserved answer.', 'Saved legacy request 1', 'Saved legacy request 2']);
+  });
+
   it.each([false, true])('keeps a peer check bounded, with author response requested=%s', async (requestAuthorResponse) => {
-    const fixture = await serviceFixture(`peer-${requestAuthorResponse}`);
+    const catalog = runtimeCatalog();
+    const peerModel = { ...catalog.models[0]!, id: 'alternate:peer-model', runtimeId: 'alternate',
+      modelProvider: 'peer-provider', model: 'peer-model', displayName: 'Peer model' };
+    catalog.models.push(peerModel);
+    catalog.runtimes.push({ ...catalog.runtimes[0]!, models: [peerModel], preflight: {
+      ...catalog.runtimes[0]!.preflight, runtime: { ...CODEX_RUNTIME_DESCRIPTOR, id: 'alternate', displayName: 'Peer runtime' },
+      capabilities: { ...codexCapabilities(), runtimeId: 'alternate' }
+    } });
+    const fixture = await serviceFixture(`peer-${requestAuthorResponse}`, () => catalog);
     const initial = await startChat(fixture);
     const conversationId = initial.wave!.conversationId;
     await completeChatJob(fixture, conversationId, () => 'A per-worker retry counter bounds total retries.');
@@ -64,7 +110,9 @@ describe('DiscourseService', () => {
     const answer = before.messages.at(-1)!;
     const preview = await fixture.service.previewContext({ conversationId, messageContext: [] });
     const request: SendDiscourseMessageRequest = { conversationId, body: 'Check the bound across workers.',
-      policy: 'CHAT', agents: selections('builtin.lead', 'builtin.skeptic'), context: [],
+      policy: 'CHAT', agents: [{ agentProfileId: 'builtin.lead' }, {
+        agentProfileId: 'builtin.skeptic', runtimeId: 'alternate', modelId: peerModel.id, reasoningEffort: 'medium'
+      }], context: [],
       replyToMessageId: answer.id, previewFingerprint: preview.fingerprint, clientMessageId: 'peer-check' };
     const check = await fixture.service.sendMessage(request);
     expect(check.jobs).toHaveLength(1);
@@ -93,6 +141,8 @@ describe('DiscourseService', () => {
     aggregate = await fixture.discourseStore.getConversation(conversationId);
     expect(aggregate.waves.find((wave) => wave.id === check.wave!.id)?.outcome).toBe('COMPLETE');
     expect(aggregate.jobs.filter((job) => job.waveId === check.wave!.id)).toHaveLength(requestAuthorResponse ? 2 : 1);
+    expect(fixture.provider.calls.map(({ session }) => [session.runtimeId, session.requestedSettings.model]))
+      .toEqual([['codex', 'gpt-test'], ['alternate', 'peer-model'], ...(requestAuthorResponse ? [['codex', 'gpt-test']] : [])]);
     expect((await fixture.service.sendMessage(request)).wave?.id).toBe(check.wave?.id);
     const after = await fixture.discourseStore.listMessages({ conversationId, limit: 100 });
     expect(after.messages.find((message) => message.id === answer.id)?.body).toBe(answer.body);

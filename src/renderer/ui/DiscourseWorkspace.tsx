@@ -921,7 +921,7 @@ export function DiscourseWorkspace({
     setComposerVersion((value) => value + 1);
   };
 
-  const toggleRespondingAgent = (_profileId: BuiltInAgentProfileId) => {
+  const togglePeer = () => {
     const ids: BuiltInAgentProfileId[] = peerEnabled ? [mainProfileId] : [mainProfileId, peerProfileId];
     rememberDefaults(responsePolicy, ids.map(agentSelection), ids);
     if (peerEnabled) setAgentRoster([mainProfileId]);
@@ -1708,7 +1708,7 @@ export function DiscourseWorkspace({
     }
   };
 
-  const prepareWaveRetry = (waveId: string, question?: string) => {
+  const prepareWaveRetry = (waveId: string) => {
     if (!aggregate) return;
     const wave = aggregate.waves.find((candidate) => candidate.id === waveId);
     const trigger = wave
@@ -1730,7 +1730,7 @@ export function DiscourseWorkspace({
       available: reference.availability === 'AVAILABLE'
     })) ?? [];
     setComposer({
-      ...createDiscourseComposerMentionState(question ? `Regarding “${question}”:\n\n` : trigger.body),
+      ...createDiscourseComposerMentionState(trigger.body),
       tokens: [...agentTokens, ...contextTokens]
     });
     setResponsePolicy(policy);
@@ -2223,9 +2223,8 @@ export function DiscourseWorkspace({
                 catalog={catalog}
                 disabled={sending || Boolean(activeWave) || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                 selections={configuredProfileIds.map(agentSelection)}
-                selectedProfileIds={configuredProfileIds}
                 onDiscoverModels={discoverAgentModels}
-                onToggleAgent={toggleRespondingAgent}
+                onTogglePeer={togglePeer}
                 onSelectionChange={updateAgentSelection}
               />
             </InspectorSection>
@@ -2258,10 +2257,11 @@ export function DiscourseWorkspace({
           </InspectorSection>
           <InspectorSection title="Access and limits">
             <dl className="tm-discourse-access-policy">
-              <div><dt>Filesystem</dt><dd>Read only</dd></div>
-              <div><dt>Network, writes, tools</dt><dd>Off</dd></div>
+              <div><dt>Requested access</dt><dd>Read only</dd></div>
+              <div><dt>Task Monki tools</dt><dd>Off</dd></div>
             </dl>
             <details><summary>View details</summary>
+            <p>Provider controls vary. Task Monki checks selected repositories for changes after each turn.</p>
             <dl className="tm-discourse-access-policy">
               <div><dt>Approvals</dt><dd>Never</dd></div>
               <div><dt>Peer check</dt><dd>Up to two replies</dd></div>

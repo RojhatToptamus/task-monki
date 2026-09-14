@@ -790,8 +790,9 @@ export class DiscourseRuntimeCoordinator {
     if (run.status !== 'QUEUED' || job.status !== 'RESOLVING_CONTEXT') {
       throw new Error('Discourse dispatch checkpoint is not safe to submit.');
     }
-    if (discourseTimeExpired(wave, this.now()) || ['STOP_REQUESTED', 'STOPPING', 'SETTLED'].includes(wave.status)) {
-      const stop = { conversationId: wave.conversationId, waveId: wave.id, clientOperationId: `${clientOperationId}:dispatch-stop`, reason: 'Response stopped or reached its time limit before dispatch.' };
+    if (wave.policy !== 'CHAT' || discourseTimeExpired(wave, this.now()) || ['STOP_REQUESTED', 'STOPPING', 'SETTLED'].includes(wave.status)) {
+      const stop = { conversationId: wave.conversationId, waveId: wave.id, clientOperationId: `${clientOperationId}:dispatch-stop`,
+        reason: wave.policy !== 'CHAT' ? 'This response used a retired conversation mode.' : 'Response stopped or reached its time limit before dispatch.' };
       if (['PLANNED', 'SNAPSHOTTING', 'QUEUED'].includes(wave.status)) await this.cancelQueuedWave(stop);
       else await this.stopActiveWave(stop);
       return requireRuntimeRun((await this.runtime.snapshot()).runs, run.id);

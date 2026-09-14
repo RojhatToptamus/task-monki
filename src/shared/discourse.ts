@@ -13,6 +13,7 @@ export type { BuiltInAgentProfileId, DiscourseDefaultPolicy, DiscourseAgentSelec
 export const DISCOURSE_LIMITS = {
   maxContextReferencesPerWave: 8,
   maxFilesystemRootsPerWave: 3,
+  // Bounds for reading and reconciling saved conversations from retired modes.
   maxTeamParticipants: 3,
   maxTeamJobs: 4,
   maxAdaptiveTeamJobs: 12,
@@ -44,10 +45,13 @@ export const DISCOURSE_LIMITS = {
 export type DiscourseConversationStatus = 'OPEN' | 'ARCHIVED';
 
 /** Current user-authored response waves. */
-export type CurrentDiscourseWavePolicy = Exclude<DiscourseDefaultPolicy, 'NONE'>;
+export type CurrentDiscourseWavePolicy = 'CHAT';
 
 /** Read/recovery compatibility for conversations written by earlier prototypes. */
 export type LegacyDiscourseWavePolicy =
+  | 'DIRECT'
+  | 'PANEL'
+  | 'TEAM'
   | 'TARGETED_REVIEW'
   | 'TARGETED_REPLY'
   | 'SYNTHESIS';
@@ -405,14 +409,13 @@ export interface DiscourseResponseWaveRecord {
   settledAt?: string;
 }
 
-export type CurrentDiscourseJobRole =
-  | 'COMPARE'
-  | 'RESPOND'
-  | 'ANSWER'
-  | 'CRITIQUE'
-  | 'CORRECT';
+export type CurrentDiscourseJobRole = 'ANSWER';
 
 export type LegacyDiscourseJobRole =
+  | 'COMPARE'
+  | 'RESPOND'
+  | 'CRITIQUE'
+  | 'CORRECT'
   | 'TARGETED_REPLY'
   | 'SYNTHESIZE'
   | 'COMPACT_HISTORY';

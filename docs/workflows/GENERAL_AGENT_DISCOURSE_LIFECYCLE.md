@@ -157,7 +157,11 @@ Discourse remains advice. It does not own Task Monki review, task phases,
 acceptance, Git status, tests, or GitHub delivery. Task Monki's detached
 agent-review workflow remains the only review authority.
 
-The existing read-only runtime boundary remains: no repository writes,
-network access, apps, MCP, dynamic tools, or approval escalation. Provider
-claims are not verified evidence. Per-job and per-response output limits remain
+The prompt prohibits repository writes and requests read-only access. Each
+adapter applies its supported native policy. Task Monki supplies no app-owned
+tools or approval escalation. Provider-owned tools and network access depend on
+the provider policy; these restrictions are not an operating-system sandbox.
+Task Monki compares selected repository state after each turn and rejects changed
+results without erasing the changes. Provider claims are not verified evidence.
+Per-job and per-response output limits remain
 in force. Estimated input/output reservations are not a provider billing cap.

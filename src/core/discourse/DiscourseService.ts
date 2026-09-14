@@ -991,6 +991,17 @@ export class DiscourseService {
       const aggregate = await this.store.getConversation(conversationId);
       const wave = aggregate.waves.find((candidate) => candidate.status !== 'SETTLED');
       if (!wave) return undefined;
+      if (wave.policy !== 'CHAT') {
+        const stop = { conversationId, waveId: wave.id,
+          clientOperationId: `${clientOperationId}:retired:${wave.id}`,
+          reason: 'This response used a retired conversation mode.' };
+        const stopped = ['PLANNED', 'SNAPSHOTTING', 'QUEUED'].includes(wave.status)
+          ? await runtime.coordinator.cancelQueuedWave(stop)
+          : await runtime.coordinator.stopActiveWave(stop);
+        this.emit('discourse.wave.updated', conversationId, stopped);
+        if (stopped.status === 'SETTLED') continue;
+        return stopped;
+      }
       const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
       const jobsWithoutRuntime = jobs.filter(
         (job) =>

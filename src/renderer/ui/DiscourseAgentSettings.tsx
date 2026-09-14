@@ -1,5 +1,5 @@
 import type {
-  BuiltInAgentProfileId, DiscourseAgentSelectionInput, DiscourseConversationAggregateRecord,
+  DiscourseAgentSelectionInput, DiscourseConversationAggregateRecord,
   DiscourseMentionCatalogSnapshot
 } from '../../shared/discourse';
 import {
@@ -14,16 +14,15 @@ interface DiscourseAgentSettingsProps {
   catalog: DiscourseMentionCatalogSnapshot;
   disabled: boolean;
   selections: DiscourseAgentSelectionInput[];
-  selectedProfileIds: BuiltInAgentProfileId[];
   onDiscoverModels(runtimeId: string): Promise<void>;
-  onToggleAgent(profileId: BuiltInAgentProfileId): void;
+  onTogglePeer(): void;
   onSelectionChange(selection: DiscourseAgentSelectionInput): void;
 }
 
 /** Responder controls inside the workspace sidebar, using the shared model picker. */
 export function DiscourseAgentSettings({
-  aggregate, catalog, disabled, selections, selectedProfileIds,
-  onDiscoverModels, onToggleAgent, onSelectionChange
+  aggregate, catalog, disabled, selections,
+  onDiscoverModels, onTogglePeer, onSelectionChange
 }: DiscourseAgentSettingsProps) {
   const eligible = eligibleDiscourseRuntimeCatalog(catalog);
   const currentRevisions = currentDiscourseParticipantRevisions(aggregate);
@@ -76,7 +75,7 @@ export function DiscourseAgentSettings({
         })}
       </div>
       <button type="button" className="outline-button" disabled={disabled}
-        onClick={() => onToggleAgent(selectedProfileIds[0] ?? 'builtin.lead')}>
+        onClick={onTogglePeer}>
         {selections.length > 1 ? 'Remove peer' : 'Add peer'}
       </button>
     </section>

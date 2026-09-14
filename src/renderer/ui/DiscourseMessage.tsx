@@ -66,7 +66,7 @@ export function DiscourseMessage({
   const comparisonOutdated = team?.kind === 'COMPARISON' && relatedJobs.some((candidate) =>
     candidate.result?.kind === 'CONTRIBUTION' && (candidate.waveId === job!.waveId
       ? candidate.phase > job!.phase : candidate.role === 'COMPARE' && candidate.targetMessageIds.includes(message.id)));
-  const sourceComparison = relatedJobs.find((candidate) => candidate.result?.kind === 'CONTRIBUTION' &&
+  const sourceComparison = relatedJobs.find((candidate) => candidate.result?.kind === 'CONTRIBUTION' && candidate.result.team?.kind === 'COMPARISON' &&
     job?.targetMessageIds.includes(candidate.result.outputMessageId))?.result;
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimerRef = useRef<number | undefined>(undefined);

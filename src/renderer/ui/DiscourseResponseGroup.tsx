@@ -49,13 +49,15 @@ export function DiscourseResponseGroup({ aggregate, wave, streamDrafts, models, 
     : !settled ? job?.status === 'QUEUED' || !job ? 'Waiting to start' : job.assignment.assignmentRole === 'REVIEWER' ? 'Checking answer' : 'Responding'
     : wave.settlementReason === 'TIME_LIMIT' ? 'Time limit reached'
     : changed ? 'Context changed'
-    : failed ? 'Response failed' : wave.outcome !== 'COMPLETE' ? `Stopped before ${author} finished` : undefined;
+    : failed ? 'Response failed' : wave.outcome !== 'COMPLETE'
+      ? unfinished.length ? `Stopped before ${author} finished` : 'Discussion paused' : undefined;
   const detail = reconfirm ? 'Use the updated context for this response?'
     : recovery ? 'Delivery is uncertain. Stop this response before asking again.'
     : changed ? 'The selected sources changed. Ask again with current context.'
     : wave.settlementReason === 'TIME_LIMIT' ? 'The 20-minute allowance ended. Completed answers are kept.'
     : failed ? discourseTerminalJobDetail(jobs) ?? 'This response did not finish. You can ask again.'
-    : settled && status ? output ? 'Partial text is kept here; it is not a completed answer.' : 'No completed answer was recorded.' : undefined;
+    : settled && status ? output ? 'Partial text is kept here; it is not a completed answer.'
+      : jobs.some((candidate) => candidate.status === 'COMPLETED') ? 'Completed responses are kept above.' : 'No completed answer was recorded.' : undefined;
   const tone = stopping || (!settled && job?.status === 'RUNNING' && !recovery && !reconfirm) ? 'working'
     : changed || recovery ? 'waiting' : failed ? 'blocked' : 'idle';
   if (!status && !legacyConcerns.length) return null;

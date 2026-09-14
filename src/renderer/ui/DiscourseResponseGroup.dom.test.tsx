@@ -7,6 +7,19 @@ import { taskManagerApi } from '../api/taskManagerClient';
 vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: { readArtifact: vi.fn() } }));
 
 describe('Discourse response lifecycle', () => {
+  it('does not describe preserved completed answers as missing when an earlier discussion paused', () => {
+    const wave = { id: 'wave', policy: 'TEAM', status: 'SETTLED', outcome: 'PARTIAL', settlementReason: 'NEEDS_USER',
+      dispatchGate: { status: 'READY' } } as DiscourseResponseWaveRecord;
+    const aggregate = { waves: [wave], concerns: [], jobs: [{ id: 'comparison', waveId: 'wave',
+      role: 'COMPARE', status: 'COMPLETED', assignment: { displayNameSnapshot: 'C' } }]
+    } as unknown as DiscourseConversationAggregateRecord;
+    render(<DiscourseResponseGroup wave={wave} aggregate={aggregate} streamDrafts={{}}
+      onRetry={vi.fn()} onConfirm={vi.fn()} onStop={vi.fn()} />);
+    expect(screen.getByText('Discussion paused')).toBeTruthy();
+    expect(screen.getByText('Completed responses are kept above.')).toBeTruthy();
+    expect(screen.queryByText(/No completed answer|Stopped before/)).toBeNull();
+  });
+
   it('keeps a completed turn quiet rather than declaring the user decision resolved', () => {
     const wave = { id: 'wave', policy: 'CHAT', status: 'SETTLED', outcome: 'COMPLETE',
       dispatchGate: { status: 'READY' } } as DiscourseResponseWaveRecord;
