@@ -640,7 +640,7 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$SOURCE_SHA"
           create_options=(
             "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft
-            --generate-notes --title "Task Monki $RELEASE_TAG"
+            --notes-from-tag --title "Task Monki $RELEASE_TAG"
           )
           gh release create "${create_options[@]}"
           gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/* --repo "$GITHUB_REPOSITORY"

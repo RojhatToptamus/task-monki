@@ -87,7 +87,9 @@ publish job receives `contents: write`. Windows and Linux jobs do not use the
 
 `package.json` owns the version. A release version must have the stable
 `MAJOR.MINOR.PATCH` form. `package-lock.json` must contain the same version. The
-tag must be `v` plus that exact version.
+tag must be `v` plus that exact version. Use an annotated tag. Its message
+provides the public release notes. Keep the notes short and describe user-visible
+changes only.
 
 The release commit must be on `main`. The workflow rejects a mismatched tag or
 an existing GitHub Release. The GitHub Actions run number becomes the macOS
@@ -149,7 +151,7 @@ For the first stable release:
 ```sh
 git switch main
 git pull --ff-only
-git tag v0.2.0
+git tag -a v0.2.0 -m "Task Monki 0.2.0 is the first stable desktop release."
 git show --no-patch --oneline v0.2.0
 git push origin v0.2.0
 ```
