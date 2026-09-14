@@ -26,9 +26,10 @@ import {
   parseDiscourseCorrection,
   parseDiscourseReview,
   parseDiscourseTeamOutput,
+  parseDiscoursePeerOutput,
   discourseTeamOutputBody
 } from './DiscourseStructuredOutput';
-import { teamTimeExpired } from './DiscourseTeam';
+import { discourseTimeExpired } from './DiscourseResponses';
 import type { DiscourseStore } from './DiscourseStore';
 
 export interface PrepareDiscourseJobInput {
@@ -321,7 +322,7 @@ export class DiscourseRuntimeCoordinator {
           ...wave,
           recordRevision: wave.recordRevision + 1,
           status: 'STOP_REQUESTED',
-          ...(teamTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
+          ...(discourseTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
         }
       });
     }
@@ -422,7 +423,7 @@ export class DiscourseRuntimeCoordinator {
           ...wave,
           recordRevision: wave.recordRevision + 1,
           status: 'STOP_REQUESTED',
-          ...(teamTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
+          ...(discourseTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
         }
       });
     } else if (wave.status === 'RECOVERY_REQUIRED') {
@@ -434,7 +435,7 @@ export class DiscourseRuntimeCoordinator {
           ...wave,
           recordRevision: wave.recordRevision + 1,
           status: 'STOPPING',
-          ...(teamTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
+          ...(discourseTimeExpired(wave, this.now()) ? { requestedStopReason: 'TIME_LIMIT' as const } : {})
         }
       });
     }
@@ -702,8 +703,8 @@ export class DiscourseRuntimeCoordinator {
     if (run.status !== 'QUEUED' || job.status !== 'RESOLVING_CONTEXT') {
       throw new Error('Discourse dispatch checkpoint is not safe to submit.');
     }
-    if (teamTimeExpired(wave, this.now()) || ['STOP_REQUESTED', 'STOPPING', 'SETTLED'].includes(wave.status)) {
-      const stop = { conversationId: wave.conversationId, waveId: wave.id, clientOperationId: `${clientOperationId}:dispatch-stop`, reason: 'Team stopped or reached its time limit before dispatch.' };
+    if (discourseTimeExpired(wave, this.now()) || ['STOP_REQUESTED', 'STOPPING', 'SETTLED'].includes(wave.status)) {
+      const stop = { conversationId: wave.conversationId, waveId: wave.id, clientOperationId: `${clientOperationId}:dispatch-stop`, reason: 'Response stopped or reached its time limit before dispatch.' };
       if (['PLANNED', 'SNAPSHOTTING', 'QUEUED'].includes(wave.status)) await this.cancelQueuedWave(stop);
       else await this.stopActiveWave(stop);
       return requireRuntimeRun((await this.runtime.snapshot()).runs, run.id);
@@ -1135,15 +1136,21 @@ export class DiscourseRuntimeCoordinator {
     }
     let bodyError = await this.terminalBodyError(run, input.body);
     let team: ReturnType<typeof parseDiscourseTeamOutput> | undefined;
+    let peer: ReturnType<typeof parseDiscoursePeerOutput> | undefined;
+    if (!bodyError && requireWave(aggregate.waves, job.waveId).policy === 'CHAT' && job.assignment.assignmentRole === 'REVIEWER') {
+      try { peer = parseDiscoursePeerOutput(input.body); }
+      catch (error) { bodyError = { code: 'INVALID_RESULT', category: 'VALIDATION', retryable: false,
+        message: error instanceof Error ? error.message : 'The peer response could not be read.' }; }
+    }
     if (!bodyError && (job.role === 'COMPARE' || job.role === 'RESPOND')) {
       try {
-        team = parseDiscourseTeamOutput(input.body, job, requireWave(aggregate.waves, job.waveId), aggregate.jobs.filter((candidate) => candidate.waveId === job.waveId));
+        team = parseDiscourseTeamOutput(input.body, job, requireWave(aggregate.waves, job.waveId), aggregate.jobs);
       } catch (error) {
         bodyError = { code: 'INVALID_RESULT', category: 'VALIDATION', retryable: false,
           message: error instanceof Error ? error.message : 'Invalid Team output.' };
       }
     }
-    const messageBody = team ? discourseTeamOutputBody(team) : input.body;
+    const messageBody = peer?.message ?? (team ? discourseTeamOutputBody(team) : input.body);
     if (team && !bodyError) bodyError = await this.terminalBodyError(run, messageBody);
     if (bodyError) {
       job = await this.failTerminalResult(job, input, bodyError);
@@ -1175,6 +1182,8 @@ export class DiscourseRuntimeCoordinator {
       : await this.discourse.appendAgentMessage({
           conversationId: scope.conversationId,
           body: messageBody,
+          ...(requireWave(aggregate.waves, job.waveId).policy === 'CHAT' && requireWave(aggregate.waves, job.waveId).assignments.length === 2
+            ? { replyToMessageId: job.targetMessageIds.find((id) => id !== requireWave(aggregate.waves, job.waveId).triggerMessageId) } : {}),
           stableParticipantId: job.assignment.stableParticipantId,
           participantRevisionId: job.assignment.participantRevisionId,
           displayNameSnapshot: job.assignment.displayNameSnapshot,
@@ -1197,7 +1206,7 @@ export class DiscourseRuntimeCoordinator {
           delivery: 'TERMINAL',
           error: undefined,
           freshnessAtCompletion: input.freshnessAtCompletion,
-          result: { kind: 'CONTRIBUTION', outputMessageId: message.id, ...(team ? { team } : {}) },
+          result: { kind: 'CONTRIBUTION', outputMessageId: message.id, ...(team ? { team } : {}), ...(peer ? { requestAuthorResponse: peer.requestAuthorResponse } : {}) },
           finishedAt: input.completedAt
         }
       });

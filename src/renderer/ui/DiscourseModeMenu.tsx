@@ -20,12 +20,10 @@ import {
 export function DiscourseModeMenu({
   value,
   disabled,
-  teamReady,
   onChange
 }: {
   value: DiscourseDefaultPolicy;
   disabled: boolean;
-  teamReady: boolean;
   onChange(policy: DiscourseDefaultPolicy): void;
 }) {
   const [open, setOpen] = useState(false);
@@ -53,7 +51,6 @@ export function DiscourseModeMenu({
   }, [open]);
 
   const select = (policy: DiscourseDefaultPolicy) => {
-    if (policy === 'TEAM' && !teamReady) return;
     triggerRef.current?.focus({ preventScroll: true });
     setOpen(false);
     onChange(policy);
@@ -65,7 +62,7 @@ export function DiscourseModeMenu({
         ref={triggerRef}
         type="button"
         className="tm-discourse-mode-menu__trigger"
-        aria-label={`Response mode: ${discourseResponsePolicyLabel(value)}`}
+        aria-label={`Conversation: ${discourseResponsePolicyLabel(value)}`}
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
@@ -100,7 +97,6 @@ export function DiscourseModeMenu({
           onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
         >
           {DISCOURSE_RESPONSE_MODE_OPTIONS.map((option) => {
-            const unavailable = option.policy === 'TEAM' && !teamReady;
             return (
               <button
                 key={option.policy}
@@ -108,10 +104,6 @@ export function DiscourseModeMenu({
                 role="menuitemradio"
                 tabIndex={-1}
                 aria-checked={value === option.policy}
-                aria-disabled={unavailable || undefined}
-                title={unavailable
-                  ? 'Team requires A, B, and C to be available.'
-                  : undefined}
                 onKeyDown={(event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
@@ -126,9 +118,6 @@ export function DiscourseModeMenu({
                 <span className="tm-discourse-mode-menu__copy">
                   <strong>{option.label}</strong>
                   <small>{option.description}</small>
-                  {unavailable ? (
-                    <em>A, B, and C must all be available.</em>
-                  ) : null}
                 </span>
                 <span className="tm-discourse-mode-menu__check">
                   {value === option.policy ? <DiscourseCheckIcon /> : null}

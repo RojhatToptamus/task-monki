@@ -965,7 +965,7 @@ async function runReadOnlyQualification(input: {
     }];
     const conversation = await input.service.createDiscourseConversation({
       title: `Read-only qualification: ${input.target.runtimeId}`,
-      defaultPolicy: 'DIRECT',
+      defaultPolicy: 'CHAT',
       agents: selection,
       clientOperationId: `provider-smoke-read-only-create:${operationId}`
     });
@@ -981,7 +981,7 @@ async function runReadOnlyQualification(input: {
         body: readOnlyProbePrompt(probeFileName),
         context,
         clientMessageId: `provider-smoke-read-only-message:${operationId}`,
-        policy: 'DIRECT',
+        policy: 'CHAT',
         agents: selection,
         previewFingerprint: preview.fingerprint
       }),

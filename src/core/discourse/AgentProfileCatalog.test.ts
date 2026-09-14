@@ -169,26 +169,17 @@ describe('AgentProfileCatalog', () => {
     const profiles = new AgentProfileCatalog();
     expect(() => profiles.require('builtin.admin')).toThrow('Unknown agent profile id');
     expect(profiles.roleContract('builtin.verifier')).toContain('abstention');
-    expect(profiles.roleContract('builtin.verifier', 3)).toContain('supplied facts');
     const entries = profiles.list(runtimeCatalog()).profiles;
     entries[0]!.resolvedSettings!.model = 'mutated';
     expect(entries[1]?.resolvedSettings?.model).toBe('gpt-primary');
   });
 
-  it('keeps prior role contracts addressable after a contract revision', () => {
+  it('does not reintroduce permanent adversarial roles when preparing new work', () => {
     const profiles = new AgentProfileCatalog();
-    expect(profiles.roleContract('builtin.skeptic', 1)).toBe(
-      'Challenge material assumptions and identify specific counterexamples.'
-    );
-    expect(profiles.roleContract('builtin.skeptic', 2)).toContain('Do not echo');
-    expect(profiles.roleContract('builtin.skeptic', 3)).toContain(
-      'strongest credible counter-position'
-    );
-    expect(profiles.roleContract('builtin.lead', 3)).toContain('actionable choice');
-    expect(profiles.roleContract('builtin.verifier', 3)).toContain('evidence-audit lens');
-    expect(() => profiles.roleContract('builtin.skeptic', 99)).toThrow(
-      'Unknown role contract version'
-    );
+    expect(profiles.roleContract('builtin.skeptic')).toBe(profiles.roleContract('builtin.lead'));
+    for (const version of [1, 2, 3, 99]) {
+      expect(() => profiles.roleContract('builtin.skeptic', version)).toThrow('cannot start new work');
+    }
   });
 });
 

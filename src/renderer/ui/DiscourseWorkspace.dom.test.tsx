@@ -28,7 +28,7 @@ describe('Discourse conversation loading', () => {
     };
     const onDefaultsChange = vi.fn().mockResolvedValue(undefined);
     const view = render(<DiscourseWorkspace defaults={defaults} onDefaultsChange={onDefaultsChange} onNotify={vi.fn()} onError={vi.fn()} />);
-    await screen.findByRole('button', { name: 'Response mode: Team' });
+    await screen.findByRole('button', { name: 'Conversation: Chat' });
     const sidebar = screen.getByRole('complementary', { name: 'Conversation settings' });
     expect(within(sidebar).getByRole('region', { name: 'Agent settings' })).toBeTruthy();
     expect(screen.queryByRole('dialog')).toBeNull();
@@ -39,7 +39,7 @@ describe('Discourse conversation loading', () => {
     expect(saved.agents.map((agent) => agent.reasoningEffort)).toEqual(['low', 'high', 'high']);
     view.unmount();
     render(<DiscourseWorkspace defaults={saved} onDefaultsChange={onDefaultsChange} onNotify={vi.fn()} onError={vi.fn()} />);
-    await screen.findByRole('button', { name: 'Response mode: Team' });
+    await screen.findByRole('button', { name: 'Conversation: Chat' });
     const reopened = screen.getByRole('group', { name: 'A provider and model reasoning' });
     expect(within(reopened).getByRole('button', { name: 'Low reasoning' }).getAttribute('aria-pressed')).toBe('true');
     expect(onDefaultsChange).toHaveBeenCalledOnce();

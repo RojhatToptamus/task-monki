@@ -1,5 +1,5 @@
 import { isEligibleDiscourseConcern } from '../../shared/discourse';
-import { isAdaptiveTeam, nextTeamStep } from './DiscourseTeam';
+import { isAdaptiveTeam } from './DiscourseResponses';
 import type {
   ContextSnapshotRecord,
   ContextSnapshotStatus,
@@ -372,6 +372,10 @@ export function deriveDiscourseWaveAggregate(
     }
     jobKeys.add(jobKey);
     assertDiscourseJobRecord(job);
+    if (wave.policy === 'CHAT' && job.status === 'COMPLETED' && job.assignment.assignmentRole === 'REVIEWER' &&
+        (job.result?.kind !== 'CONTRIBUTION' || typeof job.result.requestAuthorResponse !== 'boolean')) {
+      throw new Error('A completed peer message requires its author-response decision.');
+    }
   }
   assertConcernReferences(input);
 
@@ -424,13 +428,20 @@ export function deriveDiscourseWaveAggregate(
   }
 
   switch (wave.policy) {
-    case 'TEAM':
-      if (isAdaptiveTeam(wave)) {
-        const next = nextTeamStep(wave, jobs);
-        if (next.jobs) return { status: 'RUNNING', nextPhase: next.jobs[0]!.role };
-        return settled(next.stop === 'COMPLETED' ? 'COMPLETE' : next.stop === 'CONTEXT_CHANGED' ? 'STALE' : 'PARTIAL', next.stop);
+    case 'CHAT': {
+      if (jobs.some((job) => jobContextChanged(job))) return settled('STALE', 'CONTEXT_CHANGED');
+      if (jobs.some((job) => job.status !== 'COMPLETED')) return settled(hasUsableContribution(jobs) ? 'PARTIAL' : 'NO_RESPONSE', 'FAILED');
+      const peer = jobs.find((job) => job.assignment.assignmentRole === 'REVIEWER');
+      if (peer?.result?.kind === 'CONTRIBUTION' && peer.result.requestAuthorResponse === true &&
+          !jobs.some((job) => job.assignment.assignmentRole === 'PRIMARY')) {
+        return { status: 'RUNNING', nextPhase: 'ANSWER' };
       }
-      return deriveTeamSettlement(input);
+      return settled('COMPLETE', 'COMPLETED');
+    }
+    case 'TEAM':
+      // Retired conversations keep completed output; never schedule another old stage.
+      if (jobs.some((job) => jobContextChanged(job))) return settled('STALE', 'CONTEXT_CHANGED');
+      return settled(hasUsableContribution(jobs) ? 'PARTIAL' : 'CANCELED', 'STOPPED');
     case 'PANEL':
       return derivePanelSettlement(input);
     case 'DIRECT':
@@ -484,9 +495,6 @@ export function assertDiscourseMessageAppend(input: {
     if (!target || target.conversationId !== input.conversationId) {
       throw new Error('A discourse reply requires an existing message in the same conversation.');
     }
-    if (target.replyToMessageId) {
-      throw new Error('Discourse replies are limited to one visible nesting level.');
-    }
   }
   if (message.supersedesMessageId) {
     const target = findExistingMessage(message.supersedesMessageId);
@@ -504,96 +512,6 @@ export function assertDiscourseMessageAppend(input: {
       throw new Error('A discourse correction cannot change the agent identity.');
     }
   }
-}
-
-function deriveTeamSettlement(input: DeriveDiscourseWaveAggregateInput): DiscourseWaveAggregate {
-  const primary = input.wave.assignments.find(
-    (assignment) => assignment.assignmentRole === 'PRIMARY'
-  )!;
-  const lead = input.jobs.find(
-    (job) =>
-      job.role === 'ANSWER' &&
-      job.assignment.stableParticipantId === primary.stableParticipantId
-  );
-  if (!lead) {
-    return { status: 'RUNNING', nextPhase: 'ANSWER' };
-  }
-  if (!hasUsableContribution([lead])) {
-    if (lead?.status === 'CONTEXT_STALE') {
-      return settled('STALE', 'CONTEXT_CHANGED');
-    }
-    return settled('NO_RESPONSE', 'FAILED');
-  }
-  if (jobContextChanged(lead)) {
-    return settled('STALE', 'CONTEXT_CHANGED');
-  }
-
-  const requiredReviews = input.jobs.filter(
-    (job) => job.role === 'CRITIQUE' && job.assignment.required
-  );
-  const expectedReviewers = input.wave.assignments.filter(
-    (assignment) => assignment.assignmentRole === 'REVIEWER' && assignment.required
-  );
-  const missingReviewers = expectedReviewers.filter(
-    (assignment) =>
-      !requiredReviews.some(
-        (job) => job.assignment.stableParticipantId === assignment.stableParticipantId
-      )
-  );
-  if (expectedReviewers.length === 0) {
-    throw new Error('A Team wave requires at least one required reviewer assignment.');
-  }
-  if (missingReviewers.length > 0) {
-    return { status: 'RUNNING', nextPhase: 'REVIEW' };
-  }
-  if (requiredReviews.some((job) => job.status !== 'COMPLETED')) {
-    return settled('PARTIAL', 'FAILED');
-  }
-  const reviewResults = requiredReviews.map((job) => {
-    if (job.result?.kind !== 'REVIEW') {
-      throw new Error('A completed required review job must have a review result.');
-    }
-    return { job, result: job.result };
-  });
-  if (
-    reviewResults.some(
-      ({ job, result }) =>
-        result.outcome === 'ABSTAINED' ||
-        !result.requiredAccessAvailable ||
-        jobContextChanged(job)
-    )
-  ) {
-    return settled('PARTIAL', 'COMPLETED');
-  }
-
-  const eligibleConcernIds = new Set(
-    (input.concerns ?? []).filter(isEligibleDiscourseConcern).map((concern) => concern.id)
-  );
-  const hasEligibleConcern = requiredReviews.some(
-    (job) =>
-      job.result?.kind === 'REVIEW' &&
-      job.result.concernIds.some((concernId) => eligibleConcernIds.has(concernId))
-  );
-  if (!hasEligibleConcern) {
-    return settled('COMPLETE', 'COMPLETED');
-  }
-
-  const correction = input.jobs.find((job) => job.role === 'CORRECT');
-  if (input.jobs.filter((job) => job.role === 'CORRECT').length > 1) {
-    throw new Error('A Team wave may create at most one correction job.');
-  }
-  if (!correction) {
-    return { status: 'RUNNING', nextPhase: 'CORRECT' };
-  }
-  if (
-    correction?.status !== 'COMPLETED' ||
-    correction.result?.kind !== 'CORRECTION' ||
-    correction.result.outcome === 'ABSTAINED' ||
-    jobContextChanged(correction)
-  ) {
-    return settled('PARTIAL', 'FAILED');
-  }
-  return settled('COMPLETE', 'COMPLETED');
 }
 
 function derivePanelSettlement(input: DeriveDiscourseWaveAggregateInput): DiscourseWaveAggregate {
@@ -720,6 +638,7 @@ export function assertDiscoursePolicyRoster(
 ): void {
   const valid =
     (policy === 'NONE' && participantCount === 0) ||
+    (policy === 'CHAT' && participantCount >= 1 && participantCount <= 2) ||
     (policy === 'DIRECT' && participantCount === 1) ||
     (policy === 'PANEL' && participantCount >= 2 && participantCount <= 3) ||
     (policy === 'TEAM' && participantCount === 3) ||
@@ -741,7 +660,11 @@ function assertWaveAssignments(wave: DiscourseResponseWaveRecord): void {
   }
   const required = wave.assignments;
   assertDiscoursePolicyRoster(wave.policy, required.length);
-  if (wave.policy === 'TEAM') {
+  if (wave.policy === 'CHAT') {
+    if (required[0]?.assignmentRole !== 'PRIMARY' || (required.length === 2 && required[1]?.assignmentRole !== 'REVIEWER')) {
+      throw new Error('Chat requires one author and at most one peer.');
+    }
+  } else if (wave.policy === 'TEAM') {
     if (isAdaptiveTeam(wave)) {
       if (required.filter((assignment) => assignment.assignmentRole === 'AUTHOR').length !== 2 ||
         required.filter((assignment) => assignment.assignmentRole === 'COMPARATOR').length !== 1) {
@@ -774,6 +697,8 @@ function assertJobMatchesPolicy(
     throw new Error('Adaptive Team job does not match its assignment.');
   }
   const valid =
+    (wave.policy === 'CHAT' && job.role === 'ANSWER' &&
+      ((role === 'REVIEWER' && job.phase === 1) || (role === 'PRIMARY' && job.phase === (wave.assignments.length === 2 ? 2 : 1)))) ||
     (wave.policy === 'TEAM' &&
       ((role === 'PRIMARY' && (job.role === 'ANSWER' || job.role === 'CORRECT')) ||
         (role === 'REVIEWER' && job.role === 'CRITIQUE'))) ||

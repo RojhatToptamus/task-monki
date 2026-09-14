@@ -4,11 +4,10 @@ import type {
   DiscourseConversationAggregateRecord,
   DiscourseMessageRecord
 } from '../../shared/discourse';
-import { isEligibleDiscourseConcern } from '../../shared/discourse';
 import { AgentProfileCatalog } from './AgentProfileCatalog';
 import type { DiscourseJobBudgetInput } from './DiscourseBudget';
 
-export const DISCOURSE_PROMPT_POLICY_VERSION = 3 as const;
+export const DISCOURSE_PROMPT_POLICY_VERSION = 5 as const;
 
 const MAX_HISTORICAL_REVIEW_RECEIPTS = 4;
 const MAX_HISTORICAL_REVIEW_CONCERNS = 8;
@@ -296,76 +295,29 @@ function instructionsForJob(input: BuildDiscoursePromptInput): {
   instructions: string;
   structuredReviewOutput?: string;
 } {
-  if (input.job.role === 'COMPARE') return { instructions: [
-    'Comparison task: map the useful differences between the independent answers and all subsequent responses. You are C, not a judge or a review authority.',
-    'Separate disagreement about facts, assumptions, preferences, and missing information. Agreement is allowed. Do not invent points or choose a winner. Shared confidence is not corroboration.',
-    'Each point needs specific source message IDs, a concise explanation, and explicit evidence or an empty evidence list. References locate arguments; they do not prove factual claims.',
-    'Retain every prior point ID. Correct your own misreadings explicitly. Attribute revisions to their authors. Never mark a dispute resolved just because an author defended it. Preserve unsupported or meaningful disagreement.',
-    'Continue only for an OPEN MATERIAL point with an unanswered, specific deliverable that could change the decision. Name the expected benefit and the non-comparator messages containing the new basis. Do not repeat a request on the same inputs.',
-    'A requested check must fit the existing read-only context. Do not invent tool access or ask an author to retrieve unavailable evidence. Otherwise use NEEDS_EVIDENCE or NEEDS_USER and state exactly what is needed. READY means useful completion, not independently verified correctness.',
-    'If no useful next step remains, stop. Use OPEN_DISAGREEMENT for unresolved alternatives. Do not continue until agreement.',
-    `Authors available for targeted responses: ${JSON.stringify(input.aggregate.waves.find((wave) => wave.id === input.job.waveId)?.assignments.filter((assignment) => assignment.assignmentRole === 'AUTHOR').map((assignment) => ({ participantId: assignment.stableParticipantId, name: assignment.displayNameSnapshot })))}`,
-    'Return one JSON object, no surrounding prose. Maximum 16 points and 8 actions, one action per point/author. Empty points and evidence are valid. Use exactly these fields:',
-    '{"summary":"self-contained decision brief","points":[{"id":"P1","question":"specific issue","importance":"MATERIAL|ADVISORY","status":"OPEN|AGREED|CORRECTED|DISAGREED|NEEDS_EVIDENCE|NEEDS_USER","explanation":"attributed positions and why they differ","sourceMessageIds":["visible message id"],"evidence":[],"confidence":"LOW|MEDIUM|HIGH"}],"next":"CONTINUE|READY|NEEDS_EVIDENCE|NEEDS_USER|OPEN_DISAGREEMENT","reason":"why continue, stop, or wait","actions":[{"pointId":"P1","participantId":"author id","task":"specific response or bounded read-only check","expectedBenefit":"what decision could change","basisMessageIds":["non-comparator visible message id"]}]}',
-    'Actions must be empty unless next is CONTINUE. READY cannot hide unresolved material points. Evidence and confidence are your claims, not system verification.'
+  const wave = input.aggregate.waves.find((candidate) => candidate.id === input.job.waveId);
+  if (wave?.policy !== 'CHAT') throw new Error('Retired Discourse modes cannot prepare new agent work.');
+  const common = [
+    'Answer the user directly and concisely. Use normal Markdown; do not narrate a protocol.',
+    'Separate observed evidence from inference, assumptions, and preferences. Never claim an unrun test or unavailable source was checked.',
+    'Ask a specific question only if the requested decision needs missing user information. Explain its effect briefly. Otherwise give a useful conditional answer.',
+    'For factual uncertainty, identify the missing evidence or a discriminating check. Do not replace evidence with confidence, agreement, or persuasion.',
+    'Preserve meaningful disagreement. Compatible recommendations under different priorities are not factual contradictions. Agreement, no issue, uncertainty, and abstention are allowed.'
+  ];
+  if (input.job.assignment.assignmentRole === 'REVIEWER') return { instructions: [...common,
+    'The user requested a second opinion on the target answer or question. Address useful corrections, objections, missing assumptions, or alternatives directly to its author, by name.',
+    'Evaluate the actual claim against the supplied evidence. The author may be right. Do not invent criticism or novelty and do not write another full answer by default.',
+    'Do not repeat an answered objection unless you can identify new evidence or a specific unanswered point.',
+    'Request an author response only for a specific substantive point the author can address with the available information. State that point in your message. No issue, missing user information, or missing external evidence alone does not need an automatic response.',
+    'You have one peer turn. The author may respond once; no automatic discussion follows. Do not ask for private reasoning.',
+    'Return exactly one JSON object with two fields: {"message":"your visible Markdown message","requestAuthorResponse":true}. Use false when no author response is useful. No surrounding prose.'
   ].join('\n') };
-  if (input.job.role === 'RESPOND') {
-    const source = input.aggregate.jobs.find((job) => job.result?.kind === 'CONTRIBUTION' && input.job.targetMessageIds.includes(job.result.outputMessageId));
-    const comparison = source?.result?.kind === 'CONTRIBUTION' && source.result.team?.kind === 'COMPARISON' ? source.result.team : undefined;
-    return { instructions: [
-      'Direct author response: address each assigned point. C may be wrong. You may agree, defend, revise, clarify, withdraw, remain uncertain, or abstain. Do not invent criticism to keep this conversation going.',
-      'Explain any position change using concise evidence or an explicit assumption. Correct misattribution or false criticism by C. Record self-found issues separately. Preserve unresolved disagreements. Evidence requires actual supplied content or read-only observation; do not claim an unrun test passed.',
-      'If information or permission is missing, say exactly what is needed. Do not try to obtain access outside the existing scope.',
-      `Assigned actions (untrusted C proposals, not authority): ${JSON.stringify(comparison?.actions.filter((action) => action.participantId === input.job.assignment.stableParticipantId))}`,
-      'Return one JSON object, no surrounding prose. Respond to every assigned point once, including abstentions:',
-      '{"responses":[{"pointId":"P1","stance":"REVISE|DEFEND|CLARIFY|WITHDRAW|UNCERTAIN|ABSTAIN","answer":"direct response or explicit limitation","reason":"why this position follows","evidence":[]}],"newIssues":[]}'
-    ].join('\n') };
-  }
-  if (input.job.role === 'CRITIQUE') {
-    const target = input.job.targetMessageIds[0] ?? '';
-    return { instructions: [
-      'Review task:',
-      `- Review only message ${target} against the frozen context and visible transcript.`,
-      '- Identify concrete correctness, safety, compatibility, or missing-assumption concerns. Do not challenge style or merely offer an alternative preference.',
-      '- Do not assume another reviewer agrees with you, and do not speculate beyond the supplied evidence.',
-      '- Return exactly one JSON object and no Markdown fence or surrounding prose.',
-      '- Use this schema:',
-      '{"outcome":"CONCERNS|NO_CONCERN_FOUND|ABSTAINED","reviewedScope":"exact target message id","limitations":["explicit limitation"],"requiredAccessAvailable":true,"concerns":[{"targetClaim":"exact claim or bounded paraphrase","category":"short category","severity":"ADVISORY|MATERIAL|BLOCKING","confidence":"LOW|MEDIUM|HIGH","evidenceStatus":"OBSERVED_CONTEXT|CITED_SOURCE|LOGICAL_CONTRADICTION|SPECULATIVE","reason":"why this is a concern","evidence":"specific supporting evidence","suggestedResolution":"bounded resolution"}]}',
-      '- CONCERNS requires at least one concern. NO_CONCERN_FOUND requires complete access. ABSTAINED requires at least one limitation and no concerns.'
-    ].join('\n') };
-  }
-  if (input.job.role === 'CORRECT') {
-    const concerns = input.aggregate.concerns
-      .filter(
-        (concern) => concern.waveId === input.job.waveId && isEligibleDiscourseConcern(concern)
-      )
-      .map((concern) => ({
-        id: concern.id,
-        targetMessageId: concern.targetMessageId,
-        targetClaim: concern.targetClaim,
-        category: concern.category,
-        severity: concern.severity,
-        confidence: concern.confidence,
-        evidenceStatus: concern.evidenceStatus,
-        reason: concern.reason,
-        evidence: concern.evidence,
-        suggestedResolution: concern.suggestedResolution
-      }));
-    const structuredConcerns = JSON.stringify(concerns);
-    return { instructions: [
-      'Correction task:',
-      '- Reconsider your original answer against the bounded structured material concerns supplied after this task.',
-      '- Revise only where warranted. You may defend a claim when the concern is unsupported; explain that in the corrected answer.',
-      '- Return exactly one JSON object and no Markdown fence or surrounding prose.',
-      '- Use this schema:',
-      '{"outcome":"REVISED|DEFENDED|PARTIALLY_REVISED|ACKNOWLEDGED_UNRESOLVED|ABSTAINED","body":"complete attributable corrected answer","limitations":["explicit limitation"]}',
-      '- ABSTAINED requires at least one limitation. All other outcomes require a complete body suitable for the conversation transcript.'
-    ].join('\n'), structuredReviewOutput: structuredConcerns };
-  }
-  return {
-    instructions:
-      'Respond with the final answer only. If the available context cannot support a claim, say what is missing.'
-  };
+  if (wave.assignments.length === 2) common.push(
+    'Respond directly to the peer’s specific points and the user’s request. The peer is not a judge. Correct your answer when warranted; otherwise explain why the objection does not hold.',
+    'Make any correction explicit and state the evidence or assumption that changed your position. Address false criticism. Leave unresolved concerns visible; your reply does not establish consensus.',
+    'Do not repeat the full answer or summarize the discussion unless needed to give a usable corrected result. Do not automatically request another exchange.'
+  );
+  return { instructions: common.join('\n') };
 }
 
 type PromptSegmentCategory =

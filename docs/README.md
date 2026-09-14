@@ -27,8 +27,8 @@ behavior and architecture, not private roadmap sequencing.
 5. `docs/DEV_SEEDING.md`
    - Deterministic local seed data for UI and workflow testing.
 6. `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md`
-   - Global technical conversations, Direct/Panel/Team policy, scoped runtime
-     execution, context freshness, review/correction, cancellation, and recovery.
+   - Notes and Chat, optional peer feedback, scoped runtime execution, context
+     freshness, cancellation, history compatibility, and recovery.
 7. `docs/PROVIDER_SMOKE_TESTING.md`
    - Live provider/model verification through TaskManagerService in a clean,
      remote-free throwaway Git repository.

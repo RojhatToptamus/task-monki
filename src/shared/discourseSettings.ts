@@ -1,5 +1,6 @@
 /** Shared preference inputs used by app settings and the Discourse domain. */
-export type DiscourseDefaultPolicy = 'TEAM' | 'PANEL' | 'DIRECT' | 'NONE';
+// Older values remain readable in saved conversations and drafts. New sends use CHAT or NONE.
+export type DiscourseDefaultPolicy = 'CHAT' | 'NONE' | 'TEAM' | 'PANEL' | 'DIRECT';
 
 export type BuiltInAgentProfileId = 'builtin.lead' | 'builtin.skeptic' | 'builtin.verifier';
 

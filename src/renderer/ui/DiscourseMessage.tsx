@@ -16,7 +16,7 @@ import {
   DiscourseTaskIcon
 } from './DiscourseIcons';
 import { DiscourseMarkdown } from './DiscourseMarkdown';
-import { DiscourseTeamContent } from './DiscourseTeamContent';
+import { DiscourseHistoryContent } from './DiscourseHistoryContent';
 
 export function DiscourseMessage({
   message,
@@ -51,7 +51,11 @@ export function DiscourseMessage({
 }) {
   const user = message.author.kind === 'USER';
   const team = job?.result?.kind === 'CONTRIBUTION' ? job.result.team : undefined;
-  const comparisonOutdated = team?.kind === 'COMPARISON' && relatedJobs.some((candidate) => candidate.phase > job!.phase && candidate.result?.kind === 'CONTRIBUTION');
+  const comparisonOutdated = team?.kind === 'COMPARISON' && relatedJobs.some((candidate) =>
+    candidate.result?.kind === 'CONTRIBUTION' && (candidate.waveId === job!.waveId
+      ? candidate.phase > job!.phase : candidate.role === 'COMPARE' && candidate.targetMessageIds.includes(message.id)));
+  const sourceComparison = relatedJobs.find((candidate) => candidate.result?.kind === 'CONTRIBUTION' &&
+    job?.targetMessageIds.includes(candidate.result.outputMessageId))?.result;
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => () => {
@@ -94,13 +98,9 @@ export function DiscourseMessage({
             <span className="tm-discourse-message__state">Corrected</span>
           ) : null}
           {job ? (
-            <span className="tm-discourse-message__metadata">
-              {job.assignment.model} ·{' '}
-              {job.freshnessAtCompletion === 'FRESH'
-                ? 'context fresh'
-                : job.freshnessAtCompletion === 'CHANGED_DURING_JOB'
-                  ? 'context changed'
-                  : 'freshness unknown'}
+            <span className="tm-discourse-message__metadata" title="Model used for this response">
+              {job.assignment.model}
+              {job.freshnessAtCompletion === 'CHANGED_DURING_JOB' ? ' · context changed' : ''}
             </span>
           ) : null}
         </header>
@@ -124,11 +124,12 @@ export function DiscourseMessage({
             Context changed while this response was running. It is preserved for history, not accepted as current evidence.
           </p>
         ) : null}
-        {comparisonOutdated ? <p className="tm-discourse-message__stale-note">Newer responses follow. This comparison does not include them.</p> : null}
+        {comparisonOutdated ? <p className="tm-discourse-message__updated-note">Updated below</p> : null}
         {message.status === 'TOMBSTONE' ? (
           <p className="tm-discourse-message__tombstone">Message deleted</p>
         ) : team ? (
-          <DiscourseTeamContent result={team} sources={sourceMessages} onNavigate={onNavigate} />
+          <DiscourseHistoryContent result={team} sources={sourceMessages} onNavigate={onNavigate}
+            comparison={sourceComparison?.kind === 'CONTRIBUTION' && sourceComparison.team?.kind === 'COMPARISON' ? sourceComparison.team : undefined} />
         ) : message.author.kind === 'AGENT' ? (
           <DiscourseMarkdown text={message.body} />
         ) : (
@@ -171,6 +172,9 @@ export function DiscourseMessage({
             <span className="tm-visually-hidden" role="status" aria-live="polite">
               {copyState === 'copied' ? 'Message copied' : copyState === 'failed' ? 'Message could not be copied' : ''}
             </span>
+            {!user && message.author.kind === 'AGENT' && message.status === 'VISIBLE' ? (
+              <button type="button" className="tm-discourse-message-action tm-discourse-message-peer" onClick={onAskOthers}>Ask peer</button>
+            ) : null}
             <DiscourseActionMenu
               className="tm-discourse-message-menu"
               label={`More actions for ${messageAuthorLabel(message)}`}
@@ -178,12 +182,11 @@ export function DiscourseMessage({
               items={[
                 ...(!user && message.author.kind === 'AGENT'
                   ? [
-                      { label: 'Ask this agent', onSelect: onAskAuthor },
-                      { label: 'Ask other agents', onSelect: onAskOthers }
+                      { label: 'Ask this agent', onSelect: onAskAuthor }
                     ]
                   : []),
                 {
-                  label: selectedAsSource ? 'Remove from selection' : 'Select for synthesis',
+                  label: selectedAsSource ? 'Remove from selection' : 'Use as context',
                   pressed: selectedAsSource,
                   onSelect: onToggleSource
                 },

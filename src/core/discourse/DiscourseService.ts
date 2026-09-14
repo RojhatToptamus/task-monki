@@ -63,8 +63,8 @@ import {
   assertDiscoursePolicyRoster,
   deriveDiscourseWaveAggregate
 } from './DiscourseState';
+import { discourseTimeExpired } from './DiscourseResponses';
 import type { DiscourseStore } from './DiscourseStore';
-import { isAdaptiveTeam, nextTeamStep, teamTimeExpired } from './DiscourseTeam';
 
 export interface DiscourseServiceOptions {
   getRuntimeCatalog(): Promise<AgentRuntimeCatalog> | AgentRuntimeCatalog;
@@ -354,6 +354,16 @@ export class DiscourseService {
         assertParticipantRevisionAvailable(entry.profile.displayName, currentRevision, runtimeCatalog);
       }
     }
+    if (input.policy === 'CHAT' && profileIds.length === 2) {
+      if (!input.replyToMessageId) throw new Error('Choose the answer or question for the peer to examine.');
+      const [target] = await this.findMessages([input.replyToMessageId], input.conversationId);
+      if (!target || target.status !== 'VISIBLE') throw new Error('Choose a current, visible answer or question.');
+      if (target.author.kind === 'AGENT') {
+        const authorRevisionId = target.author.participantRevisionId;
+        const author = aggregate.participantRevisions.find((revision) => revision.id === authorRevisionId);
+        if (author?.agentProfileId !== profileIds[0]) throw new Error('The response must return to the selected answer’s author.');
+      }
+    }
     const context = await this.context.resolveSelections(input.context ?? []);
     const priorTranscript = (
       await this.store.listMessages({
@@ -400,7 +410,7 @@ export class DiscourseService {
       participantRevisions: configuration.participantRevisions,
       expectedRevision: aggregate.conversation.recordRevision,
       policy: input.policy,
-      policyVersion: input.policy === 'TEAM' ? 2 : 1,
+      policyVersion: 1,
       assignments,
       priorVisibleMessageIds,
       previewFingerprint: input.previewFingerprint,
@@ -440,7 +450,7 @@ export class DiscourseService {
       policy: accepted.policy,
       policyVersion: accepted.policyVersion ?? 1,
       assignments,
-      sourceMessageIds: [message.id],
+      sourceMessageIds: uniqueStrings([message.id, ...(message.replyToMessageId ? [message.replyToMessageId] : [])]),
       plannedContextRevisionId: contextRevision.id,
       contextSnapshotId: snapshotId,
       attempt: 1,
@@ -463,9 +473,8 @@ export class DiscourseService {
       accepted.visibleMessageIds,
       accepted.conversationId
     );
-    const answerAssignments = accepted.policy === 'TEAM'
-      ? assignments.filter((assignment) => assignment.assignmentRole === (wave.policyVersion === 2 ? 'AUTHOR' : 'PRIMARY'))
-      : assignments;
+    if (accepted.policy !== 'CHAT') throw new Error('This saved response uses a retired mode. Cancel it and send a new message in Chat.');
+    const answerAssignments = assignments.length === 2 ? [assignments[1]!] : assignments;
     const jobs = answerAssignments.map((assignment): DiscourseAgentJobRecord => {
       const jobId = this.createId();
       return {
@@ -475,7 +484,7 @@ export class DiscourseService {
         assignment,
         role: 'ANSWER',
         phase: 1,
-        targetMessageIds: [message.id],
+        targetMessageIds: uniqueStrings([message.id, ...(message.replyToMessageId ? [message.replyToMessageId] : [])]),
         visibleMessageIds: [...accepted.visibleMessageIds],
         contextSnapshotId: snapshotId,
         attemptId: this.createId(),
@@ -685,6 +694,12 @@ export class DiscourseService {
         if (accepted.status !== 'PENDING' || waveTriggerIds.has(accepted.triggerMessageId)) {
           continue;
         }
+        if (accepted.policy !== 'CHAT') {
+          aggregate = await this.store.cancelAcceptedSend({ conversationId, acceptedSendId: accepted.id,
+            expectedConversationRevision: aggregate.conversation.recordRevision,
+            clientOperationId: `retired-mode:${accepted.id}` });
+          continue;
+        }
         const message = await this.findMessage(accepted.triggerMessageId, conversationId);
         try {
           await this.planAcceptedSend(aggregate, message, accepted);
@@ -866,70 +881,24 @@ export class DiscourseService {
     if (wave.status === 'SETTLED') {
       return (await this.activateNextWave(conversationId, `${clientOperationId}:next`)) ?? wave;
     }
-    if (wave.policy !== 'TEAM') return wave;
-    if (teamTimeExpired(wave, this.now())) return this.stopWaveUnlocked({ conversationId, waveId, clientOperationId: `${clientOperationId}:time-limit`, reason: 'Team reached its 20-minute limit.' });
-    const derived = deriveDiscourseWaveAggregate({
-      wave,
-      jobs: aggregate.jobs.filter((job) => job.waveId === wave.id),
-      concerns: aggregate.concerns.filter((concern) => concern.waveId === wave.id)
-    });
-    if (!derived.nextPhase || !['REVIEW', 'CORRECT', 'COMPARE', 'RESPOND'].includes(derived.nextPhase)) {
-      return wave;
-    }
-    const snapshot = aggregate.contextSnapshots.find(
-      (candidate) => candidate.id === wave.contextSnapshotId
-    );
+    if (wave.policy !== 'CHAT') return this.stopWaveUnlocked({ conversationId, waveId,
+      clientOperationId: `${clientOperationId}:retired-mode`, reason: 'This response used a retired conversation mode.' });
+    if (discourseTimeExpired(wave, this.now())) return this.stopWaveUnlocked({ conversationId, waveId, clientOperationId: `${clientOperationId}:time-limit`, reason: 'Response reached its 20-minute limit.' });
+    const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
+    const derived = deriveDiscourseWaveAggregate({ wave, jobs });
+    if (derived.nextPhase !== 'ANSWER') return wave;
+    const peer = jobs.find((job) => job.assignment.assignmentRole === 'REVIEWER');
+    if (peer?.result?.kind !== 'CONTRIBUTION' || peer.result.requestAuthorResponse !== true) return wave;
+    const snapshot = aggregate.contextSnapshots.find((candidate) => candidate.id === wave.contextSnapshotId);
     if (!snapshot || await runtime.contextSnapshots.freshness(snapshot) !== 'FRESH') {
-      const settled = await this.settleWaveForChangedContext(
-        conversationId,
-        wave,
-        clientOperationId
-      );
-      return (await this.activateNextWave(conversationId, `${clientOperationId}:next`)) ?? settled;
+      return this.settleWaveForChangedContext(conversationId, wave, clientOperationId);
     }
-    const leadJob = aggregate.jobs.find(
-      (job) =>
-        job.waveId === wave.id &&
-        job.role === 'ANSWER' &&
-        job.result?.kind === 'CONTRIBUTION'
-    );
-    const leadMessageId = leadJob?.result?.kind === 'CONTRIBUTION'
-      ? leadJob.result.outputMessageId
-      : undefined;
-    if ((!leadJob || !leadMessageId) && !isAdaptiveTeam(wave)) {
-      throw new Error('A Team downstream phase requires the lead answer.');
-    }
-    const createdAt = this.now();
-    const teamStep = isAdaptiveTeam(wave) ? nextTeamStep(wave, aggregate.jobs.filter((job) => job.waveId === wave.id)) : undefined;
-    const downstreamJobs: DiscourseAgentJobRecord[] = teamStep?.jobs
-      ? teamStep.jobs.map((plan) => this.createQueuedJob({ ...plan, conversationId, waveId, snapshotId: snapshot.id, createdAt }))
-      : derived.nextPhase === 'REVIEW'
-      ? wave.assignments
-          .filter((assignment) => assignment.assignmentRole === 'REVIEWER')
-          .map((assignment) => this.createQueuedJob({
-            conversationId,
-            waveId,
-            snapshotId: snapshot.id,
-            assignment,
-            role: 'CRITIQUE',
-            phase: 2,
-            targetMessageIds: [leadMessageId!],
-            visibleMessageIds: uniqueStrings([...leadJob!.visibleMessageIds, leadMessageId!]),
-            createdAt
-          }))
-      : [this.createQueuedJob({
-          conversationId,
-          waveId,
-          snapshotId: snapshot.id,
-          assignment: wave.assignments.find(
-            (assignment) => assignment.assignmentRole === 'PRIMARY'
-          )!,
-          role: 'CORRECT',
-          phase: 3,
-          targetMessageIds: [leadMessageId!],
-          visibleMessageIds: uniqueStrings([...leadJob!.visibleMessageIds, leadMessageId!]),
-          createdAt
-        })];
+    const downstreamJobs = [this.createQueuedJob({
+      conversationId, waveId, snapshotId: snapshot.id, assignment: wave.assignments[0]!,
+      role: 'ANSWER', phase: 2, targetMessageIds: [peer.result.outputMessageId, ...peer.targetMessageIds],
+      visibleMessageIds: uniqueStrings([...peer.visibleMessageIds, peer.result.outputMessageId]),
+      createdAt: this.now()
+    })];
 
     wave = await this.store.updateWave({
       conversationId,
@@ -1769,18 +1738,8 @@ function validateAgentSelections(
     throw new Error('Discourse participant roster is invalid.');
   }
   assertDiscoursePolicyRoster(policy, ids.length);
-  if (policy === 'TEAM') {
-    const team: BuiltInAgentProfileId[] = [
-      'builtin.lead',
-      'builtin.skeptic',
-      'builtin.verifier'
-    ];
-    if (team.some((id) => !ids.includes(id))) {
-      throw new Error('A Team response requires A, B, and C.');
-    }
-    return team.map((profileId) => input.find(
-      (selection) => selection.agentProfileId === profileId
-    )!);
+  if (policy !== 'CHAT' && policy !== 'NONE') {
+    throw new Error('Choose Notes or Chat for new messages.');
   }
   return [...input];
 }
@@ -1959,11 +1918,8 @@ function assignmentsFromRoster(
     if (!participant || !revision) {
       throw new Error(`Discourse participant revision is missing: ${profileId}`);
     }
-    const role = policy === 'PANEL'
-      ? 'PANELIST' as const
-      : policy === 'TEAM'
-        ? profileId === 'builtin.verifier' ? 'COMPARATOR' as const : 'AUTHOR' as const
-        : 'PRIMARY' as const;
+    const role = policy === 'CHAT' && profileIds.length === 2 && profileId === profileIds[1]
+      ? 'REVIEWER' as const : 'PRIMARY' as const;
     return assignmentFromRevision(revision, role);
   });
 }

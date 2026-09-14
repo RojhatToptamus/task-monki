@@ -1073,7 +1073,7 @@ function ThemePreview({ preset, mode }: { preset: string; mode: 'light' | 'dark'
           <div className="tm-theme-preview__composer">
             <span>Write a message… Type @ for agents, tasks, or repositories</span>
             <div>
-              <small>Direct</small>
+              <small>Chat</small>
               <span className="tm-theme-preview__send">Send</span>
             </div>
           </div>

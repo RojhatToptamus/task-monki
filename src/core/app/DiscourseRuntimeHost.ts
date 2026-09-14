@@ -20,7 +20,7 @@ import { DiscourseContextResolver } from '../discourse/DiscourseContextResolver'
 import { DiscourseContextSnapshotService } from '../discourse/DiscourseContextSnapshotService';
 import { DiscourseRuntimeCoordinator } from '../discourse/DiscourseRuntimeCoordinator';
 import { DiscourseService } from '../discourse/DiscourseService';
-import { teamDeadline } from '../discourse/DiscourseTeam';
+import { discourseDeadline } from '../discourse/DiscourseResponses';
 import type { DiscourseStore } from '../discourse/DiscourseStore';
 import { DiscourseWorkspace } from '../discourse/DiscourseWorkspace';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -282,7 +282,7 @@ export class DiscourseRuntimeHost {
     const existing = this.waveDeadlineTimers.get(wave.id);
     if (existing) clearTimeout(existing);
     this.waveDeadlineTimers.delete(wave.id);
-    const deadline = teamDeadline(wave);
+    const deadline = discourseDeadline(wave);
     if (
       deadline === undefined ||
       ['SETTLED', 'STOP_REQUESTED', 'STOPPING'].includes(wave.status) ||
@@ -295,11 +295,11 @@ export class DiscourseRuntimeHost {
         await this.service.stopWave({
           conversationId: wave.conversationId,
           waveId: wave.id,
-          clientOperationId: `team-time-limit:${wave.id}`,
-          reason: 'Team reached its 20-minute limit.'
+          clientOperationId: `discourse-time-limit:${wave.id}`,
+          reason: 'Response reached its 20-minute limit.'
         });
       }).catch((error) => (this.options.logger ?? console).error(
-        'Team deadline stop requires recovery; further dispatch remains blocked.',
+        'Discourse deadline stop requires recovery; further dispatch remains blocked.',
         error
       ));
     }, Math.max(0, deadline - Date.now()));

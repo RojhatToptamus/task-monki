@@ -7,9 +7,9 @@ import {
 } from '../../core/agent/codex/codexCapabilities';
 import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
 import type { DiscourseMentionCatalogSnapshot } from '../../shared/discourse';
-import { DiscourseAgentConfigurationBar } from './DiscourseAgentConfigurationBar';
+import { DiscourseAgentSettings } from './DiscourseAgentSettings';
 
-describe('DiscourseAgentConfigurationBar', () => {
+describe('DiscourseAgentSettings', () => {
   it('keeps a provider selectable when native mutation denial is unavailable', () => {
     const codexModel = model('codex', 'codex:model', 'Codex model');
     const blockedModel = model('blocked', 'blocked:model', 'Blocked model');
@@ -95,10 +95,9 @@ describe('DiscourseAgentConfigurationBar', () => {
     };
 
     const html = renderToStaticMarkup(
-      <DiscourseAgentConfigurationBar
+      <DiscourseAgentSettings
         catalog={catalog}
         disabled={false}
-        policy="DIRECT"
         selections={[
           {
             agentProfileId: 'builtin.lead',

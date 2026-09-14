@@ -556,7 +556,7 @@ function validateLoaded(loaded: LoadedConversation, reader: SqlReader): void {
   validateTitle(conversation.title);
   if (
     !['OPEN', 'ARCHIVED'].includes(conversation.status) ||
-    !['TEAM', 'PANEL', 'DIRECT', 'NONE'].includes(conversation.defaultPolicy) ||
+    !['CHAT', 'TEAM', 'PANEL', 'DIRECT', 'NONE'].includes(conversation.defaultPolicy) ||
     !Number.isSafeInteger(conversation.recordRevision) ||
     conversation.recordRevision < 1 ||
     !Number.isSafeInteger(conversation.latestOrdinal) ||
@@ -1017,7 +1017,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
     validateOperationId(input.clientMessageId);
     requireFingerprint(input.requestFingerprint, 'send request fingerprint');
     requireFingerprint(input.previewFingerprint, 'context preview fingerprint');
-    if (!['DIRECT', 'PANEL', 'TEAM'].includes(input.policy)) {
+    if (!['CHAT', 'DIRECT', 'PANEL', 'TEAM'].includes(input.policy)) {
       throw new Error('Discourse accepted send policy or context preview is invalid.');
     }
     return this.mutateConversation(
@@ -1823,7 +1823,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
         if (
           input.jobs.length === 0 ||
           aggregate.jobs.filter(({ waveId }) => waveId === wave.id).length + input.jobs.length >
-            (wave.policy === 'TEAM' && wave.policyVersion === 2
+            (wave.policy === 'CHAT' ? DISCOURSE_LIMITS.maxChatJobs : wave.policy === 'TEAM' && wave.policyVersion === 2
               ? DISCOURSE_LIMITS.maxAdaptiveTeamJobs : DISCOURSE_LIMITS.maxTeamJobs)
         ) {
           throw new Error('Discourse downstream job plan exceeds its safety limit.');

@@ -6,14 +6,13 @@ describe('DiscourseModeMenu', () => {
   it('exposes the current mode as a named menu trigger without a native select', () => {
     const html = renderToStaticMarkup(
       <DiscourseModeMenu
-        value="DIRECT"
+        value="CHAT"
         disabled={false}
-        teamReady
         onChange={vi.fn()}
       />
     );
 
-    expect(html).toContain('aria-label="Response mode: Direct"');
+    expect(html).toContain('aria-label="Conversation: Chat"');
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('<svg');

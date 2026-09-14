@@ -70,7 +70,7 @@ describe('AppSettingsStore', () => {
     const before = await store.get();
     expect(before.discourseDefaults).toBeUndefined();
     const discourseDefaults = {
-      policy: 'TEAM' as const,
+      policy: 'CHAT' as const,
       responderProfileIds: ['builtin.lead' as const],
       agents: [
         { agentProfileId: 'builtin.lead' as const, runtimeId: 'codex', modelId: 'exact-unavailable-model', reasoningEffort: 'high' },

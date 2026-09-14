@@ -684,7 +684,7 @@ async function seedDiscourseScenario(input: {
 
 const DISCOURSE_SEED_TIME = '2026-07-20T09:00:00.000Z';
 
-function discourseSeedPolicy(slug: string): DiscourseDefaultPolicy {
+function discourseSeedPolicy(slug: string): Exclude<DiscourseDefaultPolicy, 'CHAT'> {
   if (slug.startsWith('discourse-abc-')) return 'TEAM';
   if ([
     'discourse-team-running',

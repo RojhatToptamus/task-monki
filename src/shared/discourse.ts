@@ -16,8 +16,8 @@ export const DISCOURSE_LIMITS = {
   maxTeamParticipants: 3,
   maxTeamJobs: 4,
   maxAdaptiveTeamJobs: 12,
-  maxAdaptiveTeamDurationMs: 20 * 60 * 1000,
-  maxPanelParticipants: 3,
+  maxChatJobs: 2,
+  maxChatDurationMs: 20 * 60 * 1000,
   maxHumanMessageBytes: 32 * 1024,
   maxAgentContributionBytes: 64 * 1024,
   maxContextManifestBytesPerReference: 64 * 1024,
@@ -488,7 +488,9 @@ export interface DiscourseTeamResponse {
 }
 
 export type DiscourseJobResult =
-  | { kind: 'CONTRIBUTION'; outputMessageId: string; team?: DiscourseTeamComparison | DiscourseTeamResponse }
+  | { kind: 'CONTRIBUTION'; outputMessageId: string; team?: DiscourseTeamComparison | DiscourseTeamResponse;
+      /** Requests one author response, not a correctness verdict. */
+      requestAuthorResponse?: boolean }
   | {
       kind: 'REVIEW';
       outcome: DiscourseReviewOutcome;

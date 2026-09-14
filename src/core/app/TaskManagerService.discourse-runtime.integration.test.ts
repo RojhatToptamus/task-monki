@@ -198,52 +198,40 @@ describe('TaskManagerService discourse runtime composition', () => {
     await reopened.close();
   });
 
-  it('dispatches every Panel job through the shared runtime without racing the wave', async () => {
-    const fixture = await createFixture('panel-dispatch');
+  it('hands peer output directly to its author through the shared runtime host', async () => {
+    const fixture = await createFixture('peer-dispatch');
     try {
-      const conversation = await fixture.service.createDiscourseConversation({
-        title: 'Panel dispatch',
-        defaultPolicy: 'PANEL',
-        agents: selections('builtin.lead', 'builtin.skeptic'),
-        clientOperationId: 'create-panel'
-      });
-      const preview = await fixture.service.previewDiscourseContext({
-        conversationId: conversation.id,
-        messageContext: []
-      });
-      await fixture.service.sendDiscourseMessage({
-        conversationId: conversation.id,
-        body: 'Compare the two persistence designs independently.',
-        context: [],
-        clientMessageId: 'panel-message',
-        policy: 'PANEL',
-        agents: selections('builtin.lead', 'builtin.skeptic'),
-        previewFingerprint: preview.fingerprint
-      });
-
+      const { conversationId } = await sendChatMessage(fixture, 'Does a per-worker retry count give a global bound?');
+      await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 1);
+      const first = fixture.runtimeAdapter.runtimeStarts[0]!.run;
+      await waitForActiveJob(fixture, conversationId, first.id);
+      await fixture.runtimeAdapter.complete(first.id, 'A per-worker count is sufficient.');
+      await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
+      const answer = (await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages.at(-1)!;
+      const preview = await fixture.service.previewDiscourseContext({ conversationId, messageContext: [] });
+      await fixture.service.sendDiscourseMessage({ conversationId, body: 'Check this answer across workers.',
+        context: [], clientMessageId: 'peer-check', policy: 'CHAT', replyToMessageId: answer.id,
+        agents: selections('builtin.lead', 'builtin.skeptic'), previewFingerprint: preview.fingerprint });
       await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 2);
-      await waitFor(async () =>
-        (await fixture.runtimeStore.snapshot()).runs.every(
-          (run) => run.status === 'RUNNING'
-        )
-      );
-      expect(fixture.runtimeAdapter.runtimeStarts.map(({ run }) => run.scope)).toEqual([
-        expect.objectContaining({ kind: 'DISCOURSE', conversationId: conversation.id }),
-        expect.objectContaining({ kind: 'DISCOURSE', conversationId: conversation.id })
-      ]);
-      expect((await fixture.runtimeStore.snapshot()).runs.map((run) => run.status)).toEqual([
-        'RUNNING',
-        'RUNNING'
-      ]);
-    } finally {
-      await fixture.service.shutdown();
-    }
+      const peer = fixture.runtimeAdapter.runtimeStarts[1]!.run;
+      await waitForActiveJob(fixture, conversationId, peer.id);
+      await fixture.runtimeAdapter.complete(peer.id, JSON.stringify({ message: 'A, local counters do not enforce a shared bound. What prevents two workers from retrying?', requestAuthorResponse: true }));
+      await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 3);
+      const author = fixture.runtimeAdapter.runtimeStarts[2]!.run;
+      await waitForActiveJob(fixture, conversationId, author.id);
+      await fixture.runtimeAdapter.complete(author.id, 'I revise the answer: use a shared, durable attempt budget.');
+      await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
+      expect(fixture.runtimeAdapter.runtimeStarts).toHaveLength(3);
+      const messages = (await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages;
+      expect(messages.at(-1)?.replyToMessageId).toBe(messages.at(-2)?.id);
+      expect(messages.find((message) => message.id === answer.id)?.body).toBe(answer.body);
+    } finally { await fixture.service.shutdown(); }
   });
 
   it('projects a provider terminal from the shared runtime into the conversation', async () => {
     const fixture = await createFixture('terminal');
     try {
-      const { conversationId } = await sendDirectMessage(fixture, 'Complete this answer.');
+      const { conversationId } = await sendChatMessage(fixture, 'Complete this answer.');
       await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 1);
       const run = fixture.runtimeAdapter.runtimeStarts[0]!.run;
       await waitForActiveJob(fixture, conversationId, run.id);
@@ -279,7 +267,7 @@ describe('TaskManagerService discourse runtime composition', () => {
   it('persists a stop through the shared runtime and settles on provider interruption', async () => {
     const fixture = await createFixture('interrupt');
     try {
-      const { conversationId, waveId } = await sendDirectMessage(
+      const { conversationId, waveId } = await sendChatMessage(
         fixture,
         'Keep working until stopped.'
       );
@@ -411,7 +399,7 @@ describe('TaskManagerService discourse runtime composition', () => {
     );
 
     try {
-      const { conversationId } = await sendDirectMessage(
+      const { conversationId } = await sendChatMessage(
         fixture,
         'Stream an answer while shutdown starts.'
       );
@@ -514,7 +502,7 @@ describe('TaskManagerService discourse runtime composition', () => {
       }
     );
     try {
-      await sendDirectMessage(fixture, 'Retry this after the transient failure.');
+      await sendChatMessage(fixture, 'Retry this after the transient failure.');
       releaseLease();
 
       await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 1);
@@ -566,13 +554,13 @@ async function createFixture(name: string) {
   };
 }
 
-async function sendDirectMessage(
+async function sendChatMessage(
   fixture: Awaited<ReturnType<typeof createFixture>>,
   body: string
 ): Promise<{ conversationId: string; waveId: string }> {
   const conversation = await fixture.service.createDiscourseConversation({
     title: 'Direct response',
-    defaultPolicy: 'DIRECT',
+    defaultPolicy: 'CHAT',
     agents: selections('builtin.lead'),
     clientOperationId: `create-${body}`
   });
@@ -585,7 +573,7 @@ async function sendDirectMessage(
     body,
     context: [],
     clientMessageId: `message-${body}`,
-    policy: 'DIRECT',
+    policy: 'CHAT',
     agents: selections('builtin.lead'),
     previewFingerprint: preview.fingerprint
   });

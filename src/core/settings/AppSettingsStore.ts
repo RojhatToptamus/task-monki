@@ -483,7 +483,7 @@ function requireString(value: unknown, name: string): string {
 function validateDiscourseDefaults(value: unknown): void {
   const profiles = ['builtin.lead', 'builtin.skeptic', 'builtin.verifier'];
   if (!isRecord(value) || Object.keys(value).some((key) => !['policy', 'agents', 'responderProfileIds'].includes(key)) ||
-      !['NONE', 'DIRECT', 'PANEL', 'TEAM'].includes(String(value.policy)) ||
+      !['NONE', 'CHAT', 'DIRECT', 'PANEL', 'TEAM'].includes(String(value.policy)) ||
       !Array.isArray(value.agents) || value.agents.length > 3 ||
       !Array.isArray(value.responderProfileIds) || value.responderProfileIds.length > 3 ||
       new Set(value.responderProfileIds).size !== value.responderProfileIds.length ||

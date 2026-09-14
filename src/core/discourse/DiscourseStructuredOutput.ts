@@ -9,7 +9,15 @@ import type {
   DiscourseTeamComparison,
   DiscourseTeamResponse
 } from '../../shared/discourse';
-import { outputMessageId, teamComparison } from './DiscourseTeam';
+import { outputMessageId, teamComparison } from './DiscourseResponses';
+
+/** Only the continuation decision is structured; the conversation remains normal prose. */
+export function parseDiscoursePeerOutput(value: string): { message: string; requestAuthorResponse: boolean } {
+  const record = parseRecord(value, 'peer');
+  if (Object.keys(record).some((key) => key !== 'message' && key !== 'requestAuthorResponse') ||
+      typeof record.requestAuthorResponse !== 'boolean') throw new Error('The peer response format is invalid.');
+  return { message: requireText(record.message, 'peer message', 64 * 1024), requestAuthorResponse: record.requestAuthorResponse };
+}
 
 export function parseDiscourseTeamOutput(
   value: string, job: DiscourseAgentJobRecord,
@@ -51,8 +59,10 @@ export function parseDiscourseTeamOutput(
     basisMessageIds: requireTextArray(action.basisMessageIds, 'action basis messages', 16, 200)
   }));
   const next = requireEnum(record.next, ['CONTINUE', 'READY', 'NEEDS_EVIDENCE', 'NEEDS_USER', 'OPEN_DISAGREEMENT'] as const, 'comparison next step');
-  const previous = jobs.filter((candidate) => candidate.role === 'COMPARE' && candidate.phase < job.phase)
-    .sort((a, b) => a.phase - b.phase).at(-1);
+  const previous = jobs.filter((candidate) => candidate.waveId === job.waveId && candidate.role === 'COMPARE' && candidate.phase < job.phase)
+    .sort((a, b) => a.phase - b.phase).at(-1) ?? jobs.filter((candidate) => candidate.role === 'COMPARE' &&
+      outputMessageId(candidate).some((id) => job.targetMessageIds.includes(id)))
+      .sort((a, b) => (a.finishedAt ?? a.createdAt).localeCompare(b.finishedAt ?? b.createdAt)).at(-1);
   if (new Set(points.map((point) => point.id)).size !== points.length ||
     teamComparison(previous)?.points.some((point) => !points.some((candidate) => candidate.id === point.id))) {
     throw new Error('Comparison updates must preserve every prior point ID, including disagreements and corrected comparisons.');
@@ -71,6 +81,10 @@ export function parseDiscourseTeamOutput(
     (next === 'CONTINUE') !== (actions.length > 0)) throw new Error('Comparison next step and actions are inconsistent.');
   if (next === 'READY' && points.some((point) => point.importance === 'MATERIAL' && ['OPEN', 'NEEDS_EVIDENCE', 'NEEDS_USER', 'DISAGREED'].includes(point.status))) {
     throw new Error('A ready comparison cannot hide unresolved material points.');
+  }
+  if ((next === 'NEEDS_USER' || next === 'NEEDS_EVIDENCE') &&
+    !points.some((point) => point.importance === 'MATERIAL' && point.status === next)) {
+    throw new Error('A waiting comparison must identify the material question or missing evidence.');
   }
   return { kind: 'COMPARISON', summary: requireText(record.summary, 'comparison summary', 8_000), points,
     next, reason: requireText(record.reason, 'comparison stopping reason', 2_000), actions };
