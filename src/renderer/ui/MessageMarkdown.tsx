@@ -6,9 +6,9 @@ type MarkdownBlock =
   | { kind: 'list'; ordered: boolean; items: string[] }
   | { kind: 'code'; text: string };
 
-export function DiscourseMarkdown({ text }: { text: string }) {
+export function MessageMarkdown({ text }: { text: string }) {
   return (
-    <div className="tm-discourse-message__body tm-discourse-markdown">
+    <div className="tm-message-markdown">
       {parseBlocks(text).map((block, index) => {
         const key = `${block.kind}:${index}`;
         switch (block.kind) {

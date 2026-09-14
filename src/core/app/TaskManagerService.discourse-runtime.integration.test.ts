@@ -82,7 +82,7 @@ class DiscourseCapableRuntimeAdapter extends ScriptedAgentRuntimeAdapter {
     const sequence = this.runtimeStarts.length;
     return {
       serverInstanceId: 'server-discourse',
-      providerSessionId: `thread-${sequence}`,
+      providerSessionId: input.session.providerSessionId ?? `thread-${sequence}`,
       providerTurnId: `turn-${sequence}`,
       startedAt: new Date().toISOString()
     };
@@ -222,11 +222,116 @@ describe('TaskManagerService discourse runtime composition', () => {
       await fixture.runtimeAdapter.complete(author.id, 'I revise the answer: use a shared, durable attempt budget.');
       await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
       expect(fixture.runtimeAdapter.runtimeStarts).toHaveLength(3);
+      expect(author.sessionId).toBe(first.sessionId);
+      expect(peer.sessionId).not.toBe(first.sessionId);
+      expect(fixture.runtimeAdapter.runtimeStarts[2]!.session.providerSessionId).toBe('thread-1');
       const messages = (await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages;
       expect(messages.at(-1)?.replyToMessageId).toBe(messages.at(-2)?.id);
       expect(messages.find((message) => message.id === answer.id)?.body).toBe(answer.body);
     } finally { await fixture.service.shutdown(); }
   });
+
+  it('continues each participant separately and starts a fresh peer examination for a new target', async () => {
+    const fixture = await createFixture('session-continuity');
+    try {
+      const { conversationId } = await sendChatMessage(fixture, 'Explain the tradeoff.');
+      const finish = async (count: number, body: string) => {
+        await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === count);
+        const run = fixture.runtimeAdapter.runtimeStarts[count - 1]!.run;
+        await waitForActiveJob(fixture, conversationId, run.id);
+        await fixture.runtimeAdapter.complete(run.id, body);
+        await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
+        return (await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages.at(-1)!;
+      };
+      const send = async (id: string, agents: BuiltInAgentProfileId[], replyToMessageId?: string) => {
+        const preview = await fixture.service.previewDiscourseContext({ conversationId, messageContext: [] });
+        await fixture.service.sendDiscourseMessage({ conversationId, body: id, context: [],
+          clientMessageId: id, policy: 'CHAT', agents: selections(...agents),
+          replyToMessageId, previewFingerprint: preview.fingerprint });
+      };
+      await finish(1, 'The tradeoff is latency versus certainty.');
+      await send('Explain latency.', ['builtin.lead']);
+      const answer = await finish(2, 'Here is the latency detail.');
+      expect(fixture.runtimeAdapter.runtimeStarts[1]!.run.sessionId).toBe(fixture.runtimeAdapter.runtimeStarts[0]!.run.sessionId);
+      await send('Check the detail.', ['builtin.lead', 'builtin.skeptic'], answer.id);
+      const peer = await finish(3, JSON.stringify({ message: 'No correction needed.', requestAuthorResponse: false }));
+      await send('Why do you agree?', ['builtin.skeptic'], peer.id);
+      await finish(4, 'The bounds in the answer match the assumptions.');
+      expect(fixture.runtimeAdapter.runtimeStarts[3]!.run.sessionId).toBe(fixture.runtimeAdapter.runtimeStarts[2]!.run.sessionId);
+      await send('Make a new check.', ['builtin.lead', 'builtin.skeptic'], answer.id);
+      await finish(5, JSON.stringify({ message: 'The answer remains sound.', requestAuthorResponse: false }));
+      expect(fixture.runtimeAdapter.runtimeStarts[4]!.run.sessionId).not.toBe(fixture.runtimeAdapter.runtimeStarts[2]!.run.sessionId);
+    } finally { await fixture.service.shutdown(); }
+  });
+
+  it('resumes the saved participant session after application restart', async () => {
+    let fixture = await createFixture('resume-restart');
+    try {
+      const { conversationId } = await sendChatMessage(fixture, 'Remember this discussion.');
+      await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 1);
+      const first = fixture.runtimeAdapter.runtimeStarts[0]!.run;
+      await waitForActiveJob(fixture, conversationId, first.id);
+      await fixture.runtimeAdapter.complete(first.id, 'The original answer.');
+      await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
+      await fixture.service.shutdown();
+      await fixture.persistence.close();
+      fixture = await createFixture('resume-restart', fixture.root);
+      const preview = await fixture.service.previewDiscourseContext({ conversationId, messageContext: [] });
+      await fixture.service.sendDiscourseMessage({ conversationId, body: 'Continue.', context: [],
+        clientMessageId: 'after-restart', policy: 'CHAT', agents: selections('builtin.lead'),
+        previewFingerprint: preview.fingerprint });
+      await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 1);
+      const continued = fixture.runtimeAdapter.runtimeStarts[0]!;
+      expect(continued.run.sessionId).toBe(first.sessionId);
+      expect(continued.session.providerSessionId).toBe('thread-1');
+      await waitForActiveJob(fixture, conversationId, continued.run.id);
+      await fixture.runtimeAdapter.complete(continued.run.id, 'A continued answer.');
+      await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
+      const messages = (await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages;
+      expect(messages.filter((message) => message.author.kind === 'AGENT').map((message) => message.body))
+        .toEqual(['The original answer.', 'A continued answer.']);
+    } finally { await fixture.service.shutdown(); }
+  });
+
+  it.each(['removed-message', 'settings', 'interrupted'] as const)(
+    'does not continue provider memory after %s', async (change) => {
+      const fixture = await createFixture(`resume-${change}`);
+      try {
+        const { conversationId, waveId } = await sendChatMessage(fixture, 'An initial question.');
+        await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 1);
+        const first = fixture.runtimeAdapter.runtimeStarts[0]!.run;
+        await waitForActiveJob(fixture, conversationId, first.id);
+        if (change === 'interrupted') {
+          await fixture.service.stopDiscourseWave({ conversationId, waveId,
+            clientOperationId: 'stop-before-followup', reason: 'User stopped the response.' });
+          await fixture.runtimeAdapter.confirmInterrupted(first.id);
+        } else {
+          await fixture.runtimeAdapter.complete(first.id, 'The initial answer.');
+        }
+        await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
+        if (change === 'removed-message') {
+          const aggregate = await fixture.discourseStore.getConversation(conversationId);
+          const message = (await fixture.discourseStore.listMessages({ conversationId, limit: 100 })).messages.find((value) => value.author.kind === 'USER')!;
+          await fixture.service.tombstoneDiscourseMessage({ conversationId, messageId: message.id,
+            expectedConversationRevision: aggregate.conversation.recordRevision,
+            clientOperationId: 'remove-before-followup' });
+        }
+        const preview = await fixture.service.previewDiscourseContext({ conversationId, messageContext: [] });
+        await fixture.service.sendDiscourseMessage({ conversationId, body: 'Continue.', context: [],
+          clientMessageId: 'changed-followup', policy: 'CHAT',
+          agents: [{ agentProfileId: 'builtin.lead', ...(change === 'settings' ? {
+            reasoningEffort: first.requestedSettings.reasoningEffort === 'high' ? 'low' : 'high'
+          } : {}) }],
+          previewFingerprint: preview.fingerprint });
+        await waitFor(() => fixture.runtimeAdapter.runtimeStarts.length === 2);
+        const next = fixture.runtimeAdapter.runtimeStarts[1]!.run;
+        expect(next.sessionId).not.toBe(first.sessionId);
+        await waitForActiveJob(fixture, conversationId, next.id);
+        await fixture.runtimeAdapter.complete(next.id, 'A fresh answer.');
+        await waitFor(async () => (await fixture.discourseStore.getConversation(conversationId)).waves.every((wave) => wave.status === 'SETTLED'));
+      } finally { await fixture.service.shutdown(); }
+    }
+  );
 
   it('projects a provider terminal from the shared runtime into the conversation', async () => {
     const fixture = await createFixture('terminal');
@@ -527,8 +632,8 @@ describe('TaskManagerService discourse runtime composition', () => {
   });
 });
 
-async function createFixture(name: string) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-discourse-${name}-`));
+async function createFixture(name: string, existingRoot?: string) {
+  const root = existingRoot ?? await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-discourse-${name}-`));
   const persistence = await openTestPersistence(path.join(root, 'profile'));
   const taskStore = persistence.tasks;
   const runtimeStore = persistence.agentRuntime;

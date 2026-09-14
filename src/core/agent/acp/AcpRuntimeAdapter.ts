@@ -1726,7 +1726,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     const materialized = await this.materializeRuntimeSession(
       input.session,
-      expectedSettings
+      expectedSettings,
+      input.run.id
     );
     const server = this.supervisor?.currentServer;
     if (!server || materialized.client.serverInstanceId !== server.id) {
@@ -1867,7 +1868,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   private async materializeRuntimeSession(
     initialSession: AgentRuntimeSessionRecord,
-    settings: AgentExecutionSettings
+    settings: AgentExecutionSettings,
+    runId: string
   ): Promise<{
     client: AcpRpcClient;
     session: AgentRuntimeSessionRecord;
@@ -1888,6 +1890,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       );
       client = loaded.client;
       state = loaded.state;
+    } else if (session.providerSessionId) {
+      throw new AgentRuntimeDeliveryError(
+        'NOT_DELIVERED',
+        'The provider cannot resume this session. Start a new conversation to continue.'
+      );
     } else {
       const created = await this.createNativeSession(
         session.executionContext.primaryCwd
@@ -1953,7 +1960,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         observedSettings: this.projectObservedSettings(state, settings),
         lastAttachedAt: new Date().toISOString()
       },
-      `acp-runtime-session-read-only:${session.id}:${policy.policyId}`
+      `acp-runtime-session-read-only:${runId}:${policy.policyId}`
     );
     this.setOperationalPreflight(state);
     this.emitRuntimeUpdate();

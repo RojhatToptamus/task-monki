@@ -1,0 +1,93 @@
+.tm-message-markdown {
+  color: var(--text-soft);
+  font-size: var(--t-body);
+  line-height: 1.62;
+  white-space: normal;
+}
+
+.tm-message-markdown > :first-child {
+  margin-top: 0;
+}
+
+.tm-message-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.tm-message-markdown p,
+.tm-message-markdown blockquote,
+.tm-message-markdown ul,
+.tm-message-markdown ol,
+.tm-message-markdown pre {
+  margin: 12px 0 0;
+}
+
+.tm-message-markdown h3,
+.tm-message-markdown h4 {
+  margin: 12px 0 0;
+  color: var(--text);
+  font-size: var(--t-heading);
+  line-height: 1.45;
+}
+
+.tm-message-markdown ul,
+.tm-message-markdown ol {
+  padding-left: 20px;
+}
+
+.tm-message-markdown li + li {
+  margin-top: 3px;
+}
+
+.tm-message-markdown blockquote {
+  padding-left: 10px;
+  border-left: 1px solid var(--edge);
+  color: var(--muted);
+}
+
+.tm-message-markdown code {
+  padding: 1px 4px;
+  border-radius: var(--r-xs);
+  background: var(--well);
+  color: var(--text-soft);
+  font: 0.92em var(--font-mono);
+}
+
+.tm-message-markdown pre {
+  max-width: 100%;
+  padding: 9px 10px;
+  overflow-x: auto;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--well);
+}
+
+.tm-message-markdown pre code {
+  padding: 0;
+  white-space: pre;
+}
+
+.tm-message-markdown a {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tm-message-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  min-height: 20px;
+  margin-bottom: 8px;
+}
+.tm-message-header > strong { font-size: var(--t-label); font-weight: 600; color: var(--text); }
+.tm-message-header__meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin-left: auto; }
+.tm-message-header__model, .tm-message-header__meta time {
+  color: var(--muted); font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.tm-message-header__meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-message-header__meta time { flex-shrink: 0; }
+.tm-message-header__status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--t-meta); }
+.tm-message-header__status[data-tone='working'] { color: var(--accent-ink); }
+.tm-message-header__status[data-tone='waiting'] { color: var(--waiting-ink); }
+.tm-message-header__status[data-tone='blocked'] { color: var(--blocked-ink); }

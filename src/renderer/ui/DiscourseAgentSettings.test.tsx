@@ -115,6 +115,7 @@ describe('DiscourseAgentSettings', () => {
     expect(html).not.toContain('This provider can still mutate through child agents.');
     expect(html).toContain('tm-agent-console--compact');
     expect(html).toContain('>Codex model</span>');
+    expect(html).toContain('<strong>Codex model</strong>');
     expect(html).toMatch(
       /<button[^>]*aria-disabled="false"[^>]*aria-label="Blocked model via Blocked provider/u
     );

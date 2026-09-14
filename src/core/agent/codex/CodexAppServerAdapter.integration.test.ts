@@ -297,6 +297,36 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       expect(taskSnapshot.tasks).toEqual([]);
       expect(taskSnapshot.runs).toEqual([]);
       expect(taskSnapshot.agentSessions).toEqual([]);
+      if (scope.kind === 'DISCOURSE') {
+        await adapter.releaseSession({ localSessionId: session.id, providerSessionId: started.providerSessionId });
+        const saved = (await runtime.getSession(session.id))!;
+        const followup = await runtime.prepareRuntimeTurn({
+          session: { id: saved.id, expectedRevision: saved.recordRevision },
+          run: {
+            id: 'scoped-run-2', owner, scope: { ...scope, jobId: 'job-2' },
+            sessionId: saved.id, sessionAccessEpoch: saved.accessEpoch.epoch,
+            purpose, generationKey: 'generation-2', clientOperationId: 'create-scoped-run-2',
+            requestedSettings: executionContext.modelSettings,
+            promptArtifactId: 'scoped-prompt-2', outputArtifactId: 'scoped-output-2',
+            diagnosticArtifactId: 'scoped-diagnostic-2', attachmentSelection: [attachment]
+          },
+          prompt: 'Respond to the objection.', priority: 'DISCOURSE_RESPONSE',
+          queueOperationId: 'enqueue-scoped-run-2'
+        });
+        const nextStarting = await runtime.updateRun(followup.run.id, followup.run.recordRevision,
+          { status: 'STARTING', delivery: 'SENDING', startedAt: new Date().toISOString() }, 'scoped-start-intent-2');
+        const next = await adapter.startRuntimeTurn({ session: saved, run: nextStarting,
+          executionContext, prompt: 'Respond to the objection.', attachments: [attachment] });
+        expect(next.providerSessionId).toBe(started.providerSessionId);
+        await waitForRuntimeRunStatus(runtime, followup.run.id, 'COMPLETED');
+        const continuedJournal = await fs.readFile(runtimeSnapshot.servers[0]!.protocolJournalPath, 'utf8');
+        const continuedOutbound = readOutboundMessages(continuedJournal);
+        expect(continuedOutbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+        expect(continuedOutbound.filter((message) => message.method === 'thread/resume')).toEqual([
+          expect.objectContaining({ params: expect.objectContaining({ threadId: started.providerSessionId }) })
+        ]);
+        expect(continuedOutbound.filter((message) => message.method === 'turn/start')).toHaveLength(2);
+      }
     } finally {
       unsubscribe();
       await adapter.shutdown();
@@ -6350,7 +6380,11 @@ if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
 
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
-const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+let scopedTurnNumber = 0;
+const send = (message) => process.stdout.write(JSON.stringify(message, (key, value) =>
+  mode === 'scoped' && scopedTurnNumber > 1 && value === 'turn-1'
+    ? 'turn-' + scopedTurnNumber : value
+) + '\\n');
 const mode = ${JSON.stringify(mode)};
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
 const scopedMode = mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode === 'scoped-interrupt-model-reroute' || mode === 'scoped-model-reroute' || mode === 'scoped-model-reroute-before-ack' || mode.startsWith('scoped-unexpected-request-');
@@ -6952,6 +6986,7 @@ rl.on('line', (line) => {
       } });
       break;
     case 'turn/start':
+      scopedTurnNumber += 1;
       turnStartAttempts += 1;
       if (mode === 'turn-start-rejected-once' && turnStartAttempts === 1) {
         send({ id: message.id, error: {

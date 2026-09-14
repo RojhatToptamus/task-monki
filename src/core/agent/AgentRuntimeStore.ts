@@ -136,7 +136,7 @@ export interface CreateObservedRuntimeRunInput extends CreateRuntimeRunInput {
 }
 
 export interface PrepareRuntimeTurnStoreInput {
-  session: CreateRuntimeSessionInput;
+  session: CreateRuntimeSessionInput | { id: string; expectedRevision: number };
   run: CreateRuntimeRunInput;
   prompt: string;
   priority: AgentSchedulerPriority;

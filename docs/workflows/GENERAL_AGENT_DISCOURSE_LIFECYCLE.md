@@ -11,8 +11,9 @@ available participant with a mention or reply to that participant's message.
 The settings sidebar uses the shared provider, model, and reasoning controls.
 Adding a peer makes it available; it does not start a call.
 
-**Ask peer** prepares a message about one selected answer. The user can edit the
-question before sending. The peer sees the selected answer, the user's request,
+**Ask [model]** prepares a check of one selected answer. The user can edit the
+question before sending. The accepted request appears as a compact marker;
+expanding it shows the exact saved request. The peer sees the selected answer, the user's request,
 relevant public conversation, and selected context. It addresses useful
 corrections, objections, assumptions, or alternatives directly to the author.
 It need not produce a second full answer.
@@ -37,6 +38,22 @@ A completed runtime turn means the agent stopped generating. It does not mean
 the user's decision is resolved or the answer is correct. Normal completion
 needs no extra status card.
 
+Agent headings use the executed model, not the mutable current selection.
+The main answer sits on the conversation sheet. User messages use a recessed
+surface, and peer feedback uses a raised aside. Reply links preserve the exact
+target. Model identity and time remain secondary metadata.
+
+Discourse and Designs share `MessageHeader` and `MessageMarkdown`. Domain
+components still own their actions and state. Response progress appears on the
+pending message, with only one Stop control in the composer. Failed or stopped
+plain answers reload partial text from the existing runtime output artifact.
+Partial output is labelled incomplete; it does not become an accepted answer.
+Peer JSON remains hidden until validation completes.
+
+Qualifications remain in the agent's own prose. The renderer does not infer
+decision status from text or invent an evidence claim. Access and limit labels
+describe enforced runtime behavior, not illustrative counters from a mockup.
+
 - For a complete answer, the agent gives the conclusion and relevant limits.
 - For a necessary preference or missing user fact, it asks the specific question.
   A reply targets that message; no comparison sequence restarts.
@@ -56,9 +73,20 @@ intent; they do not gain conversation messages produced after acceptance.
 
 ## Context and settings
 
-Each job uses a fresh provider session reconstructed from the public transcript.
-There is no reliance on hidden provider memory. Recent history is bounded to
-80 messages, 48,000 estimated tokens, and 256 KiB. Explicit reply and selected
+The main agent continues its own provider session. The peer uses a separate
+session for each new examination. A direct question about its contribution
+continues that peer session. The author resumes its session to answer the peer.
+
+Session reuse requires unchanged participant settings, source context, and
+visible history. Changed settings, removed messages, stale output, and interrupted
+or failed turns require a fresh session. History outside the current transcript
+window also requires a fresh session. No historical records are rewritten.
+
+Each prompt still includes the bounded public transcript and current instructions.
+The provider retains its session context, but public messages remain the app's
+source of truth. Recent history is bounded to 80 messages, 48,000 estimated tokens,
+and 256 KiB. These are per-prompt limits, not cumulative provider-memory limits.
+Explicit reply and selected
 source messages take priority over optional recent history. A job is rejected
 when its required context exceeds the applicable model or prompt budget.
 
@@ -82,6 +110,11 @@ silently fall back to another model.
 
 Chat reuses accepted sends, response waves, jobs, scoped runtime sessions,
 scheduler admission, and terminal reconciliation. It adds no parallel workflow.
+
+Saved job and runtime records identify the session after restart. Terminal turns
+release loaded resources without deleting provider history. The next turn resumes
+the saved provider session. Unsupported or failed resume does not silently create
+a replacement. Ambiguous delivery remains blocked by the existing recovery flow.
 
 A single-agent Chat wave contains one primary assignment and one answer job.
 A peer check contains a primary and reviewer assignment. Its first answer job

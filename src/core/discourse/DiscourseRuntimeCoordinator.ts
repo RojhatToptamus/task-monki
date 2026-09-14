@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   AgentExecutionContext,
   AgentRuntimePurpose,
@@ -8,6 +9,7 @@ import type {
 } from '../../shared/agentRuntime';
 import type {
   DiscourseAgentJobRecord,
+  DiscourseConversationAggregateRecord,
   DiscourseConcernRecord,
   DiscourseConversationTombstoneRecord,
   DiscourseMessageFreshness,
@@ -16,7 +18,7 @@ import type {
   StructuredDiscourseError
 } from '../../shared/discourse';
 import { DISCOURSE_LIMITS, isEligibleDiscourseConcern } from '../../shared/discourse';
-import { assertReadOnlyExecutionContext } from '../agent/AgentRuntimeOwnership';
+import { assertReadOnlyExecutionContext, createAgentSessionAccessEpoch } from '../agent/AgentRuntimeOwnership';
 import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
 import type { AgentRuntimeCoordinator } from '../agent/AgentRuntimeCoordinator';
 import {
@@ -216,8 +218,36 @@ export class DiscourseRuntimeCoordinator {
       conversationId: input.conversationId,
       stableParticipantId: job.assignment.stableParticipantId
     };
-    const sessionId = deterministicId('discourse-session', input.clientOperationId);
     const runId = deterministicId('discourse-run', input.clientOperationId);
+    // Recover the selected session from the durable run after an interrupted
+    // cross-store handoff. Never select again for an already prepared turn.
+    const existingRun = await this.runtime.getRun(runId);
+    const continuation = existingRun
+      ? await this.runtime.getSession(existingRun.sessionId)
+      : await this.continuationSession(aggregate, job);
+    if (existingRun && !continuation) {
+      throw new Error('The prepared Discourse session is missing.');
+    }
+    let sessionId = continuation?.id ?? deterministicId('discourse-session', input.clientOperationId);
+    let executionContext = input.executionContext;
+    if (continuation && sessionId !== deterministicId('discourse-session', input.clientOperationId)) {
+      executionContext = await this.agents.buildExecutionContext(job.assignment.runtimeId, {
+        sessionId,
+        primaryCwd: input.executionContext.primaryCwd,
+        readRoots: input.executionContext.readRoots,
+        modelSettings: input.executionContext.modelSettings,
+        clientOperationId: `${input.clientOperationId}:continue-context`
+      });
+      const access = createAgentSessionAccessEpoch({
+        owner, sessionId, epoch: continuation.accessEpoch.epoch,
+        runtimeId: job.assignment.runtimeId, model: job.assignment.model, executionContext
+      });
+      if (access.executionProfileHash !== continuation.accessEpoch.executionProfileHash) {
+        if (existingRun) throw new Error('The prepared Discourse session boundary changed.');
+        sessionId = deterministicId('discourse-session', input.clientOperationId);
+        executionContext = input.executionContext;
+      }
+    }
     const prepared = await this.agents.prepareTurn({
       sessionId,
       runId,
@@ -234,7 +264,7 @@ export class DiscourseRuntimeCoordinator {
       model: job.assignment.model,
       purpose: purposeForJob(job),
       generationKey: job.generationKey,
-      executionContext: input.executionContext,
+      executionContext,
       prompt: input.prompt,
       priority: priorityForJob(job),
       clientOperationId: input.clientOperationId,
@@ -277,6 +307,63 @@ export class DiscourseRuntimeCoordinator {
     }
     void wave;
     return { session, run, queueEntry, job: linkedJob };
+  }
+
+  private async continuationSession(
+    aggregate: DiscourseConversationAggregateRecord,
+    job: DiscourseAgentJobRecord
+  ): Promise<AgentRuntimeSessionRecord | undefined> {
+    const wave = aggregate.waves.find((candidate) => candidate.id === job.waveId);
+    const previous = [...aggregate.jobs].reverse().find((candidate) =>
+      candidate.id !== job.id && candidate.sessionId &&
+      candidate.assignment.stableParticipantId === job.assignment.stableParticipantId);
+    if (wave?.policy !== 'CHAT' || !previous?.sessionId ||
+      previous.assignment.participantRevisionId !== job.assignment.participantRevisionId ||
+      previous.status !== 'COMPLETED' || previous.freshnessAtCompletion !== 'FRESH') return;
+
+    const previousOutput = previous.result?.kind === 'CONTRIBUTION'
+      ? previous.result.outputMessageId : undefined;
+    // A new peer examination is scoped to its target. Direct questions about
+    // the peer's own contribution can continue that separate session.
+    if ((job.assignment.assignmentRole === 'REVIEWER' ||
+      previous.assignment.assignmentRole === 'REVIEWER') &&
+      (!previousOutput || !job.targetMessageIds.includes(previousOutput))) return;
+
+    const session = await this.runtime.getSession(previous.sessionId);
+    if (!session?.providerSessionId || !session.materialized ||
+      !['IDLE', 'NOT_LOADED'].includes(session.status) ||
+      await this.runtime.getActiveRunForSession(session.id)) return;
+    const snapshot = aggregate.contextSnapshots.find((value) => value.id === job.contextSnapshotId);
+    if (!snapshot) return;
+    const sessionJobs = aggregate.jobs.filter((value) => value.sessionId === session.id);
+    const retainedOrdinals = new Set<number>();
+    const retainedIds = new Set<string>();
+    for (const prior of sessionJobs) {
+      const priorSnapshot = aggregate.contextSnapshots.find((value) => value.id === prior.contextSnapshotId);
+      if (prior.status !== 'COMPLETED' || prior.freshnessAtCompletion !== 'FRESH' ||
+        !priorSnapshot || priorSnapshot.promptPolicyVersion !== snapshot.promptPolicyVersion ||
+        priorSnapshot.contextSchemaVersion !== snapshot.contextSchemaVersion ||
+        !isDeepStrictEqual(
+          priorSnapshot.sources.map(({ inspectedAt: _time, contextLinkId: _link, ...source }) => source),
+          snapshot.sources.map(({ inspectedAt: _time, contextLinkId: _link, ...source }) => source)
+        )) return;
+      priorSnapshot.transcriptOrdinals.forEach((ordinal) => retainedOrdinals.add(ordinal));
+      prior.visibleMessageIds.forEach((id) => retainedIds.add(id));
+      if (prior.result?.kind === 'CONTRIBUTION') retainedIds.add(prior.result.outputMessageId);
+    }
+    // Retained provider memory must remain inside the same bounded, visible
+    // transcript. Edits, removals and queued turns with older cutoffs rebuild.
+    const allowedOrdinals = new Set(snapshot.transcriptOrdinals);
+    const allowedIds = new Set(job.visibleMessageIds);
+    const messages = (await this.discourse.listMessages({
+      conversationId: job.conversationId, limit: 100
+    })).messages;
+    const retained = messages.filter((message) => retainedOrdinals.has(message.ordinal) || retainedIds.has(message.id));
+    if ([...retainedOrdinals].some((ordinal) => !retained.some((message) => message.ordinal === ordinal)) ||
+      [...retainedIds].some((id) => !retained.some((message) => message.id === id)) ||
+      retained.some((message) => message.status !== 'VISIBLE' ||
+        (!allowedOrdinals.has(message.ordinal) && !allowedIds.has(message.id)))) return;
+    return session;
   }
 
   async cancelQueuedWave(
@@ -2139,8 +2226,7 @@ export class DiscourseRuntimeCoordinator {
       (candidate) =>
         candidate.id !== run.id &&
         candidate.sessionId === session.id &&
-        !isRuntimeTerminal(candidate.status) &&
-        !['NOT_SENT', 'NOT_DELIVERED'].includes(candidate.delivery)
+        !isRuntimeTerminal(candidate.status)
     );
     if (
       !sessionStillOwnsProviderWork &&

@@ -1,6 +1,6 @@
 import type { DiscourseMessageRecord, DiscourseTeamComparison, DiscourseTeamResponse } from '../../shared/discourse';
 import { messageAuthorLabel } from '../model/discourse';
-import { DiscourseMarkdown } from './DiscourseMarkdown';
+import { MessageMarkdown } from './MessageMarkdown';
 import { DisclosureChevron } from './DisclosureChevron';
 
 /** Read-only presentation of comparisons and responses already in user history. */
@@ -13,9 +13,9 @@ export function DiscourseHistoryContent({ result, sources, comparison, onNavigat
   if (result.kind === 'RESPONSE') return <div className="tm-discourse-team">
     {result.responses.map((response) => <section key={response.pointId}>
       <h3>{comparison?.points.find((point) => point.id === response.pointId)?.question ?? responseLabel(response.stance)}</h3>
-      <DiscourseMarkdown text={response.answer} />
+      <MessageMarkdown text={response.answer} />
       <details><summary>Reason and sources</summary>
-        <DiscourseMarkdown text={response.reason} />
+        <MessageMarkdown text={response.reason} />
         {response.evidence.length ? <ul>{response.evidence.map((evidence, index) => <li key={index}>{evidence}</li>)}</ul> : null}
       </details>
     </section>)}
@@ -24,14 +24,14 @@ export function DiscourseHistoryContent({ result, sources, comparison, onNavigat
     </section> : null}
   </div>;
   return <div className="tm-discourse-team">
-    <DiscourseMarkdown text={result.summary} />
+    <MessageMarkdown text={result.summary} />
     <details className="tm-discourse-team__details"><summary>Comparison details</summary>
     <div className="tm-discourse-response__concerns">
       {result.points.map((point) => <details key={point.id}>
         <summary><DisclosureChevron className="tm-discourse-response__chevron" />
           {point.question}<small>{pointLabel(point.status)}</small>
         </summary>
-        <DiscourseMarkdown text={point.explanation} />
+        <MessageMarkdown text={point.explanation} />
         <div className="tm-discourse-message__context" aria-label={`Sources for ${point.id}`}>
           {point.sourceMessageIds.map((id) => {
             const source = sources.find((message) => message.id === id);
@@ -43,7 +43,7 @@ export function DiscourseHistoryContent({ result, sources, comparison, onNavigat
         {point.evidence.length ? <p><strong>Evidence cited by C</strong>{point.evidence.join('; ')}</p> : null}
         <small>{label(point.confidence)} confidence · C’s assessment</small>
       </details>)}
-    </div><DiscourseMarkdown text={result.reason} /></details>
+    </div><MessageMarkdown text={result.reason} /></details>
     {result.actions.length ? <details><summary>Next questions</summary>
       <ul>{result.actions.map((action) => <li key={`${action.pointId}:${action.participantId}`}>{action.task}</li>)}</ul>
     </details> : null}

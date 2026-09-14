@@ -45,6 +45,6 @@ describe('DiscourseResponseGroup', () => {
     );
 
     expect(html).toContain('Stopping…');
-    expect(html).toContain('<button type="button" disabled="">Stop</button>');
+    expect(html).not.toContain('<button');
   });
 });

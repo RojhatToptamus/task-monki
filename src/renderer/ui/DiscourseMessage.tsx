@@ -15,8 +15,11 @@ import {
   DiscourseRepositoryIcon,
   DiscourseTaskIcon
 } from './DiscourseIcons';
-import { DiscourseMarkdown } from './DiscourseMarkdown';
+import { MessageMarkdown } from './MessageMarkdown';
 import { DiscourseHistoryContent } from './DiscourseHistoryContent';
+import { MessageHeader } from './MessageHeader';
+import { messageModelName } from '../model/messageIdentity';
+import type { AgentModel } from '../../shared/contracts';
 
 export function DiscourseMessage({
   message,
@@ -32,6 +35,9 @@ export function DiscourseMessage({
   onAskAuthor,
   onAskOthers,
   selectedAsSource,
+  peerName = 'peer',
+  peerRequestName,
+  models,
   onToggleSource
 }: {
   message: DiscourseMessageRecord;
@@ -47,9 +53,15 @@ export function DiscourseMessage({
   onAskAuthor(): void;
   onAskOthers(): void;
   selectedAsSource: boolean;
+  peerName?: string;
+  peerRequestName?: string;
+  models?: readonly AgentModel[];
   onToggleSource(): void;
 }) {
   const user = message.author.kind === 'USER';
+  const authorName = messageModelName(job?.assignment.model, messageAuthorLabel(message), models, job?.assignment.runtimeId);
+  const replyJob = relatedJobs.find((candidate) => candidate.id === replyTarget?.jobId);
+  const peer = job?.role === 'ANSWER' && job.assignment.assignmentRole === 'REVIEWER';
   const team = job?.result?.kind === 'CONTRIBUTION' ? job.result.team : undefined;
   const comparisonOutdated = team?.kind === 'COMPARISON' && relatedJobs.some((candidate) =>
     candidate.result?.kind === 'CONTRIBUTION' && (candidate.waveId === job!.waveId
@@ -72,84 +84,7 @@ export function DiscourseMessage({
     if (copyTimerRef.current !== undefined) window.clearTimeout(copyTimerRef.current);
     copyTimerRef.current = window.setTimeout(() => setCopyState('idle'), 1_200);
   };
-  return (
-    <li
-      tabIndex={-1}
-      id={`discourse-message-${message.id}`}
-      className={`tm-discourse-message tm-discourse-message--${
-        message.author.kind.toLowerCase()
-      } ${
-        message.status !== 'VISIBLE'
-          ? `tm-discourse-message--${message.status.toLowerCase()}`
-          : ''
-      }`}
-    >
-      {message.author.kind !== 'AGENT' ? (
-        <div className="tm-discourse-message__rail" aria-hidden="true">
-          <span>{user ? 'Y' : 'M'}</span>
-        </div>
-      ) : null}
-      <article>
-        <header>
-          <strong>{messageAuthorLabel(message)}</strong>
-          {team ? <span className="tm-discourse-message__state">{team.kind === 'COMPARISON' ? 'Comparison' : 'Response'}</span> : null}
-          <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
-          {message.status === 'SUPERSEDED' ? (
-            <span className="tm-discourse-message__state">Corrected</span>
-          ) : null}
-          {job ? (
-            <span className="tm-discourse-message__metadata" title="Model used for this response">
-              {job.assignment.model}
-              {job.freshnessAtCompletion === 'CHANGED_DURING_JOB' ? ' · context changed' : ''}
-            </span>
-          ) : null}
-        </header>
-        {replyTarget ? (
-          <button
-            type="button"
-            className="tm-discourse-reply-reference"
-            onClick={() => onNavigate(replyTarget.id)}
-          >
-            <span>
-              <DiscourseReplyIcon />
-              {messageAuthorLabel(replyTarget)}
-            </span>
-            {replyTarget.status === 'TOMBSTONE'
-              ? 'Deleted message'
-              : compactText(replyTarget.body, 90)}
-          </button>
-        ) : null}
-        {job?.freshnessAtCompletion === 'CHANGED_DURING_JOB' ? (
-          <p className="tm-discourse-message__stale-note">
-            Context changed while this response was running. It is preserved for history, not accepted as current evidence.
-          </p>
-        ) : null}
-        {comparisonOutdated ? <p className="tm-discourse-message__updated-note">Updated below</p> : null}
-        {message.status === 'TOMBSTONE' ? (
-          <p className="tm-discourse-message__tombstone">Message deleted</p>
-        ) : team ? (
-          <DiscourseHistoryContent result={team} sources={sourceMessages} onNavigate={onNavigate}
-            comparison={sourceComparison?.kind === 'CONTRIBUTION' && sourceComparison.team?.kind === 'COMPARISON' ? sourceComparison.team : undefined} />
-        ) : message.author.kind === 'AGENT' ? (
-          <DiscourseMarkdown text={message.body} />
-        ) : (
-          <p className="tm-discourse-message__body">{message.body}</p>
-        )}
-        {context.length > 0 ? (
-          <div className="tm-discourse-message__context" aria-label="Message context">
-            {context.map((reference) => (
-              <span key={`${reference.scope}:${reference.contextLinkId}`}>
-                {reference.scope === 'PINNED'
-                  ? <DiscoursePinIcon />
-                  : reference.entityKind === 'TASK'
-                    ? <DiscourseTaskIcon />
-                    : <DiscourseRepositoryIcon />}
-                {reference.labelSnapshot}
-              </span>
-            ))}
-          </div>
-        ) : null}
-        {message.status !== 'TOMBSTONE' ? (
+  const actions = message.status !== 'TOMBSTONE' ? (
           <footer>
             <button
               type="button"
@@ -173,11 +108,11 @@ export function DiscourseMessage({
               {copyState === 'copied' ? 'Message copied' : copyState === 'failed' ? 'Message could not be copied' : ''}
             </span>
             {!user && message.author.kind === 'AGENT' && message.status === 'VISIBLE' ? (
-              <button type="button" className="tm-discourse-message-action tm-discourse-message-peer" onClick={onAskOthers}>Ask peer</button>
+              <button type="button" className="tm-discourse-message-action tm-discourse-message-peer" onClick={onAskOthers}>Ask {peerName}</button>
             ) : null}
             <DiscourseActionMenu
               className="tm-discourse-message-menu"
-              label={`More actions for ${messageAuthorLabel(message)}`}
+              label={`More actions for ${authorName}`}
               trigger={<DiscourseMoreIcon />}
               items={[
                 ...(!user && message.author.kind === 'AGENT'
@@ -199,7 +134,79 @@ export function DiscourseMessage({
               ]}
             />
           </footer>
+        ) : null;
+  return (
+    <li
+      tabIndex={-1}
+      id={`discourse-message-${message.id}`}
+      className={`tm-discourse-message tm-discourse-message--${
+        message.author.kind.toLowerCase()
+      } ${
+        message.status !== 'VISIBLE'
+          ? `tm-discourse-message--${message.status.toLowerCase()}`
+          : ''
+      } ${peer ? 'tm-discourse-message--peer' : ''}`}
+    >
+      <article>
+        {peerRequestName && message.status !== 'TOMBSTONE' ? <details className="tm-discourse-peer-request">
+          <summary><DiscourseReplyIcon /><span>You asked <strong>{peerRequestName}</strong> to check this answer</span><time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time></summary>
+          <p>{message.body}</p>
+          {replyTarget ? <button type="button" className="ghost-button" onClick={() => onNavigate(replyTarget.id)}>View checked answer</button> : null}
+          {actions}
+        </details> : <>
+        <MessageHeader author={authorName} model={job?.assignment.model} time={message.createdAt}>
+          {team ? <span className="tm-discourse-message__state">{team.kind === 'COMPARISON' ? 'Comparison' : 'Response'}</span> : null}
+          {message.status === 'SUPERSEDED' ? (
+            <span className="tm-discourse-message__state">Corrected</span>
+          ) : null}
+        </MessageHeader>
+        {replyTarget ? (
+          <button
+            type="button"
+            className="tm-discourse-reply-reference"
+            onClick={() => onNavigate(replyTarget.id)}
+          >
+            <span>
+              <DiscourseReplyIcon />
+              {messageModelName(replyJob?.assignment.model, messageAuthorLabel(replyTarget), models, replyJob?.assignment.runtimeId)}
+            </span>
+            {replyTarget.status === 'TOMBSTONE'
+              ? 'Deleted message'
+              : compactText(replyTarget.body, 90)}
+          </button>
         ) : null}
+        {job?.freshnessAtCompletion === 'CHANGED_DURING_JOB' ? (
+          <p className="tm-discourse-message__stale-note">
+            Context changed while this response was running. It is preserved for history, not accepted as current evidence.
+          </p>
+        ) : null}
+        {comparisonOutdated ? <p className="tm-discourse-message__updated-note">Updated below</p> : null}
+        <div className="tm-discourse-message__content">{message.status === 'TOMBSTONE' ? (
+          <p className="tm-discourse-message__tombstone">Message deleted</p>
+        ) : team ? (
+          <DiscourseHistoryContent result={team} sources={sourceMessages} onNavigate={onNavigate}
+            comparison={sourceComparison?.kind === 'CONTRIBUTION' && sourceComparison.team?.kind === 'COMPARISON' ? sourceComparison.team : undefined} />
+        ) : message.author.kind === 'AGENT' ? (
+          <MessageMarkdown text={message.body} />
+        ) : (
+          <p className="tm-discourse-message__body">{message.body}</p>
+        )}</div>
+        </>}
+        {context.length > 0 ? (
+          <div className="tm-discourse-message__context" aria-label="Message context">
+            {context.map((reference) => (
+              <span key={`${reference.scope}:${reference.contextLinkId}`}>
+                {reference.scope === 'PINNED'
+                  ? <DiscoursePinIcon />
+                  : reference.entityKind === 'TASK'
+                    ? <DiscourseTaskIcon />
+                    : <DiscourseRepositoryIcon />}
+                {reference.labelSnapshot}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {!peerRequestName ? actions : null}
       </article>
     </li>
   );

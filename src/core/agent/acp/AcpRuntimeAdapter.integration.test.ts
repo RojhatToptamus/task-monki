@@ -27,6 +27,7 @@ import type {
   WorktreeRecord
 } from '../../../shared/contracts';
 import type { AgentAttachmentSelection } from '../../../shared/attachments';
+import type { AgentRuntimeSessionRecord } from '../../../shared/agentRuntime';
 import { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
 import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
@@ -136,14 +137,16 @@ async function createDualProcessFixture() {
 
   const startSharedTurn = async (
     prompt: string,
-    expectedStatus: 'RUNNING' | 'COMPLETED'
+    expectedStatus: 'RUNNING' | 'COMPLETED',
+    existingSession?: AgentRuntimeSessionRecord
   ) => {
-    const sessionId = randomUUID();
+    const sessionId = existingSession?.id ?? randomUUID();
     const runId = randomUUID();
-    const owner = {
+    const owner = existingSession?.owner ?? {
       kind: 'PROMPT_REFINEMENT' as const,
       requestId: randomUUID()
     };
+    if (owner.kind !== 'PROMPT_REFINEMENT') throw new Error('Unexpected fixture session owner.');
     const context = await adapter.buildExecutionContext({
       sessionId,
       primaryCwd: process.cwd(),
@@ -157,7 +160,10 @@ async function createDualProcessFixture() {
       attachments: []
     });
     const prepared = await runtimeStore.prepareRuntimeTurn({
-      session: {
+      session: existingSession ? {
+        id: existingSession.id,
+        expectedRevision: existingSession.recordRevision
+      } : {
         id: sessionId,
         owner,
         accessEpoch: createAgentSessionAccessEpoch({
@@ -1302,6 +1308,23 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     } finally {
       await adapter.shutdown();
     }
+  });
+
+  it('continues a loaded read-only ACP session and refuses silent replacement when resume is unavailable', async () => {
+    const fixture = await createDualProcessFixture();
+    try {
+      const first = await fixture.startSharedTurn('First question.', 'COMPLETED');
+      const second = await fixture.startSharedTurn('Follow-up question.', 'COMPLETED', first.session);
+      expect(second.session.providerSessionId).toBe(first.session.providerSessionId);
+      expect(second.run.id).not.toBe(first.run.id);
+      await fixture.adapter.releaseSession({ localSessionId: second.session.id,
+        providerSessionId: second.session.providerSessionId });
+      const released = await fixture.runtimeStore.getSession(second.session.id);
+      await expect(fixture.startSharedTurn('After unloading.', 'COMPLETED', released))
+        .rejects.toThrow('cannot resume this session');
+      expect((await fixture.runtimeStore.getSession(second.session.id))?.providerSessionId)
+        .toBe(first.session.providerSessionId);
+    } finally { await fixture.adapter.shutdown(); }
   });
 
   it('keeps dedicated read-only turns on a separate ACP process lane', async () => {

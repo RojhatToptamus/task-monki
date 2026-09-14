@@ -336,8 +336,11 @@ export class DiscourseService {
       }
       let resolved: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>;
       if (currentRevision && !selection.runtimeId && !selection.modelId) {
-        assertParticipantRevisionAvailable(entry.profile.displayName, currentRevision, runtimeCatalog);
-        resolved = resolvedSettingsFromRevision(currentRevision, runtimeCatalog);
+        const selectedRevision = selection.reasoningEffort
+          ? { ...currentRevision, reasoningEffort: selection.reasoningEffort }
+          : currentRevision;
+        assertParticipantRevisionAvailable(entry.profile.displayName, selectedRevision, runtimeCatalog);
+        resolved = resolvedSettingsFromRevision(selectedRevision, runtimeCatalog);
       } else {
         resolved = this.profiles.resolveSelection(runtimeCatalog, selection, catalogSettings);
         if (currentRevision) {

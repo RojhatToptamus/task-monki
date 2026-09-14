@@ -80,8 +80,12 @@ export class ScriptedAgentRuntimeCoordinator implements AgentRuntimeCoordinator 
     const promptArtifactId = `${input.runId}-prompt`;
     const outputArtifactId = `${input.runId}-output`;
     const diagnosticArtifactId = `${input.runId}-diagnostic`;
+    const existingSession = await this.runtime.getSession(input.sessionId);
     return this.runtime.prepareRuntimeTurn({
-      session: {
+      session: existingSession ? {
+        id: existingSession.id,
+        expectedRevision: existingSession.recordRevision
+      } : {
         id: input.sessionId,
         owner: input.owner,
         accessEpoch: createAgentSessionAccessEpoch({
@@ -159,7 +163,7 @@ export class ScriptedAgentRuntimeCoordinator implements AgentRuntimeCoordinator 
       ? await this.startHook(call)
       : {
           serverInstanceId: 'server-1',
-          providerSessionId: `provider-session-${sequence}`,
+          providerSessionId: session.providerSessionId ?? `provider-session-${sequence}`,
           providerTurnId: `provider-turn-${sequence}`,
           startedAt: '2026-07-13T00:07:00.000Z'
         };

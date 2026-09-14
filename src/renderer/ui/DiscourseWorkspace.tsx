@@ -67,6 +67,7 @@ import { DiscourseMessage } from './DiscourseMessage';
 import { DiscourseMentionInput } from './DiscourseMentionInput';
 import { DiscourseModeMenu } from './DiscourseModeMenu';
 import { DiscourseResponseGroup } from './DiscourseResponseGroup';
+import { messageModelName } from '../model/messageIdentity';
 import {
   DiscourseContextPreviewIcon,
   DiscourseMoreIcon,
@@ -368,7 +369,7 @@ export function DiscourseWorkspace({
       setConversationLoadState({ status: 'ready' });
       const activeJobIds = new Set(
         nextAggregate.jobs
-          .filter((job) => !['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status))
+          .filter((job) => job.status !== 'COMPLETED')
           .map((job) => job.id)
       );
       setStreamDrafts((current) => Object.fromEntries(
@@ -491,6 +492,7 @@ export function DiscourseWorkspace({
       }
       if (event.scope.kind !== 'DISCOURSE') return;
       if (event.type === 'discourse.delta') {
+        if (event.scope.conversationId !== selectedConversationIdRef.current) return;
         const payload = event.payload as {
           jobId?: string;
           publication?: { kind?: string; text?: string };
@@ -780,7 +782,18 @@ export function DiscourseWorkspace({
     };
   }, [agentSelectionOverrides, aggregate, catalog, composer, correctionTargetId, draftAutosave, newConversation, persistDraft, replyTargetId, responsePolicy, selectedConversationId, selectedSourceMessageIds]);
 
-  const candidates = catalog ? discourseMentionCandidates(catalog, activeDraft?.tokens).filter((candidate) => candidate.kind !== 'AGENT' || configuredProfileIds.includes(candidate.id as BuiltInAgentProfileId)) : [];
+  const selectedAgentName = (profileId: BuiltInAgentProfileId, fallback = 'Agent') => {
+    const selection = agentSelection(profileId);
+    return messageModelName(selection.modelId, fallback, catalog?.runtimeCatalog.models, selection.runtimeId);
+  };
+  const candidates = catalog ? discourseMentionCandidates(catalog, activeDraft?.tokens)
+    .filter((candidate) => candidate.kind !== 'AGENT' || configuredProfileIds.includes(candidate.id as BuiltInAgentProfileId))
+    .map((candidate) => candidate.kind === 'AGENT' ? { ...candidate,
+      label: selectedAgentName(candidate.id as BuiltInAgentProfileId, candidate.label) } : candidate) : [];
+  const authorLabel = (message: DiscourseMessageRecord) => {
+    const assignment = aggregate?.jobs.find((job) => job.id === message.jobId)?.assignment;
+    return messageModelName(assignment?.model, messageAuthorLabel(message), catalog?.runtimeCatalog.models, assignment?.runtimeId);
+  };
   const selectedSummary = conversations.find(
     (conversation) => conversation.id === selectedConversationId
   );
@@ -1964,6 +1977,7 @@ export function DiscourseWorkspace({
           {aggregate && unanchoredResponseWave ? (
             <ol className="tm-discourse-messages tm-discourse-messages--unanchored-wave">
               <DiscourseResponseGroup
+                models={catalog?.runtimeCatalog.models}
                 aggregate={aggregate}
                 wave={unanchoredResponseWave}
                 streamDrafts={streamDrafts}
@@ -2005,10 +2019,17 @@ export function DiscourseWorkspace({
               {messages.map((message) => (
                 <Fragment key={message.id}>
                   <DiscourseMessage
+                    models={catalog?.runtimeCatalog.models}
                     message={message}
                     replyTarget={findReplyTarget(messages, message)}
                     context={messageContext(aggregate, message)}
                     job={aggregate?.jobs.find((job) => job.id === message.jobId)}
+                    peerName={selectedAgentName(aggregate?.jobs.find((job) => job.id === message.jobId)?.assignment.agentProfileId === peerProfileId
+                        ? mainProfileId : peerProfileId, 'peer')}
+                    peerRequestName={(() => {
+                      const peer = aggregate?.waves.find((wave) => wave.policy === 'CHAT' && wave.triggerMessageId === message.id && wave.assignments.length === 2)?.assignments[1];
+                      return peer ? messageModelName(peer.model, peer.displayNameSnapshot, catalog?.runtimeCatalog.models, peer.runtimeId) : undefined;
+                    })()}
                     relatedJobs={aggregate?.jobs}
                     sourceMessages={messages}
                     onNavigate={(messageId) => navigateToMessage(messageId)}
@@ -2040,6 +2061,7 @@ export function DiscourseWorkspace({
                     .filter((placement) => placement.afterMessageId === message.id)
                     .map(({ wave }) => (
                       <DiscourseResponseGroup
+                        models={catalog?.runtimeCatalog.models}
                         key={wave.id}
                         aggregate={aggregate}
                         wave={wave}
@@ -2080,8 +2102,8 @@ export function DiscourseWorkspace({
           ) : null}
           {replyTarget ? (
             <ComposerTarget label={activeAgentProfileIds.length === 2
-              ? `${catalog?.agents.find((entry) => entry.profile.id === activeAgentProfileIds[1])?.profile.displayName ?? 'Peer'} checking ${messageAuthorLabel(replyTarget)}`
-              : `Replying to ${messageAuthorLabel(replyTarget)}`} message={replyTarget} onRemove={() => {
+              ? `${selectedAgentName(activeAgentProfileIds[1]!, 'Peer')} checking ${authorLabel(replyTarget)}`
+              : `Replying to ${authorLabel(replyTarget)}`} message={replyTarget} onRemove={() => {
                 setReplyTargetId(undefined);
                 if (activeAgentProfileIds.length === 2) setAgentRoster([mainProfileId]);
               }} />
@@ -2156,12 +2178,12 @@ export function DiscourseWorkspace({
                 ) : null}
                 <button
                   type="button"
-                  className="tm-discourse-send"
+                  className={`tm-discourse-send ${activeWave ? 'tm-discourse-send--stop' : ''}`}
                   disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                   aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send()}
                 >
-                  {activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : 'Send'}
+                  {activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
                   {!activeWave ? <kbd>⌘↵</kbd> : null}
                 </button>
               </div>
@@ -2226,13 +2248,21 @@ export function DiscourseWorkspace({
                 ))}
               </ul>
             )}
+            {aggregate && catalog?.repositories.length ? <div className="tm-discourse-pin-menu"><DiscourseActionMenu
+              className="tm-discourse-message-menu"
+              label="Pin a repository"
+              trigger={<><PinIcon />Pin a repository</>}
+              items={catalog.repositories.map((repository) => ({ label: repository.displayName,
+                onSelect: () => void pinContext('REPOSITORY', repository.id) }))}
+            /></div> : null}
           </InspectorSection>
           <InspectorSection title="Access and limits">
+            <dl className="tm-discourse-access-policy">
+              <div><dt>Filesystem</dt><dd>Read only</dd></div>
+              <div><dt>Network, writes, tools</dt><dd>Off</dd></div>
+            </dl>
             <details><summary>View details</summary>
             <dl className="tm-discourse-access-policy">
-              <div><dt>Files</dt><dd>Read only</dd></div>
-              <div><dt>Network</dt><dd>Off</dd></div>
-              <div><dt>Task Monki tools & apps</dt><dd>Not attached</dd></div>
               <div><dt>Approvals</dt><dd>Never</dd></div>
               <div><dt>Peer check</dt><dd>Up to two replies</dd></div>
               <div><dt>Time allowance</dt><dd>20 minutes per request</dd></div>

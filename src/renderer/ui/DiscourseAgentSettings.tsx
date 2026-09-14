@@ -7,6 +7,7 @@ import {
 } from '../model/discourse';
 import { runtimeExecutionUnavailableReason } from '../model/runtimeReadiness';
 import { AgentModelSelector } from './AgentModelSelector';
+import { messageModelName } from '../model/messageIdentity';
 
 interface DiscourseAgentSettingsProps {
   aggregate?: DiscourseConversationAggregateRecord;
@@ -40,8 +41,8 @@ export function DiscourseAgentSettings({
           return (
             <div className="tm-discourse-agent-config__agent" key={selection.agentProfileId}>
               <div className="tm-discourse-agent-config__identity">
-                <strong>{index === 0 ? 'Main agent' : 'Peer'}</strong>
-                <small>{entry.profile.displayName}</small>
+                <strong>{messageModelName(selection.modelId, entry.profile.displayName, catalog.runtimeCatalog.models, selection.runtimeId)}</strong>
+                <small>{index === 0 ? 'Main agent' : 'Peer · on request'}</small>
               </div>
               <AgentModelSelector
                 presentation="compact"
