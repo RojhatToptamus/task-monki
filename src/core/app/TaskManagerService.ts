@@ -2122,7 +2122,7 @@ export class TaskManagerService {
   private async startPromptRefinementRuntimeTurn(
     input: PromptRefinementRunRequest
   ) {
-    return this.startEphemeralReadOnlyRuntimeTurn({
+    return this.startTransientReadOnlyRuntimeTurn({
       owner: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
       scope: { kind: 'PROMPT_REFINEMENT', requestId: input.requestId },
       runtimeId: input.refinementModel.runtimeId,
@@ -2172,7 +2172,7 @@ export class TaskManagerService {
         { cause }
       );
     }
-    const turn = await this.startEphemeralReadOnlyRuntimeTurn({
+    const turn = await this.startTransientReadOnlyRuntimeTurn({
       owner: {
         kind: 'PREVIEW_RECIPE_GENERATION',
         taskId: input.taskId,
@@ -2224,7 +2224,7 @@ export class TaskManagerService {
     };
   }
 
-  private async startEphemeralReadOnlyRuntimeTurn(input: {
+  private async startTransientReadOnlyRuntimeTurn(input: {
     owner: AgentOwnerScope;
     scope: AgentRunScope;
     runtimeId: AgentRuntimeId;
