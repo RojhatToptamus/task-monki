@@ -78,3 +78,6 @@ jobs:
       - name: Verify packaged Preview launcher
         if: runner.os == 'macOS'
         run: npm run verify:packaged-preview
+      - name: Verify packaged private-input persistence
+        if: runner.os == 'macOS'
+        run: npm run verify:packaged-preview-safe-storage
