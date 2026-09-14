@@ -52,7 +52,21 @@ async function main() {
           prompt: 'Verify encrypted private input persistence across a packaged relaunch.',
           repositoryId: repository.id
         });
-        await window.taskManager.prepareWorktree({ taskId: task.id });
+        const inspection = await window.taskManager.inspectWorktreePreparation({ taskId: task.id });
+        if (inspection.mode !== 'CREATE') {
+          throw new Error('Expected a new fixture worktree.');
+        }
+        const base = inspection.bases.find((candidate) => candidate.current);
+        if (!base) throw new Error('Fixture repository has no current base.');
+        const prepared = await window.taskManager.prepareWorktree({
+          taskId: task.id,
+          intent: 'CREATE',
+          baseRef: base.refName,
+          expectedBaseSha: base.sha
+        });
+        if (prepared.outcome !== 'PREPARED') {
+          throw new Error('Fixture worktree preparation did not complete: ' + prepared.outcome);
+        }
         const before = await window.taskManager.resolvePreview({ taskId: task.id });
         if (before.status !== 'PLAN' || before.executionReadiness.status !== 'BLOCKED') {
           throw new Error('Expected the unresolved private input to block execution only.');
