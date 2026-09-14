@@ -246,6 +246,8 @@ export interface TaskManagerAppSettings {
   disabledRuntimeIds: AgentRuntimeId[];
   defaultRuntimeId: AgentRuntimeId;
   agentProfiles: import('./agentProfiles').CustomAgentProfile[];
+  /** Optional additive preference: older profiles have no Discourse defaults. */
+  discourseDefaults?: import('./discourseSettings').DiscourseDefaults;
   defaultModel?: string;
   defaultModelProvider?: AgentModelProviderId;
   defaultReasoningEffort?: string;
@@ -849,6 +851,8 @@ export interface AgentModel {
   serviceTiers: string[];
   defaultServiceTier?: string;
   inputModalities: string[];
+  /** Input/output context capacity, only when explicitly reported by the runtime catalog. */
+  contextWindowTokens?: number;
   /** Provider-owned model support for the full Design workflow. */
   designSupport?: AgentDesignCapability;
   isDefault: boolean;

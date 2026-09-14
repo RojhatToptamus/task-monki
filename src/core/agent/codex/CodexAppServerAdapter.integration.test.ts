@@ -63,6 +63,12 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       purpose: 'DISCOURSE_ANSWER' as const
     },
     {
+      workflow: 'Prompt refinement',
+      owner: { kind: 'PROMPT_REFINEMENT' as const, requestId: 'refinement-1' },
+      scope: { kind: 'PROMPT_REFINEMENT' as const, requestId: 'refinement-1' },
+      purpose: 'PROMPT_REFINEMENT' as const
+    },
+    {
       workflow: 'Preview recipe generation',
       owner: {
         kind: 'PREVIEW_RECIPE_GENERATION' as const,
@@ -255,7 +261,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         cwd: workspace,
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
-        ephemeral: false,
+        ephemeral: purpose !== 'DISCOURSE_ANSWER',
         dynamicTools: []
       });
       expect(threadStart?.params).toMatchObject({
@@ -297,6 +303,46 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       expect(taskSnapshot.tasks).toEqual([]);
       expect(taskSnapshot.runs).toEqual([]);
       expect(taskSnapshot.agentSessions).toEqual([]);
+      await adapter.releaseSession({
+        localSessionId: session.id,
+        providerSessionId: started.providerSessionId
+      });
+      await expect(runtime.getSession(session.id)).resolves.toMatchObject({ status: 'NOT_LOADED' });
+      const releasedJournal = await fs.readFile(
+        runtimeSnapshot.servers[0]!.protocolJournalPath, 'utf8'
+      );
+      expect(readOutboundMessages(releasedJournal).filter(
+        (message) => message.method === 'thread/unsubscribe'
+      )).toHaveLength(1);
+      if (scope.kind === 'DISCOURSE') {
+        const saved = (await runtime.getSession(session.id))!;
+        const followup = await runtime.prepareRuntimeTurn({
+          session: { id: saved.id, expectedRevision: saved.recordRevision },
+          run: {
+            id: 'scoped-run-2', owner, scope: { ...scope, jobId: 'job-2' },
+            sessionId: saved.id, sessionAccessEpoch: saved.accessEpoch.epoch,
+            purpose, generationKey: 'generation-2', clientOperationId: 'create-scoped-run-2',
+            requestedSettings: executionContext.modelSettings,
+            promptArtifactId: 'scoped-prompt-2', outputArtifactId: 'scoped-output-2',
+            diagnosticArtifactId: 'scoped-diagnostic-2', attachmentSelection: [attachment]
+          },
+          prompt: 'Respond to the objection.', priority: 'DISCOURSE_RESPONSE',
+          queueOperationId: 'enqueue-scoped-run-2'
+        });
+        const nextStarting = await runtime.updateRun(followup.run.id, followup.run.recordRevision,
+          { status: 'STARTING', delivery: 'SENDING', startedAt: new Date().toISOString() }, 'scoped-start-intent-2');
+        const next = await adapter.startRuntimeTurn({ session: saved, run: nextStarting,
+          executionContext, prompt: 'Respond to the objection.', attachments: [attachment] });
+        expect(next.providerSessionId).toBe(started.providerSessionId);
+        await waitForRuntimeRunStatus(runtime, followup.run.id, 'COMPLETED');
+        const continuedJournal = await fs.readFile(runtimeSnapshot.servers[0]!.protocolJournalPath, 'utf8');
+        const continuedOutbound = readOutboundMessages(continuedJournal);
+        expect(continuedOutbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+        expect(continuedOutbound.filter((message) => message.method === 'thread/resume')).toEqual([
+          expect.objectContaining({ params: expect.objectContaining({ threadId: started.providerSessionId }) })
+        ]);
+        expect(continuedOutbound.filter((message) => message.method === 'turn/start')).toHaveLength(2);
+      }
     } finally {
       unsubscribe();
       await adapter.shutdown();
@@ -304,11 +350,22 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
-  it('fails before provider delivery when enabled MCP servers cannot be disabled', async () => {
+  it.each([
+    {
+      mode: 'scoped-mcp-discovery-failure',
+      message: 'Codex MCP configuration could not be inspected for this read-only turn.',
+      status: 'FAILED', delivery: 'NOT_DELIVERED'
+    },
+    {
+      mode: 'scoped-ephemeral-rejected',
+      message: 'Codex did not confirm an ephemeral thread. No prompt was sent.',
+      status: 'RECOVERY_REQUIRED', delivery: 'AMBIGUOUS'
+    }
+  ] as const)('blocks prompt delivery when the read-only thread contract fails ($mode)', async ({ mode, message, status, delivery }) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-mcp-failure-'));
     const executable = await writeFakeCodexExecutable(
       dir,
-      'scoped-mcp-discovery-failure'
+      mode
     );
     const workspacePath = path.join(dir, 'read-only-workspace');
     await fs.mkdir(workspacePath, { mode: 0o700 });
@@ -373,12 +430,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
           prepared.queueEntry.id,
           'mcp-failure-start'
         )
-      ).rejects.toThrow(
-        'Codex MCP configuration could not be inspected for this read-only turn.'
-      );
+      ).rejects.toThrow(message);
       await expect(runtime.getRun(prepared.run.id)).resolves.toMatchObject({
-        status: 'FAILED',
-        delivery: 'NOT_DELIVERED'
+        status,
+        delivery
       });
       const snapshot = await runtime.snapshot();
       const journal = await fs.readFile(
@@ -951,7 +1006,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
-  it.each([
+  it.each(([
     {
       name: 'confirms a scoped interruption by stopping Codex when no terminal arrives',
       mode: 'scoped-interrupt-no-terminal',
@@ -976,7 +1031,15 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       action: 'process-loss',
       terminalStatus: 'RECOVERY_REQUIRED'
     }
-  ] as const)('$name', async ({ mode, action, terminalStatus }) => {
+  ] as const).flatMap((scenario) => (
+    ['DISCOURSE_ANSWER', 'PROMPT_REFINEMENT', 'PREVIEW_RECIPE_GENERATION'] as const
+  ).map((purpose) => ({
+    ...scenario,
+    purpose,
+    terminalStatus: scenario.action === 'process-loss' && purpose !== 'DISCOURSE_ANSWER'
+      ? 'INTERRUPTED' as const
+      : scenario.terminalStatus
+  }))))('$name ($purpose)', async ({ mode, action, terminalStatus, purpose }) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-interrupt-'));
     const executable = await writeFakeCodexExecutable(dir, mode);
     const workspacePath = path.join(dir, 'read-only-workspace');
@@ -996,11 +1059,19 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     try {
       await adapter.initialize();
       const interruptRuntimeTurn = vi.spyOn(adapter, 'interruptRuntimeTurn');
-      const owner = {
-        kind: 'DISCOURSE' as const,
-        conversationId: 'conversation-interrupt',
-        stableParticipantId: 'participant-interrupt'
-      };
+      const owner = purpose === 'DISCOURSE_ANSWER'
+        ? {
+            kind: 'DISCOURSE' as const,
+            conversationId: 'conversation-interrupt',
+            stableParticipantId: 'participant-interrupt'
+          }
+        : purpose === 'PROMPT_REFINEMENT'
+          ? { kind: 'PROMPT_REFINEMENT' as const, requestId: 'refinement-interrupt' }
+          : {
+              kind: 'PREVIEW_RECIPE_GENERATION' as const,
+              taskId: 'task-interrupt',
+              generationId: 'generation-interrupt'
+            };
       const sessionId = 'scoped-session-interrupt';
       const executionContext = await adapter.buildExecutionContext({
         sessionId,
@@ -1042,17 +1113,17 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       let run = await runtime.createRun({
         id: 'scoped-run-interrupt',
         owner,
-        scope: {
+        scope: owner.kind === 'DISCOURSE' ? {
           kind: 'DISCOURSE',
           conversationId: owner.conversationId,
           waveId: 'wave-interrupt',
           jobId: 'job-interrupt',
           contextSnapshotId: 'context-interrupt',
           attemptId: 'attempt-interrupt'
-        },
+        } : owner,
         sessionId: session.id,
         sessionAccessEpoch: session.accessEpoch.epoch,
-        purpose: 'DISCOURSE_ANSWER',
+        purpose,
         generationKey: 'generation-interrupt',
         clientOperationId: 'create-scoped-interrupt-run',
         requestedSettings: executionContext.modelSettings,
@@ -1160,6 +1231,12 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         const supervisor = (
           adapter as unknown as { supervisor: CodexAppServerSupervisor }
         ).supervisor;
+        // A transport loss is not proof that the owned process stopped.
+        supervisor.events.emit('exit', supervisor.currentServer!, true, false);
+        await waitForRuntimeRunStatus(runtime, run.id, 'RECOVERY_REQUIRED');
+        await expect(runtime.getRun(run.id)).resolves.toMatchObject({ delivery: 'AMBIGUOUS' });
+        await expect(adapter.releaseSession({ localSessionId: session.id })).rejects.toThrow('Cannot release');
+        await expect(runtime.readArtifact(run.promptArtifactId)).resolves.toContain('Keep this response');
         await supervisor.terminateUnresponsive('Injected scoped process loss.');
       }
       for (let attempt = 0; attempt < 1_000; attempt += 1) {
@@ -1169,7 +1246,15 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       }
 
       await expect(runtime.getRun(run.id)).resolves.toMatchObject(
-        action === 'process-loss'
+        action === 'process-loss' && purpose !== 'DISCOURSE_ANSWER'
+          ? {
+              status: 'INTERRUPTED',
+              delivery: 'TERMINAL',
+              recoveryState: 'NONE',
+              terminalReason: expect.stringContaining('was not retried'),
+              providerTerminalSource: 'CONFIRMED_STOP_AFTER_DISPOSABLE_RUNTIME_LOSS'
+            }
+          : action === 'process-loss'
           ? {
               status: 'RECOVERY_REQUIRED',
               delivery: 'AMBIGUOUS',
@@ -1194,6 +1279,36 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       );
       if (action === 'interrupt') {
         expect(interruptRuntimeTurn).toHaveBeenCalledTimes(1);
+      }
+      const journal = await fs.readFile(
+        (await runtime.snapshot()).servers[0]!.protocolJournalPath, 'utf8'
+      );
+      const outbound = readOutboundMessages(journal);
+      expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+      expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+      if (action === 'process-loss' && purpose !== 'DISCOURSE_ANSWER') {
+        await adapter.shutdown();
+        const restarted = createCodexAdapter(store, new AppEventBus(), {
+          cwd: dir,
+          executable,
+          requestTimeoutMs: 2_000,
+          restartDelaysMs: [],
+          runtimeStore: runtime
+        });
+        try {
+          await restarted.initialize();
+          await expect(runtime.getRun(run.id)).resolves.toMatchObject({ status: 'INTERRUPTED' });
+          for (const server of (await runtime.snapshot()).servers) {
+            const requests = readOutboundMessages(await fs.readFile(server.protocolJournalPath, 'utf8'));
+            if (server.id !== started.serverInstanceId) {
+              expect(requests.filter((message) =>
+                message.method && ['thread/start', 'thread/resume', 'turn/start'].includes(message.method)
+              )).toEqual([]);
+            }
+          }
+        } finally {
+          await restarted.shutdown();
+        }
       }
     } finally {
       await adapter.shutdown();
@@ -6274,6 +6389,7 @@ function fakeCodexScript(
     | 'scoped-interrupt-terminal-race'
     | 'scoped-interrupt-model-reroute'
     | 'scoped-mcp-discovery-failure'
+    | 'scoped-ephemeral-rejected'
     | 'scoped-model-reroute'
     | 'scoped-model-reroute-before-ack'
     | 'scoped-unexpected-request-before-ack'
@@ -6350,10 +6466,15 @@ if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
 
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
-const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+let scopedTurnNumber = 0;
+let ephemeral = false;
+const send = (message) => process.stdout.write(JSON.stringify(message, (key, value) =>
+  mode === 'scoped' && scopedTurnNumber > 1 && value === 'turn-1'
+    ? 'turn-' + scopedTurnNumber : value
+) + '\\n');
 const mode = ${JSON.stringify(mode)};
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
-const scopedMode = mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode === 'scoped-interrupt-model-reroute' || mode === 'scoped-model-reroute' || mode === 'scoped-model-reroute-before-ack' || mode.startsWith('scoped-unexpected-request-');
+const scopedMode = mode === 'scoped' || mode === 'scoped-ephemeral-rejected' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode === 'scoped-interrupt-model-reroute' || mode === 'scoped-model-reroute' || mode === 'scoped-model-reroute-before-ack' || mode.startsWith('scoped-unexpected-request-');
 const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent' || mode === 'stale-generation';
 const userInputMode = mode === 'user-input' || mode === 'user-input-answer-exit' || mode === 'user-input-clear' || mode === 'user-input-exit';
 let goalContinuationStarted = false;
@@ -6374,7 +6495,7 @@ const thread = (turns = []) => ({
   forkedFromId: null,
   parentThreadId: null,
   preview: 'Finish the fake task.',
-  ephemeral: false,
+  ephemeral,
   modelProvider: 'openai',
   createdAt: 1,
   updatedAt: 1,
@@ -6708,6 +6829,7 @@ rl.on('line', (line) => {
       } });
       break;
     case 'thread/start':
+      ephemeral = mode !== 'scoped-ephemeral-rejected' && message.params.ephemeral === true;
       if (
         mode === 'scoped' &&
         message.params.config?.default_permissions !==
@@ -6952,6 +7074,7 @@ rl.on('line', (line) => {
       } });
       break;
     case 'turn/start':
+      scopedTurnNumber += 1;
       turnStartAttempts += 1;
       if (mode === 'turn-start-rejected-once' && turnStartAttempts === 1) {
         send({ id: message.id, error: {

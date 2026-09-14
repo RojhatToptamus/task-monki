@@ -286,6 +286,39 @@ describe('SqliteAgentRuntimeStore', () => {
     await restarted.close();
   });
 
+  it('prepares a turn on a saved session atomically without changing ownership or admitting overlapping work', async () => {
+    const fixture = await storeFixture();
+    const input = sessionInput('continued-session', discourseOwner, 'continued-session');
+    const session = await fixture.store.createSession(input);
+    await fixture.store.close();
+    const store = fixture.openStore();
+    const run = genericRunInput('continued-run', input, discourseScope, 'continued-run');
+    const request = {
+      session: { id: session.id, expectedRevision: session.recordRevision }, run,
+      prompt: 'Continue the discussion.', priority: 'DISCOURSE_RESPONSE' as const,
+      queueOperationId: 'continued-enqueue'
+    };
+    await expect(store.prepareRuntimeTurn({ ...request,
+      session: { ...request.session, expectedRevision: session.recordRevision + 1 }
+    })).rejects.toThrow('session changed');
+    await expect(store.prepareRuntimeTurn({ ...request,
+      run: { ...run, owner: { kind: 'DISCOURSE', conversationId: 'conversation-1', stableParticipantId: 'another-agent' } }
+    })).rejects.toThrow();
+    expect((await store.snapshot()).runs).toHaveLength(0);
+    expect((await store.snapshot()).artifacts).toHaveLength(0);
+    const prepared = await store.prepareRuntimeTurn(request);
+    await expect(store.prepareRuntimeTurn(request)).resolves.toEqual(prepared);
+    await expect(store.prepareRuntimeTurn({ ...request,
+      run: genericRunInput('overlapping-run', input, discourseScope, 'overlapping-run'),
+      queueOperationId: 'overlapping-enqueue'
+    })).rejects.toThrow('unfinished work');
+    const snapshot = await store.snapshot();
+    expect(snapshot.sessions).toEqual([session]);
+    expect(snapshot.runs).toHaveLength(1);
+    expect(snapshot.queueEntries).toHaveLength(1);
+    expect(snapshot.artifacts).toHaveLength(3);
+  });
+
   it('keeps an ambiguous pre-turn provider mutation out of the prompt delivery record', async () => {
     const fixture = await storeFixture();
     const runtime = fixture.store.taskAgentRuntimeAccess();

@@ -15,6 +15,7 @@ import type {
   DiscourseContextPreview,
   DiscourseDraftRecord,
   DiscourseDefaultPolicy,
+  DiscourseDefaults,
   DiscourseAgentSelectionInput,
   BuiltInAgentProfileId,
   DiscourseMessageRecord,
@@ -25,17 +26,14 @@ import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
   composerTokensFromDraft,
   canDeleteAbandonedDiscourseShell,
-  currentDiscourseParticipantRevisions,
   currentPinnedContext,
-  defaultDiscourseResponderRoster,
   defaultDiscourseAgentSelection,
   discourseClientMessageWasPersisted,
   discourseConversationActionsDisabled,
+  discourseComposerPolicy,
   discourseDraftsAlreadySent,
   discourseAcceptedSendForClientMessage,
   discourseMentionCandidates,
-  discourseResponsePolicyDescription,
-  discourseResponsePolicyLabel,
   discourseResponseReadiness,
   discourseWorkspaceLayout,
   draftTokensFromComposer,
@@ -63,12 +61,13 @@ import {
   discoursePendingConversationFingerprint
 } from '../model/discourseSend';
 import { DiscourseActionMenu } from './DiscourseActionMenu';
-import { DiscourseAgentConfigurationBar } from './DiscourseAgentConfigurationBar';
+import { DiscourseAgentSettings } from './DiscourseAgentSettings';
 import { DiscourseConversationRail } from './DiscourseConversationRail';
 import { DiscourseMessage } from './DiscourseMessage';
 import { DiscourseMentionInput } from './DiscourseMentionInput';
 import { DiscourseModeMenu } from './DiscourseModeMenu';
 import { DiscourseResponseGroup } from './DiscourseResponseGroup';
+import { messageModelName } from '../model/messageIdentity';
 import {
   DiscourseContextPreviewIcon,
   DiscourseMoreIcon,
@@ -81,7 +80,7 @@ import { PanelIcon } from './AppNavigation';
 import {
   ConfirmDialog,
   ContextPreview,
-  InspectorDrawer,
+  InspectorSidebar,
   InspectorSection
 } from './DiscourseOverlays';
 import { useDialogFocusBoundary } from './dialogFocus';
@@ -93,6 +92,8 @@ import {
 } from '../model/workspaceLayout';
 
 interface DiscourseWorkspaceProps {
+  defaults?: DiscourseDefaults;
+  onDefaultsChange?(defaults: DiscourseDefaults): Promise<void>;
   historyCollapsed?: boolean;
   onHistoryCollapsedChange?(collapsed: boolean): void;
   onNotify(message: string, tone?: 'info' | 'success' | 'error'): void;
@@ -131,6 +132,8 @@ interface PendingNewConversation {
 }
 
 export function DiscourseWorkspace({
+  defaults,
+  onDefaultsChange,
   historyCollapsed,
   onHistoryCollapsedChange,
   onNotify,
@@ -169,7 +172,7 @@ export function DiscourseWorkspace({
   const [preview, setPreview] = useState<DiscourseContextPreview>();
   const [previewLoading, setPreviewLoading] = useState(false);
   const [acceptedSendActionId, setAcceptedSendActionId] = useState<string>();
-  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [historyWidth, setHistoryWidth] = useState(() =>
     focusedPanelWidth('discourse-history', 268, 220, 360)
   );
@@ -178,8 +181,8 @@ export function DiscourseWorkspace({
   );
   const [railOpen, setRailOpen] = useState(false);
   const [compactLayout, setCompactLayout] = useState(true);
-  const [inspectorOverlayLayout, setInspectorOverlayLayout] = useState(true);
-  const [agentConfigOpen, setAgentConfigOpen] = useState(false);
+  const [collapseHistoryForInspector, setCollapseHistoryForInspector] = useState(true);
+  const defaultsRef = useRef(defaults);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>();
@@ -217,15 +220,17 @@ export function DiscourseWorkspace({
   const eventRefreshTimerRef = useRef<number | undefined>(undefined);
   const eventRefreshConversationIdsRef = useRef(new Set<string>());
 
-  const effectiveHistoryCollapsed = historyCollapsed ?? (compactLayout ? !railOpen : false);
+  const effectiveHistoryCollapsed = (inspectorOpen && collapseHistoryForInspector) ||
+    (historyCollapsed ?? (compactLayout ? !railOpen : false));
   const railModalOpen = compactLayout && !effectiveHistoryCollapsed;
   const setHistoryVisible = useCallback((visible: boolean) => {
+    if (visible && collapseHistoryForInspector) setInspectorOpen(false);
     if (onHistoryCollapsedChange) {
       onHistoryCollapsedChange(!visible);
     } else {
       setRailOpen(visible);
     }
-  }, [onHistoryCollapsedChange]);
+  }, [collapseHistoryForInspector, onHistoryCollapsedChange]);
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -233,7 +238,7 @@ export function DiscourseWorkspace({
     const update = (width: number) => {
       const layout = discourseWorkspaceLayout(width);
       setCompactLayout(layout.compact);
-      setInspectorOverlayLayout(layout.inspectorOverlay);
+      setCollapseHistoryForInspector(layout.collapseHistoryForInspector);
     };
     const updateFromElement = () => update(workspace.getBoundingClientRect().width);
     updateFromElement();
@@ -364,7 +369,7 @@ export function DiscourseWorkspace({
       setConversationLoadState({ status: 'ready' });
       const activeJobIds = new Set(
         nextAggregate.jobs
-          .filter((job) => !['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status))
+          .filter((job) => job.status !== 'COMPLETED')
           .map((job) => job.id)
       );
       setStreamDrafts((current) => Object.fromEntries(
@@ -487,6 +492,7 @@ export function DiscourseWorkspace({
       }
       if (event.scope.kind !== 'DISCOURSE') return;
       if (event.type === 'discourse.delta') {
+        if (event.scope.conversationId !== selectedConversationIdRef.current) return;
         const payload = event.payload as {
           jobId?: string;
           publication?: { kind?: string; text?: string };
@@ -569,17 +575,24 @@ export function DiscourseWorkspace({
     setReplyTargetId(activeDraft?.replyToMessageId);
     setCorrectionTargetId(activeDraft?.supersedesMessageId);
     setSelectedSourceMessageIds(activeDraft?.sourceMessageIds ?? []);
+    const savedDefaults = defaultsRef.current;
     const next = {
       ...createDiscourseComposerMentionState(activeDraft?.body ?? ''),
-      tokens: composerTokensFromDraft(activeDraft?.tokens ?? [])
+      tokens: activeDraft ? composerTokensFromDraft(activeDraft.tokens).filter((token, index, tokens) => activeDraft.policy === 'CHAT' || token.kind !== 'AGENT' || tokens.findIndex((candidate) => candidate.kind === 'AGENT') === index) :
+        !selectedConversationId && savedDefaults?.policy !== 'NONE'
+          ? (savedDefaults?.responderProfileIds ?? []).slice(0, 1).map((id) => ({
+              key: `AGENT:${id}`, kind: 'AGENT' as const, entityId: id,
+              labelSnapshot: catalog?.agents.find((entry) => entry.profile.id === id)?.profile.displayName ?? id,
+              available: catalog?.agents.some((entry) => entry.profile.id === id && entry.availability === 'AVAILABLE') ?? false
+            }))
+          : []
     };
     const defaultPolicy = activeDraft?.policy ??
       conversations.find((conversation) => conversation.id === selectedConversationId)?.defaultPolicy ??
-      'NONE';
-    setResponsePolicy(defaultPolicy);
-    setAgentConfigOpen(false);
+      savedDefaults?.policy ?? 'NONE';
+    setResponsePolicy(discourseComposerPolicy(defaultPolicy));
     setAgentSelectionOverrides(Object.fromEntries(
-      (activeDraft?.agentSelections ?? []).map((selection) => [
+      (activeDraft?.agentSelections ?? (!selectedConversationId ? savedDefaults?.agents : undefined) ?? []).map((selection) => [
         selection.agentProfileId,
         selection
       ])
@@ -590,6 +603,9 @@ export function DiscourseWorkspace({
   // revision must not remount the focused composer merely because it gained an id.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newConversation, selectedConversationId]);
+
+  const savedMainId = aggregate?.participants[0]?.agentProfileId ?? defaultsRef.current?.responderProfileIds[0];
+  const mainProfileId: BuiltInAgentProfileId = savedMainId && isBuiltInAgentProfileId(savedMainId) ? savedMainId : 'builtin.lead';
 
   useEffect(() => {
     if (alreadySentDrafts.length === 0) return;
@@ -625,34 +641,35 @@ export function DiscourseWorkspace({
         ...createDiscourseComposerMentionState(),
         tokens: retainedDiscourseComposerTokensAfterSend(
           activeDraft.policy,
-          composerTokensFromDraft(activeDraft.tokens)
+          composerTokensFromDraft(activeDraft.tokens),
+          mainProfileId
         )
       });
       setAgentSelectionOverrides({});
-      setAgentConfigOpen(false);
-      setResponsePolicy(activeDraft.policy);
+      setResponsePolicy(discourseComposerPolicy(activeDraft.policy));
       setComposerVersion((value) => value + 1);
       onNotify('Recovered the conversation without resending its saved message.', 'info');
     }
-  }, [activeDraft, alreadySentDrafts, draftAutosave, onNotify, sending]);
+  }, [activeDraft, alreadySentDrafts, draftAutosave, mainProfileId, onNotify, sending]);
 
   const selectedAgentProfileIds = composer.tokens
     .filter((token) => token.kind === 'AGENT')
     .map((token) => token.entityId)
     .filter(isBuiltInAgentProfileId);
-  const activeAgentProfileIds: BuiltInAgentProfileId[] = responsePolicy === 'TEAM'
-    ? ['builtin.lead', 'builtin.skeptic', 'builtin.verifier']
-    : responsePolicy === 'NONE'
-      ? []
-      : selectedAgentProfileIds;
-  const activeAgentSelections = activeAgentProfileIds.map((agentProfileId) =>
+  const peerProfileId: BuiltInAgentProfileId = mainProfileId === 'builtin.skeptic' ? 'builtin.lead' : 'builtin.skeptic';
+  const peerEnabled = defaultsRef.current?.responderProfileIds.includes(peerProfileId) ?? false;
+  const configuredProfileIds: BuiltInAgentProfileId[] = [mainProfileId, ...(peerEnabled ? [peerProfileId] : [])];
+  const activeAgentProfileIds: BuiltInAgentProfileId[] = responsePolicy === 'NONE' ? []
+    : selectedAgentProfileIds.length ? selectedAgentProfileIds.slice(0, 2) : [mainProfileId];
+  const agentSelection = (agentProfileId: BuiltInAgentProfileId) =>
     agentSelectionOverrides[agentProfileId] ??
+    defaultsRef.current?.agents.find((selection) => selection.agentProfileId === agentProfileId) ??
     (catalog
       ? discourseAgentSelectionFromCurrentRevision(aggregate, catalog, agentProfileId) ??
         defaultDiscourseAgentSelection(catalog, agentProfileId)
-      : { agentProfileId })
-  );
-  const draftAgentSelections = activeAgentSelections.map((selection) =>
+      : { agentProfileId });
+  const activeAgentSelections = activeAgentProfileIds.map(agentSelection);
+  const draftAgentSelections = [...new Set([...configuredProfileIds, ...activeAgentProfileIds])].map(agentSelection).map((selection) =>
     selection.runtimeId && selection.modelId
       ? selection
       : { agentProfileId: selection.agentProfileId }
@@ -765,10 +782,18 @@ export function DiscourseWorkspace({
     };
   }, [agentSelectionOverrides, aggregate, catalog, composer, correctionTargetId, draftAutosave, newConversation, persistDraft, replyTargetId, responsePolicy, selectedConversationId, selectedSourceMessageIds]);
 
-  const candidates = useMemo(
-    () => catalog ? discourseMentionCandidates(catalog, activeDraft?.tokens) : [],
-    [activeDraft?.tokens, catalog]
-  );
+  const selectedAgentName = (profileId: BuiltInAgentProfileId, fallback = 'Agent') => {
+    const selection = agentSelection(profileId);
+    return messageModelName(selection.modelId, fallback, catalog?.runtimeCatalog.models, selection.runtimeId);
+  };
+  const candidates = catalog ? discourseMentionCandidates(catalog, activeDraft?.tokens)
+    .filter((candidate) => candidate.kind !== 'AGENT' || configuredProfileIds.includes(candidate.id as BuiltInAgentProfileId))
+    .map((candidate) => candidate.kind === 'AGENT' ? { ...candidate,
+      label: selectedAgentName(candidate.id as BuiltInAgentProfileId, candidate.label) } : candidate) : [];
+  const authorLabel = (message: DiscourseMessageRecord) => {
+    const assignment = aggregate?.jobs.find((job) => job.id === message.jobId)?.assignment;
+    return messageModelName(assignment?.model, messageAuthorLabel(message), catalog?.runtimeCatalog.models, assignment?.runtimeId);
+  };
   const selectedSummary = conversations.find(
     (conversation) => conversation.id === selectedConversationId
   );
@@ -812,6 +837,7 @@ export function DiscourseWorkspace({
   });
   const conversationActionsDisabledReason =
     'Stop or finish the active response before archiving or deleting this conversation.';
+  const activeWave = aggregate?.waves.find((wave) => wave.status !== 'SETTLED');
   const composerUnavailable =
     conversationUnavailable || responseDecisionPending || activeDraftAlreadySent;
   const contextTokens = composer.tokens.filter((token) => token.kind !== 'AGENT');
@@ -820,9 +846,7 @@ export function DiscourseWorkspace({
       .filter((entry) => entry.availability === 'AVAILABLE')
       .map((entry) => entry.profile.id) ?? []
   );
-  const teamReady = (['builtin.lead', 'builtin.skeptic', 'builtin.verifier'] as const)
-    .every((profileId) => availableAgentProfileIds.has(profileId));
-  const selectedAgentsReady = selectedAgentProfileIds.every((profileId) =>
+  const selectedAgentsReady = activeAgentProfileIds.every((profileId) =>
     availableAgentProfileIds.has(profileId)
   );
   const eligibleRuntimeCatalog = catalog
@@ -840,50 +864,42 @@ export function DiscourseWorkspace({
   );
   const responseReadiness = discourseResponseReadiness({
     policy: responsePolicy,
-    selectedAgentCount: selectedAgentProfileIds.length,
-    teamReady,
+    selectedAgentCount: activeAgentProfileIds.length,
     selectedAgentsReady,
     configuredAgentsReady
   });
   const safeResponseReady = responseReadiness.ready;
   const responseRequirement = responseReadiness.requirement;
 
+  const rememberDefaults = (
+    policy: DiscourseDefaultPolicy,
+    selections: DiscourseAgentSelectionInput[],
+    responderProfileIds = configuredProfileIds
+  ) => {
+    const agents = new Map((defaultsRef.current?.agents ?? []).map((selection) => [selection.agentProfileId, selection]));
+    for (const selection of selections) agents.set(selection.agentProfileId, selection);
+    const next: DiscourseDefaults = {
+      policy, agents: [...agents.values()],
+      responderProfileIds
+    };
+    defaultsRef.current = next;
+    void onDefaultsChange?.(next);
+  };
+
   const updateComposer = (next: DiscourseComposerMentionState) => {
-    setComposer(next);
-    const agentCount = next.tokens.filter((token) => token.kind === 'AGENT').length;
-    if (agentCount === 1) {
-      setResponsePolicy('DIRECT');
-    } else if (agentCount >= 2) {
-      setResponsePolicy('PANEL');
-    }
+    const agentTokens = next.tokens.filter((token) => token.kind === 'AGENT');
+    // A mention addresses one agent; a peer check is prepared explicitly on an answer.
+    const nextTokens = agentTokens.length > 1 && selectedAgentProfileIds.length < 2
+      ? [...next.tokens.filter((token) => token.kind !== 'AGENT'), agentTokens.at(-1)!] : next.tokens;
+    setComposer({ ...next, tokens: nextTokens });
+    if (agentTokens.length) setResponsePolicy('CHAT');
   };
 
   const changeResponsePolicy = (policy: DiscourseDefaultPolicy) => {
-    setResponsePolicy(policy);
-    if (policy === 'DIRECT') {
-      setAgentRoster(defaultDiscourseResponderRoster({
-        policy,
-        selectedProfileIds: selectedAgentProfileIds,
-        availableProfileIds: availableAgentProfileIds
-      }));
-      setAgentConfigOpen(true);
-      return;
-    }
-    if (policy === 'PANEL') {
-      setAgentRoster(defaultDiscourseResponderRoster({
-        policy,
-        selectedProfileIds: selectedAgentProfileIds,
-        availableProfileIds: availableAgentProfileIds
-      }));
-      setAgentConfigOpen(true);
-      return;
-    }
-    const next = {
-      ...composer,
-      tokens: composer.tokens.filter((token) => token.kind !== 'AGENT')
-    };
-    setComposer(next);
-    setComposerVersion((value) => value + 1);
+    const next = discourseComposerPolicy(policy);
+    rememberDefaults(next, configuredProfileIds.map(agentSelection));
+    setResponsePolicy(next);
+    setAgentRoster(next === 'CHAT' ? [mainProfileId] : []);
   };
 
   const setAgentRoster = (profileIds: readonly BuiltInAgentProfileId[]) => {
@@ -905,19 +921,15 @@ export function DiscourseWorkspace({
     setComposerVersion((value) => value + 1);
   };
 
-  const toggleRespondingAgent = (profileId: BuiltInAgentProfileId) => {
-    if (responsePolicy === 'DIRECT') {
-      setAgentRoster([profileId]);
-      return;
-    }
-    if (responsePolicy !== 'PANEL') return;
-    const selected = selectedAgentProfileIds.includes(profileId)
-      ? selectedAgentProfileIds.filter((candidate) => candidate !== profileId)
-      : [...selectedAgentProfileIds, profileId].slice(0, 3);
-    setAgentRoster(selected);
+  const togglePeer = () => {
+    const ids: BuiltInAgentProfileId[] = peerEnabled ? [mainProfileId] : [mainProfileId, peerProfileId];
+    rememberDefaults(responsePolicy, ids.map(agentSelection), ids);
+    if (peerEnabled) setAgentRoster([mainProfileId]);
+    setAgentSelectionOverrides((current) => ({ ...current }));
   };
 
   const updateAgentSelection = (selection: DiscourseAgentSelectionInput) => {
+    rememberDefaults(responsePolicy, [...activeAgentSelections.filter((current) => current.agentProfileId !== selection.agentProfileId), selection]);
     setAgentSelectionOverrides((current) => ({
       ...current,
       [selection.agentProfileId]: selection
@@ -939,70 +951,23 @@ export function DiscourseWorkspace({
       (revision) => revision.id === author.participantRevisionId
     );
     if (!authorRevision) return;
-    const profiles = catalog.agents
-      .filter((entry) => entry.availability === 'AVAILABLE')
-      .filter((entry) => mode === 'AUTHOR'
-        ? entry.profile.id === authorRevision.agentProfileId
-        : entry.profile.id !== authorRevision.agentProfileId)
-      .slice(0, mode === 'AUTHOR' ? 1 : 2);
-    if (profiles.length === 0) {
-      onNotify('No suitable agent is currently available.', 'info');
-      return;
+    const authorId = authorRevision.agentProfileId;
+    if (!isBuiltInAgentProfileId(authorId)) return;
+    const otherId = authorId === mainProfileId ? peerProfileId : mainProfileId;
+    if (mode === 'OTHERS' && !peerEnabled) {
+      rememberDefaults('CHAT', [agentSelection(mainProfileId), agentSelection(peerProfileId)], [mainProfileId, peerProfileId]);
+      setInspectorOpen(true);
     }
-    const next = {
-      ...composer,
-      tokens: [
-        ...composer.tokens.filter((token) => token.kind !== 'AGENT'),
-        ...profiles.map((entry) => ({
-          key: `AGENT:${entry.profile.id}`,
-          kind: 'AGENT' as const,
-          entityId: entry.profile.id,
-          labelSnapshot: entry.profile.displayName,
-          available: true
-        }))
-      ]
-    };
-    setReplyTargetId(message.replyToMessageId ?? message.id);
+    setReplyTargetId(message.id);
     setCorrectionTargetId(undefined);
-    setResponsePolicy(profiles.length === 1 ? 'DIRECT' : 'PANEL');
-    setComposer(next);
-    setComposerVersion((value) => value + 1);
-    onNotify(
-      mode === 'AUTHOR'
-        ? `Write a follow-up for ${profiles[0]!.profile.displayName}.`
-        : 'Write a follow-up for the other agents.',
-      'info'
-    );
+    setResponsePolicy('CHAT');
+    setAgentRoster(mode === 'AUTHOR' ? [authorId] : [authorId, otherId]);
+    if (mode === 'OTHERS' && !composer.text.trim()) {
+      setComposer((current) => ({ ...current, text: 'Check this answer. Address useful corrections, objections, or alternatives directly to its author.' }));
+    }
+    requestAnimationFrame(() => workspaceRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus());
   };
 
-  const prepareSynthesis = () => {
-    if (selectedSourceMessageIds.length < 2 || !catalog) return;
-    const lead = catalog.agents.find(
-      (entry) => entry.profile.id === 'builtin.lead' && entry.availability === 'AVAILABLE'
-    );
-    if (!lead) {
-      onNotify('Lead is not currently available to synthesize these messages.', 'info');
-      return;
-    }
-    const text = 'Synthesize the selected messages into one concise answer. Preserve material disagreement, uncertainty, and any context limitations.';
-    setComposer({
-      ...createDiscourseComposerMentionState(text),
-      tokens: [
-        ...composer.tokens.filter((token) => token.kind !== 'AGENT'),
-        {
-          key: `AGENT:${lead.profile.id}`,
-          kind: 'AGENT',
-          entityId: lead.profile.id,
-          labelSnapshot: lead.profile.displayName,
-          available: true
-        }
-      ]
-    });
-    setResponsePolicy('DIRECT');
-    setReplyTargetId(undefined);
-    setCorrectionTargetId(undefined);
-    setComposerVersion((value) => value + 1);
-  };
 
   const flushCurrentDraft = (
     pendingClientMessageId?: string,
@@ -1136,6 +1101,10 @@ export function DiscourseWorkspace({
 
   const selectConversation = (conversationId: string) => {
     if (sending) return;
+    if (selectedConversationIdRef.current === conversationId) {
+      setRailOpen(false);
+      return;
+    }
     const pendingShell = pendingNewConversationRef.current?.conversationId;
     const draftFlush = flushCurrentDraft(
       pendingSendIdentityRef.current?.clientMessageId,
@@ -1193,15 +1162,12 @@ export function DiscourseWorkspace({
 
   const send = async (state = composer) => {
     const body = state.text.trim();
-    if (!body || sending) return;
+    if (!body || sending || activeWave) return;
     const sendGeneration = navigationGenerationRef.current;
     const draftScope = draftAutosave.currentScope();
     const sentPolicy = responsePolicy;
     const sentSelections = activeAgentSelections.map((selection) => ({ ...selection }));
-    const retainedComposerTokens = retainedDiscourseComposerTokensAfterSend(
-      sentPolicy,
-      state.tokens
-    );
+    const retainedComposerTokens = retainedDiscourseComposerTokensAfterSend(sentPolicy, state.tokens, mainProfileId);
     const sentReplyTargetId = replyTargetId;
     const sentCorrectionTargetId = correctionTargetId;
     const sentSourceMessageIds = [...selectedSourceMessageIds];
@@ -1209,6 +1175,7 @@ export function DiscourseWorkspace({
       onNotify(responseReadiness.requirement, 'info');
       return;
     }
+    rememberDefaults(sentPolicy, sentSelections);
     const messageContext = state.tokens.flatMap((token) =>
       token.kind === 'AGENT'
         ? []
@@ -1372,7 +1339,6 @@ export function DiscourseWorkspace({
         setSelectedSourceMessageIds([]);
         setComposer({ ...createDiscourseComposerMentionState(), tokens: retainedComposerTokens });
         setAgentSelectionOverrides({});
-        setAgentConfigOpen(false);
         setComposerVersion((value) => value + 1);
         setResponsePolicy(sentPolicy);
         if (wasNewConversation) {
@@ -1449,7 +1415,6 @@ export function DiscourseWorkspace({
                 tokens: retainedComposerTokens
               });
               setAgentSelectionOverrides({});
-              setAgentConfigOpen(false);
               setComposerVersion((value) => value + 1);
               setResponsePolicy(sentPolicy);
               selectedConversationIdRef.current = conversationId;
@@ -1753,18 +1718,10 @@ export function DiscourseWorkspace({
       ? aggregate.contextRevisions.find((revision) => revision.id === wave.plannedContextRevisionId)
       : undefined;
     if (!wave || !trigger) return;
-    const policy: DiscourseDefaultPolicy = ['DIRECT', 'PANEL', 'TEAM'].includes(wave.policy)
-      ? wave.policy as DiscourseDefaultPolicy
-      : 'DIRECT';
-    const agentTokens = policy === 'TEAM'
-      ? []
-      : wave.assignments.map((assignment) => ({
-          key: `AGENT:${assignment.agentProfileId}`,
-          kind: 'AGENT' as const,
-          entityId: assignment.agentProfileId,
-          labelSnapshot: assignment.displayNameSnapshot,
-          available: true
-        }));
+    const policy: DiscourseDefaultPolicy = 'CHAT';
+    const assignment = wave.assignments.find((entry) => entry.assignmentRole === 'PRIMARY' || entry.assignmentRole === 'AUTHOR') ?? wave.assignments[0]!;
+    const agentTokens = [{ key: `AGENT:${assignment.agentProfileId}`, kind: 'AGENT' as const,
+      entityId: assignment.agentProfileId, labelSnapshot: assignment.displayNameSnapshot, available: true }];
     const contextTokens = contextRevision?.references.map((reference) => ({
       key: `${reference.entityKind}:${reference.entityId}`,
       kind: reference.entityKind,
@@ -1781,7 +1738,7 @@ export function DiscourseWorkspace({
     setReplyTargetId(trigger.replyToMessageId);
     setCorrectionTargetId(undefined);
     setComposerVersion((value) => value + 1);
-    onNotify('Review the refreshed context, then send when ready.', 'info');
+    requestAnimationFrame(() => workspaceRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus());
   };
 
   const displayedConversations = visibleConversationSummaries(
@@ -1826,7 +1783,7 @@ export function DiscourseWorkspace({
     <main
       ref={workspaceRef}
       className={`tm-discourse ${compactLayout ? 'tm-discourse--compact' : ''} ${
-        inspectorOpen && !inspectorOverlayLayout ? 'tm-discourse--inspector-open' : ''
+        inspectorOpen ? 'tm-discourse--inspector-open' : ''
       } ${effectiveHistoryCollapsed ? 'tm-discourse--history-collapsed' : ''}`}
     >
       <DiscourseConversationRail
@@ -1914,18 +1871,14 @@ export function DiscourseWorkspace({
                 </button>
               </h1>
             )}
-            <div className="tm-discourse-header__meta">
-              <span>{aggregate?.participants.length ? `${aggregate.participants.length} agent${aggregate.participants.length === 1 ? '' : 's'}` : 'No agents'}</span>
-              {pinned.length > 0 ? <span>{pinned.length} pinned context</span> : <span>Context per message</span>}
-              {aggregate?.conversation.status === 'ARCHIVED' ? <span>Archived</span> : null}
-            </div>
+            {aggregate?.conversation.status === 'ARCHIVED' ? <div className="tm-discourse-header__meta">Archived</div> : null}
           </div>
           <div className="tm-discourse-header__actions">
             <button
               ref={inspectorReturnFocusRef}
               type="button"
               className="tm-iconbtn"
-              aria-label={inspectorOpen ? 'Close context inspector' : 'Open context inspector'}
+              aria-label={inspectorOpen ? 'Close conversation settings' : 'Open conversation settings'}
               aria-expanded={inspectorOpen}
               title={inspectorOpen ? 'Close conversation details' : 'Open conversation details'}
               onClick={() => setInspectorOpen((value) => !value)}
@@ -2024,6 +1977,7 @@ export function DiscourseWorkspace({
           {aggregate && unanchoredResponseWave ? (
             <ol className="tm-discourse-messages tm-discourse-messages--unanchored-wave">
               <DiscourseResponseGroup
+                models={catalog?.runtimeCatalog.models}
                 aggregate={aggregate}
                 wave={unanchoredResponseWave}
                 streamDrafts={streamDrafts}
@@ -2055,25 +2009,33 @@ export function DiscourseWorkspace({
             <div className="tm-discourse-empty tm-discourse-empty--loading" aria-busy="true">
               <StatusGlyph kind="working" />
               <h2>Loading conversation…</h2>
-              <p>Restoring messages, participants, and their saved agent configurations.</p>
             </div>
           ) : messages.length === 0 ? (
             <div className="tm-discourse-empty">
-              <h2>{newConversation ? 'Start a technical conversation' : 'Nothing has been said yet'}</h2>
-              <p>Write a note, compare an approach, or attach a task or repository with <kbd>@</kbd>.</p>
+              <h2>{newConversation ? 'Start a conversation' : 'Nothing has been said yet'}</h2>
             </div>
           ) : (
             <ol className="tm-discourse-messages">
               {messages.map((message) => (
                 <Fragment key={message.id}>
                   <DiscourseMessage
+                    models={catalog?.runtimeCatalog.models}
                     message={message}
                     replyTarget={findReplyTarget(messages, message)}
                     context={messageContext(aggregate, message)}
                     job={aggregate?.jobs.find((job) => job.id === message.jobId)}
+                    peerName={selectedAgentName(aggregate?.jobs.find((job) => job.id === message.jobId)?.assignment.agentProfileId === peerProfileId
+                        ? mainProfileId : peerProfileId, 'peer')}
+                    peerRequestName={(() => {
+                      const peer = aggregate?.waves.find((wave) => wave.policy === 'CHAT' && wave.triggerMessageId === message.id && wave.assignments.length === 2)?.assignments[1];
+                      return peer ? messageModelName(peer.model, peer.displayNameSnapshot, catalog?.runtimeCatalog.models, peer.runtimeId) : undefined;
+                    })()}
+                    relatedJobs={aggregate?.jobs}
+                    sourceMessages={messages}
                     onNavigate={(messageId) => navigateToMessage(messageId)}
                     onReply={() => {
-                      setReplyTargetId(message.replyToMessageId ?? message.id);
+                      if (message.author.kind === 'AGENT') { prepareAgentFollowUp(message, 'AUTHOR'); return; }
+                      setReplyTargetId(message.id);
                       setCorrectionTargetId(undefined);
                     }}
                     onCorrect={() => {
@@ -2099,6 +2061,7 @@ export function DiscourseWorkspace({
                     .filter((placement) => placement.afterMessageId === message.id)
                     .map(({ wave }) => (
                       <DiscourseResponseGroup
+                        models={catalog?.runtimeCatalog.models}
                         key={wave.id}
                         aggregate={aggregate}
                         wave={wave}
@@ -2133,40 +2096,28 @@ export function DiscourseWorkspace({
             <div className="tm-discourse-selection-bar" role="status">
               <span>{selectedSourceMessageIds.length} message{selectedSourceMessageIds.length === 1 ? '' : 's'} selected</span>
               <div>
-                <button type="button" disabled={selectedSourceMessageIds.length < 2} onClick={prepareSynthesis}>Synthesize selected</button>
                 <button type="button" onClick={() => setSelectedSourceMessageIds([])}>Clear</button>
               </div>
             </div>
           ) : null}
           {replyTarget ? (
-            <ComposerTarget label={`Replying to ${messageAuthorLabel(replyTarget)}`} message={replyTarget} onRemove={() => setReplyTargetId(undefined)} />
+            <ComposerTarget label={activeAgentProfileIds.length === 2
+              ? `${selectedAgentName(activeAgentProfileIds[1]!, 'Peer')} checking ${authorLabel(replyTarget)}`
+              : `Replying to ${authorLabel(replyTarget)}`} message={replyTarget} onRemove={() => {
+                setReplyTargetId(undefined);
+                if (activeAgentProfileIds.length === 2) setAgentRoster([mainProfileId]);
+              }} />
           ) : null}
           {correctionTarget ? (
             <ComposerTarget label="Correcting your earlier message" message={correctionTarget} onRemove={() => setCorrectionTargetId(undefined)} />
           ) : null}
           <div className="tm-discourse-composer">
-            {responsePolicy !== 'NONE' && catalog ? (
-              <DiscourseAgentConfigurationBar
-                aggregate={aggregate}
-                catalog={catalog}
-                compact={compactLayout}
-                disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
-                expanded={agentConfigOpen}
-                policy={responsePolicy}
-                selections={activeAgentSelections}
-                selectedProfileIds={activeAgentProfileIds}
-                onDiscoverModels={discoverAgentModels}
-                onExpandedChange={setAgentConfigOpen}
-                onToggleAgent={toggleRespondingAgent}
-                onSelectionChange={updateAgentSelection}
-              />
-            ) : null}
             <DiscourseMentionInput
               key={`${selectedConversationId ?? 'new'}:${composerVersion}`}
               candidates={candidates}
               initialText={composer.text}
               initialTokens={composer.tokens}
-              showAgentTokens={false}
+              showAgentTokens={activeAgentProfileIds.length === 1 && activeAgentProfileIds[0] !== mainProfileId}
               disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
               label="Message"
               placeholder={conversationUnavailable
@@ -2177,9 +2128,9 @@ export function DiscourseWorkspace({
                   ? 'Resume or cancel the interrupted response first'
                 : aggregate?.conversation.status === 'ARCHIVED'
                   ? 'Restore this conversation to add a message'
-                  : 'Write a message… Type @ for agents, tasks, or repositories'}
+                  : 'Write a message… Type @ to add context or address an agent'}
               onChange={updateComposer}
-              onSubmit={(state) => void send(state)}
+              onSubmit={(state) => { if (!activeWave) void send(state); }}
             />
             {contextTokens.length > 0 && aggregate ? (
               <div className="tm-discourse-pin-actions" aria-label="Pin message context">
@@ -2203,7 +2154,6 @@ export function DiscourseWorkspace({
               <DiscourseModeMenu
                 value={responsePolicy}
                 disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
-                teamReady={teamReady}
                 onChange={changeResponsePolicy}
               />
               <div className="tm-discourse-composer__buttons">
@@ -2211,13 +2161,13 @@ export function DiscourseWorkspace({
                   ref={previewButtonRef}
                   type="button"
                   className="tm-discourse-preview-button"
-                  aria-label={previewLoading ? 'Resolving agent context' : 'What agents will see'}
+                  aria-label={previewLoading ? 'Resolving agent context' : 'Context'}
                   aria-expanded={Boolean(preview)}
                   disabled={previewLoading || composerUnavailable}
                   onClick={() => preview ? setPreview(undefined) : void showPreview()}
                 >
                   <DiscourseContextPreviewIcon />
-                  <span>{previewLoading ? 'Resolving…' : 'What agents will see'}</span>
+                  <span>{previewLoading ? 'Resolving…' : 'Context'}</span>
                 </button>
                 {preview ? (
                   <ContextPreview
@@ -2228,13 +2178,13 @@ export function DiscourseWorkspace({
                 ) : null}
                 <button
                   type="button"
-                  className="tm-discourse-send"
-                  disabled={!composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                  className={`tm-discourse-send ${activeWave ? 'tm-discourse-send--stop' : ''}`}
+                  disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                   aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
-                  onClick={() => void send()}
+                  onClick={() => activeWave ? void stopWave(activeWave.id) : void send()}
                 >
-                  {sending ? 'Sending…' : 'Send'}
-                  <kbd>⌘↵</kbd>
+                  {activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
+                  {!activeWave ? <kbd>⌘↵</kbd> : null}
                 </button>
               </div>
             </div>
@@ -2249,7 +2199,6 @@ export function DiscourseWorkspace({
 
       {inspectorOpen ? (
         <>
-          {!inspectorOverlayLayout ? (
             <PanelResizeHandle
               label="Resize conversation details"
               value={inspectorWidth}
@@ -2263,15 +2212,26 @@ export function DiscourseWorkspace({
                 persistFocusedPanelWidth('discourse-inspector', width);
               }}
             />
-          ) : null}
-          <InspectorDrawer
-            modal={inspectorOverlayLayout}
+          <InspectorSidebar
             returnFocus={inspectorReturnFocusRef.current}
             onClose={() => setInspectorOpen(false)}
           >
-          <InspectorSection title="Pinned for future responses" count={pinned.length}>
+          {responsePolicy !== 'NONE' && catalog ? (
+            <InspectorSection title="Agents">
+              <DiscourseAgentSettings
+                aggregate={aggregate}
+                catalog={catalog}
+                disabled={sending || Boolean(activeWave) || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                selections={configuredProfileIds.map(agentSelection)}
+                onDiscoverModels={discoverAgentModels}
+                onTogglePeer={togglePeer}
+                onSelectionChange={updateAgentSelection}
+              />
+            </InspectorSection>
+          ) : null}
+          <InspectorSection title="Pinned context" count={pinned.length}>
             {pinned.length === 0 ? (
-              <p className="tm-discourse-inspector__empty">Nothing is attached automatically. Mention a task or repository, then pin it explicitly.</p>
+              <p className="tm-discourse-inspector__empty">Nothing pinned.</p>
             ) : (
               <ul className="tm-discourse-context-list">
                 {pinned.map((reference) => (
@@ -2287,46 +2247,29 @@ export function DiscourseWorkspace({
                 ))}
               </ul>
             )}
+            {aggregate && catalog?.repositories.length ? <div className="tm-discourse-pin-menu"><DiscourseActionMenu
+              className="tm-discourse-message-menu"
+              label="Pin a repository"
+              trigger={<><PinIcon />Pin a repository</>}
+              items={catalog.repositories.map((repository) => ({ label: repository.displayName,
+                onSelect: () => void pinContext('REPOSITORY', repository.id) }))}
+            /></div> : null}
           </InspectorSection>
-          <InspectorSection title="Response policy">
-            <div className="tm-discourse-inspector__policy">
-              <strong>{discourseResponsePolicyLabel(responsePolicy)}</strong>
-              <p>{discourseResponsePolicyDescription(responsePolicy)}</p>
-            </div>
-          </InspectorSection>
-          <InspectorSection title="Participants" count={aggregate?.participants.length ?? 0}>
-            {currentDiscourseParticipantRevisions(aggregate).length ? (
-              <ul className="tm-discourse-participants">
-                {currentDiscourseParticipantRevisions(aggregate).map((participant) => {
-                  const runtime = catalog?.runtimeCatalog.runtimes.find(
-                    (candidate) => candidate.preflight.runtime.id === participant.runtimeId
-                  );
-                  return (
-                    <li key={participant.id}>
-                      <span>{participant.displayNameSnapshot.slice(0, 1)}</span>
-                      <div>
-                        <strong>{participant.displayNameSnapshot}</strong>
-                        <small>
-                          {capitalize(participant.configuredRole)} ·{' '}
-                          {runtime?.preflight.runtime.displayName ?? 'Unavailable provider'} ·{' '}
-                          {participant.model}
-                        </small>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : <p className="tm-discourse-inspector__empty">No agents are bound to this human-only conversation.</p>}
-          </InspectorSection>
-          <InspectorSection title="Access policy">
+          <InspectorSection title="Access and limits">
             <dl className="tm-discourse-access-policy">
-              <div><dt>Files</dt><dd>Read only</dd></div>
-              <div><dt>Network</dt><dd>Off</dd></div>
-              <div><dt>Tools & apps</dt><dd>Off</dd></div>
-              <div><dt>Approvals</dt><dd>Never</dd></div>
+              <div><dt>Requested access</dt><dd>Read only</dd></div>
+              <div><dt>Task Monki tools</dt><dd>Off</dd></div>
             </dl>
+            <details><summary>View details</summary>
+            <p>Provider controls vary. Task Monki checks selected repositories for changes after each turn.</p>
+            <dl className="tm-discourse-access-policy">
+              <div><dt>Approvals</dt><dd>Never</dd></div>
+              <div><dt>Peer check</dt><dd>Up to two replies</dd></div>
+              <div><dt>Time allowance</dt><dd>20 minutes per request</dd></div>
+            </dl>
+            </details>
           </InspectorSection>
-          </InspectorDrawer>
+          </InspectorSidebar>
         </>
       ) : null}
 
@@ -2389,9 +2332,6 @@ function availabilityLabel(value: string): string {
   return value === 'AVAILABLE' ? 'Available' : value === 'TOMBSTONED' ? 'Historical only' : 'Unavailable';
 }
 
-function capitalize(value: string): string {
-  return value.charAt(0) + value.slice(1).toLocaleLowerCase();
-}
 
 function isBuiltInAgentProfileId(
   value: string

@@ -7,12 +7,18 @@
  * thread.
  */
 
+import type { BuiltInAgentProfileId, DiscourseDefaultPolicy, DiscourseAgentSelectionInput } from './discourseSettings';
+export type { BuiltInAgentProfileId, DiscourseDefaultPolicy, DiscourseAgentSelectionInput, DiscourseDefaults } from './discourseSettings';
+
 export const DISCOURSE_LIMITS = {
   maxContextReferencesPerWave: 8,
   maxFilesystemRootsPerWave: 3,
+  // Bounds for reading and reconciling saved conversations from retired modes.
   maxTeamParticipants: 3,
   maxTeamJobs: 4,
-  maxPanelParticipants: 3,
+  maxAdaptiveTeamJobs: 12,
+  maxChatJobs: 2,
+  maxChatDurationMs: 20 * 60 * 1000,
   maxHumanMessageBytes: 32 * 1024,
   maxAgentContributionBytes: 64 * 1024,
   maxContextManifestBytesPerReference: 64 * 1024,
@@ -38,13 +44,14 @@ export const DISCOURSE_LIMITS = {
 
 export type DiscourseConversationStatus = 'OPEN' | 'ARCHIVED';
 
-export type DiscourseDefaultPolicy = 'TEAM' | 'PANEL' | 'DIRECT' | 'NONE';
-
 /** Current user-authored response waves. */
-export type CurrentDiscourseWavePolicy = Exclude<DiscourseDefaultPolicy, 'NONE'>;
+export type CurrentDiscourseWavePolicy = 'CHAT';
 
 /** Read/recovery compatibility for conversations written by earlier prototypes. */
 export type LegacyDiscourseWavePolicy =
+  | 'DIRECT'
+  | 'PANEL'
+  | 'TEAM'
   | 'TARGETED_REVIEW'
   | 'TARGETED_REPLY'
   | 'SYNTHESIS';
@@ -69,11 +76,6 @@ export interface DiscourseConversationRecord {
   updatedAt: string;
   archivedAt?: string;
 }
-
-export type BuiltInAgentProfileId =
-  | 'builtin.lead'
-  | 'builtin.skeptic'
-  | 'builtin.verifier';
 
 export interface AgentProfileRecord {
   id: BuiltInAgentProfileId;
@@ -160,6 +162,8 @@ export interface DiscourseAcceptedSendRecord {
   triggerMessageId: string;
   clientMessageId: string;
   policy: Exclude<DiscourseDefaultPolicy, 'NONE'>;
+  /** Missing on historical accepted sends, which retain policy version 1. */
+  policyVersion?: number;
   assignments: AgentAssignmentSnapshot[];
   /** Exact bounded conversation window visible to every initial response job. */
   visibleMessageIds: string[];
@@ -172,6 +176,8 @@ export interface DiscourseAcceptedSendRecord {
 }
 
 export type DiscourseAssignmentRole =
+  | 'AUTHOR'
+  | 'COMPARATOR'
   | 'PRIMARY'
   | 'REVIEWER'
   | 'PANELIST'
@@ -287,6 +293,9 @@ export interface ContextSnapshotSourceRecord {
   generation?: ContextGenerationFingerprint;
   inspectedAt?: string;
   exclusionReasons: string[];
+  /** Recorded information included in this prompt, not a copy of live repository files. */
+  recordedContext?: string;
+  readScope?: 'TASK_WORKTREE' | 'REPOSITORY';
 }
 
 /**
@@ -316,6 +325,7 @@ interface ContextSnapshotBase {
   transcriptOrdinals: number[];
   summaryRevisionId?: string;
   attachmentIds: string[];
+  /** Historical snapshots only. Native permission identity now belongs to each runtime session. */
   permissionProfileHash?: string;
   budget: ContextSnapshotBudgetRecord;
   exclusions: string[];
@@ -341,7 +351,7 @@ export type DiscourseWaveStatus =
   | 'RECOVERY_REQUIRED'
   | 'SETTLED';
 
-export type DiscourseWavePhase = 'ANSWER' | 'REVIEW' | 'CORRECT' | 'SYNTHESIZE' | 'COMPLETE';
+export type DiscourseWavePhase = 'ANSWER' | 'REVIEW' | 'CORRECT' | 'SYNTHESIZE' | 'COMPARE' | 'RESPOND' | 'COMPLETE';
 export type DiscourseWaveOutcome =
   | 'COMPLETE'
   | 'PARTIAL'
@@ -350,6 +360,12 @@ export type DiscourseWaveOutcome =
   | 'STALE'
   | 'FAILED';
 export type DiscourseWaveSettlementReason =
+  | 'NEEDS_EVIDENCE'
+  | 'NEEDS_USER'
+  | 'OPEN_DISAGREEMENT'
+  | 'TURN_LIMIT'
+  | 'TIME_LIMIT'
+  | 'NO_NEW_BASIS'
   | 'COMPLETED'
   | 'USER_CANCELED'
   | 'SUPERSEDED'
@@ -389,15 +405,17 @@ export interface DiscourseResponseWaveRecord {
       };
   createdAt: string;
   startedAt?: string;
+  requestedStopReason?: 'TIME_LIMIT';
   settledAt?: string;
 }
 
-export type CurrentDiscourseJobRole =
-  | 'ANSWER'
-  | 'CRITIQUE'
-  | 'CORRECT';
+export type CurrentDiscourseJobRole = 'ANSWER';
 
 export type LegacyDiscourseJobRole =
+  | 'COMPARE'
+  | 'RESPOND'
+  | 'CRITIQUE'
+  | 'CORRECT'
   | 'TARGETED_REPLY'
   | 'SYNTHESIZE'
   | 'COMPACT_HISTORY';
@@ -432,8 +450,50 @@ export type DiscourseCorrectionOutcome =
   | 'ACKNOWLEDGED_UNRESOLVED'
   | 'ABSTAINED';
 
+/** C's map is a contestable agent statement, never a verified review verdict. */
+export interface DiscourseTeamComparison {
+  kind: 'COMPARISON';
+  summary: string;
+  points: {
+    id: string;
+    question: string;
+    importance: 'MATERIAL' | 'ADVISORY';
+    status: 'OPEN' | 'AGREED' | 'CORRECTED' | 'DISAGREED' | 'NEEDS_EVIDENCE' | 'NEEDS_USER';
+    explanation: string;
+    /** Message IDs locate arguments, not independent factual evidence. */
+    sourceMessageIds: string[];
+    evidence: string[];
+    confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  }[];
+  next: 'CONTINUE' | 'READY' | 'NEEDS_EVIDENCE' | 'NEEDS_USER' | 'OPEN_DISAGREEMENT';
+  reason: string;
+  actions: {
+    pointId: string;
+    participantId: string;
+    task: string;
+    expectedBenefit: string;
+    /** A previously unexamined claim, new response, or evidence in the visible messages. */
+    basisMessageIds: string[];
+  }[];
+}
+
+export interface DiscourseTeamResponse {
+  kind: 'RESPONSE';
+  responses: {
+    pointId: string;
+    stance: 'REVISE' | 'DEFEND' | 'CLARIFY' | 'WITHDRAW' | 'UNCERTAIN' | 'ABSTAIN';
+    answer: string;
+    reason: string;
+    evidence: string[];
+  }[];
+  /** Includes corrections to C and self-found issues. An empty list is valid. */
+  newIssues: string[];
+}
+
 export type DiscourseJobResult =
-  | { kind: 'CONTRIBUTION'; outputMessageId: string }
+  | { kind: 'CONTRIBUTION'; outputMessageId: string; team?: DiscourseTeamComparison | DiscourseTeamResponse;
+      /** Requests one author response, not a correctness verdict. */
+      requestAuthorResponse?: boolean }
   | {
       kind: 'REVIEW';
       outcome: DiscourseReviewOutcome;
@@ -629,14 +689,6 @@ export interface DiscourseMentionCatalogSnapshot {
   refreshedAt: string;
 }
 
-/** Renderer-selected identity; core resolves provider/service details from the live catalog. */
-export interface DiscourseAgentSelectionInput {
-  agentProfileId: BuiltInAgentProfileId;
-  runtimeId?: import('./agent').AgentRuntimeId;
-  modelId?: string;
-  reasoningEffort?: string;
-}
-
 export interface DiscourseContextPreviewReference
   extends DiscourseContextSelectionSnapshot {
   scope: DiscourseContextScope;
@@ -646,6 +698,7 @@ export interface DiscourseContextPreviewReference
   taskWorkflowPhase?: string;
   accessMode: ContextSourceAccessMode;
   exclusionReasons: string[];
+  readScope?: 'TASK_WORKTREE' | 'REPOSITORY';
 }
 
 export interface DiscourseContextPreview {

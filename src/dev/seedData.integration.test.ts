@@ -217,6 +217,15 @@ describe('Task Monki development seed data', () => {
         waves: [{ policy: 'TEAM', status: 'RUNNING' }],
         jobs: [{ role: 'ANSWER', status: 'RUNNING' }]
       });
+      await expect(discourse('discourse-abc-ready')).resolves.toMatchObject({
+        waves: [{ policy: 'TEAM', policyVersion: 2, status: 'SETTLED', outcome: 'COMPLETE' }],
+        jobs: [{ role: 'ANSWER' }, { role: 'ANSWER' }, { role: 'COMPARE', result: { team: { next: 'READY' } } }]
+      });
+      await expect(discourse('discourse-abc-waiting')).resolves.toMatchObject({ waves: [{ settlementReason: 'NEEDS_USER' }] });
+      await expect(discourse('discourse-abc-responding')).resolves.toMatchObject({
+        jobs: [{ role: 'ANSWER' }, { role: 'ANSWER' }, { role: 'COMPARE' }, { role: 'RESPOND', status: 'COMPLETED' }, { role: 'RESPOND', status: 'RUNNING' }]
+      });
+      await expect(discourse('discourse-abc-stale')).resolves.toMatchObject({ waves: [{ outcome: 'STALE' }] });
       await expect(discourse('discourse-panel-partial')).resolves.toMatchObject({
         waves: [{ policy: 'PANEL', status: 'SETTLED', outcome: 'PARTIAL' }]
       });
@@ -549,6 +558,7 @@ describe('Task Monki development seed data', () => {
     const runtimeStore = persistence.agentRuntime;
     const taskRuntime = persistence.taskRuntime;
     const before = await store.snapshot();
+    const beforeDiscourse = await persistence.discourse.getConversation('seed-discourse-abc-responding');
     const initialize = vi.fn(async () => undefined);
     const adapter = {
       descriptor: CODEX_RUNTIME_DESCRIPTOR,
@@ -573,6 +583,7 @@ describe('Task Monki development seed data', () => {
     await service.init();
     try {
       const after = await store.snapshot();
+      expect(await persistence.discourse.getConversation('seed-discourse-abc-responding')).toEqual(beforeDiscourse);
       expect(initialize).not.toHaveBeenCalled();
       await expect(service.getAgentRuntimeCatalog()).resolves.toMatchObject({
         runtimes: [

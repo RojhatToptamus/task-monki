@@ -153,6 +153,12 @@ provider process. The UI must describe this boundary correctly.
 
 ### Preview recipe generation
 
+Prompt refinement and Preview recipe generation use fresh, transient sessions.
+Their runtime records remain until terminal settlement and confirmed release.
+The Codex adapter also requests native ephemeral threads for these two purposes.
+OpenCode and ACP keep their existing session behavior because their integrations have no verified equivalent flag.
+Session close or unsubscribe does not promise provider history deletion.
+
 Preview recipe generation uses the runtime and model selected in Settings.
 It does not use an app-owned fallback model.
 

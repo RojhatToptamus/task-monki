@@ -49,7 +49,7 @@ import {
   discourseModelMatches,
   discourseRuntimeUnavailableReason
 } from './AgentProfileCatalog';
-import type { DiscourseContextSnapshotService } from './DiscourseContextSnapshotService';
+import { DiscourseContextChangedError, type DiscourseContextSnapshotService } from './DiscourseContextSnapshotService';
 import type { DiscourseContextResolver } from './DiscourseContextResolver';
 import {
   DiscourseRuntimeCoordinator,
@@ -63,6 +63,7 @@ import {
   assertDiscoursePolicyRoster,
   deriveDiscourseWaveAggregate
 } from './DiscourseState';
+import { discourseTimeExpired } from './DiscourseResponses';
 import type { DiscourseStore } from './DiscourseStore';
 
 export interface DiscourseServiceOptions {
@@ -335,8 +336,11 @@ export class DiscourseService {
       }
       let resolved: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>;
       if (currentRevision && !selection.runtimeId && !selection.modelId) {
-        assertParticipantRevisionAvailable(entry, currentRevision, runtimeCatalog);
-        resolved = resolvedSettingsFromRevision(currentRevision, runtimeCatalog);
+        const selectedRevision = selection.reasoningEffort
+          ? { ...currentRevision, reasoningEffort: selection.reasoningEffort }
+          : currentRevision;
+        assertParticipantRevisionAvailable(entry.profile.displayName, selectedRevision, runtimeCatalog);
+        resolved = resolvedSettingsFromRevision(selectedRevision, runtimeCatalog);
       } else {
         resolved = this.profiles.resolveSelection(runtimeCatalog, selection, catalogSettings);
         if (currentRevision) {
@@ -350,7 +354,17 @@ export class DiscourseService {
       }
       resolvedSelections.set(profileId, resolved);
       if (currentRevision && participantSettingsMatch(currentRevision, resolved)) {
-        assertParticipantRevisionAvailable(entry, currentRevision, runtimeCatalog);
+        assertParticipantRevisionAvailable(entry.profile.displayName, currentRevision, runtimeCatalog);
+      }
+    }
+    if (input.policy === 'CHAT' && profileIds.length === 2) {
+      if (!input.replyToMessageId) throw new Error('Choose the answer or question for the peer to examine.');
+      const [target] = await this.findMessages([input.replyToMessageId], input.conversationId);
+      if (!target || target.status !== 'VISIBLE') throw new Error('Choose a current, visible answer or question.');
+      if (target.author.kind === 'AGENT') {
+        const authorRevisionId = target.author.participantRevisionId;
+        const author = aggregate.participantRevisions.find((revision) => revision.id === authorRevisionId);
+        if (author?.agentProfileId !== profileIds[0]) throw new Error('The response must return to the selected answer’s author.');
       }
     }
     const context = await this.context.resolveSelections(input.context ?? []);
@@ -360,6 +374,23 @@ export class DiscourseService {
         limit: DISCOURSE_LIMITS.maxRecentTranscriptMessages - 1
       })
     ).messages;
+    const selectedMessageIds = uniqueStrings([
+      ...(input.sourceMessageIds ?? []),
+      ...(input.replyToMessageId ? [input.replyToMessageId] : []),
+      ...(input.supersedesMessageId ? [input.supersedesMessageId] : [])
+    ]);
+    const recentSlots = DISCOURSE_LIMITS.maxRecentTranscriptMessages - 1 - selectedMessageIds.length;
+    if (recentSlots < 0) {
+      throw new Error('Too many selected messages. Narrow the sources before sending.');
+    }
+    const recentMessageIds = priorTranscript
+      .map((candidate) => candidate.id)
+      .filter((id) => !selectedMessageIds.includes(id));
+    // Exact selected sources take priority over optional recent history.
+    const priorVisibleMessageIds = [
+      ...selectedMessageIds,
+      ...(recentSlots > 0 ? recentMessageIds.slice(-recentSlots) : [])
+    ];
     const configuration = this.buildParticipantConfiguration(
       aggregate,
       profileIds,
@@ -382,8 +413,9 @@ export class DiscourseService {
       participantRevisions: configuration.participantRevisions,
       expectedRevision: aggregate.conversation.recordRevision,
       policy: input.policy,
+      policyVersion: 1,
       assignments,
-      priorVisibleMessageIds: priorTranscript.map((candidate) => candidate.id),
+      priorVisibleMessageIds,
       previewFingerprint: input.previewFingerprint,
       requestFingerprint
     });
@@ -419,9 +451,9 @@ export class DiscourseService {
       conversationId: accepted.conversationId,
       triggerMessageId: message.id,
       policy: accepted.policy,
-      policyVersion: 1,
+      policyVersion: accepted.policyVersion ?? 1,
       assignments,
-      sourceMessageIds: [message.id],
+      sourceMessageIds: uniqueStrings([message.id, ...(message.replyToMessageId ? [message.replyToMessageId] : [])]),
       plannedContextRevisionId: contextRevision.id,
       contextSnapshotId: snapshotId,
       attempt: 1,
@@ -444,9 +476,8 @@ export class DiscourseService {
       accepted.visibleMessageIds,
       accepted.conversationId
     );
-    const answerAssignments = accepted.policy === 'TEAM'
-      ? assignments.filter((assignment) => assignment.assignmentRole === 'PRIMARY')
-      : assignments;
+    if (accepted.policy !== 'CHAT') throw new Error('This saved response uses a retired mode. Cancel it and send a new message in Chat.');
+    const answerAssignments = assignments.length === 2 ? [assignments[1]!] : assignments;
     const jobs = answerAssignments.map((assignment): DiscourseAgentJobRecord => {
       const jobId = this.createId();
       return {
@@ -456,7 +487,7 @@ export class DiscourseService {
         assignment,
         role: 'ANSWER',
         phase: 1,
-        targetMessageIds: [message.id],
+        targetMessageIds: uniqueStrings([message.id, ...(message.replyToMessageId ? [message.replyToMessageId] : [])]),
         visibleMessageIds: [...accepted.visibleMessageIds],
         contextSnapshotId: snapshotId,
         attemptId: this.createId(),
@@ -541,7 +572,7 @@ export class DiscourseService {
           messages: transcript
         });
         if (bounded.error) {
-          await this.markQueuedJobsPromptBlocked(
+          await this.markQueuedJobsFailed(
             accepted.conversationId,
             [job],
             bounded.error,
@@ -549,20 +580,26 @@ export class DiscourseService {
           );
           continue;
         }
-        const executionContext = job.id === firstJob.id
-          ? prepared.executionContext
-          : await runtime.contextSnapshots.executionContextForSnapshot({
-              snapshot: prepared.snapshot,
-              assignment: job.assignment,
-              sessionId: discourseRuntimeSessionId(prepareOperationId),
-              clientOperationId: prepareOperationId
-            });
+        let executionContext;
+        try {
+          executionContext = job.id === firstJob.id
+            ? prepared.executionContext
+            : await runtime.contextSnapshots.executionContextForSnapshot({
+                snapshot: prepared.snapshot,
+                assignment: job.assignment,
+                sessionId: discourseRuntimeSessionId(prepareOperationId),
+                clientOperationId: prepareOperationId
+              });
+        } catch (error) {
+          await this.markQueuedPreparationFailure(accepted.conversationId, [job], error, prepareOperationId);
+          continue;
+        }
         const runtimeJob = await runtime.coordinator.prepareJob({
           conversationId: accepted.conversationId,
           waveId,
           jobId: job.id,
           executionContext,
-          prompt: bounded.prompt!,
+          prompt: bounded.prompt,
           clientOperationId: prepareOperationId
         });
         preparedJobCount += 1;
@@ -658,6 +695,12 @@ export class DiscourseService {
       );
       for (const accepted of aggregate.acceptedSends) {
         if (accepted.status !== 'PENDING' || waveTriggerIds.has(accepted.triggerMessageId)) {
+          continue;
+        }
+        if (accepted.policy !== 'CHAT') {
+          aggregate = await this.store.cancelAcceptedSend({ conversationId, acceptedSendId: accepted.id,
+            expectedConversationRevision: aggregate.conversation.recordRevision,
+            clientOperationId: `retired-mode:${accepted.id}` });
           continue;
         }
         const message = await this.findMessage(accepted.triggerMessageId, conversationId);
@@ -778,16 +821,16 @@ export class DiscourseService {
         return wave;
       }
       const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
-      const messages = (await this.store.listMessages({
-        conversationId: input.conversationId,
-        limit: 100
-      })).messages;
+      const messages = await this.findMessages(
+        uniqueStrings(jobs.flatMap((job) => job.visibleMessageIds)),
+        input.conversationId
+      );
       let preparedJobCount = 0;
       for (const job of jobs) {
         const operationId = `${wave.clientOperationId}:prepare:${job.id}`;
         const bounded = await this.buildBoundedPrompt({ aggregate, job, snapshot, messages });
         if (bounded.error) {
-          await this.markQueuedJobsPromptBlocked(
+          await this.markQueuedJobsFailed(
             input.conversationId,
             [job],
             bounded.error,
@@ -795,18 +838,24 @@ export class DiscourseService {
           );
           continue;
         }
-        const executionContext = await runtime.contextSnapshots.executionContextForSnapshot({
-          snapshot,
-          assignment: job.assignment,
-          sessionId: discourseRuntimeSessionId(operationId),
-          clientOperationId: operationId
-        });
+        let executionContext;
+        try {
+          executionContext = await runtime.contextSnapshots.executionContextForSnapshot({
+            snapshot,
+            assignment: job.assignment,
+            sessionId: discourseRuntimeSessionId(operationId),
+            clientOperationId: operationId
+          });
+        } catch (error) {
+          await this.markQueuedPreparationFailure(input.conversationId, [job], error, operationId);
+          continue;
+        }
         const prepared = await runtime.coordinator.prepareJob({
           conversationId: input.conversationId,
           waveId: wave.id,
           jobId: job.id,
           executionContext,
-          prompt: bounded.prompt!,
+          prompt: bounded.prompt,
           clientOperationId: operationId
         });
         preparedJobCount += 1;
@@ -835,71 +884,29 @@ export class DiscourseService {
     if (wave.status === 'SETTLED') {
       return (await this.activateNextWave(conversationId, `${clientOperationId}:next`)) ?? wave;
     }
-    if (wave.policy !== 'TEAM') return wave;
-    const derived = deriveDiscourseWaveAggregate({
-      wave,
-      jobs: aggregate.jobs.filter((job) => job.waveId === wave.id),
-      concerns: aggregate.concerns.filter((concern) => concern.waveId === wave.id)
-    });
-    if (!derived.nextPhase || !['REVIEW', 'CORRECT'].includes(derived.nextPhase)) {
-      return wave;
-    }
-    const snapshot = aggregate.contextSnapshots.find(
-      (candidate) => candidate.id === wave.contextSnapshotId
-    );
+    if (wave.policy !== 'CHAT') return this.stopWaveUnlocked({ conversationId, waveId,
+      clientOperationId: `${clientOperationId}:retired-mode`, reason: 'This response used a retired conversation mode.' });
+    if (discourseTimeExpired(wave, this.now())) return this.stopWaveUnlocked({ conversationId, waveId, clientOperationId: `${clientOperationId}:time-limit`, reason: 'Response reached its 20-minute limit.' });
+    const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
+    const derived = deriveDiscourseWaveAggregate({ wave, jobs });
+    if (derived.nextPhase !== 'ANSWER') return wave;
+    const peer = jobs.find((job) => job.assignment.assignmentRole === 'REVIEWER');
+    if (peer?.result?.kind !== 'CONTRIBUTION' || peer.result.requestAuthorResponse !== true) return wave;
+    const snapshot = aggregate.contextSnapshots.find((candidate) => candidate.id === wave.contextSnapshotId);
     if (!snapshot || await runtime.contextSnapshots.freshness(snapshot) !== 'FRESH') {
-      const settled = await this.settleWaveForChangedContext(
-        conversationId,
-        wave,
-        clientOperationId
-      );
-      return (await this.activateNextWave(conversationId, `${clientOperationId}:next`)) ?? settled;
+      return this.settleWaveForChangedContext(conversationId, wave, clientOperationId);
     }
-    const leadJob = aggregate.jobs.find(
-      (job) =>
-        job.waveId === wave.id &&
-        job.role === 'ANSWER' &&
-        job.result?.kind === 'CONTRIBUTION'
-    );
-    const leadMessageId = leadJob?.result?.kind === 'CONTRIBUTION'
-      ? leadJob.result.outputMessageId
-      : undefined;
-    if (!leadJob || !leadMessageId) {
-      throw new Error('A Team downstream phase requires the lead answer.');
-    }
-    const createdAt = this.now();
-    const downstreamJobs: DiscourseAgentJobRecord[] = derived.nextPhase === 'REVIEW'
-      ? wave.assignments
-          .filter((assignment) => assignment.assignmentRole === 'REVIEWER')
-          .map((assignment) => this.createQueuedJob({
-            conversationId,
-            waveId,
-            snapshotId: snapshot.id,
-            assignment,
-            role: 'CRITIQUE',
-            phase: 2,
-            targetMessageIds: [leadMessageId],
-            visibleMessageIds: uniqueStrings([...leadJob.visibleMessageIds, leadMessageId]),
-            createdAt
-          }))
-      : [this.createQueuedJob({
-          conversationId,
-          waveId,
-          snapshotId: snapshot.id,
-          assignment: wave.assignments.find(
-            (assignment) => assignment.assignmentRole === 'PRIMARY'
-          )!,
-          role: 'CORRECT',
-          phase: 3,
-          targetMessageIds: [leadMessageId],
-          visibleMessageIds: uniqueStrings([...leadJob.visibleMessageIds, leadMessageId]),
-          createdAt
-        })];
+    const authorJob = this.createQueuedJob({
+      conversationId, waveId, snapshotId: snapshot.id, assignment: wave.assignments[0]!,
+      role: 'ANSWER', phase: 2, targetMessageIds: [peer.result.outputMessageId, ...peer.targetMessageIds],
+      visibleMessageIds: uniqueStrings([...peer.visibleMessageIds, peer.result.outputMessageId]),
+      createdAt: this.now()
+    });
 
     wave = await this.store.updateWave({
       conversationId,
       expectedRevision: wave.recordRevision,
-      clientOperationId: `${clientOperationId}:phase:${derived.nextPhase.toLowerCase()}`,
+      clientOperationId: `${clientOperationId}:phase:${authorJob.phase}:${derived.nextPhase.toLowerCase()}`,
       wave: {
         ...wave,
         recordRevision: wave.recordRevision + 1,
@@ -910,70 +917,47 @@ export class DiscourseService {
     await this.store.addJobsToWave({
       conversationId,
       waveId,
-      jobs: downstreamJobs,
+      jobs: [authorJob],
       expectedConversationRevision: aggregate.conversation.recordRevision,
-      clientOperationId: `${clientOperationId}:jobs:${derived.nextPhase.toLowerCase()}`
+      clientOperationId: `${clientOperationId}:jobs:${authorJob.phase}:${derived.nextPhase.toLowerCase()}`
     });
     aggregate = await this.store.getConversation(conversationId);
-    const messages = (await this.store.listMessages({ conversationId, limit: 100 })).messages;
-    const promptByJob = new Map<string, string>();
-    for (const job of downstreamJobs) {
-      const bounded = await this.buildBoundedPrompt({ aggregate, job, snapshot, messages });
-      if (bounded.error) {
-        await this.markQueuedJobsPromptBlocked(
-          conversationId,
-          [job],
-          bounded.error,
-          `${clientOperationId}:prompt-budget`
-        );
-      } else {
-        promptByJob.set(job.id, bounded.prompt!);
-      }
-    }
-    const runnableJobs = downstreamJobs.filter((job) => promptByJob.has(job.id));
-    const executionContexts = new Map<string, Awaited<ReturnType<DiscourseContextSnapshotService['executionContextForSnapshot']>>>();
-    try {
-      for (const job of runnableJobs) {
-        const operationId = `${wave.clientOperationId}:prepare:${job.id}`;
-        executionContexts.set(job.id, await runtime.contextSnapshots.executionContextForSnapshot({
+    const messages = await this.findMessages(authorJob.visibleMessageIds, conversationId);
+    const bounded = await this.buildBoundedPrompt({ aggregate, job: authorJob, snapshot, messages });
+    if (bounded.error) {
+      await this.markQueuedJobsFailed(
+        conversationId,
+        [authorJob],
+        bounded.error,
+        `${clientOperationId}:prompt-budget`
+      );
+    } else {
+      const operationId = `${wave.clientOperationId}:prepare:${authorJob.id}`;
+      let executionContext;
+      try {
+        executionContext = await runtime.contextSnapshots.executionContextForSnapshot({
           snapshot,
-          assignment: job.assignment,
+          assignment: authorJob.assignment,
           sessionId: discourseRuntimeSessionId(operationId),
           clientOperationId: operationId
-        }));
+        });
+      } catch (error) {
+        await this.markQueuedPreparationFailure(conversationId, [authorJob], error, clientOperationId);
+        const settled = await runtime.coordinator.reconcileWave(conversationId, waveId, clientOperationId);
+        this.emit('discourse.wave.updated', conversationId, settled);
+        return (await this.activateNextWave(conversationId, `${clientOperationId}:next`)) ?? settled;
       }
-    } catch (error) {
-      await this.markQueuedJobsContextStale(
-        conversationId,
-        downstreamJobs,
-        `${clientOperationId}:context-stale`
-      );
-      const currentWave = requireWave(
-        (await this.store.getConversation(conversationId)).waves,
-        waveId
-      );
-      const settled = await this.settleWaveForChangedContext(
-        conversationId,
-        currentWave,
-        clientOperationId
-      );
-      return (await this.activateNextWave(conversationId, `${clientOperationId}:next`)) ?? settled;
-    }
-    for (const job of runnableJobs) {
-      const operationId = `${wave.clientOperationId}:prepare:${job.id}`;
-      const executionContext = executionContexts.get(job.id);
-      if (!executionContext) throw new Error('Discourse execution context preparation was lost.');
       const prepared = await runtime.coordinator.prepareJob({
         conversationId,
         waveId,
-        jobId: job.id,
+        jobId: authorJob.id,
         executionContext,
-        prompt: promptByJob.get(job.id)!,
+        prompt: bounded.prompt,
         clientOperationId: operationId
       });
       this.emit('discourse.job.updated', conversationId, prepared.job);
+      runtime.notifySchedulerWorkAvailable();
     }
-    if (runnableJobs.length > 0) runtime.notifySchedulerWorkAvailable();
     const current = await runtime.coordinator.reconcileWave(
       conversationId,
       waveId,
@@ -995,6 +979,17 @@ export class DiscourseService {
       const aggregate = await this.store.getConversation(conversationId);
       const wave = aggregate.waves.find((candidate) => candidate.status !== 'SETTLED');
       if (!wave) return undefined;
+      if (wave.policy !== 'CHAT') {
+        const stop = { conversationId, waveId: wave.id,
+          clientOperationId: `${clientOperationId}:retired:${wave.id}`,
+          reason: 'This response used a retired conversation mode.' };
+        const stopped = ['PLANNED', 'SNAPSHOTTING', 'QUEUED'].includes(wave.status)
+          ? await runtime.coordinator.cancelQueuedWave(stop)
+          : await runtime.coordinator.stopActiveWave(stop);
+        this.emit('discourse.wave.updated', conversationId, stopped);
+        if (stopped.status === 'SETTLED') continue;
+        return stopped;
+      }
       const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
       const jobsWithoutRuntime = jobs.filter(
         (job) =>
@@ -1044,19 +1039,19 @@ export class DiscourseService {
         );
         continue;
       }
-      const messages = (await this.store.listMessages({ conversationId, limit: 100 })).messages;
+      const messages = await this.findMessages(uniqueStrings(jobs.flatMap((job) => job.visibleMessageIds)), conversationId);
       const promptByJob = new Map<string, string>();
       for (const job of jobsWithoutRuntime) {
         const bounded = await this.buildBoundedPrompt({ aggregate, job, snapshot, messages });
         if (bounded.error) {
-          await this.markQueuedJobsPromptBlocked(
+          await this.markQueuedJobsFailed(
             conversationId,
             [job],
             bounded.error,
             `${clientOperationId}:prompt-budget:${wave.id}`
           );
         } else {
-          promptByJob.set(job.id, bounded.prompt!);
+          promptByJob.set(job.id, bounded.prompt);
         }
       }
       const runnableJobs = jobsWithoutRuntime.filter((job) => promptByJob.has(job.id));
@@ -1080,17 +1075,10 @@ export class DiscourseService {
             clientOperationId: operationId
           }));
         }
-      } catch {
-        await this.markQueuedJobsContextStale(
-          conversationId,
-          runnableJobs,
-          `${clientOperationId}:attestation:${wave.id}`
-        );
-        await this.settleWaveForChangedContext(
-          conversationId,
-          requireWave((await this.store.getConversation(conversationId)).waves, wave.id),
-          `${clientOperationId}:attestation:${wave.id}`
-        );
+      } catch (error) {
+        await this.markQueuedPreparationFailure(conversationId, runnableJobs, error, `${clientOperationId}:attestation:${wave.id}`);
+        const settled = await runtime.coordinator.reconcileWave(conversationId, wave.id, clientOperationId);
+        this.emit('discourse.wave.updated', conversationId, settled);
         continue;
       }
       for (const job of runnableJobs) {
@@ -1122,9 +1110,24 @@ export class DiscourseService {
     job: DiscourseAgentJobRecord;
     snapshot: ContextSnapshotRecord;
     messages: readonly DiscourseMessageRecord[];
-  }): Promise<{ prompt?: string; error?: StructuredDiscourseError }> {
+  }): Promise<{ prompt: string; error?: never } | { prompt?: never; error: StructuredDiscourseError }> {
     const runtime = this.options.runtime;
     if (!runtime) throw new Error('Discourse agent execution is not configured.');
+    const runtimeCatalog = await this.options.getRuntimeCatalog();
+    try {
+      assertParticipantRevisionAvailable(
+        input.job.assignment.displayNameSnapshot,
+        input.job.assignment,
+        runtimeCatalog
+      );
+    } catch (error) {
+      return { error: {
+        code: 'PROVIDER_UNAVAILABLE',
+        message: error instanceof Error ? error.message : 'The saved agent settings are unavailable.',
+        category: 'PROVIDER',
+        retryable: false
+      } };
+    }
     const assembly = appendDiscourseSystemContext(
       assembleDiscoursePrompt(input),
       await runtime.contextSnapshots.promptFilesystemGuide(input.snapshot)
@@ -1135,7 +1138,8 @@ export class DiscourseService {
     );
     const { assessment } = runtime.contextSnapshots.assessPrompt(
       assembly,
-      cumulativeWaveOutputBytes
+      cumulativeWaveOutputBytes,
+      runtimeCatalog.models.find((model) => discourseModelMatches(model, input.job.assignment))?.contextWindowTokens
     );
     if (assessment.status === 'READY') return { prompt: assembly.prompt };
     return {
@@ -1153,7 +1157,26 @@ export class DiscourseService {
     };
   }
 
-  private async markQueuedJobsPromptBlocked(
+  private async markQueuedPreparationFailure(
+    conversationId: string,
+    jobs: readonly DiscourseAgentJobRecord[],
+    error: unknown,
+    operationId: string
+  ): Promise<void> {
+    if (error instanceof DiscourseContextChangedError) {
+      await this.markQueuedJobsContextStale(conversationId, jobs, operationId);
+      return;
+    }
+    await this.markQueuedJobsFailed(conversationId, jobs, {
+      code: 'PERMISSION_ATTESTATION_FAILED',
+      message: 'The agent could not prepare its read-only session.',
+      category: 'PERMISSION',
+      retryable: true,
+      detail: error instanceof Error ? error.message : String(error)
+    }, operationId);
+  }
+
+  private async markQueuedJobsFailed(
     conversationId: string,
     jobs: readonly DiscourseAgentJobRecord[],
     error: StructuredDiscourseError,
@@ -1167,7 +1190,7 @@ export class DiscourseService {
         continue;
       }
       if (current.runId) {
-        throw new Error('Prompt-budget settlement cannot discard prepared runtime work.');
+        throw new Error('Preparation failure cannot discard prepared runtime work.');
       }
       if (current.status === 'QUEUED') {
         current = await this.store.updateJob({
@@ -1182,7 +1205,7 @@ export class DiscourseService {
         });
       }
       if (current.status !== 'RESOLVING_CONTEXT') {
-        throw new Error('Prompt-budget settlement found an unsafe job checkpoint.');
+        throw new Error('Preparation failure found an unsafe job checkpoint.');
       }
       await this.store.updateJob({
         conversationId,
@@ -1204,7 +1227,7 @@ export class DiscourseService {
     waveId: string;
     snapshotId: string;
     assignment: AgentAssignmentSnapshot;
-    role: 'CRITIQUE' | 'CORRECT';
+    role: DiscourseAgentJobRecord['role'];
     phase: number;
     targetMessageIds: string[];
     visibleMessageIds: string[];
@@ -1473,7 +1496,7 @@ export class DiscourseService {
     if (ordered.length !== messageIds.length) {
       throw new Error('The durable Discourse transcript window could not be recovered.');
     }
-    return ordered;
+    return ordered.sort((a, b) => a.ordinal - b.ordinal);
   }
 
   private async findMessage(
@@ -1579,6 +1602,10 @@ export class DiscourseService {
   }
 
   async stopWave(input: StopDiscourseWaveRequest) {
+    return this.withConversationMutation(input.conversationId, () => this.stopWaveUnlocked(input));
+  }
+
+  private async stopWaveUnlocked(input: StopDiscourseWaveRequest) {
     const runtime = this.options.runtime;
     if (!runtime) throw new Error('Discourse agent execution is not configured.');
     const aggregate = await this.store.getConversation(input.conversationId);
@@ -1659,11 +1686,10 @@ function assignmentFromRevision(
 }
 
 function assertParticipantRevisionAvailable(
-  entry: AgentProfileCatalogEntry,
-  revision: DiscourseParticipantRevisionRecord,
+  displayName: string,
+  revision: Pick<DiscourseParticipantRevisionRecord, 'runtimeId' | 'model' | 'modelProvider' | 'reasoningEffort' | 'serviceTier'>,
   runtimeCatalog: AgentRuntimeCatalog
 ): void {
-  const displayName = entry.profile.displayName;
   const runtime = runtimeCatalog.runtimes.find(
     (candidate) => candidate.preflight.runtime.id === revision.runtimeId
   );
@@ -1714,18 +1740,8 @@ function validateAgentSelections(
     throw new Error('Discourse participant roster is invalid.');
   }
   assertDiscoursePolicyRoster(policy, ids.length);
-  if (policy === 'TEAM') {
-    const team: BuiltInAgentProfileId[] = [
-      'builtin.lead',
-      'builtin.skeptic',
-      'builtin.verifier'
-    ];
-    if (team.some((id) => !ids.includes(id))) {
-      throw new Error('A Team response requires Lead, Skeptic, and Verifier.');
-    }
-    return team.map((profileId) => input.find(
-      (selection) => selection.agentProfileId === profileId
-    )!);
+  if (policy !== 'CHAT' && policy !== 'NONE') {
+    throw new Error('Choose Notes or Chat for new messages.');
   }
   return [...input];
 }
@@ -1772,7 +1788,8 @@ function participantSettingsMatch(
   revision: DiscourseParticipantRevisionRecord,
   settings: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>
 ): boolean {
-  return revision.runtimeId === settings.runtimeId &&
+  return revision.roleContractVersion === new AgentProfileCatalog().require(revision.agentProfileId).roleContractVersion &&
+    revision.runtimeId === settings.runtimeId &&
     revision.model === settings.model &&
     revision.modelProvider === settings.modelProvider &&
     revision.reasoningEffort === settings.reasoningEffort &&
@@ -1903,11 +1920,8 @@ function assignmentsFromRoster(
     if (!participant || !revision) {
       throw new Error(`Discourse participant revision is missing: ${profileId}`);
     }
-    const role = policy === 'PANEL'
-      ? 'PANELIST' as const
-      : policy === 'TEAM' && profileId !== 'builtin.lead'
-        ? 'REVIEWER' as const
-        : 'PRIMARY' as const;
+    const role = policy === 'CHAT' && profileIds.length === 2 && profileId === profileIds[1]
+      ? 'REVIEWER' as const : 'PRIMARY' as const;
     return assignmentFromRevision(revision, role);
   });
 }

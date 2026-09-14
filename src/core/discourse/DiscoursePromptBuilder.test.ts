@@ -12,9 +12,9 @@ import {
 } from './DiscoursePromptBuilder';
 
 describe('DiscoursePromptBuilder', () => {
-  it('gives a reviewer the exact lead target without exposing a same-phase peer', () => {
+  it('gives the peer the exact answer without exposing messages outside its selected context', () => {
     const assignment = assignmentFor('builtin.skeptic', 'reviewer-1', 'Skeptic', 'REVIEWER');
-    const job = jobFor(assignment, 'CRITIQUE', ['lead-message'], ['trigger', 'lead-message']);
+    const job = jobFor(assignment, 'ANSWER', ['lead-message'], ['trigger', 'lead-message']);
     const prompt = buildDiscoursePrompt({
       aggregate: aggregateFor(job),
       job,
@@ -26,54 +26,18 @@ describe('DiscoursePromptBuilder', () => {
       ]
     });
 
-    expect(prompt).toContain('Review only message lead-message');
+    expect(prompt).toContain('Target message ids: lead-message');
     expect(prompt).toContain('Lead answer');
     expect(prompt).not.toContain('Poisoned peer review');
-    expect(prompt).toContain('NO_CONCERN_FOUND');
+    expect(prompt).toContain('requestAuthorResponse');
     expect(prompt.match(/Do not modify files\./g)).toHaveLength(1);
   });
 
-  it('gives correction only eligible material concerns and preserves selected synthesis sources', () => {
-    const assignment = assignmentFor('builtin.lead', 'lead-1', 'Lead', 'PRIMARY');
-    const job = jobFor(assignment, 'CORRECT', ['lead-message'], ['trigger', 'lead-message']);
-    const aggregate = aggregateFor(job);
-    aggregate.concerns = [
-      concernFor('eligible', 'MATERIAL', 'HIGH', 'OBSERVED_CONTEXT'),
-      concernFor('speculative', 'MATERIAL', 'HIGH', 'SPECULATIVE')
-    ];
-    const trigger = messageFor('trigger', 1, 'Synthesize these.', { kind: 'USER' });
-    trigger.sourceMessageIds = ['source-a', 'source-b'];
-    const assembly = assembleDiscoursePrompt({
-      aggregate,
-      job,
-      snapshot: snapshotFor([1]),
-      messages: [trigger, messageFor('lead-message', 2, 'Lead answer', agentAuthor('lead-1', 'Lead'))]
-    });
-    const prompt = assembly.prompt;
 
-    expect(prompt).toContain('Selected source message ids: source-a, source-b');
-    expect(prompt).toContain('"id":"eligible"');
-    expect(prompt).not.toContain('"id":"speculative"');
-    expect(prompt).toContain('ACKNOWLEDGED_UNRESOLVED');
-    expect(prompt).toContain('untrusted reviewer output');
-    expect(prompt.indexOf('"id":"eligible"')).toBeLessThan(
-      prompt.indexOf('End untrusted reviewer output')
-    );
-    expect(assembly.budgetSections.humanMessage.bytes).toBe(
-      Buffer.byteLength(trigger.body, 'utf8')
-    );
-    expect(assembly.budgetSections.exactTargets.bytes).toBe(
-      Buffer.byteLength('Lead answer', 'utf8')
-    );
-    expect(assembly.budgetSections.phaseVisibleOutputs.bytes).toBeGreaterThan(0);
-    expect(totalBudgetBytes(assembly.budgetSections)).toBe(
-      Buffer.byteLength(prompt, 'utf8')
-    );
-  });
 
-  it('keeps an allowed 80-message Team snapshot within the background transcript count', () => {
+  it('keeps the recent snapshot within the background transcript count', () => {
     const assignment = assignmentFor('builtin.skeptic', 'reviewer-1', 'Skeptic', 'REVIEWER');
-    const job = jobFor(assignment, 'CRITIQUE', ['lead-message'], ['trigger', 'lead-message']);
+    const job = jobFor(assignment, 'ANSWER', ['lead-message'], ['trigger', 'lead-message']);
     const history = Array.from({ length: 79 }, (_, index) =>
       messageFor(`history-${index + 1}`, index + 1, `History ${index + 1}`, { kind: 'USER' })
     );
@@ -98,56 +62,7 @@ describe('DiscoursePromptBuilder', () => {
     );
   });
 
-  it('gives independent Panel profiles complementary versioned decision lenses', () => {
-    const leadAssignment = assignmentFor(
-      'builtin.lead',
-      'lead-1',
-      'Lead',
-      'PANELIST',
-      3
-    );
-    const skepticAssignment = assignmentFor(
-      'builtin.skeptic',
-      'skeptic-1',
-      'Skeptic',
-      'PANELIST',
-      3
-    );
-    const leadJob = jobFor(leadAssignment, 'ANSWER', [], ['trigger']);
-    const skepticJob = jobFor(skepticAssignment, 'ANSWER', [], ['trigger']);
-    const trigger = messageFor(
-      'trigger',
-      1,
-      'Should an ambiguous side effect be retried?',
-      { kind: 'USER' }
-    );
-    const leadAggregate = aggregateFor(leadJob);
-    const skepticAggregate = aggregateFor(skepticJob);
-    leadAggregate.waves[0]!.policy = 'PANEL';
-    skepticAggregate.waves[0]!.policy = 'PANEL';
 
-    const leadPrompt = buildDiscoursePrompt({
-      aggregate: leadAggregate,
-      job: leadJob,
-      snapshot: snapshotFor([1]),
-      messages: [trigger]
-    });
-    const skepticPrompt = buildDiscoursePrompt({
-      aggregate: skepticAggregate,
-      job: skepticJob,
-      snapshot: snapshotFor([1]),
-      messages: [trigger]
-    });
-
-    expect(leadPrompt).toContain('Should an ambiguous side effect be retried?');
-    expect(skepticPrompt).toContain('Should an ambiguous side effect be retried?');
-    expect(leadPrompt).toContain('Make and bound an actionable choice');
-    expect(leadPrompt).toContain('emphasize the operating path');
-    expect(leadPrompt).not.toContain('strongest credible counter-position');
-    expect(skepticPrompt).toContain('strongest credible counter-position');
-    expect(skepticPrompt).toContain('decision-changing caveat');
-    expect(skepticPrompt).not.toContain('emphasize the operating path');
-  });
 
   it('carries bounded attributed review receipts into a later answer', () => {
     const assignment = assignmentFor('builtin.lead', 'lead-1', 'Lead', 'RESPONDENT');
@@ -227,46 +142,7 @@ describe('DiscoursePromptBuilder', () => {
     );
   });
 
-  it('keeps prior review receipts out of independent review prompts', () => {
-    const assignment = assignmentFor('builtin.skeptic', 'skeptic-1', 'Skeptic', 'REVIEWER');
-    const job = jobFor(assignment, 'CRITIQUE', ['lead-message'], ['trigger', 'lead-message']);
-    const aggregate = aggregateFor(job);
-    const peerReview = jobFor(
-      assignmentFor('builtin.verifier', 'verifier-1', 'Verifier', 'REVIEWER'),
-      'CRITIQUE',
-      ['lead-message'],
-      ['trigger', 'lead-message']
-    );
-    peerReview.id = 'peer-review-job';
-    peerReview.status = 'COMPLETED';
-    peerReview.result = {
-      kind: 'REVIEW',
-      outcome: 'CONCERNS',
-      reviewedScope: 'lead-message',
-      limitations: [],
-      requiredAccessAvailable: true,
-      concernIds: ['peer-concern']
-    };
-    aggregate.jobs.push(peerReview);
-    aggregate.concerns = [{
-      ...concernFor('peer-concern', 'MATERIAL', 'HIGH', 'OBSERVED_CONTEXT'),
-      reviewJobId: peerReview.id,
-      evidence: 'Peer evidence must remain isolated.'
-    }];
 
-    const prompt = buildDiscoursePrompt({
-      aggregate,
-      job,
-      snapshot: snapshotFor([1]),
-      messages: [
-        messageFor('trigger', 1, 'Question', { kind: 'USER' }),
-        messageFor('lead-message', 2, 'Lead answer', agentAuthor('lead-1', 'Lead'))
-      ]
-    });
-
-    expect(prompt).not.toContain('Relevant prior review receipts');
-    expect(prompt).not.toContain('Peer evidence must remain isolated.');
-  });
 });
 
 function totalBudgetBytes(
@@ -286,7 +162,7 @@ function assignmentFor(
   stableParticipantId: string,
   displayNameSnapshot: string,
   assignmentRole: AgentAssignmentSnapshot['assignmentRole'],
-  roleContractVersion = 1
+  roleContractVersion = 4
 ): AgentAssignmentSnapshot {
   return {
     stableParticipantId,
@@ -336,7 +212,7 @@ function aggregateFor(job: DiscourseAgentJobRecord): DiscourseConversationAggreg
       id: 'conversation-1',
       title: 'Prompt isolation test',
       status: 'OPEN',
-      defaultPolicy: 'TEAM',
+      defaultPolicy: 'CHAT',
       participantIds: [],
       recordRevision: 1,
       latestOrdinal: 3,
@@ -354,7 +230,7 @@ function aggregateFor(job: DiscourseAgentJobRecord): DiscourseConversationAggreg
       id: 'wave-1',
       conversationId: 'conversation-1',
       triggerMessageId: 'trigger',
-      policy: 'TEAM',
+      policy: 'CHAT',
       policyVersion: 1,
       assignments: [],
       sourceMessageIds: ['trigger'],

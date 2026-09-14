@@ -59,7 +59,6 @@ export function DiscourseConversationRail({
         <div className="tm-discourse-rail__head">
           <div>
             <h2 id="discourse-rail-title">Discourse</h2>
-            <p>Technical conversations across tasks and repositories</p>
           </div>
           <div className="tm-discourse-rail__head-actions">
             <button

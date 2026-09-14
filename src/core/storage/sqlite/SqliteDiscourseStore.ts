@@ -556,7 +556,7 @@ function validateLoaded(loaded: LoadedConversation, reader: SqlReader): void {
   validateTitle(conversation.title);
   if (
     !['OPEN', 'ARCHIVED'].includes(conversation.status) ||
-    !['TEAM', 'PANEL', 'DIRECT', 'NONE'].includes(conversation.defaultPolicy) ||
+    !['CHAT', 'TEAM', 'PANEL', 'DIRECT', 'NONE'].includes(conversation.defaultPolicy) ||
     !Number.isSafeInteger(conversation.recordRevision) ||
     conversation.recordRevision < 1 ||
     !Number.isSafeInteger(conversation.latestOrdinal) ||
@@ -1017,7 +1017,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
     validateOperationId(input.clientMessageId);
     requireFingerprint(input.requestFingerprint, 'send request fingerprint');
     requireFingerprint(input.previewFingerprint, 'context preview fingerprint');
-    if (!['DIRECT', 'PANEL', 'TEAM'].includes(input.policy)) {
+    if (!['CHAT', 'DIRECT', 'PANEL', 'TEAM'].includes(input.policy)) {
       throw new Error('Discourse accepted send policy or context preview is invalid.');
     }
     return this.mutateConversation(
@@ -1116,6 +1116,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
           triggerMessageId: message.id,
           clientMessageId: input.clientMessageId,
           policy: input.policy,
+          policyVersion: input.policyVersion ?? 1,
           assignments: clone(input.assignments),
           visibleMessageIds: [...input.priorVisibleMessageIds, message.id],
           previewFingerprint: input.previewFingerprint,
@@ -1822,7 +1823,8 @@ export class SqliteDiscourseStore implements DiscourseStore {
         if (
           input.jobs.length === 0 ||
           aggregate.jobs.filter(({ waveId }) => waveId === wave.id).length + input.jobs.length >
-            DISCOURSE_LIMITS.maxTeamJobs
+            (wave.policy === 'CHAT' ? DISCOURSE_LIMITS.maxChatJobs : wave.policy === 'TEAM' && wave.policyVersion === 2
+              ? DISCOURSE_LIMITS.maxAdaptiveTeamJobs : DISCOURSE_LIMITS.maxTeamJobs)
         ) {
           throw new Error('Discourse downstream job plan exceeds its safety limit.');
         }
@@ -3202,6 +3204,7 @@ function assertWavePlan(input: CreateDiscourseWaveInput, loaded: LoadedConversat
       wave.clientOperationId !== `${accepted.clientMessageId}:wave` ||
       wave.requestFingerprint !== accepted.requestFingerprint ||
       wave.policy !== accepted.policy ||
+      wave.policyVersion !== (accepted.policyVersion ?? 1) ||
       stableStringify(wave.assignments) !== stableStringify(accepted.assignments) ||
       wave.dispatchGate.previewFingerprint !== accepted.previewFingerprint
     )
@@ -3363,6 +3366,7 @@ function assertImmutableWave(
   }
   assertOptionalLink(existing.contextSnapshotId, next.contextSnapshotId, 'wave context snapshot');
   assertOptionalLink(existing.startedAt, next.startedAt, 'wave start timestamp');
+  assertOptionalLink(existing.requestedStopReason, next.requestedStopReason, 'wave stop reason');
   if (next.contextSnapshotId) requireSafeId(next.contextSnapshotId, 'context snapshot id');
   if (next.startedAt) requireTimestamp(next.startedAt);
   if (next.settledAt) requireTimestamp(next.settledAt);

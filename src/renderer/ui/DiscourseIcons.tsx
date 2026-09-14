@@ -76,7 +76,7 @@ export function DiscourseNavIcon() {
 
 export function DiscourseModeIcon({ policy }: { policy: DiscourseDefaultPolicy }) {
   if (policy === 'NONE') return <UiLucideIcon component={FileText} />;
-  if (policy === 'DIRECT') return <UiLucideIcon component={MessageSquare} />;
+  if (policy === 'CHAT' || policy === 'DIRECT') return <UiLucideIcon component={MessageSquare} />;
   if (policy === 'PANEL') return <UiLucideIcon component={MessagesSquare} />;
   return <UiLucideIcon component={Users} />;
 }

@@ -501,6 +501,19 @@ Codex protocol detail:
   normal resume-and-attest path is required for every later turn.
 - Shared read-only sessions carry their selected reasoning effort in the same
   thread and turn settings as other ordinary Codex turns.
+- Prompt refinement and Preview recipe generation request `ephemeral: true`.
+  The adapter checks the returned flag before it sends a prompt.
+  These disposable threads do not retain Codex rollout history.
+  Tasks, Designs, reviews, and Discourse keep persistent threads for continuation.
+  Ephemeral threads retain the same model, permissions, and cancellation rules.
+
+Disposable turns still use Task Monki's runtime records during execution.
+After terminal settlement and session release, the existing owner-scoped cleanup removes those records.
+An acknowledged disposable turn becomes interrupted only after Task Monki confirms that its process stopped.
+Task Monki does not resume or resend the lost response.
+Uncertain delivery or process termination keeps the recovery records and blocks further work for that owner.
+Restart preserves this uncertainty when the previous process cannot be verified.
+Ephemeral threads do not promise remote erasure or suppress Task Monki's bounded protocol diagnostics.
 
 ## Mid-turn user input
 

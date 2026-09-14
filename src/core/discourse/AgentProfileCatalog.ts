@@ -14,30 +14,30 @@ import type {
 const BUILT_IN_PROFILES: readonly AgentProfileRecord[] = [
   {
     id: 'builtin.lead',
-    displayName: 'Lead',
-    roleTemplate: 'LEAD',
+    displayName: 'A',
+    roleTemplate: 'GENERAL',
     defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT',
     defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT',
-    roleContractVersion: 3,
-    revision: 1
+    roleContractVersion: 4,
+    revision: 2
   },
   {
     id: 'builtin.skeptic',
-    displayName: 'Skeptic',
-    roleTemplate: 'SKEPTIC',
+    displayName: 'B',
+    roleTemplate: 'GENERAL',
     defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT',
     defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT',
-    roleContractVersion: 3,
-    revision: 1
+    roleContractVersion: 4,
+    revision: 2
   },
   {
     id: 'builtin.verifier',
-    displayName: 'Verifier',
-    roleTemplate: 'VERIFIER',
+    displayName: 'C',
+    roleTemplate: 'GENERAL',
     defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT',
     defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT',
-    roleContractVersion: 3,
-    revision: 1
+    roleContractVersion: 4,
+    revision: 2
   }
 ];
 
@@ -107,31 +107,11 @@ export class AgentProfileCatalog {
 
   roleContract(profileId: string, version = this.require(profileId).roleContractVersion): string {
     this.require(profileId);
-    const contract = ROLE_CONTRACTS[profileId]?.[version];
-    if (!contract) {
-      throw new Error(`Unknown role contract version ${version} for ${profileId}.`);
-    }
-    return contract;
+    if (version === 4) return 'Answer the assigned question using concise claims, evidence, assumptions, and uncertainty. No permanent adversarial role or authority applies. Agreement, no issue found, uncertainty, and abstention are valid. Never invent criticism or evidence. Change position only for an explicit reason.';
+    throw new Error(`Retired role contract version ${version} cannot start new work for ${profileId}.`);
   }
 }
 
-const ROLE_CONTRACTS: Readonly<Record<string, Readonly<Record<number, string>>>> = {
-  'builtin.lead': {
-    1: 'Produce the primary answer and respond once to eligible review concerns.',
-    2: 'Synthesize the strongest actionable answer. Weigh tradeoffs, rank the decision criteria, and respond once to eligible review concerns.',
-    3: 'Own the decision synthesis. Make and bound an actionable choice, explain the deciding tradeoff, give the concrete next step, and surface the strongest credible caveat or alternative. In an independent Panel answer, emphasize the operating path instead of listing generic risks or trying to anticipate another panelist. Respond once to eligible review concerns.'
-  },
-  'builtin.skeptic': {
-    1: 'Challenge material assumptions and identify specific counterexamples.',
-    2: 'Independently seek the strongest conclusion-changing counterexample. Do not echo another plausible answer; if you agree, surface a distinct residual risk, missing assumption, or disconfirming test.',
-    3: 'Take an adversarial decision lens. Develop the strongest credible counter-position or boundary condition, identify the hidden assumption or failure mode that would change the decision, and name the evidence or test that would discriminate. Do not spend an independent Panel answer paraphrasing the likely consensus; if the bottom line is obvious, focus on the distinct reasoning and decision-changing caveat.'
-  },
-  'builtin.verifier': {
-    1: 'Check factual claims against the supplied context and evidence boundary.',
-    2: 'Audit factual claims against exact supplied evidence. Separate verified facts from inference, call out unsupported certainty, and identify the smallest check that would resolve remaining uncertainty.',
-    3: 'Take an evidence-audit lens. Separate supplied facts, inference, and unknowns; identify the claim on which the decision actually turns; and name the smallest check that would resolve it. In an independent Panel answer, center evidentiary confidence and avoid duplicating a general recommendation unless the evidence boundary changes it.'
-  }
-};
 
 function resolveCatalogSettings(
   catalog: AgentRuntimeCatalog,

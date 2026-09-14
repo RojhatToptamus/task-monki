@@ -221,6 +221,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     );
   }
   validateAgentProfileLibrary(record.agentProfiles);
+  if (record.discourseDefaults !== undefined) validateDiscourseDefaults(record.discourseDefaults);
   return {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: record.theme,
@@ -232,6 +233,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     disabledRuntimeIds: [...record.disabledRuntimeIds],
     defaultRuntimeId: record.defaultRuntimeId,
     agentProfiles: structuredClone(record.agentProfiles),
+    ...(record.discourseDefaults ? { discourseDefaults: structuredClone(record.discourseDefaults) } : {}),
     defaultModel: record.defaultModel,
     defaultModelProvider: record.defaultModelProvider,
     defaultReasoningEffort: record.defaultReasoningEffort,
@@ -259,6 +261,10 @@ export function mergeAppSettings(
   input: UpdateAppSettingsRequest
 ): TaskManagerAppSettings {
   const patch: Partial<TaskManagerAppSettings> = {};
+  if (input.discourseDefaults !== undefined) {
+    validateDiscourseDefaults(input.discourseDefaults);
+    patch.discourseDefaults = structuredClone(input.discourseDefaults);
+  }
   if (input.theme !== undefined) {
     patch.theme = normalizeTheme(input.theme);
   }
@@ -474,6 +480,23 @@ function requireString(value: unknown, name: string): string {
   return normalized;
 }
 
+function validateDiscourseDefaults(value: unknown): void {
+  const profiles = ['builtin.lead', 'builtin.skeptic', 'builtin.verifier'];
+  if (!isRecord(value) || Object.keys(value).some((key) => !['policy', 'agents', 'responderProfileIds'].includes(key)) ||
+      !['NONE', 'CHAT', 'DIRECT', 'PANEL', 'TEAM'].includes(String(value.policy)) ||
+      !Array.isArray(value.agents) || value.agents.length > 3 ||
+      !Array.isArray(value.responderProfileIds) || value.responderProfileIds.length > 3 ||
+      new Set(value.responderProfileIds).size !== value.responderProfileIds.length ||
+      value.responderProfileIds.some((id) => !profiles.includes(String(id))) ||
+      value.agents.some((selection) => !isRecord(selection) ||
+        Object.keys(selection).some((key) => !['agentProfileId', 'runtimeId', 'modelId', 'reasoningEffort'].includes(key)) ||
+        !profiles.includes(String(selection.agentProfileId)) ||
+        ![selection.runtimeId, selection.modelId, selection.reasoningEffort].every(isCanonicalOptionalString)) ||
+      new Set(value.agents.map((selection) => selection.agentProfileId)).size !== value.agents.length) {
+    throw new Error('Discourse defaults are invalid.');
+  }
+}
+
 function requireBoolean(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new Error(`${name} must be a boolean.`);
   return value;
@@ -485,6 +508,7 @@ function isCurrentAppSettingsRecord(
   const allowedKeys = new Set([
     'schemaVersion',
     'agentProfiles',
+    'discourseDefaults',
     'theme',
     'themePreset',
     'sidebarCollapsed',

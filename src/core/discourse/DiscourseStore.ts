@@ -48,6 +48,7 @@ export interface AcceptAgentDiscourseSendInput extends AppendHumanDiscourseMessa
   participantRevisions: DiscourseParticipantRevisionRecord[];
   expectedRevision: number;
   policy: Exclude<DiscourseDefaultPolicy, 'NONE'>;
+  policyVersion?: number;
   assignments: AgentAssignmentSnapshot[];
   priorVisibleMessageIds: string[];
   previewFingerprint: string;

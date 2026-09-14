@@ -27,8 +27,17 @@ import {
   assertDiscourseMessageAppend
 } from './DiscourseState';
 import { isEligibleDiscourseConcern } from '../../shared/discourse';
+import { discourseDeadline, discourseTimeExpired } from './DiscourseResponses';
 
 describe('discourse state transitions', () => {
+  it('keeps a Chat deadline tied to the persisted start across restart and author handoff', () => {
+    const response = { ...wave('CHAT'), startedAt: '2026-09-14T10:00:00.000Z' };
+    expect(discourseDeadline(response)).toBe(Date.parse('2026-09-14T10:20:00.000Z'));
+    expect(discourseTimeExpired(response, '2026-09-14T10:19:59.999Z')).toBe(false);
+    expect(discourseTimeExpired({ ...response, phase: 'ANSWER' }, '2026-09-14T10:20:00.000Z')).toBe(true);
+    expect(discourseDeadline({ ...response, startedAt: undefined })).toBeUndefined();
+  });
+
   it('enumerates every context snapshot transition and keeps resolved snapshots immutable', () => {
     const states = ['RESOLVING', 'READY', 'PARTIAL', 'BLOCKED'] as const;
     const allowed = {
@@ -316,7 +325,7 @@ describe('discourse record invariants', () => {
     ).toThrow('REQUEST_CONFLICT');
   });
 
-  it('enforces append-only ordinals, one-level replies, and same-author corrections', () => {
+  it('enforces append-only ordinals, exact reply links, and same-author corrections', () => {
     const root = message('message-1', 1);
     const reply = message('message-2', 2, { replyToMessageId: root.id });
     expect(() =>
@@ -334,7 +343,7 @@ describe('discourse record invariants', () => {
         existingMessages: [root, reply],
         message: message('message-3', 3, { replyToMessageId: reply.id })
       })
-    ).toThrow('one visible nesting level');
+    ).not.toThrow();
     expect(() =>
       assertDiscourseMessageAppend({
         conversationId: 'conversation-1',
@@ -414,54 +423,9 @@ describe('discourse wave aggregation', () => {
     });
   });
 
-  it('completes Team only after full required review coverage', () => {
-    const jobs = [
-      answerJob(),
-      reviewJob('skeptic', 'NO_CONCERN_FOUND'),
-      reviewJob('verifier', 'NO_CONCERN_FOUND')
-    ];
-    expect(deriveDiscourseWaveAggregate({ wave: wave('TEAM'), jobs })).toEqual({
-      status: 'SETTLED',
-      outcome: 'COMPLETE',
-      settlementReason: 'COMPLETED'
-    });
-    expect(
-      deriveDiscourseWaveAggregate({
-        wave: wave('TEAM'),
-        jobs: [jobs[0]!, jobs[1]!, reviewJob('verifier', 'ABSTAINED')]
-      })
-    ).toEqual({ status: 'SETTLED', outcome: 'PARTIAL', settlementReason: 'COMPLETED' });
-  });
 
-  it('requires one successful correction for eligible Team concerns', () => {
-    const concernRecord = concern();
-    const baseJobs = [
-      answerJob(),
-      reviewJob('skeptic', 'CONCERNS', { concernIds: [concernRecord.id] }),
-      reviewJob('verifier', 'NO_CONCERN_FOUND')
-    ];
-    expect(
-      deriveDiscourseWaveAggregate({
-        wave: wave('TEAM'),
-        jobs: baseJobs,
-        concerns: [concernRecord]
-      })
-    ).toEqual({ status: 'RUNNING', nextPhase: 'CORRECT' });
-    expect(
-      deriveDiscourseWaveAggregate({
-        wave: wave('TEAM'),
-        jobs: [...baseJobs, correctionJob('REVISED')],
-        concerns: [concernRecord]
-      })
-    ).toEqual({ status: 'SETTLED', outcome: 'COMPLETE', settlementReason: 'COMPLETED' });
-    expect(
-      deriveDiscourseWaveAggregate({
-        wave: wave('TEAM'),
-        jobs: [...baseJobs, correctionJob('ABSTAINED')],
-        concerns: [concernRecord]
-      })
-    ).toEqual({ status: 'SETTLED', outcome: 'PARTIAL', settlementReason: 'FAILED' });
-  });
+
+
 
   it('keeps Panel responses independent and reports partial coverage', () => {
     expect(
@@ -700,22 +664,6 @@ function reviewJob(
     concernIds: [],
     ...overrides
   });
-}
-
-function correctionJob(
-  outcome: Extract<DiscourseJobResult, { kind: 'CORRECTION' }>['outcome']
-): DiscourseAgentJobRecord {
-  return {
-    ...job('lead', 'CORRECT', 'COMPLETED', {
-      kind: 'CORRECTION',
-      outcome,
-      limitations: outcome === 'ABSTAINED' ? ['Unable to verify the target.'] : [],
-      ...(outcome === 'ABSTAINED' ? {} : { outputMessageId: 'message-lead-correction' })
-    }),
-    id: 'job-lead-correction',
-    attemptId: 'attempt-lead-correction',
-    generationKey: 'generation-lead-correction'
-  };
 }
 
 function concern(

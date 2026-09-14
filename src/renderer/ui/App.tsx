@@ -1951,34 +1951,21 @@ export function App() {
   };
 
   const refinePrompt = async (input: RefinePromptRequest) => {
-    try {
-      const refinementModel = selectModel(
-        enabledRuntimeModels,
-        appSettings.promptRefinementModel,
-        promptRefinementRuntime?.preflight.runtime.id,
-        appSettings.promptRefinementModelProvider
-      );
-      const refined = await taskManagerApi.refinePrompt({
-        ...input,
-        runtimeId:
-          refinementModel?.runtimeId ??
-          promptRefinementRuntime?.preflight.runtime.id,
-        model: refinementModel?.model,
-        modelProvider:
-          refinementModel?.modelProvider ?? appSettings.promptRefinementModelProvider
-      });
-      notify(
-        refined.warning ??
-          (refined.source === 'model'
-            ? 'Prompt refined.'
-            : 'The original prompt was kept unchanged.'),
-        refined.source === 'model' && !refined.warning ? 'success' : 'info'
-      );
-      return refined;
-    } catch (caught) {
-      reportActionError(caught, 'Could not refine prompt.');
-      throw caught;
-    }
+    const refinementModel = selectModel(
+      enabledRuntimeModels,
+      appSettings.promptRefinementModel,
+      promptRefinementRuntime?.preflight.runtime.id,
+      appSettings.promptRefinementModelProvider
+    );
+    // The composer owns feedback and ignores results after its request closes.
+    return taskManagerApi.refinePrompt({
+      ...input,
+      runtimeId:
+        refinementModel?.runtimeId ?? promptRefinementRuntime?.preflight.runtime.id,
+      model: refinementModel?.model,
+      modelProvider:
+        refinementModel?.modelProvider ?? appSettings.promptRefinementModelProvider
+    });
   };
 
   const cancelPromptRefinement = async (requestId: string) => {
@@ -1988,11 +1975,17 @@ export function App() {
       promptRefinementRuntime?.preflight.runtime.id,
       appSettings.promptRefinementModelProvider
     );
-    await taskManagerApi.cancelPromptRefinement({
-      requestId,
-      runtimeId:
-        refinementModel?.runtimeId ?? promptRefinementRuntime?.preflight.runtime.id
-    });
+    try {
+      await taskManagerApi.cancelPromptRefinement({
+        requestId,
+        runtimeId:
+          refinementModel?.runtimeId ?? promptRefinementRuntime?.preflight.runtime.id
+      });
+    } catch (caught) {
+      // A failed stop still needs attention after the composer has closed.
+      reportActionError(caught, 'Could not stop prompt refinement.');
+      throw caught;
+    }
   };
 
   const startRun = async (taskId: string, instruction?: string) => {
@@ -3341,6 +3334,8 @@ export function App() {
           />
         ) : view === 'discourse' ? (
           <DiscourseWorkspace
+            defaults={appSettings.discourseDefaults}
+            onDefaultsChange={async (discourseDefaults) => { await updateAppSettings({ discourseDefaults }, ''); }}
             historyCollapsed={discourseHistoryCollapsed}
             onHistoryCollapsedChange={(collapsed) => {
               setDiscourseHistoryCollapsed(collapsed);

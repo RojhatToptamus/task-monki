@@ -44,8 +44,7 @@ describe('DiscourseResponseGroup', () => {
       />
     );
 
-    expect(html).toContain('Stopping response');
-    expect(html).toContain('<button type="button" disabled="">Stopping…</button>');
-    expect(html).not.toContain('>Stop</button>');
+    expect(html).toContain('Stopping…');
+    expect(html).not.toContain('<button');
   });
 });

@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { AppSettingsStore } from '../../settings/AppSettingsStore';
 import { describe, expect, it } from 'vitest';
 import type {
   AgentAssignmentSnapshot,
@@ -14,6 +16,51 @@ import { AppDatabase } from './AppDatabase';
 import { SqliteDiscourseStore } from './SqliteDiscourseStore';
 
 describe('SqliteDiscourseStore', () => {
+  it('upgrades conversation defaults without changing history, models, or an unsent draft', async () => {
+    const fixture = await createFixture();
+    const conversation = await createConversation(fixture.store);
+    const message = await fixture.store.appendHumanMessage({ conversationId: conversation.id,
+      body: 'Keep this question and its exact source.', clientMessageId: 'before-upgrade' });
+    const before = await fixture.store.getConversation(conversation.id);
+    const assignment = assignmentFromRevision(before.participantRevisions[0]!);
+    const wave = directWave(message.id, message.contextRevisionId!, assignment);
+    const job = directJob(message.id, assignment);
+    await fixture.store.createWave({ conversationId: conversation.id, expectedConversationRevision: before.conversation.recordRevision,
+      wave, jobs: [job], contextSnapshot: contextSnapshot(wave, message.ordinal), clientOperationId: wave.clientOperationId });
+    const draft = await fixture.store.saveDraft({ conversationId: conversation.id, policy: 'TEAM', body: 'My unfinished thought',
+      agentSelections: [{ agentProfileId: 'builtin.verifier', runtimeId: 'codex', modelId: 'unavailable-saved-model', reasoningEffort: 'high' }], tokens: [] });
+    const settings = new AppSettingsStore(fixture.database);
+    const saved = await settings.update({ discourseDefaults: { policy: 'TEAM', responderProfileIds: ['builtin.verifier'],
+      agents: draft.agentSelections } });
+    const history = await fixture.store.getConversation(conversation.id);
+    await fixture.store.close();
+    await fixture.database.close();
+    const previous = new DatabaseSync(fixture.databasePath);
+    previous.exec('PRAGMA user_version = 4');
+    previous.close();
+    const backupPath = `${fixture.databasePath}.before-chat`;
+    const upgraded = await AppDatabase.open(fixture.databasePath, { acquireLease: false,
+      beforeSchemaUpgrade: async ({ database }) => {
+        await database.backup(backupPath);
+        const backup = new DatabaseSync(backupPath, { readOnly: true });
+        expect(backup.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 4 });
+        expect(backup.prepare('SELECT COUNT(*) AS count FROM discourse_messages').get()).toMatchObject({ count: 1 });
+        backup.close();
+      } });
+    const store = new SqliteDiscourseStore(upgraded);
+    await store.init();
+    const after = await store.getConversation(conversation.id);
+    expect(after.conversation.defaultPolicy).toBe('CHAT');
+    expect(after.waves).toEqual(history.waves);
+    expect(after.jobs).toEqual(history.jobs);
+    expect(after.participantRevisions).toEqual(history.participantRevisions);
+    expect((await store.listMessages({ conversationId: conversation.id })).messages).toEqual([message]);
+    expect(await store.getDraft(draft.id)).toEqual(draft);
+    expect((await new AppSettingsStore(upgraded).get()).discourseDefaults).toEqual({ ...saved.discourseDefaults, policy: 'CHAT' });
+    await store.close();
+    await upgraded.close();
+  });
+
   it('reopens normalized conversation, message, and draft records', async () => {
     const fixture = await createFixture();
     const conversation = await createConversation(fixture.store);

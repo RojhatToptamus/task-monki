@@ -367,6 +367,8 @@ export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[
           defaultReasoningEffort: undefined,
           serviceTiers: [],
           inputModalities: modalities.length > 0 ? modalities : ['text'],
+          ...(typeof model.limit?.context === 'number' && Number.isFinite(model.limit.context) && model.limit.context > 0
+            ? { contextWindowTokens: model.limit.context } : {}),
           designSupport:
             acceptsImages && supportsTools
               ? {

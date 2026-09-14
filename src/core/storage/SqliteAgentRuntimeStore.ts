@@ -568,12 +568,18 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
     try {
       return await this.mutate((draft, transaction) => {
       const now = this.now();
-      const session = insertRuntimeSession(
-        draft,
-        input.session,
-        now,
-        this.createId
-      );
+      const session = 'expectedRevision' in input.session
+        ? requireSession(draft, input.session.id)
+        : insertRuntimeSession(draft, input.session, now, this.createId);
+      if ('expectedRevision' in input.session) {
+        if (session.recordRevision !== input.session.expectedRevision) {
+          throw new Error('Agent runtime session changed before turn preparation.');
+        }
+        if (draft.runs.some((run) => run.sessionId === session.id &&
+          run.id !== input.run.id && !isTerminalRuntimeStatus(run.status))) {
+          throw new Error('Agent runtime session already has unfinished work.');
+        }
+      }
       const run = insertRuntimeRun(
         draft,
         input.run,

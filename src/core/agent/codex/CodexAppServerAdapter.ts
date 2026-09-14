@@ -282,6 +282,7 @@ type CodexThreadMutationResponse = ThreadStartResponse | ThreadResumeResponse;
 interface CodexThreadTransportInput {
   operation: 'thread/start' | 'thread/resume';
   threadId?: string;
+  ephemeral?: boolean;
   cwd: string;
   settings: AgentExecutionSettings;
   approvalPolicy: NonNullable<TurnStartParams['approvalPolicy']>;
@@ -502,15 +503,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         !['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status) &&
         !(
           run.status === 'RECOVERY_REQUIRED' &&
-          run.providerTerminalSource === 'PROVIDER_PROCESS_LOSS'
+          run.providerTerminalSource === 'PROVIDER_PROCESS_LOSS' &&
+          !(
+            options.confirmedStopped === true &&
+            run.providerTurnId &&
+            isDisposableCodexPurpose(run.purpose)
+          )
         )
     );
     for (const run of affected) {
       const observedAt = new Date().toISOString();
       if (
         options.confirmedStopped === true &&
-        run.status === 'INTERRUPTING' &&
-        run.providerTurnId
+        run.providerTurnId &&
+        (run.status === 'INTERRUPTING' || isDisposableCodexPurpose(run.purpose))
       ) {
         const forcedFailure = isReadOnlyViolationSource(
           run.providerTerminalSource
@@ -525,9 +531,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
               ? { interruptDelivery: 'TERMINAL' as const }
               : {}),
             recoveryState: 'NONE',
-            providerTerminalSource: confirmedStopSource(
-              run.providerTerminalSource
-            ),
+            ...(run.status !== 'INTERRUPTING'
+              ? {
+                  terminalReason:
+                    `${reason} The temporary response was lost and was not retried.`
+                }
+              : {}),
+            providerTerminalSource: run.status === 'INTERRUPTING'
+              ? confirmedStopSource(run.providerTerminalSource)
+              : 'CONFIRMED_STOP_AFTER_DISPOSABLE_RUNTIME_LOSS',
             lastEventAt: observedAt,
             endedAt: observedAt
           },
@@ -741,7 +753,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
             withDynamicTools(
               {
                 ...common,
-                ephemeral: false
+                ephemeral: input.ephemeral ?? false
               },
               input.dynamicTools
             )
@@ -756,6 +768,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         );
       }
       await input.validateResponse?.(response);
+      if (input.ephemeral && response.thread.ephemeral !== true) {
+        throw new Error('Codex did not confirm an ephemeral thread. No prompt was sent.');
+      }
       return { client, serverInstanceId: server.id, response };
     } catch (error) {
       if (error instanceof CodexProviderMutationDeliveryError) throw error;
@@ -886,6 +901,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       opened = await this.openCodexThread({
         operation: input.session.providerSessionId ? 'thread/resume' : 'thread/start',
         threadId: input.session.providerSessionId,
+        ephemeral: isDisposableCodexPurpose(input.run.purpose),
         cwd: input.executionContext.primaryCwd,
         settings,
         approvalPolicy: 'never',
@@ -1807,10 +1823,15 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       ) {
         throw new Error('Codex session release does not match the stored provider thread.');
       }
-      const activeRun = await this.runtimeStore.getActiveRunForSession(runtimeSession.id);
-      if (activeRun) {
+      const unresolvedRun = (
+        await this.runtimeStore.getRunsRequiringRecovery({
+          owner: runtimeSession.owner,
+          includeQueued: true
+        })
+      ).find((run) => run.sessionId === runtimeSession.id);
+      if (unresolvedRun) {
         throw new Error(
-          `Cannot release Codex session ${runtimeSession.id} while run ${activeRun.id} is ${activeRun.status}.`
+          `Cannot release Codex session ${runtimeSession.id} while run ${unresolvedRun.id} is ${unresolvedRun.status}.`
         );
       }
       const providerSessionId =
@@ -7570,6 +7591,10 @@ function codexGitSubprocessConfig(input: {
       }
     }
   };
+}
+
+function isDisposableCodexPurpose(purpose: AgentRuntimeRunRecord['purpose']): boolean {
+  return purpose === 'PROMPT_REFINEMENT' || purpose === 'PREVIEW_RECIPE_GENERATION';
 }
 
 function codexFailureReadiness(error: unknown) {

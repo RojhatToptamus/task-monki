@@ -7,9 +7,9 @@ import {
 } from '../../core/agent/codex/codexCapabilities';
 import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
 import type { DiscourseMentionCatalogSnapshot } from '../../shared/discourse';
-import { DiscourseAgentConfigurationBar } from './DiscourseAgentConfigurationBar';
+import { DiscourseAgentSettings } from './DiscourseAgentSettings';
 
-describe('DiscourseAgentConfigurationBar', () => {
+describe('DiscourseAgentSettings', () => {
   it('keeps a provider selectable when native mutation denial is unavailable', () => {
     const codexModel = model('codex', 'codex:model', 'Codex model');
     const blockedModel = model('blocked', 'blocked:model', 'Blocked model');
@@ -95,12 +95,9 @@ describe('DiscourseAgentConfigurationBar', () => {
     };
 
     const html = renderToStaticMarkup(
-      <DiscourseAgentConfigurationBar
+      <DiscourseAgentSettings
         catalog={catalog}
-        compact
         disabled={false}
-        expanded
-        policy="DIRECT"
         selections={[
           {
             agentProfileId: 'builtin.lead',
@@ -108,10 +105,8 @@ describe('DiscourseAgentConfigurationBar', () => {
             modelId: codexModel.id
           }
         ]}
-        selectedProfileIds={['builtin.lead']}
         onDiscoverModels={async () => undefined}
-        onExpandedChange={() => undefined}
-        onToggleAgent={() => undefined}
+        onTogglePeer={() => undefined}
         onSelectionChange={() => undefined}
       />
     );
@@ -119,6 +114,7 @@ describe('DiscourseAgentConfigurationBar', () => {
     expect(html).not.toContain('This provider can still mutate through child agents.');
     expect(html).toContain('tm-agent-console--compact');
     expect(html).toContain('>Codex model</span>');
+    expect(html).toContain('<strong>Codex model</strong>');
     expect(html).toMatch(
       /<button[^>]*aria-disabled="false"[^>]*aria-label="Blocked model via Blocked provider/u
     );

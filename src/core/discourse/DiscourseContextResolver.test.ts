@@ -110,14 +110,53 @@ describe('DiscourseContextResolver', () => {
     });
 
     expect(resolved.map((reference) => reference.canonicalRoot)).toEqual([
-      firstWorktreePath,
-      secondWorktreePath
+      await fs.realpath(firstWorktreePath),
+      await fs.realpath(secondWorktreePath)
     ]);
     expect(preview.filesystemRootCount).toBe(2);
     expect(preview.references).toEqual([
       expect.objectContaining({ entityId: firstTask.id, accessMode: 'FILESYSTEM_READ' }),
       expect.objectContaining({ entityId: secondTask.id, accessMode: 'FILESYSTEM_READ' })
     ]);
+  });
+
+  it('includes selected task information without leaking another task or granting a missing worktree fallback', async () => {
+    const fixture = await contextFixture();
+    const task = await fixture.tasks.createTask({
+      title: 'Selected task', prompt: 'Investigate the timeout after shutdown.',
+      repositoryId: fixture.repository.id
+    });
+    await fixture.tasks.createTask({
+      title: 'Private other task', prompt: 'Unselected sensitive instructions',
+      repositoryId: fixture.repository.id
+    });
+    await fixture.tasks.createIterationAndWorktree({
+      task, branchName: 'missing-context',
+      worktreePath: path.join(fixture.repositoryPath, 'missing-worktree'),
+      baseSha: fixture.repository.headSha!
+    });
+    const [resolved] = await fixture.resolver.resolveSelections([{ entityKind: 'TASK', entityId: task.id }]);
+    expect(resolved?.recordedContext).toContain('Investigate the timeout after shutdown.');
+    expect(resolved?.recordedContext).not.toContain('Unselected sensitive instructions');
+    expect(resolved?.canonicalRoot).toBeUndefined();
+    expect(resolved?.snapshot.availability).toBe('AVAILABLE');
+    const preview = await fixture.resolver.preview({ pinned: [], messageContext: [{ entityKind: 'TASK', entityId: task.id }] });
+    expect(preview.references[0]?.accessMode).toBe('METADATA_ONLY');
+    expect(preview.filesystemRootCount).toBe(0);
+  });
+
+  it('changes source generation when the canonical read root moves despite identical Git content', async () => {
+    const fixture = await contextFixture();
+    const selections = [{ entityKind: 'REPOSITORY' as const, entityId: fixture.repository.id }];
+    const [before] = await fixture.resolver.resolveSelections(selections);
+    const moved = `${fixture.repositoryPath}-moved`;
+    await fs.rename(fixture.repositoryPath, moved);
+    await fs.symlink(moved, fixture.repositoryPath, 'dir');
+    const [after] = await fixture.resolver.resolveSelections(selections);
+    expect(after?.snapshot).toEqual(before?.snapshot);
+    expect(after?.canonicalRoot).not.toBe(before?.canonicalRoot);
+    expect(after?.generation?.value).not.toBe(before?.generation?.value);
+    expect(JSON.stringify(after?.generation)).not.toContain(moved);
   });
 
   it('changes task and repository generations when their live working tree changes', async () => {

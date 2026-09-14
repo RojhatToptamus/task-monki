@@ -1,19 +1,15 @@
-import { isEligibleDiscourseConcern } from '../../shared/discourse';
 import type {
   ConversationContextReferenceSnapshot,
   BuiltInAgentProfileId,
   DiscourseAgentJobRecord,
-  DiscourseConcernRecord,
   DiscourseConversationAggregateRecord,
   DiscourseConversationSummary,
-  DiscourseCorrectionOutcome,
   DiscourseDefaultPolicy,
   DiscourseDraftRecord,
   DiscourseDraftToken,
   DiscourseDraftTokenInput,
   DiscourseAgentSelectionInput,
   DiscourseContextSelection,
-  DiscourseJobStatus,
   DiscourseMentionCatalogSnapshot,
   DiscourseMessageRecord,
   DiscourseResponseWaveRecord,
@@ -26,12 +22,6 @@ import type {
   DiscourseMentionCandidate
 } from './discourseMentions';
 import { repositoryDisplayPath } from './repositories';
-
-const BUILT_IN_DISCOURSE_ROSTER: readonly BuiltInAgentProfileId[] = [
-  'builtin.lead',
-  'builtin.skeptic',
-  'builtin.verifier'
-];
 
 export interface DiscourseResponseReadiness {
   ready: boolean;
@@ -46,7 +36,7 @@ export interface DiscourseResponseModeOption {
 
 export interface DiscourseWorkspaceLayout {
   compact: boolean;
-  inspectorOverlay: boolean;
+  collapseHistoryForInspector: boolean;
 }
 
 const COMPACT_DISCOURSE_WORKSPACE_WIDTH = 880;
@@ -55,33 +45,20 @@ const DOCKED_DISCOURSE_INSPECTOR_WIDTH = 1220;
 export function discourseWorkspaceLayout(width: number): DiscourseWorkspaceLayout {
   return {
     compact: width < COMPACT_DISCOURSE_WORKSPACE_WIDTH,
-    inspectorOverlay: width < DOCKED_DISCOURSE_INSPECTOR_WIDTH
+    collapseHistoryForInspector: width < DOCKED_DISCOURSE_INSPECTOR_WIDTH
   };
 }
 
 /** Stable composer copy shared by the mode menu and conversation inspector. */
 export const DISCOURSE_RESPONSE_MODE_OPTIONS: readonly DiscourseResponseModeOption[] = [
-  {
-    policy: 'NONE',
-    label: 'Note',
-    description: 'Save a personal note; no agent responds.'
-  },
-  {
-    policy: 'DIRECT',
-    label: 'Direct',
-    description: 'One selected agent answers once.'
-  },
-  {
-    policy: 'PANEL',
-    label: 'Panel',
-    description: 'Several agents answer independently from the same context; they do not see one another’s current answers.'
-  },
-  {
-    policy: 'TEAM',
-    label: 'Team',
-    description: 'A Lead answers, reviewers critique it, then the Lead may correct or defend the answer.'
-  }
+  { policy: 'NONE', label: 'Notes', description: 'Write without agents.' },
+  { policy: 'CHAT', label: 'Chat', description: 'Talk with an agent.' }
 ];
+
+/** Older modes are historical data, not choices for the next message. */
+export function discourseComposerPolicy(policy: DiscourseDefaultPolicy): 'CHAT' | 'NONE' {
+  return policy === 'NONE' ? 'NONE' : 'CHAT';
+}
 
 /** Archive and delete require the durable conversation runtime to be settled. */
 export function discourseConversationActionsDisabled(input: {
@@ -94,21 +71,21 @@ export function discourseConversationActionsDisabled(input: {
     Boolean(input.aggregate?.waves.some((wave) => wave.status !== 'SETTLED'));
 }
 
-/** Per-message context clears after send; Direct/Panel responder choices stay conversation-scoped. */
+/** A one-off recipient or peer check must not become the next normal recipient. */
 export function retainedDiscourseComposerTokensAfterSend(
   policy: DiscourseDefaultPolicy,
-  tokens: readonly DiscourseComposerToken[]
+  tokens: readonly DiscourseComposerToken[],
+  mainProfileId: BuiltInAgentProfileId
 ): DiscourseComposerToken[] {
-  return policy === 'DIRECT' || policy === 'PANEL'
-    ? tokens.filter((token) => token.kind === 'AGENT')
-    : [];
+  return policy === 'NONE' ? [] : tokens.filter((token) => token.kind === 'AGENT' && token.entityId === mainProfileId).slice(0, 1);
 }
 
 export function discourseResponsePolicyLabel(
   policy: DiscourseDefaultPolicy | DiscourseWavePolicy
 ): string {
   switch (policy) {
-    case 'NONE': return 'Note';
+    case 'NONE': return 'Notes';
+    case 'CHAT': return 'Chat';
     case 'DIRECT': return 'Direct';
     case 'PANEL': return 'Panel';
     case 'TEAM': return 'Team';
@@ -118,52 +95,6 @@ export function discourseResponsePolicyLabel(
   }
 }
 
-export function discourseResponsePolicyDescription(
-  policy: DiscourseDefaultPolicy
-): string {
-  return DISCOURSE_RESPONSE_MODE_OPTIONS.find((option) => option.policy === policy)!
-    .description;
-}
-
-export function defaultDiscourseResponderRoster(input: {
-  policy: 'DIRECT' | 'PANEL';
-  selectedProfileIds: readonly BuiltInAgentProfileId[];
-  availableProfileIds: ReadonlySet<BuiltInAgentProfileId>;
-}): BuiltInAgentProfileId[] {
-  const selected = input.selectedProfileIds.filter((profileId) =>
-    input.availableProfileIds.has(profileId)
-  );
-  if (input.policy === 'DIRECT') {
-    return [selected[0] ?? BUILT_IN_DISCOURSE_ROSTER.find((profileId) =>
-      input.availableProfileIds.has(profileId)
-    ) ?? 'builtin.lead'];
-  }
-  for (const profileId of BUILT_IN_DISCOURSE_ROSTER) {
-    if (selected.length >= 2) break;
-    if (input.availableProfileIds.has(profileId) && !selected.includes(profileId)) {
-      selected.push(profileId);
-    }
-  }
-  return selected.slice(0, 3);
-}
-
-export function discourseResponderToggleDisabled(input: {
-  controlsDisabled: boolean;
-  policy: DiscourseDefaultPolicy;
-  selectedProfileIds: readonly BuiltInAgentProfileId[];
-  profileId: BuiltInAgentProfileId;
-  available: boolean;
-}): boolean {
-  const selected = input.selectedProfileIds.includes(input.profileId);
-  return input.controlsDisabled ||
-    (!input.available && !selected) ||
-    (
-      input.policy === 'PANEL' &&
-      input.available &&
-      selected &&
-      input.selectedProfileIds.length <= 2
-    );
-}
 
 /**
  * Keeps policy cardinality, availability, and runtime configuration in one
@@ -173,24 +104,16 @@ export function discourseResponderToggleDisabled(input: {
 export function discourseResponseReadiness(input: {
   policy: DiscourseDefaultPolicy;
   selectedAgentCount: number;
-  teamReady: boolean;
   selectedAgentsReady: boolean;
   configuredAgentsReady: boolean;
 }): DiscourseResponseReadiness {
-  const { policy, selectedAgentCount, teamReady, selectedAgentsReady, configuredAgentsReady } = input;
-  const requirement = policy === 'DIRECT' && selectedAgentCount !== 1
-    ? 'Choose one responding agent.'
-    : policy === 'PANEL' && (selectedAgentCount < 2 || selectedAgentCount > 3)
-      ? 'Choose two or three responding agents.'
-      : policy === 'TEAM' && !teamReady
-        ? 'Team responses require all three agents to be available.'
-        : policy !== 'NONE' && !selectedAgentsReady
-          ? selectedAgentCount === 1
-            ? 'The selected agent is unavailable. Check its connection in Settings.'
-            : 'One or more selected agents are unavailable. Check their connections in Settings.'
-          : policy !== 'NONE' && !configuredAgentsReady
-            ? 'Choose an available provider and model for each responding agent.'
-            : '';
+  const { policy, selectedAgentCount, selectedAgentsReady, configuredAgentsReady } = input;
+  const requirement = policy !== 'NONE' && (selectedAgentCount < 1 || selectedAgentCount > 2)
+    ? 'Choose an agent.'
+    : policy !== 'NONE' && !selectedAgentsReady
+      ? 'The selected agent is unavailable. Check Settings.'
+      : policy !== 'NONE' && !configuredAgentsReady
+        ? 'Choose an available provider and model.' : '';
   return { ready: requirement.length === 0, requirement };
 }
 
@@ -545,7 +468,7 @@ export function visibleDiscourseResponseWaves(
   const currentWave = aggregate.waves.find((wave) => wave.status !== 'SETTLED');
   return aggregate.waves.filter((wave) =>
     wave.id === currentWave?.id ||
-    (wave.status === 'SETTLED' && (wave.policy === 'TEAM' || wave.outcome !== 'COMPLETE'))
+    (wave.status === 'SETTLED' && (wave.outcome !== 'COMPLETE' || (wave.policy === 'TEAM' && wave.policyVersion !== 2)))
   );
 }
 
@@ -567,7 +490,15 @@ export function visibleDiscourseResponseWavePlacements(
   aggregate: Pick<DiscourseConversationAggregateRecord, 'waves'>,
   messages: readonly DiscourseMessageRecord[]
 ): DiscourseResponseWavePlacement[] {
+  // A checkpoint's continuation owns the next action. Its earlier comparison
+  // remains in the transcript, but must not keep asking an answered question.
+  const continuedWaveIds = new Set(aggregate.waves
+    .filter((wave) => wave.policy === 'TEAM' && wave.policyVersion === 2)
+    .flatMap((wave) => wave.sourceMessageIds.filter((id) => id !== wave.triggerMessageId))
+    .map((id) => messages.find((message) => message.id === id)?.waveId)
+    .filter((id) => id !== undefined));
   return visibleDiscourseResponseWaves(aggregate).flatMap((wave) => {
+    if (wave.status === 'SETTLED' && continuedWaveIds.has(wave.id)) return [];
     const waveMessage = messages.reduce<DiscourseMessageRecord | undefined>(
       (latest, message) =>
         message.waveId === wave.id && (!latest || message.ordinal > latest.ordinal)
@@ -581,139 +512,6 @@ export function visibleDiscourseResponseWavePlacements(
   });
 }
 
-export function discourseJobStatusLabel(status: DiscourseJobStatus): string {
-  switch (status) {
-    case 'QUEUED': return 'Waiting to start';
-    case 'RESOLVING_CONTEXT': return 'Preparing context';
-    case 'STARTING': return 'Starting response';
-    case 'RUNNING': return 'Responding';
-    case 'CANCEL_REQUESTED': return 'Stopping';
-    case 'RECOVERY_REQUIRED': return 'Needs attention';
-    case 'COMPLETED': return 'Completed';
-    case 'FAILED': return 'Failed';
-    case 'CANCELED': return 'Canceled';
-    case 'CONTEXT_STALE': return 'Context changed';
-  }
-}
-
-export type DiscourseResponseTone = 'working' | 'idle' | 'waiting' | 'blocked' | 'verified';
-
-/** Maps durable wave/job state to the small semantic vocabulary used by the transcript. */
-export function discourseResponseTone(input: {
-  wave: Pick<DiscourseResponseWaveRecord, 'status' | 'outcome' | 'dispatchGate'>;
-  activeJobStatus?: DiscourseJobStatus;
-}): DiscourseResponseTone {
-  if (input.wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED') return 'waiting';
-  if (input.activeJobStatus === 'RECOVERY_REQUIRED') return 'waiting';
-  if (input.activeJobStatus === 'QUEUED') return 'idle';
-  if (['RESOLVING_CONTEXT', 'STARTING', 'RUNNING', 'CANCEL_REQUESTED']
-    .includes(input.activeJobStatus ?? '')) return 'working';
-  if (input.wave.status !== 'SETTLED') {
-    return input.wave.status === 'QUEUED' || input.wave.status === 'PLANNED'
-      ? 'idle'
-      : 'working';
-  }
-  switch (input.wave.outcome) {
-    case 'COMPLETE': return 'verified';
-    case 'FAILED':
-    case 'NO_RESPONSE': return 'blocked';
-    case 'STALE':
-    case 'PARTIAL': return 'waiting';
-    case 'CANCELED':
-    default: return 'idle';
-  }
-}
-
-export function discourseReviewResultLabel(job: DiscourseAgentJobRecord): string {
-  if (job.status === 'FAILED') return 'Review failed';
-  if (job.status === 'CANCELED') return 'Review canceled';
-  if (job.status === 'CONTEXT_STALE') return 'Context changed';
-  if (job.result?.kind === 'REVIEW') {
-    switch (job.result.outcome) {
-      case 'NO_CONCERN_FOUND': return 'No material concerns';
-      case 'CONCERNS': return `${job.result.concernIds.length} concern${job.result.concernIds.length === 1 ? '' : 's'}`;
-      case 'ABSTAINED': return 'Abstained';
-    }
-  }
-  switch (job.status) {
-    case 'COMPLETED': return 'Review result unavailable';
-    case 'RUNNING': return 'Reviewing';
-    default: return discourseJobStatusLabel(job.status);
-  }
-}
-
-export function discourseCorrectionOutcomeLabel(
-  outcome: DiscourseCorrectionOutcome
-): string {
-  switch (outcome) {
-    case 'REVISED': return 'Revised';
-    case 'DEFENDED': return 'Defended';
-    case 'PARTIALLY_REVISED': return 'Partially revised';
-    case 'ACKNOWLEDGED_UNRESOLVED': return 'Unresolved';
-    case 'ABSTAINED': return 'Correction abstained';
-  }
-}
-
-export function discourseConcernResolutionLabel(
-  concern: DiscourseConcernRecord
-): string | undefined {
-  return concern.resolution
-    ? discourseCorrectionOutcomeLabel(concern.resolution.outcome)
-    : undefined;
-}
-
-export function discourseTeamCompletionSummary(input: {
-  jobs: readonly DiscourseAgentJobRecord[];
-  concerns: readonly DiscourseConcernRecord[];
-}): { label: string; detail: string } {
-  const correction = input.jobs.find(
-    (job) => job.role === 'CORRECT' && job.result?.kind === 'CORRECTION'
-  );
-  const outcome = correction?.result?.kind === 'CORRECTION'
-    ? correction.result.outcome
-    : input.concerns.find((concern) => concern.resolution)?.resolution?.outcome;
-  const concernCount = input.concerns.length;
-  const concernSubject = `${concernCount} structured concern${concernCount === 1 ? '' : 's'}`;
-
-  switch (outcome) {
-    case 'REVISED':
-      return { label: 'Answer revised', detail: `${concernSubject} reviewed; Lead revised the answer.` };
-    case 'DEFENDED':
-      return { label: 'Answer defended', detail: `${concernSubject} reviewed; Lead defended the original answer.` };
-    case 'PARTIALLY_REVISED':
-      return {
-        label: 'Answer partially revised',
-        detail: `${concernSubject} reviewed; Lead revised part of the answer and the remaining disagreement stays visible.`
-      };
-    case 'ACKNOWLEDGED_UNRESOLVED':
-      return {
-        label: concernCount === 1 ? 'Concern unresolved' : 'Concerns unresolved',
-        detail: `${concernSubject} reviewed; Lead acknowledged the unresolved disagreement.`
-      };
-    case 'ABSTAINED':
-      return {
-        label: 'Correction abstained',
-        detail: `${concernSubject} reviewed; Lead did not issue a correction.`
-      };
-  }
-
-  if (concernCount === 0) {
-    return {
-      label: 'Review complete',
-      detail: 'Skeptic and Verifier found no material concerns with complete access.'
-    };
-  }
-  const correctionRequired = input.concerns.some(isEligibleDiscourseConcern);
-  return correctionRequired
-    ? {
-        label: 'Review complete',
-        detail: `${concernSubject} recorded; the correction outcome is unavailable.`
-      }
-    : {
-        label: 'Review complete',
-        detail: `${concernSubject} recorded; no automatic correction was required.`
-      };
-}
 
 export function discourseTerminalJobDetail(
   jobs: readonly DiscourseAgentJobRecord[]

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DiscourseAgentJobRecord,
-  DiscourseConcernRecord,
   DiscourseConversationAggregateRecord,
   DiscourseDraftRecord,
   DiscourseMessageRecord,
@@ -18,25 +17,18 @@ import {
   composerTokensFromDraft,
   canDeleteAbandonedDiscourseShell,
   currentPinnedContext,
-  defaultDiscourseResponderRoster,
   currentDiscourseParticipantRevisions,
   defaultDiscourseAgentSelection,
   discourseAcceptedSendForClientMessage,
   discourseAgentSelectionFromCurrentRevision,
-  discourseConcernResolutionLabel,
   discourseClientMessageWasPersisted,
   discourseConversationActionsDisabled,
   discourseDraftsAlreadySent,
-  discourseJobStatusLabel,
   discourseMentionCandidates,
   discoursePendingSendFingerprint,
-  discourseReviewResultLabel,
   discourseResponseReadiness,
-  discourseResponsePolicyDescription,
+  discourseComposerPolicy,
   discourseResponsePolicyLabel,
-  discourseResponseTone,
-  discourseResponderToggleDisabled,
-  discourseTeamCompletionSummary,
   discourseWorkspaceLayout,
   discourseTerminalJobDetail,
   draftTokensFromComposer,
@@ -55,52 +47,30 @@ describe('discourse renderer model', () => {
   it('derives responsive Discourse layout from available workspace width', () => {
     expect(discourseWorkspaceLayout(549)).toEqual({
       compact: true,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(879)).toEqual({
       compact: true,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(880)).toEqual({
       compact: false,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(1219)).toEqual({
       compact: false,
-      inspectorOverlay: true
+      collapseHistoryForInspector: true
     });
     expect(discourseWorkspaceLayout(1220)).toEqual({
       compact: false,
-      inspectorOverlay: false
+      collapseHistoryForInspector: false
     });
   });
 
-  it('defines one stable set of human-readable response modes', () => {
-    expect(DISCOURSE_RESPONSE_MODE_OPTIONS).toEqual([
-      {
-        policy: 'NONE',
-        label: 'Note',
-        description: 'Save a personal note; no agent responds.'
-      },
-      {
-        policy: 'DIRECT',
-        label: 'Direct',
-        description: 'One selected agent answers once.'
-      },
-      {
-        policy: 'PANEL',
-        label: 'Panel',
-        description: 'Several agents answer independently from the same context; they do not see one another’s current answers.'
-      },
-      {
-        policy: 'TEAM',
-        label: 'Team',
-        description: 'A Lead answers, reviewers critique it, then the Lead may correct or defend the answer.'
-      }
-    ]);
-    expect(discourseResponsePolicyLabel('NONE')).toBe('Note');
-    expect(discourseResponsePolicyDescription('PANEL'))
-      .toBe(DISCOURSE_RESPONSE_MODE_OPTIONS[2]!.description);
+  it('offers only Notes and Chat while loading earlier modes as Chat', () => {
+    expect(DISCOURSE_RESPONSE_MODE_OPTIONS.map(({ policy }) => policy)).toEqual(['NONE', 'CHAT']);
+    expect(discourseResponsePolicyLabel('NONE')).toBe('Notes');
+    expect(discourseComposerPolicy('TEAM')).toBe('CHAT');
   });
 
   it('keeps destructive conversation actions unavailable until runtime work settles', () => {
@@ -121,7 +91,7 @@ describe('discourse renderer model', () => {
     })).toBe(false);
   });
 
-  it('retains conversation-scoped responders while clearing per-message context after send', () => {
+  it('returns to the main agent after a sent or recovered peer check, clearing one-off recipients and context', () => {
     const tokens = [
       {
         key: 'AGENT:builtin.lead',
@@ -139,46 +109,25 @@ describe('discourse renderer model', () => {
       }
     ] as const;
 
-    expect(retainedDiscourseComposerTokensAfterSend('DIRECT', tokens))
-      .toEqual([tokens[0]]);
-    expect(retainedDiscourseComposerTokensAfterSend('PANEL', tokens))
-      .toEqual([tokens[0]]);
-    expect(retainedDiscourseComposerTokensAfterSend('TEAM', tokens)).toEqual([]);
-    expect(retainedDiscourseComposerTokensAfterSend('NONE', tokens)).toEqual([]);
+    const peer = { ...tokens[0], key: 'AGENT:builtin.skeptic', entityId: 'builtin.skeptic', labelSnapshot: 'B' };
+    expect(retainedDiscourseComposerTokensAfterSend('CHAT', [...tokens, peer], 'builtin.lead')).toEqual([tokens[0]]);
+    expect(retainedDiscourseComposerTokensAfterSend('CHAT', [peer, ...tokens], 'builtin.lead')).toEqual([tokens[0]]);
+    expect(retainedDiscourseComposerTokensAfterSend('CHAT', [peer], 'builtin.lead')).toEqual([]);
+    expect(retainedDiscourseComposerTokensAfterSend('NONE', tokens, 'builtin.lead')).toEqual([]);
   });
 
-  it('seeds Panel from available responders and keeps unavailable selections removable', () => {
-    const available = new Set(['builtin.skeptic', 'builtin.verifier'] as const);
-    expect(defaultDiscourseResponderRoster({
-      policy: 'PANEL',
-      selectedProfileIds: ['builtin.lead'],
-      availableProfileIds: available
-    })).toEqual(['builtin.skeptic', 'builtin.verifier']);
-    expect(discourseResponderToggleDisabled({
-      controlsDisabled: false,
-      policy: 'PANEL',
-      selectedProfileIds: ['builtin.lead', 'builtin.skeptic'],
-      profileId: 'builtin.lead',
-      available: false
-    })).toBe(false);
-    expect(discourseResponderToggleDisabled({
-      controlsDisabled: false,
-      policy: 'PANEL',
-      selectedProfileIds: ['builtin.skeptic', 'builtin.verifier'],
-      profileId: 'builtin.skeptic',
-      available: true
-    })).toBe(true);
-  });
+
 
   it.each([
-    [{ policy: 'DIRECT', selectedAgentCount: 0, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: true }, false, 'Choose one responding agent.'],
-    [{ policy: 'PANEL', selectedAgentCount: 1, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: true }, false, 'Choose two or three responding agents.'],
-    [{ policy: 'PANEL', selectedAgentCount: 2, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: true }, true, ''],
-    [{ policy: 'TEAM', selectedAgentCount: 3, teamReady: false, selectedAgentsReady: false, configuredAgentsReady: true }, false, 'Team responses require all three agents to be available.'],
-    [{ policy: 'DIRECT', selectedAgentCount: 1, teamReady: true, selectedAgentsReady: false, configuredAgentsReady: true }, false, 'The selected agent is unavailable. Check its connection in Settings.'],
-    [{ policy: 'DIRECT', selectedAgentCount: 1, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: false }, false, 'Choose an available provider and model for each responding agent.']
-  ] as const)('derives one coherent response gate for %j', (input, ready, requirement) => {
-    expect(discourseResponseReadiness(input)).toMatchObject({ ready, requirement });
+    [{ policy: 'CHAT', selectedAgentCount: 0, selectedAgentsReady: true, configuredAgentsReady: true }, false],
+    [{ policy: 'CHAT', selectedAgentCount: 1, selectedAgentsReady: true, configuredAgentsReady: true }, true],
+    [{ policy: 'CHAT', selectedAgentCount: 2, selectedAgentsReady: true, configuredAgentsReady: true }, true],
+    [{ policy: 'CHAT', selectedAgentCount: 3, selectedAgentsReady: true, configuredAgentsReady: true }, false],
+    [{ policy: 'CHAT', selectedAgentCount: 1, selectedAgentsReady: false, configuredAgentsReady: true }, false],
+    [{ policy: 'CHAT', selectedAgentCount: 1, selectedAgentsReady: true, configuredAgentsReady: false }, false]
+  ] as const)('requires an available model for each selected Chat participant: %j', (input, ready) => {
+    expect(discourseResponseReadiness(input).ready).toBe(ready);
+    expect(Boolean(discourseResponseReadiness(input).requirement)).toBe(!ready);
   });
 
   it('recovers an ambiguously created replacement before a second edit moves on', async () => {
@@ -445,80 +394,15 @@ describe('discourse renderer model', () => {
     )).toEqual([{ wave: active }]);
   });
 
-  it('keeps incomplete terminal receipts and names every terminal job status', () => {
+  it('keeps incomplete terminal receipts visible without adding a completed status card', () => {
     const failed = responseWave('failed-1', 'DIRECT', 'SETTLED', 'FAILED');
     const complete = responseWave('complete-2', 'DIRECT', 'SETTLED', 'COMPLETE');
     expect(visibleDiscourseResponseWaves({ waves: [failed, complete] }).map(({ id }) => id))
       .toEqual(['failed-1']);
-    expect([
-      discourseJobStatusLabel('QUEUED'),
-      discourseJobStatusLabel('COMPLETED'),
-      discourseJobStatusLabel('FAILED'),
-      discourseJobStatusLabel('CANCELED'),
-      discourseJobStatusLabel('CONTEXT_STALE')
-    ]).toEqual(['Waiting to start', 'Completed', 'Failed', 'Canceled', 'Context changed']);
   });
 
-  it.each([
-    ['PLANNED', undefined, undefined, 'idle'],
-    ['RUNNING', undefined, 'RUNNING', 'working'],
-    ['RUNNING', undefined, 'RECOVERY_REQUIRED', 'waiting'],
-    ['SETTLED', 'COMPLETE', undefined, 'verified'],
-    ['SETTLED', 'FAILED', undefined, 'blocked'],
-    ['SETTLED', 'PARTIAL', undefined, 'waiting'],
-    ['SETTLED', 'CANCELED', undefined, 'idle']
-  ] as const)(
-    'maps %s / %s / %s response state to the %s presentation tone',
-    (status, outcome, activeJobStatus, tone) => {
-      expect(discourseResponseTone({
-        wave: {
-          status,
-          outcome,
-          dispatchGate: {
-            status: 'READY',
-            previewFingerprint: 'preview-1',
-            confirmedAtRevision: 1
-          }
-        },
-        activeJobStatus
-      })).toBe(tone);
-    }
-  );
 
-  it('shows changed pre-dispatch context as waiting even before a job starts', () => {
-    expect(discourseResponseTone({
-      wave: {
-        status: 'PLANNED',
-        dispatchGate: {
-          status: 'RECONFIRMATION_REQUIRED',
-          previewFingerprint: 'old',
-          currentFingerprint: 'new',
-          mismatchReason: 'Repository changed'
-        }
-      }
-    })).toBe('waiting');
-  });
 
-  it('shows explicit review failure, cancellation, and stale-context receipts', () => {
-    expect(discourseReviewResultLabel(agentJob('FAILED', 'CRITIQUE'))).toBe('Review failed');
-    expect(discourseReviewResultLabel({
-      ...agentJob('FAILED', 'CRITIQUE'),
-      result: {
-        kind: 'REVIEW',
-        outcome: 'NO_CONCERN_FOUND',
-        reviewedScope: 'message-1',
-        limitations: [],
-        requiredAccessAvailable: true,
-        concernIds: []
-      }
-    })).toBe('Review failed');
-    expect(discourseReviewResultLabel(agentJob('CANCELED', 'CRITIQUE'))).toBe('Review canceled');
-    expect(discourseReviewResultLabel(agentJob('CONTEXT_STALE', 'CRITIQUE'))).toBe('Context changed');
-    expect(discourseTerminalJobDetail([agentJob('CANCELED', 'CRITIQUE')]))
-      .toBe("Verifier's review was canceled.");
-    expect(discourseTerminalJobDetail([agentJob('CONTEXT_STALE', 'ANSWER')]))
-      .toBe("Verifier's response used changed context and was not accepted.");
-  });
 
   it('keeps provider diagnostics out of the normal conversation receipt', () => {
     const failed = {
@@ -540,37 +424,9 @@ describe('discourse renderer model', () => {
     expect(detail).not.toContain('rawProviderResponse');
   });
 
-  it.each([
-    ['REVISED', 'Answer revised', 'Revised'],
-    ['DEFENDED', 'Answer defended', 'Defended'],
-    ['PARTIALLY_REVISED', 'Answer partially revised', 'Partially revised'],
-    ['ACKNOWLEDGED_UNRESOLVED', 'Concern unresolved', 'Unresolved']
-  ] as const)('preserves the actual correction outcome %s', (outcome, label, resolutionLabel) => {
-    const concern = discourseConcern(outcome);
-    const summary = discourseTeamCompletionSummary({
-      jobs: [correctionJob(outcome)],
-      concerns: [concern]
-    });
-    expect(summary).toMatchObject({ label });
-    if (outcome === 'ACKNOWLEDGED_UNRESOLVED') {
-      expect(summary.detail).toContain('unresolved disagreement');
-      expect(summary.detail).not.toContain('revised the answer');
-    }
-    expect(discourseConcernResolutionLabel(concern)).toBe(resolutionLabel);
-  });
 
-  it('does not claim a correction is missing for ineligible review signals', () => {
-    const concern = {
-      ...discourseConcern('ACKNOWLEDGED_UNRESOLVED'),
-      resolution: undefined,
-      confidence: 'LOW' as const,
-      evidenceStatus: 'SPECULATIVE' as const
-    };
-    expect(discourseTeamCompletionSummary({ jobs: [], concerns: [concern] })).toEqual({
-      label: 'Review complete',
-      detail: '1 structured concern recorded; no automatic correction was required.'
-    });
-  });
+
+
 });
 
 function responseWave(
@@ -600,28 +456,6 @@ function agentJob(
     status,
     assignment: { displayNameSnapshot: 'Verifier' }
   } as DiscourseAgentJobRecord;
-}
-
-function correctionJob(
-  outcome: NonNullable<DiscourseConcernRecord['resolution']>['outcome']
-): DiscourseAgentJobRecord {
-  return {
-    ...agentJob('COMPLETED', 'CORRECT'),
-    result: { kind: 'CORRECTION', outcome, limitations: [], outputMessageId: 'message-2' }
-  } as DiscourseAgentJobRecord;
-}
-
-function discourseConcern(
-  outcome: NonNullable<DiscourseConcernRecord['resolution']>['outcome']
-): DiscourseConcernRecord {
-  return {
-    id: 'concern-1',
-    severity: 'MATERIAL',
-    confidence: 'HIGH',
-    evidenceStatus: 'LOGICAL_CONTRADICTION',
-    requiredAccessAvailable: true,
-    resolution: { correctionJobId: 'job-1', correctionMessageId: 'message-2', outcome }
-  } as DiscourseConcernRecord;
 }
 
 function catalog(): DiscourseMentionCatalogSnapshot {

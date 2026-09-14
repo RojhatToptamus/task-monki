@@ -1383,6 +1383,20 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
           AND json_extract(review_run.payload_json, '$.purpose') = 'TASK_REVIEW'
           AND artifact.run_id <> review_run.id
       );`
+  },
+  {
+    version: 5,
+    name: 'discourse-chat-defaults',
+    // Change mutable defaults only. Executed waves, messages, models, and unsent drafts stay intact.
+    sql: `UPDATE discourse_conversations
+      SET default_policy = 'CHAT',
+          payload_json = json_set(payload_json, '$.defaultPolicy', 'CHAT', '$.recordRevision', record_revision + 1),
+          record_revision = record_revision + 1
+      WHERE default_policy IN ('DIRECT', 'PANEL', 'TEAM');
+      UPDATE app_settings
+      SET settings_json = json_set(settings_json, '$.discourseDefaults.policy', 'CHAT'),
+          record_revision = record_revision + 1
+      WHERE json_extract(settings_json, '$.discourseDefaults.policy') IN ('DIRECT', 'PANEL', 'TEAM');`
   }
 ] as const;
 

@@ -17,7 +17,8 @@ import {
   formatDesignUpdatedAt,
   type DesignProjectDetail
 } from '../model/designs';
-import { DiscourseMarkdown } from './DiscourseMarkdown';
+import { MessageMarkdown } from './MessageMarkdown';
+import { MessageHeader } from './MessageHeader';
 import { InteractionPanel } from './InteractionPanel';
 import { RunActivityTimeline } from './RunActivityTimeline';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
@@ -540,8 +541,7 @@ function DesignTurnMessages({
       </div>
 
       <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
-        <header>
-          <strong>Design agent</strong>
+        <MessageHeader author="Design agent">
           <div className="tm-design-message__ready-actions">
             <span className="tm-design-message__turn-status" data-tone={view.tone}>
               {entry.readyRevision
@@ -559,9 +559,9 @@ function DesignTurnMessages({
               />
             ) : null}
           </div>
-        </header>
+        </MessageHeader>
         {entry.assistantMessage ? (
-          <DiscourseMarkdown text={entry.assistantMessage} />
+          <MessageMarkdown text={entry.assistantMessage} />
         ) : (
           <p className="tm-design-message__pending">
             {view.detail ?? view.statusLabel}

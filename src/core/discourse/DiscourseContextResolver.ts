@@ -24,6 +24,7 @@ export interface ResolvedDiscourseContextReference {
   canonicalRoot?: string;
   repositoryId?: string;
   generation?: ContextGenerationFingerprint;
+  recordedContext?: string;
 }
 
 interface ResolvedRepository {
@@ -64,7 +65,7 @@ export class DiscourseContextResolver {
             repositoryId: task.repositoryId,
             repositoryName: repository?.name ?? 'Unknown repository',
             workflowPhase: task.workflowPhase,
-            availability: repository?.status === 'AVAILABLE' ? 'AVAILABLE' : 'UNAVAILABLE',
+            availability: 'AVAILABLE',
             archived: task.workflowPhase === 'ARCHIVED'
           };
         })
@@ -103,12 +104,16 @@ export class DiscourseContextResolver {
     const liveGitGeneration = (canonicalRoot: string): Promise<string> => {
       const existing = liveGitGenerations.get(canonicalRoot);
       if (existing) return existing;
-      const inspection = inspectGitWorkingTreeFingerprint(canonicalRoot).catch((cause) => {
+      const inspection = inspectGitWorkingTreeFingerprint(canonicalRoot)
+        // Source identity includes the actual read root, independently of each
+        // provider's native permission policy. Keep paths out of the manifest.
+        .then((fingerprint) => sha256(`${canonicalRoot}\0${fingerprint}`))
+        .catch((cause) => {
         throw new Error(
           'Could not inspect live Git working-tree state for discourse context.',
           { cause }
         );
-      });
+        });
       liveGitGenerations.set(canonicalRoot, inspection);
       return inspection;
     };
@@ -152,8 +157,14 @@ export class DiscourseContextResolver {
           repositoryId: repository.id,
           repositoryName: repository.name,
           accessMode: resolvedRepository ? 'FILESYSTEM_READ' : 'UNAVAILABLE',
+          ...(resolvedRepository ? { readScope: 'REPOSITORY' as const } : {}),
           exclusionReasons: resolvedRepository ? [] : ['Repository is unavailable.']
         },
+        recordedContext: JSON.stringify({
+          repository: { id: repository.id, name: repository.name, branch: repository.branch,
+            headSha: repository.headSha, status: repository.status, checkedAt: repository.checkedAt },
+          scope: 'Selected repository only. Task descriptions, other worktrees, attachments, and provider transcripts are not included.'
+        }),
         ...(resolvedRepository
           ? {
               canonicalRoot: resolvedRepository.canonicalRealPath,
@@ -181,8 +192,15 @@ export class DiscourseContextResolver {
       ...input.messageContext
     ]);
     const resolved = await this.resolveSelections(combined);
+    return this.previewResolved(resolved, input.pinned);
+  }
+
+  previewResolved(
+    resolved: readonly ResolvedDiscourseContextReference[],
+    pinned: readonly ConversationContextReferenceSnapshot[]
+  ): DiscourseContextPreview {
     const pinnedKeys = new Set(
-      input.pinned.map((reference) => `${reference.entityKind}:${reference.entityId}`)
+      pinned.map((reference) => `${reference.entityKind}:${reference.entityId}`)
     );
     const rootOrder = uniqueStrings(
       resolved.flatMap((reference) =>
@@ -205,6 +223,7 @@ export class DiscourseContextResolver {
           ? 'PINNED'
           : 'MESSAGE',
         accessMode: overflow ? 'METADATA_ONLY' : reference.preview.accessMode,
+        readScope: overflow ? undefined : reference.preview.readScope,
         exclusionReasons: overflow
           ? [...reference.preview.exclusionReasons, 'Filesystem root limit reached.']
           : reference.preview.exclusionReasons
@@ -221,6 +240,7 @@ export class DiscourseContextResolver {
         accessMode: reference.accessMode
       })),
       generations: resolved.map((reference) => reference.generation?.value ?? null),
+      recordedContent: resolved.map((reference) => reference.recordedContext ?? null),
       roots: [...allowedRoots].map((root) => sha256(root)),
       exclusions
     };
@@ -252,13 +272,40 @@ export class DiscourseContextResolver {
   ): Promise<ResolvedDiscourseContextReference> {
     const worktree = task.currentWorktreeId
       ? snapshot.worktrees.find(
-          (candidate) => candidate.id === task.currentWorktreeId && candidate.status === 'PRESENT'
+          (candidate) => candidate.id === task.currentWorktreeId && candidate.taskId === task.id &&
+            candidate.repositoryId === task.repositoryId
         )
       : undefined;
-    const root = worktree?.worktreePath ?? repository?.canonicalRealPath;
-    const repositoryId = repository?.repositoryId;
+    // An unavailable task worktree must not silently grant the repository checkout instead.
+    const root = task.currentWorktreeId
+      ? worktree?.status === 'PRESENT'
+        ? await fs.realpath(worktree.worktreePath).catch(() => undefined)
+        : undefined
+      : repository?.canonicalRealPath;
+    const repositoryId = task.repositoryId;
     const repositoryName = repository?.record.name ?? 'Unknown repository';
-    const availability = root ? 'AVAILABLE' as const : 'UNAVAILABLE' as const;
+    const git = worktree ? snapshot.gitSnapshots
+      .filter((candidate) => candidate.worktreeId === worktree.id)
+      .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0] : undefined;
+    const recordedContext = JSON.stringify({
+      task: { id: task.id, title: task.title, description: task.prompt,
+        phase: task.workflowPhase, resolution: task.resolution, updatedAt: task.updatedAt },
+      repository: { id: repositoryId, name: repositoryName },
+      worktree: worktree ? { id: worktree.id, branch: worktree.branchName, status: worktree.status } : null,
+      recordedGit: git ? { id: git.id, headSha: git.headSha, branch: git.branch,
+        status: git.status, diffStat: git.diffStat, capturedAt: git.capturedAt } : null,
+      recordedDelivery: { pullRequest: task.projection.githubPullRequest,
+        pullRequestNumber: task.projection.githubPullRequestNumber,
+        pullRequestUrl: task.projection.githubPullRequestUrl, ciChecks: task.projection.ciChecks,
+        reviews: task.projection.reviews, merge: task.projection.merge },
+      agentReview: task.projection.agentReview ?? null,
+      providerReportedRunStatus: task.projection.agentRun,
+      limitations: [
+        'Recorded observations are not a fresh test or review. Agent review content is advice, not verified correctness.',
+        'Attachments, local test output, provider transcripts, and other tasks are not included automatically.'
+      ]
+    });
+    const availability = 'AVAILABLE' as const;
     return {
       snapshot: {
         entityKind: 'TASK',
@@ -275,9 +322,11 @@ export class DiscourseContextResolver {
         repositoryName,
         taskTitle: task.title,
         taskWorkflowPhase: task.workflowPhase,
-        accessMode: root ? 'FILESYSTEM_READ' : 'UNAVAILABLE',
-        exclusionReasons: root ? [] : ['Task repository or worktree is unavailable.']
+        accessMode: root ? 'FILESYSTEM_READ' : 'METADATA_ONLY',
+        ...(root ? { readScope: worktree ? 'TASK_WORKTREE' as const : 'REPOSITORY' as const } : {}),
+        exclusionReasons: root ? [] : ['Task information is available, but its repository or worktree is unavailable. No files are granted.']
       },
+      recordedContext,
       ...(root ? { canonicalRoot: root } : {}),
       ...(repositoryId ? { repositoryId } : {}),
       generation: taskGeneration(

@@ -529,28 +529,6 @@
   margin-top: 12px;
 }
 
-.tm-design-message header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.tm-design-message header strong {
-  color: var(--text);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-
-.tm-design-message header time {
-  color: var(--muted);
-  font: 9px var(--font-mono);
-}
-
-.tm-design-message--agent > header {
-  justify-content: space-between;
-}
-
 .tm-design-message__ready-actions {
   display: inline-flex;
   align-items: center;
@@ -638,7 +616,7 @@
 }
 
 
-.tm-design-message--agent .tm-discourse-markdown {
+.tm-design-message--agent .tm-message-markdown {
   color: var(--text-soft);
   font-size: 12px;
   line-height: 1.55;

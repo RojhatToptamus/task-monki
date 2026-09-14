@@ -1,7 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { parseDiscourseCorrection, parseDiscourseReview } from './DiscourseStructuredOutput';
+import type { DiscourseAgentJobRecord, DiscourseResponseWaveRecord } from '../../shared/discourse';
+import { parseDiscourseCorrection, parseDiscourseReview, parseDiscourseTeamOutput } from './DiscourseStructuredOutput';
 
 describe('structured discourse output', () => {
+  it('reconciles a saved author response against its targeted comparison, not an earlier answer', () => {
+    const answer = { result: { kind: 'CONTRIBUTION', outputMessageId: 'answer' } } as DiscourseAgentJobRecord;
+    const comparison = { result: { kind: 'CONTRIBUTION', outputMessageId: 'comparison', team: {
+      kind: 'COMPARISON', actions: [{ participantId: 'author', pointId: 'shared-limit' }]
+    } } } as DiscourseAgentJobRecord;
+    const unrelated = { result: { kind: 'CONTRIBUTION', outputMessageId: 'unrelated', team: {
+      kind: 'COMPARISON', actions: [{ participantId: 'author', pointId: 'other-point' }]
+    } } } as DiscourseAgentJobRecord;
+    const job = { role: 'RESPOND', assignment: { stableParticipantId: 'author' },
+      targetMessageIds: ['answer', 'comparison'] } as DiscourseAgentJobRecord;
+    const wave = { policy: 'TEAM' } as DiscourseResponseWaveRecord;
+    const response = { responses: [{ pointId: 'shared-limit', stance: 'REVISE',
+      answer: 'Use one durable attempt counter.', reason: 'Workers share the retry budget.', evidence: [] }], newIssues: [] };
+
+    expect(parseDiscourseTeamOutput(JSON.stringify(response), job, wave, [answer, unrelated, comparison]))
+      .toEqual({ kind: 'RESPONSE', ...response });
+    expect(() => parseDiscourseTeamOutput(JSON.stringify({ ...response, responses: [
+      { ...response.responses[0], pointId: 'other-point' }
+    ] }), job, wave, [answer, unrelated, comparison])).toThrow('each assigned point once');
+  });
+
   it('accepts an evidence-scoped material concern', () => {
     expect(parseDiscourseReview(JSON.stringify({
       outcome: 'CONCERNS',

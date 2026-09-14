@@ -97,10 +97,11 @@ Reasoning choices come from the selected model's native catalog.
 ## Discourse
 
 Discourse is a global technical conversation workspace beside task workflow.
-It supports human-only notes, one-agent Direct replies, independent two- or
-three-agent Panels, and a bounded Team sequence in which Lead answers, Skeptic
-and Verifier review exact claims, and Lead may append one attributable
-correction. It never creates a hidden task or treats an agent response as Git,
+It offers Notes without agents and Chat with one main agent and an optional peer.
+A requested peer check addresses a selected answer. The author responds once
+when the peer raises a substantive point. Further exchanges need a user request;
+there is no judge or automatic consensus. Discourse
+never creates a hidden task or treats an agent response as Git,
 test, GitHub, workflow, or acceptance evidence.
 
 Task and repository context is explicit per message or explicitly pinned.

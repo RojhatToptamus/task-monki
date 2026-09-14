@@ -311,19 +311,28 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const promptArtifactId = `prompt-${input.runId}`;
     const outputArtifactId = `output-${input.runId}`;
     const diagnosticArtifactId = `diagnostic-${input.runId}`;
+    const existingSession = await this.runtimeStore.getSession(input.sessionId);
+    const accessEpoch = createAgentSessionAccessEpoch({
+      owner: input.owner,
+      sessionId: input.sessionId,
+      epoch: existingSession?.accessEpoch.epoch ?? 1,
+      runtimeId: input.runtimeId,
+      model: input.model,
+      executionContext: input.executionContext,
+      createdAt: input.createdAt
+    });
+    if (existingSession &&
+      accessEpoch.executionProfileHash !== existingSession.accessEpoch.executionProfileHash) {
+      throw new Error('A continued turn must keep its session owner, settings, and access boundary.');
+    }
     return this.runtimeStore.prepareRuntimeTurn({
-      session: {
+      session: existingSession && input.owner.kind === 'DISCOURSE' ? {
+        id: existingSession.id,
+        expectedRevision: existingSession.recordRevision
+      } : {
         id: input.sessionId,
         owner: input.owner,
-        accessEpoch: createAgentSessionAccessEpoch({
-          owner: input.owner,
-          sessionId: input.sessionId,
-          epoch: 1,
-          runtimeId: input.runtimeId,
-          model: input.model,
-          executionContext: input.executionContext,
-          createdAt: input.createdAt
-        }),
+        accessEpoch,
         executionContext: input.executionContext,
         clientOperationId: `${input.clientOperationId}:session`,
         runtimeId: input.runtimeId,
@@ -343,7 +352,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         owner: input.owner,
         scope: input.scope,
         sessionId: input.sessionId,
-        sessionAccessEpoch: 1,
+        sessionAccessEpoch: accessEpoch.epoch,
         purpose: input.purpose,
         generationKey: input.generationKey,
         clientOperationId: `${input.clientOperationId}:run`,
@@ -811,6 +820,9 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       run.id,
       `runtime-finish-settle:${run.id}`
     );
+    // A late terminal notification must not unload a session now owned by
+    // its next queued or running turn.
+    if (await this.runtimeStore.getActiveRunForSession(run.sessionId)) return;
     const released = await this.releaseTerminalRuntimeSession(run);
     if (released && run.owner.kind === 'PROMPT_REFINEMENT') {
       await this.runtimeStore
