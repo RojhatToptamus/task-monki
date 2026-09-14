@@ -170,7 +170,7 @@ describe('DiscourseService', () => {
     expect(aggregate.jobs.filter((job) => job.waveId === check.wave!.id)).toHaveLength(1);
   });
 
-  it.each(['invalid-output', 'stopped', 'model-unavailable'] as const)('preserves the peer result and does not dispatch an author after %s', async (failure) => {
+  it.each(['invalid-output', 'stopped', 'model-unavailable', 'context-unavailable'] as const)('preserves the peer result and does not dispatch an author after %s', async (failure) => {
     let catalog = runtimeCatalog();
     const fixture = await serviceFixture(`peer-${failure}`, () => catalog);
     const initial = await startChat(fixture);
@@ -187,6 +187,8 @@ describe('DiscourseService', () => {
     if (failure === 'stopped') await fixture.service.stopWave({ conversationId, waveId: check.wave!.id,
       clientOperationId: 'stop-before-author', reason: 'Stopped by user.' });
     if (failure === 'model-unavailable') catalog = runtimeCatalog({ id: 'codex:replacement', model: 'replacement' });
+    if (failure === 'context-unavailable') vi.spyOn(fixture.snapshots, 'executionContextForSnapshot')
+      .mockRejectedValue(new Error('Read-only scope unavailable.'));
     await fixture.service.recoverConversation(conversationId);
     await fixture.service.recoverConversation(conversationId);
     const aggregate = await fixture.discourseStore.getConversation(conversationId);
@@ -195,9 +197,12 @@ describe('DiscourseService', () => {
     const author = jobs.find((job) => job.assignment.assignmentRole === 'PRIMARY');
     expect(author?.runId).toBeUndefined();
     expect(aggregate.waves.find((wave) => wave.id === check.wave!.id)?.status).toBe('SETTLED');
-    if (failure === 'model-unavailable') {
+    if (failure === 'model-unavailable' || failure === 'context-unavailable') {
       expect(author?.status).toBe('FAILED');
-      expect(author?.error?.message).toContain('saved model');
+      if (failure === 'model-unavailable') expect(author?.error?.message).toContain('saved model');
+      else expect(author?.error).toMatchObject({
+        code: 'PERMISSION_ATTESTATION_FAILED', detail: 'Read-only scope unavailable.'
+      });
     } else expect(author).toBeUndefined();
     if (failure === 'invalid-output') {
       expect(peer.status).toBe('FAILED');

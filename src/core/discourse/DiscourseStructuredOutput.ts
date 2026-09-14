@@ -25,7 +25,8 @@ export function parseDiscourseTeamOutput(
 ): DiscourseTeamComparison | DiscourseTeamResponse {
   const record = parseRecord(value, 'Team');
   if (job.role === 'RESPOND') {
-    const source = jobs.find((candidate) => outputMessageId(candidate).some((id) => job.targetMessageIds.includes(id)));
+    const source = jobs.find((candidate) => teamComparison(candidate) &&
+      outputMessageId(candidate).some((id) => job.targetMessageIds.includes(id)));
     const assigned = teamComparison(source)?.actions.filter((action) => action.participantId === job.assignment.stableParticipantId) ?? [];
     const responses = requireRecords(record.responses, 'responses', 8).map((response) => ({
       pointId: requireText(response.pointId, 'response point', 80),
