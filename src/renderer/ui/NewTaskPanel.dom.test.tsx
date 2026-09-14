@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentModel, ExistingWorktree, ImportPreview, Repository } from '../../shared/contracts';
+import type { AgentModel, ExistingWorktree, ImportPreview, RefinePromptResponse, Repository } from '../../shared/contracts';
 import {
   CODEX_RUNTIME_DESCRIPTOR,
   codexCapabilities
@@ -63,28 +63,51 @@ describe('mounted NewTaskPanel prompt refinement', () => {
       .toBe(false);
   });
 
-  it('cancels the active refinement before closing the composer', async () => {
-    let resolveRefinement: (() => void) | undefined;
+  it.each(['rejected', 'completed'] as const)('ignores a %s refinement after closing starts', async (outcome) => {
+    let settleRefinement!: () => void;
+    let finishCancellation!: () => void;
     const onRefinePrompt = vi.fn(
       (_input: RefinePromptInput) =>
-        new Promise<never>(() => {
-          resolveRefinement = () => undefined;
+        new Promise<RefinePromptResponse>((resolve, reject) => {
+          settleRefinement = () => {
+            if (outcome === 'rejected') {
+              reject(new Error("Error invoking remote method 'prompt:refine': PromptRefinementCanceledError: Prompt refinement was canceled."));
+            } else {
+              resolve({ titleSuggestion: 'Late title', prompt: 'Late proposal', source: 'model', evidence: emptyEvidence() });
+            }
+          };
         })
     );
-    const onCancelPromptRefinement = vi.fn(async () => undefined);
+    const onCancelPromptRefinement = vi.fn(() => new Promise<void>((resolve) => {
+      finishCancellation = resolve;
+    }));
     const onClose = vi.fn();
     renderPanel({ onRefinePrompt, onCancelPromptRefinement, onClose });
     fireEvent.click(screen.getByRole('button', { name: 'Refine' }));
     await waitFor(() => expect(onRefinePrompt).toHaveBeenCalledOnce());
-    expect(resolveRefinement).toBeTypeOf('function');
     const requestId = onRefinePrompt.mock.calls[0]![0].requestId;
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 
+    expect(onCancelPromptRefinement).toHaveBeenCalledWith(requestId);
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => settleRefinement());
+    expect(screen.queryByText(/PromptRefinementCanceledError/)).toBeNull();
+    expect(screen.queryByRole('group', { name: 'Refined description proposal' })).toBeNull();
+    expect((screen.getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement).value).toBe('add a sync badge');
+    await act(async () => finishCancellation());
     await waitFor(() => {
       expect(onCancelPromptRefinement).toHaveBeenCalledWith(requestId);
       expect(onClose).toHaveBeenCalledOnce();
     });
+  });
+
+  it('keeps an active refinement failure visible and preserves the editable request', async () => {
+    renderPanel({ onRefinePrompt: async () => { throw new Error('The selected runtime is unavailable.'); } });
+    fireEvent.click(screen.getByRole('button', { name: 'Refine' }));
+    expect(await screen.findByText('The selected runtime is unavailable.')).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement).value).toBe('add a sync badge');
+    expect((screen.getByRole('button', { name: 'Refine' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('shows a specific degraded reason without presenting an unchanged proposal', async () => {
