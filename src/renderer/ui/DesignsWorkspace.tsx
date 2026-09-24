@@ -45,6 +45,8 @@ import {
   type DesignCanvasShowRequest
 } from './DesignCanvas';
 import { DesignConversation } from './DesignConversation';
+import { DesignNetworkAccess } from './DesignNetworkAccess';
+import { designNetworkAccessPolicy } from '../../shared/agentExecutionSupport';
 import { DesignFilesDrawer } from './DesignFilesDrawer';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useDialogFocusBoundary } from './dialogFocus';
@@ -83,6 +85,7 @@ export type CreateBlankDesignInput = Pick<
   | 'model'
   | 'modelProvider'
   | 'reasoningEffort'
+  | 'networkAccess'
   | 'attachmentDraftId'
 >;
 
@@ -107,7 +110,8 @@ export interface DesignsWorkspaceProps {
     designId: string,
     message: string,
     referenceIds: string[],
-    attachmentDraftId?: string
+    attachmentDraftId?: string,
+    networkAccess?: boolean
   ): Promise<void>;
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
@@ -144,7 +148,7 @@ export interface DesignsWorkspaceProps {
   onRenameDesign(designId: string, title: string): Promise<void>;
   onArchiveDesign(designId: string): Promise<void>;
   onDeleteDesign(designId: string): Promise<void>;
-  onShowCanvas?(request: DesignCanvasShowRequest): void;
+  onShowCanvas?(request: DesignCanvasShowRequest): void | Promise<void>;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRetryLoad?(): void;
 }
@@ -198,6 +202,7 @@ export function DesignsWorkspace({
   const historyRailRef = useRef<HTMLElement>(null);
   const historySearchRef = useRef<HTMLInputElement>(null);
   const [creatingBlank, setCreatingBlank] = useState(false);
+  const [networkSelection, setNetworkSelection] = useState<{ designId: string; value: boolean }>();
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const [layout, setLayout] = useState<DesignWorkspaceLayoutMode>(() => savedDesignLayout());
   const [historyWidth, setHistoryWidth] = useState(() =>
@@ -247,6 +252,18 @@ export function DesignsWorkspace({
           ? 'The selected Design model is not available from this provider.'
           : designModelUnavailableReason(projectRuntime, projectModel)
     : undefined;
+  const latestEntry = project?.conversation.at(-1);
+  const projectNetworkPolicy = projectRuntime && designNetworkAccessPolicy(projectRuntime.preflight.capabilities);
+  const requestedNetworkAccess = networkSelection?.designId === project?.design.id
+    ? networkSelection?.value
+    : project?.turns.at(-1)?.networkAccess ?? project?.task.agentSettings.networkAccess;
+  const projectNetworkAccess = projectNetworkPolicy === 'REQUIRED' ||
+    (projectNetworkPolicy === 'OPTIONAL' && requestedNetworkAccess === true);
+  const retryEntry =
+    project?.actions.canRefine && !refineUnavailableReason && latestEntry &&
+    ['FAILED', 'NEEDS_ATTENTION', 'CANCELED'].includes(latestEntry.turn.outcome ?? '')
+      ? latestEntry
+      : undefined;
 
   useEffect(() => {
     if (!project || !projectRuntime) return;
@@ -561,15 +578,19 @@ export function DesignsWorkspace({
                     project={project}
                     draft={draft}
                     model={projectModel}
+                    networkPolicy={projectNetworkPolicy}
+                    networkAccess={projectNetworkAccess}
+                    onNetworkAccessChange={(value) => setNetworkSelection({ designId: project.design.id, value })}
                     refineUnavailableReason={refineUnavailableReason}
                     selectedReferenceIds={selectedReferenceIds}
                     onSelectionChange={setSelectedReferenceIds}
-                    onSubmit={(message, referenceIds, attachmentDraftId) =>
+                    onSubmit={(message, referenceIds, attachmentDraftId, networkAccess) =>
                       onSubmitRefinement(
                         project.design.id,
                         message,
                         referenceIds,
-                        attachmentDraftId
+                        attachmentDraftId,
+                        networkAccess
                       )
                     }
                     onStageAttachmentBatch={onStageAttachmentBatch}
@@ -632,6 +653,17 @@ export function DesignsWorkspace({
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
                     onRestart={onRestartCanvas}
+                    onRetryUpdate={retryEntry ? () => onSubmitRefinement(
+                      project.design.id,
+                      retryEntry.userMessage,
+                      retryEntry.turn.referenceIds.filter((referenceId) =>
+                        project.references.some((reference) =>
+                          reference.id === referenceId && reference.state === 'ACTIVE'
+                        )
+                      ),
+                      undefined,
+                      projectNetworkAccess
+                    ) : undefined}
                     onSelectRevision={(revisionId) =>
                       onSelectRevision(project.design.id, revisionId)
                     }
@@ -817,6 +849,7 @@ function BlankDesignForm({
   onCreate(input: CreateBlankDesignInput): Promise<void>;
 }) {
   const [brief, setBrief] = useState('');
+  const [networkAccess, setNetworkAccess] = useState(false);
   const [agentProfileId, setAgentProfileId] = useState<string>();
   const [creationToken] = useState(() => crypto.randomUUID());
   const selectableModels = supportedDesignModels(runtimes, models);
@@ -881,6 +914,9 @@ function BlankDesignForm({
   const selectedRuntimeUnavailableReason = selectedRuntime
     ? designRuntimeUnavailableReason(selectedRuntime, models)
     : undefined;
+  const networkPolicy = selectedRuntime && designNetworkAccessPolicy(selectedRuntime.preflight.capabilities);
+  const effectiveNetworkAccess = networkPolicy === 'REQUIRED' ||
+    (networkPolicy === 'OPTIONAL' && networkAccess);
   const attachmentsEnabled = Boolean(
     selectedRuntime &&
       selectedRuntime.preflight.capabilities.attachmentDelivery.maturity !== 'unsupported'
@@ -922,6 +958,7 @@ function BlankDesignForm({
             ? { modelProvider: selectedModel.modelProvider }
             : {}),
           reasoningEffort: selectedReasoningEffort || undefined,
+          networkAccess: effectiveNetworkAccess,
           ...(attachmentDraftId ? { attachmentDraftId } : {})
         });
       } catch (caught) {
@@ -1072,6 +1109,14 @@ function BlankDesignForm({
                 onReasoningEffortChange={setReasoningEffort}
               />
             </div>
+
+            <DesignNetworkAccess
+              value={effectiveNetworkAccess}
+              policy={networkPolicy}
+              runtimeId={selectedRuntimeId}
+              disabled={composerLocked}
+              onChange={setNetworkAccess}
+            />
 
             {error ? <p className="tm-design-create__error" role="alert">{error}</p> : null}
           </div>

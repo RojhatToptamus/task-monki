@@ -54,7 +54,7 @@ describe('mounted Design workspace', () => {
     expect(screen.getByRole('heading', { name: 'New Design' })).toBeTruthy();
   });
 
-  it('creates one blank Design with the selected compatible model', async () => {
+  it('creates one blank Design with the selected model and explicit command network choice', async () => {
     const profile = { id: '83bf4f11-9ef5-40b1-b0a5-bfbfef05fed8', name: 'Frontend', description: '', instructions: 'Use the established UI.' };
     const onCreateBlankDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(
@@ -76,6 +76,9 @@ describe('mounted Design workspace', () => {
       target: { value: '  Build a calm project portfolio.  ' }
     });
     fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
+    const network = screen.getByRole('switch', { name: 'Command network' });
+    expect(network.getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(network);
     const create = screen.getByRole('button', { name: 'Create Design' });
     fireEvent.click(create);
     fireEvent.click(create);
@@ -87,8 +90,10 @@ describe('mounted Design workspace', () => {
       creationToken: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/u),
       runtimeId: 'codex',
       model: 'gpt-5.6-luna',
-      reasoningEffort: 'medium'
+      reasoningEffort: 'medium',
+      networkAccess: true
     });
+    expect(network).toHaveProperty('disabled', true);
   });
 
   it('uses the selected model Design reasoning default in the creation form', async () => {
@@ -471,11 +476,13 @@ describe('mounted Design workspace', () => {
     );
   });
 
-  it('renders the ready conversation and sends one trimmed refinement', async () => {
+  it('carries the last command network choice into the next refinement and lets users disable it', async () => {
     const onSubmitRefinement = vi.fn(() => new Promise<void>(() => undefined));
+    const project = designProject();
+    project.turns = [{ ...project.conversation[0]!.turn, networkAccess: true }];
     render(
       <DesignsWorkspace
-        {...workspaceProps({ onSubmitRefinement })}
+        {...workspaceProps({ project, onSubmitRefinement })}
       />
     );
 
@@ -484,6 +491,9 @@ describe('mounted Design workspace', () => {
     expect(screen.queryByRole('heading', { name: 'Conversation' })).toBeNull();
     expect(screen.queryByText(/Codex\s*·\s*scenario-model\s*·\s*low/)).toBeNull();
     const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
+    const network = screen.getByRole('switch', { name: 'Command network' });
+    expect(network.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(network);
     fireEvent.change(composer, { target: { value: '  Increase the title contrast.  ' } });
     const send = screen.getByRole('button', { name: 'Send' });
     fireEvent.click(send);
@@ -494,7 +504,8 @@ describe('mounted Design workspace', () => {
       'design-1',
       'Increase the title contrast.',
       [],
-      undefined
+      undefined,
+      false
     );
   });
 
@@ -622,7 +633,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Use the attached direction.',
         [],
-        'later-message-draft'
+        'later-message-draft',
+        false
       )
     );
     await waitFor(() => expect(screen.queryByText('later-direction.txt')).toBeNull());
@@ -637,7 +649,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Make the next change without a reference.',
         [],
-        undefined
+        undefined,
+        false
       )
     );
     expect(onStageAttachmentBatch).toHaveBeenCalledOnce();
@@ -749,7 +762,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Use only the dropped file.',
         [],
-        'conversation-interaction-draft'
+        'conversation-interaction-draft',
+        false
       )
     );
   });
@@ -836,7 +850,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Use a quieter headline.',
         ['reference-1'],
-        undefined
+        undefined,
+        false
       )
     );
 
@@ -875,7 +890,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Apply only the first direction.',
         ['reference-first'],
-        undefined
+        undefined,
+        false
       )
     );
     await waitFor(() => expect((first as HTMLInputElement).checked).toBe(false));
@@ -891,7 +907,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Now apply only the second direction.',
         ['reference-second'],
-        undefined
+        undefined,
+        false
       )
     );
     await waitFor(() => expect((second as HTMLInputElement).checked).toBe(false));
@@ -906,7 +923,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Continue without either old reference.',
         [],
-        undefined
+        undefined,
+        false
       )
     );
   });
@@ -987,7 +1005,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Reduce the chart density.',
         [],
-        'queued-message-draft'
+        'queued-message-draft',
+        false
       )
     );
 
@@ -1092,7 +1111,8 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Continue with the saved direction.',
         [],
-        savedAttachmentDraft.id
+        savedAttachmentDraft.id,
+        false
       )
     );
     expect(onStageAttachmentBatch).not.toHaveBeenCalled();
@@ -1417,6 +1437,71 @@ describe('mounted Design workspace', () => {
     boundsSpy.mockRestore();
   });
 
+  it('keeps a failed native load actionable and clears the error after a successful retry', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 12, y: 24, width: 1_200, height: 720,
+      top: 24, left: 12, right: 1_212, bottom: 744, toJSON: () => ({})
+    });
+    const onShowCanvas = vi.fn(async () => { throw new Error('Load failed'); });
+    const onRefreshCanvas = vi.fn()
+      .mockRejectedValueOnce(new Error('Still unavailable'))
+      .mockResolvedValueOnce(undefined);
+    render(<DesignsWorkspace {...workspaceProps({ onShowCanvas, onRefreshCanvas })} />);
+
+    expect(await screen.findByText('Preview could not load')).toBeTruthy();
+    expect(screen.getByText('v1 ready')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry preview' }));
+    expect(await screen.findByText('Still unavailable')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry preview' }));
+
+    await waitFor(() => expect(screen.queryByText('Preview could not load')).toBeNull());
+    expect(screen.queryByText('Still unavailable')).toBeNull();
+    expect(onRefreshCanvas).toHaveBeenCalledTimes(2);
+    expect(onRefreshCanvas).toHaveBeenLastCalledWith(expect.objectContaining({
+      designId: 'design-1', generationId: 'generation-1'
+    }));
+  });
+
+  it('shows a load failure even when a later bounds report was acknowledged while loading', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 12, y: 24, width: 1_200, height: 720,
+      top: 24, left: 12, right: 1_212, bottom: 744, toJSON: () => ({})
+    });
+    let rejectLoad!: (reason: Error) => void;
+    const onShowCanvas = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectLoad = reject; }))
+      .mockResolvedValue(undefined);
+    render(<DesignsWorkspace {...workspaceProps({ onShowCanvas })} />);
+    fireEvent.scroll(window);
+    expect(onShowCanvas).toHaveBeenCalledTimes(2);
+    rejectLoad(new Error('First native load failed'));
+
+    expect(await screen.findByRole('button', { name: 'Retry preview' })).toBeTruthy();
+  });
+
+  it('retries a failed first update with the selected network choice and original request', async () => {
+    const project = projectWithTwoReferences();
+    const turn = { ...project.conversation[0]!.turn, outcome: 'NEEDS_ATTENTION' as const,
+      failureReason: 'The final candidate was not verified.', referenceIds: ['reference-first'], networkAccess: false };
+    const onSubmitRefinement = vi.fn(async () => undefined);
+    render(<DesignsWorkspace {...workspaceProps({
+      onSubmitRefinement,
+      project: {
+        ...project, design: { ...project.design, status: 'NEEDS_ATTENTION' },
+        turns: [turn], conversation: [{ ...project.conversation[0]!, turn }], canvas: { state: 'EMPTY' }
+      }
+    })} />);
+
+    expect(screen.getAllByText('The final candidate was not verified.').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Split view' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Command network' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry update' }));
+
+    await waitFor(() => expect(onSubmitRefinement).toHaveBeenCalledWith(
+      project.design.id, project.conversation[0]!.userMessage, ['reference-first'], undefined, true
+    ));
+  });
+
   it('previews an earlier version before it offers an explicit restore', async () => {
     const revisions: DesignProjectDetail['revisions'] = [
       {
@@ -1548,6 +1633,7 @@ describe('mounted Design workspace', () => {
         {...workspaceProps({ project, onShowCanvas, onOpenCanvas })}
       />
     );
+    fireEvent.click(screen.getByRole('button', { name: 'Canvas only' }));
 
     expect(onShowCanvas).toHaveBeenCalledWith(expect.objectContaining({
       generationId: 'candidate-1',

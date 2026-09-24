@@ -26,7 +26,7 @@ export type DesignCanvasHideRequest = HideDesignCanvasRequest;
 export type DesignCanvasRefreshRequest = RefreshDesignCanvasRequest;
 
 type CanvasDevice = 'desktop' | 'tablet' | 'phone';
-type CanvasOperation = 'refresh' | 'restart' | 'select' | 'restore' | 'open';
+type CanvasOperation = 'refresh' | 'restart' | 'retry' | 'select' | 'restore' | 'open';
 
 const DEVICE_OPTIONS: ReadonlyArray<{
   id: CanvasDevice;
@@ -42,10 +42,11 @@ export interface DesignCanvasProps {
   project: DesignProjectDetail;
   desktopAvailable: boolean;
   occluded?: boolean;
-  onShowCanvas?(request: DesignCanvasShowRequest): void;
+  onShowCanvas?(request: DesignCanvasShowRequest): void | Promise<void>;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRefresh(request: DesignCanvasRefreshRequest): Promise<void>;
   onRestart(designId: string): Promise<void>;
+  onRetryUpdate?(): Promise<void>;
   onSelectRevision(revisionId: string): Promise<void>;
   onRestore(revisionId: string): Promise<void>;
   onOpen?(taskId: string, generationId: string, routeId: string): Promise<void>;
@@ -66,6 +67,7 @@ export function DesignCanvas({
   onHideCanvas,
   onRefresh,
   onRestart,
+  onRetryUpdate,
   onSelectRevision,
   onRestore,
   onOpen
@@ -75,6 +77,7 @@ export function DesignCanvas({
   const [operation, setOperation] = useState<CanvasOperation>();
   const [device, setDevice] = useState<CanvasDevice>('desktop');
   const [error, setError] = useState<string>();
+  const [failedGenerationId, setFailedGenerationId] = useState<string>();
   const presentation = designCanvasPresentation({ project, desktopAvailable, occluded });
   const generationId = presentation.kind === 'NATIVE' ? presentation.target.generationId : undefined;
   const routeId = presentation.kind === 'NATIVE' ? presentation.target.routeId : undefined;
@@ -113,19 +116,25 @@ export function DesignCanvas({
 
     let frame: number | undefined;
     let scheduled = false;
+    let disposed = false;
     const report = () => {
       const bounds = finiteDesignCanvasBounds(host.getBoundingClientRect());
       if (!bounds) {
         onHideCanvas?.({ designId: project.design.id, requestId: nextCanvasRequestId() });
         return;
       }
-      onShowCanvas({
+      const requestId = nextCanvasRequestId();
+      void Promise.resolve(onShowCanvas({
         designId: project.design.id,
         taskId: project.task.id,
         generationId,
         routeId,
-        requestId: nextCanvasRequestId(),
+        requestId,
         bounds
+      })).then(() => {
+        if (!disposed) setFailedGenerationId(undefined);
+      }, () => {
+        if (!disposed) setFailedGenerationId(generationId);
       });
     };
     const schedule = () => {
@@ -143,6 +152,7 @@ export function DesignCanvas({
     schedule();
 
     return () => {
+      disposed = true;
       if (frame !== undefined) window.cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener('resize', schedule);
@@ -178,6 +188,24 @@ export function DesignCanvas({
     }
   };
 
+  const refreshPreview = () => runOperation(
+    'refresh',
+    async () => {
+      try {
+        await onRefresh({
+          designId: project.design.id,
+          generationId: generationId!,
+          requestId: nextCanvasRequestId()
+        });
+        setFailedGenerationId(undefined);
+      } catch (caught) {
+        setFailedGenerationId(generationId);
+        throw caught;
+      }
+    },
+    'Could not refresh the preview.'
+  );
+
   const previewContent = presentation.kind === 'NATIVE' ? (
     <div
       ref={hostRef}
@@ -189,6 +217,20 @@ export function DesignCanvas({
       <span className="tm-visually-hidden">
         The interactive preview is displayed in the isolated desktop canvas.
       </span>
+      {failedGenerationId === generationId ? (
+        <div className="tm-design-canvas__placeholder" role="alert">
+          <strong>Preview could not load</strong>
+          <span>Reload the preview to try again.</span>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={operation !== undefined}
+            onClick={() => void refreshPreview()}
+          >
+            {operation === 'refresh' ? 'Reloading…' : 'Retry preview'}
+          </button>
+        </div>
+      ) : null}
     </div>
   ) : (
     <div className="tm-design-canvas__placeholder" aria-live="polite">
@@ -206,6 +248,15 @@ export function DesignCanvas({
           )}
         >
           {operation === 'restart' ? 'Restarting…' : 'Restart preview'}
+        </button>
+      ) : presentation.kind === 'PLACEHOLDER' && onRetryUpdate ? (
+        <button
+          type="button"
+          className="primary-button"
+          disabled={operation !== undefined}
+          onClick={() => void runOperation('retry', onRetryUpdate, 'Could not retry the update.')}
+        >
+          {operation === 'retry' ? 'Retrying…' : 'Retry update'}
         </button>
       ) : null}
     </div>
@@ -280,15 +331,7 @@ export function DesignCanvas({
             aria-label="Reload preview"
             title="Reload preview"
             disabled={!generationId || operation !== undefined}
-            onClick={() => void runOperation(
-              'refresh',
-              () => onRefresh({
-                designId: project.design.id,
-                generationId: generationId!,
-                requestId: nextCanvasRequestId()
-              }),
-              'Could not refresh the preview.'
-            )}
+            onClick={() => void refreshPreview()}
           >
             <UiRefreshIcon busy={operation === 'refresh'} />
           </button>

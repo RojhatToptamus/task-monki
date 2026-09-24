@@ -322,6 +322,13 @@ export async function createTaskMonkiScenario(
   let service: TaskManagerService | undefined;
   let repository: Awaited<ReturnType<TaskManagerService['addRepository']>> | undefined;
   try {
+    // Unrelated scenarios must not probe the host's installed/authenticated gh.
+    // Keep this as an initial setting so GitHub scenarios can reconfigure it.
+    if (!options.ghPath) {
+      await persistence.settings.update({
+        externalExecutables: { ghExecutablePath: path.join(rootDir, 'unconfigured-gh') }
+      });
+    }
     service = new TaskManagerService(store, repositoryPath, events, {
       worktreeRoot,
       ghPath: options.ghPath,

@@ -10,6 +10,10 @@ import {
   codexReadOnlyScopeProfile
 } from './CodexPermissionProfile';
 
+const systemCryptoConfig = process.platform === 'darwin'
+  ? { '/System/Library/OpenSSL/openssl.cnf': 'read' }
+  : {};
+
 describe('Codex permission profile', () => {
   it('allows only the runtime minimum, exact worktree, and exact attachment files', () => {
     const worktree = nativeAbsolute('worktrees', 'task-1');
@@ -34,6 +38,7 @@ describe('Codex permission profile', () => {
         [profileId]: {
           filesystem: {
             ':minimal': 'read',
+            ...systemCryptoConfig,
             [worktree]: 'write',
             [attachment]: 'read'
           },
@@ -60,6 +65,7 @@ describe('Codex permission profile', () => {
       'task_monki_session-2': {
         filesystem: {
           ':minimal': 'read',
+          ...systemCryptoConfig,
           [worktree]: 'read'
         },
         network: { enabled: true }
@@ -84,6 +90,7 @@ describe('Codex permission profile', () => {
 
     expect(config.permissions['task_monki_review-session']?.filesystem).toEqual({
       ':minimal': 'read',
+      ...systemCryptoConfig,
       [worktree]: 'read',
       [gitCommonDir]: 'read'
     });

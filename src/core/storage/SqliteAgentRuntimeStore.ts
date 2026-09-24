@@ -2105,9 +2105,9 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
     return this.mutate((draft) => {
       const session = requireOwnedSession(draft, input.owner, input.sessionId);
       const parent = requireOwnedSession(draft, input.owner, input.parentSessionId);
-      const parentRun = input.parentRunId
-        ? requireOwnedRun(draft, input.owner, input.parentRunId, parent.id)
-        : undefined;
+      if (input.parentRunId) {
+        requireOwnedRun(draft, input.owner, input.parentRunId, parent.id);
+      }
       const fingerprint = requestFingerprint(input);
       const replay = replayImmutableRecord(
         draft.subagentObservations,
@@ -2120,7 +2120,7 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
       assertProtocolReference(
         draft,
         input.rawMessage,
-        parentRun,
+        undefined,
         undefined,
         'subagent observation',
         parent
@@ -2588,13 +2588,15 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
       if (parent.owner.kind !== 'TASK') {
         throw new Error('Only a Task session can own a Task subagent observation.');
       }
-      const parentRun = input.parentRunId
-        ? requireOwnedRun(draft, parent.owner, input.parentRunId, parent.id)
-        : undefined;
+      if (input.parentRunId) {
+        requireOwnedRun(draft, parent.owner, input.parentRunId, parent.id);
+      }
+      // The spawning run can belong to an earlier App Server generation.
+      // New status observations must match its runtime, not that old process.
       assertProtocolReference(
         draft,
         input.rawMessage,
-        parentRun,
+        undefined,
         undefined,
         'subagent observation',
         parent
@@ -2627,6 +2629,9 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
         );
       }
       const relationshipProblems = [
+        existing && existing.role !== 'SUBAGENT'
+          ? 'Provider observation cannot change a Task Monki-owned session role.'
+          : undefined,
         input.providerChildSessionId === parent.providerSessionId
           ? 'Provider reported a session as its own child.'
           : undefined,
@@ -2681,10 +2686,11 @@ export class SqliteAgentRuntimeStore implements AgentRuntimeStore {
           : input.status === 'ERRORED'
             ? 'SYSTEM_ERROR'
             : existing?.status ?? 'UNKNOWN';
-      const stored: AgentRuntimeSessionRecord = existing
+      const stored: AgentRuntimeSessionRecord = existing && existing.role !== 'SUBAGENT'
+        ? existing
+        : existing
         ? {
             ...existing,
-            role: 'SUBAGENT',
             providerSessionTreeId:
               input.providerSessionTreeId ?? existing.providerSessionTreeId,
             parentSessionId:

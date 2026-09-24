@@ -151,7 +151,7 @@ import {
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
 const DESIGN_CANVAS_LOAD_FAILED_NOTICE =
-  'The Design preview could not load. Select the Design again to retry.';
+  'The Design preview could not load. Reload the preview to retry.';
 const unavailableSoftwareUpdateState: SoftwareUpdateState = {
   status: 'unavailable',
   currentVersion: '',
@@ -318,6 +318,7 @@ export function App() {
     message: string;
     referenceIds: string[];
     attachmentDraftId?: string;
+    networkAccess?: boolean;
     clientMessageId: string;
   } | undefined>(undefined);
   const pendingDesignActionIdsRef = useRef(new Map<string, string>());
@@ -801,6 +802,7 @@ export function App() {
         | 'model'
         | 'modelProvider'
         | 'reasoningEffort'
+        | 'networkAccess'
         | 'attachmentDraftId'
       >
     ) => {
@@ -813,6 +815,7 @@ export function App() {
           model: input.model,
           modelProvider: input.modelProvider,
           reasoningEffort: input.reasoningEffort,
+          networkAccess: input.networkAccess,
           ...(input.attachmentDraftId
             ? { attachmentDraftId: input.attachmentDraftId }
             : {})
@@ -834,7 +837,8 @@ export function App() {
       designId: string,
       message: string,
       referenceIds: string[],
-      attachmentDraftId?: string
+      attachmentDraftId?: string,
+      networkAccess?: boolean
     ) => {
       const pending =
         pendingDesignTurnRef.current?.designId === designId &&
@@ -843,13 +847,15 @@ export function App() {
         pendingDesignTurnRef.current.referenceIds.every(
           (referenceId, index) => referenceId === referenceIds[index]
         ) &&
-        pendingDesignTurnRef.current.attachmentDraftId === attachmentDraftId
+        pendingDesignTurnRef.current.attachmentDraftId === attachmentDraftId &&
+        pendingDesignTurnRef.current.networkAccess === networkAccess
           ? pendingDesignTurnRef.current
           : {
               designId,
               message,
               referenceIds: [...referenceIds],
               attachmentDraftId,
+              networkAccess,
               clientMessageId: crypto.randomUUID()
             };
       pendingDesignTurnRef.current = pending;
@@ -859,6 +865,7 @@ export function App() {
           clientMessageId: pending.clientMessageId,
           message,
           referenceIds: pending.referenceIds,
+          networkAccess: pending.networkAccess,
           ...(pending.attachmentDraftId
             ? { attachmentDraftId: pending.attachmentDraftId }
             : {})
@@ -1217,13 +1224,14 @@ export function App() {
     (input: ShowDesignCanvasRequest) => {
       const canvas = window.designCanvas;
       if (!canvas) return;
-      void canvas
+      return canvas
         .show(input)
         .then(() => {
           designCanvasErrorRef.current = undefined;
         })
         .catch(() => {
           reportDesignCanvasError(undefined, DESIGN_CANVAS_LOAD_FAILED_NOTICE);
+          throw new Error(DESIGN_CANVAS_LOAD_FAILED_NOTICE);
         });
     },
     [reportDesignCanvasError]

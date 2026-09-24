@@ -124,9 +124,10 @@ The adapter must:
   not inherit unrelated user/plugin tool processes;
 - allow explicit settings opt-in for cached or live Codex web search, all
   configured Codex MCP servers, and Codex apps/connectors when a task needs
-  those external tools in packaged Electron. Browser development forces all
-  three modes off, rejects enable attempts, and aborts before App Server launch
-  unless every enabled MCP entry can be discovered and explicitly disabled;
+  those external tools in packaged Electron. When MCP is disabled, both hosts
+  abort before App Server launch unless every enabled MCP entry can be
+  discovered and explicitly disabled. Browser development forces all three
+  modes off and rejects enable attempts;
 - validate settings reported by thread start/resume/fork responses before
   persistence or a subsequent turn/review operation. In browser development,
   an unsafe response or live settings notification latches the adapter closed
@@ -176,6 +177,8 @@ separately secured extraction or tool boundary.
 For scoped execution, the adapter supplies a complete, collision-resistant
 permission profile through the existing thread-local config layer. It grants
 `:minimal`, the exact worktree, and exact verified task attachment files.
+On macOS it also permits reading the system OpenSSL configuration file, which
+Node requires even for local syntax checks.
 For every restricted implementation or review session, the adapter also
 resolves and canonicalizes the
 worktree's Git directory and common Git directory, proves that the worktree is
@@ -187,6 +190,12 @@ worktree registrations are ignored; the active worktree must still resolve and
 match exactly. Restricted subprocesses use the already resolved concrete Git
 executable in a non-login shell, ignore system and user Git configuration,
 disable optional Git locks, and resolve Git's excludes file to the null device.
+The concrete Git directory is added to the App Server process environment before
+Codex adds its own tool directories. Native bundles with a sibling `codex-path`
+directory also include those companion tools. Thread configuration preserves that PATH.
+With scoped filesystem access, shell discovery such as `command -v node` can
+fail even when Codex permits a command that invokes Node. Tool verification must
+observe the actual command result, not infer availability from that lookup.
 Review sessions additionally isolate home and XDG configuration inside the
 worktree; implementation sessions retain their ordinary home environment so
 unrelated developer tools keep working. This avoids macOS `xcrun` cache
@@ -204,6 +213,7 @@ The review uses the isolated read-only profile plus the validated Git common dir
 
 Thread create, resume, fork, each ordinary turn, and recovery require the returned profile.
 They also require the sole runtime workspace root before provider input.
+Sandboxed thread responses must attest the requested command network permission.
 Live settings drift terminates the provider and fails active runs.
 Attachment reads need no separate permission escalation or path expansion flow.
 Before each read-only thread starts or resumes, the adapter finds each enabled
@@ -224,15 +234,15 @@ An empty local Codex session can bind its first exact attachment scope before
 the first provider prompt. The store permits this only before materialization
 and before any provider turn ID exists.
 
-Codex keeps that permission-profile identity after provider admission.
-It cannot replace it with a different exact attachment scope.
-When a Design turn selects a different reference set, Task Monki uses the
+Codex keeps a loaded thread's permission scope after provider admission.
+Resuming that thread does not apply a changed network setting under the same profile ID.
+When a turn changes the loaded network scope or its exact attachment scope, Task Monki uses the
 existing native thread-fork operation. The fork keeps the conversation history
-but starts with a new, attested profile for only that turn's selected files.
+but starts with a new, attested profile for that turn's selected files and network permission.
 Task Monki creates a new local primary session for the forked thread. The old
 local session keeps its immutable provider thread identity. Both sessions stay
 in the same Task conversation lineage.
-If the reference scope is unchanged, it resumes the current thread as usual.
+If the permission scope is unchanged, it resumes the current thread as usual.
 
 Full access remains available with or without attachments. It requires the
 runtime to attest the exact `:danger-full-access` profile and sole Task Monki
@@ -279,6 +289,11 @@ than inferred from Codex events.
     `projection.agentReview`.
 - Provider-origin child runs
   - Observed child/subagent activity. These do not replace the task workflow.
+
+Provider spawn and thread-parent evidence establish child lineage. Collaboration
+message recipients can be roots or siblings; later messages retain known
+lineage. Observations cannot change an app-owned session's role. A child's
+spawning run remains historical when a new App Server observes its status.
 
 Fork alternatives are intentionally not a `RunRecord.mode`. They are created by
 Task Monki as a new task with a separate worktree, branch, iteration, fresh

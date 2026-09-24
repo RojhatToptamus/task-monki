@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type {
   CodexAppsMode,
   CodexExternalToolSettings,
@@ -125,6 +128,47 @@ describe('Codex external tool config', () => {
         requireCompleteDiscovery: true
       })
     ).toThrow('could not be disabled safely');
+  });
+
+  it('refuses packaged startup when disabled MCP servers cannot be discovered', async () => {
+    await expect(
+      resolveCodexExternalToolConfigOverrides({
+        executable: '/definitely/not/codex',
+        cwd: process.cwd(),
+        settings: {
+          webSearchMode: 'live',
+          mcpServers: 'disabled',
+          apps: 'enabled'
+        }
+      })
+    ).rejects.toThrow('could not be completely inspected and disabled');
+  });
+
+  it('refuses packaged startup when discovery cannot disable every enabled MCP server', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-mcp-discovery-'));
+    try {
+      const payload = JSON.stringify([
+        {
+          name: 'docs',
+          enabled: true,
+          transport: { type: 'stdio', command: 'docs-mcp' }
+        },
+        { name: 'unrecognized', enabled: true, transport: { type: 'unknown' } }
+      ]);
+      await fs.writeFile(
+        path.join(root, 'mcp'),
+        `process.stdout.write(${JSON.stringify(payload)});\n`
+      );
+      await expect(
+        resolveCodexExternalToolConfigOverrides({
+          executable: process.execPath,
+          cwd: root,
+          settings: { webSearchMode: 'disabled', mcpServers: 'disabled', apps: 'disabled' }
+        })
+      ).rejects.toThrow('could not be completely inspected and disabled');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it('builds complete per-thread denial config for enabled MCP servers', () => {

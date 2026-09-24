@@ -1,11 +1,14 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import path from 'node:path';
+import fs from 'node:fs/promises';
 import type {
   AgentRuntimeResolutionDiagnostics,
   AgentServerInstance,
   CodexExternalToolSettings
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
+import { resolveAgentGitExecutablePath } from '../../git/AgentGitMetadata';
 import {
   isPortableProcessTreeRunning,
   terminatePortableProcessTree,
@@ -429,12 +432,32 @@ export class CodexAppServerSupervisor {
       this.server = server;
       this.assertStartupActive();
 
+      const environment = sanitizeEnvironment(
+        this.options.environment ?? process.env,
+        CODEX_ENVIRONMENT_POLICY.allowedKeys
+      );
+      // Select concrete Git before Codex adds its bundled tool directories to PATH.
+      // Overriding PATH in thread config would discard those runtime helpers.
+      const gitDirectory = path.dirname(await resolveAgentGitExecutablePath());
+      // Native distributions can supply sibling companion tools without adding
+      // them to the child PATH. Keep those helpers available in the sandbox.
+      const companionDirectory = path.join(path.dirname(executable), 'codex-path');
+      const hasCompanionDirectory = await fs.stat(companionDirectory).then(
+        (stat) => stat.isDirectory(),
+        () => false
+      );
+      environment.PATH = [
+        gitDirectory,
+        ...(hasCompanionDirectory ? [companionDirectory] : []),
+        ...(environment.PATH ?? '').split(path.delimiter).filter(
+          (candidate) => candidate && path.resolve(candidate) !== gitDirectory &&
+            (!hasCompanionDirectory || path.resolve(candidate) !== companionDirectory)
+        )
+      ].join(path.delimiter);
+      this.assertStartupActive();
       child = (this.options.spawnProcess ?? spawnOwnedPortable)(executable, argv, {
         cwd: this.options.cwd,
-        env: sanitizeEnvironment(
-          this.options.environment ?? process.env,
-          CODEX_ENVIRONMENT_POLICY.allowedKeys
-        ),
+        env: environment,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32'
       }) as ChildProcessWithoutNullStreams;

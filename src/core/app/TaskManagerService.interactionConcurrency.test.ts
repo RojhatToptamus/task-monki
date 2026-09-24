@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentExecutionSettings } from '../../shared/agent';
@@ -11,20 +11,6 @@ import {
 } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
-const temporaryProfiles: Array<{
-  directory: string;
-  close(): Promise<void>;
-}> = [];
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryProfiles.splice(0).map(async ({ directory, close }) => {
-      await close();
-      await fs.rm(directory, { recursive: true, force: true });
-    })
-  );
-});
-
 describe('TaskManagerService interaction and cancellation coordination', () => {
   it('admits Stop while a normal Task start still owns the task action', async () => {
     const scenario = await createTaskMonkiScenario({
@@ -32,69 +18,75 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
     });
     let releaseSession = () => {};
     let starting: Promise<unknown> | undefined;
-    try {
-      const task = await scenario.createTask({
-        title: 'Cancel queued Task start',
-        prompt: 'This prompt must remain unsent after Stop.'
-      });
-      await prepareTestWorktree(scenario.service, task.id);
-      const createSession = scenario.agent.createSession.bind(scenario.agent);
-      let markSessionStarted!: () => void;
-      const sessionStarted = new Promise<void>((resolve) => {
-        markSessionStarted = resolve;
-      });
-      const sessionGate = new Promise<void>((resolve) => {
-        releaseSession = resolve;
-      });
-      vi.spyOn(scenario.agent, 'createSession').mockImplementation(async (input) => {
-        markSessionStarted();
-        await sessionGate;
-        return createSession(input);
-      });
-
-      starting = scenario.service.startRun({ taskId: task.id });
-      await Promise.race([
-        sessionStarted,
-        starting.then(() => {
-          throw new Error('The run finished before it tried to create a provider session.');
-        })
-      ]);
-      const queued = (await scenario.store.snapshot()).runs.find(
-        (candidate) => candidate.taskId === task.id
-      )!;
-      expect(queued.status).toBe('QUEUED');
-      expect(queued.providerTurnId).toBeUndefined();
-
-      await expect(
-        scenario.service.cancelRun({ runId: queued.id })
-      ).resolves.toBeUndefined();
-      releaseSession();
-
-      await expect(starting).resolves.toMatchObject({
-        id: queued.id,
-        status: 'INTERRUPTED',
-        providerTurnId: undefined
-      });
-      expect(scenario.agent.startedTurns).toEqual([]);
-    } finally {
+    onTestFinished(async () => {
       releaseSession();
       await starting?.catch(() => undefined);
       await scenario.dispose();
-    }
+    });
+    const task = await scenario.createTask({
+      title: 'Cancel queued Task start',
+      prompt: 'This prompt must remain unsent after Stop.'
+    });
+    await prepareTestWorktree(scenario.service, task.id);
+    const createSession = scenario.agent.createSession.bind(scenario.agent);
+    let markSessionStarted!: () => void;
+    const sessionStarted = new Promise<void>((resolve) => {
+      markSessionStarted = resolve;
+    });
+    const sessionGate = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    vi.spyOn(scenario.agent, 'createSession').mockImplementation(async (input) => {
+      markSessionStarted();
+      await sessionGate;
+      return createSession(input);
+    });
+
+    starting = scenario.service.startRun({ taskId: task.id });
+    await Promise.race([
+      sessionStarted,
+      starting.then(() => {
+        throw new Error('The run finished before it tried to create a provider session.');
+      })
+    ]);
+    const queued = (await scenario.store.snapshot()).runs.find(
+      (candidate) => candidate.taskId === task.id
+    )!;
+    expect(queued.status).toBe('QUEUED');
+    expect(queued.providerTurnId).toBeUndefined();
+
+    await expect(
+      scenario.service.cancelRun({ runId: queued.id })
+    ).resolves.toBeUndefined();
+    releaseSession();
+
+    await expect(starting).resolves.toMatchObject({
+      id: queued.id,
+      status: 'INTERRUPTED',
+      providerTurnId: undefined
+    });
+    expect(scenario.agent.startedTurns).toEqual([]);
   }, 20_000);
 
   it('does not deliver a positive approval while cancellation owns the task', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-interaction-cancel-')
     );
+    onTestFinished(() => fs.rm(directory, { recursive: true, force: true }));
     const opened = await openScriptedTaskManagerPersistence(
       path.join(directory, 'store')
     );
-    temporaryProfiles.push({ directory, close: () => opened.persistence.close() });
     const { store, ...scriptedRuntime } = opened;
     const adapter = scriptedRuntime.adapter;
     const service = new TaskManagerService(store, directory, undefined, {
       ...scriptedRuntime.serviceOptions
+    });
+    let releaseCancellation = () => {};
+    let cancellation: Promise<void> | undefined;
+    onTestFinished(async () => {
+      releaseCancellation();
+      await cancellation?.catch(() => undefined);
+      await service.shutdown();
     });
     const settings: AgentExecutionSettings = {
       runtimeId: 'codex',
@@ -186,7 +178,6 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
       `interaction-request:${run.id}`
     );
 
-    let releaseCancellation!: () => void;
     const cancellationReleased = new Promise<void>((resolve) => {
       releaseCancellation = resolve;
     });
@@ -200,8 +191,13 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
     });
     const respond = vi.spyOn(adapter, 'respondToInteraction');
 
-    const cancellation = service.cancelRun({ runId: run.id });
-    await cancellationStarted;
+    cancellation = service.cancelRun({ runId: run.id });
+    await Promise.race([
+      cancellationStarted,
+      cancellation.then(() => {
+        throw new Error('Cancellation finished before it tried to interrupt the provider.');
+      })
+    ]);
 
     const approval = {
       taskId: task.id,
@@ -221,7 +217,5 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
     await cancellation;
     await expect(service.respondToInteraction(approval)).rejects.toThrow('cannot resume');
     expect(respond).not.toHaveBeenCalled();
-
-    await service.shutdown();
   });
 });

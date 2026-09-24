@@ -178,9 +178,29 @@ It uses `AgentOrchestrator` for provider sessions and turns.
 The Design workflow supplies permanent instructions, app-owned skills,
 selected references, the managed worktree, and one `inspect_design` grant.
 
+Codex Designs keep worktree-scoped writes and approval policy `never`.
+Command network access defaults to off. Users can select it when creating a
+Design and for each update. Each queued message retains its selected permission;
+later messages cannot change it. Legacy messages use the creation setting.
+The packaged app's Web search and MCP settings independently control those
+provider tools; enabling Web search does not enable network commands.
+Saved Codex command allow rules can authorize matching commands outside the
+sandbox, including network access. The network control describes sandboxed
+commands and does not remove these existing authorizations.
+Browser development keeps its separate offline boundary. Other runtimes use
+their advertised approval-free write and network policies.
+
 Task Monki owns source capture, candidate identity, Preview, and Ready cutover.
 The visible last Ready result stays safe during later work.
 A final source change cannot become Ready without browser verification.
+
+Failed startup or candidate validation settles the update and advances queued
+messages. Follow-up prompts include Task Monki's failure reason. If browser
+cleanup fails, the current and queued messages instead need attention; no queued
+message is delivered. An explicit retry must close the previous browser owner
+before starting provider work. The canvas offers Retry update when the first
+preview fails, and Reload for native page-load failures. Page-load errors remain
+transient display state and do not rewrite the last verified Design revision.
 
 ## Capability projection
 

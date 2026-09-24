@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DESIGN_LIMITS } from '../../shared/design';
 import type {
   DesignSourceCheckpoint,
   GitSnapshotRecord,
@@ -267,18 +268,73 @@ describe('DesignUpdateCoordinator', () => {
     );
   });
 
-  it('does not settle a completed turn when browser cleanup remains incomplete', async () => {
+  it('starts a queued correction after the completed turn fails final preview validation', async () => {
     const harness = await createHarness();
     const run = await startAndCompleteCurrentTurn(harness);
+    const next = await harness.store.createInlineDesignTurn({
+      designId: harness.designId,
+      clientMessageId: 'correct-failed-preview',
+      message: 'Fix and verify the preview.',
+      referenceIds: []
+    });
+    harness.source.captureCandidate.mockRejectedValueOnce(new Error('Source capture failed'));
+
+    await harness.coordinator.handleRunTerminal(run.id);
+
+    const detail = await harness.store.getDesignDetail(harness.designId);
+    expect(detail.turns[0]).toMatchObject({
+      outcome: 'NEEDS_ATTENTION', failureReason: 'Source capture failed'
+    });
+    expect(detail.turns[1]).toMatchObject({
+      id: next.id, runId: detail.currentRun?.id,
+      checkpoint: { boundary: 'RUN_LINKED' }
+    });
+    expect(harness.startTurn).toHaveBeenCalledTimes(2);
+    expect(harness.startTurn.mock.calls[1]?.[0].prompt).toContain('Source capture failed');
+  });
+
+  it('reports incomplete browser cleanup for the full queue and blocks provider delivery until retry closes it', async () => {
+    const harness = await createHarness();
+    const run = await startAndCompleteCurrentTurn(harness);
+    for (let index = 0; index < DESIGN_LIMITS.queuedTurns; index += 1) {
+      await harness.store.createInlineDesignTurn({
+        designId: harness.designId, clientMessageId: `browser-cleanup-queue-${index}`,
+        message: `Queued correction ${index}`, referenceIds: []
+      });
+    }
     harness.browser.closeRun.mockRejectedValue(new Error('persistent close failure'));
 
-    await expect(harness.coordinator.handleRunTerminal(run.id)).rejects.toThrow(
-      'persistent close failure'
-    );
+    await harness.coordinator.handleRunTerminal(run.id);
 
     expect(harness.browser.closeRun).toHaveBeenCalledTimes(2);
-    expect((await harness.store.getDesignDetail(harness.designId)).turns[0]?.outcome)
-      .toBeUndefined();
+    const blocked = await harness.store.getDesignDetail(harness.designId);
+    expect(blocked.design.status).toBe('NEEDS_ATTENTION');
+    expect(blocked.turns).toHaveLength(DESIGN_LIMITS.queuedTurns + 1);
+    expect(blocked.turns.every((turn) => turn.outcome === 'NEEDS_ATTENTION' &&
+      turn.failureReason?.includes('browser could not close'))).toBe(true);
+    expect(blocked.actions).toMatchObject({ canRefine: true, queuedTurnCount: 0 });
+    expect(harness.startTurn).toHaveBeenCalledTimes(1);
+    expect(harness.source.publishPreparedCandidateCommit).not.toHaveBeenCalled();
+
+    await harness.store.createInlineDesignTurn({
+      designId: harness.designId, clientMessageId: 'cleanup-retry-failed',
+      message: 'Retry the update.', referenceIds: []
+    });
+    await expect(harness.coordinator.dispatch(harness.designId)).rejects.toThrow('persistent close failure');
+    expect(harness.startTurn).toHaveBeenCalledTimes(1);
+
+    harness.browser.closeRun.mockResolvedValue(undefined);
+    const retry = await harness.store.createInlineDesignTurn({
+      designId: harness.designId, clientMessageId: 'cleanup-retry-recovered',
+      message: 'Retry after browser recovery.', referenceIds: []
+    });
+    await harness.coordinator.dispatch(harness.designId);
+
+    expect(harness.browser.closeRun).toHaveBeenLastCalledWith(run.id);
+    expect(harness.startTurn).toHaveBeenCalledTimes(2);
+    expect((await harness.store.getDesignDetail(harness.designId)).turns.at(-1)).toMatchObject({
+      id: retry.id, checkpoint: { boundary: 'RUN_LINKED' }
+    });
   });
 
   it('uses runtime interruption for the active message and cancels queued messages locally', async () => {
@@ -357,6 +413,28 @@ describe('DesignUpdateCoordinator', () => {
       failureReason: 'Git evidence is unavailable.'
     });
     expect(detail.turns[0]).not.toHaveProperty('checkpoint');
+  });
+
+  it('advances the queue when a provider cannot start the next turn', async () => {
+    const harness = await createHarness();
+    const next = await harness.store.createInlineDesignTurn({
+      designId: harness.designId,
+      clientMessageId: 'retry-start-failure',
+      message: 'Try the update again.',
+      referenceIds: []
+    });
+    harness.startTurn.mockRejectedValueOnce(new Error('Provider start failed'));
+    harness.coordinator.open();
+
+    await expect(harness.coordinator.dispatch(harness.designId)).rejects.toThrow('Provider start failed');
+
+    const detail = await harness.store.getDesignDetail(harness.designId);
+    expect(detail.turns[0]).toMatchObject({ outcome: 'FAILED', failureReason: 'Provider start failed' });
+    expect(detail.turns[1]).toMatchObject({
+      id: next.id, runId: detail.currentRun?.id,
+      checkpoint: { boundary: 'RUN_LINKED' }
+    });
+    expect(harness.startTurn).toHaveBeenCalledTimes(2);
   });
 
   it('admits a terminal event during interruption, drains it, then closes admission', async () => {

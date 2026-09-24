@@ -196,7 +196,8 @@ export function designCanvasPresentation(input: {
     return {
       kind: 'PLACEHOLDER',
       title: 'No ready preview',
-      detail: canvas.detail ?? 'Resolve the current issue, then try the update again.',
+      detail: canvas.detail ?? input.project.turns.at(-1)?.failureReason ??
+        'Send a follow-up message to try the update again.',
       restart: input.project.actions.canRestart
     };
   }

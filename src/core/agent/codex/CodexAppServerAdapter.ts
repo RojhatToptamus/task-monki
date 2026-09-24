@@ -122,10 +122,7 @@ import {
   listDisabledCodexMcpServerThreadConfig,
   normalizeCodexExternalToolSettings
 } from './CodexToolConfig';
-import {
-  resolveAgentGitExecutablePath,
-  resolveAgentGitMetadata
-} from '../../git/AgentGitMetadata';
+import { resolveAgentGitMetadata } from '../../git/AgentGitMetadata';
 import type { ServerNotification } from './protocol/generated/ServerNotification';
 import type { ServerRequest } from './protocol/generated/ServerRequest';
 import type { Model } from './protocol/generated/v2/Model';
@@ -2303,7 +2300,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           recoveryRequiredSessionIds.add(run.sessionId);
         }
       } catch (error) {
-        if (error instanceof BrowserDevBoundaryViolationError) {
+        if (error instanceof BrowserDevBoundaryViolationError || this.securityBoundaryViolation) {
           throw error;
         }
         await this.recordReconciliation(
@@ -3145,7 +3142,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       sourceMetadata.parentThreadId ??
       (sourceMetadata.isSpawnedSubagent ? thread.forkedFromId : null);
 
-    if (providerParentSessionId) {
+    if (providerParentSessionId && (!existing || existing.role === 'SUBAGENT')) {
       const parent = await this.taskRuntime.getAgentSessionByProviderId(this.descriptor.id,
         providerParentSessionId
       );
@@ -3246,34 +3243,43 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         model: item.model ?? undefined,
         reasoningEffort: item.reasoningEffort ?? undefined
       });
-      for (const childThreadId of new Set(item.receiverThreadIds)) {
+      const observe = async (
+        childThreadId: string,
+        source: 'COLLAB_RECEIVER' | 'COLLAB_STATE',
+        status?: AgentSubagentStatus
+      ) => {
+        const child = await this.taskRuntime.getAgentSessionByProviderId(
+          this.descriptor.id, childThreadId
+        );
+        // A message receiver can be the root or a sibling. Only spawning
+        // establishes parentage; later tool calls retain the known lineage.
+        if (child && child.role !== 'SUBAGENT') return;
+        const owner = child?.parentSessionId
+          ? await this.taskRuntime.getAgentSession(child.parentSessionId)
+          : item.tool === 'spawnAgent' ? parent : undefined;
+        if (!owner) return;
         await this.persistObservedSubagent({
-          parentSessionId: parent.id,
-          parentRunId: run.id,
+          parentSessionId: owner.id,
+          parentRunId: child?.parentRunId ?? (owner.id === run.sessionId ? run.id : undefined),
           providerChildSessionId: childThreadId,
-          providerParentSessionId: item.senderThreadId,
-          source: 'COLLAB_RECEIVER',
-          delegatedPrompt:
-            item.tool === 'spawnAgent' && item.prompt
-              ? redactCredentialText(item.prompt, this.sensitiveValues)
-              : undefined,
-          requestedSettings,
+          providerParentSessionId: owner.providerSessionId,
+          source,
+          status,
+          delegatedPrompt: item.tool === 'spawnAgent' && item.prompt
+            ? redactCredentialText(item.prompt, this.sensitiveValues)
+            : undefined,
+          requestedSettings: item.tool === 'spawnAgent' ? requestedSettings : undefined,
           rawMessage: raw
         });
+      };
+      for (const childThreadId of new Set(item.receiverThreadIds)) {
+        await observe(childThreadId, 'COLLAB_RECEIVER');
       }
       for (const [childThreadId, state] of Object.entries(item.agentsStates)) {
         if (!state) {
           continue;
         }
-        await this.persistObservedSubagent({
-          parentSessionId: parent.id,
-          parentRunId: run.id,
-          providerChildSessionId: childThreadId,
-          providerParentSessionId: item.senderThreadId,
-          source: 'COLLAB_STATE',
-          status: mapCollabAgentStatus(state.status),
-          rawMessage: raw
-        });
+        await observe(childThreadId, 'COLLAB_STATE', mapCollabAgentStatus(state.status));
       }
       return;
     }
@@ -6291,6 +6297,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       activeProfile?.providerSessionId === providerSessionId
         ? activeProfile.profileId
         : undefined;
+    const currentNetworkAccess =
+      session.observedSettings?.networkAccess ?? session.requestedSettings.networkAccess;
     const task = await this.taskStore.getTask(session.taskId);
     const storedGrantMatches = await this.storedAttachmentAccessMatches(
       session.id,
@@ -6309,7 +6317,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       options.allowProfileFork !== false &&
       settings.sandbox !== 'DANGER_FULL_ACCESS' &&
       (currentProfileId
-        ? currentProfileId !== expectedProfileId
+        // A loaded Codex thread retains its network scope when resumed with
+        // the same profile id, even when that profile's config has changed.
+        ? currentProfileId !== expectedProfileId ||
+          (currentNetworkAccess === true) !== (settings.networkAccess === true)
         : task?.kind === 'DESIGN' || !storedGrantMatches);
     if (shouldFork) {
       throw new AgentProviderSessionMissingError(
@@ -6462,9 +6473,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     if (designPack && settings.sandbox === 'DANGER_FULL_ACCESS') {
       throw new Error('Design sessions require a restricted writable worktree.');
     }
-    if (designPack && settings.networkAccess === true) {
-      throw new Error('Design sessions cannot enable provider network access.');
-    }
     const permissionProfile = codexPermissionProfileConfig({
       sessionId: session.id,
       settings,
@@ -6495,7 +6503,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       repositoryPath: repository.path,
       worktreePath: worktree.worktreePath
     });
-    const gitExecutablePath = await resolveAgentGitExecutablePath();
     return {
       ...codexPermissionProfileConfig({
         sessionId: session.id,
@@ -6509,7 +6516,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       }),
       ...codexGitSubprocessConfig({
         worktreePath: session.worktreePath,
-        gitExecutablePath,
         isolateHome: session.role === 'REVIEW'
       })
     };
@@ -7297,13 +7303,23 @@ function assertProviderPermissionProfile(
   expectedProfileId: string,
   response: unknown
 ): void {
+  const evidence = response as CodexPermissionProfileEvidence;
   assertCodexPermissionProfileEvidence({
     sessionId,
     sandbox: settings.sandbox,
     worktreePath,
     expectedProfileId,
-    response: response as CodexPermissionProfileEvidence
+    response: evidence
   });
+  if (settings.sandbox !== 'DANGER_FULL_ACCESS') {
+    const sandbox = evidence.sandbox;
+    if (
+      !sandbox || typeof sandbox !== 'object' || !('networkAccess' in sandbox) ||
+      sandbox.networkAccess !== (settings.networkAccess === true)
+    ) {
+      throw new Error('Codex did not attest the requested command network access.');
+    }
+  }
 }
 
 function permissionProfileIdFromConfig(config: Record<string, JsonValue>): string {
@@ -7558,14 +7574,9 @@ function isRuntimeRevisionConflict(error: unknown): boolean {
 
 function codexGitSubprocessConfig(input: {
   worktreePath: string;
-  gitExecutablePath: string;
   isolateHome: boolean;
 }): Record<string, JsonValue> {
-  const gitDirectory = path.dirname(input.gitExecutablePath);
   const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
-  const inheritedPath = (process.env.PATH ?? '')
-    .split(path.delimiter)
-    .filter((candidate) => candidate && path.resolve(candidate) !== gitDirectory);
   return {
     // A login shell can reorder PATH and select macOS's /usr/bin/git xcrun
     // shim, which requires a writable cache. Reviews intentionally have none.
@@ -7574,7 +7585,6 @@ function codexGitSubprocessConfig(input: {
       inherit: 'all',
       ignore_default_excludes: false,
       set: {
-        PATH: [gitDirectory, ...inheritedPath].join(path.delimiter),
         ...(input.isolateHome
           ? {
               HOME: input.worktreePath,

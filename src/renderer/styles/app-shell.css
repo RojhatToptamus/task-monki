@@ -2566,6 +2566,14 @@ button.tm-software-update:hover {
   font-weight: 600;
 }
 
+.tm-settings__description {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .tm-settings__select,
 .tm-settings__input {
   height: 32px;

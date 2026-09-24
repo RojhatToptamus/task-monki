@@ -379,7 +379,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
-      runtimeStore: runtime
+      runtimeStore: runtime,
+      toolSettings: { webSearchMode: 'disabled', mcpServers: 'all', apps: 'disabled' }
     });
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     try {
@@ -1369,12 +1370,16 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const store = persistence.tasks;
     const runtime = persistence.agentRuntime;
     const events = new AppEventBus();
+    const expectsTerminalNotification =
+      expectedSource === 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST';
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      interruptRequestTimeoutMs: 40,
-      interruptCompletionTimeoutMs: 100,
+      // Only timeout scenarios need accelerated deadlines. A responsive child
+      // and its durable journal can take more than 40 ms under suite load.
+      interruptRequestTimeoutMs: expectsTerminalNotification ? 2_000 : 40,
+      interruptCompletionTimeoutMs: expectsTerminalNotification ? 2_000 : 100,
       restartDelaysMs: [],
       runtimeStore: runtime
     });
@@ -1899,7 +1904,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
-  it('scopes the validated Design skill catalog and read root to a Design turn', async () => {
+  it.each([false, true])('keeps Design filesystem access scoped with command network %s', async (networkAccess) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-skills-app-server-'));
     const executable = await writeFakeCodexExecutable(dir);
     const designSkillRoot = await fs.realpath(path.resolve('resources/design-skills'));
@@ -1930,7 +1935,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       prompt: task.prompt,
       instructionProfile: 'DESIGN',
       generationKey: turnId,
-      settings: task.agentSettings
+      settings: { ...task.agentSettings, networkAccess }
     });
     await terminal;
     expect(await store.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
@@ -1960,7 +1965,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(filesystem?.[designSkillRoot]).toBe('read');
     expect(filesystem?.[worktree.worktreePath]).toBe('write');
     expect(profileId ? config?.permissions?.[profileId]?.network?.enabled : undefined).toBe(
-      false
+      networkAccess
     );
 
     const turnStart = messages.find((message) => message.method === 'turn/start');
@@ -2172,6 +2177,66 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('rebinds changed Design network access before delivery and resumes unchanged access', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-network-scope-'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, {
+      cwd: dir,
+      executable: await writeFakeCodexExecutable(dir, 'network-rebind'),
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot: await fs.realpath(path.resolve('resources/design-skills'))
+    });
+    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    qualifyFakeDesignModel(adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree, turnId } = await createDesignTaskContext(store, dir);
+    const runs: RunRecord[] = [];
+    try {
+      for (const networkAccess of [false, true, false, false]) {
+        const generationKey = runs.length === 0 ? turnId : (await store.createInlineDesignTurn({
+          designId: task.id,
+          clientMessageId: randomUUID(),
+          message: 'Continue with the selected command network access.',
+          referenceIds: [],
+          networkAccess
+        })).id;
+        const terminal = waitForAppEvent(events, 'run.terminal');
+        const run = await orchestrator.startTurn({
+          task: (await store.getTask(task.id))!,
+          iteration,
+          worktree,
+          mode: 'DESIGN',
+          instructionProfile: 'DESIGN',
+          generationKey,
+          prompt: 'Continue with the selected command network access.',
+          settings: { ...task.agentSettings, networkAccess }
+        });
+        await terminal;
+        runs.push(run);
+        const session = (await runtimeForTaskStore(store).getSession(run.sessionId))!;
+        expect(session.observedSettings?.networkAccess).toBe(networkAccess);
+        expect(session.executionContext.externalTools.network).toBe(networkAccess);
+        expect(session.executionContext.managedAttachments).toEqual([]);
+      }
+      expect(new Set(runs.map((run) => run.serverInstanceId)).size).toBe(1);
+      expect(new Set(runs.map((run) => run.sessionId)).size).toBe(3);
+      expect(runs[3]!.sessionId).toBe(runs[2]!.sessionId);
+      const server = (await store.snapshot()).agentServers[0]!;
+      const outbound = readOutboundMessages(await fs.readFile(server.protocolJournalPath, 'utf8'));
+      expect(outbound.filter((message) => message.method === 'thread/fork')).toHaveLength(2);
+      expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(4);
+      // Retired sessions retain the permissions under which their turns ran.
+      const runtime = runtimeForTaskStore(store);
+      expect((await runtime.getSession(runs[0]!.sessionId))!.executionContext.externalTools.network).toBe(false);
+      expect((await runtime.getSession(runs[1]!.sessionId))!.executionContext.externalTools.network).toBe(true);
+    } finally {
+      await orchestrator.shutdown();
+    }
+  });
 
   it('sends a selected Design image as a native input on every turn', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-image-turns-'));
@@ -2677,11 +2742,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(profileConfig?.shell_environment_policy?.set).not.toHaveProperty(
       'XDG_CONFIG_HOME'
     );
-    const implementationPath = profileConfig?.shell_environment_policy?.set?.PATH;
-    expect(implementationPath).toEqual(expect.any(String));
-    if (process.platform === 'darwin') {
-      expect(implementationPath?.split(path.delimiter)[0]).not.toBe('/usr/bin');
-    }
+    // Codex adds its bundled helpers after process startup. A thread-level PATH
+    // override would discard that runtime-owned search path.
+    expect(profileConfig?.shell_environment_policy?.set).not.toHaveProperty('PATH');
     const turnInput = (turnStart?.params as {
       input?: Array<{ type?: string; text?: string; path?: string }>;
     } | undefined)?.input;
@@ -3979,11 +4042,12 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
-  it('fences App Server when thread/start returns an unattested permission profile', async () => {
+  it.each(['profile-mismatch-create', 'profile-network-mismatch'] as const)(
+    'fences App Server before prompt delivery for %s', async (mode) => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-thread-start-profile-mismatch-')
     );
-    const executable = await writeFakeCodexExecutable(dir, 'profile-mismatch-create');
+    const executable = await writeFakeCodexExecutable(dir, mode);
     const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
@@ -4012,6 +4076,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       status: 'RECOVERY_REQUIRED'
     });
     expect(snapshot.agentServers.at(-1)).toMatchObject({ status: 'EXITED' });
+    const outbound = readOutboundMethods(await fs.readFile(snapshot.agentServers.at(-1)!.protocolJournalPath, 'utf8'));
+    expect(outbound).not.toContain('turn/start');
     await expect(adapter.preflight()).resolves.toMatchObject({
       readiness: {
         status: 'FAILED',
@@ -5341,7 +5407,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   });
 
-  it('discovers child sessions and correlates child-origin approvals', async () => {
+  it('keeps parent ownership and follow-ups after child messages and approvals', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-'));
     const executable = await writeFakeCodexExecutable(dir, 'subagent');
     const store = await openCodexTaskStore(path.join(dir, 'store'));
@@ -5404,6 +5470,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       status: 'COMPLETED'
     });
     expect(storedChild?.subagentStatus).toBe('COMPLETED');
+    expect(snapshot.agentSessions.find((session) => session.providerSessionId === 'thread-sibling'))
+      .toMatchObject({ parentSessionId: parentRun.sessionId, relationshipState: 'RESOLVED' });
     expect(
       snapshot.agentSessions.some(
         (session) => session.providerSessionId === 'thread-review'
@@ -5426,6 +5494,21 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     expect(snapshot.tasks[0]?.currentRunId).toBe(parentRun.id);
     expect(snapshot.tasks[0]?.projection.agentRun).toBe('COMPLETED');
+
+    const followUp = await orchestrator.startTurn({
+      task: (await store.getTask(task.id))!,
+      iteration,
+      worktree,
+      mode: 'FOLLOW_UP',
+      prompt: 'Continue after the delegated review.',
+      settings: task.agentSettings
+    });
+    await waitForRunStatus(store, followUp.id, 'COMPLETED');
+    expect(followUp.sessionId).toBe(parentRun.sessionId);
+    expect(await store.getAgentSession(parentRun.sessionId)).toMatchObject({
+      role: 'PRIMARY',
+      relationshipState: 'ROOT'
+    });
 
     await orchestrator.shutdown();
   });
@@ -5628,16 +5711,27 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       allowNetworkAccess: false
     });
 
-    await expect(orchestrator.initialize()).rejects.toThrow(
-      'Recovery resume observed settings is unsafe'
-    );
+    await expect(orchestrator.initialize()).rejects.toMatchObject({
+      operation: 'thread/resume'
+    });
 
     const snapshot = await store.snapshot();
     expect(snapshot.agentServers.at(-1)?.status).toBe('EXITED');
     expect(snapshot.agentSessions.find((candidate) => candidate.id === session.id))
       .not.toHaveProperty('observedSettings');
+    const outbound = readOutboundMethods(await fs.readFile(
+      snapshot.agentServers.at(-1)!.protocolJournalPath,
+      'utf8'
+    ));
+    expect(outbound).not.toContain('turn/start');
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: {
+        status: 'FAILED',
+        diagnostics: [expect.objectContaining({ code: 'SECURITY_BOUNDARY_FAILED' })]
+      }
+    });
     await expect(adapter.listModels()).rejects.toThrow(
-      'Recovery resume observed settings is unsafe'
+      'Codex did not attest the requested command network access.'
     );
   });
 
@@ -6419,7 +6513,9 @@ function fakeCodexScript(
     | 'unsafe-live-settings'
     | 'design-browser'
     | 'profile-rebind'
+    | 'network-rebind'
     | 'profile-mismatch-create'
+    | 'profile-network-mismatch'
     | 'profile-drift'
     | 'unsafe-recovery-resume'
     | 'interrupt-ambiguous-then-terminal'
@@ -6469,7 +6565,7 @@ const rl = readline.createInterface({ input: process.stdin });
 let scopedTurnNumber = 0;
 let ephemeral = false;
 const send = (message) => process.stdout.write(JSON.stringify(message, (key, value) =>
-  mode === 'scoped' && scopedTurnNumber > 1 && value === 'turn-1'
+  (mode === 'scoped' || mode === 'subagent') && scopedTurnNumber > 1 && value === 'turn-1'
     ? 'turn-' + scopedTurnNumber : value
 ) + '\\n');
 const mode = ${JSON.stringify(mode)};
@@ -6540,12 +6636,20 @@ const reviewThread = () => ({
 });
 let currentProfileId = ':workspace';
 let currentProfileNetworkAccess = false;
+const networkProfiles = new Map();
+let networkForkCount = 0;
 let turnStartAttempts = 0;
 let designBrowserToolRegistered = false;
 const threadResponse = (request = {}) => {
   currentProfileId = request.config?.default_permissions ?? currentProfileId;
-  currentProfileNetworkAccess =
-    request.config?.permissions?.[currentProfileId]?.network?.enabled === true;
+  const requestedNetwork = request.config?.permissions?.[currentProfileId]?.network?.enabled === true;
+  // The native runtime retains a loaded profile's network scope on resume.
+  if (mode === 'network-rebind') {
+    if (!networkProfiles.has(currentProfileId)) networkProfiles.set(currentProfileId, requestedNetwork);
+    currentProfileNetworkAccess = networkProfiles.get(currentProfileId);
+  } else {
+    currentProfileNetworkAccess = requestedNetwork;
+  }
   const configuredEffort =
     request.config && typeof request.config.model_reasoning_effort === 'string'
       ? request.config.model_reasoning_effort
@@ -6574,7 +6678,8 @@ const threadResponse = (request = {}) => {
   } : {
     type: 'workspaceWrite',
     writableRoots: [process.cwd()],
-    networkAccess: false,
+    networkAccess: mode === 'profile-network-mismatch' && currentProfileId !== 'task_monki_capability_probe'
+      ? !currentProfileNetworkAccess : currentProfileNetworkAccess,
     excludeTmpdirEnvVar: true,
     excludeSlashTmp: true
   },
@@ -6879,7 +6984,7 @@ rl.on('line', (line) => {
               )
             ]),
             id:
-              mode === 'profile-rebind'
+              mode === 'profile-rebind' || mode === 'network-rebind'
                 ? message.params.threadId
                 : 'thread-1'
           }
@@ -7022,7 +7127,9 @@ rl.on('line', (line) => {
         const response = {
           ...threadResponse(message.params),
           thread:
-            mode === 'profile-rebind'
+            mode === 'network-rebind'
+              ? { ...thread(), id: 'thread-network-' + (++networkForkCount) }
+              : mode === 'profile-rebind'
               ? { ...thread(), id: 'thread-rebound' }
               : reviewThread()
         };
@@ -7076,6 +7183,15 @@ rl.on('line', (line) => {
     case 'turn/start':
       scopedTurnNumber += 1;
       turnStartAttempts += 1;
+      if (mode === 'network-rebind') {
+        const currentTurn = { ...turn('inProgress'), id: 'turn-' + turnStartAttempts };
+        send({ id: message.id, result: { turn: currentTurn } });
+        setTimeout(() => send({ method: 'turn/completed', params: {
+          threadId: message.params.threadId,
+          turn: { ...currentTurn, status: 'completed' }
+        } }), 20);
+        return;
+      }
       if (mode === 'turn-start-rejected-once' && turnStartAttempts === 1) {
         send({ id: message.id, error: {
           code: -32602,
@@ -7271,6 +7387,12 @@ rl.on('line', (line) => {
           return;
         }
         if (mode === 'subagent') {
+          if (scopedTurnNumber > 1) {
+            send({ method: 'turn/completed', params: {
+              threadId: 'thread-1', turn: turn('completed')
+            } });
+            return;
+          }
           send({ method: 'item/started', params: {
             threadId: 'thread-1',
             turnId: 'turn-1',
@@ -7281,7 +7403,7 @@ rl.on('line', (line) => {
               tool: 'spawnAgent',
               status: 'inProgress',
               senderThreadId: 'thread-1',
-              receiverThreadIds: ['thread-child'],
+              receiverThreadIds: ['thread-child', 'thread-sibling'],
               prompt: 'Inspect the repository tests.',
               model: 'fake-model',
               reasoningEffort: 'low',
@@ -7295,6 +7417,26 @@ rl.on('line', (line) => {
           send({ method: 'turn/started', params: {
             threadId: 'thread-child',
             turn: { ...turn('inProgress'), id: 'turn-child' }
+          } });
+          send({ method: 'item/completed', params: {
+            threadId: 'thread-child',
+            turnId: 'turn-child',
+            completedAtMs: Date.now(),
+            item: {
+              type: 'collabAgentToolCall',
+              id: 'child-to-parent-message',
+              tool: 'sendInput',
+              status: 'completed',
+              senderThreadId: 'thread-child',
+              receiverThreadIds: ['thread-1', 'thread-sibling'],
+              prompt: 'The delegated review is progressing.',
+              model: null,
+              reasoningEffort: null,
+              agentsStates: {
+                'thread-1': { status: 'running', message: null },
+                'thread-sibling': { status: 'running', message: null }
+              }
+            }
           } });
           send({ method: 'item/started', params: {
             threadId: 'thread-child',

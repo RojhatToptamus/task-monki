@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../../shared/agent';
 import { APP_DATABASE_APPLICATION_ID, DATABASE_MIGRATIONS } from './DatabaseMigrations';
@@ -54,6 +55,97 @@ function designAgentSettings() {
 }
 
 describe('ApplicationPersistence', () => {
+  it('repairs collaboration-corrupted roots during upgrade and preserves provider history', async () => {
+    const profileRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-session-upgrade-'));
+    let persistence = await open(profileRoot);
+    const paths = persistence.paths;
+    const task = await persistence.tasks.createTask({
+      title: 'Continue a Design after child feedback', prompt: 'Preserve session ownership.',
+      repositoryId: (await addTestRepository(persistence.tasks, profileRoot)).id
+    });
+    const ownership = await persistence.tasks.createIterationAndWorktree({
+      task, branchName: 'codex/session-history', worktreePath: profileRoot, baseSha: 'base'
+    });
+    const template = await createScriptedAgentRuntimeFixture(persistence).createSession({
+      task, ...ownership
+    });
+    const templateRuntime = (await persistence.agentRuntime.getSession(template.id))!;
+    const operationId = `task-session:${task.id}:${ownership.iteration.id}:codex`;
+    const root = await persistence.taskRuntime.createTaskSession({
+      id: randomUUID(), taskId: task.id,
+      iterationId: ownership.iteration.id, worktreeId: ownership.worktree.id,
+      worktreePath: profileRoot, runtimeId: 'codex',
+      requestedSettings: template.requestedSettings,
+      executionContext: { ...templateRuntime.executionContext, clientOperationId: operationId },
+      operationId
+    });
+    await persistence.tasks.recordAgentSessionCreated(root);
+    const server = await persistence.agentRuntime.createAgentServer({
+      runtimeId: 'codex', runtimeKind: 'APP_SERVER', transport: 'STDIO',
+      executable: 'codex', argv: ['app-server']
+    });
+    const rawMessage = await persistence.agentRuntime.appendProtocolMessage(server.id, 'INBOUND',
+      JSON.stringify({ method: 'item/completed', tool: 'sendInput', receiver: 'provider-root' }));
+    const { session: child } = await persistence.taskRuntime.observeSubagent({
+      parentSessionId: root.id, providerChildSessionId: 'provider-child',
+      source: 'THREAD_STARTED_PARENT', rawMessage
+    }, 'observe-real-child');
+    await persistence.taskRuntime.updateAgentSession(root.id,
+      { providerSessionId: 'provider-root' }, 'root-provider-id');
+    await persistence.taskRuntime.observeSubagent({
+      parentSessionId: child.id, providerChildSessionId: 'provider-root',
+      source: 'COLLAB_RECEIVER', rawMessage
+    }, 'observe-child-message');
+    const original = (await persistence.agentRuntime.getSession(root.id))!;
+    const readHistory = (owner: ApplicationPersistence) => owner.database.read((reader) =>
+      ['runtime_subagent_observations', 'runtime_events', 'task_domain_events'].map((table) =>
+        reader.all(`SELECT * FROM ${table} ORDER BY id`)
+      )
+    );
+    const history = await readHistory(persistence);
+    await close(persistence);
+
+    // Recreate the schema-5 write that made a receiver a child of its sender.
+    const corrupted = { ...original, role: 'SUBAGENT', parentSessionId: child.id,
+      providerParentSessionId: child.providerSessionId, relationshipState: 'RESOLVED',
+      subagentStatus: 'RUNNING' };
+    const legacy = new DatabaseSync(paths.databasePath);
+    legacy.prepare('UPDATE runtime_sessions SET role = ?, payload_json = ? WHERE id = ?')
+      .run('SUBAGENT', JSON.stringify(corrupted), root.id);
+    legacy.exec(`PRAGMA user_version = 5;
+      CREATE TRIGGER fail_role_repair BEFORE UPDATE ON runtime_sessions
+      BEGIN SELECT RAISE(ABORT, 'test role repair failure'); END;`);
+    legacy.close();
+    await expect(open(profileRoot)).rejects.toThrow('test role repair failure');
+    const failed = new DatabaseSync(paths.databasePath);
+    expect(failed.prepare('PRAGMA user_version').get()!.user_version).toBe(5);
+    expect(JSON.parse(String(failed.prepare('SELECT payload_json FROM runtime_sessions WHERE id = ?')
+      .get(root.id)!.payload_json))).toEqual(corrupted);
+    failed.exec('DROP TRIGGER fail_role_repair');
+    failed.close();
+
+    persistence = await open(profileRoot);
+    const repaired = (await persistence.agentRuntime.getSession(root.id))!;
+    expect(repaired).toEqual({ ...original, recordRevision: original.recordRevision + 1 });
+    expect((await persistence.tasks.getPrimaryAgentSession(task.id, ownership.iteration.id))?.id).toBe(root.id);
+    expect(await persistence.taskRuntime.getAgentSession(child.id)).toEqual(child);
+    expect(await persistence.taskRuntime.getAgentSession(template.id)).toEqual(template);
+    expect(await readHistory(persistence)).toEqual(history);
+    expect(await persistence.agentRuntime.readProtocolMessage(rawMessage)).toBeDefined();
+    const backups = await fs.readdir(paths.backupsRoot);
+    expect(backups.length).toBeGreaterThan(0);
+    for (const id of backups) {
+      const backup = await persistence.backups.verifyBackup(id);
+      expect(backup.manifest.database.schemaVersion).toBe(5);
+    }
+    await close(persistence);
+    persistence = await open(profileRoot);
+    expect(await persistence.agentRuntime.getSession(root.id)).toEqual(repaired);
+    expect(await fs.readdir(paths.backupsRoot)).toEqual(backups);
+    await close(persistence);
+    await fs.rm(profileRoot, { recursive: true, force: true });
+  });
+
   it('backs up and invalidates mixed review results without changing their history', async () => {
     const profileRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-upgrade-'));
     let persistence = await open(profileRoot);

@@ -22,6 +22,7 @@ import {
   parseEnabledCodexMcpServerNames
 } from './CodexToolConfig';
 import { openTestPersistence } from '../../../testSupport/persistenceFixture';
+import { resolveAgentGitExecutablePath } from '../../git/AgentGitMetadata';
 import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import type { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
 
@@ -244,10 +245,12 @@ describe('Codex App Server launch configuration', () => {
     await closeRuntimeStore(store, directory);
   });
 
-  it('persists and emits only redacted argv and process diagnostics', async () => {
+  it('preserves packaged tools in the startup path and redacts process diagnostics', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-supervisor-'));
     const store = await openRuntimeStore(path.join(directory, 'store'));
     const child = fakeCodexChild();
+    const companionDirectory = path.join(directory, 'codex-path');
+    await fs.mkdir(companionDirectory);
     const diagnostics: string[] = [];
     let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
     let detached: boolean | undefined;
@@ -259,7 +262,10 @@ describe('Codex App Server launch configuration', () => {
         CODEX_HOME: path.join(directory, 'codex-home'),
         OPENAI_API_KEY: 'codex-environment-secret'
       },
-      runtimeResolver: async () => resolvedCodexRuntime(),
+      runtimeResolver: async () => ({
+        ...resolvedCodexRuntime(),
+        executable: path.join(directory, 'codex')
+      }),
       argvResolver: async () => [
         'app-server',
         '--stdio',
@@ -284,8 +290,15 @@ describe('Codex App Server launch configuration', () => {
 
     const server = (await store.snapshot()).servers[0]!;
     const durable = JSON.stringify(server);
+    const gitDirectory = path.dirname(await resolveAgentGitExecutablePath());
     expect(spawnedEnvironment).toEqual({
-      PATH: process.env.PATH,
+      PATH: [
+        gitDirectory,
+        companionDirectory,
+        ...(process.env.PATH ?? '').split(path.delimiter).filter(
+          (candidate) => candidate && path.resolve(candidate) !== gitDirectory
+        )
+      ].join(path.delimiter),
       CODEX_HOME: path.join(directory, 'codex-home')
     });
     expect(detached).toBe(process.platform !== 'win32');

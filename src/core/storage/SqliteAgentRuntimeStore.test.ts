@@ -25,6 +25,71 @@ afterEach(async () => {
 });
 
 describe('SqliteAgentRuntimeStore', () => {
+  it.each(['PRIMARY', 'REVIEW', 'ALTERNATIVE'] as const)(
+    'keeps %s session ownership when a child reports it as a receiver', async (role) => {
+      const fixture = await storeFixture();
+      const root = await fixture.store.createSession({
+        ...sessionInput('root', taskOwner, 'root-operation'),
+        role,
+        providerSessionId: 'provider-root'
+      });
+      const server = await createServerWithJournal(fixture.store, 'collab-ownership');
+      const rawMessage = await fixture.store.appendProtocolMessage(server.id, 'INBOUND', '{}');
+      const runtime = fixture.store.taskAgentRuntimeAccess();
+      const { session: child } = await runtime.observeSubagent({
+        parentSessionId: root.id,
+        providerChildSessionId: 'provider-child',
+        source: 'COLLAB_RECEIVER',
+        rawMessage
+      }, 'observe-child');
+
+      const message = await runtime.observeSubagent({
+        parentSessionId: child.id,
+        providerChildSessionId: root.providerSessionId!,
+        providerParentSessionId: child.providerSessionId,
+        source: 'COLLAB_RECEIVER',
+        status: 'RUNNING',
+        requestedSettings: { model: 'different-model' },
+        rawMessage
+      }, 'child-message-to-root');
+
+      expect(message.observation.relationshipState).toBe('CONTRADICTORY');
+      expect(await fixture.store.getSession(root.id)).toEqual(root);
+      expect(await fixture.openStore().getSession(root.id)).toEqual(root);
+      expect((await runtime.getAgentSession(child.id))?.parentSessionId).toBe(root.id);
+    }
+  );
+
+  it('retains child lineage when a new server observes a prior spawning run', async () => {
+    const fixture = await storeFixture();
+    const session = await fixture.store.createSession(
+      sessionInput('root', taskOwner, 'root-operation')
+    );
+    const firstServer = await createServerWithJournal(fixture.store, 'first');
+    const run = await fixture.store.createRun(runInput('parent-run', session, taskScope, 'parent-run'));
+    await fixture.store.updateRun(run.id, run.recordRevision, {
+      status: 'STARTING', delivery: 'SENDING', serverInstanceId: firstServer.id
+    }, 'start-parent-run');
+    const runtime = fixture.store.taskAgentRuntimeAccess();
+    const input = {
+      parentSessionId: session.id, parentRunId: run.id,
+      providerChildSessionId: 'provider-child', source: 'COLLAB_STATE' as const
+    };
+    const { session: child } = await runtime.observeSubagent({
+      ...input,
+      rawMessage: await fixture.store.appendProtocolMessage(firstServer.id, 'INBOUND', '{}')
+    }, 'first-observation');
+    const nextServer = await createServerWithJournal(fixture.store, 'next');
+    const observed = await runtime.observeSubagent({
+      ...input, status: 'COMPLETED',
+      rawMessage: await fixture.store.appendProtocolMessage(nextServer.id, 'INBOUND', '{}')
+    }, 'resumed-observation');
+    expect(observed.session).toMatchObject({
+      id: child.id, parentSessionId: session.id, parentRunId: run.id,
+      relationshipState: 'RESOLVED', subagentStatus: 'COMPLETED'
+    });
+  });
+
   it('loads equivalent read-only paths without rewriting records or trusting redirected aliases', async () => {
     const fixture = await storeFixture();
     const root = await fs.realpath(fixture.root);

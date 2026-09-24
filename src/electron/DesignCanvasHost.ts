@@ -100,7 +100,6 @@ interface CanvasWebContents {
   isDestroyed(): boolean;
   close(): void;
   loadURL(url: string): Promise<void>;
-  reload(): void;
   getURL(): string;
   setWindowOpenHandler(
     handler: (details: { url: string }) => { action: 'deny' }
@@ -344,22 +343,27 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
     void state.session.closeAllConnections();
   }
 
-  refresh(input: {
+  async refresh(input: {
     designId: string;
     generationId: string;
     requestId: number;
-  }): void {
+  }): Promise<void> {
     const state = this.sessions.get(input.designId);
     if (
       !state ||
       !this.acceptRequest(state, input.requestId) ||
-      state.active?.generationId !== input.generationId ||
-      !state.view ||
-      state.view.webContents.isDestroyed()
+      state.requestedShow?.generationId !== input.generationId
     ) {
       return;
     }
-    state.view.webContents.reload();
+    if (state.fenceToken) {
+      throw new Error('The preview is still loading. Try reloading after it finishes.');
+    }
+    if (!state.view || state.view.webContents.isDestroyed()) {
+      await this.show({ ...state.requestedShow, requestId: input.requestId });
+      return;
+    }
+    await this.loadView(state, state.view, state.view.webContents.getURL());
   }
 
   close(designId: string): Promise<void> {
@@ -477,8 +481,16 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
     });
     state.view = view;
     this.hardenView(state, view);
-    const expectedGeneration = route.generationId;
-    await view.webContents.loadURL(route.url).catch((error: unknown) => {
+    await this.loadView(state, view, route.url);
+  }
+
+  private async loadView(
+    state: DesignCanvasSessionState,
+    view: CanvasView,
+    url: string
+  ): Promise<void> {
+    const expectedGeneration = state.active!.generationId;
+    await view.webContents.loadURL(url).catch((error: unknown) => {
       if (state.view !== view || state.active?.generationId !== expectedGeneration) {
         return;
       }

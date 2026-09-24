@@ -21,6 +21,24 @@ export type AgentExecutionSupport =
   | { supported: true }
   | { supported: false; reason: string };
 
+export function designNetworkAccessPolicy(
+  capabilities: AgentRuntimeCapabilities
+): 'DISABLED' | 'OPTIONAL' | 'REQUIRED' | undefined {
+  const presets = capabilities.executionPolicy.presets;
+  const preset = presets.find(
+    (candidate) =>
+      candidate.repositoryMutation === 'ALLOW' &&
+      candidate.approvalPolicy.toLocaleLowerCase() === 'never'
+  );
+  if (!preset) return undefined;
+  return presets.some(
+    (candidate) =>
+      candidate.sandbox === preset.sandbox && candidate.networkAccess === 'OPTIONAL'
+  )
+    ? 'OPTIONAL'
+    : preset.networkAccess;
+}
+
 /**
  * Projects the operations that Task Monki currently exposes for one runtime.
  * Runtime health is separate because active-session controls can remain usable

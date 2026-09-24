@@ -647,6 +647,7 @@ function ToolSettings({
         <div className="tm-settings__list">
           <ChoiceSettingRow
             label="Web search"
+            description="Controls the model's search tool. Use Command network in a Design to allow internet access for commands."
             value={appSettings.codexExternalTools.webSearchMode}
             options={[
               { value: 'disabled', label: 'Off' },
@@ -1172,21 +1173,28 @@ function SettingsSwitch({
 
 function ChoiceSettingRow<Value extends string>({
   label,
+  description,
   value,
   options,
   onChange
 }: {
   label: string;
+  description?: string;
   value: Value;
   options: Array<{ value: Value; label: string }>;
   onChange(value: Value): void;
 }) {
   return (
     <label className="tm-settings__row">
-      <span className="tm-settings__k">{label}</span>
+      <span>
+        <span className="tm-settings__k">{label}</span>
+        {description ? <span className="tm-settings__description">{description}</span> : null}
+      </span>
       <select
         className="tm-settings__select tm-settings__select--compact"
         value={value}
+        aria-label={label}
+        aria-description={description}
         onChange={(event) => onChange(event.target.value as Value)}
       >
         {options.map((option) => (

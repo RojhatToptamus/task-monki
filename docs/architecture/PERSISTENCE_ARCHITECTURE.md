@@ -189,6 +189,13 @@ verify a `PRE_UPGRADE` backup. A migration error rolls back the transaction.
 The backup remains available for explicit recovery. New profiles apply the full
 migration sequence. Future changes add new SQLite migrations.
 
+Migration 6 repairs primary Codex sessions that collaboration messages
+incorrectly classified as children. The original session-creation event,
+creation identity, and attested execution context must prove root ownership.
+The migration clears the incorrect parent links. It preserves provider
+observations and protocol history; those observations do not define session roles.
+Sessions without this evidence remain unchanged.
+
 ## Backup And Restore
 
 A complete backup is created in a private staging directory and published only

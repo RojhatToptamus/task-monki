@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 import { openScriptedTaskManagerPersistence } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
@@ -12,6 +12,7 @@ const exec = promisify(execFile);
 describe('TaskManagerService fork alternatives', () => {
   it('creates a linked task with an isolated worktree and starts a fresh implementation run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-fork-alt-'));
+    onTestFinished(() => fs.rm(dir, { recursive: true, force: true }));
     const repositoryPath = path.join(dir, 'repo');
     const worktreeRoot = path.join(dir, 'worktrees');
     await fs.mkdir(repositoryPath, { recursive: true });
@@ -23,6 +24,7 @@ describe('TaskManagerService fork alternatives', () => {
       worktreeRoot,
       ...scriptedRuntime.serviceOptions
     });
+    onTestFinished(() => service.shutdown());
     const repository = await service.addRepository(repositoryPath);
 
     const sourceTask = await store.createTask({
@@ -106,6 +108,7 @@ describe('TaskManagerService fork alternatives', () => {
 
   it('leaves failed fork setup visible as a blocked alternative task', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-fork-fail-'));
+    onTestFinished(() => fs.rm(dir, { recursive: true, force: true }));
     const repositoryPath = path.join(dir, 'repo');
     const worktreeRoot = path.join(dir, 'worktrees-file');
     await fs.mkdir(repositoryPath, { recursive: true });
@@ -117,6 +120,7 @@ describe('TaskManagerService fork alternatives', () => {
       worktreeRoot,
       ...scriptedRuntime.serviceOptions
     });
+    onTestFinished(() => service.shutdown());
     const repository = await service.addRepository(repositoryPath);
 
     const sourceTask = await store.createTask({
