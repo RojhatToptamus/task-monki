@@ -151,7 +151,7 @@ import {
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
 const DESIGN_CANVAS_LOAD_FAILED_NOTICE =
-  'The Design preview could not load. Select the Design again to retry.';
+  'The Design preview could not load. Reload the preview to retry.';
 const unavailableSoftwareUpdateState: SoftwareUpdateState = {
   status: 'unavailable',
   currentVersion: '',
@@ -1217,13 +1217,14 @@ export function App() {
     (input: ShowDesignCanvasRequest) => {
       const canvas = window.designCanvas;
       if (!canvas) return;
-      void canvas
+      return canvas
         .show(input)
         .then(() => {
           designCanvasErrorRef.current = undefined;
         })
         .catch(() => {
           reportDesignCanvasError(undefined, DESIGN_CANVAS_LOAD_FAILED_NOTICE);
+          throw new Error(DESIGN_CANVAS_LOAD_FAILED_NOTICE);
         });
     },
     [reportDesignCanvasError]

@@ -80,17 +80,14 @@ export async function resolveCodexExternalToolConfigOverrides(input: {
         input.executable,
         input.cwd,
         input.environment,
-        { requireCompleteDiscovery: input.failClosedMcpDiscovery === true }
+        { requireCompleteDiscovery: true }
       ))
     ];
   } catch (error) {
-    if (input.failClosedMcpDiscovery) {
-      throw new Error(
-        'Codex MCP configuration could not be completely inspected and disabled for the browser development boundary.',
-        { cause: error }
-      );
-    }
-    return overrides;
+    throw new Error(
+      'Codex MCP configuration could not be completely inspected and disabled. Check the configured Codex executable and MCP configuration, then retry.',
+      { cause: error }
+    );
   }
 }
 

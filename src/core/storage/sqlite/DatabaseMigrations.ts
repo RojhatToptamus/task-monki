@@ -1397,6 +1397,40 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
       SET settings_json = json_set(settings_json, '$.discourseDefaults.policy', 'CHAT'),
           record_revision = record_revision + 1
       WHERE json_extract(settings_json, '$.discourseDefaults.policy') IN ('DIRECT', 'PANEL', 'TEAM');`
+  },
+  {
+    version: 6,
+    name: 'restore-app-owned-session-roles',
+    // Collaboration messages used to reparent their receiver, including a root.
+    // Restore only roots proven by both the app's creation identity and event.
+    // Raw provider observations remain historical evidence, never role authority.
+    sql: `WITH roots AS (
+      SELECT session.id
+      FROM runtime_sessions AS session
+      JOIN task_domain_events AS event ON event.session_id = session.id
+        AND event.task_id = session.task_id
+        AND event.iteration_id = json_extract(session.payload_json, '$.taskContext.iterationId')
+        AND event.worktree_id = json_extract(session.payload_json, '$.taskContext.worktreeId')
+      WHERE session.owner_kind = 'TASK' AND session.runtime_id = 'codex' AND session.role = 'SUBAGENT'
+        AND event.type = 'AGENT_SESSION_CREATED'
+        AND json_extract(event.payload_json, '$.payload.role') = 'PRIMARY'
+        AND json_extract(event.payload_json, '$.payload.runtimeId') = session.runtime_id
+        AND json_extract(event.payload_json, '$.payload.worktreePath') = json_extract(session.payload_json, '$.taskContext.worktreePath')
+        AND json_extract(session.payload_json, '$.executionContext.attestation.status') = 'ATTESTED'
+        AND session.client_operation_id IN (
+          'task-session:' || session.task_id || ':' || event.iteration_id || ':' || session.runtime_id,
+          'task-session:' || session.task_id || ':' || event.iteration_id || ':' || session.runtime_id || ':' || session.id
+        )
+    )
+    UPDATE runtime_sessions
+    SET role = 'PRIMARY',
+        payload_json = json_set(json_remove(payload_json,
+          '$.parentSessionId', '$.parentRunId', '$.providerParentSessionId',
+          '$.providerForkedFromSessionId', '$.relationshipDetail', '$.subagentStatus'),
+          '$.role', 'PRIMARY',
+          '$.relationshipState', 'ROOT', '$.recordRevision', record_revision + 1),
+        record_revision = record_revision + 1
+    WHERE id IN (SELECT id FROM roots);`
   }
 ] as const;
 

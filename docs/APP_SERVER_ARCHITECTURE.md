@@ -124,9 +124,10 @@ The adapter must:
   not inherit unrelated user/plugin tool processes;
 - allow explicit settings opt-in for cached or live Codex web search, all
   configured Codex MCP servers, and Codex apps/connectors when a task needs
-  those external tools in packaged Electron. Browser development forces all
-  three modes off, rejects enable attempts, and aborts before App Server launch
-  unless every enabled MCP entry can be discovered and explicitly disabled;
+  those external tools in packaged Electron. When MCP is disabled, both hosts
+  abort before App Server launch unless every enabled MCP entry can be
+  discovered and explicitly disabled. Browser development forces all three
+  modes off and rejects enable attempts;
 - validate settings reported by thread start/resume/fork responses before
   persistence or a subsequent turn/review operation. In browser development,
   an unsafe response or live settings notification latches the adapter closed
@@ -176,6 +177,8 @@ separately secured extraction or tool boundary.
 For scoped execution, the adapter supplies a complete, collision-resistant
 permission profile through the existing thread-local config layer. It grants
 `:minimal`, the exact worktree, and exact verified task attachment files.
+On macOS it also permits reading the system OpenSSL configuration file, which
+Node requires even for local syntax checks.
 For every restricted implementation or review session, the adapter also
 resolves and canonicalizes the
 worktree's Git directory and common Git directory, proves that the worktree is
@@ -187,6 +190,12 @@ worktree registrations are ignored; the active worktree must still resolve and
 match exactly. Restricted subprocesses use the already resolved concrete Git
 executable in a non-login shell, ignore system and user Git configuration,
 disable optional Git locks, and resolve Git's excludes file to the null device.
+The concrete Git directory is added to the App Server process environment before
+Codex adds its own tool directories. Native bundles with a sibling `codex-path`
+directory also include those companion tools. Thread configuration preserves that PATH.
+With scoped filesystem access, shell discovery such as `command -v node` can
+fail even when Codex permits a command that invokes Node. Tool verification must
+observe the actual command result, not infer availability from that lookup.
 Review sessions additionally isolate home and XDG configuration inside the
 worktree; implementation sessions retain their ordinary home environment so
 unrelated developer tools keep working. This avoids macOS `xcrun` cache
@@ -279,6 +288,11 @@ than inferred from Codex events.
     `projection.agentReview`.
 - Provider-origin child runs
   - Observed child/subagent activity. These do not replace the task workflow.
+
+Provider spawn and thread-parent evidence establish child lineage. Collaboration
+message recipients can be roots or siblings; later messages retain known
+lineage. Observations cannot change an app-owned session's role. A child's
+spawning run remains historical when a new App Server observes its status.
 
 Fork alternatives are intentionally not a `RunRecord.mode`. They are created by
 Task Monki as a new task with a separate worktree, branch, iteration, fresh

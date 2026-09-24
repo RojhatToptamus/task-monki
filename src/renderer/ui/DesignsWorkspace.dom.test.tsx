@@ -1417,6 +1417,69 @@ describe('mounted Design workspace', () => {
     boundsSpy.mockRestore();
   });
 
+  it('keeps a failed native load actionable and clears the error after a successful retry', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 12, y: 24, width: 1_200, height: 720,
+      top: 24, left: 12, right: 1_212, bottom: 744, toJSON: () => ({})
+    });
+    const onShowCanvas = vi.fn(async () => { throw new Error('Load failed'); });
+    const onRefreshCanvas = vi.fn()
+      .mockRejectedValueOnce(new Error('Still unavailable'))
+      .mockResolvedValueOnce(undefined);
+    render(<DesignsWorkspace {...workspaceProps({ onShowCanvas, onRefreshCanvas })} />);
+
+    expect(await screen.findByText('Preview could not load')).toBeTruthy();
+    expect(screen.getByText('v1 ready')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry preview' }));
+    expect(await screen.findByText('Still unavailable')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry preview' }));
+
+    await waitFor(() => expect(screen.queryByText('Preview could not load')).toBeNull());
+    expect(screen.queryByText('Still unavailable')).toBeNull();
+    expect(onRefreshCanvas).toHaveBeenCalledTimes(2);
+    expect(onRefreshCanvas).toHaveBeenLastCalledWith(expect.objectContaining({
+      designId: 'design-1', generationId: 'generation-1'
+    }));
+  });
+
+  it('shows a load failure even when a later bounds report was acknowledged while loading', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 12, y: 24, width: 1_200, height: 720,
+      top: 24, left: 12, right: 1_212, bottom: 744, toJSON: () => ({})
+    });
+    let rejectLoad!: (reason: Error) => void;
+    const onShowCanvas = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectLoad = reject; }))
+      .mockResolvedValue(undefined);
+    render(<DesignsWorkspace {...workspaceProps({ onShowCanvas })} />);
+    fireEvent.scroll(window);
+    expect(onShowCanvas).toHaveBeenCalledTimes(2);
+    rejectLoad(new Error('First native load failed'));
+
+    expect(await screen.findByRole('button', { name: 'Retry preview' })).toBeTruthy();
+  });
+
+  it('retries a failed first update with its original request and active references', async () => {
+    const project = projectWithTwoReferences();
+    const turn = { ...project.conversation[0]!.turn, outcome: 'NEEDS_ATTENTION' as const,
+      failureReason: 'The final candidate was not verified.', referenceIds: ['reference-first'] };
+    const onSubmitRefinement = vi.fn(async () => undefined);
+    render(<DesignsWorkspace {...workspaceProps({
+      onSubmitRefinement,
+      project: {
+        ...project, design: { ...project.design, status: 'NEEDS_ATTENTION' },
+        turns: [turn], conversation: [{ ...project.conversation[0]!, turn }], canvas: { state: 'EMPTY' }
+      }
+    })} />);
+
+    expect(screen.getAllByText('The final candidate was not verified.').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry update' }));
+
+    await waitFor(() => expect(onSubmitRefinement).toHaveBeenCalledWith(
+      project.design.id, project.conversation[0]!.userMessage, ['reference-first']
+    ));
+  });
+
   it('previews an earlier version before it offers an explicit restore', async () => {
     const revisions: DesignProjectDetail['revisions'] = [
       {

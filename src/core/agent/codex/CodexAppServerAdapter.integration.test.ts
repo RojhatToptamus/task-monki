@@ -379,7 +379,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
-      runtimeStore: runtime
+      runtimeStore: runtime,
+      toolSettings: { webSearchMode: 'disabled', mcpServers: 'all', apps: 'disabled' }
     });
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     try {
@@ -1369,12 +1370,16 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const store = persistence.tasks;
     const runtime = persistence.agentRuntime;
     const events = new AppEventBus();
+    const expectsTerminalNotification =
+      expectedSource === 'TURN_COMPLETED_NOTIFICATION_AFTER_UNEXPECTED_SERVER_REQUEST';
     const adapter = createCodexAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      interruptRequestTimeoutMs: 40,
-      interruptCompletionTimeoutMs: 100,
+      // Only timeout scenarios need accelerated deadlines. A responsive child
+      // and its durable journal can take more than 40 ms under suite load.
+      interruptRequestTimeoutMs: expectsTerminalNotification ? 2_000 : 40,
+      interruptCompletionTimeoutMs: expectsTerminalNotification ? 2_000 : 100,
       restartDelaysMs: [],
       runtimeStore: runtime
     });
@@ -2677,11 +2682,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(profileConfig?.shell_environment_policy?.set).not.toHaveProperty(
       'XDG_CONFIG_HOME'
     );
-    const implementationPath = profileConfig?.shell_environment_policy?.set?.PATH;
-    expect(implementationPath).toEqual(expect.any(String));
-    if (process.platform === 'darwin') {
-      expect(implementationPath?.split(path.delimiter)[0]).not.toBe('/usr/bin');
-    }
+    // Codex adds its bundled helpers after process startup. A thread-level PATH
+    // override would discard that runtime-owned search path.
+    expect(profileConfig?.shell_environment_policy?.set).not.toHaveProperty('PATH');
     const turnInput = (turnStart?.params as {
       input?: Array<{ type?: string; text?: string; path?: string }>;
     } | undefined)?.input;
@@ -5341,7 +5344,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   });
 
-  it('discovers child sessions and correlates child-origin approvals', async () => {
+  it('keeps parent ownership and follow-ups after child messages and approvals', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-'));
     const executable = await writeFakeCodexExecutable(dir, 'subagent');
     const store = await openCodexTaskStore(path.join(dir, 'store'));
@@ -5404,6 +5407,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       status: 'COMPLETED'
     });
     expect(storedChild?.subagentStatus).toBe('COMPLETED');
+    expect(snapshot.agentSessions.find((session) => session.providerSessionId === 'thread-sibling'))
+      .toMatchObject({ parentSessionId: parentRun.sessionId, relationshipState: 'RESOLVED' });
     expect(
       snapshot.agentSessions.some(
         (session) => session.providerSessionId === 'thread-review'
@@ -5426,6 +5431,21 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     );
     expect(snapshot.tasks[0]?.currentRunId).toBe(parentRun.id);
     expect(snapshot.tasks[0]?.projection.agentRun).toBe('COMPLETED');
+
+    const followUp = await orchestrator.startTurn({
+      task: (await store.getTask(task.id))!,
+      iteration,
+      worktree,
+      mode: 'FOLLOW_UP',
+      prompt: 'Continue after the delegated review.',
+      settings: task.agentSettings
+    });
+    await waitForRunStatus(store, followUp.id, 'COMPLETED');
+    expect(followUp.sessionId).toBe(parentRun.sessionId);
+    expect(await store.getAgentSession(parentRun.sessionId)).toMatchObject({
+      role: 'PRIMARY',
+      relationshipState: 'ROOT'
+    });
 
     await orchestrator.shutdown();
   });
@@ -6469,7 +6489,7 @@ const rl = readline.createInterface({ input: process.stdin });
 let scopedTurnNumber = 0;
 let ephemeral = false;
 const send = (message) => process.stdout.write(JSON.stringify(message, (key, value) =>
-  mode === 'scoped' && scopedTurnNumber > 1 && value === 'turn-1'
+  (mode === 'scoped' || mode === 'subagent') && scopedTurnNumber > 1 && value === 'turn-1'
     ? 'turn-' + scopedTurnNumber : value
 ) + '\\n');
 const mode = ${JSON.stringify(mode)};
@@ -7271,6 +7291,12 @@ rl.on('line', (line) => {
           return;
         }
         if (mode === 'subagent') {
+          if (scopedTurnNumber > 1) {
+            send({ method: 'turn/completed', params: {
+              threadId: 'thread-1', turn: turn('completed')
+            } });
+            return;
+          }
           send({ method: 'item/started', params: {
             threadId: 'thread-1',
             turnId: 'turn-1',
@@ -7281,7 +7307,7 @@ rl.on('line', (line) => {
               tool: 'spawnAgent',
               status: 'inProgress',
               senderThreadId: 'thread-1',
-              receiverThreadIds: ['thread-child'],
+              receiverThreadIds: ['thread-child', 'thread-sibling'],
               prompt: 'Inspect the repository tests.',
               model: 'fake-model',
               reasoningEffort: 'low',
@@ -7295,6 +7321,26 @@ rl.on('line', (line) => {
           send({ method: 'turn/started', params: {
             threadId: 'thread-child',
             turn: { ...turn('inProgress'), id: 'turn-child' }
+          } });
+          send({ method: 'item/completed', params: {
+            threadId: 'thread-child',
+            turnId: 'turn-child',
+            completedAtMs: Date.now(),
+            item: {
+              type: 'collabAgentToolCall',
+              id: 'child-to-parent-message',
+              tool: 'sendInput',
+              status: 'completed',
+              senderThreadId: 'thread-child',
+              receiverThreadIds: ['thread-1', 'thread-sibling'],
+              prompt: 'The delegated review is progressing.',
+              model: null,
+              reasoningEffort: null,
+              agentsStates: {
+                'thread-1': { status: 'running', message: null },
+                'thread-sibling': { status: 'running', message: null }
+              }
+            }
           } });
           send({ method: 'item/started', params: {
             threadId: 'thread-child',

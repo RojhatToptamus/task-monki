@@ -178,9 +178,23 @@ It uses `AgentOrchestrator` for provider sessions and turns.
 The Design workflow supplies permanent instructions, app-owned skills,
 selected references, the managed worktree, and one `inspect_design` grant.
 
+Codex Designs use the restricted worktree policy with shell network access
+disabled. The packaged app's Web search and MCP settings independently control
+those provider tools; enabling Web search does not enable network commands.
+Browser development disables these external tools. Other runtimes use their
+advertised approval-free write policy.
+
 Task Monki owns source capture, candidate identity, Preview, and Ready cutover.
 The visible last Ready result stays safe during later work.
 A final source change cannot become Ready without browser verification.
+
+Failed startup or candidate validation settles the update and advances queued
+messages. Follow-up prompts include Task Monki's failure reason. If browser
+cleanup fails, the current and queued messages instead need attention; no queued
+message is delivered. An explicit retry must close the previous browser owner
+before starting provider work. The canvas offers Retry update when the first
+preview fails, and Reload for native page-load failures. Page-load errors remain
+transient display state and do not rewrite the last verified Design revision.
 
 ## Capability projection
 

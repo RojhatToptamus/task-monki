@@ -8,6 +8,11 @@ import type { JsonValue } from './protocol/generated/serde_json/JsonValue';
 
 const PROFILE_PREFIX = 'task_monki_';
 const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+const RUNTIME_READ_GRANTS: Record<string, 'read'> = {
+  ':minimal': 'read',
+  // Node reads the standard macOS crypto configuration even for syntax checks.
+  ...(process.platform === 'darwin' ? { '/System/Library/OpenSSL/openssl.cnf': 'read' as const } : {})
+};
 
 export interface CodexPermissionProfileEvidence {
   activePermissionProfile?: { id?: unknown; extends?: unknown } | null;
@@ -97,7 +102,7 @@ export async function codexReadOnlyScopeProfile(input: {
     )
   );
   const filesystemEntries = [
-    { path: ':minimal', access: 'read' as const },
+    ...Object.entries(RUNTIME_READ_GRANTS).map(([path, access]) => ({ path, access })),
     ...roots.map((candidate) => ({ path: candidate, access: 'read' as const })),
     ...attachmentPaths.map((candidate) => ({ path: candidate, access: 'read' as const }))
   ];
@@ -129,7 +134,7 @@ export async function codexReadOnlyScopeProfile(input: {
     .update(JSON.stringify(scopeDescriptor))
     .digest('hex');
   const profileId = codexReadOnlyScopeProfileId(input.sessionId, scopeHash);
-  const filesystem: Record<string, 'read'> = { ':minimal': 'read' };
+  const filesystem: Record<string, 'read'> = { ...RUNTIME_READ_GRANTS };
   for (const candidate of roots) filesystem[candidate] = 'read';
   for (const candidate of attachmentPaths) filesystem[candidate] = 'read';
   return {
@@ -167,7 +172,7 @@ export function codexPermissionProfileConfig(input: {
   const additionalReadOnlyPaths = input.additionalReadOnlyPaths ?? [];
   const worktreePath = requireAbsolute(input.worktreePath, 'worktree');
   const filesystem: Record<string, 'read' | 'write'> = {
-    ':minimal': 'read',
+    ...RUNTIME_READ_GRANTS,
     [worktreePath]: input.settings.sandbox === 'READ_ONLY' ? 'read' : 'write'
   };
   for (const candidate of additionalReadOnlyPaths) {

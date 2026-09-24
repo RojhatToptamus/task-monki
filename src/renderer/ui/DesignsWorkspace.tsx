@@ -144,7 +144,7 @@ export interface DesignsWorkspaceProps {
   onRenameDesign(designId: string, title: string): Promise<void>;
   onArchiveDesign(designId: string): Promise<void>;
   onDeleteDesign(designId: string): Promise<void>;
-  onShowCanvas?(request: DesignCanvasShowRequest): void;
+  onShowCanvas?(request: DesignCanvasShowRequest): void | Promise<void>;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRetryLoad?(): void;
 }
@@ -247,6 +247,12 @@ export function DesignsWorkspace({
           ? 'The selected Design model is not available from this provider.'
           : designModelUnavailableReason(projectRuntime, projectModel)
     : undefined;
+  const latestEntry = project?.conversation.at(-1);
+  const retryEntry =
+    project?.actions.canRefine && !refineUnavailableReason && latestEntry &&
+    ['FAILED', 'NEEDS_ATTENTION', 'CANCELED'].includes(latestEntry.turn.outcome ?? '')
+      ? latestEntry
+      : undefined;
 
   useEffect(() => {
     if (!project || !projectRuntime) return;
@@ -632,6 +638,15 @@ export function DesignsWorkspace({
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
                     onRestart={onRestartCanvas}
+                    onRetryUpdate={retryEntry ? () => onSubmitRefinement(
+                      project.design.id,
+                      retryEntry.userMessage,
+                      retryEntry.turn.referenceIds.filter((referenceId) =>
+                        project.references.some((reference) =>
+                          reference.id === referenceId && reference.state === 'ACTIVE'
+                        )
+                      )
+                    ) : undefined}
                     onSelectRevision={(revisionId) =>
                       onSelectRevision(project.design.id, revisionId)
                     }

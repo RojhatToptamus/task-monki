@@ -127,7 +127,6 @@ export class DesignUpdateCoordinator {
     if (this.terminalAdmissionClosed) return Promise.resolve();
     const work = this.options.store.getRun(runId).then(async (run) => {
       if (!run || run.mode !== 'DESIGN') return;
-      await this.closeBrowserRun(run.id);
       return this.withDesignLock(run.taskId, () => this.settleRunUnlocked(run.id));
     });
     this.terminalAdmissions.add(work);
@@ -516,6 +515,9 @@ export class DesignUpdateCoordinator {
 
     let run: RunRecord | undefined;
     try {
+      if (detail.currentRun && !ACTIVE_RUN_STATUSES.has(detail.currentRun.status)) {
+        await this.closeBrowserRun(detail.currentRun.id);
+      }
       const context = requireReadyContext(detail);
       const before = await this.options.refreshGitEvidence(designId);
       if (!before.headSha) {
@@ -553,6 +555,9 @@ export class DesignUpdateCoordinator {
         });
       }
       this.emitUpdated(designId, { reason: 'agent-start-failed' });
+      if (!run || !ACTIVE_RUN_STATUSES.has(run.status)) {
+        await this.dispatchNextUnlocked(designId);
+      }
       throw error;
     }
     await this.options.store.linkDesignTurnRun({
@@ -579,8 +584,23 @@ export class DesignUpdateCoordinator {
       });
     }
     if (ACTIVE_RUN_STATUSES.has(run.status)) return;
-    if (run.status !== 'COMPLETED') {
+    try {
       await this.closeBrowserRun(run.id);
+    } catch (error) {
+      await this.stopOpenedCandidate(turn).catch(() => undefined);
+      const failureReason = `The Design browser could not close. Retry the update to finish cleanup. ${boundedReason(error, 'Browser cleanup failed.')}`;
+      for (const pending of detail.turns.filter((candidate) => candidate.outcome === undefined)) {
+        await this.options.store.settleDesignTurn({
+          designId: run.taskId,
+          turnId: pending.id,
+          outcome: 'NEEDS_ATTENTION',
+          failureReason
+        });
+      }
+      this.emitUpdated(run.taskId, { reason: 'browser-cleanup-failed', runId });
+      return;
+    }
+    if (run.status !== 'COMPLETED') {
       await this.stopOpenedCandidate(turn).catch(() => undefined);
       await this.settleTerminalFailure(run.taskId, turn.id, run);
       this.emitUpdated(run.taskId, { reason: 'run-failed', runId });
@@ -634,6 +654,7 @@ export class DesignUpdateCoordinator {
         });
       }
       this.emitUpdated(run.taskId, { reason: 'candidate-failed', runId });
+      await this.dispatchNextUnlocked(run.taskId);
     }
   }
 
@@ -1188,6 +1209,9 @@ function promptForTurn(
           `User: ${candidate.userMessage}`,
           candidate.assistantMessage
             ? `Design agent: ${candidate.assistantMessage}`
+            : undefined,
+          candidate.turn.failureReason
+            ? `Task Monki update failure: ${candidate.turn.failureReason}`
             : undefined
         ]
           .filter(Boolean)

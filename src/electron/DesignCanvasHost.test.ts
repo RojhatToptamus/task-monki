@@ -9,6 +9,60 @@ import {
 } from './DesignCanvasHost';
 
 describe('DesignCanvasHost', () => {
+  it('reloads the requested preview after an initial page load fails', async () => {
+    const fixture = createFixture();
+    fixture.host.attachWindow(fixture.window);
+    const createView = fixture.runtime.createView;
+    vi.spyOn(fixture.runtime, 'createView').mockImplementationOnce((options) => {
+      const view = createView(options);
+      vi.spyOn(view.webContents, 'loadURL').mockRejectedValueOnce(new Error('connection lost'));
+      return view;
+    });
+
+    await expect(showFirst(fixture)).rejects.toThrow('connection lost');
+    expect(fixture.views[0].webContents.closed).toBe(true);
+
+    await fixture.host.refresh({ designId: 'design-1', generationId: 'generation-1', requestId: 2 });
+
+    expect(fixture.views).toHaveLength(2);
+    expect(fixture.views[1].webContents.loaded).toEqual([route('generation-1').url]);
+    expect(fixture.window.added.at(-1)).toBe(fixture.views[1]);
+  });
+
+  it('reports reload failure and permits the same preview to recover on retry', async () => {
+    const fixture = createFixture();
+    fixture.host.attachWindow(fixture.window);
+    await showFirst(fixture);
+    vi.spyOn(fixture.views[0].webContents, 'loadURL')
+      .mockRejectedValueOnce(new Error('connection lost'));
+
+    await expect(fixture.host.refresh({
+      designId: 'design-1', generationId: 'generation-1', requestId: 2
+    })).rejects.toThrow('connection lost');
+    expect(fixture.events).toContainEqual(expect.objectContaining({
+      type: 'load-failed', generationId: 'generation-1'
+    }));
+
+    await fixture.host.refresh({ designId: 'design-1', generationId: 'generation-1', requestId: 3 });
+
+    expect(fixture.views.at(-1)?.webContents.loaded).toEqual([route('generation-1').url]);
+    expect(fixture.views.at(-1)?.visible).toBe(true);
+  });
+
+  it('does not reload a retiring view while a cutover owns the canvas', async () => {
+    const fixture = createFixture();
+    fixture.host.attachWindow(fixture.window);
+    await showFirst(fixture);
+    const lease = await fixture.host.begin({
+      designId: 'design-1', candidate: identity('generation-2'), replaced: identity('generation-1')
+    });
+    await expect(fixture.host.refresh({
+      designId: 'design-1', generationId: 'generation-1', requestId: 2
+    })).rejects.toThrow('still loading');
+    await lease.rollback();
+    expect(fixture.views.at(-1)?.visible).toBe(true);
+  });
+
   it('loads only a resolved route in a hardened in-memory view', async () => {
     const fixture = createFixture();
     fixture.host.attachWindow(fixture.window);

@@ -6530,6 +6530,8 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
     }
   }
   for (const observation of state.agentSubagentObservations) {
+    // Historical provider observations can contradict an app-owned session's
+    // role. Validate their owners without adopting the reported relationship.
     const child = sessions.get(observation.sessionId);
     const parent = sessions.get(observation.parentSessionId);
     const parentRun = observation.parentRunId
@@ -6538,7 +6540,6 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
     if (
       !child ||
       !parent ||
-      child.role !== 'SUBAGENT' ||
       observation.runtimeId !== child.runtimeId ||
       observation.runtimeId !== parent.runtimeId ||
       observation.taskId !== child.taskId ||
