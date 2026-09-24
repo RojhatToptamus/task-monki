@@ -130,7 +130,10 @@ import {
   normalizePullRequestTitle,
 } from '../../shared/contracts';
 import type { AgentRuntimeId } from '../../shared/agent';
-import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
+import {
+  designNetworkAccessPolicy,
+  projectAgentExecutionSupport
+} from '../../shared/agentExecutionSupport';
 import type {
   AgentOwnerScope,
   AgentRunScope,
@@ -1791,7 +1794,8 @@ export class TaskManagerService {
           runtimeId: input.runtimeId,
           model: input.model,
           modelProvider: input.modelProvider,
-          reasoningEffort: input.reasoningEffort
+          reasoningEffort: input.reasoningEffort,
+          networkAccess: input.networkAccess
         },
         attachments,
         this.allowCandidateDesignModels
@@ -1838,6 +1842,15 @@ export class TaskManagerService {
           return this.getDesign(input.designId);
         }
         const task = await this.requireDesignTask(input.designId, 'Design update');
+        const detail = await this.store.getDesignDetail(input.designId);
+        const settings = {
+          ...task.agentSettings,
+          networkAccess:
+            input.networkAccess ??
+            detail.turns.at(-1)?.networkAccess ??
+            task.agentSettings.networkAccess
+        };
+        const executionTask = { ...task, agentSettings: settings };
         const accept = async () => {
           let attachments: readonly Pick<
             AgentAttachmentSelection,
@@ -1849,10 +1862,10 @@ export class TaskManagerService {
               throw new Error('The attached files do not belong to this Design draft.');
             }
             attachments = (
-              await this.validateDesignAttachmentDraft(task, input.attachmentDraftId)
+              await this.validateDesignAttachmentDraft(executionTask, input.attachmentDraftId)
             ).attachments;
           } else {
-            await this.assertDesignTaskSupported(task, attachments);
+            await this.assertDesignTaskSupported(executionTask, attachments);
           }
           await this.store.createInlineDesignTurn(input);
         };
@@ -5065,6 +5078,11 @@ async function prepareDesignCreationExecution(
     });
   }
   assertResolvedExecutionRuntime(adapter, resolved);
+  if (resolved.settings.networkAccess !== settings.networkAccess) {
+    throw new Error(
+      `${adapter.descriptor.displayName} did not apply the selected Design network access.`
+    );
+  }
   const requestedModel = requestedSettings.model?.trim();
   if (requestedModel && resolved.model.model !== requestedModel) {
     throw new Error(
@@ -5142,6 +5160,21 @@ async function prepareAgentExecutionSettings(
     approvalsReviewer: preset.approvalsReviewer,
     networkAccess: preset.networkAccess === 'REQUIRED'
   };
+  if (presetKind === 'AUTONOMOUS_WRITE') {
+    const networkPolicy = designNetworkAccessPolicy(capabilities);
+    const requestedNetwork = requestedSettings.networkAccess;
+    if (
+      requestedNetwork !== undefined &&
+      (typeof requestedNetwork !== 'boolean' ||
+        (networkPolicy !== 'OPTIONAL' &&
+          requestedNetwork !== (networkPolicy === 'REQUIRED')))
+    ) {
+      throw new Error(
+        `${adapter.descriptor.displayName} does not support the selected Design network access.`
+      );
+    }
+    presetSettings.networkAccess = requestedNetwork ?? (networkPolicy === 'REQUIRED');
+  }
   const settings: AgentExecutionSettings = {
     ...(presetKind === 'AUTONOMOUS_WRITE'
       ? { ...explicitSettings, ...presetSettings }

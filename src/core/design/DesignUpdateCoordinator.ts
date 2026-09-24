@@ -531,7 +531,10 @@ export class DesignUpdateCoordinator {
         mode: 'DESIGN',
         prompt,
         instructionProfile: 'DESIGN',
-        settings: context.task.agentSettings,
+        settings: {
+          ...context.task.agentSettings,
+          networkAccess: turn.networkAccess ?? context.task.agentSettings.networkAccess
+        },
         generationKey: turn.id,
         beforeGitSnapshotId: before.id
       });

@@ -2300,7 +2300,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           recoveryRequiredSessionIds.add(run.sessionId);
         }
       } catch (error) {
-        if (error instanceof BrowserDevBoundaryViolationError) {
+        if (error instanceof BrowserDevBoundaryViolationError || this.securityBoundaryViolation) {
           throw error;
         }
         await this.recordReconciliation(
@@ -6297,6 +6297,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       activeProfile?.providerSessionId === providerSessionId
         ? activeProfile.profileId
         : undefined;
+    const currentNetworkAccess =
+      session.observedSettings?.networkAccess ?? session.requestedSettings.networkAccess;
     const task = await this.taskStore.getTask(session.taskId);
     const storedGrantMatches = await this.storedAttachmentAccessMatches(
       session.id,
@@ -6315,7 +6317,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       options.allowProfileFork !== false &&
       settings.sandbox !== 'DANGER_FULL_ACCESS' &&
       (currentProfileId
-        ? currentProfileId !== expectedProfileId
+        // A loaded Codex thread retains its network scope when resumed with
+        // the same profile id, even when that profile's config has changed.
+        ? currentProfileId !== expectedProfileId ||
+          (currentNetworkAccess === true) !== (settings.networkAccess === true)
         : task?.kind === 'DESIGN' || !storedGrantMatches);
     if (shouldFork) {
       throw new AgentProviderSessionMissingError(
@@ -6467,9 +6472,6 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         : undefined;
     if (designPack && settings.sandbox === 'DANGER_FULL_ACCESS') {
       throw new Error('Design sessions require a restricted writable worktree.');
-    }
-    if (designPack && settings.networkAccess === true) {
-      throw new Error('Design sessions cannot enable provider network access.');
     }
     const permissionProfile = codexPermissionProfileConfig({
       sessionId: session.id,
@@ -7301,13 +7303,23 @@ function assertProviderPermissionProfile(
   expectedProfileId: string,
   response: unknown
 ): void {
+  const evidence = response as CodexPermissionProfileEvidence;
   assertCodexPermissionProfileEvidence({
     sessionId,
     sandbox: settings.sandbox,
     worktreePath,
     expectedProfileId,
-    response: response as CodexPermissionProfileEvidence
+    response: evidence
   });
+  if (settings.sandbox !== 'DANGER_FULL_ACCESS') {
+    const sandbox = evidence.sandbox;
+    if (
+      !sandbox || typeof sandbox !== 'object' || !('networkAccess' in sandbox) ||
+      sandbox.networkAccess !== (settings.networkAccess === true)
+    ) {
+      throw new Error('Codex did not attest the requested command network access.');
+    }
+  }
 }
 
 function permissionProfileIdFromConfig(config: Record<string, JsonValue>): string {

@@ -60,6 +60,7 @@ export interface DesignTurn {
   messageArtifactId?: string;
   attachmentDraftId?: string;
   referenceIds: string[];
+  networkAccess?: boolean;
   runId?: string;
   checkpoint?: DesignTurnCheckpoint;
   finalOpenedCandidate?: DesignOpenedCandidateCheckpoint;
@@ -175,6 +176,7 @@ export interface CreateBlankDesignRequest {
   model?: string;
   modelProvider?: AgentModelProviderId;
   reasoningEffort?: string;
+  networkAccess?: boolean;
   attachmentDraftId?: string;
 }
 
@@ -183,6 +185,7 @@ export interface SubmitDesignTurnRequest {
   clientMessageId: string;
   message: string;
   referenceIds: string[];
+  networkAccess?: boolean;
   attachmentDraftId?: string;
 }
 

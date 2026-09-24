@@ -165,6 +165,7 @@ export interface CreateInlineDesignTurnInput {
   clientMessageId: string;
   message: string;
   referenceIds: string[];
+  networkAccess?: boolean;
   attachmentDraftId?: string;
 }
 
@@ -387,7 +388,8 @@ function designCreationMetadata(
     Buffer.byteLength(brief, 'utf8') > 1024 * 1024 ||
     (input.model !== undefined && !model) ||
     (input.modelProvider !== undefined && !modelProvider) ||
-    (input.reasoningEffort !== undefined && !reasoningEffort)
+    (input.reasoningEffort !== undefined && !reasoningEffort) ||
+    (input.networkAccess !== undefined && typeof input.networkAccess !== 'boolean')
   ) {
     throw new TaskCreationRequestError(
       'TASK_CREATION_INVALID_REQUEST',
@@ -403,6 +405,7 @@ function designCreationMetadata(
     model: model ?? null,
     modelProvider: modelProvider ?? null,
     reasoningEffort: reasoningEffort ?? null,
+    ...(input.networkAccess !== undefined ? { networkAccess: input.networkAccess } : {}),
     attachmentDraftId: input.attachmentDraftId ?? null
   });
   if (!canonicalRequest) {
@@ -429,6 +432,9 @@ function validateInlineDesignTurnInput(input: CreateInlineDesignTurnInput): void
     throw new Error('Design message id is invalid.');
   }
   if (!input.message.trim()) throw new Error('Design message is required.');
+  if (input.networkAccess !== undefined && typeof input.networkAccess !== 'boolean') {
+    throw new Error('Design network access must be enabled or disabled.');
+  }
   if (Buffer.byteLength(input.message, 'utf8') > ARTIFACT_BYTE_LIMITS['design-message']) {
     throw new Error('Design message exceeds its durable byte limit.');
   }
@@ -2563,6 +2569,7 @@ export class SqliteTaskStore {
           messageSource: 'TASK_PROMPT',
           attachmentDraftId: input.request.attachmentDraftId,
           referenceIds: references.map((reference) => reference.id),
+          networkAccess: task.agentSettings.networkAccess,
           checkpoint: { boundary: 'QUEUED' },
           createdAt: now
         };
@@ -3042,13 +3049,10 @@ export class SqliteTaskStore {
           {},
           input.message
         );
-        const order =
-          Math.max(
-            0,
-            ...this.state.designTurns
-              .filter((turn) => turn.designId === design.id)
-              .map((turn) => turn.order)
-          ) + 1;
+        const previousTurn = this.state.designTurns
+          .filter((turn) => turn.designId === design.id)
+          .sort((left, right) => right.order - left.order)[0];
+        const order = (previousTurn?.order ?? 0) + 1;
         const turn: DesignTurn = {
           id: randomUUID(),
           designId: design.id,
@@ -3058,6 +3062,8 @@ export class SqliteTaskStore {
           messageArtifactId: artifact.id,
           attachmentDraftId: input.attachmentDraftId,
           referenceIds: [...referenceIds, ...addedReferences.map((reference) => reference.id)],
+          networkAccess:
+            input.networkAccess ?? previousTurn?.networkAccess ?? design.agentSettings.networkAccess,
           checkpoint: { boundary: 'QUEUED' },
           createdAt: now
         };
@@ -4161,6 +4167,9 @@ export class SqliteTaskStore {
       existing.messageSource !== 'INLINE_MESSAGE' ||
       storedMessage !== input.message ||
       existing.attachmentDraftId !== input.attachmentDraftId ||
+      (input.networkAccess !== undefined &&
+        input.networkAccess !==
+          (existing.networkAccess ?? this.requireDesign(existing.designId).agentSettings.networkAccess)) ||
       existing.referenceIds.length !== expectedReferenceIds.length ||
       existing.referenceIds.some(
         (referenceId, index) => referenceId !== expectedReferenceIds[index]
@@ -6856,6 +6865,7 @@ function validatePersistedDesignRelationships(state: StoreState): void {
           (design.sourceDesignId !== undefined || turn.order > 1);
     if (
       !hasValidMessageLineage ||
+      (turn.networkAccess !== undefined && typeof turn.networkAccess !== 'boolean') ||
       new Set(turn.referenceIds).size !== turn.referenceIds.length ||
       (turn.attachmentDraftId !== undefined &&
         !turn.referenceIds.some(

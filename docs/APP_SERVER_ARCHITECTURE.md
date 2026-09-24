@@ -213,6 +213,7 @@ The review uses the isolated read-only profile plus the validated Git common dir
 
 Thread create, resume, fork, each ordinary turn, and recovery require the returned profile.
 They also require the sole runtime workspace root before provider input.
+Sandboxed thread responses must attest the requested command network permission.
 Live settings drift terminates the provider and fails active runs.
 Attachment reads need no separate permission escalation or path expansion flow.
 Before each read-only thread starts or resumes, the adapter finds each enabled
@@ -233,15 +234,15 @@ An empty local Codex session can bind its first exact attachment scope before
 the first provider prompt. The store permits this only before materialization
 and before any provider turn ID exists.
 
-Codex keeps that permission-profile identity after provider admission.
-It cannot replace it with a different exact attachment scope.
-When a Design turn selects a different reference set, Task Monki uses the
+Codex keeps a loaded thread's permission scope after provider admission.
+Resuming that thread does not apply a changed network setting under the same profile ID.
+When a turn changes the loaded network scope or its exact attachment scope, Task Monki uses the
 existing native thread-fork operation. The fork keeps the conversation history
-but starts with a new, attested profile for only that turn's selected files.
+but starts with a new, attested profile for that turn's selected files and network permission.
 Task Monki creates a new local primary session for the forked thread. The old
 local session keeps its immutable provider thread identity. Both sessions stay
 in the same Task conversation lineage.
-If the reference scope is unchanged, it resumes the current thread as usual.
+If the permission scope is unchanged, it resumes the current thread as usual.
 
 Full access remains available with or without attachments. It requires the
 runtime to attest the exact `:danger-full-access` profile and sole Task Monki

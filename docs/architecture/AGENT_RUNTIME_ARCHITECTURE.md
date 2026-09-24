@@ -178,11 +178,17 @@ It uses `AgentOrchestrator` for provider sessions and turns.
 The Design workflow supplies permanent instructions, app-owned skills,
 selected references, the managed worktree, and one `inspect_design` grant.
 
-Codex Designs use the restricted worktree policy with shell network access
-disabled. The packaged app's Web search and MCP settings independently control
-those provider tools; enabling Web search does not enable network commands.
-Browser development disables these external tools. Other runtimes use their
-advertised approval-free write policy.
+Codex Designs keep worktree-scoped writes and approval policy `never`.
+Command network access defaults to off. Users can select it when creating a
+Design and for each update. Each queued message retains its selected permission;
+later messages cannot change it. Legacy messages use the creation setting.
+The packaged app's Web search and MCP settings independently control those
+provider tools; enabling Web search does not enable network commands.
+Saved Codex command allow rules can authorize matching commands outside the
+sandbox, including network access. The network control describes sandboxed
+commands and does not remove these existing authorizations.
+Browser development keeps its separate offline boundary. Other runtimes use
+their advertised approval-free write and network policies.
 
 Task Monki owns source capture, candidate identity, Preview, and Ready cutover.
 The visible last Ready result stays safe during later work.

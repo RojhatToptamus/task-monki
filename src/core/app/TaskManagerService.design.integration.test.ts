@@ -146,7 +146,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     }
   }, 60_000);
 
-  it('uses the provider approval-free write policy for Design work', async () => {
+  it('dispatches each queued Design message with its selected network access and unchanged write policy', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-autonomous-policy',
       previewEnabled: true,
@@ -161,17 +161,118 @@ describeMac('TaskManagerService Design vertical slice', () => {
       }
     });
 
-    const detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small product page.',
       creationToken: 'design-autonomous-policy-create',
-      runtimeId: 'codex'
+      runtimeId: 'codex',
+      networkAccess: true
     });
 
     expect(detail.task.agentSettings).toMatchObject({
       sandbox: 'WORKSPACE_WRITE',
       approvalPolicy: 'never',
-      networkAccess: false
+      networkAccess: true
     });
+    const worktreeId = detail.currentWorktree!.id;
+    const offRequest = {
+      designId: detail.design.id,
+      clientMessageId: 'design-network-off',
+      message: 'Refine the spacing without using the network.',
+      referenceIds: [],
+      networkAccess: false
+    };
+    await scenario.service.submitDesignTurn(offRequest);
+    await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-network-inherited',
+      message: 'Continue with the selected permissions.',
+      referenceIds: []
+    });
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-network-on',
+      message: 'Use the network to check the documentation.',
+      referenceIds: [],
+      networkAccess: true
+    });
+    expect(detail.turns.map((turn) => turn.networkAccess)).toEqual([true, false, false, true]);
+    await expect(scenario.service.submitDesignTurn({
+      ...offRequest,
+      networkAccess: true
+    })).rejects.toThrow('already used for different content');
+    await scenario.service.submitDesignTurn(offRequest);
+    expect(scenario.agent.startedTurns).toHaveLength(1);
+
+    for (const [index, networkAccess] of [true, false, false, true].entries()) {
+      const runId = requireRunId(detail);
+      expect(detail.currentRun).toMatchObject({
+        worktreeId,
+        requestedSettings: {
+          sandbox: 'WORKSPACE_WRITE',
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          networkAccess
+        }
+      });
+      expect(scenario.agent.startedTurns[index]?.settings?.networkAccess).toBe(networkAccess);
+      await scenario.completeRun(runId);
+      detail = await waitForDesign(scenario, detail.design.id, (candidate) =>
+        index === 3
+          ? candidate.turns.every((turn) => turn.outcome !== undefined)
+          : candidate.currentRun?.id !== runId && candidate.turns[index + 1]?.runId !== undefined
+      );
+    }
+    expect(scenario.agent.startedTurns).toHaveLength(4);
+    expect(detail.task.agentSettings.networkAccess).toBe(true);
+    expect(detail.turns.map((turn) => turn.outcome)).toEqual(['READY', 'NO_CHANGE', 'NO_CHANGE', 'NO_CHANGE']);
+  }, 45_000);
+
+  it.each([
+    ['DISABLED', true, false],
+    ['REQUIRED', false, true]
+  ] as const)('honors %s provider network policy without choosing a broader sandbox', async (networkPolicy, rejectedChoice, defaultChoice) => {
+    const scenario = await createTaskMonkiScenario({
+      name: `task-monki-design-network-${networkPolicy.toLowerCase()}`,
+      previewEnabled: true,
+      designMode: true
+    });
+    const capabilities = codexCapabilities();
+    vi.spyOn(scenario.agent, 'capabilities').mockResolvedValue({
+      ...capabilities,
+      executionPolicy: {
+        ...capabilities.executionPolicy,
+        presets: capabilities.executionPolicy.presets.map((preset) => ({
+          ...preset,
+          networkAccess: preset.sandbox === 'WORKSPACE_WRITE' ? networkPolicy : preset.networkAccess
+        }))
+      }
+    });
+    await expect(scenario.service.createBlankDesign({
+      brief: 'Use the selected network policy.',
+      creationToken: 'design-network-rejected',
+      runtimeId: 'codex',
+      networkAccess: rejectedChoice
+    })).rejects.toThrow('does not support the selected Design network access');
+    expect(await scenario.store.listDesigns()).toEqual([]);
+    const detail = await scenario.service.createBlankDesign({
+      brief: 'Use the provider default network policy.',
+      creationToken: 'design-network-default',
+      runtimeId: 'codex'
+    });
+    expect(detail.task.agentSettings).toMatchObject({
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'never',
+      networkAccess: defaultChoice
+    });
+    await expect(scenario.service.submitDesignTurn({
+      designId: detail.design.id,
+      clientMessageId: 'design-network-rejected-followup',
+      message: 'Change network access.',
+      referenceIds: [],
+      networkAccess: rejectedChoice
+    })).rejects.toThrow('does not support the selected Design network access');
+    expect(scenario.agent.startedTurns).toHaveLength(1);
+    expect((await scenario.service.getDesign(detail.design.id)).turns).toHaveLength(1);
   });
 
   it('shows a checked candidate while the last Ready route stays available', async () => {
