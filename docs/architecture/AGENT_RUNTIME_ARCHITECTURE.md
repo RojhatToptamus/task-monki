@@ -183,6 +183,8 @@ The packaged app's Internet access setting controls web search and Design
 command network access. Live enables both; Off and Cached search keep Design
 commands offline. Each queued update reads the current setting when it starts.
 Executed runs retain the permissions they used. MCP access remains independent.
+Changes save immediately, active turns keep their permissions, and Settings
+shows pending external-tool changes until Codex becomes idle and applies them.
 Saved Codex command allow rules can authorize matching commands outside the
 sandbox, including network access. The Internet access setting does not remove
 these existing authorizations.

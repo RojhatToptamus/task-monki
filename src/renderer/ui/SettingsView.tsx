@@ -586,9 +586,13 @@ function ToolSettings({
   onSetAppSettings,
   externalToolStatus,
   onRefreshExternalTools,
-  onTestExternalTool
+  onTestExternalTool,
+  runtimes
 }: SettingsViewProps) {
   const [refreshing, setRefreshing] = useState(false);
+  const pendingSettings = runtimeReadinessView(
+    runtimes.find((runtime) => runtime.preflight.runtime.id === 'codex')
+  ).warnings.find((warning) => warning.code === 'RUNTIME_RESTART_REQUIRED');
 
   const refresh = async () => {
     setRefreshing(true);
@@ -644,6 +648,9 @@ function ToolSettings({
       </SettingsSubsection>
 
       <SettingsSubsection title="Codex integrations">
+        {pendingSettings ? (
+          <p className="form-warning" role="status">{pendingSettings.message}</p>
+        ) : null}
         <div className="tm-settings__list">
           <ChoiceSettingRow
             label="Internet access"

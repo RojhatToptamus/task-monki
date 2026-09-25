@@ -46,7 +46,7 @@ function renderSettings({
   models?: AgentModel[];
   runtimes?: AgentRuntimeState[];
 } = {}) {
-  render(
+  const settings = (runtimeStates = runtimes) => (
     <SettingsView
       onSaveAgentProfile={async () => undefined}
       onDeleteAgentProfile={async () => undefined}
@@ -67,10 +67,12 @@ function renderSettings({
         throw new Error('not called');
       }}
       models={models}
-      runtimes={runtimes}
+      runtimes={runtimeStates}
     />
   );
+  const view = render(settings());
   return {
+    rerenderRuntimes: (runtimeStates: AgentRuntimeState[]) => view.rerender(settings(runtimeStates)),
     onSetTheme,
     onSetAppSettings,
     onPreviewThemePreset,
@@ -102,6 +104,33 @@ const readyCodexRuntime: AgentRuntimeState = {
   models: [previewModel],
   refreshedAt: '2026-08-31T00:00:00.000Z'
 };
+
+describe('Tool settings', () => {
+  it('shows pending Codex settings until the runtime clears the restart warning', () => {
+    const { rerenderRuntimes } = renderSettings({ runtimes: [readyCodexRuntime] });
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    const tools = screen.getByRole('tabpanel', { name: 'Tools' });
+    expect(within(tools).queryByRole('status')).toBeNull();
+
+    const message = 'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.';
+    rerenderRuntimes([{
+      ...readyCodexRuntime,
+      preflight: {
+        ...readyCodexRuntime.preflight,
+        readiness: createRuntimeReadiness('READY', 'Ready', {
+          diagnostics: [{
+            code: 'RUNTIME_RESTART_REQUIRED', stage: 'CONFIGURATION',
+            severity: 'WARNING', message
+          }]
+        })
+      }
+    }]);
+    expect(within(tools).getByRole('status').textContent).toBe(message);
+
+    rerenderRuntimes([readyCodexRuntime]);
+    expect(within(tools).queryByRole('status')).toBeNull();
+  });
+});
 
 describe('Model settings', () => {
   it('stores the Preview generation runtime and model together', () => {
