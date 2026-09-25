@@ -38,6 +38,82 @@ jobs:
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
       - run: npm run typecheck
+      # Temporary diagnostic: compare storage locations before changing test configuration.
+      - name: Measure Windows temporary storage
+        if: runner.os == 'Windows'
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs/promises');
+          const os = require('node:os');
+          const path = require('node:path');
+          const { DatabaseSync } = require('node:sqlite');
+          const { performance } = require('node:perf_hooks');
+          const summarize = (values) => ({
+            count: values.length,
+            totalMs: Number(values.reduce((sum, value) => sum + value, 0).toFixed(1)),
+            maxMs: Number(Math.max(...values).toFixed(1))
+          });
+          (async () => {
+            if (!process.env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is unavailable.');
+            const locations = await Promise.all([
+              { name: 'os.tmpdir', directory: os.tmpdir() },
+              { name: 'RUNNER_TEMP', directory: process.env.RUNNER_TEMP }
+            ].map(async (location) => {
+              const canonicalPath = await fs.realpath(location.directory);
+              return { ...location, canonicalPath, volume: path.parse(canonicalPath).root };
+            }));
+            console.log(JSON.stringify({
+              locations,
+              sameDirectory: locations[0].canonicalPath.toLowerCase() === locations[1].canonicalPath.toLowerCase()
+            }));
+            const payload = 'x'.repeat(1024);
+            for (const [round, order] of [[0, 1], [1, 0]].entries()) {
+              for (const index of order) {
+                const location = locations[index];
+                console.log(JSON.stringify({ phase: 'start', round: round + 1, location: location.name }));
+                const directory = await fs.mkdtemp(path.join(location.directory, 'task-monki-io-probe-'));
+                let database;
+                try {
+                  const setupStarted = performance.now();
+                  database = new DatabaseSync(path.join(directory, 'probe.sqlite3'));
+                  database.exec('PRAGMA journal_mode = DELETE; PRAGMA synchronous = EXTRA; CREATE TABLE probe (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);');
+                  const setupMs = Number((performance.now() - setupStarted).toFixed(1));
+                  const insert = database.prepare('INSERT INTO probe (id, payload) VALUES (?, ?)');
+                  const transactions = [];
+                  for (let id = 0; id < 30; id += 1) {
+                    const started = performance.now();
+                    database.exec('BEGIN IMMEDIATE');
+                    insert.run(id, payload);
+                    database.exec('COMMIT');
+                    transactions.push(performance.now() - started);
+                  }
+                  const files = [];
+                  for (let id = 0; id < 30; id += 1) {
+                    const started = performance.now();
+                    const file = await fs.open(path.join(directory, `file-${id}`), 'wx');
+                    try { await file.writeFile(payload); await file.sync(); }
+                    finally { await file.close(); }
+                    files.push(performance.now() - started);
+                  }
+                  console.log(JSON.stringify({
+                    phase: 'measured', round: round + 1, location: location.name, setupMs,
+                    journal: database.prepare('PRAGMA journal_mode').get().journal_mode,
+                    synchronous: database.prepare('PRAGMA synchronous').get().synchronous,
+                    transactions: summarize(transactions), syncedFiles: summarize(files)
+                  }));
+                } finally {
+                  const cleanupStarted = performance.now();
+                  try { database?.close(); }
+                  finally { await fs.rm(directory, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 }); }
+                  console.log(JSON.stringify({ phase: 'cleaned', round: round + 1, location: location.name, cleanupMs: Number((performance.now() - cleanupStarted).toFixed(1)) }));
+                }
+              }
+            }
+          })().catch((error) => { console.error(error); process.exitCode = 1; });
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run focused tests
         run: npm run test:focused
       - name: Run integration tests
