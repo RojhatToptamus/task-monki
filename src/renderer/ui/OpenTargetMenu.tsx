@@ -99,7 +99,9 @@ export function OpenTargetMenuItems({
   const [inspection, setInspection] = useState<OpenTargetInspection>();
   const [error, setError] = useState<string>();
   const [busyAction, setBusyAction] = useState<string>();
+  const [inspectionAttempt, setInspectionAttempt] = useState(0);
   const firstItemRef = useRef<HTMLButtonElement>(null);
+  const loadingItemRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let canceled = false;
@@ -110,18 +112,21 @@ export function OpenTargetMenuItems({
       .inspectOpenTarget({ target })
       .then((next) => {
         if (!canceled) {
+          if (document.activeElement === loadingItemRef.current) {
+            focusOwningMenu(loadingItemRef.current);
+          }
           setInspection(next);
         }
       })
       .catch((caught: unknown) => {
         if (!canceled) {
-          setError(caught instanceof Error ? caught.message : 'Could not inspect path.');
+          setError(openTargetErrorMessage(caught, 'Could not inspect path.'));
         }
       });
     return () => {
       canceled = true;
     };
-  }, [targetKey]);
+  }, [targetKey, inspectionAttempt]);
 
   useLayoutEffect(() => {
     if (!autoFocusFirst || !inspection) {
@@ -161,7 +166,7 @@ export function OpenTargetMenuItems({
       }
       onActionComplete?.();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Action failed.');
+      setError(openTargetErrorMessage(caught, 'Action failed.'));
     } finally {
       setBusyAction(undefined);
     }
@@ -170,9 +175,21 @@ export function OpenTargetMenuItems({
   if (error && !inspection) {
     return (
       <>
-        <div className="tm-pathmenu__message" role="menuitem" aria-disabled="true">
+        <div className="tm-pathmenu__message" role="menuitem" aria-disabled="true" tabIndex={-1}>
           {error}
         </div>
+        <button
+          type="button"
+          role="menuitem"
+          tabIndex={-1}
+          className="tm-taskmenu__item tm-pathmenu__item"
+          onClick={(event) => {
+            focusOwningMenu(event.currentTarget);
+            setInspectionAttempt((attempt) => attempt + 1);
+          }}
+        >
+          Retry
+        </button>
         <OpenTargetLiveAnnouncement tone="error">{error}</OpenTargetLiveAnnouncement>
       </>
     );
@@ -180,7 +197,7 @@ export function OpenTargetMenuItems({
   if (!inspection) {
     return (
       <>
-        <div className="tm-pathmenu__message" role="menuitem" aria-disabled="true">
+        <div ref={loadingItemRef} className="tm-pathmenu__message" role="menuitem" aria-disabled="true" tabIndex={-1}>
           Loading...
         </div>
         <OpenTargetLiveAnnouncement>Loading open target.</OpenTargetLiveAnnouncement>
@@ -232,6 +249,7 @@ export function OpenTargetMenuItems({
             className="tm-pathmenu__message tm-pathmenu__message--error"
             role="menuitem"
             aria-disabled="true"
+            tabIndex={-1}
           >
             {error}
           </div>
@@ -240,6 +258,11 @@ export function OpenTargetMenuItems({
       ) : null}
     </>
   );
+}
+
+function openTargetErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  return error.message.replace(/^Error invoking remote method 'openTarget:(?:inspect|execute)': (?:Error: )?/, '');
 }
 
 function OpenTargetLiveAnnouncement({

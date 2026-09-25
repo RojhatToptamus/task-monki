@@ -38,6 +38,12 @@ jobs:
       - run: npm run check:codex-protocol
       - run: npm run check:architecture
       - run: npm run typecheck
+      - name: Use runner temporary storage on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - name: Run focused tests
         run: npm run test:focused
       - name: Run integration tests

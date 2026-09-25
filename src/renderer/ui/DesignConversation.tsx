@@ -29,23 +29,18 @@ import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer'
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
 import { UiArrowRightIcon } from './UiIcons';
-import { DesignNetworkAccess } from './DesignNetworkAccess';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
   draft: DesignDraftRecord | null;
   model?: AgentModel;
-  networkPolicy?: 'DISABLED' | 'OPTIONAL' | 'REQUIRED';
-  networkAccess: boolean;
-  onNetworkAccessChange(value: boolean): void;
   refineUnavailableReason?: string;
   selectedReferenceIds: string[];
   onSelectionChange(referenceIds: string[]): void;
   onSubmit(
     message: string,
     referenceIds: string[],
-    attachmentDraftId?: string,
-    networkAccess?: boolean
+    attachmentDraftId?: string
   ): Promise<void>;
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(draftId: string): Promise<void>;
@@ -73,9 +68,6 @@ export function DesignConversation({
   project,
   draft,
   model,
-  networkPolicy,
-  networkAccess,
-  onNetworkAccessChange,
   refineUnavailableReason,
   selectedReferenceIds,
   onSelectionChange,
@@ -242,7 +234,7 @@ export function DesignConversation({
       }
       await persistDraft(nextMessage, selectedReferenceIds);
       const attachmentDraftId = await attachments.prepareForCreate();
-      await onSubmit(nextMessage, selectedReferenceIds, attachmentDraftId, networkAccess);
+      await onSubmit(nextMessage, selectedReferenceIds, attachmentDraftId);
       suppressDraftSaveRef.current = true;
       await attachments.finishAdoption();
       setMessage('');
@@ -461,13 +453,6 @@ export function DesignConversation({
             </ul>
           ) : null}
         </AttachmentComposerShell>
-        <DesignNetworkAccess
-          value={networkAccess}
-          policy={networkPolicy}
-          runtimeId={project.task.runtimeId}
-          disabled={!canRefine || submitting || submissionOutcomeUnknown}
-          onChange={onNetworkAccessChange}
-        />
         {attachments.overflowError || attachments.modelError ? (
           <p className="task-attachment-message task-attachment-message--error" role="alert">
             {attachments.overflowError ?? attachments.modelError}

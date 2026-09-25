@@ -112,7 +112,11 @@ export function DiscourseActionMenu({
             onClose: () => setOpen(false),
             returnFocus: triggerRef.current
           })}
-          onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
+          onBlur={(event) => {
+            if (event.relatedTarget !== triggerRef.current) {
+              handleMenuBlur(event, () => setOpen(false));
+            }
+          }}
         >
           {items.map((item) => {
             const disabledReasonId = item.disabled && item.disabledReason

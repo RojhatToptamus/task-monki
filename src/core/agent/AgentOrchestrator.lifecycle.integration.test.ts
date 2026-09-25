@@ -759,7 +759,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     expect(adapter.lastStart?.session.localSessionId).toBe(replacementSession.id);
   });
 
-  it('records ambiguous turn submission as recovery-required without false failure', async () => {
+  it.each(['AMBIGUOUS', 'ACKNOWLEDGED'] as const)(
+    'closes %s recovery without a provider turn ID only after explicit abandonment', async (delivery) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-ambiguous-start-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
@@ -799,11 +800,22 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       snapshot.events.some((event) => event.type === 'AGENT_RUN_FAILED')
     ).toBe(false);
 
-    await orchestrator.interruptRun(snapshot.runs[0]!.id);
-    await expect(store.getRun(snapshot.runs[0]!.id)).resolves.toMatchObject({
+    const runId = snapshot.runs[0]!.id;
+    if (delivery === 'ACKNOWLEDGED') {
+      // Older clients could acknowledge thread warnings before turn/start.
+      const recovery = (await runtime.store.getRun(runId))!;
+      await runtime.store.updateRun(runId, recovery.recordRevision, {
+        delivery
+      }, 'restore-acknowledged-recovery');
+    }
+    await orchestrator.interruptRun(runId);
+    await expect(store.getRun(runId)).resolves.toMatchObject({
       status: 'INTERRUPTED',
       recoveryState: 'NONE',
       terminalReason: 'Recovery-required run was explicitly abandoned by the user.'
+    });
+    await expect(runtime.store.getRun(runId)).resolves.toMatchObject({
+      delivery: delivery === 'ACKNOWLEDGED' ? 'TERMINAL' : 'NOT_DELIVERED'
     });
   });
 

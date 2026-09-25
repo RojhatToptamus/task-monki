@@ -537,6 +537,7 @@ export class TaskManagerService {
         browser: this.designBrowser,
         fence: designOwners.canvasFence,
         events: this.events,
+        resolveExecutionSettings: (task) => this.designExecutionSettings(task.runtimeId, task.agentSettings),
         refreshGitEvidence: (designId) => this.refreshDesignGitEvidence(designId),
         ensurePostRunEvidence: (runId) => this.ensurePostRunEvidence(runId),
         ensureDesignWorktree: (designId) => this.ensureDesignWorktree(designId)
@@ -1790,13 +1791,12 @@ export class TaskManagerService {
     ) => {
       const execution = await prepareDesignCreationExecution(
         adapter,
-        {
+        await this.designExecutionSettings(input.runtimeId, {
           runtimeId: input.runtimeId,
           model: input.model,
           modelProvider: input.modelProvider,
-          reasoningEffort: input.reasoningEffort,
-          networkAccess: input.networkAccess
-        },
+          reasoningEffort: input.reasoningEffort
+        }),
         attachments,
         this.allowCandidateDesignModels
       );
@@ -1842,15 +1842,6 @@ export class TaskManagerService {
           return this.getDesign(input.designId);
         }
         const task = await this.requireDesignTask(input.designId, 'Design update');
-        const detail = await this.store.getDesignDetail(input.designId);
-        const settings = {
-          ...task.agentSettings,
-          networkAccess:
-            input.networkAccess ??
-            detail.turns.at(-1)?.networkAccess ??
-            task.agentSettings.networkAccess
-        };
-        const executionTask = { ...task, agentSettings: settings };
         const accept = async () => {
           let attachments: readonly Pick<
             AgentAttachmentSelection,
@@ -1862,10 +1853,10 @@ export class TaskManagerService {
               throw new Error('The attached files do not belong to this Design draft.');
             }
             attachments = (
-              await this.validateDesignAttachmentDraft(executionTask, input.attachmentDraftId)
+              await this.validateDesignAttachmentDraft(task, input.attachmentDraftId)
             ).attachments;
           } else {
-            await this.assertDesignTaskSupported(executionTask, attachments);
+            await this.assertDesignTaskSupported(task, attachments);
           }
           await this.store.createInlineDesignTurn(input);
         };
@@ -1997,13 +1988,11 @@ export class TaskManagerService {
   cancelDesignTurn(
     input: CancelDesignTurnRequest
   ): Promise<DesignDetailSnapshot> {
-    return this.withTaskAction(input.designId, 'Design turn cancellation', () =>
-      this.withRuntimeOperation(async () => {
-        const designUpdates = await this.requireDesignUpdates();
-        await designUpdates.cancelTurn(input.designId, input.turnId);
-        return this.getDesign(input.designId);
-      })
-    );
+    return this.withRuntimeOperation(async () => {
+      const designUpdates = await this.requireDesignUpdates();
+      await designUpdates.cancelTurn(input.designId, input.turnId);
+      return this.getDesign(input.designId);
+    });
   }
 
   restartDesignPreview(
@@ -4762,10 +4751,22 @@ export class TaskManagerService {
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
     await prepareDesignCreationExecution(
       adapter,
-      task.agentSettings,
+      await this.designExecutionSettings(task.runtimeId, task.agentSettings),
       attachments,
       this.allowCandidateDesignModels
     );
+  }
+
+  private async designExecutionSettings(
+    runtimeId: AgentRuntimeId,
+    settings: AgentExecutionSettings
+  ): Promise<AgentExecutionSettings> {
+    if (runtimeId !== 'codex') return settings;
+    return {
+      ...settings,
+      networkAccess: !this.browserDevAgentBoundary &&
+        (await this.appSettingsStore.get()).codexExternalTools.webSearchMode === 'live'
+    };
   }
 
   private emitDesignUpdate(designId: string, payload: unknown): void {

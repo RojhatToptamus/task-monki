@@ -363,7 +363,61 @@ describe('DesignUpdateCoordinator', () => {
     expect(interruptRun).toHaveBeenCalledWith(firstRun.id);
   });
 
-  it('interrupts an active message and stops its candidate when browser cleanup fails', async () => {
+  it.each(['preview startup', 'browser verification'] as const)(
+    'acknowledges Stop during %s before releasing the candidate operation',
+    async (phase) => {
+      const interruptRun = vi.fn(async () => undefined);
+      const harness = await createHarness({ interruptRun });
+      const first = await startAndCompleteCurrentTurn(harness);
+      await harness.coordinator.handleRunTerminal(first.id);
+      const ready = (await harness.store.getDesignDetail(harness.designId)).currentPreview!;
+      const turn = await harness.store.createInlineDesignTurn({
+        designId: harness.designId, clientMessageId: `cancel-candidate-${phase === 'preview startup' ? 'startup' : 'browser'}`,
+        message: 'Change the page.', referenceIds: []
+      });
+      await harness.coordinator.dispatch(harness.designId);
+      const run = requireCurrentRun(await harness.store.getDesignDetail(harness.designId));
+      await harness.scriptedRuntime.transitionRun(run.id, { status: 'RUNNING' });
+      interruptRun.mockImplementation(async () => {
+        await harness.scriptedRuntime.transitionRun(run.id, { status: 'INTERRUPTING' });
+      });
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const operation = phase === 'preview startup'
+        ? harness.previews.executeManagedDesignCandidate
+        : harness.browser.openCandidate;
+      const original = operation.getMockImplementation() as (...args: unknown[]) => Promise<unknown>;
+      operation.mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        entered.resolve();
+        await release.promise;
+        return result;
+      });
+      const opening = harness.coordinator.inspectDesign({
+        runId: run.id, operation: { operation: 'open_candidate' }
+      });
+      const opened = opening.catch((error: unknown) => error);
+      await entered.promise;
+      let acknowledged = false;
+      const stopping = harness.coordinator.cancelTurn(harness.designId, turn.id)
+        .then(() => { acknowledged = true; });
+      try {
+        await vi.waitFor(() => expect(acknowledged).toBe(true));
+        expect(interruptRun).toHaveBeenCalledWith(run.id);
+        expect((await harness.store.getDesignDetail(harness.designId)).canvas.target?.generationId)
+          .toBe(ready.id);
+      } finally {
+        release.resolve();
+        await stopping;
+        await opened;
+      }
+      expect(await opened).toBeInstanceOf(Error);
+      expect(harness.previews.publishManagedDesignCandidateCanvas).not.toHaveBeenCalled();
+      expect(harness.previews.stopManagedDesignCandidate).not.toHaveBeenCalledWith(ready.id);
+    }
+  );
+
+  it('acknowledges interruption and reports terminal browser cleanup failure separately', async () => {
     const interruptRun = vi.fn(async () => undefined);
     const harness = await createHarness({ interruptRun });
     harness.coordinator.open();
@@ -371,7 +425,7 @@ describe('DesignUpdateCoordinator', () => {
     const current = requireCurrentRun(await harness.store.getDesignDetail(harness.designId));
     await harness.scriptedRuntime.transitionRun(
       current.id,
-      { status: 'RUNNING' },
+      { status: 'RUNNING', providerTurnId: `provider-${current.id}` },
       `design-test-run-running:${current.id}`
     );
     await harness.coordinator.inspectDesign({
@@ -383,15 +437,20 @@ describe('DesignUpdateCoordinator', () => {
     harness.previews.stopManagedDesignCandidate.mockClear();
     harness.browser.closeRun.mockRejectedValue(new Error('persistent close failure'));
 
-    await expect(
-      harness.coordinator.cancelTurn(harness.designId, turn.id)
-    ).rejects.toThrow('cancel request did not complete cleanly');
+    await harness.coordinator.cancelTurn(harness.designId, turn.id);
+    expect(interruptRun).toHaveBeenCalledWith(current.id);
+    expect(harness.browser.closeRun).not.toHaveBeenCalled();
+
+    await harness.scriptedRuntime.transitionRun(current.id, { status: 'INTERRUPTED' });
+    await harness.coordinator.handleRunTerminal(current.id);
 
     expect(harness.browser.closeRun).toHaveBeenCalledTimes(2);
     expect(harness.previews.stopManagedDesignCandidate).toHaveBeenCalledWith(
       turn.finalOpenedCandidate!.previewGenerationId
     );
-    expect(interruptRun).toHaveBeenCalledWith(current.id);
+    expect((await harness.store.getDesignDetail(harness.designId)).turns[0]).toMatchObject({
+      outcome: 'NEEDS_ATTENTION', failureReason: expect.stringContaining('browser could not close')
+    });
   });
 
   it('settles a pre-provider dispatch failure instead of leaving the turn queued', async () => {
@@ -749,6 +808,7 @@ interface CoordinatorHarness {
     materializeRestoreCommit: ReturnType<typeof vi.fn>;
   };
   previews: {
+    abortManagedDesignCandidateStartups: ReturnType<typeof vi.fn>;
     prepareManagedDesignExactCommit: ReturnType<typeof vi.fn>;
     executeManagedDesign: ReturnType<typeof vi.fn>;
     executeManagedDesignCandidate: ReturnType<typeof vi.fn>;
@@ -898,6 +958,7 @@ async function createHarness(
     );
   });
   const previews = {
+    abortManagedDesignCandidateStartups: vi.fn(async () => undefined),
     prepareManagedDesignExactCommit: vi.fn(async (input) => input),
     executeManagedDesign: vi.fn(async () => {
       throw new Error('Unexpected Preview execution.');
@@ -958,6 +1019,7 @@ async function createHarness(
       }
     },
     events: new AppEventBus(),
+    resolveExecutionSettings: async (task) => task.agentSettings,
     refreshGitEvidence: options.refreshGitEvidence ?? (async () => before),
     ensurePostRunEvidence: async () => undefined,
     ensureDesignWorktree

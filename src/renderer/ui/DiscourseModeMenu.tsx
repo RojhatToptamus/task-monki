@@ -94,7 +94,11 @@ export function DiscourseModeMenu({
             onClose: () => setOpen(false),
             returnFocus: triggerRef.current
           })}
-          onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
+          onBlur={(event) => {
+            if (event.relatedTarget !== triggerRef.current) {
+              handleMenuBlur(event, () => setOpen(false));
+            }
+          }}
         >
           {DISCOURSE_RESPONSE_MODE_OPTIONS.map((option) => {
             return (

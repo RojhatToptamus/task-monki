@@ -586,9 +586,13 @@ function ToolSettings({
   onSetAppSettings,
   externalToolStatus,
   onRefreshExternalTools,
-  onTestExternalTool
+  onTestExternalTool,
+  runtimes
 }: SettingsViewProps) {
   const [refreshing, setRefreshing] = useState(false);
+  const pendingSettings = runtimeReadinessView(
+    runtimes.find((runtime) => runtime.preflight.runtime.id === 'codex')
+  ).warnings.find((warning) => warning.code === 'RUNTIME_RESTART_REQUIRED');
 
   const refresh = async () => {
     setRefreshing(true);
@@ -644,14 +648,17 @@ function ToolSettings({
       </SettingsSubsection>
 
       <SettingsSubsection title="Codex integrations">
+        {pendingSettings ? (
+          <p className="form-warning" role="status">{pendingSettings.message}</p>
+        ) : null}
         <div className="tm-settings__list">
           <ChoiceSettingRow
-            label="Web search"
-            description="Controls the model's search tool. Use Command network in a Design to allow internet access for commands."
+            label="Internet access"
+            description="Live enables web search and internet access for Design commands. Cached search keeps Design commands offline."
             value={appSettings.codexExternalTools.webSearchMode}
             options={[
               { value: 'disabled', label: 'Off' },
-              { value: 'cached', label: 'Cached' },
+              { value: 'cached', label: 'Cached search' },
               { value: 'live', label: 'Live' }
             ]}
             onChange={(webSearchMode) =>

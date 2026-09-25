@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type {
   AgentModel,
   AgentRuntimeState,
@@ -54,7 +54,7 @@ describe('mounted Design workspace', () => {
     expect(screen.getByRole('heading', { name: 'New Design' })).toBeTruthy();
   });
 
-  it('creates one blank Design with the selected model and explicit command network choice', async () => {
+  it('creates one blank Design with the selected model', async () => {
     const profile = { id: '83bf4f11-9ef5-40b1-b0a5-bfbfef05fed8', name: 'Frontend', description: '', instructions: 'Use the established UI.' };
     const onCreateBlankDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(
@@ -76,9 +76,6 @@ describe('mounted Design workspace', () => {
       target: { value: '  Build a calm project portfolio.  ' }
     });
     fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
-    const network = screen.getByRole('switch', { name: 'Command network' });
-    expect(network.getAttribute('aria-checked')).toBe('false');
-    fireEvent.click(network);
     const create = screen.getByRole('button', { name: 'Create Design' });
     fireEvent.click(create);
     fireEvent.click(create);
@@ -90,10 +87,8 @@ describe('mounted Design workspace', () => {
       creationToken: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/u),
       runtimeId: 'codex',
       model: 'gpt-5.6-luna',
-      reasoningEffort: 'medium',
-      networkAccess: true
+      reasoningEffort: 'medium'
     });
-    expect(network).toHaveProperty('disabled', true);
   });
 
   it('uses the selected model Design reasoning default in the creation form', async () => {
@@ -476,10 +471,9 @@ describe('mounted Design workspace', () => {
     );
   });
 
-  it('carries the last command network choice into the next refinement and lets users disable it', async () => {
+  it('submits one refinement from the compact conversation', async () => {
     const onSubmitRefinement = vi.fn(() => new Promise<void>(() => undefined));
     const project = designProject();
-    project.turns = [{ ...project.conversation[0]!.turn, networkAccess: true }];
     render(
       <DesignsWorkspace
         {...workspaceProps({ project, onSubmitRefinement })}
@@ -491,9 +485,6 @@ describe('mounted Design workspace', () => {
     expect(screen.queryByRole('heading', { name: 'Conversation' })).toBeNull();
     expect(screen.queryByText(/Codex\s*·\s*scenario-model\s*·\s*low/)).toBeNull();
     const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
-    const network = screen.getByRole('switch', { name: 'Command network' });
-    expect(network.getAttribute('aria-checked')).toBe('true');
-    fireEvent.click(network);
     fireEvent.change(composer, { target: { value: '  Increase the title contrast.  ' } });
     const send = screen.getByRole('button', { name: 'Send' });
     fireEvent.click(send);
@@ -504,8 +495,7 @@ describe('mounted Design workspace', () => {
       'design-1',
       'Increase the title contrast.',
       [],
-      undefined,
-      false
+      undefined
     );
   });
 
@@ -633,8 +623,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Use the attached direction.',
         [],
-        'later-message-draft',
-        false
+        'later-message-draft'
       )
     );
     await waitFor(() => expect(screen.queryByText('later-direction.txt')).toBeNull());
@@ -649,8 +638,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Make the next change without a reference.',
         [],
-        undefined,
-        false
+        undefined
       )
     );
     expect(onStageAttachmentBatch).toHaveBeenCalledOnce();
@@ -762,8 +750,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Use only the dropped file.',
         [],
-        'conversation-interaction-draft',
-        false
+        'conversation-interaction-draft'
       )
     );
   });
@@ -850,8 +837,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Use a quieter headline.',
         ['reference-1'],
-        undefined,
-        false
+        undefined
       )
     );
 
@@ -890,8 +876,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Apply only the first direction.',
         ['reference-first'],
-        undefined,
-        false
+        undefined
       )
     );
     await waitFor(() => expect((first as HTMLInputElement).checked).toBe(false));
@@ -907,8 +892,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Now apply only the second direction.',
         ['reference-second'],
-        undefined,
-        false
+        undefined
       )
     );
     await waitFor(() => expect((second as HTMLInputElement).checked).toBe(false));
@@ -923,8 +907,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Continue without either old reference.',
         [],
-        undefined,
-        false
+        undefined
       )
     );
   });
@@ -1005,8 +988,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Reduce the chart density.',
         [],
-        'queued-message-draft',
-        false
+        'queued-message-draft'
       )
     );
 
@@ -1111,8 +1093,7 @@ describe('mounted Design workspace', () => {
         'design-1',
         'Continue with the saved direction.',
         [],
-        savedAttachmentDraft.id,
-        false
+        savedAttachmentDraft.id
       )
     );
     expect(onStageAttachmentBatch).not.toHaveBeenCalled();
@@ -1437,6 +1418,33 @@ describe('mounted Design workspace', () => {
     boundsSpy.mockRestore();
   });
 
+  it('preserves the native preview while follow-ups queue, stop, or finish without a replacement', () => {
+    const boundsSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, width: 800, height: 600, top: 0, left: 0,
+      right: 800, bottom: 600, toJSON: () => ({})
+    });
+    onTestFinished(() => boundsSpy.mockRestore());
+    const onShowCanvas = vi.fn();
+    const onHideCanvas = vi.fn();
+    const project = designProject();
+    const turn = project.conversation[0]!.turn;
+    const props = workspaceProps({ onShowCanvas, onHideCanvas, project });
+    const view = render(<DesignsWorkspace {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Canvas only' }));
+    onHideCanvas.mockClear();
+    expect(onShowCanvas).toHaveBeenCalledTimes(1);
+
+    for (const outcome of ['READY', undefined, 'CANCELED', undefined, 'NO_CHANGE', 'FAILED'] as const) {
+      view.rerender(<DesignsWorkspace {...props} project={{
+        ...project, turns: [{ ...turn, outcome }]
+      }} />);
+      expect(onHideCanvas).not.toHaveBeenCalled();
+      expect(onShowCanvas).toHaveBeenCalledTimes(1);
+    }
+    view.unmount();
+    expect(onHideCanvas).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a failed native load actionable and clears the error after a successful retry', async () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
       x: 12, y: 24, width: 1_200, height: 720,
@@ -1479,10 +1487,10 @@ describe('mounted Design workspace', () => {
     expect(await screen.findByRole('button', { name: 'Retry preview' })).toBeTruthy();
   });
 
-  it('retries a failed first update with the selected network choice and original request', async () => {
+  it('retries a failed first update with its original request and references', async () => {
     const project = projectWithTwoReferences();
     const turn = { ...project.conversation[0]!.turn, outcome: 'NEEDS_ATTENTION' as const,
-      failureReason: 'The final candidate was not verified.', referenceIds: ['reference-first'], networkAccess: false };
+      failureReason: 'The final candidate was not verified.', referenceIds: ['reference-first'] };
     const onSubmitRefinement = vi.fn(async () => undefined);
     render(<DesignsWorkspace {...workspaceProps({
       onSubmitRefinement,
@@ -1494,11 +1502,10 @@ describe('mounted Design workspace', () => {
 
     expect(screen.getAllByText('The final candidate was not verified.').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: 'Split view' }));
-    fireEvent.click(screen.getByRole('switch', { name: 'Command network' }));
     fireEvent.click(screen.getByRole('button', { name: 'Retry update' }));
 
     await waitFor(() => expect(onSubmitRefinement).toHaveBeenCalledWith(
-      project.design.id, project.conversation[0]!.userMessage, ['reference-first'], undefined, true
+      project.design.id, project.conversation[0]!.userMessage, ['reference-first']
     ));
   });
 

@@ -198,7 +198,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
                 : [
                       'QUEUED',
                       'STARTING'
-                    ].includes(run.status)
+                    ].includes(run.status) && isAuthoritativeAgentProgress(eventType)
                   ? 'RUNNING'
                   : ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status) &&
                       getBoolean(event.payload, 'interactionPending') !== true &&
