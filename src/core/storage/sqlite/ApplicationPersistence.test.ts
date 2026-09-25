@@ -227,12 +227,15 @@ describe('ApplicationPersistence', () => {
     const legacy = { ...settings, schemaVersion: 12, theme: 'light', showMascot: false };
     const oldDatabase = new DatabaseSync(paths.databasePath);
     try {
+      // Build the legacy fixture transactionally, as AppDatabase applies migrations.
+      oldDatabase.exec('BEGIN IMMEDIATE');
       for (const migration of DATABASE_MIGRATIONS.filter((entry) => entry.version <= 2)) {
         oldDatabase.exec(migration.sql);
       }
       oldDatabase.exec(`PRAGMA application_id = ${APP_DATABASE_APPLICATION_ID}; PRAGMA user_version = 2;`);
       oldDatabase.prepare('INSERT INTO app_settings (singleton_id, record_revision, settings_json) VALUES (1, 7, ?)')
         .run(JSON.stringify(legacy));
+      oldDatabase.exec('COMMIT');
     } finally {
       oldDatabase.close();
     }

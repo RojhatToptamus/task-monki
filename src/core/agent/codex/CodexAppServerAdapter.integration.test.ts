@@ -2178,6 +2178,63 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
+  it('delivers and interrupts a Design follow-up when resume emits a configuration warning', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-resume-warning-'));
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, {
+      cwd: dir,
+      executable: await writeFakeCodexExecutable(dir, 'resume-warning'),
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      designSkillRoot: await fs.realpath(path.resolve('resources/design-skills'))
+    });
+    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    qualifyFakeDesignModel(adapter);
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree, turnId } = await createDesignTaskContext(store, dir);
+    try {
+      const terminal = waitForAppEvent(events, 'run.terminal');
+      await orchestrator.startTurn({
+        task, iteration, worktree, mode: 'DESIGN', instructionProfile: 'DESIGN',
+        generationKey: turnId, prompt: task.prompt, settings: task.agentSettings
+      });
+      await terminal;
+      const followup = await store.createInlineDesignTurn({
+        designId: task.id,
+        clientMessageId: 'resume-warning-followup',
+        message: 'Continue the Design.',
+        referenceIds: []
+      });
+      const run = await orchestrator.startTurn({
+        task: (await store.getTask(task.id))!,
+        iteration, worktree, mode: 'DESIGN', instructionProfile: 'DESIGN',
+        generationKey: followup.id, prompt: 'Continue the Design.', settings: task.agentSettings
+      });
+      expect(run).toMatchObject({ status: 'RUNNING', providerTurnId: 'turn-2' });
+      expect((await store.snapshot()).events).toContainEqual(expect.objectContaining({
+        type: 'AGENT_ACTIVITY_RECEIVED',
+        runId: run.id,
+        payload: expect.objectContaining({
+          eventType: 'warning', message: 'Codex is ignoring an unrecognized configuration setting.'
+        })
+      }));
+      await orchestrator.interruptRun(run.id);
+      expect(await waitForRunStatus(store, run.id, 'INTERRUPTED')).toMatchObject({
+        providerTurnId: 'turn-2', recoveryState: 'NONE'
+      });
+      const server = (await store.snapshot()).agentServers[0]!;
+      const outbound = readOutboundMessages(await fs.readFile(server.protocolJournalPath, 'utf8'));
+      expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(2);
+      expect(outbound).toContainEqual(expect.objectContaining({
+        method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-2' }
+      }));
+    } finally {
+      await orchestrator.shutdown();
+    }
+  });
+
   it('rebinds changed Design network access before delivery and resumes unchanged access', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-network-scope-'));
     const store = await openCodexTaskStore(path.join(dir, 'store'));
@@ -6513,6 +6570,7 @@ function fakeCodexScript(
     | 'design-browser'
     | 'profile-rebind'
     | 'network-rebind'
+    | 'resume-warning'
     | 'profile-mismatch-create'
     | 'profile-network-mismatch'
     | 'profile-drift'
@@ -6991,6 +7049,14 @@ rl.on('line', (line) => {
         if (mode === 'unsafe-recovery-resume') {
           response.sandbox = { type: 'dangerFullAccess' };
         }
+        if (mode === 'resume-warning') {
+          send({ method: 'warning', params: {
+            threadId: message.params.threadId,
+            message: 'Codex is ignoring an unrecognized configuration setting.'
+          } });
+          setTimeout(() => send({ id: message.id, result: response }), 50);
+          break;
+        }
         send({ id: message.id, result: response });
         if (mode === 'recovery-notification-echo') {
           send({ method: 'turn/completed', params: {
@@ -7182,9 +7248,10 @@ rl.on('line', (line) => {
     case 'turn/start':
       scopedTurnNumber += 1;
       turnStartAttempts += 1;
-      if (mode === 'network-rebind') {
+      if (mode === 'network-rebind' || mode === 'resume-warning') {
         const currentTurn = { ...turn('inProgress'), id: 'turn-' + turnStartAttempts };
         send({ id: message.id, result: { turn: currentTurn } });
+        if (mode === 'resume-warning' && turnStartAttempts > 1) return;
         setTimeout(() => send({ method: 'turn/completed', params: {
           threadId: message.params.threadId,
           turn: { ...currentTurn, status: 'completed' }
@@ -7777,6 +7844,14 @@ rl.on('line', (line) => {
       }, 10);
       break;
     case 'turn/interrupt':
+      if (mode === 'resume-warning') {
+        send({ id: message.id, result: {} });
+        send({ method: 'turn/completed', params: {
+          threadId: message.params.threadId,
+          turn: { ...turn('interrupted'), id: message.params.turnId }
+        } });
+        break;
+      }
       if (mode === 'scoped-interrupt-model-reroute') {
         send({ method: 'model/rerouted', params: {
           threadId: 'thread-1',

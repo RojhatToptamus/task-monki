@@ -4995,7 +4995,10 @@ function runtimeRunUpdate(
       result.delivery = existing.delivery;
     }
   } else if (isTerminalRuntimeStatus(status)) {
-    result.delivery = providerTurnId ? 'TERMINAL' : 'NOT_DELIVERED';
+    result.delivery = providerTurnId ||
+      existing.delivery === 'ACKNOWLEDGED' || existing.delivery === 'TERMINAL'
+      ? 'TERMINAL'
+      : 'NOT_DELIVERED';
     result.endedAt = update.endedAt ?? occurredAt;
     if (existing.interruptDelivery) result.interruptDelivery = 'TERMINAL';
   }

@@ -281,7 +281,13 @@ describe('OpenCodeServerSupervisor', () => {
     }
   });
 
-  it('bounds early-exit retries and redacts every persisted attempt', async () => {
+  it.each([
+    { limit: 'attempt count', elapsedPerAttemptMs: 0, expectedPorts: ['45101', '45102', '45103'] },
+    { limit: 'startup deadline', elapsedPerAttemptMs: 1_000, expectedPorts: ['45101'] }
+  ])('bounds early-exit retries by $limit and redacts every persisted attempt', async ({
+    elapsedPerAttemptMs,
+    expectedPorts
+  }) => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-opencode-supervisor-')
     );
@@ -302,6 +308,11 @@ describe('OpenCodeServerSupervisor', () => {
       }
     });
 
+    // Exercise each bound independently of host filesystem latency.
+    const startedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(
+      () => startedAt + processSupervisor.launchSpecs.length * elapsedPerAttemptMs
+    );
     try {
       let failure: Error | undefined;
       try {
@@ -313,14 +324,10 @@ describe('OpenCodeServerSupervisor', () => {
 
       expect(failure?.message).toContain('[REDACTED]');
       expect(failure?.message).not.toContain(processSupervisor.generatedPassword);
-      expect(processSupervisor.launchSpecs).toHaveLength(3);
-      expect(servers).toHaveLength(3);
+      expect(processSupervisor.launchSpecs).toHaveLength(expectedPorts.length);
+      expect(servers).toHaveLength(expectedPorts.length);
       expect(servers.every((server) => server.status === 'FAILED')).toBe(true);
-      expect(servers.map((server) => server.argv[4]).sort()).toEqual([
-        '45101',
-        '45102',
-        '45103'
-      ]);
+      expect(servers.map((server) => server.argv[4]).sort()).toEqual(expectedPorts);
       for (const spec of processSupervisor.launchSpecs) {
         expect(spec.argv).not.toContain(processSupervisor.generatedPassword);
       }
@@ -332,6 +339,7 @@ describe('OpenCodeServerSupervisor', () => {
         );
       }
     } finally {
+      clock.mockRestore();
       await supervisor.shutdown();
       await closeRuntimeStore(store);
     }
