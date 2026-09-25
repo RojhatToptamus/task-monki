@@ -252,6 +252,10 @@ describe('Design workspace view model', () => {
       status: 'RUNNING',
       statusLabel: 'Working'
     });
+    for (const runStatus of ['INTERRUPTING', 'INTERRUPTED'] as const) {
+      expect(designTurnView({ ...entry, runStatus }))
+        .toMatchObject({ status: 'RUNNING', statusLabel: 'Stopping' });
+    }
     expect(
       designTurnView({
         ...entry,

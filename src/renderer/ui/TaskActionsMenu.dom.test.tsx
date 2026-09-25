@@ -47,11 +47,38 @@ describe('Task actions menu', () => {
     expect(document.activeElement).toBe(menu);
 
     const archive = within(menu).getByRole('menuitem', { name: 'Archive' });
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(within(menu).getByText('Loading...'));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(archive);
     fireEvent.pointerDown(archive);
     expect(screen.getByRole('menu')).toBe(menu);
     fireEvent.click(archive);
     expect(onArchive).toHaveBeenCalledWith('task-1');
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('keeps a failed inspection navigable and retries without losing task actions or focus', async () => {
+    vi.spyOn(taskManagerApi, 'inspectOpenTarget')
+      .mockRejectedValueOnce(new Error("Error invoking remote method 'openTarget:inspect': Error: Repository path is unavailable."))
+      .mockResolvedValueOnce(inspection);
+    const { trigger } = renderMenu();
+    fireEvent.click(trigger);
+    const menu = screen.getByRole('menu');
+    const error = await within(menu).findByRole('menuitem', { name: 'Repository path is unavailable.' });
+    expect(menu.textContent).not.toContain('openTarget:inspect');
+    const retry = within(menu).getByRole('menuitem', { name: 'Retry' });
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(error);
+    fireEvent.keyDown(error, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(retry);
+    fireEvent.keyDown(retry, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Archive' }));
+    fireEvent.click(retry);
+    const open = await within(menu).findByRole('menuitem', { name: 'Open in VS Code' });
+    expect(document.activeElement).toBe(open);
+    expect(screen.getByRole('menu')).toBe(menu);
+    expect(within(menu).queryByText('Repository path is unavailable.')).toBeNull();
   });
 
   it('keeps the keyboard selection visible when path items arrive and restores focus on Escape', async () => {
@@ -75,6 +102,17 @@ describe('Task actions menu', () => {
     fireEvent.keyDown(lastItem, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it('moves focus from the loading row to the available path action', async () => {
+    let resolve!: (result: OpenTargetInspection) => void;
+    vi.spyOn(taskManagerApi, 'inspectOpenTarget').mockReturnValue(new Promise(done => { resolve = done; }));
+    const { trigger } = renderMenu();
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Loading...' }));
+    await act(async () => resolve(inspection));
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open in VS Code' }));
   });
 
   it('dismisses on anchor scroll and resize but allows scrolling the menu itself', async () => {

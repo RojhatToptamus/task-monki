@@ -1,4 +1,5 @@
 import type {
+  AgentExecutionSettings,
   DesignDetailSnapshot,
   DesignSourceAction,
   DesignOpenedCandidateCheckpoint,
@@ -8,6 +9,7 @@ import type {
   PreviewGenerationRecord,
   RestoreDesignRevisionRequest,
   RunRecord,
+  Task,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
@@ -61,6 +63,7 @@ export interface DesignUpdateCoordinatorOptions {
   browser: DesignBrowserOwner;
   fence: DesignCanvasCutoverFence;
   events: AppEventBus;
+  resolveExecutionSettings(task: Task): Promise<AgentExecutionSettings>;
   refreshGitEvidence(designId: string): Promise<GitSnapshotRecord>;
   ensurePostRunEvidence(runId: string): Promise<void>;
   ensureDesignWorktree(designId: string): Promise<WorktreeRecord>;
@@ -177,19 +180,28 @@ export class DesignUpdateCoordinator {
     }
   }
 
-  cancelTurn(designId: string, turnId: string): Promise<void> {
+  async cancelTurn(designId: string, turnId: string): Promise<void> {
     this.assertAccepting();
-    void this.options.store.getDesignDetail(designId).then((detail) => {
-      const runId = detail.turns.find((candidate) => candidate.id === turnId)?.runId;
-      if (runId) this.options.browser.abortRun(runId);
-    });
+    // Provider startup and candidate verification own the Design lock. Stop
+    // must reach the run before those operations finish; terminal settlement
+    // retains the lock while cleaning up and advancing the queue.
+    const pending = await this.options.store.getDesignDetail(designId);
+    const pendingTurn = pending.turns.find((candidate) => candidate.id === turnId);
+    if (!pendingTurn) throw new Error('Design turn not found.');
+    if (pendingTurn.outcome !== undefined) return;
+    const pendingRun = await this.options.store.getRunByGenerationKey(designId, turnId);
+    if (pendingRun && ACTIVE_RUN_STATUSES.has(pendingRun.status)) {
+      await this.interruptDesignRun(pendingRun, turnId);
+      return;
+    }
     return this.withDesignLock(designId, async () => {
       const detail = await this.options.store.getDesignDetail(designId);
       const turn = detail.turns.find((candidate) => candidate.id === turnId);
       if (!turn) throw new Error('Design turn not found.');
       if (turn.outcome !== undefined) return;
 
-      if (!turn.runId) {
+      const run = await this.options.store.getRunByGenerationKey(designId, turnId);
+      if (!run && !turn.runId) {
         await this.options.store.settleDesignTurn({
           designId,
           turnId,
@@ -200,30 +212,25 @@ export class DesignUpdateCoordinator {
         return;
       }
 
-      const run = await this.options.store.getRun(turn.runId);
       if (!run) {
         throw new Error('The active Design turn lost its agent run.');
       }
       if (ACTIVE_RUN_STATUSES.has(run.status)) {
-        const results = await Promise.allSettled([
-          this.closeBrowserAndStopOpenedCandidate(run.id, turn),
-          this.options.agents.interruptRun(run.id)
-        ]);
-        this.emitUpdated(designId, {
-          reason: 'turn-cancel-requested',
-          turnId,
-          runId: run.id
-        });
-        const failures = rejectedReasons(results);
-        if (failures.length > 0) {
-          throw new AggregateError(
-            failures,
-            'The Design cancel request did not complete cleanly.'
-          );
-        }
+        await this.interruptDesignRun(run, turnId);
         return;
       }
       await this.settleRunUnlocked(run.id);
+    });
+  }
+
+  private async interruptDesignRun(run: RunRecord, turnId: string): Promise<void> {
+    this.options.browser.abortRun(run.id);
+    await this.options.previews.abortManagedDesignCandidateStartups(run.id);
+    await this.options.agents.interruptRun(run.id);
+    // An open may have entered while the interrupt was being recorded.
+    this.options.browser.abortRun(run.id);
+    this.emitUpdated(run.taskId, {
+      reason: 'turn-cancel-requested', turnId, runId: run.id
     });
   }
 
@@ -531,10 +538,7 @@ export class DesignUpdateCoordinator {
         mode: 'DESIGN',
         prompt,
         instructionProfile: 'DESIGN',
-        settings: {
-          ...context.task.agentSettings,
-          networkAccess: turn.networkAccess ?? context.task.agentSettings.networkAccess
-        },
+        settings: await this.options.resolveExecutionSettings(context.task),
         generationKey: turn.id,
         beforeGitSnapshotId: before.id
       });
@@ -878,13 +882,22 @@ export class DesignUpdateCoordinator {
         context,
         commitSha: source.candidateCommitSha
       });
+      try {
+        await this.requireActiveDesignRun(run.id);
+      } catch (error) {
+        await this.options.previews.stopManagedDesignCandidate(prepared.generation.id);
+        throw error;
+      }
       generation = await this.options.previews.executeManagedDesignCandidate(prepared, {
         designId: run.taskId,
         onCandidateReady: async () => undefined
       });
     }
-    const lease = await this.options.previews.openManagedDesignBrowserLease(generation.id);
+    let lease: Awaited<ReturnType<PreviewManager['openManagedDesignBrowserLease']>> | undefined;
     try {
+      await this.requireActiveDesignRun(run.id);
+      lease = await this.options.previews.openManagedDesignBrowserLease(generation.id);
+      await this.requireActiveDesignRun(run.id);
       const observation = await this.options.browser.openCandidate({
         designId: run.taskId,
         runId: run.id,
@@ -892,6 +905,7 @@ export class DesignUpdateCoordinator {
         origin: lease.origin,
         lease
       });
+      await this.requireActiveDesignRun(run.id);
       await this.options.previews.publishManagedDesignCandidateCanvas(generation.id);
       await this.options.store.updateDesignOpenedCandidate({
         designId: run.taskId,
@@ -906,7 +920,7 @@ export class DesignUpdateCoordinator {
     } catch (error) {
       const failures: unknown[] = [];
       try {
-        await lease.close();
+        await lease?.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
@@ -1007,29 +1021,6 @@ export class DesignUpdateCoordinator {
     );
     if (generation?.routingState === 'CANDIDATE') {
       await this.options.previews.stopManagedDesignCandidate(generation.id);
-    }
-  }
-
-  private async closeBrowserAndStopOpenedCandidate(
-    runId: string,
-    turn: DesignTurn
-  ): Promise<void> {
-    const failures: unknown[] = [];
-    try {
-      await this.closeBrowserRun(runId);
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      await this.stopOpenedCandidate(turn);
-    } catch (error) {
-      failures.push(error);
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures,
-        'The Design browser and candidate did not clean up completely.'
-      );
     }
   }
 

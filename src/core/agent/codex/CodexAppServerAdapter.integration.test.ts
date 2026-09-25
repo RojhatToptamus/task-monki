@@ -2201,8 +2201,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
           designId: task.id,
           clientMessageId: randomUUID(),
           message: 'Continue with the selected command network access.',
-          referenceIds: [],
-          networkAccess
+          referenceIds: []
         })).id;
         const terminal = waitForAppEvent(events, 'run.terminal');
         const run = await orchestrator.startTurn({

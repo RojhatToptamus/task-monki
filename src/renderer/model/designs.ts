@@ -295,12 +295,15 @@ export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
           : 'working'
     };
   }
+  if (entry.runStatus === 'INTERRUPTING' || entry.runStatus === 'INTERRUPTED') {
+    return { status: 'RUNNING', statusLabel: 'Stopping', tone: 'working' };
+  }
   if (entry.runStatus === 'COMPLETED') {
     return { status: 'RUNNING', statusLabel: 'Preparing preview', tone: 'working' };
   }
   if (
     entry.runStatus &&
-    ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(entry.runStatus)
+    ['FAILED', 'RECOVERY_REQUIRED', 'LOST'].includes(entry.runStatus)
   ) {
     return {
       status: 'FAILED',

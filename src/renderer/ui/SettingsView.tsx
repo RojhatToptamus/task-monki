@@ -646,12 +646,12 @@ function ToolSettings({
       <SettingsSubsection title="Codex integrations">
         <div className="tm-settings__list">
           <ChoiceSettingRow
-            label="Web search"
-            description="Controls the model's search tool. Use Command network in a Design to allow internet access for commands."
+            label="Internet access"
+            description="Live enables web search and internet access for Design commands. Cached search keeps Design commands offline."
             value={appSettings.codexExternalTools.webSearchMode}
             options={[
               { value: 'disabled', label: 'Off' },
-              { value: 'cached', label: 'Cached' },
+              { value: 'cached', label: 'Cached search' },
               { value: 'live', label: 'Live' }
             ]}
             onChange={(webSearchMode) =>

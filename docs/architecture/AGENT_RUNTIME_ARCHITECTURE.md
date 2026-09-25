@@ -179,14 +179,13 @@ The Design workflow supplies permanent instructions, app-owned skills,
 selected references, the managed worktree, and one `inspect_design` grant.
 
 Codex Designs keep worktree-scoped writes and approval policy `never`.
-Command network access defaults to off. Users can select it when creating a
-Design and for each update. Each queued message retains its selected permission;
-later messages cannot change it. Legacy messages use the creation setting.
-The packaged app's Web search and MCP settings independently control those
-provider tools; enabling Web search does not enable network commands.
+The packaged app's Internet access setting controls web search and Design
+command network access. Live enables both; Off and Cached search keep Design
+commands offline. Each queued update reads the current setting when it starts.
+Executed runs retain the permissions they used. MCP access remains independent.
 Saved Codex command allow rules can authorize matching commands outside the
-sandbox, including network access. The network control describes sandboxed
-commands and does not remove these existing authorizations.
+sandbox, including network access. The Internet access setting does not remove
+these existing authorizations.
 Browser development keeps its separate offline boundary. Other runtimes use
 their advertised approval-free write and network policies.
 
@@ -201,6 +200,12 @@ message is delivered. An explicit retry must close the previous browser owner
 before starting provider work. The canvas offers Retry update when the first
 preview fails, and Reload for native page-load failures. Page-load errors remain
 transient display state and do not rewrite the last verified Design revision.
+
+Stop acknowledges the provider interrupt without waiting for candidate or browser
+cleanup. It also aborts verification startup and restores the last Ready canvas.
+Terminal settlement retains the Design lock until cleanup finishes; queued
+messages cannot start before it releases the workspace. Stop remains available
+while a provider session starts, before the Design turn has linked its run.
 
 ## Capability projection
 

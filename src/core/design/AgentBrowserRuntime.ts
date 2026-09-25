@@ -178,6 +178,7 @@ interface BrowserSession {
  */
 export class AgentBrowserRuntime implements DesignBrowserOwner {
   private readonly sessions = new Map<string, BrowserSession>();
+  private readonly openingControllers = new Map<AbortController, string>();
   private readonly operations = new Map<string, Promise<unknown>>();
   private readonly imageUsage = new Map<string, { bytes: number; count: number }>();
   private accepting = true;
@@ -336,8 +337,11 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     lease: PreviewGatewayBrowserLease;
   }): Promise<DesignBrowserObservation> {
     this.assertAvailable();
+    const controller = new AbortController();
+    this.openingControllers.set(controller, input.runId);
     return this.withRunOperation(input.runId, async () => {
       await this.closeRunUnlocked(input.runId);
+      controller.signal.throwIfAborted();
       const root = this.runRoot(input.runId);
       const socketRoot = this.runSocketRoot(input.runId);
       await Promise.all([
@@ -364,10 +368,11 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
         environment,
         lease: input.lease,
         refs: new Set(),
-        controller: new AbortController()
+        controller
       };
       this.sessions.set(input.runId, session);
       try {
+        controller.signal.throwIfAborted();
         await this.runCli(
           environment,
           ['open', input.origin],
@@ -379,7 +384,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
         await this.closeRunUnlocked(input.runId).catch(() => undefined);
         throw error;
       }
-    });
+    }).finally(() => this.openingControllers.delete(controller));
   }
 
   inspect(
@@ -439,6 +444,9 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
   }
 
   abortRun(runId: string): void {
+    for (const [controller, ownerRunId] of this.openingControllers) {
+      if (ownerRunId === runId) controller.abort(new Error('Design browser verification was canceled.'));
+    }
     this.sessions.get(runId)?.controller.abort(
       new Error('Design browser verification was canceled.')
     );
@@ -453,6 +461,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
 
   async shutdown(): Promise<void> {
     this.accepting = false;
+    for (const controller of this.openingControllers.keys()) controller.abort();
     for (const session of this.sessions.values()) session.controller.abort();
     const closeResults = await Promise.allSettled(
       [...this.sessions.keys()].map((runId) =>

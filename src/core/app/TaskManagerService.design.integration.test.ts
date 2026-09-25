@@ -14,6 +14,7 @@ import {
 } from '../../testSupport/taskMonkiScenario';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { AppEventBus } from '../runner/AppEventBus';
+import type { PreviewGraph } from '../preview/PreviewGraph';
 import { TaskManagerService } from './TaskManagerService';
 
 const scenarioRegistry = new TaskMonkiScenarioRegistry();
@@ -26,6 +27,47 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService Design vertical slice', () => {
+  it('exposes Stop during Design session startup and cancels before provider delivery', async () => {
+    const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const createSession = scenario.agent.createSession.bind(scenario.agent);
+    vi.spyOn(scenario.agent, 'createSession').mockImplementationOnce(async (input) => {
+      entered.resolve();
+      await release.promise;
+      return createSession(input);
+    });
+    const creating = scenario.service.createBlankDesign({
+      brief: 'This request must not reach the provider.',
+      creationToken: 'cancel-design-startup', runtimeId: 'codex'
+    });
+    try {
+      await Promise.race([entered.promise, creating.then(() => {
+        throw new Error('The Design started without reaching session creation.');
+      })]);
+      const design = (await scenario.service.listDesigns())[0]!;
+      const pending = await scenario.service.getDesign(design.id);
+      expect(pending.actions).toMatchObject({ canStop: true, stopTurnId: pending.turns[0]!.id });
+      expect(pending.currentRun?.status).toBe('QUEUED');
+      let acknowledged = false;
+      const stopping = scenario.service.cancelDesignTurn({
+        designId: design.id, turnId: pending.turns[0]!.id
+      }).then(() => { acknowledged = true; });
+      try {
+        await vi.waitFor(() => expect(acknowledged).toBe(true));
+      } finally {
+        release.resolve();
+        await stopping;
+      }
+      await creating;
+      await waitForDesign(scenario, design.id, (detail) => detail.turns[0]?.outcome === 'CANCELED');
+      expect(scenario.agent.startedTurns).toEqual([]);
+    } finally {
+      release.resolve();
+      await creating.catch(() => undefined);
+    }
+  });
+
   it('upgrades and recovers a Design interrupted after branch publication but before index repair', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-upgrade-recovery',
@@ -146,7 +188,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     }
   }, 60_000);
 
-  it('dispatches each queued Design message with its selected network access and unchanged write policy', async () => {
+  it('uses current Internet settings for queued Design turns without broadening write policy', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-autonomous-policy',
       previewEnabled: true,
@@ -161,11 +203,11 @@ describeMac('TaskManagerService Design vertical slice', () => {
       }
     });
 
+    await scenario.service.updateAppSettings({ codexExternalTools: { webSearchMode: 'live' } });
     let detail = await scenario.service.createBlankDesign({
       brief: 'Create a small product page.',
       creationToken: 'design-autonomous-policy-create',
-      runtimeId: 'codex',
-      networkAccess: true
+      runtimeId: 'codex'
     });
 
     expect(detail.task.agentSettings).toMatchObject({
@@ -178,28 +220,21 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designId: detail.design.id,
       clientMessageId: 'design-network-off',
       message: 'Refine the spacing without using the network.',
-      referenceIds: [],
-      networkAccess: false
+      referenceIds: []
     };
     await scenario.service.submitDesignTurn(offRequest);
     await scenario.service.submitDesignTurn({
       designId: detail.design.id,
       clientMessageId: 'design-network-inherited',
-      message: 'Continue with the selected permissions.',
+      message: 'Continue with the current Internet setting.',
       referenceIds: []
     });
     detail = await scenario.service.submitDesignTurn({
       designId: detail.design.id,
       clientMessageId: 'design-network-on',
       message: 'Use the network to check the documentation.',
-      referenceIds: [],
-      networkAccess: true
+      referenceIds: []
     });
-    expect(detail.turns.map((turn) => turn.networkAccess)).toEqual([true, false, false, true]);
-    await expect(scenario.service.submitDesignTurn({
-      ...offRequest,
-      networkAccess: true
-    })).rejects.toThrow('already used for different content');
     await scenario.service.submitDesignTurn(offRequest);
     expect(scenario.agent.startedTurns).toHaveLength(1);
 
@@ -215,6 +250,10 @@ describeMac('TaskManagerService Design vertical slice', () => {
         }
       });
       expect(scenario.agent.startedTurns[index]?.settings?.networkAccess).toBe(networkAccess);
+      const nextMode = (['disabled', 'cached', 'live'] as const)[index];
+      if (nextMode) {
+        await scenario.service.updateAppSettings({ codexExternalTools: { webSearchMode: nextMode } });
+      }
       await scenario.completeRun(runId);
       detail = await waitForDesign(scenario, detail.design.id, (candidate) =>
         index === 3
@@ -247,13 +286,18 @@ describeMac('TaskManagerService Design vertical slice', () => {
         }))
       }
     });
+    await scenario.service.updateAppSettings({
+      codexExternalTools: { webSearchMode: rejectedChoice ? 'live' : 'disabled' }
+    });
     await expect(scenario.service.createBlankDesign({
       brief: 'Use the selected network policy.',
       creationToken: 'design-network-rejected',
-      runtimeId: 'codex',
-      networkAccess: rejectedChoice
+      runtimeId: 'codex'
     })).rejects.toThrow('does not support the selected Design network access');
     expect(await scenario.store.listDesigns()).toEqual([]);
+    await scenario.service.updateAppSettings({
+      codexExternalTools: { webSearchMode: defaultChoice ? 'live' : 'disabled' }
+    });
     const detail = await scenario.service.createBlankDesign({
       brief: 'Use the provider default network policy.',
       creationToken: 'design-network-default',
@@ -264,18 +308,20 @@ describeMac('TaskManagerService Design vertical slice', () => {
       approvalPolicy: 'never',
       networkAccess: defaultChoice
     });
+    await scenario.service.updateAppSettings({
+      codexExternalTools: { webSearchMode: rejectedChoice ? 'live' : 'disabled' }
+    });
     await expect(scenario.service.submitDesignTurn({
       designId: detail.design.id,
       clientMessageId: 'design-network-rejected-followup',
       message: 'Change network access.',
-      referenceIds: [],
-      networkAccess: rejectedChoice
+      referenceIds: []
     })).rejects.toThrow('does not support the selected Design network access');
     expect(scenario.agent.startedTurns).toHaveLength(1);
     expect((await scenario.service.getDesign(detail.design.id)).turns).toHaveLength(1);
   });
 
-  it('shows a checked candidate while the last Ready route stays available', async () => {
+  it('keeps the last Ready route through candidate changes, cancellation, and queued recovery', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-canvas-progress',
       previewEnabled: true,
@@ -434,6 +480,109 @@ describeMac('TaskManagerService Design vertical slice', () => {
     expect(await requestActiveRoute(requireActivePreview(detail), '/styles.css')).toContain(
       'cornflowerblue'
     );
+
+    const preservedReady = requireActivePreview(detail);
+    detail = await scenario.service.submitDesignTurn({
+      designId: detail.design.id, clientMessageId: 'cancel-candidate-visible',
+      message: 'Try another color.', referenceIds: []
+    });
+    const canceledRun = detail.currentRun!;
+    await fs.writeFile(path.join(worktreePath, 'styles.css'), 'body { color: red; }\n');
+    await designUpdates.inspectDesign({
+      runId: canceledRun.id, operation: { operation: 'open_candidate' }
+    });
+    expect((await scenario.service.getDesign(detail.design.id)).canvas.state).toBe('PREVIEWING');
+    const releaseQueue = deferred<void>();
+    const queueEntered = deferred<void>();
+    const releaseCleanup = deferred<void>();
+    const cleanupEntered = deferred<void>();
+    const resolveExecution = scenario.agent.resolveExecution.bind(scenario.agent);
+    vi.spyOn(scenario.agent, 'resolveExecution').mockImplementationOnce(async (input) => {
+      queueEntered.resolve();
+      await releaseQueue.promise;
+      return resolveExecution(input);
+    });
+    const browser = (scenario.service as unknown as {
+      designBrowser: { closeRun(runId: string): Promise<void> };
+    }).designBrowser;
+    const closeRun = browser.closeRun.bind(browser);
+    const cleanup = vi.spyOn(browser, 'closeRun').mockImplementationOnce(async (runId) => {
+      cleanupEntered.resolve();
+      await releaseCleanup.promise;
+      await closeRun(runId);
+    });
+    const startedBeforeStop = scenario.agent.startedTurns.length;
+    const queued = scenario.service.submitDesignTurn({
+      designId: detail.design.id, clientMessageId: 'after-candidate-cancel',
+      message: 'Continue with the existing layout.', referenceIds: []
+    });
+    try {
+      await Promise.race([queueEntered.promise, queued.then(() => {
+        throw new Error('The queued message did not reach validation.');
+      })]);
+      detail = await scenario.service.cancelDesignTurn({
+        designId: detail.design.id, turnId: detail.turns.at(-1)!.id
+      });
+      expect(detail.canvas).toMatchObject({
+        state: 'READY', target: { generationId: preservedReady.id }
+      });
+      expect(await requestActiveRoute(preservedReady, '/styles.css')).toContain('cornflowerblue');
+      scenario.events.emit({
+        type: 'run.terminal', taskId: detail.design.id, runId: canceledRun.id,
+        payload: { status: 'INTERRUPTED' }, at: new Date().toISOString()
+      });
+      await cleanupEntered.promise;
+      releaseQueue.resolve();
+      await vi.waitFor(async () => {
+        expect((await scenario.service.getDesign(detail.design.id)).turns.at(-1)?.runId).toBeUndefined();
+        expect((await scenario.service.getDesign(detail.design.id)).turns.at(-1)?.clientMessageId)
+          .toBe('after-candidate-cancel');
+      });
+      expect(scenario.agent.startedTurns).toHaveLength(startedBeforeStop);
+      expect(await requestActiveRoute(preservedReady, '/styles.css')).toContain('cornflowerblue');
+    } finally {
+      releaseQueue.resolve();
+      releaseCleanup.resolve();
+      await queued;
+      cleanup.mockRestore();
+    }
+    detail = await waitForDesign(scenario, detail.design.id, (candidate) =>
+      candidate.turns.some((turn) => turn.runId === canceledRun.id && turn.outcome === 'CANCELED') &&
+      candidate.turns.at(-1)?.runId !== undefined
+    );
+    expect(scenario.agent.startedTurns).toHaveLength(startedBeforeStop + 1);
+    expect(detail.canvas.target?.generationId).toBe(preservedReady.id);
+
+    const graph = (scenario.service as unknown as { previews: { graph: PreviewGraph } }).previews.graph;
+    const startupEntered = deferred<void>();
+    let rejectStartup: ((error: Error) => void) | undefined;
+    const startup = vi.spyOn(graph, 'start').mockImplementationOnce(async (input) => {
+      if (!input.signal) throw new Error('Preview startup has no cancellation signal.');
+      const signal = input.signal;
+      startupEntered.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        rejectStartup = reject;
+        signal.addEventListener('abort', () => reject(new Error('Preview startup was canceled.')), { once: true });
+      });
+    });
+    const startingRun = detail.currentRun!;
+    let startupSettled = false;
+    const opening = designUpdates.inspectDesign({
+      runId: startingRun.id, operation: { operation: 'open_candidate' }
+    }).catch((error: unknown) => error).finally(() => { startupSettled = true; });
+    try {
+      await startupEntered.promise;
+      await scenario.service.cancelDesignTurn({
+        designId: detail.design.id, turnId: detail.turns.at(-1)!.id
+      });
+      await vi.waitFor(() => expect(startupSettled).toBe(true));
+      expect(await opening).toMatchObject({ message: 'Preview startup was canceled.' });
+      expect(await requestActiveRoute(preservedReady, '/styles.css')).toContain('cornflowerblue');
+    } finally {
+      rejectStartup?.(new Error('Release the controlled preview startup.'));
+      await opening;
+      startup.mockRestore();
+    }
   }, 45_000);
 
   it('fails before Design creation when scoped skill access is unavailable', async () => {

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Repository, WorktreeRecord } from '../../shared/contracts';
 import {
   createNodeOpenTargetHost,
@@ -190,6 +190,54 @@ describe('OpenTargetService', () => {
     worktree.taskId = 'another-task';
     await expect(service.execute({ action: 'copyPath', target: worktreeTarget }, context))
       .resolves.toMatchObject({ ok: false, message: 'Worktree is not recorded by Task Monki.' });
+  });
+
+  it.each([
+    ['INVALID', true],
+    ['MISSING', true],
+    ['MISSING', false]
+  ] as const)('keeps recorded %s repository path actions available when the folder exists: %s', async (status, exists) => {
+    const host = new FakeOpenTargetHost({ '/': directory(), ...(exists ? { '/repo': directory() } : {}) });
+    const service = new OpenTargetService(host);
+    const context = testContext();
+    (await context.getRepository('repository-1'))!.status = status;
+    const target = { type: 'repository' as const, repositoryId: 'repository-1' };
+
+    await expect(service.inspect({ target }, context)).resolves.toMatchObject({
+      canOpen: exists,
+      canReveal: true,
+      canOpenTerminal: true
+    });
+    await expect(service.execute({ target, action: 'copyPath' }, context))
+      .resolves.toEqual({ ok: true, clipboardText: '/repo' });
+    await expect(service.execute({ target, action: 'reveal' }, context))
+      .resolves.toEqual({ ok: true });
+    expect(host.reveals).toEqual([exists ? '/repo' : '/']);
+    await expect(service.execute({ target, action: 'open' }, context))
+      .resolves.toMatchObject({ ok: exists });
+    expect(host.defaults).toEqual(exists ? ['/repo'] : []);
+  });
+
+  it('keeps path actions available when file contents cannot be read safely', async () => {
+    const host = new FakeOpenTargetHost({
+      '/worktree': directory(),
+      '/worktree/locked.txt': file('private')
+    });
+    vi.spyOn(host, 'readFile').mockRejectedValue(new Error('File could not be opened safely.'));
+    const service = new OpenTargetService(host);
+    const target = { type: 'worktreeFile' as const, worktreeId: 'worktree-1', relativePath: 'locked.txt' };
+    const context = testContext();
+
+    await expect(service.inspect({ target }, context)).resolves.toMatchObject({
+      canOpen: true,
+      canReveal: true,
+      canCopyFileContents: false,
+      copyFileContentsDisabledReason: 'File could not be opened safely.'
+    });
+    await expect(service.execute({ target, action: 'copyPath' }, context))
+      .resolves.toEqual({ ok: true, clipboardText: '/worktree/locked.txt' });
+    await expect(service.execute({ target, action: 'copyFileContents' }, context))
+      .resolves.toEqual({ ok: false, message: 'File could not be opened safely.' });
   });
 
   it('keeps missing files usable for copy path and reveal parent fallbacks', async () => {

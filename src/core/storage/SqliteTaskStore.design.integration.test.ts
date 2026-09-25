@@ -180,31 +180,16 @@ describe('SqliteTaskStore Design ownership', () => {
         repository
       })
     ).rejects.toThrow('already used for a different request');
-    await expect(store.resolveDesignCreationRetry({
-      ...request,
-      networkAccess: true
-    })).rejects.toThrow('already used for a different request');
-    await expect(store.resolveDesignCreationRetry({
-      ...request,
-      networkAccess: 'enabled' as unknown as boolean
-    })).rejects.toThrow('Design creation request is invalid');
-    await persistenceFixture(store).database.write((transaction) => {
-      transaction.run(
-        "UPDATE design_turns SET payload_json = json_remove(payload_json, '$.networkAccess') WHERE id = ?",
-        [created.turn.id]
-      );
-    });
     await closeStore(store);
     const reopened = await createStore(dir);
-    const legacyRetry = await reopened.resolveDesignCreationRetry(request);
-    expect(legacyRetry?.task.id).toBe(created.task.id);
-    expect(legacyRetry?.turn.networkAccess).toBeUndefined();
+    const reopenedRetry = await reopened.resolveDesignCreationRetry(request);
+    expect(reopenedRetry?.task.id).toBe(created.task.id);
     await expect(reopened.createInlineDesignTurn({
       designId: created.task.id,
-      clientMessageId: 'design-legacy-followup',
+      clientMessageId: 'design-reopened-followup',
       message: 'Continue the layout.',
       referenceIds: []
-    })).resolves.toMatchObject({ networkAccess: false });
+    })).resolves.toMatchObject({ designId: created.task.id, order: 2 });
     await closeStore(reopened);
   });
 
@@ -280,20 +265,9 @@ describe('SqliteTaskStore Design ownership', () => {
       ...input,
       clientMessageId: 'design-message-0002',
       message: 'Use a warmer accent color.',
-      networkAccess: true,
       referenceIds: []
     });
-    expect(turn.networkAccess).toBe(false);
-    expect(queued.networkAccess).toBe(true);
     await expect(store.resolveInlineDesignTurnRetry(input)).resolves.toEqual(turn);
-    await expect(store.resolveInlineDesignTurnRetry({
-      ...input,
-      networkAccess: true
-    })).rejects.toThrow('already used for different content');
-    await expect(store.createInlineDesignTurn({
-      ...input,
-      networkAccess: 'enabled' as unknown as boolean
-    })).rejects.toThrow('Design network access must be enabled or disabled');
 
     const detail = await store.getDesignDetail(created.task.id);
     expect(detail.conversation.at(-2)).toMatchObject({
@@ -315,13 +289,12 @@ describe('SqliteTaskStore Design ownership', () => {
       )
     ).toHaveLength(2);
     for (let index = 3; index <= 20; index += 1) {
-      const inherited = await store.createInlineDesignTurn({
+      await store.createInlineDesignTurn({
         designId: created.task.id,
         clientMessageId: `design-message-${index.toString().padStart(4, '0')}`,
         message: `Queued change ${index}`,
         referenceIds: []
       });
-      expect(inherited.networkAccess).toBe(true);
     }
     await expect(
       store.createInlineDesignTurn({

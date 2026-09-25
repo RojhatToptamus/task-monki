@@ -164,8 +164,8 @@ export class OpenTargetService {
     if (!repository) {
       throw new Error('Repository is not recorded by Task Monki.');
     }
-    if (repository.status !== 'AVAILABLE') {
-      throw new Error(`Repository is ${repository.status.toLowerCase()}.`);
+    if (repository.status === 'DISCONNECTED') {
+      throw new Error('Repository is disconnected.');
     }
     const normalized = this.normalizeLocalPath(repository.path);
     return await this.classifyPath(ref, normalized, normalized);
@@ -325,7 +325,14 @@ export class OpenTargetService {
   }
 
   private async canCopyFileContents(target: ResolvedOpenTarget): Promise<TextFileReadiness> {
-    return (await this.readTextFileContents(target)).readiness;
+    try {
+      return (await this.readTextFileContents(target)).readiness;
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : 'File contents could not be read.'
+      };
+    }
   }
 
   private async readTextFileContents(

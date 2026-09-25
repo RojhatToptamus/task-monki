@@ -20,6 +20,47 @@ afterEach(async () => {
 });
 
 describe('AgentBrowserRuntime', () => {
+  it('cancels browser startup before a pending ownership-file write can launch it', async () => {
+    const root = await fixtureRoot();
+    const execute = vi.fn(async (_executable: string, argv: string[]) =>
+      argv[0] === '--version'
+        ? { stdout: 'agent-browser 0.34.0\n', stderr: '' }
+        : json(argv[1] === 'snapshot' ? 'page' : '(no output)')
+    );
+    const runtime = await runtimeFixture(root, execute);
+    const lease = { proxyUrl: 'http://127.0.0.1:42000', close: vi.fn(async () => {}) };
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const writeFile = fs.writeFile.bind(fs);
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      await writeFile(...args);
+      if (String(args[0]).endsWith('action-policy.json')) {
+        enter();
+        await gate;
+      }
+    });
+    const opening = runtime.openCandidate({
+      designId, runId, generationId: 'candidate-1',
+      origin: 'http://tm-1234567890abcdef1234567890abcdef.localhost:41000/', lease
+    });
+    try {
+      await entered;
+      runtime.abortRun(runId);
+      release();
+      await expect(opening).rejects.toThrow('canceled');
+      expect(execute.mock.calls.some(([, argv]) => argv[1] === 'open')).toBe(false);
+      expect(lease.close).toHaveBeenCalledOnce();
+      expect(await fs.readdir(path.join(root, 'scratch'))).toEqual([]);
+    } finally {
+      release();
+      await opening.catch(() => undefined);
+      write.mockRestore();
+      await runtime.shutdown();
+    }
+  });
+
   it('uses current refs, returns transient screenshots, and removes owned scratch on close', async () => {
     const root = await fixtureRoot();
     const calls: string[][] = [];

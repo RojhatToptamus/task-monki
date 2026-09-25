@@ -82,7 +82,6 @@ export function DesignCanvas({
   const generationId = presentation.kind === 'NATIVE' ? presentation.target.generationId : undefined;
   const routeId = presentation.kind === 'NATIVE' ? presentation.target.routeId : undefined;
   const previewInProgress = presentation.kind === 'NATIVE' && presentation.progress;
-  const latestTurnOutcome = project.turns.at(-1)?.outcome;
   const latestRevision = project.revisions.at(-1);
   const presentedRevisionId =
     presentation.kind === 'NATIVE' ? presentation.target.revisionId : undefined;
@@ -165,8 +164,7 @@ export function DesignCanvas({
     onShowCanvas,
     project.design.id,
     project.task.id,
-    routeId,
-    latestTurnOutcome
+    routeId
   ]);
 
   const runOperation = async (

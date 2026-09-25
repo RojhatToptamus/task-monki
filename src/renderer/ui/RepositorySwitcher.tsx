@@ -144,7 +144,11 @@ export function RepositorySwitcher({
               returnFocus: triggerRef.current
             })
           }
-          onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
+          onBlur={(event) => {
+            if (event.relatedTarget !== triggerRef.current) {
+              handleMenuBlur(event, () => setOpen(false));
+            }
+          }}
         >
           <div className="tm-repo-menu__head" role="presentation">
             <span>Repositories</span>

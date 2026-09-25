@@ -640,6 +640,26 @@ export class PreviewManager {
     });
   }
 
+  async abortManagedDesignCandidateStartups(runId: string): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    const run = snapshot.runs.find((candidate) => candidate.id === runId);
+    if (!run || run.mode !== 'DESIGN' || run.status === 'COMPLETED' ||
+        snapshot.tasks.find((task) => task.id === run.taskId)?.currentRunId !== run.id ||
+        !snapshot.designTurns.some((turn) => turn.id === run.generationKey && turn.outcome === undefined)) {
+      return;
+    }
+    // The Design lock permits one verification candidate operation for this
+    // run; restore/restart candidates are excluded. Candidate-only execution
+    // removes its controller before cutover, so this cannot stop a Ready view.
+    for (const generation of snapshot.previewGenerations) {
+      if (generation.taskId === run.taskId && generation.worktreeId === run.worktreeId &&
+          generation.routingState === 'CANDIDATE' && generation.source.type === 'EXACT_COMMIT' &&
+          generation.source.designRevisionId === undefined) {
+        this.startups.get(generation.id)?.abort();
+      }
+    }
+  }
+
   async openManagedDesignBrowserLease(
     generationId: string
   ): Promise<ManagedDesignBrowserLease> {
