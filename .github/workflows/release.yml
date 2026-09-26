@@ -638,9 +638,11 @@ jobs:
           test "$(find "$RELEASE_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 12
           (cd "$RELEASE_DIR" && sha256sum -c SHA256SUMS-macOS.txt && sha256sum -c SHA256SUMS-Windows.txt && sha256sum -c SHA256SUMS-Linux.txt)
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$SOURCE_SHA"
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)"
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq .message > "$RUNNER_TEMP/release-notes.txt"
           create_options=(
             "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft
-            --notes-from-tag --title "Task Monki $RELEASE_TAG"
+            --notes-file "$RUNNER_TEMP/release-notes.txt" --title "Task Monki $RELEASE_TAG"
           )
           gh release create "${create_options[@]}"
           gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/* --repo "$GITHUB_REPOSITORY"
