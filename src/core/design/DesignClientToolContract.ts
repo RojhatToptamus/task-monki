@@ -41,6 +41,7 @@ export const INSPECT_DESIGN_TOOL_DEFINITION: DesignClientToolDefinition = {
         enum: [
           'open_candidate',
           'observe',
+          'navigate',
           'act',
           'set_viewport',
           'set_media',
@@ -48,6 +49,7 @@ export const INSPECT_DESIGN_TOOL_DEFINITION: DesignClientToolDefinition = {
           'accessibility'
         ]
       },
+      path: { type: 'string', description: 'For navigate: an absolute path within the selected application, including optional query and fragment.', maxLength: 2048, pattern: '^/(?!/)' },
       action: {
         type: 'string',
         description: 'Required only when operation is "act".',
@@ -108,6 +110,11 @@ export const INSPECT_DESIGN_TOOL_DEFINITION: DesignClientToolDefinition = {
       fullPage: { type: 'boolean' }
     },
     oneOf: [
+      {
+        title: 'Navigate within the selected application',
+        properties: { operation: { const: 'navigate' } },
+        required: ['operation', 'path']
+      },
       {
         title: 'Open the exact current candidate',
         properties: { operation: { const: 'open_candidate' } },

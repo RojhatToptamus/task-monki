@@ -27,6 +27,175 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService Design vertical slice', () => {
+  it('isolates registered source, keeps setup queued, and retains repository bytes on archive and deletion', async () => {
+    const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
+    const inspection = await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId });
+    const base = inspection.bases[0]!;
+    await fs.writeFile(path.join(scenario.repositoryPath, 'uncommitted.txt'), 'primary checkout only');
+    const primaryStatus = await git(scenario.repositoryPath, ['status', '--porcelain=v1']);
+    let detail = await scenario.service.createDesign({
+      brief: 'Improve the existing application.', creationToken: 'repository-design-creation', runtimeId: 'codex',
+      source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha }
+    });
+    expect(detail.repository.id).toBe(scenario.repositoryId);
+    expect(detail.currentWorktree).toMatchObject({ ownership: 'MANAGED', status: 'PRESENT', baseSha: base.sha });
+    expect(detail.currentWorktree!.worktreePath).not.toBe(scenario.repositoryPath);
+    expect(await fs.readFile(path.join(scenario.repositoryPath, 'uncommitted.txt'), 'utf8')).toBe('primary checkout only');
+    await expect(fs.access(path.join(detail.currentWorktree!.worktreePath, 'uncommitted.txt'))).rejects.toThrow();
+    expect(await git(scenario.repositoryPath, ['status', '--porcelain=v1'])).toBe(primaryStatus);
+    expect(detail.repositorySetup?.preview).toMatchObject({ status: 'UNAVAILABLE', reasonCode: 'RECIPE_MISSING' });
+    expect(detail.design.status).toBe('NEEDS_ATTENTION');
+    expect(detail.turns[0]?.outcome).toBeUndefined();
+    expect(scenario.agent.startedTurns).toHaveLength(0);
+    expect(detail.actions.canStop).toBe(true);
+    expect((await scenario.service.getDesign(detail.design.id)).task.acceptedWorkspaceSnapshotId).toBe(detail.task.acceptedWorkspaceSnapshotId);
+    detail = await scenario.service.cancelDesignTurn({ designId: detail.design.id, turnId: detail.turns[0]!.id });
+    expect(detail.turns[0]?.outcome).toBe('CANCELED');
+    const acceptedBeforeRecovery = detail.task.acceptedWorkspaceSnapshotId;
+    await fs.writeFile(path.join(detail.currentWorktree!.worktreePath, 'returned-edit.txt'), 'preserve the returned workspace');
+    const recovered = await scenario.service.prepareWorktree({ taskId: detail.task.id, intent: 'RECOVER' });
+    if (recovered.outcome !== 'PREPARED') throw new Error('Expected the returned workspace to be verified.');
+    expect(recovered.worktree.status).toBe('PRESENT');
+    detail = await scenario.service.getDesign(detail.task.id);
+    expect(detail.task.acceptedWorkspaceSnapshotId).toBe(acceptedBeforeRecovery);
+    expect(detail.repositorySetup?.workspaceChanged).toBe(true);
+    expect(await fs.readFile(path.join(detail.currentWorktree!.worktreePath, 'returned-edit.txt'), 'utf8')).toBe('preserve the returned workspace');
+    await scenario.service.archiveDesign({ designId: detail.design.id });
+    const workspace = detail.currentWorktree!.worktreePath;
+    await fs.writeFile(path.join(workspace, '.gitignore'), 'private.env\n');
+    await fs.writeFile(path.join(workspace, 'private.env'), 'fake-secret=keep');
+    await expect(scenario.service.deleteTask({ taskId: detail.design.id, removeWorktree: true })).rejects.toThrow('ignored files');
+    expect(await fs.readFile(path.join(workspace, 'private.env'), 'utf8')).toBe('fake-secret=keep');
+    expect((await scenario.service.getDesign(detail.design.id)).design.status).toBe('ARCHIVED');
+    const deleted = await scenario.service.deleteTask({ taskId: detail.design.id, removeWorktree: false });
+    expect(deleted.retainedWorktrees).toEqual([{ path: workspace, branchName: detail.currentWorktree!.branchName }]);
+    expect(await fs.stat(detail.currentWorktree!.worktreePath)).toBeTruthy();
+    expect((await scenario.store.snapshot()).repositories.some((item) => item.id === scenario.repositoryId)).toBe(true);
+    expect(await git(scenario.repositoryPath, ['status', '--porcelain=v1'])).toBe(primaryStatus);
+  }, 30_000);
+
+  it('runs the repository recipe against the inspected commit and retains its application target in Ready history', async () => {
+    const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
+    await scenario.commitFile('server.mjs', `import http from 'node:http';
+import fs from 'node:fs';
+http.createServer((request, response) => { response.end(fs.readFileSync('page.html', 'utf8')); }).listen(Number(process.env.PORT), '127.0.0.1');`);
+    await scenario.commitFile('page.html', '<h1>Existing application</h1>');
+    await scenario.commitFile('.taskmonki/preview.yaml', `version: 1
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /ready }
+routes:
+  admin: { service: web, port: http }
+  app: { service: web, port: http, primary: true }
+`);
+    const base = (await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId })).bases[0]!;
+    let detail = await scenario.service.createDesign({ brief: 'Improve the app page.', creationToken: 'repository-design-ready', runtimeId: 'codex',
+      source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha } });
+    expect(scenario.agent.startedTurns).toHaveLength(0);
+    detail = await scenario.service.updateDesignPreviewTarget({ designId: detail.design.id, target: { routeId: 'app', entryPath: '/products?view=grid' } });
+    const resolved = detail.repositorySetup!.preview!;
+    if (resolved.status !== 'PLAN') throw new Error('Expected a repository Preview plan.');
+    await scenario.service.approvePreviewPlan({ taskId: detail.task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest });
+    expect.soft((await scenario.service.getDesign(detail.design.id)).canvas.state).toBe('EMPTY');
+    detail = await scenario.service.startDesign({ designId: detail.design.id });
+    expect(scenario.agent.startedTurns).toHaveLength(1);
+    expect(scenario.agent.startedTurns[0]?.prompt).toContain('/products?view=grid');
+    detail = await scenario.service.submitDesignTurn({ designId: detail.design.id, clientMessageId: 'queued-repository-refinement', message: 'Adjust the page spacing.', referenceIds: [] });
+    expect.soft(detail.design.status).toBe('STARTING');
+    detail = await scenario.service.cancelDesignTurn({ designId: detail.design.id, turnId: detail.turns.at(-1)!.id });
+    expect.soft(detail.design.status).toBe('STARTING');
+    await fs.writeFile(path.join(detail.currentWorktree!.worktreePath, 'page.html'), '<h1>Updated application</h1>');
+    const updates = (scenario.service as unknown as { designUpdates: { inspectDesign(input: { runId: string; operation: { operation: 'open_candidate' } }): Promise<unknown> } }).designUpdates;
+    await updates.inspectDesign({ runId: requireRunId(detail), operation: { operation: 'open_candidate' } });
+    detail = await scenario.service.getDesign(detail.design.id);
+    expect.soft(detail.canvas).toMatchObject({ state: 'PREVIEWING', target: { routeId: 'app' } });
+    await scenario.completeRun(requireRunId(detail));
+    detail = await waitForDesign(scenario, detail.design.id, (item) => item.turns[0]?.outcome !== undefined);
+    expect(detail.turns[0]?.failureReason).toBeUndefined();
+    expect(detail.turns[0]?.outcome).toBe('READY');
+    expect(detail.revisions[0]).toMatchObject({ routeId: 'app', target: { routeId: 'app', entryPath: '/products?view=grid' }, verificationGenerationId: detail.currentPreview?.id });
+    expect(detail.currentPreview?.executionAuthority.type).toBe('USER_APPROVAL');
+    expect(await requestActiveRoute(requireActivePreview(detail))).toContain('Updated application');
+    expect(await fs.readFile(path.join(scenario.repositoryPath, 'page.html'), 'utf8')).toBe('<h1>Existing application</h1>');
+    expect(detail.actions.canRestore).toBe(false);
+    await expect(scenario.service.restoreDesignRevision({ designId: detail.design.id, revisionId: detail.revisions[0]!.id, clientActionId: randomUUID() })).rejects.toThrow('Duplicate');
+    const copy = await scenario.service.duplicateDesign({ designId: detail.design.id, revisionId: detail.revisions[0]!.id, clientActionId: randomUUID() });
+    expect(copy.repository.id).toBe(scenario.repositoryId);
+    expect(copy.turns).toEqual([]);
+    expect(copy.revisions).toEqual([]);
+    expect(copy.task.designPreviewTarget).toEqual(detail.revisions[0]!.target);
+    expect(copy.currentWorktree!.branchName).not.toBe(detail.currentWorktree!.branchName);
+    await expect(scenario.service.stopPreview({ taskId: copy.task.id, generationId: detail.currentPreview!.id })).rejects.toThrow('not found for this task');
+    const stopped = await scenario.service.stopPreview({ taskId: detail.task.id, generationId: detail.currentPreview!.id });
+    expect(stopped.state).toBe('STOPPED');
+    const retained = await scenario.service.getDesign(detail.task.id);
+    expect(retained.revisions).toEqual(detail.revisions);
+    expect(retained.canvas.state).toBe('RESTART_REQUIRED');
+  }, 30_000);
+
+  it('requires explicit acceptance of observed edits and rejects stale acceptance or changed commits', async () => {
+    const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
+    const base = (await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId })).bases[0]!;
+    let detail = await scenario.service.createDesign({ brief: 'Inspect changes.', creationToken: 'repository-external-edits', runtimeId: 'codex',
+      source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha } });
+    const baseline = detail.task.acceptedWorkspaceSnapshotId;
+    const workspace = detail.currentWorktree!.worktreePath;
+    await fs.writeFile(path.join(workspace, 'external.txt'), 'first edit');
+    detail = await scenario.service.getDesign(detail.task.id);
+    expect(detail.repositorySetup?.workspaceChanged).toBe(true);
+    expect(detail.task.acceptedWorkspaceSnapshotId).toBe(baseline);
+    const observed = detail.repositorySetup!.workspaceSnapshotId;
+    await fs.writeFile(path.join(workspace, 'external.txt'), 'second edit');
+    await expect(scenario.service.startDesign({ designId: detail.task.id, acceptWorkspaceSnapshotId: observed })).rejects.toThrow('changed again');
+    detail = await scenario.service.getDesign(detail.task.id);
+    detail = await scenario.service.startDesign({ designId: detail.task.id, acceptWorkspaceSnapshotId: detail.repositorySetup!.workspaceSnapshotId });
+    expect(detail.task.acceptedWorkspaceSnapshotId).not.toBe(baseline);
+    expect(detail.repositorySetup?.workspaceChanged).not.toBe(true);
+    await git(workspace, ['add', 'external.txt']);
+    await git(workspace, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'External commit']);
+    detail = await scenario.service.getDesign(detail.task.id);
+    expect(detail.repositorySetup?.blocker).toContain('branch or commit changed');
+    expect(detail.repositorySetup?.workspaceChanged).not.toBe(true);
+    await expect(scenario.service.startDesign({ designId: detail.task.id, acceptWorkspaceSnapshotId: observed })).rejects.toThrow('branch or commit changed');
+    expect(scenario.agent.startedTurns).toHaveLength(0);
+    await scenario.service.cancelDesignTurn({ designId: detail.task.id, turnId: detail.turns[0]!.id });
+  }, 30_000);
+
+  it('admits Preview data repair only after the Design turn settles and external edits are accepted', async () => {
+    const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
+    const base = (await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId })).bases[0]!;
+    let detail = await scenario.service.createDesign({ brief: 'Repair setup safely.', creationToken: 'repository-repair', runtimeId: 'codex',
+      source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha } });
+    const request = { taskId: detail.task.id, generationId: 'failed-generation', resourceId: 'database', scenarioId: 'default' };
+    const internals = scenario.service as unknown as { previews: { resetData(input: unknown): Promise<void> } };
+    const reset = vi.spyOn(internals.previews, 'resetData').mockRejectedValue(new Error('reset boundary reached'));
+    await expect(scenario.service.resetPreviewData(request)).rejects.toThrow('Stop and settle');
+    await expect(scenario.service.stopPreview(request)).rejects.toThrow('Stop and settle');
+    await scenario.service.cancelDesignTurn({ designId: detail.task.id, turnId: detail.turns[0]!.id });
+    await fs.writeFile(path.join(detail.currentWorktree!.worktreePath, 'external.txt'), 'keep these edits');
+    await expect(scenario.service.resetPreviewData(request)).rejects.toThrow('changed outside');
+    expect(reset).not.toHaveBeenCalled();
+    detail = await scenario.service.getDesign(detail.task.id);
+    await scenario.service.startDesign({ designId: detail.task.id, acceptWorkspaceSnapshotId: detail.repositorySetup!.workspaceSnapshotId });
+    await expect(scenario.service.resetPreviewData(request)).rejects.toThrow('reset boundary reached');
+    expect(reset).toHaveBeenCalledOnce();
+    expect((await scenario.service.getDesign(detail.task.id)).revisions).toEqual([]);
+  });
+
+  it('rejects a moved repository base before creating a Design or worktree', async () => {
+    const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
+    const base = (await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId })).bases[0]!;
+    await scenario.commitFile('new-source.txt', 'new base');
+    await expect(scenario.service.createDesign({
+      brief: 'Improve this application.', creationToken: 'repository-design-moved-base', runtimeId: 'codex',
+      source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha }
+    })).rejects.toThrow('selected base changed');
+    expect(await scenario.service.listDesigns()).toEqual([]);
+    expect((await git(scenario.repositoryPath, ['worktree', 'list', '--porcelain'])).match(/^worktree /gm)).toHaveLength(1);
+  });
+
   it('exposes Stop during Design session startup and cancels before provider delivery', async () => {
     const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
     const entered = deferred<void>();
@@ -37,7 +206,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       await release.promise;
       return createSession(input);
     });
-    const creating = scenario.service.createBlankDesign({
+    const creating = scenario.service.createDesign({
       brief: 'This request must not reach the provider.',
       creationToken: 'cancel-design-startup', runtimeId: 'codex'
     });
@@ -74,7 +243,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    const detail = await scenario.service.createBlankDesign({
+    const detail = await scenario.service.createDesign({
       brief: 'Preserve the interrupted Design update.',
       creationToken: 'design-upgrade-recovery',
       runtimeId: 'codex'
@@ -171,14 +340,14 @@ describeMac('TaskManagerService Design vertical slice', () => {
       await restarted.init();
 
       const recovered = await restarted.getDesign(detail.design.id);
-      expect(recovered.turns[0]?.failureReason).toBeUndefined();
-      expect(recovered.turns[0]?.outcome).toBe('READY');
-      expect(recovered.revisions).toHaveLength(1);
-      expect(recovered.revisions[0]?.commitSha).toBe(candidate.candidateCommitSha);
+      expect(recovered.turns[0]?.failureReason).toContain('inspected Preview generation stopped');
+      expect(recovered.turns[0]?.outcome).toBe('NEEDS_ATTENTION');
+      expect(recovered.revisions).toHaveLength(0);
+      expect((await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim()).toBe(candidate.candidateCommitSha);
       expect(runtime.adapter.startedTurns).toEqual([]);
       expect((await git(worktree.worktreePath, ['write-tree'])).trim()).toBe(candidate.treeSha);
       expect(await git(worktree.worktreePath, ['status', '--porcelain=v1'])).toBe('');
-      expect(await requestActiveRoute(requireActivePreview(recovered))).toContain('Recovered Design');
+      expect(recovered.currentPreview?.routingState).not.toBe('ACTIVE');
     } finally {
       try {
         await restarted.shutdown();
@@ -204,7 +373,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     });
 
     await scenario.service.updateAppSettings({ codexExternalTools: { webSearchMode: 'live' } });
-    let detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createDesign({
       brief: 'Create a small product page.',
       creationToken: 'design-autonomous-policy-create',
       runtimeId: 'codex'
@@ -289,7 +458,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await scenario.service.updateAppSettings({
       codexExternalTools: { webSearchMode: rejectedChoice ? 'live' : 'disabled' }
     });
-    await expect(scenario.service.createBlankDesign({
+    await expect(scenario.service.createDesign({
       brief: 'Use the selected network policy.',
       creationToken: 'design-network-rejected',
       runtimeId: 'codex'
@@ -298,7 +467,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     await scenario.service.updateAppSettings({
       codexExternalTools: { webSearchMode: defaultChoice ? 'live' : 'disabled' }
     });
-    const detail = await scenario.service.createBlankDesign({
+    const detail = await scenario.service.createDesign({
       brief: 'Use the provider default network policy.',
       creationToken: 'design-network-default',
       runtimeId: 'codex'
@@ -328,7 +497,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designMode: true
     });
 
-    let detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createDesign({
       brief: 'Create a small product page.',
       creationToken: 'design-canvas-progress-create',
       runtimeId: 'codex'
@@ -598,7 +767,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     );
 
     await expect(
-      scenario.service.createBlankDesign({
+      scenario.service.createDesign({
         brief: 'Create a compact status page.',
         creationToken: 'design-skills-unavailable',
         runtimeId: 'codex'
@@ -642,7 +811,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     );
 
     await expect(
-      scenario.service.createBlankDesign({
+      scenario.service.createDesign({
         brief: 'Create a compact status page.',
         creationToken: 'design-model-unsupported',
         runtimeId: 'codex',
@@ -681,7 +850,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       }
     ]);
 
-    const detail = await scenario.service.createBlankDesign({
+    const detail = await scenario.service.createDesign({
       brief: 'Create a compact status page.',
       creationToken: 'design-reasoning-default',
       runtimeId: 'codex',
@@ -722,7 +891,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       }
     ]);
 
-    let detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createDesign({
       brief: 'Create a compact status page.',
       creationToken: 'design-model-candidate-qualification',
       runtimeId: 'codex',
@@ -756,7 +925,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    const detail = await scenario.service.createBlankDesign({
+    const detail = await scenario.service.createDesign({
       brief: 'Create a compact status page.',
       creationToken: 'design-model-qualification-drift',
       runtimeId: 'codex',
@@ -799,7 +968,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       previewEnabled: true,
       designMode: true
     });
-    let detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createDesign({
       brief: 'Create a compact status page.',
       creationToken: 'design-queued-qualification-drift',
       runtimeId: 'codex',
@@ -903,8 +1072,8 @@ describeMac('TaskManagerService Design vertical slice', () => {
       reasoningEffort: 'medium',
       attachmentDraftId: draft.id
     };
-    const detail = await scenario.service.createBlankDesign(createInput);
-    const retry = await scenario.service.createBlankDesign(createInput);
+    const detail = await scenario.service.createDesign(createInput);
+    const retry = await scenario.service.createDesign(createInput);
 
     expect(retry.design.id).toBe(detail.design.id);
     expect(scenario.agent.startedTurns).toHaveLength(1);
@@ -942,7 +1111,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designMode: true
     });
 
-    let detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createDesign({
       brief: 'Create a small status page with a clear launch button.',
       creationToken: 'design-vertical-create',
       runtimeId: 'codex'
@@ -1062,7 +1231,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designMode: true
     });
 
-    let detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createDesign({
       brief: 'Create a small editorial page.',
       creationToken: 'design-reference-service-create',
       runtimeId: 'codex',
@@ -1225,14 +1394,14 @@ describeMac('TaskManagerService Design vertical slice', () => {
       model: 'scenario-model',
       reasoningEffort: 'medium'
     };
-    let detail = await scenario.service.createBlankDesign(request);
+    let detail = await scenario.service.createDesign(request);
     expect(detail.task.agentProfile).toEqual(profile);
     expect(scenario.agent.startedTurns[0]?.prompt).toContain(profile.instructions);
     await scenario.service.saveAgentProfile({ ...profile, instructions: 'Updated library direction.' });
     await scenario.service.deleteAgentProfile(profile.id);
-    await expect(scenario.service.createBlankDesign(request)).resolves.toMatchObject({ task: { id: detail.task.id, agentProfile: profile } });
-    await expect(scenario.service.createBlankDesign({ ...request, agentProfileId: undefined })).rejects.toThrow('already used for a different request');
-    await expect(scenario.service.createBlankDesign({ ...request, creationToken: 'missing-profile-design' })).rejects.toThrow('no longer in the library');
+    await expect(scenario.service.createDesign(request)).resolves.toMatchObject({ task: { id: detail.task.id, agentProfile: profile } });
+    await expect(scenario.service.createDesign({ ...request, agentProfileId: undefined })).rejects.toThrow('already used for a different request');
+    await expect(scenario.service.createDesign({ ...request, creationToken: 'missing-profile-design' })).rejects.toThrow('no longer in the library');
     const firstRun = detail.currentRun!;
     const attachmentDraft = await scenario.service.stageTaskAttachmentBatch({
       attachments: [{
@@ -1345,7 +1514,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designMode: true
     });
 
-    let source = await scenario.service.createBlankDesign({
+    let source = await scenario.service.createDesign({
       brief: 'Create a compact product page.',
       creationToken: 'design-ready-actions-create',
       runtimeId: 'codex'
@@ -1509,7 +1678,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     expect(await git(repositoryPath, ['branch', '--list', sourceBranch])).toBe('');
     await expect(scenario.service.getDesign(copy.design.id)).resolves.toMatchObject({
       design: { status: 'ARCHIVED' },
-      canvas: { state: 'READY' }
+      canvas: { state: 'RESTART_REQUIRED' }
     });
 
     await scenario.service.deleteTask({ taskId: copy.design.id, removeWorktree: true });
@@ -1524,7 +1693,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designMode: true
     });
 
-    const detail = await scenario.service.createBlankDesign({
+    const detail = await scenario.service.createDesign({
       brief: 'Create a compact reporting page.',
       creationToken: 'design-adopted-draft-create',
       runtimeId: 'codex'
@@ -1589,7 +1758,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
       designMode: true
     });
 
-    let detail = await scenario.service.createBlankDesign({
+    let detail = await scenario.service.createDesign({
       brief: 'Create a small status page.',
       creationToken: 'design-restart-delete',
       runtimeId: 'codex'

@@ -1431,6 +1431,13 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
           '$.relationshipState', 'ROOT', '$.recordRevision', record_revision + 1),
         record_revision = record_revision + 1
     WHERE id IN (SELECT id FROM roots);`
+  },
+  {
+    version: 7,
+    name: 'existing-repository-design',
+    // JSON payloads retain target and Git observation references. The version
+    // prevents older clients from opening repository Designs they cannot own.
+    sql: 'SELECT 1;'
   }
 ] as const;
 

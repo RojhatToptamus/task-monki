@@ -6,7 +6,7 @@ import type {
   CancelRunRequest,
   CancelDesignTurnRequest,
   ContinueRunRequest,
-  CreateBlankDesignRequest,
+  CreateDesignRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   ImportTaskRequest,
@@ -236,7 +236,10 @@ const api: TaskManagerApi = {
     invokeIpc('design:draft:save', input),
   deleteDesignDraft: (input: DeleteDesignDraftRequest) =>
     invokeIpc('design:draft:delete', input),
-  createBlankDesign: (input: CreateBlankDesignRequest) =>
+  inspectDesignRepository: (input: import('../shared/design').InspectDesignRepositoryRequest) => invokeIpc('design:repository:inspect', input),
+  updateDesignPreviewTarget: (input: import('../shared/design').UpdateDesignPreviewTargetRequest) => invokeIpc('design:target:update', input),
+  startDesign: (input: import('../shared/design').StartDesignRequest) => invokeIpc('design:start', input),
+  createDesign: (input: CreateDesignRequest) =>
     invokeIpc('design:create', input),
   submitDesignTurn: (input: SubmitDesignTurnRequest) =>
     invokeIpc('design:turn:submit', input),

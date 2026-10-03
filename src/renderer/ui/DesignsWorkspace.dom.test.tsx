@@ -8,7 +8,7 @@ import type {
   DesignListItem
 } from '../../shared/contracts';
 import type { AttachmentDraftSnapshot } from '../../shared/attachments';
-import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
+import { createInitialProjection, TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import type { DesignProjectDetail } from '../model/designs';
 import { DesignsWorkspace, type DesignsWorkspaceProps } from './DesignsWorkspace';
@@ -56,7 +56,7 @@ describe('mounted Design workspace', () => {
 
   it('creates one blank Design with the selected model', async () => {
     const profile = { id: '83bf4f11-9ef5-40b1-b0a5-bfbfef05fed8', name: 'Frontend', description: '', instructions: 'Use the established UI.' };
-    const onCreateBlankDesign = vi.fn(() => new Promise<void>(() => undefined));
+    const onCreateDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(
       <DesignsWorkspace
         {...workspaceProps({
@@ -64,7 +64,7 @@ describe('mounted Design workspace', () => {
           designs: [],
           selectedDesignId: undefined,
           project: undefined,
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -80,8 +80,8 @@ describe('mounted Design workspace', () => {
     fireEvent.click(create);
     fireEvent.click(create);
 
-    await waitFor(() => expect(onCreateBlankDesign).toHaveBeenCalledOnce());
-    expect(onCreateBlankDesign).toHaveBeenCalledWith({
+    await waitFor(() => expect(onCreateDesign).toHaveBeenCalledOnce());
+    expect(onCreateDesign).toHaveBeenCalledWith({
       brief: 'Build a calm project portfolio.',
       agentProfileId: profile.id,
       creationToken: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/u),
@@ -92,7 +92,7 @@ describe('mounted Design workspace', () => {
   });
 
   it('uses the selected model Design reasoning default in the creation form', async () => {
-    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const onCreateDesign = vi.fn(async () => undefined);
     const model: AgentModel = {
       ...designModel,
       supportedReasoningEfforts: ['low', 'high'],
@@ -114,7 +114,7 @@ describe('mounted Design workspace', () => {
             model: model.model,
             reasoningEffort: 'high'
           },
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -124,10 +124,40 @@ describe('mounted Design workspace', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
 
-    await waitFor(() => expect(onCreateBlankDesign).toHaveBeenCalledOnce());
-    expect(onCreateBlankDesign).toHaveBeenCalledWith(
+    await waitFor(() => expect(onCreateDesign).toHaveBeenCalledOnce());
+    expect(onCreateDesign).toHaveBeenCalledWith(
       expect.objectContaining({ reasoningEffort: 'low' })
     );
+  });
+
+  it('sends the selected repository base and preserves the brief after a stale-base rejection', async () => {
+    const repository = { ...designProject().repository, kind: 'USER_REGISTERED' as const,
+      name: 'Shop', path: '/projects/shop', status: 'AVAILABLE' as const };
+    const onCreateDesign = vi.fn(async () => { throw Object.assign(new Error('The selected base changed.'), { status: 409, code: 'BASE_CHANGED' }); });
+    const onInspectRepository = vi.fn(async () => ({ repository, bases: [
+      { refName: 'refs/heads/main', displayName: 'main', sha: 'a'.repeat(40), current: true },
+      { refName: 'refs/heads/catalog', displayName: 'catalog', sha: 'b'.repeat(40), current: false }
+    ] }));
+    render(<DesignsWorkspace {...workspaceProps({ designs: [], selectedDesignId: undefined,
+      project: undefined, repositories: [repository], onCreateDesign, onInspectRepository })} />);
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Blank' }), { key: 'ArrowRight' });
+    expect(screen.getByRole('button', { name: 'Existing repository' }).getAttribute('aria-pressed')).toBe('true');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Existing repository' }));
+    expect((screen.getByRole('combobox', { name: 'Base branch' }) as HTMLSelectElement).disabled).toBe(true);
+    const repositoryTrigger = screen.getByRole('button', { name: 'Design repository: Select a repository' });
+    fireEvent.click(repositoryTrigger);
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Design repository options' })).getByRole('button', { name: `Shop, ${repository.path}` }));
+    expect(document.activeElement).toBe(repositoryTrigger);
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Base branch' }) as HTMLSelectElement).disabled).toBe(false));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Base branch' }), { target: { value: 'refs/heads/catalog' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), { target: { value: 'Refine the product cards.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
+    expect(await screen.findByText('The selected base changed.')).toBeTruthy();
+    expect(onCreateDesign).toHaveBeenCalledWith(expect.objectContaining({
+      brief: 'Refine the product cards.', source: { kind: 'EXISTING_REPOSITORY',
+        repositoryId: repository.id, baseRef: 'refs/heads/catalog', expectedBaseSha: 'b'.repeat(40) }
+    }));
+    expect((screen.getByRole('textbox', { name: 'Brief' }) as HTMLTextAreaElement).value).toBe('Refine the product cards.');
   });
 
   it('keeps an unsupported model visible but creates only with a supported model', async () => {
@@ -140,7 +170,7 @@ describe('mounted Design workspace', () => {
       isDefault: true,
       designSupport: { maturity: 'unsupported', detail: reason }
     };
-    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const onCreateDesign = vi.fn(async () => undefined);
     render(
       <DesignsWorkspace
         {...workspaceProps({
@@ -153,7 +183,7 @@ describe('mounted Design workspace', () => {
             model: 'unsupported',
             reasoningEffort: 'medium'
           },
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -170,14 +200,14 @@ describe('mounted Design workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
 
     await waitFor(() =>
-      expect(onCreateBlankDesign).toHaveBeenCalledWith(
+      expect(onCreateDesign).toHaveBeenCalledWith(
         expect.objectContaining({ runtimeId: 'codex', model: 'gpt-5.6-luna' })
       )
     );
   });
 
   it('keeps the blank brief ready when Design models load after the form mounts', async () => {
-    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const onCreateDesign = vi.fn(async () => undefined);
     const delayedModel: AgentModel = {
       ...designModel,
       supportedReasoningEfforts: ['low', 'high'],
@@ -193,7 +223,7 @@ describe('mounted Design workspace', () => {
       project: undefined,
       models: [],
       runtimes: [],
-      onCreateBlankDesign
+      onCreateDesign
     });
     const view = render(<DesignsWorkspace {...initial} />);
 
@@ -217,7 +247,7 @@ describe('mounted Design workspace', () => {
     expect((create as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(create);
     await waitFor(() =>
-      expect(onCreateBlankDesign).toHaveBeenCalledWith(
+      expect(onCreateDesign).toHaveBeenCalledWith(
         expect.objectContaining({
           brief: 'Build after the agent catalog is ready.',
           model: 'gpt-5.6-luna',
@@ -232,7 +262,7 @@ describe('mounted Design workspace', () => {
     const onStageAttachmentBatch = vi.fn<DesignsWorkspaceProps['onStageAttachmentBatch']>(
       async () => attachmentDraft('initial-image-draft')
     );
-    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const onCreateDesign = vi.fn(async () => undefined);
     const view = render(
       <DesignsWorkspace
         {...workspaceProps({
@@ -240,7 +270,7 @@ describe('mounted Design workspace', () => {
           selectedDesignId: undefined,
           project: undefined,
           onStageAttachmentBatch,
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -258,7 +288,7 @@ describe('mounted Design workspace', () => {
       expect.objectContaining({ displayName: 'reference.png', declaredMediaType: 'image/png' })
     ]);
     await waitFor(() =>
-      expect(onCreateBlankDesign).toHaveBeenCalledWith(
+      expect(onCreateDesign).toHaveBeenCalledWith(
         expect.objectContaining({ attachmentDraftId: 'initial-image-draft' })
       )
     );
@@ -269,7 +299,7 @@ describe('mounted Design workspace', () => {
     const onStageAttachmentBatch = vi.fn<DesignsWorkspaceProps['onStageAttachmentBatch']>(
       async () => attachmentDraft('multiple-reference-draft')
     );
-    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const onCreateDesign = vi.fn(async () => undefined);
     const view = render(
       <DesignsWorkspace
         {...workspaceProps({
@@ -277,7 +307,7 @@ describe('mounted Design workspace', () => {
           selectedDesignId: undefined,
           project: undefined,
           onStageAttachmentBatch,
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -296,7 +326,7 @@ describe('mounted Design workspace', () => {
     expect(onStageAttachmentBatch.mock.calls[0]?.[0].attachments.map(({ displayName }) => displayName))
       .toEqual(['direction.md', 'layout.webp']);
     await waitFor(() =>
-      expect(onCreateBlankDesign).toHaveBeenCalledWith(
+      expect(onCreateDesign).toHaveBeenCalledWith(
         expect.objectContaining({ attachmentDraftId: 'multiple-reference-draft' })
       )
     );
@@ -306,7 +336,7 @@ describe('mounted Design workspace', () => {
     const onStageAttachmentBatch = vi.fn<DesignsWorkspaceProps['onStageAttachmentBatch']>(
       async () => attachmentDraft('dropped-reference-draft')
     );
-    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const onCreateDesign = vi.fn(async () => undefined);
     const view = render(
       <DesignsWorkspace
         {...workspaceProps({
@@ -314,7 +344,7 @@ describe('mounted Design workspace', () => {
           selectedDesignId: undefined,
           project: undefined,
           onStageAttachmentBatch,
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -333,7 +363,7 @@ describe('mounted Design workspace', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
     await waitFor(() =>
-      expect(onCreateBlankDesign).toHaveBeenCalledWith(
+      expect(onCreateDesign).toHaveBeenCalledWith(
         expect.objectContaining({ attachmentDraftId: 'dropped-reference-draft' })
       )
     );
@@ -344,7 +374,7 @@ describe('mounted Design workspace', () => {
     const onStageAttachmentBatch = vi.fn<DesignsWorkspaceProps['onStageAttachmentBatch']>(
       async () => attachmentDraft('pasted-reference-draft')
     );
-    const onCreateBlankDesign = vi.fn(async () => undefined);
+    const onCreateDesign = vi.fn(async () => undefined);
     render(
       <DesignsWorkspace
         {...workspaceProps({
@@ -352,7 +382,7 @@ describe('mounted Design workspace', () => {
           selectedDesignId: undefined,
           project: undefined,
           onStageAttachmentBatch,
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -371,7 +401,7 @@ describe('mounted Design workspace', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
     await waitFor(() =>
-      expect(onCreateBlankDesign).toHaveBeenCalledWith(
+      expect(onCreateDesign).toHaveBeenCalledWith(
         expect.objectContaining({ attachmentDraftId: 'pasted-reference-draft' })
       )
     );
@@ -381,8 +411,8 @@ describe('mounted Design workspace', () => {
     const onStageAttachmentBatch = vi.fn<DesignsWorkspaceProps['onStageAttachmentBatch']>(
       async () => attachmentDraft('retry-reference-draft')
     );
-    const onCreateBlankDesign = vi
-      .fn<DesignsWorkspaceProps['onCreateBlankDesign']>()
+    const onCreateDesign = vi
+      .fn<DesignsWorkspaceProps['onCreateDesign']>()
       .mockRejectedValueOnce(new Error('Connection lost.'))
       .mockResolvedValueOnce(undefined);
     render(
@@ -392,7 +422,7 @@ describe('mounted Design workspace', () => {
           selectedDesignId: undefined,
           project: undefined,
           onStageAttachmentBatch,
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -412,14 +442,14 @@ describe('mounted Design workspace', () => {
       true
     );
     fireEvent.click(screen.getByRole('button', { name: 'Retry creation' }));
-    await waitFor(() => expect(onCreateBlankDesign).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onCreateDesign).toHaveBeenCalledTimes(2));
 
     expect(onStageAttachmentBatch).toHaveBeenCalledOnce();
-    expect(onCreateBlankDesign.mock.calls[1]?.[0].creationToken).toBe(
-      onCreateBlankDesign.mock.calls[0]?.[0].creationToken
+    expect(onCreateDesign.mock.calls[1]?.[0].creationToken).toBe(
+      onCreateDesign.mock.calls[0]?.[0].creationToken
     );
-    expect(onCreateBlankDesign.mock.calls[1]?.[0].attachmentDraftId).toBe(
-      onCreateBlankDesign.mock.calls[0]?.[0].attachmentDraftId
+    expect(onCreateDesign.mock.calls[1]?.[0].attachmentDraftId).toBe(
+      onCreateDesign.mock.calls[0]?.[0].attachmentDraftId
     );
   });
 
@@ -432,8 +462,8 @@ describe('mounted Design workspace', () => {
       status: 400,
       code: 'TASK_CREATION_INVALID_REQUEST'
     });
-    const onCreateBlankDesign = vi
-      .fn<DesignsWorkspaceProps['onCreateBlankDesign']>()
+    const onCreateDesign = vi
+      .fn<DesignsWorkspaceProps['onCreateDesign']>()
       .mockRejectedValueOnce(invalidRequest)
       .mockResolvedValueOnce(undefined);
     const onDiscardAttachmentDraft = vi.fn(async () => undefined);
@@ -445,7 +475,7 @@ describe('mounted Design workspace', () => {
           project: undefined,
           onStageAttachmentBatch,
           onDiscardAttachmentDraft,
-          onCreateBlankDesign
+          onCreateDesign
         })}
       />
     );
@@ -465,8 +495,8 @@ describe('mounted Design workspace', () => {
     );
     expect(screen.getByRole('textbox', { name: 'Brief' })).toHaveProperty('disabled', false);
     fireEvent.click(screen.getByRole('button', { name: 'Create Design' }));
-    await waitFor(() => expect(onCreateBlankDesign).toHaveBeenCalledTimes(2));
-    expect(onCreateBlankDesign.mock.calls[1]?.[0].attachmentDraftId).toBe(
+    await waitFor(() => expect(onCreateDesign).toHaveBeenCalledTimes(2));
+    expect(onCreateDesign.mock.calls[1]?.[0].attachmentDraftId).toBe(
       'replacement-reference-draft'
     );
   });
@@ -1206,7 +1236,7 @@ describe('mounted Design workspace', () => {
     fireEvent.click(confirm);
 
     expect(onDeleteDesign).toHaveBeenCalledOnce();
-    expect(onDeleteDesign).toHaveBeenCalledWith('design-1');
+    expect(onDeleteDesign).toHaveBeenCalledWith('design-1', true);
   });
 
   it('offers earlier Ready actions and the small project action menu', async () => {
@@ -1338,7 +1368,23 @@ describe('mounted Design workspace', () => {
     );
 
     expect(screen.getByText('Copied from Original portfolio · Ready state 3')).toBeTruthy();
-    expect(screen.getByText('Continue from this ready copy')).toBeTruthy();
+    expect(screen.getByText('Continue from this version')).toBeTruthy();
+  });
+
+  it('keeps a repository copy usable while its own Preview approval is pending', () => {
+    render(<DesignsWorkspace {...workspaceProps({ project: designProject({
+      repository: { id: 'repository-1', kind: 'USER_REGISTERED' } as DesignProjectDetail['repository'],
+      design: designListItem({ status: 'NEEDS_ATTENTION' }),
+      conversation: [], turns: [], revisions: [],
+      canvas: { state: 'EMPTY', detail: 'Review and approve the Preview configuration.' },
+      origin: { designId: 'source-design', revisionId: 'source-revision', revisionOrdinal: 1 }
+    }) })} />);
+    expect(screen.queryByText('This copy could not start')).toBeNull();
+    expect(screen.getByText('Continue from this version')).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refine this Design' }), {
+      target: { value: 'Refine the product cards.' }
+    });
+    expect(screen.getByRole('button', { name: 'Send' }).hasAttribute('disabled')).toBe(false);
   });
 
   it('shows the desktop-only canvas notice in a browser build', () => {
@@ -1371,7 +1417,17 @@ describe('mounted Design workspace', () => {
     const props = workspaceProps({
       onShowCanvas,
       onHideCanvas,
-      onRefreshCanvas
+      onRefreshCanvas,
+      onUpdateProject: vi.fn(),
+      project: designProject({
+        task: { ...designProject().task, projection: createInitialProjection('2026-08-20T10:00:00.000Z') },
+        repository: { ...designProject().repository, kind: 'USER_REGISTERED' },
+        repositorySetup: { state: {
+          previewPlans: [], previewApprovals: [], previewGenerations: [],
+          previewGenerationAttachments: [], previewManagedResources: [], previewNodeAttempts: [],
+          previewComposeProjects: [], previewLocalBindings: [], previewResources: [], previewTaskRoutes: []
+        } }
+      })
     });
     const view = render(
       <DesignsWorkspace
@@ -1409,6 +1465,26 @@ describe('mounted Design workspace', () => {
       generationId: 'generation-1',
       requestId: expect.any(Number)
     });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Split view' }));
+    onHideCanvas.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview setup' }));
+    expect(within(screen.getByRole('region', { name: 'Design canvas' }))
+      .getByRole('region', { name: 'Preview configuration' })).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Design conversation' }))
+      .queryByRole('region', { name: 'Preview configuration' })).toBeNull();
+    expect(screen.queryByLabelText('Quiet portfolio preview')).toBeNull();
+    expect(onHideCanvas).toHaveBeenCalled();
+
+    onShowCanvas.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to preview' }));
+    expect(screen.getByLabelText('Quiet portfolio preview')).toBeTruthy();
+    expect(onShowCanvas).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Canvas only' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Preview setup' }));
+    expect(screen.getByRole('region', { name: 'Preview configuration' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to preview' }));
 
     view.rerender(<DesignsWorkspace {...props} canvasOccluded />);
     expect(screen.getByText('Canvas hidden')).toBeTruthy();
@@ -1538,6 +1614,7 @@ describe('mounted Design workspace', () => {
     const onRestoreRevision = vi.fn(async () => undefined);
     const currentProject = designProject({
       revisions,
+      conversation: [{ ...designProject().conversation[0]!, readyRevision: revisions[0] }],
       canvas: {
         state: 'READY',
         target: {
@@ -1596,6 +1673,19 @@ describe('mounted Design workspace', () => {
     await waitFor(() =>
       expect(onRestoreRevision).toHaveBeenCalledWith('design-1', 'revision-1')
     );
+    view.rerender(<DesignsWorkspace {...workspaceProps({ project: {
+      ...currentProject,
+      repository: { ...currentProject.repository, kind: 'USER_REGISTERED' },
+      revisions: revisions.map((revision) => ({ ...revision, target: { routeId: 'shop', entryPath: revision.ordinal === 1 ? '/old' : '/new' } })),
+      actions: { ...currentProject.actions, canRestore: false },
+      canvas: { state: 'READY', target: { generationId: 'generation-1', routeId: 'shop', revisionId: 'revision-1' } }
+    } })} />);
+    expect(screen.queryByRole('button', { name: 'Restore version 1 as a new version' })).toBeNull();
+    expect(screen.getByText('shop/old')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Back to v2' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Ready state 1 options' }));
+    expect(screen.queryByRole('menuitem', { name: 'Restore this version' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Duplicate from here' })).toBeTruthy();
   });
 
   it('shows checked candidate progress without enabling the external Ready action', () => {
@@ -1676,7 +1766,7 @@ function workspaceProps(
     },
     desktopCanvasAvailable: true,
     onSelectDesign: vi.fn(),
-    onCreateBlankDesign: vi.fn(async () => undefined),
+    onCreateDesign: vi.fn(async () => undefined),
     onSubmitRefinement: vi.fn(async () => undefined),
     onStageAttachmentBatch: vi.fn(async () => ({
       id: 'design-reference-draft',

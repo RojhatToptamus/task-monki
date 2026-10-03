@@ -246,8 +246,8 @@ describe('PreviewGateway', () => {
     const hostname = previewRouteHostname('design-browser', 'app');
     const origin = `http://${hostname}:${gateway.port}/`;
     const lease = await gateway.instance.openBrowserLease({
-      origin,
-      target: { host: '127.0.0.1', port: candidate }
+      generationId: 'candidate',
+      routes: { [origin]: { host: '127.0.0.1', port: candidate } }
     });
     const proxyPort = Number(new URL(lease.proxyUrl).port);
 
@@ -266,7 +266,7 @@ describe('PreviewGateway', () => {
       '403 Forbidden'
     );
     await expect(
-      rawProxyMethod(proxyPort, 'GET', origin, {
+      rawProxyMethod(proxyPort, 'GET', 'http://example.com/socket', {
         Connection: 'Upgrade',
         Upgrade: 'websocket'
       })
@@ -276,13 +276,40 @@ describe('PreviewGateway', () => {
     await expect(proxyRequest(proxyPort, origin)).rejects.toBeDefined();
   });
 
+  it('binds application, API and WebSocket traffic to one generation and revokes it before replacement', async () => {
+    const app = await fixture((_request, response) => response.end('candidate app'));
+    const server = http.createServer((_request, response) => response.end('candidate api'));
+    server.on('upgrade', (_request, socket) => {
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
+      socket.on('data', (chunk) => socket.write(`echo:${chunk.toString('utf8')}`));
+    });
+    const api = await listen(server);
+    closers.push(() => closeServer(server));
+    const gateway = await startGateway();
+    const appHost = previewRouteHostname('design-multiple', 'app');
+    const apiHost = previewRouteHostname('design-multiple', 'api');
+    const appOrigin = `http://${appHost}:${gateway.port}`;
+    const apiOrigin = `http://${apiHost}:${gateway.port}`;
+    const lease = await gateway.instance.openBrowserLease({ generationId: 'candidate', routes: {
+      [appOrigin]: { host: '127.0.0.1', port: app }, [apiOrigin]: { host: '127.0.0.1', port: api }
+    } });
+    const proxyPort = Number(new URL(lease.proxyUrl).port);
+    await expect(proxyRequest(proxyPort, `${appOrigin}/products`)).resolves.toMatchObject({ body: 'candidate app' });
+    await expect(proxyRequest(proxyPort, `${apiOrigin}/data`)).resolves.toMatchObject({ body: 'candidate api' });
+    await expect(rawUpgrade(proxyPort, `${apiHost}:${gateway.port}`)).resolves.toContain('echo:ping');
+    const replacement = await fixture((_request, response) => response.end('replacement'));
+    gateway.instance.replaceRoutes('replacement', { [appHost]: { host: '127.0.0.1', port: replacement } }, 'candidate');
+    await expect(proxyRequest(proxyPort, appOrigin)).rejects.toBeDefined();
+    await expect(request(gateway.port, appHost)).resolves.toMatchObject({ body: 'replacement' });
+  });
+
   it('closes active browser leases when the gateway stops', async () => {
     const candidate = await fixture((_request, response) => response.end('candidate'));
     const gateway = await startGateway();
     const hostname = previewRouteHostname('design-browser-close', 'app');
     const lease = await gateway.instance.openBrowserLease({
-      origin: `http://${hostname}:${gateway.port}/`,
-      target: { host: '127.0.0.1', port: candidate }
+      generationId: 'candidate',
+      routes: { [`http://${hostname}:${gateway.port}/`]: { host: '127.0.0.1', port: candidate } }
     });
     const proxyPort = Number(new URL(lease.proxyUrl).port);
 
@@ -299,8 +326,8 @@ describe('PreviewGateway', () => {
     const hostname = previewRouteHostname('design-browser-reset', 'app');
     const origin = `http://${hostname}:${gateway.port}/`;
     const lease = await gateway.instance.openBrowserLease({
-      origin,
-      target: { host: '127.0.0.1', port: candidate }
+      generationId: 'candidate',
+      routes: { [origin]: { host: '127.0.0.1', port: candidate } }
     });
     const proxyPort = Number(new URL(lease.proxyUrl).port);
     const socket = net.connect(proxyPort, '127.0.0.1');

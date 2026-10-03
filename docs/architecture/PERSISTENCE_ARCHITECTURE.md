@@ -67,7 +67,9 @@ For a profile root, current application-owned paths are:
 ```
 
 `design-worktrees` and `task-artifact-captures` are derived or staging data.
-Managed Design repositories are durable. The desktop host keeps ordinary task
+Managed Design repositories are durable. Registered-repository Design commits
+remain in the registered Git repository; profile backups do not include that
+external repository or uncommitted worktree edits. The desktop host keeps ordinary task
 worktrees outside this persistence root. Preview runtime data and Discourse
 execution workspaces are also outside this root. SQLite stores their durable
 identities and outcomes where required.

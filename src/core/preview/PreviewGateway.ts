@@ -35,7 +35,7 @@ export class PreviewGateway {
   private readonly routes = new Map<string, PreviewGatewayTarget>();
   private readonly sockets = new Set<net.Socket>();
   private readonly upstreamSockets = new Set<net.Socket>();
-  private readonly browserLeases = new Set<() => Promise<void>>();
+  private readonly browserLeases = new Map<() => Promise<void>, string>();
   private readonly server = http.createServer((request, response) => {
     this.proxyRequest(request, response);
   });
@@ -105,12 +105,15 @@ export class PreviewGateway {
   }
 
   removeOwnedRoutes(generationId: string): void {
+    // Close generation-bound clients before replacement can reuse a target port.
+    void this.revokeBrowserLeases(generationId).catch(() => undefined);
     for (const [hostname, target] of this.routes) {
       if (target.generationId === generationId) this.routes.delete(hostname);
     }
   }
 
   clearRoutes(): void {
+    for (const close of this.browserLeases.keys()) void close().catch(() => undefined);
     this.routes.clear();
   }
 
@@ -118,37 +121,46 @@ export class PreviewGateway {
     return this.routes.has(normalizeHostname(hostname));
   }
 
-  async openBrowserLease(input: {
-    origin: string;
-    target: Omit<PreviewGatewayTarget, 'generationId'>;
-  }): Promise<PreviewGatewayBrowserLease> {
-    const origin = new URL(input.origin);
-    validateRoute(origin.hostname, input.target);
-    if (
-      origin.protocol !== 'http:' ||
-      origin.username ||
-      origin.password ||
-      origin.pathname !== '/' ||
-      origin.search ||
-      origin.hash ||
-      Number(origin.port) !== this.requireListeningPort()
-    ) {
-      throw new Error('Preview browser lease requires one exact Task Monki HTTP origin.');
-    }
+  async revokeBrowserLeases(generationId: string): Promise<void> {
+    await Promise.all([...this.browserLeases].filter(([, owner]) => owner === generationId).map(([close]) => close()));
+  }
 
+  async openBrowserLease(input: {
+    generationId: string;
+    routes: Record<string, Omit<PreviewGatewayTarget, 'generationId'>>;
+  }): Promise<PreviewGatewayBrowserLease> {
+    if (!input.generationId || !Object.keys(input.routes).length) throw new Error('Preview browser lease requires owned routes.');
+    const routes = new Map(Object.entries(input.routes).map(([value, target]) => {
+      const origin = new URL(value);
+      validateRoute(origin.hostname, target);
+      if (origin.protocol !== 'http:' || origin.username || origin.password || origin.pathname !== '/' ||
+          origin.search || origin.hash || Number(origin.port) !== this.requireListeningPort()) {
+        throw new Error('Preview browser lease requires exact Task Monki HTTP origins.');
+      }
+      return [origin.origin, { origin, target }] as const;
+    }));
+    const destination = (request: IncomingMessage) => {
+      try {
+        const url = new URL(request.url ?? '', `http://${request.headers.host}`);
+        if (url.protocol === 'ws:') url.protocol = 'http:';
+        if (url.username || url.password) return undefined;
+        return routes.get(url.origin);
+      } catch { return undefined; }
+    };
     const sockets = new Set<net.Socket>();
     const upstreamSockets = new Set<net.Socket>();
     let closed = false;
     const server = http.createServer((request, response) => {
-      if (closed || !matchesForwardProxyOrigin(request.url, origin)) {
+      const selected = destination(request);
+      if (closed || !selected) {
         sendBoundedError(response, 403, 'Preview browser lease rejected this destination.');
         return;
       }
       proxyExactRequest(
         request,
         response,
-        input.target,
-        origin,
+        selected.target,
+        selected.origin,
         upstreamSockets
       );
     });
@@ -159,8 +171,16 @@ export class PreviewGateway {
     server.on('connect', (_request, socket) => {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     });
-    server.on('upgrade', (_request, socket) => {
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    server.on('upgrade', (request, socket, head) => {
+      const selected = destination(request);
+      if (closed || !selected) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      const requested = new URL(request.url!, selected.origin);
+      request.url = `${requested.pathname}${requested.search}`;
+      request.headers.host = selected.origin.host;
+      proxyUpgradeToTarget(request, socket, head, { ...selected.target, generationId: input.generationId }, upstreamSockets);
     });
     const port = await bindLoopbackServer(server);
     const close = async () => {
@@ -173,13 +193,13 @@ export class PreviewGateway {
         server.close((error) => (error ? reject(error) : resolve()))
       );
     };
-    this.browserLeases.add(close);
+    this.browserLeases.set(close, input.generationId);
     return { proxyUrl: `http://127.0.0.1:${port}`, close };
   }
 
   async close(): Promise<void> {
     this.routes.clear();
-    await Promise.allSettled([...this.browserLeases].map((close) => close()));
+    await Promise.allSettled([...this.browserLeases.keys()].map((close) => close()));
     for (const socket of [...this.sockets, ...this.upstreamSockets]) socket.destroy();
     if (!this.server.listening) return;
     await new Promise<void>((resolve, reject) =>
@@ -266,22 +286,7 @@ export class PreviewGateway {
       socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       return;
     }
-    const upstream = net.connect(target.port, target.host);
-    trackSocket(this.upstreamSockets, upstream);
-    upstream.setTimeout(30_000, () => upstream.destroy());
-    upstream.once('connect', () => {
-      upstream.setTimeout(0);
-      upstream.write(serializeUpgradeRequest(request, target));
-      if (head.length > 0) upstream.write(head);
-      socket.pipe(upstream).pipe(socket);
-    });
-    upstream.once('error', () => {
-      if (!socket.destroyed) {
-        socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
-      }
-    });
-    socket.once('error', () => upstream.destroy());
-    socket.once('close', () => upstream.destroy());
+    proxyUpgradeToTarget(request, socket, head, target, this.upstreamSockets);
   }
 
   private targetFor(request: IncomingMessage): PreviewGatewayTarget | undefined {
@@ -297,20 +302,23 @@ export class PreviewGateway {
   }
 }
 
-function matchesForwardProxyOrigin(value: string | undefined, expected: URL): boolean {
-  if (!value) return false;
-  try {
-    const requested = new URL(value);
-    return (
-      requested.protocol === expected.protocol &&
-      requested.hostname === expected.hostname &&
-      requested.port === expected.port &&
-      !requested.username &&
-      !requested.password
-    );
-  } catch {
-    return false;
-  }
+function proxyUpgradeToTarget(request: IncomingMessage, socket: Duplex, head: Buffer, target: PreviewGatewayTarget, upstreamSockets: Set<net.Socket>): void {
+  const upstream = net.connect(target.port, target.host);
+  trackSocket(upstreamSockets, upstream);
+  upstream.setTimeout(30_000, () => upstream.destroy());
+  upstream.once('connect', () => {
+    upstream.setTimeout(0);
+    upstream.write(serializeUpgradeRequest(request, target));
+    if (head.length > 0) upstream.write(head);
+    socket.pipe(upstream).pipe(socket);
+  });
+  upstream.once('error', () => {
+    if (!socket.destroyed) {
+      socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
+    }
+  });
+  socket.once('error', () => upstream.destroy());
+  socket.once('close', () => upstream.destroy());
 }
 
 function proxyExactRequest(
@@ -320,7 +328,7 @@ function proxyExactRequest(
   origin: URL,
   upstreamSockets: Set<net.Socket>
 ): void {
-  const requested = new URL(request.url!);
+  const requested = new URL(request.url!, origin);
   const upstream = http.request(
     {
       host: target.host,

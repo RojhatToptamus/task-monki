@@ -63,7 +63,7 @@ export function RepositorySelect({
     setOpen(false);
     setQuery('');
   };
-  const triggerName = selectedOption?.name ?? 'No repositories available';
+  const triggerName = selectedOption?.name ?? (options.length > 0 ? 'Select a repository' : 'No repositories available');
 
   return (
     <div
@@ -91,7 +91,7 @@ export function RepositorySelect({
         aria-label={
           selectedOption
             ? `${ariaLabel}: ${selectedOption.name}, ${selectedOption.path}`
-            : `${ariaLabel}: No repositories available`
+            : `${ariaLabel}: ${triggerName}`
         }
         aria-haspopup="dialog"
         aria-expanded={open}

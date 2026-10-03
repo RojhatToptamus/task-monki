@@ -71,8 +71,20 @@ branch at another commit blocks recreation. Restoration never transfers dirty
 files or silently changes the base. Start requires an already prepared worktree.
 
 Existing Design worktrees use ordinary verification before Git evidence refresh.
-Their observed HEAD can advance after publication. Exact-commit checks apply
-when a worktree must be recreated, not when observing a new Design commit.
+Repository Designs keep an accepted Git snapshot reference separately from the
+latest observation. Refresh and restart do not advance that reference. Owned
+setup, turn completion, recovery, and explicit acceptance can advance it.
+
+Interrupted initial Design creation can complete during startup. A previously
+available repository Design worktree requires explicit Recover workspace if
+missing. Recovery uses the accepted commit and refuses a changed branch.
+Standalone Design retains its managed-source reconstruction behavior.
+
+Candidate publication uses a recorded commit or branch checkpoint. It does not
+scan Git's object database for orphan commits. Index repair holds Git's index
+lock and refuses unexpected staging. A dead verification generation prevents
+Ready publication even when source publication can be repaired. Archived
+Designs remain stopped; their managed data survives cleanup and reconciliation.
 
 External checkout verification never creates directories, changes permissions,
 switches branches, or removes checkout files. A moved external checkout requires

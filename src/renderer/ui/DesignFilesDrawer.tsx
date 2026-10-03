@@ -241,7 +241,7 @@ export function DesignFilesDrawer({
                   assetPath={reference.projectAssetPath}
                   selected={selectedReferenceIds.includes(reference.id)}
                   busy={referenceActionId === reference.id}
-                  importDisabled={assetImportBlocked}
+                  importDisabled={assetImportBlocked || project.repository.kind === 'USER_REGISTERED'}
                   onSelectedChange={(selected) =>
                     onSelectionChange(
                       selected

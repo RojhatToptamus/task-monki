@@ -9,7 +9,7 @@ import type {
   CancelDesignTurnRequest,
   CancelPromptRefinementRequest,
   ContinueRunRequest,
-  CreateBlankDesignRequest,
+  CreateDesignRequest,
   BranchPublicationRecord,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
@@ -397,7 +397,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
         `/api/designs/${encodeURIComponent(input.designId)}/draft/delete`,
         input
       ),
-    createBlankDesign: (input: CreateBlankDesignRequest) =>
+    inspectDesignRepository: (input: import('../../shared/design').InspectDesignRepositoryRequest) => post<import('../../shared/contracts').DesignRepositoryInspection>(baseUrl, '/api/designs/repository/inspect', input),
+    updateDesignPreviewTarget: (input: import('../../shared/design').UpdateDesignPreviewTargetRequest) => post<DesignDetailSnapshot>(baseUrl, '/api/designs/target', input),
+    startDesign: (input: import('../../shared/design').StartDesignRequest) => post<DesignDetailSnapshot>(baseUrl, '/api/designs/start', input),
+    createDesign: (input: CreateDesignRequest) =>
       post<DesignDetailSnapshot>(baseUrl, '/api/designs', input),
     submitDesignTurn: (input: SubmitDesignTurnRequest) =>
       post<DesignDetailSnapshot>(

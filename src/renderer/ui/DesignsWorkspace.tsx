@@ -3,6 +3,7 @@ import { AgentProfileSelect } from './AgentProfileSelect';
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent
@@ -12,7 +13,7 @@ import type {
   AgentExecutionSettings,
   AgentModel,
   AgentRuntimeState,
-  CreateBlankDesignRequest,
+  CreateDesignRequest,
   DesignDraftRecord,
   InteractionRequestRecord
 } from '../../shared/contracts';
@@ -44,9 +45,12 @@ import {
   type DesignCanvasRefreshRequest,
   type DesignCanvasShowRequest
 } from './DesignCanvas';
+import { DesignRepositorySetup } from './DesignRepositorySetup';
 import { DesignConversation } from './DesignConversation';
 import { DesignFilesDrawer } from './DesignFilesDrawer';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
+import { RepositorySelect } from './RepositoryPicker';
+import { buildRepositoryOptions } from '../model/repositories';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { AgentModelSelector } from './AgentModelSelector';
 import {
@@ -74,8 +78,9 @@ import {
   savedDesignLayout
 } from '../model/workspaceLayout';
 
-export type CreateBlankDesignInput = Pick<
-  CreateBlankDesignRequest,
+export type CreateDesignInput = Pick<
+  CreateDesignRequest,
+  | 'source'
   | 'brief'
   | 'agentProfileId'
   | 'creationToken'
@@ -87,6 +92,10 @@ export type CreateBlankDesignInput = Pick<
 >;
 
 export interface DesignsWorkspaceProps {
+  onUpdateProject?(project: DesignProjectDetail): void;
+  repositories?: readonly import('../../shared/contracts').Repository[];
+  onInspectRepository?(repositoryId: string): Promise<import('../../shared/contracts').DesignRepositoryInspection>;
+
   agentProfiles?: readonly CustomAgentProfile[];
   historyCollapsed?: boolean;
   onHistoryCollapsedChange?(collapsed: boolean): void;
@@ -102,7 +111,7 @@ export interface DesignsWorkspaceProps {
   desktopCanvasAvailable: boolean;
   canvasOccluded?: boolean;
   onSelectDesign(designId: string): void;
-  onCreateBlankDesign(input: CreateBlankDesignInput): Promise<void>;
+  onCreateDesign(input: CreateDesignInput): Promise<void>;
   onSubmitRefinement(
     designId: string,
     message: string,
@@ -143,13 +152,16 @@ export interface DesignsWorkspaceProps {
   onDuplicateDesign(designId: string, revisionId: string): Promise<void>;
   onRenameDesign(designId: string, title: string): Promise<void>;
   onArchiveDesign(designId: string): Promise<void>;
-  onDeleteDesign(designId: string): Promise<void>;
+  onDeleteDesign(designId: string, removeWorktree?: boolean): Promise<void>;
   onShowCanvas?(request: DesignCanvasShowRequest): void | Promise<void>;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRetryLoad?(): void;
 }
 
 export function DesignsWorkspace({
+  onUpdateProject,
+  repositories = [],
+  onInspectRepository,
   agentProfiles = [],
   historyCollapsed = false,
   onHistoryCollapsedChange,
@@ -165,7 +177,7 @@ export function DesignsWorkspace({
   desktopCanvasAvailable,
   canvasOccluded = false,
   onSelectDesign,
-  onCreateBlankDesign,
+  onCreateDesign,
   onSubmitRefinement,
   onStageAttachmentBatch,
   onDiscardAttachmentDraft,
@@ -211,6 +223,7 @@ export function DesignsWorkspace({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [previewSetupModalOpen, setPreviewSetupModalOpen] = useState(false);
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
   const referenceDesignId = useRef<string | undefined>(undefined);
   const restoredDraftRevision = useRef<number | undefined>(undefined);
@@ -482,7 +495,9 @@ export function DesignsWorkspace({
 
       <section className="tm-designs-main" inert={historyModalOpen ? true : undefined}>
         {showCreate ? (
-          <BlankDesignForm
+          <NewDesignForm
+            repositories={repositories}
+            onInspectRepository={onInspectRepository}
             agentProfiles={agentProfiles}
             historyCollapsed={historyCollapsed}
             canCancel={designs.length > 0}
@@ -496,7 +511,7 @@ export function DesignsWorkspace({
             onHistoryCollapsedChange={onHistoryCollapsedChange}
             onCancel={() => setCreatingBlank(false)}
             onCreate={async (input) => {
-              await onCreateBlankDesign(input);
+              await onCreateDesign(input);
               setCreatingBlank(false);
             }}
           />
@@ -508,15 +523,22 @@ export function DesignsWorkspace({
             onHistoryCollapsedChange={onHistoryCollapsedChange}
             action={onRetryLoad ? { label: 'Try again', onClick: onRetryLoad } : undefined}
           />
-        ) : loading || !project ? (
+        ) : loading ? (
+          <div className="tm-designs-loading" role="status" aria-busy="true" aria-label="Loading Design">
+            <header className="tm-designs-header">
+              <DesignHistoryToggle collapsed={historyCollapsed} onChange={onHistoryCollapsedChange} />
+            </header>
+            <div className="tm-designs-loading__body">
+              <div className="tm-workspace-loading">
+                <StatusGlyph kind="working" />
+                <span>Loading Design</span>
+              </div>
+            </div>
+          </div>
+        ) : !project ? (
           <WorkspaceState
-            title={loading ? 'Loading Design' : 'Select a Design'}
-            detail={
-              loading
-                ? 'Task Monki is loading the conversation and canvas.'
-                : 'Choose a Design from the list or create a blank Design.'
-            }
-            busy={loading}
+            title="Select a Design"
+            detail="Choose a Design from the list or create a blank Design."
             historyCollapsed={historyCollapsed}
             onHistoryCollapsedChange={onHistoryCollapsedChange}
           />
@@ -631,9 +653,16 @@ export function DesignsWorkspace({
                   id="design-canvas-panel"
                 >
                   <DesignCanvas
+                    key={project.design.id}
                     project={project}
+                    setup={project.repository.kind === 'USER_REGISTERED' && project.task.workflowPhase !== 'ARCHIVED' && onUpdateProject ? (
+                      <DesignRepositorySetup project={project} onUpdate={onUpdateProject}
+                        onOpenLocation={() => project.currentWorktree ? onOpenDesignLocation(project.design.id, project.currentWorktree.id) : Promise.resolve()}
+                        onModalOpenChange={setPreviewSetupModalOpen} />
+                    ) : undefined}
+                    setupRequired={Boolean(project.repositorySetup?.blocker) || project.turns.some((turn) => !turn.runId && !turn.outcome)}
                     desktopAvailable={desktopCanvasAvailable}
-                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen}
+                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen || previewSetupModalOpen}
                     onShowCanvas={onShowCanvas}
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
@@ -690,9 +719,10 @@ export function DesignsWorkspace({
       {deleteOpen && project ? (
         <DeleteDesignDialog
           designTitle={project.design.title}
+          retainedWorkspace={project.repository.kind === 'USER_REGISTERED' ? project.currentWorktree?.worktreePath : undefined}
           onCancel={() => setDeleteOpen(false)}
-          onDelete={async () => {
-            await onDeleteDesign(project.design.id);
+          onDelete={async (removeWorktree) => {
+            await onDeleteDesign(project.design.id, removeWorktree);
             setDeleteOpen(false);
           }}
         />
@@ -802,7 +832,9 @@ function DesignHeader({
   );
 }
 
-function BlankDesignForm({
+function NewDesignForm({
+  repositories,
+  onInspectRepository,
   agentProfiles,
   historyCollapsed,
   canCancel,
@@ -817,6 +849,8 @@ function BlankDesignForm({
   onCancel,
   onCreate
 }: {
+  repositories: readonly import('../../shared/contracts').Repository[];
+  onInspectRepository?: DesignsWorkspaceProps['onInspectRepository'];
   agentProfiles: readonly CustomAgentProfile[];
   historyCollapsed: boolean;
   canCancel: boolean;
@@ -829,9 +863,39 @@ function BlankDesignForm({
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   onHistoryCollapsedChange?(collapsed: boolean): void;
   onCancel(): void;
-  onCreate(input: CreateBlankDesignInput): Promise<void>;
+  onCreate(input: CreateDesignInput): Promise<void>;
 }) {
   const [brief, setBrief] = useState('');
+  const [sourceKind, setSourceKind] = useState<'BLANK' | 'EXISTING_REPOSITORY'>('BLANK');
+  const [repositoryId, setRepositoryId] = useState('');
+  const [inspection, setInspection] = useState<import('../../shared/contracts').DesignRepositoryInspection>();
+  const [baseKey, setBaseKey] = useState('');
+  const [inspecting, setInspecting] = useState(false);
+  const repositoryOptions = useMemo(() => buildRepositoryOptions({
+    repositories: repositories.filter((item) => item.kind === 'USER_REGISTERED' && item.status === 'AVAILABLE'),
+    tasks: []
+  }), [repositories]);
+  const inspectionRequest = useRef(0);
+  const base = inspection?.bases.find((item) => (item.refName ?? 'HEAD') === baseKey);
+  const inspectRepository = async (id: string) => {
+    const request = ++inspectionRequest.current;
+    setRepositoryId(id);
+    setInspection(undefined);
+    setBaseKey('');
+    setInspecting(true);
+    setError(undefined);
+    try {
+      const next = await onInspectRepository?.(id);
+      if (request !== inspectionRequest.current) return;
+      setInspection(next);
+      setBaseKey(next?.bases[0]?.refName ?? 'HEAD');
+    } catch (caught) {
+      if (request === inspectionRequest.current) setError(caught instanceof Error ? caught.message : 'Could not inspect the repository.');
+    } finally {
+      if (request === inspectionRequest.current) setInspecting(false);
+    }
+  };
+
   const [agentProfileId, setAgentProfileId] = useState<string>();
   const [creationToken] = useState(() => crypto.randomUUID());
   const selectableModels = supportedDesignModels(runtimes, models);
@@ -915,6 +979,7 @@ function BlankDesignForm({
     const nextBrief = brief.trim();
     if (
       !nextBrief ||
+      (sourceKind === 'EXISTING_REPOSITORY' && (!base || inspecting)) ||
       !selectedRuntimeId ||
       !selectedModel ||
       selectedRuntimeUnavailableReason ||
@@ -929,6 +994,7 @@ function BlankDesignForm({
       try {
         await onCreate({
           brief: nextBrief,
+          ...(sourceKind === 'EXISTING_REPOSITORY' && base ? { source: { kind: sourceKind, repositoryId, baseRef: base.refName, expectedBaseSha: base.sha } } : {}),
           ...(agentProfileId ? { agentProfileId } : {}),
           creationToken,
           runtimeId: selectedRuntimeId,
@@ -973,10 +1039,7 @@ function BlankDesignForm({
               collapsed={historyCollapsed}
               onChange={onHistoryCollapsedChange}
             />
-            <div>
-              <h1>New Design</h1>
-              <p>Describe the page or interface the agent should build.</p>
-            </div>
+            <h1>New Design</h1>
           </div>
           {canCancel ? (
             <button
@@ -994,50 +1057,96 @@ function BlankDesignForm({
 
         <div className="tm-design-create__body">
           <div className="tm-design-create__content">
-            <div className="tm-design-create__label-row">
-              <label htmlFor="new-design-brief">Brief</label>
-              <span>Reference images help most</span>
+            <div className="field">
+              <span>Source</span>
+              <div className="segmented" role="group" aria-label="Design source" onKeyDown={(event) => {
+                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                event.preventDefault();
+                const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
+                next?.focus();
+                next?.click();
+              }}>
+                {(['BLANK', 'EXISTING_REPOSITORY'] as const).map((kind) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    className="segmented__btn"
+                    aria-pressed={sourceKind === kind}
+                    disabled={composerLocked}
+                    onClick={() => setSourceKind(kind)}
+                  >
+                    {kind === 'BLANK' ? 'Blank' : 'Existing repository'}
+                  </button>
+                ))}
+              </div>
             </div>
-            <AttachmentComposerShell
-              attachments={attachments}
-              className="tm-design-create__composer"
-              attachmentLabel="Design references"
-              toolbarAction={
-                <AgentProfileSelect
-                  profiles={agentProfiles}
-                  value={agentProfileId}
+            {sourceKind === 'EXISTING_REPOSITORY' ? (
+              <>
+                <div className="field">
+                  <span>Repository</span>
+                  <RepositorySelect
+                    options={repositoryOptions}
+                    selectedId={repositoryId}
+                    disabled={composerLocked}
+                    ariaLabel="Design repository"
+                    onChange={(id) => void inspectRepository(id)}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field__label" htmlFor="design-base">Base branch</label>
+                  <select id="design-base" aria-describedby="design-base-help" value={baseKey} disabled={composerLocked || inspecting || !inspection} onChange={(event) => setBaseKey(event.target.value)}>
+                    {inspecting ? <option value="">Loading branches…</option> : null}
+                    {!inspection && !inspecting ? <option value="">Select a repository first</option> : null}
+                    {inspection?.bases.map((item) => <option key={item.refName ?? 'HEAD'} value={item.refName ?? 'HEAD'}>{item.refName?.replace('refs/heads/', '') ?? 'Detached HEAD'} · {item.sha.slice(0, 8)}</option>)}
+                  </select>
+                  <small id="design-base-help">Creates a separate worktree. Uncommitted changes are not included.</small>
+                </div>
+              </>
+            ) : null}
+
+            <div className="field field--prompt">
+              <label className="field__label" htmlFor="new-design-brief">Brief</label>
+              <AttachmentComposerShell
+                attachments={attachments}
+                className="tm-design-create__composer"
+                attachmentLabel="Design references"
+                toolbarAction={
+                  <AgentProfileSelect
+                    profiles={agentProfiles}
+                    value={agentProfileId}
+                    disabled={composerLocked}
+                    onChange={setAgentProfileId}
+                  />
+                }
+                removeDisabled={composerLocked}
+                addButtonTitle={
+                  attachmentsEnabled
+                    ? 'Stored locally and shared read-only with the Design agent.'
+                    : 'The selected agent runtime does not support references.'
+                }
+                hint={
+                  !attachmentsEnabled
+                    ? 'Unavailable for this runtime'
+                    : attachments.isReadingClipboardImage
+                      ? 'Reading clipboard image…'
+                      : attachments.activeItems.length > 0
+                        ? `${attachments.activeItems.length} ${
+                            attachments.activeItems.length === 1 ? 'file' : 'files'
+                          } · ${formatAttachmentBytes(attachments.byteCount)}`
+                        : 'Paste or drop files'
+                }
+              >
+                <textarea
+                  id="new-design-brief"
+                  value={brief}
+                  rows={7}
+                  placeholder="Describe what you want to design or change…"
                   disabled={composerLocked}
-                  onChange={setAgentProfileId}
+                  onChange={(event) => setBrief(event.target.value)}
+                  onPaste={attachments.paste}
                 />
-              }
-              removeDisabled={composerLocked}
-              addButtonTitle={
-                attachmentsEnabled
-                  ? 'Stored locally and shared read-only with the Design agent.'
-                  : 'The selected agent runtime does not support references.'
-              }
-              hint={
-                !attachmentsEnabled
-                  ? 'Unavailable for this runtime'
-                  : attachments.isReadingClipboardImage
-                    ? 'Reading clipboard image…'
-                    : attachments.activeItems.length > 0
-                      ? `${attachments.activeItems.length} ${
-                          attachments.activeItems.length === 1 ? 'file' : 'files'
-                        } · ${formatAttachmentBytes(attachments.byteCount)}`
-                      : 'Paste or drop files'
-              }
-            >
-              <textarea
-                id="new-design-brief"
-                value={brief}
-                rows={7}
-                placeholder="A focused landing page for…"
-                disabled={composerLocked}
-                onChange={(event) => setBrief(event.target.value)}
-                onPaste={attachments.paste}
-              />
-            </AttachmentComposerShell>
+              </AttachmentComposerShell>
+            </div>
 
             {attachments.overflowError || attachments.modelError ? (
               <p className="task-attachment-message task-attachment-message--error" role="alert">
@@ -1103,6 +1212,7 @@ function BlankDesignForm({
             disabled={
               submitting ||
               brief.trim().length === 0 ||
+              (sourceKind === 'EXISTING_REPOSITORY' && (!base || inspecting)) ||
               !selectedRuntimeId ||
               !selectedModelId ||
               Boolean(selectedRuntimeUnavailableReason) ||
@@ -1200,17 +1310,20 @@ function RenameDesignDialog({
 
 function DeleteDesignDialog({
   designTitle,
+  retainedWorkspace,
   onCancel,
   onDelete
 }: {
   designTitle: string;
+  retainedWorkspace?: string;
   onCancel(): void;
-  onDelete(): Promise<void>;
+  onDelete(removeWorktree: boolean): Promise<void>;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const deletingRef = useRef(false);
   const [deleting, setDeleting] = useState(false);
+  const [removeWorktree, setRemoveWorktree] = useState(!retainedWorkspace);
   const [error, setError] = useState<string | undefined>();
   useDialogFocusBoundary({
     dialogRef,
@@ -1225,7 +1338,7 @@ function DeleteDesignDialog({
     setDeleting(true);
     setError(undefined);
     try {
-      await onDelete();
+      await onDelete(removeWorktree);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not delete the Design.');
     } finally {
@@ -1252,7 +1365,10 @@ function DeleteDesignDialog({
       />
       <div className="tm-modal__panel tm-design-delete">
         <h3 id="delete-design-title">Delete “{designTitle}”?</h3>
-        <p>Task Monki removes the Design. It removes the managed workspace when that action is safe.</p>
+        {retainedWorkspace ? <>
+          <p>The repository and Design branch are kept. The workspace stays at <code>{retainedWorkspace}</code>.</p>
+          <label><input type="checkbox" checked={removeWorktree} disabled={deleting} onChange={(event) => setRemoveWorktree(event.target.checked)} /> Also remove the workspace if it has no unsaved, untracked, or ignored files.</label>
+        </> : <p>Task Monki removes the Design. It removes the managed workspace when that action is safe.</p>}
         {error ? <p className="tm-design-delete__error" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button
@@ -1276,21 +1392,18 @@ function DeleteDesignDialog({
 function WorkspaceState({
   title,
   detail,
-  busy = false,
   action,
   historyCollapsed,
   onHistoryCollapsedChange
 }: {
   title: string;
   detail: string;
-  busy?: boolean;
   action?: { label: string; onClick(): void };
   historyCollapsed: boolean;
   onHistoryCollapsedChange?(collapsed: boolean): void;
 }) {
   return (
-    <div className="tm-designs-state" role={busy ? 'status' : undefined}>
-      {busy ? <StatusGlyph kind="working" /> : null}
+    <div className="tm-designs-state">
       <div className="tm-designs-state__title">
         <DesignHistoryToggle
           collapsed={historyCollapsed}

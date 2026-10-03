@@ -63,7 +63,7 @@ import type {
   TaskAttachmentRecord
 } from './attachments';
 import type {
-  CreateBlankDesignRequest,
+  CreateDesignRequest,
   DesignActionAvailability,
   DesignCanvasProjection,
   DesignConversationEntry,
@@ -81,7 +81,23 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 26 as const;
+export interface DesignRepositoryInspection {
+  repository: Repository;
+  bases: WorktreeBaseOption[];
+}
+export interface DesignRepositorySetup {
+  state?: Pick<TaskDetailSnapshot,
+    'previewPlans' | 'previewApprovals' | 'previewGenerations' | 'previewGenerationAttachments' |
+    'previewManagedResources' | 'previewNodeAttempts' | 'previewComposeProjects' |
+    'previewLocalBindings' | 'previewResources' | 'previewTaskRoutes'>;
+
+  preview?: import('./preview').ResolvePreviewResult;
+  blocker?: string;
+  workspaceChanged?: boolean;
+  workspaceSnapshotId?: string;
+}
+
+export const TASK_STORE_SCHEMA_VERSION = 27 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -489,6 +505,8 @@ export interface Task {
   /** Historical source links for a copied Design. */
   sourceDesignId?: string;
   sourceDesignRevisionId?: string;
+  designPreviewTarget?: import('./design').DesignPreviewTarget;
+  acceptedWorkspaceSnapshotId?: string;
   agentSettings: AgentExecutionSettings;
   createdAt: string;
   updatedAt: string;
@@ -864,6 +882,7 @@ export interface TaskSnapshot {
 }
 
 export interface DesignDetailSnapshot {
+  repositorySetup?: DesignRepositorySetup;
   schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
   design: DesignListItem;
   task: Task;
@@ -1192,6 +1211,7 @@ export interface DeleteTaskRequest {
 export interface DeleteTaskResult {
   taskId: string;
   removedWorktree: boolean;
+  retainedWorktrees?: Array<{ path: string; branchName: string }>;
 }
 
 export interface ReadArtifactRequest {
@@ -1484,7 +1504,11 @@ export interface TaskManagerApi {
   listDesignConversation(
     input: import('./design').ListDesignConversationRequest
   ): Promise<import('./design').DesignConversationPage>;
-  createBlankDesign(input: CreateBlankDesignRequest): Promise<DesignDetailSnapshot>;
+  createDesign(input: CreateDesignRequest): Promise<DesignDetailSnapshot>;
+  inspectDesignRepository(input: import('./design').InspectDesignRepositoryRequest): Promise<DesignRepositoryInspection>;
+  updateDesignPreviewTarget(input: import('./design').UpdateDesignPreviewTargetRequest): Promise<DesignDetailSnapshot>;
+  startDesign(input: import('./design').StartDesignRequest): Promise<DesignDetailSnapshot>;
+
   submitDesignTurn(input: SubmitDesignTurnRequest): Promise<DesignDetailSnapshot>;
   addDesignReferences(
     input: import('./design').AddDesignReferencesRequest

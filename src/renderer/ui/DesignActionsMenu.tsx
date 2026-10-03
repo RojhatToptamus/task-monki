@@ -72,11 +72,11 @@ export function DesignReadyMenu({
       label={`Ready state ${ordinal} options`}
       compact
       items={[
-        {
+        ...(canRestore ? [{
           label: 'Restore this version',
-          disabled: isCurrent || !canRestore,
+          disabled: isCurrent,
           action: onRestore
-        },
+        }] : []),
         {
           label: 'Duplicate from here',
           disabled: !canDuplicate,

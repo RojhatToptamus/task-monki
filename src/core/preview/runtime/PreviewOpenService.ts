@@ -12,6 +12,8 @@ export interface ResolvedPreviewRoute {
   routeId: string;
   url: string;
   origin: string;
+  allowedOrigins?: string[];
+  networkLease?: import('../PreviewGateway').PreviewGatewayBrowserLease;
 }
 
 export class PreviewOpenService {

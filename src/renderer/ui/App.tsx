@@ -19,7 +19,7 @@ import {
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
-  type CreateBlankDesignRequest,
+  type CreateDesignRequest,
   type DeleteTaskResult,
   type DesignDetailSnapshot,
   type DesignDraftRecord,
@@ -791,10 +791,12 @@ export function App() {
       showLoading: false
     });
   }, [designs, loadDesign, refreshDesignList]);
-  const createBlankDesign = useCallback(
+  const createDesign = useCallback(
     async (
       input: Pick<
-        CreateBlankDesignRequest,
+        CreateDesignRequest,
+        | 'source'
+        | 'agentProfileId'
         | 'brief'
         | 'creationToken'
         | 'runtimeId'
@@ -806,7 +808,8 @@ export function App() {
     ) => {
       const brief = input.brief.trim();
       try {
-        const detail = await taskManagerApi.createBlankDesign({
+        const detail = await taskManagerApi.createDesign({
+          ...input,
           brief,
           creationToken: input.creationToken,
           runtimeId: input.runtimeId,
@@ -1163,9 +1166,9 @@ export function App() {
     [applyDesignActionDetail, notify, refreshDesignList]
   );
   const deleteDesign = useCallback(
-    async (designId: string) => {
+    async (designId: string, removeWorktree = false) => {
       try {
-        await taskManagerApi.deleteTask({ taskId: designId, removeWorktree: true });
+        const result = await taskManagerApi.deleteTask({ taskId: designId, removeWorktree });
         designListReadGenerationRef.current += 1;
         designReadGenerationRef.current += 1;
         const remainingDesigns = designs.filter(
@@ -1191,7 +1194,7 @@ export function App() {
             setDesignsError(undefined);
           }
         }
-        notify('Design deleted.', 'success');
+        notify(result.retainedWorktrees?.length ? `Design deleted. Workspace retained at ${result.retainedWorktrees.map((item) => item.path).join(', ')}.` : 'Design deleted.', 'success');
         void refreshDesignList();
       } catch (caught) {
         const message =
@@ -3271,6 +3274,9 @@ export function App() {
           </main>
         ) : view === 'designs' ? (
           <DesignsWorkspace
+            onUpdateProject={(detail) => applyDesignActionDetail(detail, false)}
+            repositories={snapshot.repositories}
+            onInspectRepository={(repositoryId) => taskManagerApi.inspectDesignRepository({ repositoryId })}
             agentProfiles={appSettings.agentProfiles}
             historyCollapsed={designHistoryCollapsed}
             onHistoryCollapsedChange={(collapsed) => {
@@ -3295,7 +3301,7 @@ export function App() {
             onSelectDesign={(designId) => {
               void loadDesign(designId, { select: true, showLoading: true });
             }}
-            onCreateBlankDesign={createBlankDesign}
+            onCreateDesign={createDesign}
             onSubmitRefinement={submitDesignRefinement}
             onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
             onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
