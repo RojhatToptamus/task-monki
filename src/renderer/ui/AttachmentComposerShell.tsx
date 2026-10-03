@@ -31,7 +31,7 @@ export function AttachmentComposerShell({
 }) {
   return (
     <div
-      className={`field__prompt-shell ${className} ${
+      className={`tm-composer field__prompt-shell ${className} ${
         attachments.isDragging ? 'field__prompt-shell--dragging' : ''
       }`.trim()}
       onDragEnter={bindDropTarget ? attachments.dragEnter : undefined}

@@ -425,14 +425,9 @@
 }
 
 .field__prompt-shell {
-  position: relative;
   display: flex;
-  box-shadow: inset 0 0 0 1px var(--field-edge);
   flex-direction: column;
   overflow: hidden;
-  border: 0;
-  border-radius: var(--r-md);
-  background: var(--field);
   transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 

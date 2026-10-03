@@ -19,6 +19,7 @@ import { DisclosureChevron } from './DisclosureChevron';
 interface CompletedChangeSummaryPanelProps {
   run?: RunRecord;
   capturePending?: boolean;
+  compact?: boolean;
   gitSnapshots: GitSnapshotRecord[];
   artifacts: ArtifactRecord[];
   onViewDiff(snapshotId: string): void;
@@ -43,6 +44,7 @@ type DiffArtifactLoadState =
 export function CompletedChangeSummaryPanel({
   run,
   capturePending = false,
+  compact = false,
   gitSnapshots,
   artifacts,
   onViewDiff
@@ -128,6 +130,7 @@ export function CompletedChangeSummaryPanel({
 
   return (
     <CompletedChangeSummaryCard
+      compact={compact}
       summary={summary}
       captureStatus={captureStatus}
       snapshot={snapshot}
@@ -139,6 +142,7 @@ export function CompletedChangeSummaryPanel({
 }
 
 export function CompletedChangeSummaryCard({
+  compact = false,
   summary,
   captureStatus,
   snapshot,
@@ -146,6 +150,7 @@ export function CompletedChangeSummaryCard({
   historical = false,
   onViewDiff
 }: {
+  compact?: boolean;
   summary?: CompletedChangeSummary;
   captureStatus: CaptureStatus;
   snapshot?: GitSnapshotRecord;
@@ -153,6 +158,24 @@ export function CompletedChangeSummaryCard({
   historical?: boolean;
   onViewDiff?(): void;
 }) {
+  if (compact) {
+    if (captureStatus === 'NO_CHANGES' || captureStatus === 'NOT_CAPTURED') return null;
+    if (!summary) return <CaptureStatusMessage status={captureStatus} incomplete={incomplete} />;
+    return <details className="tm-change-summary-inline">
+      <summary><DisclosureChevron /><FilePlus2 size={14} strokeWidth={1.5} aria-hidden="true" />
+        <span>{summary.fileCount} {plural(summary.fileCount, 'file')} changed</span>
+        <DiffStat additions={summary.additions} deletions={summary.deletions} />
+        <span className="tm-change-summary-inline__capture">{historical ? 'Historical capture' : 'Captured changes'}{incomplete ? ' · Incomplete' : ''}</span>
+      </summary>
+      <div className="tm-change-summary-inline__files">
+        {[...summary.previewFiles, ...summary.hiddenFiles].map((file) => <ChangeFileRow key={file.path} file={file} />)}
+      </div>
+      <div className="tm-change-summary-inline__footer">
+        {snapshot ? <time dateTime={snapshot.capturedAt}>{formatCaptureTime(snapshot.capturedAt)}</time> : null}
+        {onViewDiff ? <button className="ghost-button" onClick={onViewDiff}>View captured diff</button> : null}
+      </div>
+    </details>;
+  }
   const title =
     incomplete && summary
       ? `Incomplete captured diff · ${summary.fileCount} observed ${plural(summary.fileCount, 'file')}`

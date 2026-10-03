@@ -34,6 +34,7 @@ export interface OverviewActivityLeaf {
   detail?: string;
   detailKind?: OverviewActivityDetailKind;
   metric?: string;
+  execution?: RunActivityRow['execution'];
   tone: RunActivityTone;
   status: RunActivityStatus;
   at: string;
@@ -177,7 +178,8 @@ function copyRow(
     label: overrides.label,
     detail: overrides.detail,
     detailKind: overrides.detailKind,
-    metric: overrides.metric ?? row.metric,
+    metric: 'metric' in overrides ? overrides.metric : row.metric,
+    execution: row.execution,
     tone: row.tone,
     status: row.status,
     at: row.at,
@@ -239,7 +241,7 @@ function commandGroupRow(children: OverviewActivityLeaf[]): OverviewActivityRow 
     sourceItemIds: unique(children.flatMap((child) => child.sourceItemIds)),
     sourceInteractionIds: unique(children.flatMap((child) => child.sourceInteractionIds)),
     grouped: true,
-    defaultOpen: true,
+    defaultOpen: false,
     children
   };
 }
@@ -254,6 +256,7 @@ function commandDetail(row: RunActivityRow): string {
 }
 
 function durationCopy(metric: string | undefined): string | undefined {
+  if (metric && /^\d+\s*ms$/.test(metric) && Number.parseInt(metric, 10) < 1000) return undefined;
   const duration = readableDuration(metric);
   return duration ? `for ${duration}` : undefined;
 }

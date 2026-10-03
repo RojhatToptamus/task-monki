@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { makeAgentItemRecord, makeRunRecord } from '../../testSupport/rendererRecords';
 import {
   TASK_STORE_SCHEMA_VERSION,
   type AgentRuntimeCatalog,
@@ -7,6 +8,7 @@ import {
 } from '../../shared/contracts';
 import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import {
+  designActivityRows,
   designCanvasClientEvent,
   designCanvasPresentation,
   designProjectStatus,
@@ -27,6 +29,18 @@ import {
 } from './designs';
 
 describe('Design workspace view model', () => {
+  it('keeps conversation prose out of supporting tool activity', () => {
+    const run = makeRunRecord({ status: 'COMPLETED', finalMessage: 'Built the reading list.' });
+    const project = designProject({ currentRun: run, items: [
+      makeAgentItemRecord({ id: 'response', type: 'AGENT_MESSAGE', payload: { text: run.finalMessage } }),
+      makeAgentItemRecord({ id: 'tool', type: 'COMMAND_EXECUTION', status: 'COMPLETED', payload: { command: 'npm test', durationMs: 2000 } })
+    ] });
+    const rows = designActivityRows(project);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'command', detail: 'npm test' });
+    expect(project.items[0].payload).toEqual({ text: 'Built the reading list.' });
+  });
+
   it('accepts only scoped external-link canvas requests', () => {
     const event = canvasUpdateEvent({
       reason: 'external-link-requested',

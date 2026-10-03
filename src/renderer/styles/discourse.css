@@ -429,100 +429,6 @@
   display: grid;
 }
 
-.tm-discourse-menu {
-  position: relative;
-}
-
-.tm-discourse-menu__trigger {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  color: var(--muted);
-  letter-spacing: 1px;
-}
-
-.tm-discourse-menu__trigger:hover,
-.tm-discourse-menu__trigger[aria-expanded='true'] {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-discourse-menu__popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: var(--layer-menu);
-  width: 188px;
-  padding: 5px;
-  border: 1px solid var(--edge);
-  border-radius: 9px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-}
-
-.tm-discourse-menu__popover button {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 16px;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 31px;
-  padding: 0 8px;
-  border-radius: 6px;
-  text-align: left;
-  color: var(--text-soft);
-  font-size: 12px;
-}
-
-.tm-discourse-menu__copy {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
-}
-
-.tm-discourse-menu__popover button[aria-disabled='true'] {
-  color: var(--muted);
-  cursor: default;
-  opacity: 0.72;
-}
-
-.tm-discourse-menu__popover button[aria-disabled='true']:hover {
-  background: transparent;
-  color: var(--muted);
-}
-
-.tm-discourse-menu__popover button[aria-disabled='true']:active {
-  filter: none;
-}
-
-.tm-discourse-menu__disabled-reason {
-  margin: 4px 4px 0;
-  padding: 7px 4px 3px;
-  border-top: 1px solid var(--hair);
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.35;
-}
-
-.tm-discourse-menu__check {
-  display: grid;
-  width: 16px;
-  place-items: center;
-  color: var(--text-soft);
-}
-
-.tm-discourse-menu__popover button:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-discourse-menu .tm-discourse-menu__danger,
-.tm-discourse-message-menu .tm-discourse-menu__danger {
-  color: var(--blocked-ink);
-}
-
 .tm-discourse-transcript-shell {
   position: relative;
   min-width: 0;
@@ -673,8 +579,7 @@
   line-height: 1.5;
 }
 
-.tm-discourse-empty kbd,
-.tm-discourse-send kbd {
+.tm-discourse-empty kbd {
   font: 500 9px var(--font-mono);
 }
 
@@ -862,44 +767,6 @@
   letter-spacing: 0;
 }
 
-.tm-discourse-message-menu__popover {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 5px);
-  z-index: var(--layer-menu);
-  display: grid;
-  width: 190px;
-  padding: 5px;
-  border: 1px solid var(--edge);
-  border-radius: 9px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-}
-
-.tm-discourse-message-menu__popover--below {
-  top: calc(100% + 5px);
-  bottom: auto;
-}
-
-.tm-discourse-message-menu__popover button {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 16px;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 31px;
-  padding: 0 8px;
-  border-radius: 6px;
-  color: var(--text-soft);
-  font-size: 12.5px;
-  text-align: left;
-}
-
-.tm-discourse-message-menu__popover button:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
 .tm-discourse-new-responses {
   position: absolute;
   left: 50%;
@@ -1046,26 +913,7 @@
 }
 
 .tm-discourse-composer {
-  position: relative;
   padding: 8px 10px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--field);
-  box-shadow: inset 0 0 0 1px var(--field-edge);
-}
-
-.tm-discourse-composer:focus-within {
-  background: var(--field-focus);
-  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
-  outline: 0;
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-discourse-composer:focus-within {
-  background: var(--field-focus);
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
-  outline: 0;
 }
 
 .tm-discourse-composer-target {
@@ -1599,6 +1447,8 @@
   font-weight: 600;
 }
 
+.tm-discourse-send.tm-composer-action { padding: 0; }
+
 .tm-discourse-send:disabled {
   background: var(--primary-disabled);
   color: var(--text-disabled);
@@ -1945,8 +1795,7 @@
     width: 100%;
   }
 
-  .tm-discourse-mode-menu__trigger small,
-  .tm-discourse-send kbd {
+  .tm-discourse-mode-menu__trigger small {
     display: none;
   }
 
@@ -2033,12 +1882,6 @@
     width: 100%;
     padding-inline: 8px;
   }
-}
-
-.tm-discourse-message--user .tm-discourse-message__content {
-  padding: 10px 12px;
-  border-radius: var(--r);
-  background: var(--field);
 }
 
 .tm-discourse-message--peer .tm-discourse-message__content {

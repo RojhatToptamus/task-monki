@@ -67,6 +67,7 @@
     "verify:trusted-mac-release": "node scripts/verify-trusted-mac-release.mjs"
   },
   "dependencies": {
+    "@radix-ui/react-dropdown-menu": "^2.1.24",
     "electron-updater": "6.8.9",
     "lucide-react": "^1.25.0",
     "pg": "^8.22.0",

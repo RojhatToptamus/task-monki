@@ -66,7 +66,6 @@ import {
 } from '../model/selectors';
 import { describeHealthFinding } from '../model/debugDiagnostics';
 import { AgentSession, type AgentSessionProps } from './AgentSession';
-import { RunHeader } from './RunHeader';
 import { EvidencePanel } from './EvidencePanel';
 import { InteractionAuditPanel } from './InteractionAuditPanel';
 import { ProviderActivityPanel } from './ProviderActivityPanel';
@@ -121,7 +120,7 @@ import {
   projectDebugTaskActivity,
   projectOverviewTaskActivity
 } from '../model/taskActivity';
-import { selectProgressRun, canStopTaskRun } from '../model/runProgress';
+import { selectProgressRun } from '../model/runProgress';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { buildReviewActivityViewModel } from '../model/reviewActivity';
 import {
@@ -136,6 +135,7 @@ import {
 } from './ReviewPanel';
 import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
+import { conversationCaptureRunIds } from '../model/completedChangeSummary';
 import { describeGitSnapshot } from './gitSnapshotCopy';
 import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
@@ -313,6 +313,7 @@ export function TaskDetail(props: TaskDetailProps) {
     reviewRollup,
     mergeSnapshot
   } = props;
+  const captureRunIds = useMemo(() => conversationCaptureRunIds(props.runs, gitSnapshots), [props.runs, gitSnapshots]);
   const [tab, setTab] = useState<DetailTab>('overview');
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
@@ -986,7 +987,8 @@ export function TaskDetail(props: TaskDetailProps) {
   const detailHeadClassName = props.showMascot
     ? 'tm-detail__head tm-detail__head--with-mascot'
     : 'tm-detail__head';
-  const showPrStatus = shouldShowPrStatusOnOverview(prStatus);
+  const showPrStatus = shouldShowPrStatusOnOverview(prStatus) &&
+    !(implementationRetryRequired && prStatus.kind === 'NO_PR');
   const previewPanelProps = {
     task,
     worktree,
@@ -1065,8 +1067,7 @@ export function TaskDetail(props: TaskDetailProps) {
       </>
     }
               />);
-  return (
-    <main ref={detailRootRef} className="tm-detail" tabIndex={-1}>
+  const taskHeader = (
       <div
         className={detailHeadClassName}
         inert={taskDetailModalOpen ? true : undefined}
@@ -1159,10 +1160,10 @@ export function TaskDetail(props: TaskDetailProps) {
             placement="task"
           />
         ) : null}
-        {interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status)) || implementationRetryRequired ? (
+        {tab !== 'agent' && interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status)) ? (
           <button className="outline-button tm-agent-attention" onClick={() => {
             setTab('agent'); setAgentAttentionRequest((value) => value + 1);
-          }}>{interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status)) ? 'Agent needs your answer' : 'Agent needs attention'}</button>
+          }}>Agent needs your answer</button>
         ) : null}
         <div className="tm-tabs" role="tablist" aria-label="Task sections">
           <AccessibleTab
@@ -1206,6 +1207,11 @@ export function TaskDetail(props: TaskDetailProps) {
           />
         </div>
       </div>
+  );
+
+  return (
+    <main ref={detailRootRef} className={`tm-detail tm-detail--${tab}`} tabIndex={-1}>
+      {tab !== 'agent' ? taskHeader : null}
 
       <div
         id="task-detail-panel"
@@ -1222,37 +1228,19 @@ export function TaskDetail(props: TaskDetailProps) {
           <div className="tm-overview">
             {/* Action and recovery risks first, then the request and execution. */}
             <div className="tm-overview__col">
-              {runFailure ? (
-                <div className="tm-failure">
-                  <div className="tm-failure__head">
-                    <StatusGlyph kind="blocked" />
-                    <span className="tm-failure__eyebrow">
-                      {humanizeEnum(runFailure.status)}
-                    </span>
-                  </div>
-                  <h3 className="tm-panel__title tm-panel__title--failure">
-                    {runFailure.title}
-                  </h3>
-                  <p className="tm-panel__lead tm-panel__lead--flush">
-                    {runFailure.detail}
-                  </p>
-                </div>
-              ) : null}
-
-              {requestCard}
-
               <TaskWorkPanels>
                 <div className="tm-panel tm-agent-overview">
-                  <RunHeader running={Boolean(progressRun && canStopTaskRun(progressRun))} tone="neutral"
-                    operationName="Agent" scope={progressRun ? humanizeEnum(progressRun.status) : 'Not started'} startedAt={progressRun?.startedAt}
-                    onStop={progressRun && canStopTaskRun(progressRun) ? () => void props.onCancel(progressRun.id) : undefined}
-                    stopDisabled={reviewActionBusy || deliveryActionBusy} />
-                  <button className="outline-button" onClick={() => setTab('agent')}>Open Agent</button>
-                  {progressRun ? <CompletedChangeSummaryPanel run={progressRun}
+                  <button className="tm-agent-overview__link" onClick={() => setTab('agent')}>
+                    <span><strong>Agent conversation</strong><span>{props.runtimeState?.preflight.runtime.displayName ?? task.runtimeId}</span></span>
+                    <span className="tm-agent-overview__state">{implementationRetryRequired ? 'Needs retry' : progressRun ? humanizeEnum(progressRun.status) : 'Not started'}<span aria-hidden="true">→</span></span>
+                  </button>
+                  {runFailure ? <p className="tm-agent-overview__failure">{runFailure.detail}</p> : null}
+                  {progressRun ? <CompletedChangeSummaryPanel compact run={progressRun}
                     capturePending={props.postRunEvidencePendingRunIds?.includes(progressRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
                     onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
                 </div>
 
+                {requestCard}
                 {reviewPhaseVisible ? (
                   <ReviewPanel
                     reviewGate={reviewGate}
@@ -1324,7 +1312,7 @@ export function TaskDetail(props: TaskDetailProps) {
           </div>
         ) : null}
 
-        {tab === 'agent' ? <AgentSession key={task.id} task={task} run={run} runs={props.runs}
+        {tab === 'agent' ? <AgentSession key={task.id} header={taskHeader} task={task} run={run} runs={props.runs} worktreePath={worktree?.worktreePath}
           runtimeName={props.runtimeState?.preflight.runtime.displayName}
           sessions={sessions} items={props.items} plans={planRevisions} interactions={interactions}
           instructions={props.agentInstructions} requiresRecovery={implementationRetryRequired}
@@ -1338,9 +1326,9 @@ export function TaskDetail(props: TaskDetailProps) {
           attentionRequested={agentAttentionRequest} request={requestCard}
           preRunAction={primaryAction ? <button className="primary-button" disabled={primaryAction.disabled}
             onClick={primaryAction.onClick}>{primaryAction.label}</button> : null}
-          capture={(capturedRun) => <CompletedChangeSummaryPanel run={capturedRun}
+          capture={(capturedRun) => captureRunIds.has(capturedRun.id) ? <CompletedChangeSummaryPanel compact run={capturedRun}
             capturePending={props.postRunEvidencePendingRunIds?.includes(capturedRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
-            onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} />}
+            onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
         /> : null}
 
         {tab === 'preview' ? (

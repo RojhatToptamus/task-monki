@@ -83,6 +83,30 @@ export function selectCompletedRunChangeSnapshot(
   );
 }
 
+/** Read-only follow-ups must not appear to have produced the same files again. */
+export function conversationCaptureRunIds(
+  runs: RunRecord[],
+  snapshots: GitSnapshotRecord[]
+): Set<string> {
+  const visible = new Set<string>();
+  let previous: GitSnapshotRecord | undefined;
+  for (const run of [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))) {
+    const capture = selectCompletedRunChangeSnapshot(run, snapshots);
+    if (!capture) {
+      visible.add(run.id);
+      continue;
+    }
+    const unchanged = previous && capture.headSha && capture.dirtyFingerprint &&
+      capture.worktreeId === previous.worktreeId &&
+      capture.iterationId === previous.iterationId &&
+      capture.headSha === previous.headSha &&
+      capture.dirtyFingerprint === previous.dirtyFingerprint;
+    if (!unchanged) visible.add(run.id);
+    previous = capture;
+  }
+  return visible;
+}
+
 function plural(count: number, singular: string): string {
   return count === 1 ? singular : `${singular}s`;
 }

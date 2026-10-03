@@ -1193,12 +1193,10 @@ describe('mounted Design workspace', () => {
     const onDeleteDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(<DesignsWorkspace {...workspaceProps({ onDeleteDesign })} />);
 
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Design options for Quiet portfolio' })
-    );
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Design options for Quiet portfolio' }), { key: 'ArrowDown' });
     expect(
-      (screen.getByRole('menuitem', { name: 'Open in Finder' }) as HTMLButtonElement).disabled
-    ).toBe(true);
+      screen.getByRole('menuitem', { name: 'Open in Finder' }).getAttribute('aria-disabled')
+    ).toBe('true');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete…' }));
     expect(screen.getByRole('dialog', { name: /Delete “Quiet portfolio”/ })).toBeTruthy();
     const confirm = screen.getByRole('button', { name: 'Delete Design' });
@@ -1282,12 +1280,12 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Ready state 1 options' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Ready state 1 options' }), { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Restore this version' }));
     await waitFor(() =>
       expect(onRestoreRevision).toHaveBeenCalledWith('design-1', 'revision-1')
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Ready state 1 options' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Ready state 1 options' }), { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Duplicate from here' }));
     await waitFor(() =>
       expect(onDuplicateDesign).toHaveBeenCalledWith('design-1', 'revision-1')
@@ -1296,17 +1294,17 @@ describe('mounted Design workspace', () => {
     const projectMenu = screen.getByRole('button', {
       name: 'Design options for Quiet portfolio'
     });
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open in Finder' }));
     await waitFor(() =>
       expect(onOpenDesignLocation).toHaveBeenCalledWith('design-1', 'worktree-1')
     );
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Duplicate current' }));
     await waitFor(() =>
       expect(onDuplicateDesign).toHaveBeenCalledWith('design-1', 'revision-2')
     );
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
     const name = screen.getByRole('textbox', { name: 'Name' });
     fireEvent.change(name, { target: { value: 'Calm portfolio' } });
@@ -1314,7 +1312,7 @@ describe('mounted Design workspace', () => {
     await waitFor(() =>
       expect(onRenameDesign).toHaveBeenCalledWith('design-1', 'Calm portfolio')
     );
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }));
     await waitFor(() => expect(onArchiveDesign).toHaveBeenCalledWith('design-1'));
   });

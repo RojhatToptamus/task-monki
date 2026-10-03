@@ -7,7 +7,7 @@ import {
   useRef,
   useState
 } from 'react';
-import { X } from 'lucide-react';
+import { ArrowUp, Check, Square, X } from 'lucide-react';
 import type {
   ConversationContextReferenceSnapshot,
   DiscourseConversationAggregateRecord,
@@ -60,7 +60,7 @@ import {
   deriveDiscourseConversationTitle,
   discoursePendingConversationFingerprint
 } from '../model/discourseSend';
-import { DiscourseActionMenu } from './DiscourseActionMenu';
+import { ActionMenu } from './ActionMenu';
 import { DiscourseAgentSettings } from './DiscourseAgentSettings';
 import { DiscourseConversationRail } from './DiscourseConversationRail';
 import { DiscourseMessage } from './DiscourseMessage';
@@ -1886,8 +1886,8 @@ export function DiscourseWorkspace({
               <DiscoursePanelRightIcon expanded={inspectorOpen} />
             </button>
             {aggregate ? (
-              <DiscourseActionMenu
-                className="tm-discourse-menu"
+              <ActionMenu
+                className="tm-action-menu"
                 label="Conversation actions"
                 trigger={<DiscourseMoreIcon />}
                 items={[
@@ -2111,7 +2111,7 @@ export function DiscourseWorkspace({
           {correctionTarget ? (
             <ComposerTarget label="Correcting your earlier message" message={correctionTarget} onRemove={() => setCorrectionTargetId(undefined)} />
           ) : null}
-          <div className="tm-discourse-composer">
+          <div className="tm-composer tm-discourse-composer">
             <DiscourseMentionInput
               key={`${selectedConversationId ?? 'new'}:${composerVersion}`}
               candidates={candidates}
@@ -2178,13 +2178,14 @@ export function DiscourseWorkspace({
                 ) : null}
                 <button
                   type="button"
-                  className={`tm-discourse-send ${activeWave ? 'tm-discourse-send--stop' : ''}`}
+                  className={`tm-discourse-send tm-composer-action ${activeWave ? 'tm-discourse-send--stop' : ''}`}
                   disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                  aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
+                  title={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Save note · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}
                   aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send()}
                 >
-                  {activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
-                  {!activeWave ? <kbd>⌘↵</kbd> : null}
+                  {sending || (activeWave && ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status)) ? <StatusGlyph kind="working" /> : activeWave ? <Square size={14} strokeWidth={1.5} aria-hidden="true" /> : responsePolicy === 'NONE' ? <Check size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
                 </button>
               </div>
             </div>
@@ -2247,7 +2248,7 @@ export function DiscourseWorkspace({
                 ))}
               </ul>
             )}
-            {aggregate && catalog?.repositories.length ? <div className="tm-discourse-pin-menu"><DiscourseActionMenu
+            {aggregate && catalog?.repositories.length ? <div className="tm-discourse-pin-menu"><ActionMenu
               className="tm-discourse-message-menu"
               label="Pin a repository"
               trigger={<><PinIcon />Pin a repository</>}

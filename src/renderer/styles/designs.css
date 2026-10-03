@@ -406,18 +406,6 @@
   text-align: center;
 }
 
-.tm-design-project-menu .tm-taskmenu__trigger {
-  width: 29px;
-  height: 29px;
-  border: 0;
-  background: var(--field);
-  color: var(--muted);
-}
-
-.tm-design-project-menu .tm-taskmenu__menu {
-  min-width: 176px;
-}
-
 .tm-designs-split {
   min-width: 0;
   min-height: 0;
@@ -535,15 +523,6 @@
   gap: 4px;
 }
 
-.tm-design-ready-menu .tm-taskmenu__trigger {
-  width: 28px;
-  height: 28px;
-}
-
-.tm-design-ready-menu .tm-taskmenu__menu {
-  min-width: 178px;
-}
-
 .tm-design-conversation__origin {
   margin: 0 0 16px;
   padding: 8px 10px;
@@ -555,34 +534,11 @@
 }
 
 .tm-design-message--user {
-  width: min(90%, 520px);
+  width: min(90%, 720px);
   margin-left: auto;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 11px 11px 3px 11px;
-  background: var(--field);
 }
-
-.tm-design-message--user p {
-  margin: 0;
-  color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-
-.tm-design-message--user footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 7px;
-}
-
-.tm-design-message--user footer time {
-  margin-left: auto;
-  color: var(--muted);
-  font: 9px var(--font-mono);
-}
+.tm-design-message--user footer { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.tm-design-message--user footer time { margin-left: auto; color: var(--muted); font: var(--t-meta) var(--font-mono); }
 
 .tm-design-message__references {
   display: block;
@@ -618,8 +574,8 @@
 
 .tm-design-message--agent .tm-message-markdown {
   color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: var(--t-body);
+  line-height: 1.62;
 }
 
 .tm-design-message__pending,
@@ -737,37 +693,20 @@
   color: var(--placeholder);
 }
 
-.tm-design-composer__footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 8px;
+.tm-design-composer .field__prompt-toolbar > button {
+  flex-shrink: 0;
+  height: var(--h-toolbar);
+  padding: 0 10px;
+  font-size: var(--t-help);
 }
 
-.tm-design-composer__footer > span {
-  margin-right: auto;
-  color: var(--muted);
-  font-size: 9.5px;
-}
-
-.tm-design-composer__footer .primary-button,
-.tm-design-composer__footer .outline-button {
-  min-height: 30px;
-  padding: 0 12px;
-  font-size: 11px;
-}
-
-.tm-design-composer__footer .primary-button {
+.tm-design-composer .primary-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-.tm-design-composer__footer .primary-button svg {
-  width: 12px;
-  height: 12px;
-}
+.tm-design-composer .primary-button svg { width: 14px; height: 14px; }
 
 .tm-design-composer__error,
 .tm-design-create__error,

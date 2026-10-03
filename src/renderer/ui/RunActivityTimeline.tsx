@@ -18,31 +18,36 @@ interface RunActivityTimelineProps {
   outputSummary?: string;
   onShowDebug?: () => void;
   live?: boolean;
+  compact?: boolean;
 }
 
 export function RunActivityTimeline({
   rows,
   outputSummary,
   onShowDebug,
-  live = true
+  live = true,
+  compact = false
 }: RunActivityTimelineProps) {
   if (rows.length === 0) {
     return null;
   }
   return (
     <section
-      className={`tm-run-activity ${live ? 'tm-run-activity--live' : ''}`}
+      className={`tm-run-activity ${live ? 'tm-run-activity--live' : ''} ${compact ? 'tm-run-activity--compact' : ''}`}
       aria-label="Agent activity"
     >
-      <div className="tm-run-activity__head">
+      {!compact ? <div className="tm-run-activity__head">
         <span>{live ? 'Activity' : 'Recent activity'}</span>
         {live ? <span>following tail</span> : null}
-      </div>
-      <div className="tm-run-activity__list">
-        {rows.map((row) => (
-          <ActivityRow key={row.key} row={row} />
-        ))}
-      </div>
+      </div> : null}
+      {compact && rows.length > 1 ? <details className="tm-run-activity__group">
+        <summary><DisclosureChevron /><Wrench size={14} strokeWidth={1.5} aria-hidden="true" />
+          <span>{rows.length} operations</span>
+          {rows.some((row) => row.status === 'active') ? <span className="tm-run-activity__state">{rows.filter((row) => row.status === 'active').length} running</span>
+            : rows.some((row) => row.status === 'failed') ? <span className="tm-run-activity__state">{rows.filter((row) => row.status === 'failed').length} unsuccessful</span> : null}
+        </summary>
+        <div className="tm-run-activity__list">{rows.map((row) => <ActivityRow key={row.key} row={row} compact />)}</div>
+      </details> : <div className="tm-run-activity__list">{rows.map((row) => <ActivityRow key={row.key} row={row} compact={compact} />)}</div>}
       {outputSummary ? (
         <button
           type="button"
@@ -58,15 +63,33 @@ export function RunActivityTimeline({
   );
 }
 
-function ActivityRow({ row }: { row: OverviewActivityRow }) {
+function ActivityRow({ row, compact }: { row: OverviewActivityRow; compact: boolean }) {
   const expandable = row.grouped && row.children && row.children.length > 0;
   const [open, setOpen] = useState(Boolean(row.defaultOpen));
   const className = [
     'tm-run-activity__row',
     `tm-run-activity__row--${row.kind}`,
     row.status === 'active' ? 'tm-run-activity__row--active' : '',
-    row.status === 'failed' ? 'tm-run-activity__row--failed' : ''
+    row.status === 'failed' && row.tone === 'error' ? 'tm-run-activity__row--failed' : ''
   ].filter(Boolean).join(' ');
+
+  if (compact && !expandable && (row.execution || row.kind === 'command')) {
+    const label = row.status === 'failed' ? row.label === 'Stopped' ? 'Stopped' : row.label === 'Unfinished' ? 'Unfinished' : 'Failed'
+      : row.status === 'active' ? 'Running' : 'Ran';
+    const hasDetails = Boolean(row.execution?.command || row.execution?.output || row.execution?.error);
+    const heading = <><ActivityIcon icon={row.icon} /><span className="tm-run-activity__copy"><span>{label}</span>
+      {row.detail ? <span className="tm-run-activity__detail" title={row.detail}>{row.detail}</span> : null}</span>
+      </>;
+    if (!hasDetails) return <div className={className}>{heading}</div>;
+    return <details className={className}>
+      <summary className="tm-run-activity__summary">{heading}<DisclosureChevron /></summary>
+      <div className="tm-run-activity__execution">
+        {row.execution?.command ? <pre>{row.execution.command}</pre> : null}
+        {row.execution?.error ? <p className="tm-run-activity__error">{row.execution.error}</p> : null}
+        {row.execution?.output ? <pre className="tm-run-activity__output-text">{row.execution.output}</pre> : null}
+      </div>
+    </details>;
+  }
 
   if (expandable) {
     return (
@@ -116,7 +139,7 @@ function ActivityCopy({
   return (
     <span className={`tm-run-activity__copy ${child ? 'tm-run-activity__copy--child' : ''}`}>
       <span className="tm-run-activity__label">{row.label}</span>
-      {row.detail ? <span className={detailClass}>{row.detail}</span> : null}
+      {row.detail ? <span className={detailClass} title={row.detail}>{row.detail}</span> : null}
       {row.metric ? <span className="tm-run-activity__metric">{row.metric}</span> : null}
     </span>
   );

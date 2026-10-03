@@ -15,7 +15,7 @@ export interface PlanListStep {
  * stopped ("stopped here"). Kept separate from status so the plan model stays the
  * provider's plan while the card supplies run-outcome context.
  */
-export type PlanStepMarker = 'failed' | 'stopped';
+export type PlanStepMarker = 'failed' | 'stopped' | 'unfinished';
 
 export interface PlanListMarker {
   /** Index of the step the marker sits on. */
@@ -81,6 +81,7 @@ function planStepAriaLabel(step: PlanListStep, marker?: PlanStepMarker): string 
 }
 
 function planStepStatusLabel(step: PlanListStep, marker?: PlanStepMarker): string {
+  if (marker === 'unfinished') return 'Unfinished';
   if (marker === 'failed') {
     return 'Failed';
   }

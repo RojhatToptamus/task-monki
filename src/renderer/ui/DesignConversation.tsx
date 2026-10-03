@@ -17,6 +17,7 @@ import {
   formatDesignUpdatedAt,
   type DesignProjectDetail
 } from '../model/designs';
+import { MessageContent } from './MessageContent';
 import { MessageMarkdown } from './MessageMarkdown';
 import { MessageHeader } from './MessageHeader';
 import { InteractionPanel } from './InteractionPanel';
@@ -28,7 +29,8 @@ import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
-import { UiArrowRightIcon } from './UiIcons';
+import { ArrowUp, CornerDownRight, RotateCcw, Square } from 'lucide-react';
+import { StatusGlyph } from './StatusBadge';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
@@ -366,7 +368,7 @@ export function DesignConversation({
         )}
 
         {activityRows.length > 0 ? (
-          <RunActivityTimeline rows={activityRows} />
+          <RunActivityTimeline rows={activityRows} live={false} compact />
         ) : null}
 
         {detailedActivityRows.length > 0 ? (
@@ -399,7 +401,37 @@ export function DesignConversation({
           addButtonTitle="Add read-only references to this Design message."
           addButtonLabel="Reference"
           onAddButtonClick={onOpenReferences}
-          hint={
+          toolbarAction={
+            <>
+              {project.actions.canStop && project.actions.stopTurnId ? (
+                <button
+                  type="button"
+                  className="ghost-button tm-composer-action"
+                  aria-label={stopping ? 'Stopping' : 'Stop'} title="Stop response"
+                  disabled={stopping}
+                  onClick={() => {
+                    setStopping(true);
+                    setError(undefined);
+                    void onStop(project.actions.stopTurnId!)
+                      .catch((caught) => {
+                        setError(caught instanceof Error ? caught.message : 'Could not stop work.');
+                      })
+                      .finally(() => setStopping(false));
+                  }}
+                >
+                  {stopping ? <StatusGlyph kind="working" /> : <Square size={14} strokeWidth={1.5} aria-hidden="true" />}
+                </button>
+              ) : null}
+              {activeWork ? <span className="tm-agent-session__hint">After response</span> : null}
+              <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
+                aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
+                title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
+                {submitting ? <StatusGlyph kind="working" /> : submissionOutcomeUnknown ? <RotateCcw size={16} strokeWidth={1.5} aria-hidden="true" />
+                  : activeWork ? <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
+              </button>
+            </>
+          }
+          hint={<span id="design-refinement-help">{
             attachments.isRestoringDraft
               ? 'Loading draft files…'
               : attachments.isReadingClipboardImage
@@ -408,8 +440,8 @@ export function DesignConversation({
                   ? `${attachments.activeItems.length} ${
                       attachments.activeItems.length === 1 ? 'new file' : 'new files'
                     } · ${formatAttachmentBytes(attachments.byteCount)}`
-                  : 'Paste or drop files'
-          }
+                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : project.actions.queuedTurnCount > 0 ? `${project.actions.queuedTurnCount} queued` : '⌘ Enter')
+          }</span>}
         >
           <label className="tm-visually-hidden" htmlFor="design-refinement-message">
             Refine this Design
@@ -458,48 +490,6 @@ export function DesignConversation({
             {attachments.overflowError ?? attachments.modelError}
           </p>
         ) : null}
-        <div className="tm-design-composer__footer">
-          <span id="design-refinement-help">
-            {disabledReason ??
-              (draftStatus === 'saving'
-                ? 'Saving draft…'
-                : draftStatus === 'saved'
-                  ? 'Draft saved'
-                  : draftStatus === 'error'
-                    ? 'Draft not saved'
-                    : project.actions.queuedTurnCount > 0
-                      ? `${project.actions.queuedTurnCount} queued`
-                      : 'Press ⌘ Enter to send')}
-          </span>
-          {project.actions.canStop && project.actions.stopTurnId ? (
-            <button
-              type="button"
-              className="outline-button"
-              disabled={stopping}
-              onClick={() => {
-                setStopping(true);
-                setError(undefined);
-                void onStop(project.actions.stopTurnId!)
-                  .catch((caught) => {
-                    setError(caught instanceof Error ? caught.message : 'Could not stop work.');
-                  })
-                  .finally(() => setStopping(false));
-              }}
-            >
-              {stopping ? 'Stopping…' : 'Stop'}
-            </button>
-          ) : null}
-          <button type="submit" className="primary-button" disabled={!canSubmit}>
-            {submitting
-              ? 'Sending…'
-              : submissionOutcomeUnknown
-                ? 'Retry'
-                : activeWork
-                  ? 'Queue'
-                  : 'Send'}
-            <UiArrowRightIcon />
-          </button>
-        </div>
         {error ? <p className="tm-design-composer__error" role="alert">{error}</p> : null}
       </form>
     </section>
@@ -526,7 +516,7 @@ function DesignTurnMessages({
   const view = designTurnView(entry);
   return (
     <article className="tm-design-turn">
-      <div className="tm-design-message tm-design-message--user">
+      <MessageContent user className="tm-design-message tm-design-message--user">
         <p>{entry.userMessage}</p>
         <footer>
           {references.length > 0 ? (
@@ -538,7 +528,7 @@ function DesignTurnMessages({
             {formatDesignUpdatedAt(entry.turn.createdAt)}
           </time>
         </footer>
-      </div>
+      </MessageContent>
 
       <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
         <MessageHeader author="Design agent">

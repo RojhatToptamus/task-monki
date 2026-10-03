@@ -10,6 +10,9 @@
   flex-direction: column;
 }
 
+.tm-detail--overview, .tm-detail--evidence, .tm-detail--debug { overflow-y: auto; }
+.tm-detail--overview > .tm-detail__body, .tm-detail--evidence > .tm-detail__body, .tm-detail--debug > .tm-detail__body { flex: 0 0 auto; overflow: visible; }
+
 .tm-detail__head {
   position: relative;
   flex: 0 0 auto;
@@ -60,7 +63,7 @@
 .tm-detail__title {
   min-width: 0;
   margin: 0;
-  font-size: 22px;
+  font-size: var(--t-heading);
   font-weight: 600;
   letter-spacing: -0.02em;
   line-height: 1.18;
@@ -3495,50 +3498,6 @@
   white-space: pre-wrap;
 }
 
-/* failure card */
-.tm-failure {
-  border: 1px solid var(--edge-raised);
-  border-radius: 13px;
-  background: var(--card);
-  padding: 18px;
-  box-shadow: var(--shadow-card);
-}
-
-.tm-failure__head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 10px;
-}
-
-.tm-failure__eyebrow {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.tm-panel__title--failure {
-  margin: 0 0 7px;
-}
-
-.tm-panel__lead--flush {
-  margin: 0;
-}
-
-.tm-failure pre {
-  margin: 0;
-  padding: 11px;
-  border-radius: 8px;
-  background: var(--well);
-  color: var(--text-soft);
-  font: 11px/1.5 var(--font-mono);
-  overflow: auto;
-  white-space: pre-wrap;
-  max-height: 180px;
-}
-
 /* One run header for any async operation: state · name · scope · elapsed · Stop. */
 .tm-runheader {
   display: flex;
@@ -3865,7 +3824,6 @@
   padding: 6px 8px;
 }
 
-.tm-run-activity__row:not(details):hover,
 .tm-run-activity__summary:hover {
   background: var(--hover);
 }
@@ -5608,3 +5566,33 @@
   }
 
 }
+
+/* Supporting activity inside a conversation does not own a second section header. */
+.tm-run-activity--compact { margin: 0; padding: 0; border: 0; }
+.tm-run-activity--compact .tm-run-activity__list { gap: 0; }
+.tm-run-activity--compact .tm-run-activity__row { padding: 0; }
+.tm-run-activity--compact .tm-run-activity__summary,
+.tm-run-activity--compact .tm-run-activity__row:not(details) { min-height: var(--h-toolbar); padding: 4px 0; font-size: var(--t-help); gap: 8px; }
+.tm-run-activity--compact .tm-run-activity__metric { display: none; }
+.tm-run-activity__execution { margin: 4px 0 8px 22px; padding: 8px 12px; max-height: 240px; overflow: auto; background: var(--well); border-radius: var(--r-sm); color: var(--text-soft); }
+.tm-run-activity__execution pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--t-help)/1.5 var(--font-mono); }
+.tm-run-activity__execution > * + * { margin-top: 8px; }
+.tm-run-activity__error { color: var(--blocked-ink); font-size: var(--t-help); }
+.tm-run-activity__output-text { color: var(--muted); }
+.tm-run-activity__group > summary { display: flex; align-items: center; gap: 8px; min-height: var(--h-toolbar); color: var(--muted); font-size: var(--t-help); cursor: pointer; }
+.tm-run-activity__group > .tm-run-activity__list { margin-left: 20px; }
+.tm-run-activity__state { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-meta); }
+.tm-run-activity--compact .tm-run-activity__summary { margin: 0; }
+.tm-run-activity--compact .tm-run-activity__copy { flex: 0 1 auto; }
+.tm-run-activity--compact .tm-run-activity__detail { max-width: 65ch; }
+
+.tm-run-activity--compact .tm-run-activity__summary { display: flex; justify-content: flex-start; }
+.tm-run-activity--compact .tm-run-activity__summary > .tm-disclosure__chevron { flex: 0 0 auto; }
+
+/* A captured file set supports the response without becoming a second card. */
+.tm-change-summary-inline { min-width: 0; font-size: var(--t-help); }
+.tm-change-summary-inline > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: var(--h-toolbar); cursor: pointer; color: var(--text-soft); }
+.tm-change-summary-inline__capture { color: var(--muted); font-size: var(--t-meta); }
+.tm-change-summary-inline__files { margin: 4px 0 4px 20px; max-height: 220px; overflow: auto; }
+.tm-change-summary-inline__footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--muted); font-size: var(--t-meta); padding-left: 20px; }
+.tm-change-summary-inline__footer button { height: var(--h-toolbar); font-size: var(--t-help); }

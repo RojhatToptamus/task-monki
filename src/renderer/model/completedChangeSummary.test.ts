@@ -3,11 +3,23 @@ import type { AgentItemRecord, GitSnapshotRecord, RunRecord } from '../../shared
 import type { DiffFile } from './diffEvidence';
 import {
   buildCompletedChangeSummary,
+  conversationCaptureRunIds,
   hasNewerGitEvidence,
   selectCompletedRunChangeSnapshot
 } from './completedChangeSummary';
 
 describe('completed change summary model', () => {
+  it('does not repeat unchanged captures after read-only follow-ups and retains later file changes', () => {
+    const snapshots = [gitSnapshotFixture({ id: 'first', headSha: 'known-head', dirtyFingerprint: 'files-v1' }),
+      gitSnapshotFixture({ id: 'same', headSha: 'known-head', dirtyFingerprint: 'files-v1', diffArtifactId: 'another-artifact' }),
+      gitSnapshotFixture({ id: 'changed', headSha: 'known-head', dirtyFingerprint: 'files-v2' })];
+    const runs = snapshots.map((snapshot, index) => runFixture({ id: `run-${index}`, afterGitSnapshotId: snapshot.id, startedAt: `2026-07-07T10:0${index}:00Z` }));
+    expect([...conversationCaptureRunIds(runs, snapshots)]).toEqual(['run-0', 'run-2']);
+    expect(selectCompletedRunChangeSnapshot(runs[1], snapshots)?.id).toBe('same');
+    expect([...conversationCaptureRunIds(runs, snapshots.map((snapshot) => ({ ...snapshot, headSha: undefined })))])
+      .toEqual(['run-0', 'run-1', 'run-2']);
+  });
+
   it('builds compact totals and a bounded file preview from parsed diff evidence', () => {
     const summary = buildCompletedChangeSummary([
       diffFile({ path: 'src/core/app/TaskManagerService.progress.integration.test.ts', additions: 6, deletions: 6 }),

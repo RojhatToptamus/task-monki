@@ -5,7 +5,7 @@ import type {
   DiscourseMessageRecord
 } from '../../shared/discourse';
 import { messageAuthorLabel } from '../model/discourse';
-import { DiscourseActionMenu } from './DiscourseActionMenu';
+import { ActionMenu } from './ActionMenu';
 import {
   DiscourseCheckIcon,
   DiscourseCopyIcon,
@@ -17,6 +17,7 @@ import {
 } from './DiscourseIcons';
 import { MessageMarkdown } from './MessageMarkdown';
 import { DiscourseHistoryContent } from './DiscourseHistoryContent';
+import { MessageContent } from './MessageContent';
 import { MessageHeader } from './MessageHeader';
 import { messageModelName } from '../model/messageIdentity';
 import type { AgentModel } from '../../shared/contracts';
@@ -110,7 +111,7 @@ export function DiscourseMessage({
             {!user && message.author.kind === 'AGENT' && message.status === 'VISIBLE' ? (
               <button type="button" className="tm-discourse-message-action tm-discourse-message-peer" onClick={onAskOthers}>Ask {peerName}</button>
             ) : null}
-            <DiscourseActionMenu
+            <ActionMenu
               className="tm-discourse-message-menu"
               label={`More actions for ${authorName}`}
               trigger={<DiscourseMoreIcon />}
@@ -181,7 +182,7 @@ export function DiscourseMessage({
           </p>
         ) : null}
         {comparisonOutdated ? <p className="tm-discourse-message__updated-note">Updated below</p> : null}
-        <div className="tm-discourse-message__content">{message.status === 'TOMBSTONE' ? (
+        <MessageContent user={user} className="tm-discourse-message__content">{message.status === 'TOMBSTONE' ? (
           <p className="tm-discourse-message__tombstone">Message deleted</p>
         ) : team ? (
           <DiscourseHistoryContent result={team} sources={sourceMessages} onNavigate={onNavigate}
@@ -190,7 +191,7 @@ export function DiscourseMessage({
           <MessageMarkdown text={message.body} />
         ) : (
           <p className="tm-discourse-message__body">{message.body}</p>
-        )}</div>
+        )}</MessageContent>
         </>}
         {context.length > 0 ? (
           <div className="tm-discourse-message__context" aria-label="Message context">

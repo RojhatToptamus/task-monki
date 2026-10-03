@@ -34,7 +34,8 @@ describe('imported task actions', () => {
     props.gitSnapshots = [captured];
     props.artifacts = [{ id: 'diff-captured', taskId: 'task-1', kind: 'diff', path: '/tmp/captured.diff', byteCount: 120, createdAt: TEST_NOW, updatedAt: TEST_NOW }];
     const view = render(<TaskDetail {...props} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'View diff' }));
+    fireEvent.click(await screen.findByText('1 file changed'));
+    fireEvent.click(screen.getByRole('button', { name: 'View captured diff' }));
     expect(screen.getByText('Historical Git capture')).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Change comparison' })).toBeNull();
 

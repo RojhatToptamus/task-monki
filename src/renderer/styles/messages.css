@@ -91,3 +91,7 @@
 .tm-message-header__status[data-tone='working'] { color: var(--accent-ink); }
 .tm-message-header__status[data-tone='waiting'] { color: var(--waiting-ink); }
 .tm-message-header__status[data-tone='blocked'] { color: var(--blocked-ink); }
+
+.tm-message-content { min-width: 0; overflow-wrap: anywhere; color: var(--text-soft); font-size: var(--t-body); line-height: 1.62; }
+.tm-message-content--user { padding: 12px 16px; border-radius: var(--r-md); background: var(--field); }
+.tm-message-content > p { margin: 0; white-space: pre-wrap; }

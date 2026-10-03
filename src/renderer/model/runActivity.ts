@@ -32,6 +32,7 @@ export interface RunActivityLeaf {
   label: string;
   detail?: string;
   metric?: string;
+  execution?: { command?: string; output?: string; error?: string };
   tone: RunActivityTone;
   status: RunActivityStatus;
   at: string;
@@ -76,6 +77,7 @@ export function buildRunActivityProjection(input: {
   items: AgentItemRecord[];
   interactions?: InteractionRequestRecord[];
   groupContext?: boolean;
+  cwd?: string;
 }): RunActivityProjection {
   const runItems = input.items.filter((item) => item.runId === input.run.id);
   const runInteractions = (input.interactions ?? []).filter(
@@ -83,7 +85,7 @@ export function buildRunActivityProjection(input: {
   );
   let order = 0;
   const itemRows = runItems.flatMap((item) =>
-    activityRowsFromItem(item).map((candidate) => ({ ...candidate, order: order++ }))
+    activityRowsFromItem(item, input.cwd).map((candidate) => ({ ...candidate, order: order++ }))
   );
   const requestRows = runInteractions.map((interaction) => ({
     ...activityRowFromInteraction(interaction),
@@ -153,7 +155,7 @@ function stripCandidateOrder(candidate: ActivityCandidate): RunActivityRow {
   return row;
 }
 
-function activityRowsFromItem(item: AgentItemRecord): RunActivityLeaf[] {
+function activityRowsFromItem(item: AgentItemRecord, cwd?: string): RunActivityLeaf[] {
   const payload = objectPayload(item.payload);
   const at = item.providerCompletedAt ?? item.providerStartedAt ?? item.updatedAt ?? item.createdAt;
   switch (item.type) {
@@ -174,10 +176,23 @@ function activityRowsFromItem(item: AgentItemRecord): RunActivityLeaf[] {
           ]
         : [];
     }
-    case 'COMMAND_EXECUTION':
-      return commandActivityRows(item, payload, at);
+    case 'COMMAND_EXECUTION': {
+      // Stored tool records expose inputs either directly or in their tool state.
+      // Read display data without changing the provider record or workflow truth.
+      const state = objectPayload(payload.state);
+      const input = objectPayload(state.input ?? payload.rawInput);
+      const command = stringValue(payload.command) ?? stringValue(input.command);
+      const output = stringValue(payload.aggregatedOutput) ?? stringValue(state.output);
+      const error = stringValue(state.error) ?? stringValue(payload.error);
+      return commandActivityRows(item, { ...payload, command }, at).map((row) => ({ ...row,
+        execution: {
+          command: command ? unwrapShellCommand(command).slice(0, 4000) : undefined,
+          output: output?.slice(-6000), error: error?.slice(0, 2000)
+        }
+      }));
+    }
     case 'FILE_CHANGE':
-      return fileChangeActivityRows(item, payload, at);
+      return fileChangeActivityRows(item, payload, at, cwd);
     case 'MCP_TOOL_CALL':
       return [
         rowFromItem(item, {
@@ -425,7 +440,7 @@ function commandFallbackActivityRow(
       suffix: `command:read-context:${status}`
     });
   }
-  if (active || failed) {
+  if (active || failed || command) {
     return rowFromItem(item, {
       category: failed ? 'error' : 'bash',
       label: 'Bash',
@@ -434,7 +449,7 @@ function commandFallbackActivityRow(
       tone: activityToneForStatus(status, false),
       status,
       at,
-      suffix: `command:generic:${status}`
+      suffix: 'command:generic'
     });
   }
   return undefined;
@@ -443,10 +458,19 @@ function commandFallbackActivityRow(
 function fileChangeActivityRows(
   item: AgentItemRecord,
   payload: Record<string, unknown>,
-  at: string
+  at: string,
+  cwd?: string
 ): RunActivityLeaf[] {
   const status = activityStatusForItem(item.status);
   const changes = Array.isArray(payload.changes) ? payload.changes : [];
+  if (changes.length === 0 && compactToolName(payload)) {
+    // Some providers classify non-file tools as edits. Without file evidence,
+    // retain the tool identity rather than claiming that files were patched.
+    const toolError = stringValue(objectPayload(payload.state).error);
+    return [{ ...rowFromItem(item, { category: 'mcp', label: 'Tool', detail: compactToolName(payload),
+      tone: activityToneForStatus(status, false), status, at, suffix: 'file-change-tool' }),
+      ...(toolError ? { execution: { error: toolError.slice(0, 2000) } } : {}) }];
+  }
   if (changes.length === 0) {
     return [
       rowFromItem(item, {
@@ -463,7 +487,7 @@ function fileChangeActivityRows(
   return changes.map((change, index) => {
     const value = objectPayload(change);
     const kind = fileChangeKind(value);
-    const path = shortPath(stringValue(value.path)) ?? 'file';
+    const path = shortPath(stringValue(value.path), cwd) ?? 'file';
     const label = fileChangeLabel(kind);
     return rowFromItem(item, {
       category: fileChangeCategory(kind),
@@ -722,11 +746,11 @@ function compactCommandLabel(command: string): string {
 
 function unwrapShellCommand(command: string): string {
   const normalized = normalizeLabel(command);
-  const quoted = /^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(['"])([\s\S]*)\1$/.exec(normalized);
+  const quoted = /^(?:\/bin\/)?(?:zsh|bash|sh)\s+-(?:lc|c)\s+(['"])([\s\S]*)\1$/.exec(normalized);
   if (quoted) {
     return quoted[2].replace(/\\(["'])/g, '$1');
   }
-  const unquoted = /^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(.+)$/.exec(normalized);
+  const unquoted = /^(?:\/bin\/)?(?:zsh|bash|sh)\s+-(?:lc|c)\s+(.+)$/.exec(normalized);
   return unquoted ? unquoted[1] : normalized;
 }
 
