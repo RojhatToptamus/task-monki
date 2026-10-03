@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -2997,6 +2997,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     operation: string,
     update: Partial<Pick<AgentSessionRecord, 'status' | 'materialized'>> = {}
   ): Promise<AgentSessionRecord> {
+    // Each inspection observes mutable settings, even within the same native session.
     try {
       return await this.taskRuntime.updateAgentSession(session.id, {
         ...update,
@@ -3004,7 +3005,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         observedSettings: this.safeObservedSettings(
           settingsFromSession(providerSession, settings)
         )
-      }, runtimeOperationId('session/permission-attestation', session.id, providerSession.id, operation));
+      }, runtimeOperationId('session/permission-attestation', session.id, randomUUID()));
     } catch (cause) {
       const diagnostic = this.redactProviderText(errorMessage(cause));
       await this.quarantineSessionRuntime(

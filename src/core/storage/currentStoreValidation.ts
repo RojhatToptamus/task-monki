@@ -156,6 +156,10 @@ export function validateCurrentStoreRecords(state: StoreState): void {
   validateCollection(state.tasks, 'tasks', (task) => {
     strings(task, 'tasks', ['runtimeId', 'title']);
     stringField(task, 'prompt', 'tasks', task.prompt === '' && externalTaskIds.has(task.id));
+    if (task.agentDraft !== undefined) {
+      stringField(task, 'agentDraft', 'tasks', true);
+      if (task.agentDraft.length > 65_536) throw new Error('Task draft is too long.');
+    }
     if (task.agentProfile !== undefined) {
       validateAgentProfile(task.agentProfile);
     }
@@ -176,6 +180,24 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     timestamp(task, 'createdAt', 'tasks');
     timestamp(task, 'updatedAt', 'tasks');
     projection(task.projection);
+  });
+
+  validateCollection(state.taskInstructions, 'taskInstructions', (instruction) => {
+    uuidFields(instruction, 'taskInstructions', ['id', 'taskId', 'iterationId', 'worktreeId', 'sourceRunId', 'sessionId']);
+    optionalUuidFields(instruction, 'taskInstructions', ['runId']);
+    strings(instruction, 'taskInstructions', ['text']);
+    if (instruction.text.length > 65_536) throw new Error('Task instruction is too long.');
+    integer(instruction, 'order', 'taskInstructions', 1);
+    enumField(instruction, 'mode', ['QUEUE', 'FOLLOW_UP', 'RETRY', 'STEER'], 'taskInstructions');
+    enumField(instruction, 'status', ['QUEUED', 'HELD', 'SENDING', 'SUBMITTED', 'FAILED', 'UNCERTAIN'], 'taskInstructions');
+    optionalStrings(instruction, 'taskInstructions', ['detail']);
+    timestamp(instruction, 'createdAt', 'taskInstructions');
+    timestamp(instruction, 'updatedAt', 'taskInstructions');
+    if (!state.tasks.some((task) => task.id === instruction.taskId && task.kind === 'NORMAL') ||
+        !state.iterations.some((iteration) => iteration.id === instruction.iterationId && iteration.taskId === instruction.taskId) ||
+        !state.worktrees.some((worktree) => worktree.id === instruction.worktreeId && worktree.taskId === instruction.taskId)) {
+      throw new Error('Task instruction owner is missing.');
+    }
   });
 
   validateCollection(state.iterations, 'iterations', (iteration) => {

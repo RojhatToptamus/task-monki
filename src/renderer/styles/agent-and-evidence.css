@@ -1,128 +1,55 @@
-/* Agent continuation and recovery */
+.tm-agent-session__hint { color: var(--muted); font-size: var(--t-help); line-height: 1.45; }
+.tm-agent-session__compose-actions select { border: 0; border-radius: var(--r-md); background: var(--field); color: var(--text); box-shadow: inset 0 0 0 1px var(--field-edge); padding: 0 8px; font: var(--t-help)/1.4 var(--font-ui); }
+.app-shell[data-input-modality='keyboard'] .tm-agent-session__composer:focus-within { box-shadow: inset 0 0 0 1px var(--field-edge-focus), 0 0 0 3px var(--focus-ring); }
 
-.agent-controls__subtitle {
-  margin: 3px 0 0;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.agent-controls__actions {
-  display: grid;
-  gap: 10px;
-}
-
-.agent-controls__button-row,
-.agent-controls__composer-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.agent-controls__button-row .primary-button,
-.agent-controls__button-row .outline-button,
-.agent-controls__composer-actions .primary-button,
-.agent-controls__composer-actions .outline-button {
-  height: 32px;
-  padding: 0 12px;
-  font-size: 12px;
-}
-
-.agent-controls__action--active {
-  background: var(--sel);
-  color: var(--text);
-}
-
-.outline-button.agent-controls__action--active:not(:disabled):hover {
-  background: var(--sel);
-}
-
-.agent-controls__group {
-  display: grid;
-  gap: 8px;
-}
-
-.agent-controls__group--recovery {
-  padding: 10px 11px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--well);
-}
-
-.agent-controls__group-copy {
-  display: grid;
-  gap: 3px;
-  color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.agent-controls__group-copy strong {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.agent-controls__composer {
-  display: grid;
-  gap: 9px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--hair);
-}
-
-.agent-controls__composer-head {
-  display: grid;
-  gap: 3px;
-}
-
-.agent-controls__composer-head strong {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.agent-controls__composer-head span {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.agent-controls__composer label {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.agent-controls__composer textarea {
-  width: 100%;
-  min-height: 92px;
-  padding: 10px 11px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--field);
-  box-shadow: inset 0 0 0 1px var(--field-edge);
-  color: var(--text);
-  font: 12.5px/1.5 var(--font-ui);
-  resize: vertical;
-}
-
-.agent-controls__composer textarea:focus {
-  outline: 0;
-  background: var(--field-focus);
-  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
-}
-
-.app-shell[data-input-modality='keyboard'] .agent-controls__composer textarea:focus {
-  outline: 0;
-  background: var(--field-focus);
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
-}
-
-.agent-controls__composer-actions {
-  justify-content: flex-end;
+/* Agent session uses the same message chrome and field planes as Design and Discourse. */
+.tm-detail__body.tm-detail__body--agent { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.tm-agent-session { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.tm-agent-session__toolbar { display: flex; align-items: center; gap: 12px; padding: 12px 24px 6px; }
+.tm-agent-session__toolbar .tm-runheader { flex: 1; min-width: 0; }
+.tm-agent-session__state { color: var(--muted); font-size: var(--t-help); }
+.tm-agent-session__disclosures { display: flex; flex-wrap: wrap; gap: 16px; padding: 4px 24px 12px; border-bottom: 1px solid var(--hair); }
+.tm-agent-session summary { cursor: pointer; font-size: var(--t-help); color: var(--text-soft); }
+.tm-agent-session__disclosures details[open] { flex-basis: 100%; }
+.tm-agent-session__original-request { max-height: 200px; overflow: auto; }
+.tm-agent-session__disclosures .tm-plan__steps { margin-top: 12px; max-height: 180px; overflow: auto; }
+.tm-agent-session__history { flex: 1; min-height: 100px; overflow: auto; scrollbar-gutter: stable; padding: 8px 24px 20px; overflow-anchor: none; }
+.tm-agent-session__turn { padding: 12px 0 16px; }
+.tm-agent-session__turn + .tm-agent-session__turn { border-top: 1px solid var(--hair); }
+.tm-agent-session__turn-heading { display: flex; justify-content: space-between; gap: 16px; width: 100%; background: none; color: var(--muted); font-size: var(--t-meta); text-align: left; padding: 4px 0 8px; }
+.tm-agent-session__turn-heading:disabled { opacity: 1; color: var(--muted); cursor: default; }
+.tm-agent-session__turn-preview { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-soft); margin: 0; font-size: var(--t-body); }
+.tm-agent-session__boundary { margin: 0 0 12px; font-size: var(--t-meta); color: var(--muted); }
+.tm-agent-session__message { margin: 12px 0 20px; overflow-wrap: anywhere; min-width: 0; }
+.tm-agent-session__message .tm-message-markdown { margin-top: 6px; }
+.tm-agent-session__turn .tm-run-activity { margin: 10px 0 14px; }
+.tm-agent-session__turn .tm-run-activity__head { display: none; }
+.tm-agent-session__prompt { margin-top: 12px; }
+.tm-agent-session__prompt pre { padding: 12px; background: var(--well); border-radius: var(--r-md); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; font: var(--t-help)/1.5 var(--font-mono); }
+.tm-agent-session__footer { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 24px 16px; border-top: 1px solid var(--hair); background: var(--surface); }
+.tm-agent-session__queue { flex-basis: 100%; }
+.tm-agent-session__queue ol { max-height: 144px; overflow: auto; margin: 8px 0; padding-left: 22px; }
+.tm-agent-session__queue li { padding: 6px 0; font-size: var(--t-help); }
+.tm-agent-session__queued-text { display: block; max-height: 60px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tm-agent-session__queue-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tm-agent-session__composer { width: 100%; background: var(--field); border-radius: var(--r-md); box-shadow: inset 0 0 0 1px var(--field-edge); padding: 10px 12px; }
+.tm-agent-session__composer:focus-within { box-shadow: inset 0 0 0 1px var(--field-edge-focus); }
+.tm-agent-session__composer textarea { width: 100%; min-height: 54px; max-height: 150px; resize: vertical; padding: 0; border: 0; outline: none; background: none; box-shadow: none; color: var(--text); font: var(--t-body)/1.5 var(--font-ui); }
+.tm-agent-session__composer textarea:focus { background: none; box-shadow: none; outline: none; }
+.tm-agent-session__compose-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.tm-agent-session__compose-actions > span { flex: 1; min-width: 140px; }
+.tm-agent-session__compose-actions select { max-width: 180px; height: var(--h-control); }
+.tm-agent-session__queue textarea { width: 100%; min-height: 64px; padding: 8px; color: var(--text); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); border: 0; border-radius: var(--r-md); }
+.tm-agent-session__more { flex-basis: 100%; }
+.tm-agent-session__empty { padding: 12px 0; }
+.tm-agent-session__requests:empty { display: none; }
+.tm-agent-overview > .outline-button { margin-top: 12px; }
+.tm-agent-attention { margin: 4px 0 8px; }
+@media (max-width: 760px) {
+  .tm-agent-session__toolbar { padding: 10px 14px 6px; }
+  .tm-agent-session__disclosures { padding: 4px 14px 10px; }
+  .tm-agent-session__history { padding: 8px 14px 16px; }
+  .tm-agent-session__footer { padding: 10px 14px; }
 }
 
 .recovery-banner {

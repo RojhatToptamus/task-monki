@@ -5,6 +5,7 @@ import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
+  TaskInstruction,
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
   AgentItemRecord,
@@ -1079,6 +1080,7 @@ export class SqliteTaskStore {
       repository: state.repositories.find(
         (repository) => repository.id === task.repositoryId
       ),
+      taskInstructions: taskRecords(state.taskInstructions),
       iterations: taskRecords(state.iterations),
       worktrees: taskRecords(state.worktrees),
       gitSnapshots: taskRecords(state.gitSnapshots),
@@ -2906,6 +2908,37 @@ export class SqliteTaskStore {
     });
   }
 
+  async saveTaskAgentDraft(taskId: string, text: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (typeof text !== 'string' || text.length > 65_536) throw new Error('Instruction is too long.');
+      const task = this.state.tasks.find((record) => record.id === taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
+      this.state = { ...this.state, tasks: this.state.tasks.map((record) =>
+        record.id === taskId ? { ...record, agentDraft: text } : record) };
+      await this.persistSnapshot();
+    });
+  }
+
+  /** Serialized with all task mutations; callers must not perform provider or filesystem IO here. */
+  async updateTaskInstructions<T>(taskId: string, update: (records: TaskInstruction[]) => T, clearDraft?: string): Promise<T> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!this.state.tasks.some((task) => task.id === taskId && task.kind === 'NORMAL')) {
+        throw new Error('Task not found.');
+      }
+      const records = clone(this.state.taskInstructions.filter((record) => record.taskId === taskId));
+      const result = update(records);
+      this.state = { ...this.state, taskInstructions: [
+        ...this.state.taskInstructions.filter((record) => record.taskId !== taskId), ...records
+      ], tasks: this.state.tasks.map((task) =>
+        task.id === taskId && clearDraft !== undefined && task.agentDraft?.trim() === clearDraft
+          ? { ...task, agentDraft: '' } : task) };
+      await this.persistSnapshot();
+      return clone(result);
+    });
+  }
+
   async renameDesign(designId: string, titleInput: string): Promise<Task> {
     return this.serializeMutation(async () => {
       await this.init();
@@ -3739,6 +3772,7 @@ export class SqliteTaskStore {
       tasks: this.state.tasks
         .filter((candidate) => candidate.id !== taskId)
         .map((candidate) => removeTaskLink(candidate, taskId, now)),
+      taskInstructions: this.state.taskInstructions.filter((record) => record.taskId !== taskId),
       designTurns: this.state.designTurns.filter((turn) => turn.designId !== taskId),
       designReferences: this.state.designReferences.filter(
         (reference) => reference.designId !== taskId
@@ -5749,6 +5783,7 @@ function withoutTaskRuntimeProjection(state: StoreState): PersistedTaskState {
     repositories: state.repositories,
     boards: state.boards,
     tasks: state.tasks,
+    taskInstructions: state.taskInstructions,
     designTurns: state.designTurns,
     designReferences: state.designReferences,
     designRevisions: state.designRevisions,

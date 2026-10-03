@@ -185,6 +185,7 @@ function taskExecutionContext(input: {
   };
 }
 export interface StartOrchestratedTurn {
+  runId?: string;
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
@@ -1812,7 +1813,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (session.runtimeId !== runtimeId) {
       throw new Error('Selected agent session runtime changed unexpectedly.');
     }
-    const runId = randomUUID();
+    const runId = input.runId ?? randomUUID();
     const run = await this.taskRuntime.createTaskRun({
       id: runId,
       taskId: input.task.id,
@@ -2020,7 +2021,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
   }
 
-  async steerRun(runId: string, instruction: string): Promise<void> {
+  async steerRun(runId: string, instruction: string, clientMessageId: string = randomUUID()): Promise<void> {
     this.assertProviderStartupAvailable();
     const prompt = instruction.trim();
     if (!prompt) {
@@ -2056,7 +2057,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         },
         providerTurnId: run.providerTurnId,
         prompt,
-        clientMessageId: randomUUID()
+        clientMessageId
       });
     } catch (error) {
       if (error instanceof AgentMutationAmbiguousError) {

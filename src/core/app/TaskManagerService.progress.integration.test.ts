@@ -4,7 +4,7 @@ import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import {
   TaskMonkiScenarioRegistry
 } from '../../testSupport/taskMonkiScenario';
-import { buildRunProgressViewModel } from '../../renderer/model/runProgress';
+import { sessionEntries } from '../../renderer/model/agentSession';
 import type { RunRecord } from '../../shared/contracts';
 
 const scenarios = new TaskMonkiScenarioRegistry();
@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe('TaskManagerService progress harness', () => {
-  it('starts a throwaway-repo run with progress guidance and projects useful fallback progress', async () => {
+  it('starts a throwaway-repo run with progress guidance and retains readable messages, activity and native plans', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-progress-harness'
     });
@@ -108,44 +108,13 @@ describe('TaskManagerService progress harness', () => {
       }, `progress-file-change:${run.id}`);
 
       let snapshot = await scenario.store.snapshot();
-      let view = buildRunProgressViewModel({
-        preferredRun: startedRun,
-        runs: snapshot.runs.filter((candidate) => candidate.taskId === task.id),
-        planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === task.id),
-        items: snapshot.agentItems.filter((item) => item.taskId === task.id)
-      });
-      expect(view).toMatchObject({
-        state: 'RUNNING',
-        headerLabel: 'Current run',
-        steps: [
-          {
-            step: 'Waiting for provider plan...',
-            status: 'IN_PROGRESS'
-          }
-        ],
-        activityTail: [
-          expect.objectContaining({
-            category: 'other',
-            label: 'Finished discovery and will add hello.txt next.',
-            detail: undefined,
-            tone: 'neutral',
-            status: 'completed'
-          }),
-          expect.objectContaining({
-            category: 'read',
-            label: 'Read',
-            detail: 'README.md',
-            metric: '1 line'
-          }),
-          expect.objectContaining({
-            category: 'write',
-            label: 'Wrote',
-            detail: 'hello.txt',
-            metric: '+1'
-          })
-        ],
-        activityOutputSummary: 'show output · 1 line'
-      });
+      const entries = sessionEntries(startedRun, snapshot.agentItems, []);
+      expect(entries).toContainEqual(expect.objectContaining({ kind: 'message', author: 'Agent', text: 'Progress: Finished discovery and will add hello.txt next.' }));
+      expect(entries.flatMap((entry) => entry.kind === 'activity' ? entry.rows : [])).toEqual([
+        expect.objectContaining({ category: 'read', detail: 'README.md', metric: '1 line' }),
+        expect.objectContaining({ category: 'write', detail: 'hello.txt', metric: '+1' })
+      ]);
+      expect(snapshot.agentPlanRevisions.filter((plan) => plan.runId === run.id)).toEqual([]);
 
       const server = await scenario.runtimeStore.createAgentServer({
         runtimeId: 'codex',
@@ -183,41 +152,12 @@ describe('TaskManagerService progress harness', () => {
       );
 
       snapshot = await scenario.store.snapshot();
-      view = buildRunProgressViewModel({
-        preferredRun: startedRun,
-        runs: snapshot.runs.filter((candidate) => candidate.taskId === task.id),
-        planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === task.id),
-        items: snapshot.agentItems.filter((item) => item.taskId === task.id)
-      });
-      expect(view).toMatchObject({
-        state: 'RUNNING',
-        headerLabel: 'Current run',
-        steps: [
-          { step: 'Inspect repository state', status: 'COMPLETED' },
-          { step: 'Add hello file', status: 'IN_PROGRESS' },
-          { step: 'Verify repository status', status: 'PENDING' }
-        ],
-        activityTail: [
-          expect.objectContaining({
-            category: 'other',
-            label: 'Finished discovery and will add hello.txt next.',
-            detail: undefined
-          }),
-          expect.objectContaining({
-            category: 'read',
-            label: 'Read',
-            detail: 'README.md',
-            metric: '1 line'
-          }),
-          expect.objectContaining({
-            category: 'write',
-            label: 'Wrote',
-            detail: 'hello.txt',
-            metric: '+1'
-          })
-        ],
-        activityOutputSummary: 'show output · 1 line'
-      });
+      expect(snapshot.agentPlanRevisions.find((plan) => plan.runId === startedRun.id)?.steps).toEqual([
+        { step: 'Inspect repository state', status: 'COMPLETED' },
+        { step: 'Add hello file', status: 'IN_PROGRESS' },
+        { step: 'Verify repository status', status: 'PENDING' }
+      ]);
+
     } finally {
       await scenario.dispose();
     }

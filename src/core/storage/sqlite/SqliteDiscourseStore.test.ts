@@ -36,7 +36,7 @@ describe('SqliteDiscourseStore', () => {
     await fixture.store.close();
     await fixture.database.close();
     const previous = new DatabaseSync(fixture.databasePath);
-    previous.exec('PRAGMA user_version = 4');
+    previous.exec('DROP TABLE task_instructions; PRAGMA user_version = 4');
     previous.close();
     const backupPath = `${fixture.databasePath}.before-chat`;
     const upgraded = await AppDatabase.open(fixture.databasePath, { acquireLease: false,

@@ -934,6 +934,30 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/task-instructions/queue') {
+        const result = await options.service.queueTaskInstruction((await readJson()) as never);
+        sendJson(response, requestId, 200, result ?? {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/task-instructions/edit') {
+        const result = await options.service.editTaskInstruction((await readJson()) as never);
+        sendJson(response, requestId, 200, result ?? {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/task-instructions/send') {
+        const result = await options.service.sendTaskInstruction((await readJson()) as never);
+        sendJson(response, requestId, 200, result ?? {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/task-instructions/draft') {
+        const result = await options.service.saveTaskAgentDraft((await readJson()) as never);
+        sendJson(response, requestId, 200, result ?? {});
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/runs/steer') {
         await options.service.steerRun((await readJson()) as never);
         sendJson(response, requestId, 200, {});

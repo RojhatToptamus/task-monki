@@ -87,6 +87,11 @@ import type {
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   StartReviewRequest,
+  TaskInstruction,
+  QueueTaskInstructionRequest,
+  EditTaskInstructionRequest,
+  SendTaskInstructionRequest,
+  SaveTaskAgentDraftRequest,
   SteerRunRequest,
   TestExternalToolRequest,
   UpdateAgentNativeSessionRequest,
@@ -468,6 +473,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     inspectWorktreePreparation: (input: InspectWorktreePreparationRequest) =>
       post<WorktreePreparationInspection>(baseUrl, '/api/worktrees/inspect-preparation', input),
     startRun: (input: StartRunRequest) => post<RunRecord>(baseUrl, '/api/runs/start', input),
+    queueTaskInstruction: (input: QueueTaskInstructionRequest) => post<TaskInstruction>(baseUrl, '/api/task-instructions/queue', input),
+    editTaskInstruction: (input: EditTaskInstructionRequest) => post<void>(baseUrl, '/api/task-instructions/edit', input),
+    sendTaskInstruction: (input: SendTaskInstructionRequest) => post<RunRecord>(baseUrl, '/api/task-instructions/send', input),
+    saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => post<void>(baseUrl, '/api/task-instructions/draft', input),
     steerRun: (input: SteerRunRequest) => post<void>(baseUrl, '/api/runs/steer', input),
     continueRun: (input: ContinueRunRequest) =>
       post<RunRecord>(baseUrl, '/api/runs/continue', input),

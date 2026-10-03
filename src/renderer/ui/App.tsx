@@ -247,6 +247,41 @@ export function App() {
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isTaskDetailModalOpen, setIsTaskDetailModalOpen] = useState(false);
   const pendingAppActions = useRef(0);
+  const [agentDrafts, setAgentDrafts] = useState<Record<string, string>>({});
+  const [agentDraftErrors, setAgentDraftErrors] = useState<Record<string, string | undefined>>({});
+  const agentDraftWrites = useRef(new Map<string, { text: string; work?: Promise<void>; error?: string }>());
+  const saveAgentDraft = (taskId: string, text: string) => {
+    setAgentDrafts((current) => {
+      const entries = Object.entries(current).filter(([id]) => id !== taskId).slice(-39);
+      return { ...Object.fromEntries(entries), [taskId]: text };
+    });
+    const entry = agentDraftWrites.current.get(taskId) ?? { text };
+    entry.text = text;
+    entry.error = undefined;
+    agentDraftWrites.current.set(taskId, entry);
+    if (!entry.work) {
+      entry.work = (async () => {
+        let saved: string;
+        do {
+          saved = entry.text;
+          await taskManagerApi.saveTaskAgentDraft({ taskId, text: saved });
+        } while (saved !== entry.text);
+        setAgentDraftErrors((current) => ({ ...current, [taskId]: undefined }));
+      })().catch((caught: unknown) => {
+        entry.error = `Draft could not be saved: ${String(caught)}`;
+        setAgentDraftErrors((current) => ({ ...current, [taskId]: entry.error }));
+        throw caught;
+      }).finally(() => {
+        entry.work = undefined;
+        for (const [id, previous] of agentDraftWrites.current) {
+          if (agentDraftWrites.current.size <= 40) break;
+          if (id !== taskId && !previous.work && !previous.error) agentDraftWrites.current.delete(id);
+        }
+      });
+      void entry.work.catch(() => undefined);
+    }
+  };
+
   const withAppAction = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     pendingAppActions.current += 1;
     try { return await action(); }
@@ -2444,14 +2479,14 @@ export function App() {
     }
   };
 
-  const steerRun = async (runId: string, instruction: string) => {
+  const steerRun = async (runId: string, instruction: string, clientMessageId?: string) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
       if (!run) {
         throw new Error('Run not found.');
       }
-      await withAppAction(() => taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction }));
+      await withAppAction(() => taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction, clientMessageId }));
       notify('Instruction sent.', 'success');
       await refresh();
     } catch (caught) {
@@ -2460,7 +2495,7 @@ export function App() {
     }
   };
 
-  const continueRun = async (runId: string, instruction?: string) => {
+  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
@@ -2470,7 +2505,7 @@ export function App() {
       const recoveryContinuation =
         run.status !== 'COMPLETED' ||
         Boolean(selectedTask && getImplementationRetryReason(selectedTask));
-      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction }));
+      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId }));
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
         'success'
@@ -2485,7 +2520,8 @@ export function App() {
   const retryRun = async (
     runId: string,
     strategy: AgentRetryStrategy,
-    instruction?: string
+    instruction?: string,
+    clientMessageId?: string
   ) => {
     setError(undefined);
     try {
@@ -2497,7 +2533,8 @@ export function App() {
         taskId: run.taskId,
         runId,
         strategy,
-        instruction
+        instruction,
+        clientMessageId
       }));
       if (strategy === 'FORK') {
         await taskDataCoordinator.refreshBoard();
@@ -3160,6 +3197,27 @@ export function App() {
 
         {showDetail && selectedTask && taskDetail ? (
           <TaskDetail
+            agentInstructions={taskDetail.taskInstructions}
+            agentDraft={agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
+            agentDraftError={agentDraftErrors[selectedTask.id]}
+            onAgentDraftChange={(text) => saveAgentDraft(selectedTask.id, text)}
+            onFlushAgentDraft={async () => {
+              const pending = agentDraftWrites.current.get(selectedTask.id);
+              await pending?.work;
+              if (pending?.error) throw new Error(pending.error);
+            }}
+            onQueueInstruction={async (runId, instruction, id) => {
+              await withAppAction(() => taskManagerApi.queueTaskInstruction({ taskId: selectedTask.id, runId, instruction, id }));
+              await refresh();
+            }}
+            onEditInstruction={async (id, instruction) => {
+              await withAppAction(() => taskManagerApi.editTaskInstruction({ taskId: selectedTask.id, id, instruction }));
+              await refresh();
+            }}
+            onSendInstruction={async (id, runId) => {
+              await withAppAction(() => taskManagerApi.sendTaskInstruction({ taskId: selectedTask.id, id, runId }));
+              await refresh();
+            }}
             headingRef={taskDetailHeadingRef}
             error={error}
             task={selectedTask}

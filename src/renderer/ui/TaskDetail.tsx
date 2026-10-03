@@ -65,9 +65,9 @@ import {
   canStartRun
 } from '../model/selectors';
 import { describeHealthFinding } from '../model/debugDiagnostics';
-import { AgentControlPanel } from './AgentControlPanel';
+import { AgentSession, type AgentSessionProps } from './AgentSession';
+import { RunHeader } from './RunHeader';
 import { EvidencePanel } from './EvidencePanel';
-import { InteractionPanel } from './InteractionPanel';
 import { InteractionAuditPanel } from './InteractionAuditPanel';
 import { ProviderActivityPanel } from './ProviderActivityPanel';
 import { ProviderOverviewPanel } from './ProviderOverviewPanel';
@@ -121,7 +121,7 @@ import {
   projectDebugTaskActivity,
   projectOverviewTaskActivity
 } from '../model/taskActivity';
-import { buildRunProgressViewModel, canStopTaskRun } from '../model/runProgress';
+import { selectProgressRun, canStopTaskRun } from '../model/runProgress';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { buildReviewActivityViewModel } from '../model/reviewActivity';
 import {
@@ -136,7 +136,6 @@ import {
 } from './ReviewPanel';
 import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
-import { RunProgressCard } from './RunProgressCard';
 import { describeGitSnapshot } from './gitSnapshotCopy';
 import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
@@ -158,6 +157,14 @@ import {
 } from './TaskDetailModals';
 
 interface TaskDetailProps {
+  agentInstructions: AgentSessionProps['instructions'];
+  agentDraft: string;
+  agentDraftError?: string;
+  onAgentDraftChange: AgentSessionProps['onDraftChange'];
+  onFlushAgentDraft: AgentSessionProps['onFlushDraft'];
+  onQueueInstruction: AgentSessionProps['onQueue'];
+  onEditInstruction: AgentSessionProps['onEditQueue'];
+  onSendInstruction: AgentSessionProps['onSendQueue'];
   headingRef?: RefObject<HTMLHeadingElement | null>;
   error?: string;
   task?: Task;
@@ -212,9 +219,9 @@ interface TaskDetailProps {
   onUpdateWorktreeComparison?(taskId: string, baseRef: string): Promise<void>;
   onRefreshEvidence?(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
-  onSteer(runId: string, instruction: string): Promise<void>;
-  onContinue(runId: string, instruction?: string): Promise<void>;
-  onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string): Promise<void>;
+  onSteer(runId: string, instruction: string, id?: string): Promise<void>;
+  onContinue(runId: string, instruction?: string, id?: string): Promise<void>;
+  onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string, id?: string): Promise<void>;
   onReview(runId?: string): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
   onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
@@ -268,7 +275,7 @@ interface HeadAction {
   onClick(): void;
 }
 
-type DetailTab = 'overview' | 'preview' | 'evidence' | 'debug';
+type DetailTab = 'agent' | 'overview' | 'preview' | 'evidence' | 'debug';
 
 export function focusRequestedActivityHistory(
   tab: DetailTab,
@@ -307,6 +314,7 @@ export function TaskDetail(props: TaskDetailProps) {
     mergeSnapshot
   } = props;
   const [tab, setTab] = useState<DetailTab>('overview');
+  const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   const [reviewRequest, setReviewRequest] = useState<{
     reviewRunId: string;
@@ -568,22 +576,7 @@ export function TaskDetail(props: TaskDetailProps) {
     () => projectDebugTaskActivity(taskActivityLedger),
     [taskActivityLedger]
   );
-  const runProgress = useMemo(
-    () =>
-      buildRunProgressViewModel({
-        preferredRun: run,
-        runs: props.runs,
-        planRevisions,
-        items: props.items
-      }),
-    [run, props.runs, planRevisions, props.items]
-  );
-  // The run the progress card reflects (for its RunHeader's elapsed timer + Stop)
-  // and its scope in mono (audit §05 RunHeader row).
-  const progressRun = runProgress
-    ? props.runs.find((candidate) => candidate.id === runProgress.runId)
-    : undefined;
-  const runProgressScope = describeGitSnapshot(gitSnapshot);
+  const progressRun = selectProgressRun(run, props.runs);
   const evidenceGitSnapshot = evidenceGitSnapshotId
     ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId)
     : gitSnapshot;
@@ -888,7 +881,9 @@ export function TaskDetail(props: TaskDetailProps) {
     worktreePreparationPending: props.worktreePreparationPending,
     worktree,
     onPrepareWorktree: props.onPrepareWorktree,
-    onStart: externalWork ? async () => setExistingWorkModal('instruction') : props.onStart
+    onStart: externalWork ? async () => setExistingWorkModal('instruction') : async (taskId) => {
+      setTab('agent'); await props.onStart(taskId);
+    }
   });
   const implementationRetryRequired = isImplementationRetryRequired(task, run);
 
@@ -1028,6 +1023,48 @@ export function TaskDetail(props: TaskDetailProps) {
     modalRootRef: previewModalRootRef,
     onModalOpenChange: setPreviewModalOpen
   };
+  const requestCard = (<RequestCard
+    prompt={task.prompt}
+    attachments={props.attachments}
+    summaryLine={`${model}/${effort} · ${formatAgentPermissionMode(
+      displayedAgentSettings
+    )}${
+      props.attachments.length > 0
+        ? ` · ${props.attachments.length} ${
+            props.attachments.length === 1 ? 'attachment' : 'attachments'
+          }`
+        : ''
+    }`}
+    hasRun={Boolean(run)}
+    config={
+      <>
+        <ConfigRow k="Model / effort" v={`${model} / ${effort}`} />
+        <ConfigRow
+          k="Permissions"
+          v={formatAgentPermissionMode(displayedAgentSettings)}
+        />
+        <ConfigRow k="Network" v={formatAgentNetworkAccess(displayedAgentSettings)} />
+        <ConfigRow
+          k={externalWork ? 'Comparison base' : 'Base'}
+          v={worktree ? `${worktree.baseRef ?? 'Detached HEAD'} @ ${worktree.baseSha.slice(0, 12)}` : 'Not selected'}
+        />
+        <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
+        {externalWork && worktree ? <>
+          <ConfigRow k="Checkout" v={worktree.worktreePath} />
+          <div className="tm-config__actions">
+            <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+              title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+              onClick={() => void runReviewAction(async () => { await props.onRefreshEvidence?.(task.id); })}>Refresh checkout</button>
+            {['MISSING', 'ERROR'].includes(worktree.status) ? (
+              <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
+                title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
+                onClick={() => setExistingWorkModal('reconnect')}>Reconnect checkout</button>
+            ) : null}
+          </div>
+        </> : null}
+      </>
+    }
+              />);
   return (
     <main ref={detailRootRef} className="tm-detail" tabIndex={-1}>
       <div
@@ -1122,6 +1159,11 @@ export function TaskDetail(props: TaskDetailProps) {
             placement="task"
           />
         ) : null}
+        {interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status)) || implementationRetryRequired ? (
+          <button className="outline-button tm-agent-attention" onClick={() => {
+            setTab('agent'); setAgentAttentionRequest((value) => value + 1);
+          }}>{interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status)) ? 'Agent needs your answer' : 'Agent needs attention'}</button>
+        ) : null}
         <div className="tm-tabs" role="tablist" aria-label="Task sections">
           <AccessibleTab
             id="task-detail-tab-overview"
@@ -1130,6 +1172,8 @@ export function TaskDetail(props: TaskDetailProps) {
             selected={tab === 'overview'}
             onSelect={() => setTab('overview')}
           />
+          <AccessibleTab id="task-detail-tab-agent" panelId="task-detail-panel" label="Agent"
+            selected={tab === 'agent'} onSelect={() => setTab('agent')} />
           <AccessibleTab
             id="task-detail-tab-preview"
             panelId="task-detail-panel"
@@ -1165,7 +1209,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
       <div
         id="task-detail-panel"
-        className="tm-detail__body"
+        className={`tm-detail__body${tab === 'agent' ? ' tm-detail__body--agent' : ''}`}
         ref={bodyRef}
         role="tabpanel"
         aria-labelledby={`task-detail-tab-${tab}`}
@@ -1178,12 +1222,6 @@ export function TaskDetail(props: TaskDetailProps) {
           <div className="tm-overview">
             {/* Action and recovery risks first, then the request and execution. */}
             <div className="tm-overview__col">
-              <InteractionPanel
-                interactions={interactions}
-                sessions={sessions}
-                onRespond={props.onRespondToInteraction}
-              />
-
               {runFailure ? (
                 <div className="tm-failure">
                   <div className="tm-failure__head">
@@ -1201,79 +1239,19 @@ export function TaskDetail(props: TaskDetailProps) {
                 </div>
               ) : null}
 
-              <RequestCard
-                prompt={task.prompt}
-                attachments={props.attachments}
-                summaryLine={`${model}/${effort} · ${formatAgentPermissionMode(
-                  displayedAgentSettings
-                )}${
-                  props.attachments.length > 0
-                    ? ` · ${props.attachments.length} ${
-                        props.attachments.length === 1 ? 'attachment' : 'attachments'
-                      }`
-                    : ''
-                }`}
-                hasRun={Boolean(run)}
-                config={
-                  <>
-                    <ConfigRow k="Model / effort" v={`${model} / ${effort}`} />
-                    <ConfigRow
-                      k="Permissions"
-                      v={formatAgentPermissionMode(displayedAgentSettings)}
-                    />
-                    <ConfigRow k="Network" v={formatAgentNetworkAccess(displayedAgentSettings)} />
-                    <ConfigRow
-                      k={externalWork ? 'Comparison base' : 'Base'}
-                      v={worktree ? `${worktree.baseRef ?? 'Detached HEAD'} @ ${worktree.baseSha.slice(0, 12)}` : 'Not selected'}
-                    />
-                    <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
-                    {externalWork && worktree ? <>
-                      <ConfigRow k="Checkout" v={worktree.worktreePath} />
-                      <div className="tm-config__actions">
-                        <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
-                          title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
-                          onClick={() => void runReviewAction(async () => { await props.onRefreshEvidence?.(task.id); })}>Refresh checkout</button>
-                        {['MISSING', 'ERROR'].includes(worktree.status) ? (
-                          <button type="button" className="outline-button" disabled={reviewActionsPaused || reviewActionBusy}
-                            title={reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)}
-                            onClick={() => setExistingWorkModal('reconnect')}>Reconnect checkout</button>
-                        ) : null}
-                      </div>
-                    </> : null}
-                  </>
-                }
-              />
+              {requestCard}
 
               <TaskWorkPanels>
-                {runProgress ? (
-                  <RunProgressCard
-                    progress={runProgress}
-                    runStartedAt={progressRun?.startedAt}
-                    scope={runProgressScope}
-                    animate={!prefersReducedMotion}
-                    completedChangeSummary={
-                      progressRun ? (
-                        <CompletedChangeSummaryPanel
-                          run={progressRun}
-                          capturePending={props.postRunEvidencePendingRunIds?.includes(progressRun.id)}
-                          gitSnapshots={gitSnapshots}
-                          artifacts={props.artifacts}
-                          onViewDiff={(snapshotId) => {
-                            setEvidenceGitSnapshotId(snapshotId);
-                            setTab('evidence');
-                          }}
-                        />
-                      ) : undefined
-                    }
-                    onShowDebug={() => setTab('debug')}
-                    onStop={
-                      canStopTaskRun(progressRun)
-                        ? () => void props.onCancel(runProgress.runId)
-                        : undefined
-                    }
-                    stopDisabled={reviewActionBusy || deliveryActionBusy}
-                  />
-                ) : null}
+                <div className="tm-panel tm-agent-overview">
+                  <RunHeader running={Boolean(progressRun && canStopTaskRun(progressRun))} tone="neutral"
+                    operationName="Agent" scope={progressRun ? humanizeEnum(progressRun.status) : 'Not started'} startedAt={progressRun?.startedAt}
+                    onStop={progressRun && canStopTaskRun(progressRun) ? () => void props.onCancel(progressRun.id) : undefined}
+                    stopDisabled={reviewActionBusy || deliveryActionBusy} />
+                  <button className="outline-button" onClick={() => setTab('agent')}>Open Agent</button>
+                  {progressRun ? <CompletedChangeSummaryPanel run={progressRun}
+                    capturePending={props.postRunEvidencePendingRunIds?.includes(progressRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
+                    onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
+                </div>
 
                 {reviewPhaseVisible ? (
                   <ReviewPanel
@@ -1303,18 +1281,6 @@ export function TaskDetail(props: TaskDetailProps) {
                     onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
                   />
                 ) : null}
-
-                <AgentControlPanel
-                  run={run}
-                  worktree={worktree}
-                  requiresRecovery={implementationRetryRequired}
-                  activeTurnSteeringSupported={activeTurnSteeringSupported}
-                  interactions={interactions}
-                  onSteer={props.onSteer}
-                  onInterrupt={props.onCancel}
-                  onContinue={props.onContinue}
-                  onRetry={props.onRetry}
-                />
               </TaskWorkPanels>
             </div>
 
@@ -1357,6 +1323,25 @@ export function TaskDetail(props: TaskDetailProps) {
             </div>
           </div>
         ) : null}
+
+        {tab === 'agent' ? <AgentSession key={task.id} task={task} run={run} runs={props.runs}
+          runtimeName={props.runtimeState?.preflight.runtime.displayName}
+          sessions={sessions} items={props.items} plans={planRevisions} interactions={interactions}
+          instructions={props.agentInstructions} requiresRecovery={implementationRetryRequired}
+          runtimeUnavailable={props.runtimeState && !props.runtimeState.preflight.readiness.canStart ? props.runtimeState.preflight.readiness.summary : undefined}
+          steeringSupported={activeTurnSteeringSupported} draft={props.agentDraft} draftError={props.agentDraftError}
+          onDraftChange={props.onAgentDraftChange} onFlushDraft={props.onFlushAgentDraft}
+          onQueue={props.onQueueInstruction} onEditQueue={props.onEditInstruction} onSendQueue={props.onSendInstruction}
+          onSteer={props.onSteer} onContinue={props.onContinue} onRetry={props.onRetry} onStop={props.onCancel}
+          onRespond={props.onRespondToInteraction} onReadArtifact={props.onReadArtifact}
+          onShowDebug={() => setTab('debug')} onShowReview={() => setTab('overview')}
+          attentionRequested={agentAttentionRequest} request={requestCard}
+          preRunAction={primaryAction ? <button className="primary-button" disabled={primaryAction.disabled}
+            onClick={primaryAction.onClick}>{primaryAction.label}</button> : null}
+          capture={(capturedRun) => <CompletedChangeSummaryPanel run={capturedRun}
+            capturePending={props.postRunEvidencePendingRunIds?.includes(capturedRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
+            onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} />}
+        /> : null}
 
         {tab === 'preview' ? (
           <PreviewWorkspace key={task.id} {...previewPanelProps} />

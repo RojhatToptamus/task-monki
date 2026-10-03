@@ -1431,6 +1431,17 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
           '$.relationshipState', 'ROOT', '$.recordRevision', record_revision + 1),
         record_revision = record_revision + 1
     WHERE id IN (SELECT id FROM roots);`
+  },
+  {
+    version: 7,
+    name: 'task-agent-instructions',
+    sql: `CREATE TABLE task_instructions (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      instruction_order INTEGER NOT NULL CHECK (instruction_order > 0),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      UNIQUE(task_id, instruction_order)
+    ) STRICT;`
   }
 ] as const;
 

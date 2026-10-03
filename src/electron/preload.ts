@@ -45,6 +45,10 @@ import type {
   StartRunRequest,
   StartPreviewRequest,
   StartReviewRequest,
+  QueueTaskInstructionRequest,
+  EditTaskInstructionRequest,
+  SendTaskInstructionRequest,
+  SaveTaskAgentDraftRequest,
   SteerRunRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
@@ -265,6 +269,10 @@ const api: TaskManagerApi = {
   inspectWorktreePreparation: (input: InspectWorktreePreparationRequest) =>
     invokeIpc('worktree:inspectPreparation', input),
   startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),
+  queueTaskInstruction: (input: QueueTaskInstructionRequest) => invokeIpc('agent:queueTaskInstruction', input),
+  editTaskInstruction: (input: EditTaskInstructionRequest) => invokeIpc('agent:editTaskInstruction', input),
+  sendTaskInstruction: (input: SendTaskInstructionRequest) => invokeIpc('agent:sendTaskInstruction', input),
+  saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => invokeIpc('agent:saveTaskAgentDraft', input),
   steerRun: (input: SteerRunRequest) => invokeIpc('agent:steerRun', input),
   continueRun: (input: ContinueRunRequest) =>
     invokeIpc('agent:continueRun', input),

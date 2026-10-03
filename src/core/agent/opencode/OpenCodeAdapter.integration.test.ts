@@ -97,6 +97,31 @@ describe('OpenCodeAdapter', () => {
     }
   });
 
+  it('re-attests changed provider settings before a second turn in the same session', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    try {
+      const start = async (mode: 'IMPLEMENTATION' | 'FOLLOW_UP') => {
+        const run = await createRun(fixture, session);
+        const turn = await fixture.adapter.startTurn({
+          localRunId: run.id, session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+          mode, prompt: fixture.task.prompt, authoritativeGoal: fixture.task.prompt, settings: SETTINGS
+        });
+        return { run, turn };
+      };
+      const first = await start('IMPLEMENTATION');
+      fixture.harness.settleAbort = true;
+      await fixture.adapter.interruptTurn({ session: { localSessionId: session.id, providerSessionId: session.providerSessionId }, providerTurnId: first.turn.providerTurnId! });
+      await waitForCondition(async () => (await fixture.runtime.getRun(first.run.id))?.status === 'INTERRUPTED');
+      const providerSession = fixture.harness.sessions.get(session.providerSessionId!)!;
+      providerSession.model = { providerID: 'anthropic', modelID: 'claude-observed', variant: 'high' };
+      const second = await start('FOLLOW_UP');
+      expect(second.turn.providerTurnId).not.toBe(first.turn.providerTurnId);
+      expect(fixture.harness.promptBodies).toHaveLength(2);
+    } finally { await fixture.adapter.shutdown(); }
+  });
+
   it('runs Design in pure mode with one registered MCP bridge and bounded turn grants', async () => {
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
